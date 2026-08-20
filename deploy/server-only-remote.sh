@@ -151,7 +151,11 @@ gunzip -c "${SERVER_ARCHIVE}" | docker load
 if [[ -e "${REMOTE_ROOT}/current" && ! -L "${REMOTE_ROOT}/current" ]]; then
   die "refusing to replace non-symlink current directory"
 fi
-ln -sfn "${RELEASE_DIR}" "${REMOTE_ROOT}/current"
+switch_tmp="${REMOTE_ROOT}/.current.$$.tmp"
+rm -f "${switch_tmp}"
+ln -s "${RELEASE_DIR}" "${switch_tmp}"
+python3 -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' \
+  "${switch_tmp}" "${REMOTE_ROOT}/current"
 
 if ! docker compose --env-file "${ENV_PATH}" -f "${REMOTE_ROOT}/current/docker-compose.prod.yml" up -d --no-deps "${SERVER_SERVICE}"; then
   verify_protected_ids

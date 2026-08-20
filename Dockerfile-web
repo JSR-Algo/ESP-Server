@@ -1,5 +1,6 @@
 # 第一阶段：构建Vue前端
-FROM node:18 AS web-builder
+ARG WEB_NODE_IMAGE=node:18
+FROM ${WEB_NODE_IMAGE} AS web-builder
 WORKDIR /app
 COPY main/manager-web/package*.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci

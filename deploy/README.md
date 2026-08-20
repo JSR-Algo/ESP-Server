@@ -92,9 +92,17 @@ deploy/deploy-vps.sh \
   --server-only \
   --env-file deploy/production.env \
   --dry-run
+
+deploy/rollback-vps.sh \
+  --host <ip> \
+  --user <ssh-user> \
+  --tag <previous-reviewed-tag> \
+  --server-only \
+  --env-file deploy/production.env \
+  --dry-run
 ```
 
-Remove `--dry-run` only after the lane has passed its review/release gate and the production owner authorizes deployment. The default remote free-space gate requires both 2 GiB and 5% free. Override them only with reviewed values using `--min-free-bytes` and `--min-free-percent`.
+Remove `--dry-run` only after the lane has passed its review/release gate and the production owner authorizes deployment or rollback. Server-only rollback validates the saved env before installing it, recreates only `tbot-esp32-server` with `--no-deps`, and verifies the database and web container IDs remain unchanged. The default remote free-space gate requires both 2 GiB and 5% free. Override them only with reviewed values using `--min-free-bytes` and `--min-free-percent`.
 
 If the gate is missed, cleanup considers only images in the configured server image repository. It resolves every active scaled-server container through Compose, preserves every active image ID plus the newest distinct rollback image, and skips any image used by a container. The transaction fails before backup, image load, symlink switch, or Compose recreation if the threshold remains unmet.
 

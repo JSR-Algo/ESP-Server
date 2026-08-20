@@ -478,3 +478,131 @@ def test_deploy_rejects_invalid_candidate_env_before_transport(tmp_path: Path) -
     assert "ESP PUBLIC endpoint" not in result.stderr
     assert "ssh" not in result.stdout
     assert "scp" not in result.stdout
+
+
+def test_rollback_dry_run_is_secret_safe_and_server_only(tmp_path: Path) -> None:
+    env_file = tmp_path / "rollback.env"
+    secret = "rollback-secret-must-not-appear"
+    env_file.write_text(
+        "TBOT_REMOTE_ROOT=/opt/tbot\n"
+        "TBOT_SERVER_IMAGE=local/tbot-server:previous\n"
+        f"MYSQL_ROOT_PASSWORD='{secret}'\n",
+        encoding="utf-8",
+    )
+
+    result = run(
+        "bash",
+        DEPLOY_DIR / "rollback-vps.sh",
+        "--host",
+        "fixture.invalid",
+        "--user",
+        "fixture",
+        "--tag",
+        "previous",
+        "--env-file",
+        env_file,
+        "--server-only",
+        "--dry-run",
+    )
+
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, result.stderr
+    assert "validate-env.py" in result.stdout
+    assert "up -d --no-deps tbot-esp32-server" in result.stdout
+    assert "up -d tbot-esp32-server-db" not in result.stdout
+    assert "up -d tbot-esp32-server-web" not in result.stdout
+    assert secret not in combined
+
+
+def test_rollback_rejects_invalid_env_before_transport_without_echoing_value(tmp_path: Path) -> None:
+    env_file = tmp_path / "rollback.env"
+    env_file.write_text(
+        "TBOT_REMOTE_ROOT=/opt/tbot\nPUBLIC_LABEL=ESP PUBLIC endpoint\n",
+        encoding="utf-8",
+    )
+
+    result = run(
+        "bash",
+        DEPLOY_DIR / "rollback-vps.sh",
+        "--host",
+        "fixture.invalid",
+        "--user",
+        "fixture",
+        "--tag",
+        "previous",
+        "--env-file",
+        env_file,
+        "--server-only",
+        "--dry-run",
+    )
+
+    assert result.returncode != 0
+    assert "PUBLIC_LABEL" in result.stderr
+    assert "ESP PUBLIC endpoint" not in result.stderr
+    assert "ssh" not in result.stdout
+
+
+def test_rollback_executes_only_target_release_server_image(tmp_path: Path) -> None:
+    remote_root = tmp_path / "remote"
+    target = remote_root / "releases" / "previous"
+    current_release = remote_root / "releases" / "current"
+    target.mkdir(parents=True)
+    current_release.mkdir(parents=True)
+    shutil.copy2(DEPLOY_DIR / "validate-env.py", target / "validate-env.py")
+    (target / "docker-compose.prod.yml").write_text("services: {}\n", encoding="utf-8")
+    (target / "server-image.ref").write_text(
+        "local/tbot-server:previous\n", encoding="utf-8"
+    )
+    env_backup = remote_root / ".env.rollback-20260821-current"
+    env_backup.write_text(
+        f"TBOT_REMOTE_ROOT={remote_root}\nTBOT_SERVER_IMAGE=local/tbot-server:previous\n",
+        encoding="utf-8",
+    )
+    (current_release / "env-backup-path").write_text(f"{env_backup}\n", encoding="utf-8")
+    (remote_root / "current").symlink_to(current_release)
+    local_env = tmp_path / "rollback.env"
+    local_env.write_text(f"TBOT_REMOTE_ROOT={remote_root}\n", encoding="utf-8")
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_log = tmp_path / "docker.log"
+    executable(
+        fake_bin / "ssh",
+        "#!/usr/bin/env bash\nset -euo pipefail\ncommand=${!#}\nexec bash -c \"$command\"\n",
+    )
+    executable(
+        fake_bin / "docker",
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> {docker_log!s}
+if [[ "$1" == inspect && "${{4:-}}" == tbot-esp32-server-db ]]; then echo db-id; exit 0; fi
+if [[ "$1" == inspect && "${{4:-}}" == tbot-esp32-server-web ]]; then echo web-id; exit 0; fi
+if [[ "$1" == compose && "$*" == *' up -d --no-deps tbot-esp32-server'* ]]; then exit 0; fi
+exit 91
+""",
+    )
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+
+    result = run(
+        "bash",
+        DEPLOY_DIR / "rollback-vps.sh",
+        "--host",
+        "fixture.invalid",
+        "--user",
+        "fixture",
+        "--tag",
+        "previous",
+        "--env-file",
+        local_env,
+        "--server-only",
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (remote_root / "current").resolve() == target.resolve()
+    commands = docker_log.read_text(encoding="utf-8")
+    assert "up -d --no-deps tbot-esp32-server" in commands
+    assert "tbot-esp32-server-db" not in next(
+        line for line in commands.splitlines() if " up " in f" {line} "
+    )
