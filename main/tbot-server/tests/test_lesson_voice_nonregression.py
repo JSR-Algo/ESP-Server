@@ -65,6 +65,7 @@ LESSON_ERROR_JSON = (
     '"body":{"code":"STEP_TIMEOUT","message":"x"}}'
 )
 LESSON_JSONS = (LESSON_ACK_JSON, LESSON_PROGRESS_JSON, LESSON_ERROR_JSON)
+TTS_ACK_JSON = '{"type":"tts_ack","state":"stop","drainId":"drain-1"}'
 
 
 class _RecordingClient:
@@ -374,6 +375,129 @@ class LessonVoiceNonRegressionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(recorded, list(LESSON_JSONS))
         self.assertEqual(discarded, [])
+
+    async def test_lesson_ack_processing_does_not_block_following_tts_ack(self):
+        handler = _build_handler()
+        lesson_ack_started = asyncio.Event()
+        release_lesson_ack = asyncio.Event()
+        recorded = []
+        original_handle_text = connection_module.handleTextMessage
+
+        async def record_handle_text(conn, message):
+            recorded.append(message)
+            if message == LESSON_ACK_JSON:
+                lesson_ack_started.set()
+                await release_lesson_ack.wait()
+
+        connection_module.handleTextMessage = record_handle_text
+        route_task = asyncio.create_task(handler._route_message(LESSON_ACK_JSON))
+        try:
+            await lesson_ack_started.wait()
+            await asyncio.sleep(0)
+            self.assertTrue(route_task.done())
+
+            await handler._route_message(TTS_ACK_JSON)
+            self.assertEqual(recorded, [LESSON_ACK_JSON, TTS_ACK_JSON])
+        finally:
+            release_lesson_ack.set()
+            await route_task
+            close_tasks = getattr(handler, "_close_lesson_control_tasks", None)
+            if callable(close_tasks):
+                await close_tasks()
+            connection_module.handleTextMessage = original_handle_text
+
+    async def test_lesson_control_tasks_preserve_per_connection_order(self):
+        handler = _build_handler()
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        calls = []
+        original_handle_text = connection_module.handleTextMessage
+
+        async def record_handle_text(conn, message):
+            calls.append(("start", message))
+            if message == LESSON_ACK_JSON:
+                first_started.set()
+                await release_first.wait()
+            calls.append(("done", message))
+
+        connection_module.handleTextMessage = record_handle_text
+        try:
+            first = handler.schedule_lesson_control_message(LESSON_ACK_JSON)
+            second = handler.schedule_lesson_control_message(LESSON_PROGRESS_JSON)
+            await first_started.wait()
+            await asyncio.sleep(0)
+            self.assertEqual(calls, [("start", LESSON_ACK_JSON)])
+
+            release_first.set()
+            await asyncio.gather(first, second)
+            self.assertEqual(
+                calls,
+                [
+                    ("start", LESSON_ACK_JSON),
+                    ("done", LESSON_ACK_JSON),
+                    ("start", LESSON_PROGRESS_JSON),
+                    ("done", LESSON_PROGRESS_JSON),
+                ],
+            )
+        finally:
+            await handler._close_lesson_control_tasks()
+            connection_module.handleTextMessage = original_handle_text
+
+    async def test_lesson_control_teardown_cancels_drains_and_clears_tasks(self):
+        handler = _build_handler()
+        started = asyncio.Event()
+        original_handle_text = connection_module.handleTextMessage
+
+        async def block_handle_text(conn, message):
+            started.set()
+            await asyncio.Event().wait()
+
+        connection_module.handleTextMessage = block_handle_text
+        try:
+            task = handler.schedule_lesson_control_message(LESSON_ACK_JSON)
+            await started.wait()
+
+            await handler._close_lesson_control_tasks()
+
+            self.assertTrue(task.cancelled())
+            self.assertEqual(handler.lesson_control_tasks, set())
+            self.assertIsNone(handler._lesson_control_tail_task)
+            self.assertTrue(handler.lesson_control_tasks_closed)
+        finally:
+            connection_module.handleTextMessage = original_handle_text
+
+    async def test_lesson_control_task_exception_is_captured_without_orphan(self):
+        handler = _build_handler()
+        warnings = []
+        original_handle_text = connection_module.handleTextMessage
+
+        class RecordingLogger:
+            def bind(self, **kwargs):
+                return self
+
+            def warning(self, message, *args, **kwargs):
+                warnings.append(message)
+
+        async def fail_handle_text(conn, message):
+            raise RuntimeError("dispatch failed")
+
+        handler.logger = RecordingLogger()
+        connection_module.handleTextMessage = fail_handle_text
+        try:
+            task = handler.schedule_lesson_control_message(LESSON_ACK_JSON)
+            with self.assertRaises(RuntimeError):
+                await task
+            await asyncio.sleep(0)
+
+            self.assertEqual(handler.lesson_control_tasks, set())
+            self.assertIsNone(handler._lesson_control_tail_task)
+            self.assertEqual(
+                warnings,
+                ["Lesson control task failed errorType=RuntimeError"],
+            )
+        finally:
+            await handler._close_lesson_control_tasks()
+            connection_module.handleTextMessage = original_handle_text
 
     # ---- Route 1: classic pipeline provider falls through ----------------
     async def test_route_message_classic_pipeline_falls_through(self):

@@ -281,6 +281,9 @@ class ConnectionHandler:
         self.mcp_client = None
         self.mcp_background_tasks = set()
         self.mcp_tasks_closed = False
+        self.lesson_control_tasks = set()
+        self.lesson_control_tasks_closed = False
+        self._lesson_control_tail_task = None
         self._lesson_pull_lock = asyncio.Lock()
         self.activity_leases = None
         self._activity_leases_closed = False
@@ -558,11 +561,23 @@ class ConnectionHandler:
                 await self._route_audio_message(message)
             return
 
+        lesson_control_type = (
+            self._lesson_control_message_type(message)
+            if isinstance(message, str)
+            else None
+        )
+        if lesson_control_type is not None:
+            if lesson_control_type == "tts_ack":
+                await handleTextMessage(self, message)
+            else:
+                self.schedule_lesson_control_message(message)
+                await asyncio.sleep(0)
+            return
+
         if isinstance(message, str) and (
             self._is_hello_message(message)
             or self._is_ping_message(message)
             or self._is_mcp_message(message)
-            or self._is_lesson_control_message(message)
             or self._is_abort_message(message)
         ):
             await handleTextMessage(self, message)
@@ -1026,16 +1041,22 @@ class ConnectionHandler:
         return isinstance(payload, dict) and payload.get("type") == "listen"
 
     def _is_lesson_control_message(self, message):
+        return ConnectionHandler._lesson_control_message_type(message) is not None
+
+    @staticmethod
+    def _lesson_control_message_type(message):
         try:
             payload = json.loads(message)
         except (TypeError, json.JSONDecodeError):
-            return False
-        return isinstance(payload, dict) and payload.get("type") in {
+            return None
+        if not isinstance(payload, dict) or payload.get("type") not in {
             "lesson_ack",
             "lesson_progress",
             "lesson_error",
             "tts_ack",
-        }
+        }:
+            return None
+        return payload["type"]
 
     def _is_abort_message(self, message):
         try:
@@ -2548,6 +2569,29 @@ class ConnectionHandler:
         task.add_done_callback(self._mcp_background_task_done)
         return task
 
+    def schedule_lesson_control_message(self, message):
+        """Preserve lesson-frame order without blocking a following drain ack."""
+        if self.lesson_control_tasks_closed:
+            return None
+
+        previous = self._lesson_control_tail_task
+
+        async def dispatch_in_order():
+            if previous is not None:
+                try:
+                    await previous
+                except asyncio.CancelledError:
+                    return
+                except Exception:
+                    pass
+            await handleTextMessage(self, message)
+
+        task = asyncio.create_task(dispatch_in_order())
+        self._lesson_control_tail_task = task
+        self.lesson_control_tasks.add(task)
+        task.add_done_callback(self._lesson_control_task_done)
+        return task
+
     def _ensure_activity_leases(self):
         if self.activity_leases is not None:
             return self.activity_leases
@@ -2625,6 +2669,32 @@ class ConnectionHandler:
                 f"MCP background task failed errorType={type(exc).__name__}"
             )
 
+    def _lesson_control_task_done(self, task):
+        self.lesson_control_tasks.discard(task)
+        if self._lesson_control_tail_task is task:
+            self._lesson_control_tail_task = None
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            self.logger.bind(tag=TAG).warning(
+                f"Lesson control task failed errorType={type(exc).__name__}"
+            )
+
+    async def _close_lesson_control_tasks(self):
+        self.lesson_control_tasks_closed = True
+        tasks = tuple(self.lesson_control_tasks)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.lesson_control_tasks.clear()
+        self._lesson_control_tail_task = None
+
     async def _close_mcp_background_tasks(self):
         self.mcp_tasks_closed = True
         tasks = tuple(self.mcp_background_tasks)
@@ -2637,6 +2707,7 @@ class ConnectionHandler:
 
     async def _close_connection_owned_mcp_callers(self):
         """Stop every connection-owned path that can use device/server MCP."""
+        await self._close_lesson_control_tasks()
         await self._close_mcp_background_tasks()
 
         tasks = []
