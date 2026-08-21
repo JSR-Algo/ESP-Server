@@ -383,7 +383,7 @@ class GoogleLiveAudioBridge:
                         if not isinstance(generation, int):
                             calls = event.get("calls") or []
                             if any(
-                                isinstance(call, Mapping) and call.get("name") in LESSON_CONVERSATION_TOOLS
+                                isinstance(call, Mapping) and call.get("name") in LESSON_SEMANTIC_TOOLS
                                 for call in calls
                             ):
                                 self.logger.bind(tag="GoogleLive").warning(
