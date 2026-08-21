@@ -35,6 +35,7 @@ _LESSON_ENV = (
     "LESSON_RENDERER_V2_ENABLED",
     "LESSON_RENDERER_V4_ENABLED",
     "LESSON_RENDERER_V5_ENABLED",
+    "LESSON_COURSE_MODE_V2_ENABLED",
     "COURSE_BACKEND_URL",
     "LESSON_ASSET_ORIGIN_BASE",
     "LESSON_ASSET_PUBLIC_BASE_URL",
@@ -139,6 +140,17 @@ def test_default_config_keeps_interactive_sample_lesson_disabled():
     assert config["lesson"]["storage_hil_device_allowlist"] == []
     assert config["lesson"]["renderer_v4_enabled"] is False
     assert config["lesson"]["renderer_v5_enabled"] is False
+    assert config["lesson"]["course_mode_v2_enabled"] is False
+
+
+def test_course_mode_v2_flag_is_strict_and_defaults_false(monkeypatch):
+    config = _apply_lesson_env_overrides({"lesson": {}})
+    assert config["lesson"]["course_mode_v2_enabled"] is False
+    monkeypatch.setenv("LESSON_COURSE_MODE_V2_ENABLED", "true")
+    assert _apply_lesson_env_overrides({"lesson": {}})["lesson"]["course_mode_v2_enabled"] is True
+    monkeypatch.setenv("LESSON_COURSE_MODE_V2_ENABLED", "sometimes")
+    with pytest.raises(ValueError, match="LESSON_COURSE_MODE_V2_ENABLED"):
+        _apply_lesson_env_overrides({"lesson": {}})
 
 
 def test_renderer_v4_rollout_env_requires_and_accepts_one_device(monkeypatch):

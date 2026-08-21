@@ -74,6 +74,8 @@ from core.lesson.conversation_runtime import (
     SpeakingEvidence,
     inactive_conversation_decision,
 )
+from core.lesson.course_mode_contract import CourseModeContract
+from core.lesson.course_orchestrator import ChildObservation, CourseOrchestrator
 from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
 from core.utils.util import get_vision_url
 from core.lesson.interaction_templates import FUN_PATTERN_PROMPTS, SafeSpeakingSession, fun_pattern_prompt
@@ -88,6 +90,41 @@ from core.lesson.sd_pack_sync import request_sd_pack_sync, sd_pack_sync_timeout_
 TAG = "LessonRuntime"
 SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_to_sd"
 SAMPLE_SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_sample_to_sd"
+
+
+class CourseModeRuntimeAdapter:
+    course_mode_active = True
+
+    def __init__(self, contract: CourseModeContract) -> None:
+        self.contract = contract
+        self.orchestrator = CourseOrchestrator(contract, started_at_ms=0, soft_deadline_ms=540_000)
+
+    async def course_observe_child(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        observation = ChildObservation(
+            observation_id=arguments["observationId"], turn_sequence_id=arguments["turnSequenceId"],
+            semantic_class=arguments["semanticClass"], speech_class=arguments["speechClass"],
+            language=arguments["language"], intent=arguments["intent"], engagement=arguments["engagement"],
+            safety_class=arguments["safetyClass"], assessment_eligible=arguments["assessmentEligible"],
+            confidence_band=arguments["confidenceBand"], activity_id=arguments["activityId"],
+            context_id=arguments["contextId"], now_ms=arguments["turnSequenceId"] * 1_000,
+            robot_audio_contaminated=arguments["robotAudioContaminated"],
+            target_text_visible=arguments["targetTextVisible"],
+        )
+        decision = self.orchestrator.observe(observation)
+        return {
+            "accepted": decision.accepted, "decisionId": decision.decision_id,
+            "nextState": decision.next_state.value, "action": decision.action,
+            "acknowledgmentIntent": decision.acknowledgment_intent,
+            "teachingIntent": decision.teaching_intent, "questionIntent": decision.question_intent,
+            "embodiedIntent": decision.embodied_intent.value, "mayModelTarget": decision.may_model_target,
+            "evidenceEvent": decision.evidence_event,
+        }
+
+
+def course_mode_runtime_from_manifest(manifest: Any, *, enabled: bool) -> CourseModeRuntimeAdapter | None:
+    if not enabled or not isinstance(manifest, dict) or "courseModeContract" not in manifest:
+        return None
+    return CourseModeRuntimeAdapter(CourseModeContract.from_mapping(manifest["courseModeContract"]))
 
 
 class _SdSyncRealtimeBusyTimeoutError(Exception):

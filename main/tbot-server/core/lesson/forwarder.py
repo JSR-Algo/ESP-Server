@@ -38,6 +38,24 @@ except Exception:  # pragma: no cover
 # lifecycle events are deliberately NOT here.
 LESSON_PROGRESS_FAMILY = frozenset({"step_started", "step_completed"})
 
+_WORD_EVIDENCE_FIELDS = {
+    "sequence", "targetId", "evidenceLevel", "activityId", "contextId",
+    "supportCodesSinceLastModel", "elapsedSinceFullModelMs", "interveningActivityCount",
+    "assessmentConfidenceBand", "reviewNeeded",
+}
+
+
+def serialize_word_evidence_event(value: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != _WORD_EVIDENCE_FIELDS:
+        raise ValueError("word evidence fields must match exactly")
+    if value["assessmentConfidenceBand"] not in {"low", "medium", "high"}:
+        raise ValueError("confidence must use a bounded band")
+    if not isinstance(value["supportCodesSinceLastModel"], list) or not all(
+        isinstance(item, str) and item.isupper() for item in value["supportCodesSinceLastModel"]
+    ):
+        raise ValueError("support codes must be bounded identifiers")
+    return {"type": "word_evidence_recorded", **value}
+
 
 class LessonEventForwarder:
     """Dedicated outbound path for lesson progress events.

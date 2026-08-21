@@ -118,6 +118,70 @@ LESSON_CONVERSATION_TOOL_SPECS = {
 }
 
 
+def _course_spec(name: str, properties: Mapping[str, Any]) -> dict[str, Any]:
+    return {"type": "function", "function": {"name": name, "description": "Server-authoritative Course Mode operation.", "parameters": {"type": "object", "additionalProperties": False, "properties": dict(properties), "required": list(properties)}}}
+
+
+_COURSE_IDENTITY = {"lessonSessionId": {"type": "string"}, "turnSequenceId": {"type": "integer", "minimum": 1}, "observationId": {"type": "string"}}
+COURSE_MODE_TOOL_SPECS = {
+    "course_observe_child": _course_spec("course_observe_child", {
+        **_COURSE_IDENTITY,
+        "semanticClass": {"type": "string", "enum": ["target_en", "meaning_vi", "related", "unrelated", "unknown"]},
+        "speechClass": {"type": "string", "enum": ["exact", "near", "partial", "silence", "uncertain", "not_applicable"]},
+        "language": {"type": "string", "enum": ["vi", "en", "mixed", "unknown"]},
+        "intent": {"type": "string"}, "engagement": {"type": "string"},
+        "safetyClass": {"type": "string", "enum": ["normal", "safety"]},
+        "assessmentEligible": {"type": "boolean"}, "confidenceBand": {"type": "string", "enum": ["low", "medium", "high"]},
+        "activityId": {"type": "string"}, "contextId": {"type": "string"},
+        "robotAudioContaminated": {"type": "boolean"}, "targetTextVisible": {"type": "boolean"},
+    }),
+    "course_open_context": _course_spec("course_open_context", {**_COURSE_IDENTITY, "branchType": {"type": "string"}}),
+    "course_close_context": _course_spec("course_close_context", {**_COURSE_IDENTITY, "branchId": {"type": "string"}, "bridgeIntent": {"type": "string"}, "childDetailCode": {"type": "string"}}),
+    "course_apply_response_plan": _course_spec("course_apply_response_plan", {**_COURSE_IDENTITY, "planId": {"type": "string"}}),
+    "course_continue": _course_spec("course_continue", _COURSE_IDENTITY),
+}
+
+
+async def _execute_course(conn: Any, tool_name: str, arguments: Mapping[str, Any]):
+    runtime, rejected = _runtime(conn)
+    if rejected is not None:
+        return rejected
+    if getattr(runtime, "course_mode_active", False) is not True:
+        return _rejected("COURSE_MODE_NOT_ACTIVE")
+    required = COURSE_MODE_TOOL_SPECS[tool_name]["function"]["parameters"]["required"]
+    if set(arguments) != set(required):
+        return _rejected("INVALID_TOOL_ARGS")
+    operation = getattr(runtime, tool_name, None)
+    if not callable(operation):
+        return _rejected("COURSE_OPERATION_NOT_AVAILABLE")
+    return ActionResponse(action=Action.REQLLM, result=await operation(dict(arguments)))
+
+
+@register_function("course_observe_child", COURSE_MODE_TOOL_SPECS["course_observe_child"], ToolType.SYSTEM_CTL)
+async def course_observe_child(conn, **arguments):
+    return await _execute_course(conn, "course_observe_child", arguments)
+
+
+@register_function("course_open_context", COURSE_MODE_TOOL_SPECS["course_open_context"], ToolType.SYSTEM_CTL)
+async def course_open_context(conn, **arguments):
+    return await _execute_course(conn, "course_open_context", arguments)
+
+
+@register_function("course_close_context", COURSE_MODE_TOOL_SPECS["course_close_context"], ToolType.SYSTEM_CTL)
+async def course_close_context(conn, **arguments):
+    return await _execute_course(conn, "course_close_context", arguments)
+
+
+@register_function("course_apply_response_plan", COURSE_MODE_TOOL_SPECS["course_apply_response_plan"], ToolType.SYSTEM_CTL)
+async def course_apply_response_plan(conn, **arguments):
+    return await _execute_course(conn, "course_apply_response_plan", arguments)
+
+
+@register_function("course_continue", COURSE_MODE_TOOL_SPECS["course_continue"], ToolType.SYSTEM_CTL)
+async def course_continue(conn, **arguments):
+    return await _execute_course(conn, "course_continue", arguments)
+
+
 def _validate_arguments(tool_name: str, arguments: Mapping[str, Any]) -> bool:
     parameters = LESSON_CONVERSATION_TOOL_SPECS[tool_name]["function"]["parameters"]
     return set(arguments) == set(parameters["required"])

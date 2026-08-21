@@ -527,6 +527,7 @@ def _validate_lesson_rollout_file_config(lesson_cfg):
         "renderer_v2_enabled",
         "renderer_v4_enabled",
         "renderer_v5_enabled",
+        "course_mode_v2_enabled",
     ):
         if key in lesson_cfg and type(lesson_cfg[key]) is not bool:
             raise ValueError(f"lesson.{key} must be a boolean")
@@ -579,6 +580,7 @@ def _apply_lesson_env_overrides(config):
     renderer_v2_flag = _parse_strict_bool_env("LESSON_RENDERER_V2_ENABLED")
     renderer_v4_flag = _parse_strict_bool_env("LESSON_RENDERER_V4_ENABLED")
     renderer_v5_flag = _parse_strict_bool_env("LESSON_RENDERER_V5_ENABLED")
+    course_mode_v2_flag = _parse_strict_bool_env("LESSON_COURSE_MODE_V2_ENABLED")
     rollout_allowlist_raw = _clean_env("LESSON_ROLLOUT_DEVICE_ALLOWLIST")
     storage_hil_allowlist_raw = _clean_env("LESSON_STORAGE_HIL_DEVICE_ALLOWLIST")
     course_url = _clean_env("COURSE_BACKEND_URL") or _clean_env("TBOT_BACKEND_API_URL")
@@ -652,6 +654,7 @@ def _apply_lesson_env_overrides(config):
         and renderer_v2_flag is None
         and renderer_v4_flag is None
         and renderer_v5_flag is None
+        and course_mode_v2_flag is None
         and rollout_allowlist_raw is None
     ):
         lesson_cfg = config.get("lesson")
@@ -664,6 +667,7 @@ def _apply_lesson_env_overrides(config):
         lesson_cfg.setdefault("renderer_v2_enabled", False)
         lesson_cfg.setdefault("renderer_v4_enabled", False)
         lesson_cfg.setdefault("renderer_v5_enabled", False)
+        lesson_cfg.setdefault("course_mode_v2_enabled", False)
         lesson_cfg.setdefault("rollout_device_allowlist", [])
         lesson_cfg["storage_hil_device_allowlist"] = storage_hil_allowlist
         configured_allowlist = lesson_cfg["rollout_device_allowlist"]
@@ -695,6 +699,7 @@ def _apply_lesson_env_overrides(config):
     lesson_cfg.setdefault("renderer_v2_enabled", False)
     lesson_cfg.setdefault("renderer_v4_enabled", False)
     lesson_cfg.setdefault("renderer_v5_enabled", False)
+    lesson_cfg.setdefault("course_mode_v2_enabled", False)
     lesson_cfg["storage_hil_device_allowlist"] = storage_hil_allowlist
     if flag is not None:
         lesson_cfg["runtime_enabled"] = flag
@@ -722,6 +727,9 @@ def _apply_lesson_env_overrides(config):
         renderer_v5_flag
         if renderer_v5_flag is not None
         else lesson_cfg["renderer_v5_enabled"]
+    )
+    lesson_cfg["course_mode_v2_enabled"] = (
+        course_mode_v2_flag if course_mode_v2_flag is not None else lesson_cfg["course_mode_v2_enabled"]
     )
     if rollout_allowlist_raw is not None:
         lesson_cfg["rollout_device_allowlist"] = sorted(

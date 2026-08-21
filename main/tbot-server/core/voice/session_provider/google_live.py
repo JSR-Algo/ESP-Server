@@ -17,7 +17,7 @@ from core.voice.google_live.interaction_controller import (
     InteractionState,
 )
 from core.voice.session_provider.base import VoiceSessionProvider
-from core.providers.tools.product_toolset import LESSON_CONVERSATION_TOOLS, product_tool_names
+from core.providers.tools.product_toolset import LESSON_SEMANTIC_TOOLS, product_tool_names
 from core.voice.live_admission import AdmissionDecision, AdmissionReason, LiveAdmissionGate
 from core.voice.session_orchestrator import SessionMode, normalize_session_mode
 from plugins_func.register import Action
@@ -5802,7 +5802,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         response_payload,
         validation_receipt,
     ):
-        if name not in LESSON_CONVERSATION_TOOLS:
+        if name not in LESSON_SEMANTIC_TOOLS:
             return
         if not self._validation_tool_audit_enabled():
             return
@@ -5896,7 +5896,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     }
                 )
                 continue
-            if in_lesson and name not in LESSON_CONVERSATION_TOOLS:
+            if in_lesson and name not in LESSON_SEMANTIC_TOOLS:
                 responses.append(
                     {
                         "id": call_id,
@@ -6061,7 +6061,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         lesson_validation_receipt=None,
     ):
         try:
-            if name in LESSON_CONVERSATION_TOOLS:
+            if name in LESSON_SEMANTIC_TOOLS:
                 from plugins_func.functions.lesson_conversation import (
                     _google_live_lesson_tool_admission,
                 )
@@ -6115,7 +6115,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             )
         try:
             try:
-                if name in LESSON_CONVERSATION_TOOLS:
+                if name in LESSON_SEMANTIC_TOOLS:
                     self.conn.logger.bind(tag="GoogleLive").info(
                         with_lesson_log_context(
                             "Google Live lesson tool dispatch name={} argument_keys=[{}]",
@@ -6150,7 +6150,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 )
             try:
                 action_name = getattr(getattr(result, "action", None), "name", "?")
-                if name in LESSON_CONVERSATION_TOOLS:
+                if name in LESSON_SEMANTIC_TOOLS:
                     self.conn.logger.bind(tag="GoogleLive").info(
                         with_lesson_log_context(
                             "Google Live lesson tool returned name={} action={}",

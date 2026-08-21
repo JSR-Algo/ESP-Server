@@ -39,6 +39,11 @@ LESSON_CONVERSATION_TOOLS = (
     "lesson_visual_reaction",
     "lesson_continue",
 )
+COURSE_MODE_TOOLS = (
+    "course_observe_child", "course_open_context", "course_close_context",
+    "course_apply_response_plan", "course_continue",
+)
+LESSON_SEMANTIC_TOOLS = LESSON_CONVERSATION_TOOLS + COURSE_MODE_TOOLS
 
 # Music remains a classic-pipeline allowance for existing product behavior. Live
 # removes it with its documented incompatibility filter before sending tools to
@@ -72,7 +77,7 @@ def product_tool_names(conn: Any) -> List[str]:
     if lesson_start_enabled(conn):
         names.extend(ALWAYS_INCLUDE_WHEN_LESSON_ENABLED)
     if lesson_runtime_enabled(conn):
-        names.extend(LESSON_CONVERSATION_TOOLS)
+        names.extend(LESSON_SEMANTIC_TOOLS)
     return _dedupe(name for name in names if _is_child_allowed(name))
 
 
