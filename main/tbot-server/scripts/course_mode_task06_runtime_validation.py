@@ -34,6 +34,7 @@ ALLOWED_ESP_EVIDENCE_PATHS = (
     "docs/qa/ad-hoc/2026-08-22-course-mode-task06-runtime-validation.md",
     "docs/qa/artifacts/2026-08-22-course-mode-task06/",
     "main/tbot-server/scripts/course_mode_task06_runtime_validation.py",
+    "main/tbot-server/tests/test_course_mode_e2e_journeys.py",
     "main/tbot-server/tests/test_course_mode_task06_validation_script.py",
 )
 ALLOWED_ESP_DIRTY_PATHS = (
@@ -197,7 +198,6 @@ def main() -> int:
 
     journey_module = load_journey_module()
     journeys = journey_module.JOURNEYS
-    baseline = {row["name"]: journey_module._run(row) for row in journeys}
     threads_before = threading.active_count()
     fds_before = fd_count()
     tracemalloc.start()
@@ -207,9 +207,25 @@ def main() -> int:
     iteration = 0
     while iteration < args.iterations or time.perf_counter() - started < args.min_duration_seconds:
         for row in journeys:
-            actual = journey_module._run(row)
-            if actual != baseline[row["name"]]:
-                failures.append({"iteration": iteration, "journey": row["name"]})
+            try:
+                result = journey_module._run_full_session(row)
+                if (
+                    result["initialOutcome"] != journey_module.EXPECTED_OUTCOMES[row["name"]]
+                    or result["finalState"] != "CLOSING"
+                    or result["steps"] < 4
+                ):
+                    failures.append({"iteration": iteration, "journey": row["name"], "result": result})
+                    break
+            except Exception as exc:  # The evidence records the first deterministic failure.
+                failures.append({
+                    "iteration": iteration,
+                    "journey": row["name"],
+                    "errorType": type(exc).__name__,
+                    "error": str(exc),
+                })
+                break
+        if failures:
+            break
         iteration += 1
     duration = time.perf_counter() - started
     heap_current, heap_peak = tracemalloc.get_traced_memory()

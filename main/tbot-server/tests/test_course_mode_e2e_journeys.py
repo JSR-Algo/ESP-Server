@@ -13,6 +13,32 @@ JOURNEYS = json.loads((ROOT / "course_mode_journeys.json").read_text(encoding="u
 CONTRACT = CourseModeContract.from_mapping(json.loads(
     (ROOT / "course-mode" / "course-mode-pilot-cat-ball.json").read_text(encoding="utf-8")
 ))
+EXPECTED_OUTCOMES = {
+    "knows word early": ("ACKNOWLEDGE_GUIDE_INVITE", "WORD_ACTIVE", "INDEPENDENT_RECALL"),
+    "repetition only": ("MODEL_AND_SUPPORT", "WORD_ACTIVE", "SUPPORTED_SPEECH"),
+    "Vietnamese answer": ("ACKNOWLEDGE_GUIDE_INVITE", "WORD_ACTIVE", "UNDERSTOOD"),
+    "partial speech": ("MODEL_AND_SUPPORT", "WORD_ACTIVE", "NOT_STARTED"),
+    "silence": ("MODEL_AND_SUPPORT", "WORD_ACTIVE", "NOT_STARTED"),
+    "low confidence": ("OWN_ASR_UNCERTAINTY", "TECHNICAL_RECOVERY", "NOT_STARTED"),
+    "unrelated story": ("OPEN_CONTEXT_BRANCH", "CONTEXT_BRANCH", "NOT_STARTED"),
+    "emotional share": ("RESPOND_WITHOUT_REDIRECT", "REGULATION_BREAK", "NOT_STARTED"),
+    "refusal": ("RESPOND_WITHOUT_REDIRECT", "REGULATION_BREAK", "NOT_STARTED"),
+    "fatigue": ("RESPOND_WITHOUT_REDIRECT", "REGULATION_BREAK", "NOT_STARTED"),
+    "question": ("OPEN_CONTEXT_BRANCH", "CONTEXT_BRANCH", "NOT_STARTED"),
+    "barge-in": ("ACKNOWLEDGE_GUIDE_INVITE", "WORD_ACTIVE", "UNDERSTOOD"),
+    "reconnect": ("WORD_ACTIVE", ()),
+    "duplicate tool call": (True, False, "DUPLICATE_IGNORED"),
+    "delayed recall success": ("MASTERED_TODAY", False),
+    "delayed recall failure": ("TRANSFERRED", True),
+    "one-word close": ("CLOSE_WITHOUT_SECOND_WORD", "animals.cat"),
+    "two-word success": ("START_OPTIONAL_SECONDARY", "toys.ball"),
+    "safety pause": ("PAUSE_FOR_SAFETY", "SAFETY_PAUSED", "NOT_STARTED"),
+    "technical recovery": ("OWN_ASR_UNCERTAINTY", "TECHNICAL_RECOVERY", "NOT_STARTED"),
+    "visible answer text": ("MODEL_AND_SUPPORT", "WORD_ACTIVE", "SUPPORTED_SPEECH"),
+    "routine related story bridge": (
+        "OPEN_CONTEXT_BRANCH", "RETURN_THROUGH_AUTHORED_BRIDGE", "bridge_white_cat_visual",
+    ),
+}
 
 
 def runtime() -> CourseOrchestrator:
@@ -56,8 +82,64 @@ def test_all_scripted_journeys_are_deterministic_and_truthful() -> None:
         assert first == second, row["name"]
 
 
-def _run(row: dict):
+def test_all_scripted_journeys_match_explicit_expected_outcomes() -> None:
+    assert set(EXPECTED_OUTCOMES) == {row["name"] for row in JOURNEYS}
+    for row in JOURNEYS:
+        assert _run(row) == EXPECTED_OUTCOMES[row["name"]], row["name"]
+
+
+def test_all_soak_journeys_reach_a_closing_session_state() -> None:
+    for row in JOURNEYS:
+        result = _run_full_session(row)
+        assert result["finalState"] == "CLOSING", row["name"]
+        assert result["steps"] >= 4, row["name"]
+        assert result["initialOutcome"] == EXPECTED_OUTCOMES[row["name"]], row["name"]
+
+
+def _run_full_session(row: dict) -> dict:
     value = runtime()
+    initial = _run(row, value=value)
+    steps = 4
+    if row.get("special") == "restore":
+        value = CourseOrchestrator.restore(CONTRACT, value.snapshot())
+    if value.session_state.value == "CONTEXT_BRANCH":
+        value.close_context_branch(
+            branch_id=value.snapshot()["activeBranchId"],
+            bridge_intent="white_cat_visual",
+            child_detail_code="no_personal_detail",
+        )
+        steps += 1
+    if value.session_state.value in {"REGULATION_BREAK", "SAFETY_PAUSED"}:
+        value.observe(ChildObservation(
+            observation_id=f"close-{row['name']}", turn_sequence_id=99,
+            semantic_class="unknown", speech_class="not_applicable", language="vi",
+            intent="stop", engagement="engaged", safety_class="normal",
+            assessment_eligible=False, confidence_band="high",
+            activity_id="cat-recall-visual-02", context_id="cat_primary_visual_recall",
+            now_ms=120_000, robot_audio_contaminated=False, target_text_visible=False,
+        ))
+        steps += 1
+    elif value.session_state.value == "TECHNICAL_RECOVERY":
+        value.observe(ChildObservation(
+            observation_id=f"deadline-{row['name']}", turn_sequence_id=99,
+            semantic_class="unknown", speech_class="silence", language="vi",
+            intent="answer", engagement="engaged", safety_class="normal",
+            assessment_eligible=False, confidence_band="high",
+            activity_id="cat-recall-visual-02", context_id="cat_primary_visual_recall",
+            now_ms=541_000, robot_audio_contaminated=False, target_text_visible=False,
+        ))
+        steps += 1
+    if value.session_state.value == "WORD_ACTIVE":
+        value.maybe_advance_target(now_ms=500_000)
+        steps += 1
+        if value.session_state.value == "WORD_ACTIVE":
+            value.maybe_advance_target(now_ms=500_001)
+            steps += 1
+    return {"initialOutcome": initial, "finalState": value.session_state.value, "steps": steps}
+
+
+def _run(row: dict, *, value: CourseOrchestrator | None = None):
+    value = value or runtime()
     if row["name"] == "repetition only":
         value.active_mastery.record_model(now_ms=25_000)
     special = row.get("special")
