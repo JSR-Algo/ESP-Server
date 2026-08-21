@@ -1397,6 +1397,48 @@ async def test_committed_closing_plan_completes_parent_runtime_and_emits_stop() 
 
 
 @pytest.mark.asyncio
+async def test_failed_closing_stop_remains_resumable_until_stop_is_sent() -> None:
+    store = MemoryCourseModeSnapshotStore()
+
+    async def fail_stop(raw):
+        frame = json.loads(raw)
+        if frame["type"] == "lesson_stop":
+            raise ConnectionError("socket closed")
+
+    runtime = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest={"courseModeContract": contract()}, asset_cache=object(),
+        forwarder=_Forwarder(), send=fail_stop,
+        course_mode_snapshot_store=store, course_mode_snapshot_device_id="device-1",
+    )
+    runtime.course_mode.orchestrator.session_state = SessionState.CLOSING
+    runtime.course_mode._latest_decision_id = "course-decision-1"
+    runtime.course_mode._applied_decision_ids.add("course-decision-1")
+    await runtime.persist_course_mode_snapshot()
+
+    assert await runtime._complete_course_mode_close() is False
+    snapshot = await store.load("device-1", "a1")
+    assert runtime.course_mode.orchestrator.session_state is SessionState.CLOSING
+    assert snapshot["orchestrator"]["sessionState"] == "CLOSING"
+
+    sent = []
+
+    async def send(raw):
+        sent.append(json.loads(raw))
+
+    resumed = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest={"courseModeContract": contract()}, asset_cache=object(),
+        forwarder=_Forwarder(), send=send, course_mode_snapshot=snapshot,
+        course_mode_snapshot_store=store, course_mode_snapshot_device_id="device-1",
+    )
+    assert resumed.course_mode.orchestrator.session_state is SessionState.CLOSING
+    assert await resumed._complete_course_mode_close() is True
+    assert sent[-1]["type"] == "lesson_stop"
+    assert resumed.course_mode.orchestrator.session_state is SessionState.COMPLETE
+
+
+@pytest.mark.asyncio
 async def test_course_continue_closes_after_failed_delayed_recall() -> None:
     runtime = course_mode_runtime_from_manifest(
         {"courseModeContract": contract()}, enabled=True, clock=lambda: 70.0,

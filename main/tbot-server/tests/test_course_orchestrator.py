@@ -92,6 +92,20 @@ def test_safety_disclosure_context_enters_protected_pause_without_story_bridge()
     assert decision.branch_id is None
 
 
+def test_emotional_context_tool_enters_regulation_without_a_vocabulary_bridge() -> None:
+    runtime = course()
+
+    decision = runtime.open_context_branch(
+        observation_id="emotional-share", turn_sequence_id=1,
+        branch_type="EMOTIONAL_SHARE",
+    )
+
+    assert decision.action == "RESPOND_WITHOUT_REDIRECT"
+    assert decision.next_state is SessionState.REGULATION_BREAK
+    assert decision.embodied_intent is EmbodiedIntent.COMFORT_CALM
+    assert decision.branch_id is None
+
+
 def test_emotional_safety_refusal_and_fatigue_never_force_vocabulary() -> None:
     for intent, safety, expected_state in (
         ("emotional_share", "normal", SessionState.REGULATION_BREAK),

@@ -821,15 +821,15 @@ def _course_mode_snapshot_is_terminal(snapshot: Any) -> bool:
     if not isinstance(snapshot, dict):
         return False
     orchestrator = snapshot.get("orchestrator")
-    if not isinstance(orchestrator, dict) or orchestrator.get("sessionState") not in {
-        SessionState.CLOSING.value,
-        SessionState.COMPLETE.value,
-    }:
+    if not isinstance(orchestrator, dict):
         return False
+    state = orchestrator.get("sessionState")
     latest_decision_id = snapshot.get("latestDecisionId")
-    return latest_decision_id is None or latest_decision_id in snapshot.get(
-        "appliedDecisionIds", []
-    )
+    if state == SessionState.CLOSING.value:
+        return latest_decision_id is None
+    if state != SessionState.COMPLETE.value:
+        return False
+    return latest_decision_id is None or latest_decision_id in snapshot.get("appliedDecisionIds", [])
 
 
 class _SdSyncRealtimeBusyTimeoutError(Exception):
@@ -2255,8 +2255,6 @@ class LessonRuntime:
         committed = self.course_mode.commit_course_response_plan(arguments)
         if committed:
             closing = self.course_mode.orchestrator.session_state is SessionState.CLOSING
-            if closing:
-                self.course_mode.orchestrator.session_state = SessionState.COMPLETE
             try:
                 await self.persist_course_mode_snapshot()
             except Exception:
@@ -2269,10 +2267,29 @@ class LessonRuntime:
                     retry_interrupted_delivery=False,
                 )
                 return False
-            if closing and not self._completion_stop_sent:
+            if closing:
+                return await self._complete_course_mode_close()
+        return committed
+
+    async def _complete_course_mode_close(self) -> bool:
+        if self.course_mode is None:
+            return False
+        if self.course_mode.orchestrator.session_state is SessionState.COMPLETE:
+            return True
+        if self.course_mode.orchestrator.session_state is not SessionState.CLOSING:
+            return False
+        try:
+            if not self._completion_stop_sent:
                 await self._emit("lesson_stop", body={"reason": "COMPLETED"})
                 self._completion_stop_sent = True
-        return committed
+        except Exception:
+            return False
+        self.course_mode.orchestrator.session_state = SessionState.COMPLETE
+        try:
+            await self.persist_course_mode_snapshot()
+        except Exception:
+            return False
+        return True
 
     async def mark_response_plan_delivery_attempted(self, arguments: Dict[str, Any]) -> bool:
         if self.course_mode is None:
@@ -2488,6 +2505,9 @@ class LessonRuntime:
             return
         if self.course_mode is not None:
             await self._flush_course_evidence_outbox()
+            if self.course_mode.orchestrator.session_state is SessionState.CLOSING:
+                await self._complete_course_mode_close()
+                return
             self.course_mode.start_course_budget()
         await self._emit("lesson_prepare", body=self._prepare_body())
 

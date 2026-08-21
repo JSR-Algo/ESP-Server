@@ -295,6 +295,19 @@ class CourseOrchestrator:
                 "PAUSE_FOR_SAFETY", acknowledgment="acknowledge_safety",
                 embodied=EmbodiedIntent.COMFORT_CALM,
             )
+        if branch_type in {"EMOTIONAL_SHARE", "REFUSAL"}:
+            self.session_state = SessionState.REGULATION_BREAK
+            self._active_branch_id = None
+            return self._decision(
+                "RESPOND_WITHOUT_REDIRECT",
+                acknowledgment=f"acknowledge_{branch_type.casefold()}",
+                question="offer_pause_choice",
+                embodied=(
+                    EmbodiedIntent.COMFORT_CALM
+                    if branch_type == "EMOTIONAL_SHARE"
+                    else EmbodiedIntent.PAUSE_CHOICE
+                ),
+            )
         self.session_state = SessionState.CONTEXT_BRANCH
         self._active_branch_id = f"branch-{turn_sequence_id}-{observation_id}"
         return self._decision(
