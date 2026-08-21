@@ -52,6 +52,32 @@ def test_related_story_is_meaningfully_acknowledged_then_authored_bridge_returns
     assert runtime.active_mastery.level is before
 
 
+def test_context_branch_rejects_unbounded_model_invented_identifiers() -> None:
+    runtime = course()
+    runtime.begin(); runtime.continue_opening(); runtime.continue_opening()
+
+    invalid_open = runtime.open_context_branch(
+        observation_id="invented-open", turn_sequence_id=4,
+        branch_type="INVENTED_BRANCH",
+    )
+    assert invalid_open.accepted is False
+    assert invalid_open.action == "INVALID_CONTEXT_BRANCH_IGNORED"
+    assert runtime.session_state is SessionState.WORD_ACTIVE
+
+    opened = runtime.open_context_branch(
+        observation_id="valid-open", turn_sequence_id=5,
+        branch_type="RELATED_STORY",
+    )
+    invalid_close = runtime.close_context_branch(
+        branch_id=opened.branch_id,
+        bridge_intent="invented_curriculum",
+        child_detail_code="raw_free_form_story",
+    )
+    assert invalid_close.accepted is False
+    assert invalid_close.action == "INVALID_CONTEXT_BRIDGE_IGNORED"
+    assert runtime.session_state is SessionState.CONTEXT_BRANCH
+
+
 def test_emotional_safety_refusal_and_fatigue_never_force_vocabulary() -> None:
     for intent, safety, expected_state in (
         ("emotional_share", "normal", SessionState.REGULATION_BREAK),

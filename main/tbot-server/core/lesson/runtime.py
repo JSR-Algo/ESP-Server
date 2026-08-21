@@ -90,6 +90,7 @@ from core.lesson.sd_pack_mcp_payload import (
 from core.lesson.sd_pack_sync import request_sd_pack_sync, sd_pack_sync_timeout_sec
 
 TAG = "LessonRuntime"
+COURSE_EVIDENCE_SEQUENCE_BASE = -3_000_000
 SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_to_sd"
 SAMPLE_SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_sample_to_sd"
 
@@ -116,20 +117,27 @@ class CourseModeRuntimeAdapter:
         self._consumed_operation_ids: set[str] = set()
         self._decisions: dict[str, CourseDecision] = {}
         self._latest_decision_id: str | None = None
+        self._next_turn_sequence_id = 1
 
     def _identity_error(self, arguments: Dict[str, Any]) -> Dict[str, Any] | None:
         if arguments.get("lessonSessionId") != self.lesson_session_id:
             return {"accepted": False, "code": "LESSON_SESSION_MISMATCH"}
+        turn_sequence_id = arguments.get("turnSequenceId")
+        if type(turn_sequence_id) is not int or turn_sequence_id != self._next_turn_sequence_id:
+            return {"accepted": False, "code": "STALE_TURN_SEQUENCE"}
         return None
 
     def _consume_operation(self, arguments: Dict[str, Any]) -> Dict[str, Any] | None:
-        error = self._identity_error(arguments)
-        if error is not None:
-            return error
+        if arguments.get("lessonSessionId") != self.lesson_session_id:
+            return {"accepted": False, "code": "LESSON_SESSION_MISMATCH"}
         observation_id = arguments["observationId"]
         if observation_id in self._consumed_operation_ids:
             return {"accepted": False, "code": "DUPLICATE_OPERATION_IGNORED"}
+        error = self._identity_error(arguments)
+        if error is not None:
+            return error
         self._consumed_operation_ids.add(observation_id)
+        self._next_turn_sequence_id += 1
         return None
 
     @staticmethod
@@ -191,7 +199,7 @@ class CourseModeRuntimeAdapter:
             "courseMode": True,
             "identity": {
                 "lessonSessionId": self.lesson_session_id,
-                "turnSequenceId": self.orchestrator.snapshot()["decisionSequence"] + 1,
+                "turnSequenceId": self._next_turn_sequence_id,
             },
             "activeTargetId": target.target_id,
             "activities": activities,
@@ -205,7 +213,7 @@ class CourseModeRuntimeAdapter:
         leak = mastery.answer_leakage
         elapsed = 0 if leak.last_full_model_at_ms is None else max(0, int(self._clock() * 1_000) - leak.last_full_model_at_ms)
         event = serialize_word_evidence_event({
-            "sequence": int(decision.decision_id.rsplit("-", 1)[-1]),
+            "sequence": COURSE_EVIDENCE_SEQUENCE_BASE - int(decision.decision_id.rsplit("-", 1)[-1]),
             **decision.evidence_event,
             "supportCodesSinceLastModel": [],
             "elapsedSinceFullModelMs": elapsed,

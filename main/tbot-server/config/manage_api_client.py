@@ -468,7 +468,11 @@ def _normalize_lesson_event(event: Dict) -> Dict:
             "supportCodesSinceLastModel", "elapsedSinceFullModelMs",
             "interveningActivityCount", "assessmentConfidenceBand", "reviewNeeded",
         )
-        return {key: event[key] for key in fields if key in event and event[key] is not None}
+        return {
+            key: _strip_lesson_sensitive_fields(event[key])
+            for key in fields
+            if key in event and event[key] is not None
+        }
     sanitized = _strip_lesson_sensitive_fields(event)
     out: Dict = {}
     _copy_lesson_event_fields(

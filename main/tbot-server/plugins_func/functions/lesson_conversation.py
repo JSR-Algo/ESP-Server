@@ -8,6 +8,11 @@ from contextvars import ContextVar
 from typing import Any
 
 from core.lesson.conversation_contract import ConversationContractError, LessonToolIdentity
+from core.lesson.course_orchestrator import (
+    CONTEXT_BRANCH_TYPES,
+    CONTEXT_BRIDGE_INTENTS,
+    CONTEXT_CHILD_DETAIL_CODES,
+)
 from plugins_func.register import Action, ActionResponse, ToolType, register_function
 
 _GOOGLE_LIVE_LESSON_ADMISSION = ContextVar("google_live_lesson_admission", default=None)
@@ -135,8 +140,14 @@ COURSE_MODE_TOOL_SPECS = {
         "activityId": {"type": "string"}, "contextId": {"type": "string"},
         "robotAudioContaminated": {"type": "boolean"}, "targetTextVisible": {"type": "boolean"},
     }),
-    "course_open_context": _course_spec("course_open_context", {**_COURSE_IDENTITY, "branchType": {"type": "string"}}),
-    "course_close_context": _course_spec("course_close_context", {**_COURSE_IDENTITY, "branchId": {"type": "string"}, "bridgeIntent": {"type": "string"}, "childDetailCode": {"type": "string"}}),
+    "course_open_context": _course_spec("course_open_context", {
+        **_COURSE_IDENTITY, "branchType": {"type": "string", "enum": list(CONTEXT_BRANCH_TYPES)},
+    }),
+    "course_close_context": _course_spec("course_close_context", {
+        **_COURSE_IDENTITY, "branchId": {"type": "string"},
+        "bridgeIntent": {"type": "string", "enum": list(CONTEXT_BRIDGE_INTENTS)},
+        "childDetailCode": {"type": "string", "enum": list(CONTEXT_CHILD_DETAIL_CODES)},
+    }),
     "course_apply_response_plan": _course_spec("course_apply_response_plan", {
         **_COURSE_IDENTITY, "planId": {"type": "string"}, "decisionId": {"type": "string"},
         "acknowledgment": {"type": "string"}, "relation": {"type": "string"},

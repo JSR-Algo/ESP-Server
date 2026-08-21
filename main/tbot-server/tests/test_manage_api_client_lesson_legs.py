@@ -18,6 +18,7 @@ mirroring tests/test_lesson_forwarder.py.
 """
 
 import importlib.util
+import json
 import os
 import re
 import unittest
@@ -385,6 +386,29 @@ class PostLessonEventContractTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(client.last["json"]["events"], [event])
+
+    async def test_scrubs_nested_sensitive_fields_from_malformed_word_evidence(self):
+        client = _RecordingClient([_FakeResponse(json_body={"data": {"accepted": 1}})])
+        event = {
+            "type": "word_evidence_recorded", "sequence": -3_000_001,
+            "targetId": "animals.cat", "evidenceLevel": "INDEPENDENT_RECALL",
+            "activityId": "cat-recall-visual-02", "contextId": "cat_primary_visual_recall",
+            "supportCodesSinceLastModel": [
+                {"code": "FIRST_SOUND", "transcript": "private child words"},
+            ],
+            "elapsedSinceFullModelMs": 32_000,
+            "interveningActivityCount": 1, "assessmentConfidenceBand": "high",
+            "reviewNeeded": False,
+        }
+
+        await MAC.post_lesson_event(
+            client, BASE, "dev1", {"assignmentId": "a1", "sessionId": "s1", "events": [event]},
+            token=TOKEN,
+        )
+
+        sent = client.last["json"]["events"][0]
+        self.assertEqual(sent["supportCodesSinceLastModel"], [{"code": "FIRST_SOUND"}])
+        self.assertNotIn("private child words", json.dumps(sent))
 
     async def test_no_token_post_omits_authorization(self):
         client = _RecordingClient([_FakeResponse(json_body={"data": {"accepted": 0}})])

@@ -11,6 +11,31 @@ from core.lesson.embodied_intent import EmbodiedIntent
 from core.lesson.word_mastery import EvidenceLevel, WordMastery
 
 
+CONTEXT_BRANCH_TYPES = (
+    "RELATED_STORY",
+    "UNRELATED_CURIOSITY",
+    "EMOTIONAL_SHARE",
+    "HELP_REQUEST",
+    "PLAY_REQUEST",
+    "REFUSAL",
+    "SAFETY_DISCLOSURE",
+)
+CONTEXT_BRIDGE_INTENTS = (
+    "white_cat_visual",
+    "pet_sound_clue",
+    "resume_active_word_visual",
+    "resume_active_word_choice",
+)
+CONTEXT_CHILD_DETAIL_CODES = (
+    "grandmother_pet",
+    "related_pet",
+    "child_choice",
+    "current_visual",
+    "earlier_session_detail",
+    "no_personal_detail",
+)
+
+
 class SessionState(str, Enum):
     PREPARING = "PREPARING"
     OPENING = "OPENING"
@@ -238,6 +263,8 @@ class CourseOrchestrator:
     def open_context_branch(self, *, observation_id: str, turn_sequence_id: int, branch_type: str) -> CourseDecision:
         if observation_id in self._consumed_observations:
             return self._decision("DUPLICATE_IGNORED", accepted=False, acknowledgment="retain_authoritative_state")
+        if branch_type not in CONTEXT_BRANCH_TYPES:
+            return self._decision("INVALID_CONTEXT_BRANCH_IGNORED", accepted=False)
         self._consumed_observations.add(observation_id)
         self.session_state = SessionState.CONTEXT_BRANCH
         self._active_branch_id = f"branch-{turn_sequence_id}-{observation_id}"
@@ -250,6 +277,11 @@ class CourseOrchestrator:
     def close_context_branch(self, *, branch_id: str | None, bridge_intent: str, child_detail_code: str) -> CourseDecision:
         if branch_id != self._active_branch_id:
             return self._decision("STALE_BRANCH_IGNORED", accepted=False)
+        if (
+            bridge_intent not in CONTEXT_BRIDGE_INTENTS
+            or child_detail_code not in CONTEXT_CHILD_DETAIL_CODES
+        ):
+            return self._decision("INVALID_CONTEXT_BRIDGE_IGNORED", accepted=False)
         self._active_branch_id = None
         self.session_state = SessionState.WORD_ACTIVE
         return self._decision(
