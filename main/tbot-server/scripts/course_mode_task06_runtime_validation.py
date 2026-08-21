@@ -27,6 +27,7 @@ EXPECTED_LAYOUT = "e61b56d1f8219a86c7f3986e7d5c70b91f512286604b5b206ef11e2c989d2
 EXPECTED_ESP_SHA = "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268"
 EXPECTED_FIRMWARE_SHA = "d47174daebe17b9c1a9d1a1eb506711a57cd3512"
 EXPECTED_BACKEND_SHA = "657474ff3b58fba2c3c31f2978d53370ffad8b11"
+MAX_RETAINED_HEAP_GROWTH_BYTES = 1024 * 1024
 ALLOWED_ESP_EVIDENCE_PATHS = (
     ".gitattributes",
     ".gitignore",
@@ -34,6 +35,9 @@ ALLOWED_ESP_EVIDENCE_PATHS = (
     "docs/qa/artifacts/2026-08-22-course-mode-task06/",
     "main/tbot-server/scripts/course_mode_task06_runtime_validation.py",
     "main/tbot-server/tests/test_course_mode_task06_validation_script.py",
+)
+ALLOWED_ESP_DIRTY_PATHS = (
+    "docs/qa/artifacts/2026-08-22-course-mode-task06/",
 )
 ALLOWED_BACKEND_EVIDENCE_PATHS = (
     "src/lessons/authoring/esptft-publish-budget.logic.spec.ts",
@@ -57,7 +61,13 @@ def git_head(root: Path) -> str:
     ).stdout.strip()
 
 
-def candidate_revision(root: Path, expected_sha: str, allowed_paths: tuple[str, ...]) -> dict[str, Any]:
+def candidate_revision(
+    root: Path,
+    expected_sha: str,
+    allowed_paths: tuple[str, ...],
+    *,
+    allowed_dirty_paths: tuple[str, ...] = (),
+) -> dict[str, Any]:
     head = git_head(root)
     dirty_rows = subprocess.run(
         ["git", "status", "--porcelain=v1", "--untracked-files=no"],
@@ -78,7 +88,10 @@ def candidate_revision(root: Path, expected_sha: str, allowed_paths: tuple[str, 
     ]
     unexpected_dirty = [
         path for path in dirty
-        if not any(path == allowed or (allowed.endswith("/") and path.startswith(allowed)) for allowed in allowed_paths)
+        if not any(
+            path == allowed or (allowed.endswith("/") and path.startswith(allowed))
+            for allowed in allowed_dirty_paths
+        )
     ]
     return {
         "headSha": head,
@@ -91,6 +104,14 @@ def candidate_revision(root: Path, expected_sha: str, allowed_paths: tuple[str, 
         "unexpectedTrackedChanges": unexpected,
         "runtimeTreeMatchesFrozenCandidate": ancestor and not unexpected_dirty and not unexpected,
     }
+
+
+def resource_gate_passes(resources: dict[str, int]) -> bool:
+    return (
+        resources["threadDelta"] == 0
+        and resources["fdDelta"] == 0
+        and resources["heapCurrentDeltaBytes"] <= MAX_RETAINED_HEAP_GROWTH_BYTES
+    )
 
 
 def load_journey_module():
@@ -141,7 +162,12 @@ def main() -> int:
     identity = pilot["identity"]
     release = pilot["release"]
     revisions = {
-        "esp": candidate_revision(ROOT, EXPECTED_ESP_SHA, ALLOWED_ESP_EVIDENCE_PATHS),
+        "esp": candidate_revision(
+            ROOT,
+            EXPECTED_ESP_SHA,
+            ALLOWED_ESP_EVIDENCE_PATHS,
+            allowed_dirty_paths=ALLOWED_ESP_DIRTY_PATHS,
+        ),
         "firmware": candidate_revision(
             args.firmware_root, EXPECTED_FIRMWARE_SHA, ALLOWED_FIRMWARE_EVIDENCE_PATHS,
         ),
@@ -183,6 +209,7 @@ def main() -> int:
         "fdDelta": fd_count() - fds_before,
         "heapCurrentDeltaBytes": heap_current - heap_before,
         "heapPeakBytes": heap_peak,
+        "maximumRetainedHeapGrowthBytes": MAX_RETAINED_HEAP_GROWTH_BYTES,
     }
     candidate_ok = (
         len(set(fixture_hashes)) == 1
@@ -194,7 +221,7 @@ def main() -> int:
         and all(revision["runtimeTreeMatchesFrozenCandidate"] for revision in revisions.values())
     )
     visuals = visual_evidence(args.backend_root)
-    passed = candidate_ok and not failures and resources["threadDelta"] == 0 and resources["fdDelta"] == 0
+    passed = candidate_ok and not failures and resource_gate_passes(resources)
     report = {
         "schemaVersion": 1,
         "generatedAtUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
