@@ -108,3 +108,26 @@ def test_claims_and_questions_are_validated_from_spoken_text(value) -> None:
         CourseResponsePlan.from_mapping(
             value, approved_fact_codes={"animals.cat", "pet"},
         )
+
+
+def test_target_fact_wording_must_stay_within_authorized_teaching_forms() -> None:
+    with pytest.raises(CourseResponsePlanError, match="UNAPPROVED_FACT_WORDING"):
+        CourseResponsePlan.from_mapping(
+            valid(
+                acknowledgment="Yes.", relation="Cats live on Mars.",
+                guidance="They eat moon rocks.", invitation="", questionCount=0,
+                targetFactsUsed=["animals.cat"],
+            ),
+            approved_fact_codes={"animals.cat"},
+            approved_fact_terms={"cat", "con mèo", "mèo"},
+        )
+
+    plan = CourseResponsePlan.from_mapping(
+        valid(
+            acknowledgment="Yes.", relation="", guidance="This is a cat.",
+            invitation="Can you say cat?", targetFactsUsed=["animals.cat"],
+        ),
+        approved_fact_codes={"animals.cat"},
+        approved_fact_terms={"cat", "con mèo", "mèo"},
+    )
+    assert plan.target_facts_used == ("animals.cat",)

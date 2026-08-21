@@ -148,6 +148,32 @@ async def test_pending_decision_blocks_progress_until_response_plan_is_applied()
 
 
 @pytest.mark.asyncio
+async def test_response_plan_is_advertised_and_consumed_only_for_a_pending_decision() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    assert "course_apply_response_plan" not in runtime.tool_context()["allowedTools"]
+
+    premature = await runtime.course_apply_response_plan({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "premature-plan", "planId": "premature-plan",
+        "decisionId": "missing", "acknowledgment": "Hello.", "relation": "",
+        "guidance": "", "invitation": "", "questionCount": 0,
+        "embodiedIntent": "GREET_SMALL", "targetFactsUsed": [],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    })
+    opening = await runtime.course_continue({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "opening-after-premature-plan",
+    })
+
+    assert premature == {"accepted": False, "code": "COURSE_OPERATION_NOT_ALLOWED"}
+    assert opening["action"] == "GREET_AND_CHECK_IN"
+    assert "course_apply_response_plan" in runtime.tool_context()["allowedTools"]
+
+
+@pytest.mark.asyncio
 async def test_duplicate_decision_operation_replays_exact_pending_result() -> None:
     runtime = course_mode_runtime_from_manifest(
         {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
@@ -191,6 +217,41 @@ async def test_duplicate_replay_requires_matching_session_operation_and_turn() -
     assert wrong_session == {"accepted": False, "code": "LESSON_SESSION_MISMATCH"}
     assert wrong_operation == {"accepted": False, "code": "DUPLICATE_OPERATION_IGNORED"}
     assert wrong_turn == {"accepted": False, "code": "STALE_TURN_SEQUENCE"}
+
+
+@pytest.mark.asyncio
+async def test_adapter_snapshot_restore_replays_committed_results_without_effects() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    decision_args = {
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "opening-before-reconnect",
+    }
+    decision = await runtime.course_continue(decision_args)
+    plan_args = {
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 2,
+        "observationId": "plan-before-reconnect", "planId": "plan-before-reconnect",
+        "decisionId": decision["decisionId"], "acknowledgment": "Hello.",
+        "relation": "", "guidance": "", "invitation": "Ready?", "questionCount": 1,
+        "embodiedIntent": decision["embodiedIntent"], "targetFactsUsed": [],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    }
+    applied = await runtime.course_apply_response_plan(plan_args)
+    assert runtime.commit_course_response_plan(plan_args) is True
+
+    persisted_snapshot = json.loads(json.dumps(runtime.snapshot()))
+    restored = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+        authoritative_snapshot=persisted_snapshot,
+    )
+    assert restored is not None
+    assert await restored.course_continue(decision_args) == decision
+    assert await restored.course_apply_response_plan(plan_args) == applied
+    assert restored.response_plan_requires_delivery(plan_args) is False
+    assert restored.tool_context()["identity"]["turnSequenceId"] == 3
+    assert restored.orchestrator.snapshot() == runtime.orchestrator.snapshot()
 
 
 @pytest.mark.asyncio
@@ -750,16 +811,16 @@ async def test_response_plan_rejects_rejected_decision_and_inactive_target_facts
         "targetFactsUsed": ["animals.cat"],
     })
     active = await runtime.course_continue({
-        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 3,
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 2,
         "observationId": "active-decision",
     })
     inactive_fact_plan = await runtime.course_apply_response_plan({
-        **common, "turnSequenceId": 4, "observationId": "inactive-fact-plan",
+        **common, "turnSequenceId": 3, "observationId": "inactive-fact-plan",
         "planId": "inactive-fact-plan", "decisionId": active["decisionId"],
         "embodiedIntent": active["embodiedIntent"], "targetFactsUsed": ["toys.ball"],
     })
 
-    assert rejected_plan == {"accepted": False, "code": "REJECTED_DECISION"}
+    assert rejected_plan == {"accepted": False, "code": "COURSE_OPERATION_NOT_ALLOWED"}
     assert inactive_fact_plan == {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
 
 

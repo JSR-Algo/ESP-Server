@@ -23,6 +23,11 @@ _QUESTION_LEAD_RE = re.compile(
     r"|(?:^|[.!]\s+)con\s+(?:có|muốn|thấy|nghĩ)\b",
     re.IGNORECASE,
 )
+_FACT_CLAUSE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_FACT_GUIDANCE_LEAD_RE = re.compile(
+    r"^(?:look|find|point|say|repeat|listen|show|nhìn|chỉ|nói|lặp|nghe)\b",
+    re.IGNORECASE,
+)
 
 
 class CourseResponsePlanError(ValueError):
@@ -53,6 +58,7 @@ class CourseResponsePlan:
     def from_mapping(
         cls, value: Any, *, approved_fact_codes: Set[str],
         safety_forbidden_terms: Set[str] = frozenset(),
+        approved_fact_terms: Set[str] = frozenset(),
     ) -> "CourseResponsePlan":
         if not isinstance(value, Mapping) or set(value) != _FIELDS:
             raise CourseResponsePlanError("INVALID_FIELDS")
@@ -87,6 +93,7 @@ class CourseResponsePlan:
             raise CourseResponsePlanError("PROHIBITED_WORDING")
         if _UNSUPPORTED_MASTERY_CLAIM_RE.search(text):
             raise CourseResponsePlanError("MASTERY_PRAISE_NOT_AUTHORIZED")
+        cls._validate_fact_wording(text_fields, approved_fact_terms)
         try:
             embodied = EmbodiedIntent(value["embodiedIntent"])
         except (TypeError, ValueError) as exc:
@@ -111,6 +118,39 @@ class CourseResponsePlan:
             target_facts_used=tuple(facts), praise_level=str(value["praiseLevel"]),
             safety_mode=bool(value["safetyMode"]), normal_miss=bool(value["normalMiss"]),
         )
+
+    @staticmethod
+    def _validate_fact_wording(text_fields: tuple[Any, ...], approved_fact_terms: Set[str]) -> None:
+        terms = tuple(
+            term.casefold().strip() for term in approved_fact_terms
+            if isinstance(term, str) and term.strip()
+        )
+        if not terms:
+            return
+        term_patterns = []
+        for term in terms:
+            suffix = "s?" if term.isascii() and term.isalpha() else ""
+            term_patterns.append(rf"(?<!\w){re.escape(term)}{suffix}(?!\w)")
+        target_re = re.compile("|".join(term_patterns), re.IGNORECASE)
+        identity_re = re.compile(
+            rf"^(?:(?:this|that|it|the answer|here|đây|đó)\s+"
+            rf"(?:is|means|là)\s+(?:(?:a|an|the|một|con|quả)\s+)?(?:{target_re.pattern})"
+            rf"|(?:{target_re.pattern})\s+(?:means|là)\s+(?:{target_re.pattern}))$",
+            re.IGNORECASE,
+        )
+        for field in text_fields:
+            for raw_clause in _FACT_CLAUSE_SPLIT_RE.split(field.strip()):
+                clause = raw_clause.strip()
+                if not clause or target_re.search(clause) is None:
+                    continue
+                normalized = clause.rstrip(".!?").strip()
+                if (
+                    clause.endswith("?")
+                    or _FACT_GUIDANCE_LEAD_RE.match(normalized)
+                    or identity_re.fullmatch(normalized)
+                ):
+                    continue
+                raise CourseResponsePlanError("UNAPPROVED_FACT_WORDING")
 
     def response_text(self) -> str:
         return " ".join(filter(None, (

@@ -77,6 +77,7 @@ from core.lesson.conversation_runtime import (
 from core.lesson.course_mode_contract import CourseModeContract
 from core.lesson.course_orchestrator import ChildObservation, CourseDecision, CourseOrchestrator, SessionState
 from core.lesson.course_response_plan import CourseResponsePlan, CourseResponsePlanError
+from core.lesson.embodied_intent import EmbodiedIntent
 from core.lesson.forwarder import serialize_word_evidence_event
 from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
 from core.utils.util import get_vision_url
@@ -224,7 +225,7 @@ class CourseModeRuntimeAdapter:
             return False
         state = self.orchestrator.session_state
         if operation == "course_apply_response_plan":
-            return True
+            return self._response_plan_pending()
         if state is SessionState.SAFETY_PAUSED:
             return operation in {"course_observe_child", "course_continue"}
         if state is SessionState.REGULATION_BREAK:
@@ -384,6 +385,8 @@ class CourseModeRuntimeAdapter:
         replay = self._replay_operation(operation, arguments)
         if replay is not None:
             return replay
+        if not self._operation_allowed(operation, arguments):
+            return self._operation_not_allowed()
         error = self._consume_operation(arguments)
         if error is not None:
             return error
@@ -414,11 +417,20 @@ class CourseModeRuntimeAdapter:
             for meaning in active_target.vietnamese_meanings
             if meaning.split()
         )
+        approved_fact_terms = {
+            active_target.target_word, *active_target.vietnamese_meanings,
+        }
+        approved_fact_terms.update(
+            meaning.split()[-1]
+            for meaning in active_target.vietnamese_meanings
+            if meaning.split()
+        )
         try:
             plan = CourseResponsePlan.from_mapping(
                 plan_fields,
                 approved_fact_codes=approved_facts,
                 safety_forbidden_terms=safety_terms,
+                approved_fact_terms=approved_fact_terms,
             )
         except CourseResponsePlanError:
             return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
@@ -507,17 +519,116 @@ class CourseModeRuntimeAdapter:
             decision = self.orchestrator.maybe_advance_target(now_ms=int(self._clock() * 1_000))
         return self._remember_operation(operation, arguments, decision)
 
+    @staticmethod
+    def _snapshot_decision(decision: CourseDecision) -> Dict[str, Any]:
+        return {
+            "decisionId": decision.decision_id,
+            "accepted": decision.accepted,
+            "nextState": decision.next_state.value,
+            "action": decision.action,
+            "acknowledgmentIntent": decision.acknowledgment_intent,
+            "teachingIntent": decision.teaching_intent,
+            "questionIntent": decision.question_intent,
+            "embodiedIntent": decision.embodied_intent.value,
+            "mayModelTarget": decision.may_model_target,
+            "evidenceEvent": copy.deepcopy(decision.evidence_event),
+            "branchId": decision.branch_id,
+        }
+
+    @staticmethod
+    def _restore_decision(value: Dict[str, Any]) -> CourseDecision:
+        return CourseDecision(
+            decision_id=value["decisionId"], accepted=value["accepted"],
+            next_state=SessionState(value["nextState"]), action=value["action"],
+            acknowledgment_intent=value["acknowledgmentIntent"],
+            teaching_intent=value["teachingIntent"], question_intent=value["questionIntent"],
+            embodied_intent=EmbodiedIntent(value["embodiedIntent"]),
+            may_model_target=value["mayModelTarget"],
+            evidence_event=copy.deepcopy(value["evidenceEvent"]), branch_id=value["branchId"],
+        )
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            "snapshotVersion": 1,
+            "lessonSessionId": self.lesson_session_id,
+            "startedAtMs": self._started_at_ms,
+            "orchestrator": self.orchestrator.snapshot(),
+            "appliedPlanIds": sorted(self._applied_plan_ids),
+            "appliedDecisionIds": sorted(self._applied_decision_ids),
+            "consumedOperationIds": sorted(self._consumed_operation_ids),
+            "operationResults": [
+                {
+                    "lessonSessionId": lesson_session_id,
+                    "observationId": observation_id,
+                    **copy.deepcopy(record),
+                }
+                for (lesson_session_id, observation_id), record in sorted(self._operation_results.items())
+            ],
+            "decisions": {
+                decision_id: self._snapshot_decision(decision)
+                for decision_id, decision in self._decisions.items()
+            },
+            "latestDecisionId": self._latest_decision_id,
+            "nextTurnSequenceId": self._next_turn_sequence_id,
+            "responsePlanRollback": copy.deepcopy(self._response_plan_rollback),
+            "courseBudgetStarted": self._course_budget_started,
+        }
+
+    @classmethod
+    def restore(
+        cls, contract: CourseModeContract, snapshot: Dict[str, Any], *,
+        clock: Callable[[], float] = time.monotonic, assignment_id: str | None = None,
+        forwarder: Any = None, runtime_session_id: str | None = None,
+    ) -> "CourseModeRuntimeAdapter":
+        if snapshot.get("snapshotVersion") != 1:
+            raise ValueError("unsupported course mode snapshot")
+        snapshot_session_id = snapshot["lessonSessionId"]
+        if runtime_session_id is not None and runtime_session_id != snapshot_session_id:
+            raise ValueError("course mode snapshot session mismatch")
+        value = cls(
+            contract, clock=clock, assignment_id=assignment_id, forwarder=forwarder,
+            runtime_session_id=snapshot_session_id,
+        )
+        value._started_at_ms = snapshot["startedAtMs"]
+        value.orchestrator = CourseOrchestrator.restore(contract, snapshot["orchestrator"])
+        value._applied_plan_ids = set(snapshot["appliedPlanIds"])
+        value._applied_decision_ids = set(snapshot["appliedDecisionIds"])
+        value._consumed_operation_ids = set(snapshot["consumedOperationIds"])
+        value._operation_results = {
+            (record["lessonSessionId"], record["observationId"]): {
+                "operation": record["operation"],
+                "turnSequenceId": record["turnSequenceId"],
+                "result": copy.deepcopy(record["result"]),
+            }
+            for record in snapshot["operationResults"]
+        }
+        value._decisions = {
+            decision_id: cls._restore_decision(decision)
+            for decision_id, decision in snapshot["decisions"].items()
+        }
+        value._latest_decision_id = snapshot["latestDecisionId"]
+        value._next_turn_sequence_id = snapshot["nextTurnSequenceId"]
+        value._response_plan_rollback = copy.deepcopy(snapshot["responsePlanRollback"])
+        value._course_budget_started = snapshot["courseBudgetStarted"]
+        return value
+
 
 def course_mode_runtime_from_manifest(
     manifest: Any, *, enabled: bool, clock: Callable[[], float] = time.monotonic,
     assignment_id: str | None = None, forwarder: Any = None,
     runtime_session_id: str | None = None,
+    authoritative_snapshot: Dict[str, Any] | None = None,
 ) -> CourseModeRuntimeAdapter | None:
     if not enabled or not isinstance(manifest, dict) or "courseModeContract" not in manifest:
         return None
+    contract = CourseModeContract.from_mapping(manifest["courseModeContract"])
+    if authoritative_snapshot is not None:
+        return CourseModeRuntimeAdapter.restore(
+            contract, authoritative_snapshot, clock=clock, assignment_id=assignment_id,
+            forwarder=forwarder, runtime_session_id=runtime_session_id,
+        )
     return CourseModeRuntimeAdapter(
-        CourseModeContract.from_mapping(manifest["courseModeContract"]), clock=clock,
-        assignment_id=assignment_id, forwarder=forwarder,
+        contract, clock=clock, assignment_id=assignment_id, forwarder=forwarder,
         runtime_session_id=runtime_session_id,
     )
 
