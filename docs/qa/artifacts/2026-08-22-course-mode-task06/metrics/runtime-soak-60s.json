@@ -1,7 +1,7 @@
 {
   "candidate": {
     "backendSha": "1920586d48e5448dcf653dbfa2391c7ef346fcd9",
-    "espSha": "78a41f2fce06ad5bfea303d1302917a0301054da",
+    "espSha": "2c6e2309ec81f7214838084ff3908100d68c2571",
     "expectedShas": {
       "backendSha": "657474ff3b58fba2c3c31f2978d53370ffad8b11",
       "espSha": "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268",
@@ -41,7 +41,7 @@
         ],
         "expectedIsAncestor": true,
         "expectedSha": "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268",
-        "headSha": "78a41f2fce06ad5bfea303d1302917a0301054da",
+        "headSha": "2c6e2309ec81f7214838084ff3908100d68c2571",
         "runtimeTreeMatchesFrozenCandidate": true,
         "trackedChanges": [
           ".gitattributes",
@@ -112,7 +112,7 @@
     "semanticChecksum": "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264"
   },
   "dataPolicy": "synthetic-no-child-data",
-  "generatedAtUtc": "2026-08-21T22:18:21Z",
+  "generatedAtUtc": "2026-08-21T22:26:06Z",
   "journeys": {
     "journeyCount": 22,
     "names": [
@@ -146,18 +146,19 @@
     "fdDelta": 0,
     "heapCurrentDeltaBytes": 208,
     "heapPeakBytes": 4880,
+    "maximumRetainedHeapGrowthBytes": 1048576,
     "threadAfter": 1,
     "threadBefore": 1,
     "threadDelta": 0
   },
   "schemaVersion": 1,
   "soak": {
-    "durationSeconds": 60.000052,
+    "durationSeconds": 60.000015,
     "failureDetails": [],
     "failures": 0,
-    "iterations": 159407,
+    "iterations": 159927,
     "minimumIterations": 2000,
-    "sessions": 3506954
+    "sessions": 3518394
   },
   "verdict": "PASS",
   "visuals": {
