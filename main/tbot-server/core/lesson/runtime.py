@@ -110,6 +110,7 @@ class CourseModeRuntimeAdapter:
             contract, started_at_ms=self._started_at_ms, soft_deadline_ms=540_000,
         )
         self._applied_plan_ids: set[str] = set()
+        self._applied_decision_ids: set[str] = set()
         self._consumed_operation_ids: set[str] = set()
         self._decisions: dict[str, CourseDecision] = {}
 
@@ -143,6 +144,34 @@ class CourseModeRuntimeAdapter:
         self._decisions[decision.decision_id] = decision
         return self._decision_payload(decision)
 
+    def tool_context(self) -> Dict[str, Any]:
+        target = next(
+            item for item in (self.contract.primary, self.contract.secondary)
+            if item is not None and item.target_id == self.orchestrator.active_target_id
+        )
+        activities = [
+            {
+                "activityId": activity.activity_id,
+                "stage": activity.stage,
+                "contextId": activity.context_id,
+            }
+            for activity in self.contract.activities
+            if activity.target_id == target.target_id
+        ]
+        return {
+            "courseMode": True,
+            "identity": {
+                "lessonSessionId": self.contract.lesson_session_id,
+                "turnSequenceId": self.orchestrator.snapshot()["decisionSequence"] + 1,
+            },
+            "activeTargetId": target.target_id,
+            "activities": activities,
+            "allowedTools": [
+                "course_observe_child", "course_open_context", "course_close_context",
+                "course_apply_response_plan", "course_continue",
+            ],
+        }
+
     def _forward_evidence(self, decision: CourseDecision) -> None:
         if decision.evidence_event is None or self.forwarder is None or not self.assignment_id:
             return
@@ -163,7 +192,7 @@ class CourseModeRuntimeAdapter:
         })
 
     async def course_observe_child(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        error = self._identity_error(arguments)
+        error = self._consume_operation(arguments)
         if error is not None:
             return error
         observation = ChildObservation(
@@ -208,6 +237,8 @@ class CourseModeRuntimeAdapter:
         decision = self._decisions.get(arguments["decisionId"])
         if decision is None:
             return {"accepted": False, "code": "UNKNOWN_DECISION"}
+        if decision.decision_id in self._applied_decision_ids:
+            return {"accepted": False, "code": "DECISION_ALREADY_APPLIED"}
         plan_fields = {
             key: value for key, value in arguments.items()
             if key not in {"lessonSessionId", "turnSequenceId", "observationId", "planId", "decisionId"}
@@ -223,7 +254,13 @@ class CourseModeRuntimeAdapter:
             return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
         if plan.embodied_intent is not decision.embodied_intent:
             return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+        protected_decision = decision.next_state in {
+            SessionState.SAFETY_PAUSED, SessionState.REGULATION_BREAK,
+        }
+        if plan.safety_mode is not protected_decision:
+            return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
         self._applied_plan_ids.add(plan_id)
+        self._applied_decision_ids.add(decision.decision_id)
         now_ms = int(self._clock() * 1_000)
         if decision.may_model_target:
             self.orchestrator.active_mastery.record_model(now_ms=now_ms)
@@ -1980,6 +2017,8 @@ class LessonRuntime:
         self._conversation_started_at = self._clock()
 
     def conversation_tool_context(self) -> dict[str, Any] | None:
+        if self.course_mode is not None:
+            return self.course_mode.tool_context()
         conversation = self.conversation
         if conversation is None or conversation.attempt_id is None:
             return None
@@ -2071,6 +2110,12 @@ class LessonRuntime:
         return _child_response_matches_expected(recognized_text, [value for value in expected if value])
 
     def conversation_tool_path_active(self) -> bool:
+        if self.course_mode is not None:
+            return bool(
+                not self._closed
+                and getattr(self.conn, "lesson_runtime", None) is self
+                and self.state == S_RUNNING
+            )
         conversation = self.conversation
         return bool(
             conversation is not None

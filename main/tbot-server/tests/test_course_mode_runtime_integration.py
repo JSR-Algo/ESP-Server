@@ -57,6 +57,10 @@ def test_production_lesson_runtime_activates_v2_only_with_strict_flag() -> None:
         manifest=manifest, asset_cache=object(), forwarder=_Forwarder(),
     )
     assert enabled.course_mode_active is True
+    enabled.conn.lesson_runtime = enabled
+    enabled.state = "RUNNING"
+    assert enabled.conversation_tool_path_active() is True
+    assert enabled.conversation_tool_context()["courseMode"] is True
 
     conn = _Conn()
     conn.config = {"lesson": {**conn.config["lesson"], "course_mode_v2_enabled": False}}
@@ -127,6 +131,16 @@ async def test_adapter_implements_all_advertised_operations_and_forwards_safe_ev
         "targetFactsUsed": ["animals.cat"], "praiseLevel": "engagement",
         "safetyMode": False, "normalMiss": False,
     }))["accepted"] is True
+    replayed_decision = await runtime.course_apply_response_plan({
+        **identity, "observationId": "operation-5", "planId": "plan-2",
+        "decisionId": opened["decisionId"],
+        "acknowledgment": "Robot heard you.", "relation": "We can keep learning.",
+        "guidance": "Look at the picture.", "invitation": "What is it?",
+        "questionCount": 1, "embodiedIntent": opened["embodiedIntent"],
+        "targetFactsUsed": ["animals.cat"], "praiseLevel": "engagement",
+        "safetyMode": False, "normalMiss": False,
+    })
+    assert replayed_decision == {"accepted": False, "code": "DECISION_ALREADY_APPLIED"}
     duplicate = await runtime.course_continue({**identity, "observationId": "operation-1"})
     assert duplicate == {"accepted": False, "code": "DUPLICATE_OPERATION_IGNORED"}
 
@@ -220,3 +234,41 @@ async def test_response_plan_must_pass_fail_closed_validator() -> None:
         "safetyMode": False, "normalMiss": True,
     })
     assert result == {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+
+
+@pytest.mark.asyncio
+async def test_safety_decision_rejects_plan_that_claims_normal_teaching_mode() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    decision = await runtime.course_observe_child({
+        "lessonSessionId": runtime.contract.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "safety", "semanticClass": "unknown", "speechClass": "not_applicable",
+        "language": "vi", "intent": "answer", "engagement": "engaged",
+        "safetyClass": "safety", "assessmentEligible": False, "confidenceBand": "high",
+        "activityId": "cat-recall-visual-02", "contextId": "cat_primary_visual_recall",
+        "robotAudioContaminated": False, "targetTextVisible": False,
+    })
+    result = await runtime.course_apply_response_plan({
+        "lessonSessionId": runtime.contract.lesson_session_id, "turnSequenceId": 2,
+        "observationId": "unsafe-plan", "planId": "p1", "decisionId": decision["decisionId"],
+        "acknowledgment": "Robot heard you.", "relation": "Let us learn.",
+        "guidance": "Look at cat.", "invitation": "What is cat?", "questionCount": 1,
+        "embodiedIntent": decision["embodiedIntent"], "targetFactsUsed": ["animals.cat"],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    })
+    assert result == {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+
+
+def test_course_tool_context_exposes_only_authoritative_bounded_identifiers() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    context = runtime.tool_context()
+    assert context["identity"]["lessonSessionId"] == runtime.contract.lesson_session_id
+    assert context["activeTargetId"] == "animals.cat"
+    assert {row["activityId"] for row in context["activities"]} == set(runtime.contract.primary.activity_ids)
+    serialized = json.dumps(context).casefold()
+    assert not any(field in serialized for field in ("transcript", "utterance", "audio", "story"))

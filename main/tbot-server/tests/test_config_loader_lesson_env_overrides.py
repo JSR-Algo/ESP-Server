@@ -147,6 +147,9 @@ def test_course_mode_v2_flag_is_strict_and_defaults_false(monkeypatch):
     config = _apply_lesson_env_overrides({"lesson": {}})
     assert config["lesson"]["course_mode_v2_enabled"] is False
     monkeypatch.setenv("LESSON_COURSE_MODE_V2_ENABLED", "true")
+    with pytest.raises(ValueError, match="exactly one device"):
+        _apply_lesson_env_overrides({"lesson": {}})
+    monkeypatch.setenv("LESSON_ROLLOUT_DEVICE_ALLOWLIST", "robot-course-v2")
     assert _apply_lesson_env_overrides({"lesson": {}})["lesson"]["course_mode_v2_enabled"] is True
     monkeypatch.setenv("LESSON_COURSE_MODE_V2_ENABLED", "sometimes")
     with pytest.raises(ValueError, match="LESSON_COURSE_MODE_V2_ENABLED"):

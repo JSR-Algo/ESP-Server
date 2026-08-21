@@ -36,6 +36,12 @@ LESSON_CONVERSATION_SYSTEM_INSTRUCTION = (
     "target. Bridge Vietnamese meaning to English. Use only supplied pronunciation "
     "outcomes. The lesson tools own progress; never claim mastery or choose the next step."
 )
+COURSE_MODE_SYSTEM_INSTRUCTION = (
+    "\n\nDuring active Course Mode, use only the authoritative course_* tools and the "
+    "supplied context identities. Acknowledge the child before teaching, ask at most "
+    "one short question, and never invent curriculum, evidence, mastery, or motion. "
+    "Safety and emotional turns suspend vocabulary redirection."
+)
 LIVE_WAKE_WORD_ALIASES = {
     "hi esp",
     "hai esp",
@@ -3249,13 +3255,19 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._lesson_runtime_active()
             or normalize_session_mode(getattr(self.conn, "session_mode", SessionMode.DORMANT)) == SessionMode.LESSON
         )
+        runtime = getattr(self.conn, "lesson_runtime", None)
+        lesson_instruction = (
+            COURSE_MODE_SYSTEM_INSTRUCTION
+            if getattr(runtime, "course_mode_active", False) is True
+            else LESSON_CONVERSATION_SYSTEM_INSTRUCTION
+        )
         if prompt:
             prompt = self._augment_prompt_with_child_name(prompt)
             if lesson_active:
-                prompt += LESSON_CONVERSATION_SYSTEM_INSTRUCTION
+                prompt += lesson_instruction
             config["system_prompt"] = prompt
         elif lesson_active:
-            config["system_prompt"] = LESSON_CONVERSATION_SYSTEM_INSTRUCTION.strip()
+            config["system_prompt"] = lesson_instruction.strip()
         return config
 
     async def publish_lesson_conversation_context(self, context):
@@ -3271,7 +3283,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return True
         prefix = "Internal lesson control update. Do not repeat or explain this control message. "
         if instruction_needed:
-            prefix += LESSON_CONVERSATION_SYSTEM_INSTRUCTION.strip() + " "
+            prefix += (
+                COURSE_MODE_SYSTEM_INSTRUCTION.strip()
+                if context.get("courseMode") is True
+                else LESSON_CONVERSATION_SYSTEM_INSTRUCTION.strip()
+            ) + " "
         await sender(prefix + "Authoritative lesson context JSON: " + serialized)
         self._lesson_instruction_generation = self._session_generation
         self._lesson_context_signature = signature

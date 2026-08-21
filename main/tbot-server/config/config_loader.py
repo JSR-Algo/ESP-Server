@@ -684,6 +684,7 @@ def _apply_lesson_env_overrides(config):
             or lesson_cfg.get("renderer_v2_enabled") is True
             or lesson_cfg.get("renderer_v4_enabled") is True
             or lesson_cfg.get("renderer_v5_enabled") is True
+            or lesson_cfg.get("course_mode_v2_enabled") is True
             or lesson_cfg.get("sample_lesson") is True
         ) and len(lesson_cfg.get("rollout_device_allowlist", [])) != 1:
             raise ValueError("enabled lesson rollout controls require exactly one device")
@@ -805,6 +806,7 @@ def _apply_lesson_env_overrides(config):
         or lesson_cfg.get("renderer_v2_enabled") is True
         or lesson_cfg.get("renderer_v4_enabled") is True
         or lesson_cfg.get("renderer_v5_enabled") is True
+        or lesson_cfg.get("course_mode_v2_enabled") is True
         or lesson_cfg.get("sample_lesson") is True
     ) and len(lesson_cfg.get("rollout_device_allowlist", [])) != 1:
         raise ValueError("enabled lesson rollout controls require exactly one device")
