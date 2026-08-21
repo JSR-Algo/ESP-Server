@@ -100,8 +100,10 @@ class CourseModeRuntimeAdapter:
     def __init__(
         self, contract: CourseModeContract, *, clock: Callable[[], float] = time.monotonic,
         assignment_id: str | None = None, forwarder: Any = None,
+        runtime_session_id: str | None = None,
     ) -> None:
         self.contract = contract
+        self.lesson_session_id = runtime_session_id or contract.lesson_session_id
         self._clock = clock
         self._started_at_ms = int(clock() * 1_000)
         self.assignment_id = assignment_id
@@ -115,7 +117,7 @@ class CourseModeRuntimeAdapter:
         self._decisions: dict[str, CourseDecision] = {}
 
     def _identity_error(self, arguments: Dict[str, Any]) -> Dict[str, Any] | None:
-        if arguments.get("lessonSessionId") != self.contract.lesson_session_id:
+        if arguments.get("lessonSessionId") != self.lesson_session_id:
             return {"accepted": False, "code": "LESSON_SESSION_MISMATCH"}
         return None
 
@@ -161,7 +163,7 @@ class CourseModeRuntimeAdapter:
         return {
             "courseMode": True,
             "identity": {
-                "lessonSessionId": self.contract.lesson_session_id,
+                "lessonSessionId": self.lesson_session_id,
                 "turnSequenceId": self.orchestrator.snapshot()["decisionSequence"] + 1,
             },
             "activeTargetId": target.target_id,
@@ -187,7 +189,7 @@ class CourseModeRuntimeAdapter:
         })
         self.forwarder.enqueue({
             "assignmentId": self.assignment_id,
-            "sessionId": self.contract.lesson_session_id,
+            "sessionId": self.lesson_session_id,
             "events": [event],
         })
 
@@ -276,6 +278,10 @@ class CourseModeRuntimeAdapter:
             decision = self.orchestrator.begin()
         elif self.orchestrator.session_state is SessionState.OPENING:
             decision = self.orchestrator.continue_opening()
+        elif self.orchestrator.session_state in {
+            SessionState.SAFETY_PAUSED, SessionState.REGULATION_BREAK,
+        }:
+            decision = self.orchestrator.hold_protected_pause()
         elif self.orchestrator.active_mastery.level.value != "MASTERED_TODAY":
             decision = self.orchestrator.continue_word()
         else:
@@ -286,12 +292,14 @@ class CourseModeRuntimeAdapter:
 def course_mode_runtime_from_manifest(
     manifest: Any, *, enabled: bool, clock: Callable[[], float] = time.monotonic,
     assignment_id: str | None = None, forwarder: Any = None,
+    runtime_session_id: str | None = None,
 ) -> CourseModeRuntimeAdapter | None:
     if not enabled or not isinstance(manifest, dict) or "courseModeContract" not in manifest:
         return None
     return CourseModeRuntimeAdapter(
         CourseModeContract.from_mapping(manifest["courseModeContract"]), clock=clock,
         assignment_id=assignment_id, forwarder=forwarder,
+        runtime_session_id=runtime_session_id,
     )
 
 
@@ -1440,6 +1448,7 @@ class LessonRuntime:
             enabled=lesson_cfg.get("course_mode_v2_enabled") is True,
             assignment_id=self.assignment_id,
             forwarder=forwarder,
+            runtime_session_id=self.session_id,
         )
         self.course_mode_active = self.course_mode is not None
         self.preload_status_reporter = preload_status_reporter

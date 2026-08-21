@@ -156,8 +156,53 @@ async def test_adapter_implements_all_advertised_operations_and_forwards_safe_ev
     })
     assert evidence["evidenceEvent"]["evidenceLevel"] == "INDEPENDENT_RECALL"
     assert forwarder.batches[0]["assignmentId"] == "a1"
+    assert forwarder.batches[0]["sessionId"] == runtime.lesson_session_id
     serialized = json.dumps(forwarder.batches[0]).casefold()
     assert not any(field in serialized for field in ("transcript", "utterance", "audio", "story"))
+
+
+def test_production_runtime_uses_unique_execution_session_identity() -> None:
+    manifest = {"courseModeContract": contract()}
+    first = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest=manifest, asset_cache=object(), forwarder=_Forwarder(),
+    )
+    second = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest=manifest, asset_cache=object(), forwarder=_Forwarder(),
+    )
+
+    assert first.course_mode.lesson_session_id == first.session_id
+    assert second.course_mode.lesson_session_id == second.session_id
+    assert first.course_mode.lesson_session_id != second.course_mode.lesson_session_id
+    assert first.conversation_tool_context()["identity"]["lessonSessionId"] == first.session_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("safety_class,intent", [("safety", "answer"), ("normal", "fatigue")])
+async def test_course_continue_does_not_resume_vocabulary_from_protected_pause(
+    safety_class: str, intent: str,
+) -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    identity = runtime.contract.lesson_session_id
+    paused = await runtime.course_observe_child({
+        "lessonSessionId": identity, "turnSequenceId": 1, "observationId": "pause",
+        "semanticClass": "unknown", "speechClass": "not_applicable", "language": "vi",
+        "intent": intent, "engagement": "engaged", "safetyClass": safety_class,
+        "assessmentEligible": False, "confidenceBand": "high",
+        "activityId": "cat-recall-visual-02", "contextId": "cat_primary_visual_recall",
+        "robotAudioContaminated": False, "targetTextVisible": False,
+    })
+    continued = await runtime.course_continue({
+        "lessonSessionId": identity, "turnSequenceId": 2, "observationId": "continue",
+    })
+
+    assert continued["nextState"] == paused["nextState"]
+    assert continued["action"] == "HOLD_PROTECTED_PAUSE"
+    assert continued["teachingIntent"] is None
 
 
 @pytest.mark.asyncio

@@ -188,22 +188,22 @@ class CourseOrchestrator:
                 context_id=observation.context_id,
             )
             self.word_state = WordState.DELAYED_RECALL
-        elif (
-            activity.stage == "DELAYED_RECALL"
-            and observation.semantic_class == "target_en"
-            and observation.speech_class in {"exact", "near"}
-        ):
+        elif activity.stage == "DELAYED_RECALL":
             result = mastery.record_delayed_recall(
                 evidence_id=observation.observation_id, activity_id=observation.activity_id,
                 context_id=observation.context_id, now_ms=observation.now_ms,
                 assessment_eligible=observation.assessment_eligible,
                 confidence_band=observation.confidence_band,
+                successful=(
+                    observation.semantic_class == "target_en"
+                    and observation.speech_class in {"exact", "near"}
+                ),
             )
             self.word_state = WordState.DONE_FOR_SESSION
         else:
             self.session_state = SessionState.WORD_ACTIVE
             return self._decision("ACKNOWLEDGE_GUIDE_INVITE", question="one_next_question")
-        if result.accepted and result.level is not before_level:
+        if result.accepted and (result.level is not before_level or result.review_needed):
             evidence = {
                 "targetId": self.active_target_id, "evidenceLevel": result.level.value,
                 "activityId": observation.activity_id, "contextId": observation.context_id,
@@ -242,6 +242,19 @@ class CourseOrchestrator:
             question="invite_observation", embodied=EmbodiedIntent.THINK_CURIOUS,
         )
 
+    def hold_protected_pause(self) -> CourseDecision:
+        if self.session_state is SessionState.SAFETY_PAUSED:
+            return self._decision(
+                "HOLD_PROTECTED_PAUSE", acknowledgment="acknowledge_safety",
+                question="await_safety_clearance", embodied=EmbodiedIntent.COMFORT_CALM,
+            )
+        if self.session_state is SessionState.REGULATION_BREAK:
+            return self._decision(
+                "HOLD_PROTECTED_PAUSE", acknowledgment="honor_pause_choice",
+                question="offer_pause_choice", embodied=EmbodiedIntent.PAUSE_CHOICE,
+            )
+        raise ValueError("protected pause can only be held from a protected state")
+
     def maybe_advance_target(self, *, now_ms: int) -> CourseDecision:
         if (
             self.contract.secondary is not None
@@ -259,6 +272,7 @@ class CourseOrchestrator:
     def snapshot(self) -> dict[str, Any]:
         return {
             "lessonSessionId": self.contract.lesson_session_id, "sessionState": self.session_state.value,
+            "startedAtMs": self.started_at_ms, "softDeadlineMs": self.soft_deadline_ms,
             "wordState": self.word_state.value, "activeTargetId": self.active_target_id,
             "openingStep": self._opening_step, "decisionSequence": self._decision_sequence,
             "consumedObservationIds": sorted(self._consumed_observations),
@@ -268,7 +282,10 @@ class CourseOrchestrator:
 
     @classmethod
     def restore(cls, contract: CourseModeContract, snapshot: dict[str, Any]) -> "CourseOrchestrator":
-        value = cls(contract, started_at_ms=0, soft_deadline_ms=540_000)
+        value = cls(
+            contract, started_at_ms=snapshot["startedAtMs"],
+            soft_deadline_ms=snapshot["softDeadlineMs"],
+        )
         value.session_state = SessionState(snapshot["sessionState"])
         value.word_state = WordState(snapshot["wordState"])
         value.active_target_id = snapshot["activeTargetId"]

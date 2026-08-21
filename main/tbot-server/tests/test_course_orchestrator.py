@@ -99,6 +99,41 @@ def test_duplicate_observation_and_restored_pending_effects_are_not_replayed() -
     assert restored.pending_effects == ()
 
 
+def test_snapshot_restore_preserves_session_deadline_basis() -> None:
+    runtime = course(now_ms=1_000_000)
+    runtime.begin(); runtime.continue_opening(); runtime.continue_opening()
+    restored = CourseOrchestrator.restore(runtime.contract, runtime.snapshot())
+
+    decision = restored.observe(observation(observation_id="after-reconnect", now_ms=1_020_000))
+
+    assert decision.action != "CLOSE_WITHOUT_SECOND_WORD"
+
+
+def test_failed_delayed_recall_records_review_without_losing_transfer() -> None:
+    runtime = course()
+    runtime.begin(); runtime.continue_opening(); runtime.continue_opening()
+    mastery = runtime.active_mastery
+    mastery.record_meaning(evidence_id="meaning", activity_id="meaning", context_id="choice")
+    mastery.record_model(now_ms=1_000)
+    mastery.record_intervening_activity()
+    mastery.record_speech(
+        evidence_id="recall", activity_id="recall", context_id="visual", now_ms=30_000,
+        semantic_class="target_en", speech_class="exact", assessment_eligible=True,
+        confidence_band="high",
+    )
+    mastery.record_transfer(evidence_id="transfer", activity_id="transfer", context_id="scene")
+
+    decision = runtime.observe(observation(
+        observation_id="delayed-miss", semantic_class="unknown", speech_class="silence",
+        activity_id="cat-delayed-recall-01", context_id="cat_delayed_callback", now_ms=70_000,
+    ))
+
+    assert mastery.level.name == "TRANSFERRED"
+    assert mastery.snapshot()["missesAfterRecall"] == 1
+    assert decision.evidence_event is not None
+    assert decision.evidence_event["reviewNeeded"] is True
+
+
 def test_time_budget_prefers_one_deep_word_and_does_not_rush_secondary() -> None:
     runtime = course(); runtime.begin(); runtime.continue_opening(); runtime.continue_opening()
     decision = runtime.observe(observation(intent="answer", now_ms=541_000))

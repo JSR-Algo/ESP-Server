@@ -125,11 +125,14 @@ class WordMastery:
 
     def record_delayed_recall(
         self, *, evidence_id: str, activity_id: str, context_id: str, now_ms: int,
-        assessment_eligible: bool, confidence_band: str,
+        assessment_eligible: bool, confidence_band: str, successful: bool = True,
     ) -> EvidenceResult:
         if not self._consume(evidence_id):
             return self._result(False)
-        eligible = assessment_eligible and confidence_band == "high" and self.answer_leakage.independent_eligible(now_ms)
+        eligible = (
+            successful and assessment_eligible and confidence_band == "high"
+            and self.answer_leakage.independent_eligible(now_ms)
+        )
         if self._meaning and self._independent and self._transfer and eligible:
             self._delayed = True
             self.level = EvidenceLevel.MASTERED_TODAY

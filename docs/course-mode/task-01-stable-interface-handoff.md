@@ -20,6 +20,9 @@ Task 01 freezes the server-authoritative semantic boundary consumed by Tasks 02 
 - Confidence is the bounded `low | medium | high` band. Raw transcript, utterance,
   audio, pronunciation score, and free-form child story are forbidden.
 - Treat `(lessonSessionId, observationId)` and `decisionId` as idempotency identities.
+  `lessonSessionId` is the unique `LessonRuntime.session_id` for an execution; the
+  frozen manifest's fixture value is authoring input and is never the backend event
+  batch `sessionId` for multiple runs.
 
 ## Provider tools
 
