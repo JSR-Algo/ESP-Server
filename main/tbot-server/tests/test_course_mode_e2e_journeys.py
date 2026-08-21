@@ -102,6 +102,33 @@ def test_all_soak_journeys_reach_a_closing_session_state() -> None:
         assert result["initialOutcome"] == EXPECTED_OUTCOMES[row["name"]], row["name"]
 
 
+def test_reconnect_soak_continues_on_the_restored_orchestrator(monkeypatch) -> None:
+    restored_instances = []
+    advanced_instances = []
+    original_restore = CourseOrchestrator.restore
+    original_advance = CourseOrchestrator.maybe_advance_target
+
+    def tracking_restore(cls, contract, snapshot):
+        restored = original_restore(contract, snapshot)
+        restored_instances.append(restored)
+        return restored
+
+    def tracking_advance(self, *, now_ms):
+        advanced_instances.append(self)
+        return original_advance(self, now_ms=now_ms)
+
+    monkeypatch.setattr(CourseOrchestrator, "restore", classmethod(tracking_restore))
+    monkeypatch.setattr(CourseOrchestrator, "maybe_advance_target", tracking_advance)
+
+    row = next(row for row in JOURNEYS if row["name"] == "reconnect")
+    result = _run_full_session(row)
+
+    assert result["finalState"] == "CLOSING"
+    assert len(restored_instances) == 1
+    assert advanced_instances
+    assert all(value is restored_instances[0] for value in advanced_instances)
+
+
 def _run_full_session(row: dict) -> dict:
     value = CourseOrchestrator(CONTRACT, started_at_ms=0, soft_deadline_ms=540_000)
     operations = [
@@ -110,9 +137,7 @@ def _run_full_session(row: dict) -> dict:
         value.continue_opening().action,
         f"RUN_SCENARIO:{row['name']}",
     ]
-    initial = _run(row, value=value)
-    if row.get("special") == "restore":
-        value = CourseOrchestrator.restore(CONTRACT, value.snapshot())
+    initial, value = _run_scenario(row, value)
     if value.session_state.value == "CONTEXT_BRANCH":
         value.close_context_branch(
             branch_id=value.snapshot()["activeBranchId"],
@@ -156,29 +181,34 @@ def _run_full_session(row: dict) -> dict:
 
 def _run(row: dict, *, value: CourseOrchestrator | None = None):
     value = value or runtime()
+    result, _ = _run_scenario(row, value)
+    return result
+
+
+def _run_scenario(row: dict, value: CourseOrchestrator):
     if row["name"] == "repetition only":
         value.active_mastery.record_model(now_ms=25_000)
     special = row.get("special")
     if special == "restore":
         restored = CourseOrchestrator.restore(CONTRACT, value.snapshot())
-        return restored.session_state.value, restored.pending_effects
+        return (restored.session_state.value, restored.pending_effects), restored
     if special == "duplicate":
         first = observe(value, row)
         second = observe(value, row)
-        return first.accepted, second.accepted, second.action
+        return (first.accepted, second.accepted, second.action), value
     if special == "deadline":
         decision = observe(value, row, now_ms=541_000)
-        return decision.action, value.active_target_id
+        return (decision.action, value.active_target_id), value
     if special == "secondary":
         value.active_mastery.level = EvidenceLevel.MASTERED_TODAY
         decision = value.maybe_advance_target(now_ms=200_000)
-        return decision.action, value.active_target_id
+        return (decision.action, value.active_target_id), value
     if special == "bridge":
         opened = observe(value, {"semantic": "related", "intent": "story"})
         closed = value.close_context_branch(
             branch_id=opened.branch_id, bridge_intent="white_cat_visual", child_detail_code="grandmother_pet",
         )
-        return opened.action, closed.action, closed.teaching_intent
+        return (opened.action, closed.action, closed.teaching_intent), value
     if special in {"delayed_success", "delayed_failure"}:
         mastery = value.active_mastery
         mastery.record_meaning(evidence_id="m", activity_id="meaning", context_id="choice")
@@ -192,11 +222,11 @@ def _run(row: dict, *, value: CourseOrchestrator | None = None):
             evidence_id="d", activity_id="delayed", context_id="callback", now_ms=70_000,
             assessment_eligible=special == "delayed_success", confidence_band="high",
         )
-        return result.level.value, result.review_needed
+        return (result.level.value, result.review_needed), value
     decision = observe(value, row)
     assert decision.action == row["expectedAction"], row["name"]
     if row["name"] in {"repetition only", "visible answer text"}:
         assert value.active_mastery.level is not EvidenceLevel.INDEPENDENT_RECALL
     if row["name"] in {"emotional share", "safety pause"}:
         assert decision.question_intent not in {"elicit_target", "recall_target"}
-    return decision.action, decision.next_state.value, value.active_mastery.level.value
+    return (decision.action, decision.next_state.value, value.active_mastery.level.value), value
