@@ -53,7 +53,16 @@ class CourseResponsePlan:
         facts = value["targetFactsUsed"]
         if not isinstance(facts, list) or any(fact not in approved_fact_codes for fact in facts):
             raise CourseResponsePlanError("UNAPPROVED_FACT")
-        text = " ".join(str(value[key]) for key in ("acknowledgment", "relation", "guidance", "invitation")).casefold()
+        text_fields = tuple(
+            value[key] for key in ("acknowledgment", "relation", "guidance", "invitation")
+        )
+        if any(not isinstance(field, str) or len(field) > 160 for field in text_fields):
+            raise CourseResponsePlanError("INVALID_RESPONSE_TEXT")
+        if not any(field.strip() for field in text_fields):
+            raise CourseResponsePlanError("EMPTY_RESPONSE_TEXT")
+        text = " ".join(text_fields).casefold()
+        if len(text) > 320:
+            raise CourseResponsePlanError("RESPONSE_TEXT_TOO_LONG")
         if text.count("?") != value["questionCount"]:
             raise CourseResponsePlanError("QUESTION_COUNT_MISMATCH")
         if any(token in text for token in _PROHIBITED):
@@ -77,7 +86,7 @@ class CourseResponsePlan:
             ):
                 raise CourseResponsePlanError("SAFETY_REDIRECTION")
         return cls(
-            *(str(value[key]) for key in ("acknowledgment", "relation", "guidance", "invitation")),
+            *text_fields,
             question_count=value["questionCount"], embodied_intent=embodied,
             target_facts_used=tuple(facts), praise_level=str(value["praiseLevel"]),
             safety_mode=bool(value["safetyMode"]), normal_miss=bool(value["normalMiss"]),

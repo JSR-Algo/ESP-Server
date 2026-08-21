@@ -82,6 +82,9 @@ def test_v2_tool_schemas_are_separate_closed_and_cannot_submit_mastery_or_transc
         assert parameters["additionalProperties"] is False
         assert not forbidden.intersection(parameters["properties"])
     assert set(COURSE_MODE_TOOL_SPECS) <= set(LESSON_SEMANTIC_TOOLS)
+    plan_properties = COURSE_MODE_TOOL_SPECS["course_apply_response_plan"]["function"]["parameters"]["properties"]
+    for field in ("acknowledgment", "relation", "guidance", "invitation"):
+        assert plan_properties[field]["maxLength"] == 160
 
 
 def test_v1_specs_remain_byte_equal_when_v2_specs_are_used() -> None:

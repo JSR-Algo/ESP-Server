@@ -69,3 +69,21 @@ def test_underreported_questions_fail_closed() -> None:
             valid(guidance="What is it? Can you say it?", invitation="Ready?", questionCount=1),
             approved_fact_codes={"animals.cat", "pet"},
         )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        valid(
+            acknowledgment="", relation="", guidance="", invitation="",
+            questionCount=0, targetFactsUsed=[],
+        ),
+        valid(guidance="x" * 161),
+        valid(acknowledgment=123),
+    ],
+)
+def test_empty_unbounded_or_non_string_child_text_fails_closed(value) -> None:
+    with pytest.raises(CourseResponsePlanError):
+        CourseResponsePlan.from_mapping(
+            value, approved_fact_codes={"animals.cat", "pet"},
+        )

@@ -150,8 +150,10 @@ COURSE_MODE_TOOL_SPECS = {
     }),
     "course_apply_response_plan": _course_spec("course_apply_response_plan", {
         **_COURSE_IDENTITY, "planId": {"type": "string"}, "decisionId": {"type": "string"},
-        "acknowledgment": {"type": "string"}, "relation": {"type": "string"},
-        "guidance": {"type": "string"}, "invitation": {"type": "string"},
+        "acknowledgment": {"type": "string", "maxLength": 160},
+        "relation": {"type": "string", "maxLength": 160},
+        "guidance": {"type": "string", "maxLength": 160},
+        "invitation": {"type": "string", "maxLength": 160},
         "questionCount": {"type": "integer", "minimum": 0, "maximum": 1},
         "embodiedIntent": {"type": "string"},
         "targetFactsUsed": {"type": "array", "items": {"type": "string"}},
@@ -180,6 +182,8 @@ def _course_value_matches_schema(value: Any, schema: Mapping[str, Any]) -> bool:
     if not valid:
         return False
     if "enum" in schema and value not in schema["enum"]:
+        return False
+    if isinstance(value, str) and "maxLength" in schema and len(value) > schema["maxLength"]:
         return False
     if type(value) is int:
         if "minimum" in schema and value < schema["minimum"]:
