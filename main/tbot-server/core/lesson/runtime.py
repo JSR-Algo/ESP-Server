@@ -110,10 +110,12 @@ class CourseModeRuntimeAdapter:
         self, contract: CourseModeContract, *, clock: Callable[[], float] = time.monotonic,
         assignment_id: str | None = None, forwarder: Any = None,
         runtime_session_id: str | None = None,
+        assessment_state: Callable[[], Dict[str, Any]] | None = None,
     ) -> None:
         self.contract = contract
         self.lesson_session_id = runtime_session_id or contract.lesson_session_id
         self._clock = clock
+        self._assessment_state = assessment_state or (lambda: {})
         self._started_at_ms = int(clock() * 1_000)
         self.assignment_id = assignment_id
         self.forwarder = forwarder
@@ -365,15 +367,47 @@ class CourseModeRuntimeAdapter:
             return self._remember_operation(
                 operation, arguments, self.orchestrator.continue_opening(),
             )
+        try:
+            activity = self.contract.activity(arguments["activityId"])
+        except KeyError:
+            activity = None
+        policy = activity.answer_policy if activity is not None else {}
+        try:
+            server_state = self._assessment_state()
+        except Exception:
+            server_state = {"robotAudioContaminated": True}
+        if not isinstance(server_state, dict):
+            server_state = {"robotAudioContaminated": True}
+        target_text_visible = bool(
+            arguments["targetTextVisible"]
+            or policy.get("targetTextVisible", True)
+            or server_state.get("targetTextVisible", False)
+        )
+        robot_audio_contaminated = bool(
+            arguments["robotAudioContaminated"]
+            or server_state.get("robotAudioContaminated", False)
+        )
+        authored_assessment_safe = bool(
+            activity is not None
+            and not policy.get("targetAudioBeforeAssessment", True)
+            and not policy.get("spokenTargetInPrompt", True)
+            and not policy.get("multipleChoiceContainsTarget", True)
+        )
+        assessment_eligible = bool(
+            arguments["assessmentEligible"]
+            and authored_assessment_safe
+            and not target_text_visible
+            and not robot_audio_contaminated
+        )
         observation = ChildObservation(
             observation_id=arguments["observationId"], turn_sequence_id=arguments["turnSequenceId"],
             semantic_class=arguments["semanticClass"], speech_class=arguments["speechClass"],
             language=arguments["language"], intent=arguments["intent"], engagement=arguments["engagement"],
-            safety_class=arguments["safetyClass"], assessment_eligible=arguments["assessmentEligible"],
+            safety_class=arguments["safetyClass"], assessment_eligible=assessment_eligible,
             confidence_band=arguments["confidenceBand"], activity_id=arguments["activityId"],
             context_id=arguments["contextId"], now_ms=int(self._clock() * 1_000),
-            robot_audio_contaminated=arguments["robotAudioContaminated"],
-            target_text_visible=arguments["targetTextVisible"],
+            robot_audio_contaminated=robot_audio_contaminated,
+            target_text_visible=target_text_visible,
         )
         decision = self.orchestrator.observe(observation)
         self._forward_evidence(decision)
@@ -608,6 +642,7 @@ class CourseModeRuntimeAdapter:
         cls, contract: CourseModeContract, snapshot: Dict[str, Any], *,
         clock: Callable[[], float] = time.monotonic, assignment_id: str | None = None,
         forwarder: Any = None, runtime_session_id: str | None = None,
+        assessment_state: Callable[[], Dict[str, Any]] | None = None,
     ) -> "CourseModeRuntimeAdapter":
         if snapshot.get("snapshotVersion") != 1:
             raise ValueError("unsupported course mode snapshot")
@@ -616,7 +651,7 @@ class CourseModeRuntimeAdapter:
             raise ValueError("course mode snapshot session mismatch")
         value = cls(
             contract, clock=clock, assignment_id=assignment_id, forwarder=forwarder,
-            runtime_session_id=snapshot_session_id,
+            runtime_session_id=snapshot_session_id, assessment_state=assessment_state,
         )
         value._started_at_ms = snapshot["startedAtMs"]
         value.orchestrator = CourseOrchestrator.restore(contract, snapshot["orchestrator"])
@@ -647,6 +682,7 @@ def course_mode_runtime_from_manifest(
     assignment_id: str | None = None, forwarder: Any = None,
     runtime_session_id: str | None = None,
     authoritative_snapshot: Dict[str, Any] | None = None,
+    assessment_state: Callable[[], Dict[str, Any]] | None = None,
 ) -> CourseModeRuntimeAdapter | None:
     if not enabled or not isinstance(manifest, dict) or "courseModeContract" not in manifest:
         return None
@@ -655,10 +691,11 @@ def course_mode_runtime_from_manifest(
         return CourseModeRuntimeAdapter.restore(
             contract, authoritative_snapshot, clock=clock, assignment_id=assignment_id,
             forwarder=forwarder, runtime_session_id=runtime_session_id,
+            assessment_state=assessment_state,
         )
     return CourseModeRuntimeAdapter(
         contract, clock=clock, assignment_id=assignment_id, forwarder=forwarder,
-        runtime_session_id=runtime_session_id,
+        runtime_session_id=runtime_session_id, assessment_state=assessment_state,
     )
 
 
@@ -1808,6 +1845,17 @@ class LessonRuntime:
             assignment_id=self.assignment_id,
             forwarder=forwarder,
             runtime_session_id=self.session_id,
+            assessment_state=lambda: {
+                "robotAudioContaminated": bool(
+                    getattr(self.conn, "client_is_speaking", False)
+                    or getattr(
+                        self.conn, "google_live_lesson_prompt_output_allowed", False,
+                    )
+                    or time.monotonic() < float(
+                        getattr(self.conn, "google_live_echo_suppress_until", 0.0) or 0.0
+                    )
+                ),
+            },
         )
         self.course_mode_active = self.course_mode is not None
         self.preload_status_reporter = preload_status_reporter

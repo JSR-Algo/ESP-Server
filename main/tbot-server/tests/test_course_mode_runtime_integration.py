@@ -105,6 +105,35 @@ async def test_adapter_rejects_cross_session_and_uses_elapsed_server_clock() -> 
 
 
 @pytest.mark.asyncio
+async def test_server_playback_state_overrides_model_assessment_flags() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 30.0,
+        assessment_state=lambda: {
+            "robotAudioContaminated": True,
+            "targetTextVisible": True,
+        },
+    )
+    assert runtime is not None
+    runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
+    runtime.orchestrator.active_mastery.record_model(now_ms=1_000)
+    runtime.orchestrator.active_mastery.record_intervening_activity()
+
+    result = await runtime.course_observe_child({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "model-claims-clean-audio", "semanticClass": "target_en",
+        "speechClass": "exact", "language": "en", "intent": "answer",
+        "engagement": "engaged", "safetyClass": "normal", "assessmentEligible": True,
+        "confidenceBand": "high", "activityId": "cat-recall-visual-02",
+        "contextId": "cat_primary_visual_recall", "robotAudioContaminated": False,
+        "targetTextVisible": False,
+    })
+
+    assert result["action"] == "OWN_ASR_UNCERTAINTY"
+    assert result["evidenceEvent"] is None
+    assert runtime.orchestrator.active_mastery.level is EvidenceLevel.EXPOSED
+
+
+@pytest.mark.asyncio
 async def test_adapter_rejects_stale_turn_before_mutating_authoritative_state() -> None:
     runtime = course_mode_runtime_from_manifest(
         {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
