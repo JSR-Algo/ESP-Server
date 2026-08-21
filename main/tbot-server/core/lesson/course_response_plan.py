@@ -47,6 +47,18 @@ _FACT_RELATION_LEAD_RE = re.compile(
     r"|here is another word|okay)$",
     re.IGNORECASE,
 )
+_FACT_INVITATION_LEAD_RE = re.compile(
+    r"^(?:can|could|would)\s+you\s+(?:say|repeat|point|find|show)\b"
+    r"|^(?:what|which)\b"
+    r"|^(?:trong\s+tiếng\s+anh|.+\s+là\s+gì)\b",
+    re.IGNORECASE,
+)
+_TARGET_FACT_VERB_RE = re.compile(
+    r"\b(?:is|are|was|were|can|could|will|would|has|have|"
+    r"live|lives|eat|eats|fly|flies|sleep|sleeps|like|likes|"
+    r"là|sống|bay|ăn|ngủ|có|thích)\b",
+    re.IGNORECASE,
+)
 
 
 class CourseResponsePlanError(ValueError):
@@ -113,7 +125,7 @@ class CourseResponsePlan:
             raise CourseResponsePlanError("PROHIBITED_WORDING")
         if _UNSUPPORTED_MASTERY_CLAIM_RE.search(text):
             raise CourseResponsePlanError("MASTERY_PRAISE_NOT_AUTHORIZED")
-        cls._validate_fact_wording(text_fields, approved_fact_terms)
+        cls._validate_fact_wording(text_fields, approved_fact_terms, bool(facts))
         try:
             embodied = EmbodiedIntent(value["embodiedIntent"])
         except (TypeError, ValueError) as exc:
@@ -147,7 +159,9 @@ class CourseResponsePlan:
         )
 
     @staticmethod
-    def _validate_fact_wording(text_fields: tuple[Any, ...], approved_fact_terms: Set[str]) -> None:
+    def _validate_fact_wording(
+        text_fields: tuple[Any, ...], approved_fact_terms: Set[str], has_fact_codes: bool,
+    ) -> None:
         terms = tuple(
             term.casefold().strip() for term in approved_fact_terms
             if isinstance(term, str) and term.strip()
@@ -184,7 +198,16 @@ class CourseResponsePlan:
                     continue
                 if unsupported_declaration_re.search(normalized):
                     raise CourseResponsePlanError("UNAPPROVED_FACT_WORDING")
-                if field_index in {0, 3}:
+                contains_target = target_re.search(normalized) is not None
+                if field_index == 0:
+                    if contains_target and (
+                        not has_fact_codes or _TARGET_FACT_VERB_RE.search(normalized)
+                    ):
+                        raise CourseResponsePlanError("UNAPPROVED_FACT_WORDING")
+                    continue
+                if field_index == 3:
+                    if contains_target and not _FACT_INVITATION_LEAD_RE.match(normalized):
+                        raise CourseResponsePlanError("UNAPPROVED_FACT_WORDING")
                     continue
                 if (
                     (field_index == 1 and _FACT_RELATION_LEAD_RE.match(normalized))

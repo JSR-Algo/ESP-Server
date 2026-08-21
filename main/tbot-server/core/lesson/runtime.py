@@ -114,10 +114,12 @@ class CourseModeRuntimeAdapter:
         runtime_session_id: str | None = None,
         assessment_state: Callable[[], Dict[str, Any]] | None = None,
         defer_evidence_forwarding: bool = False,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self.contract = contract
         self.lesson_session_id = runtime_session_id or contract.lesson_session_id
         self._clock = clock
+        self._wall_clock = wall_clock
         self._assessment_state = assessment_state or (lambda: {})
         self._defer_evidence_forwarding = defer_evidence_forwarding
         self._pending_evidence_batches: list[Dict[str, Any]] = []
@@ -362,10 +364,13 @@ class CourseModeRuntimeAdapter:
             return
         self.forwarder.enqueue(batch)
 
-    def flush_pending_evidence(self) -> None:
-        batches, self._pending_evidence_batches = self._pending_evidence_batches, []
-        for batch in batches:
-            self.forwarder.enqueue(batch)
+    def flush_pending_evidence(self) -> int:
+        forwarded = 0
+        while self._pending_evidence_batches:
+            self.forwarder.enqueue(self._pending_evidence_batches[0])
+            self._pending_evidence_batches.pop(0)
+            forwarded += 1
+        return forwarded
 
     async def course_observe_child(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         operation = "course_observe_child"
@@ -669,6 +674,13 @@ class CourseModeRuntimeAdapter:
             "courseBudgetStarted": self._course_budget_started,
         }
 
+    def durable_snapshot(self) -> Dict[str, Any]:
+        value = self.snapshot()
+        value["monotonicCapturedAtMs"] = int(self._clock() * 1_000)
+        value["wallCapturedAtMs"] = int(self._wall_clock() * 1_000)
+        value["pendingEvidenceBatches"] = copy.deepcopy(self._pending_evidence_batches)
+        return value
+
     @classmethod
     def restore(
         cls, contract: CourseModeContract, snapshot: Dict[str, Any], *,
@@ -676,6 +688,7 @@ class CourseModeRuntimeAdapter:
         forwarder: Any = None, runtime_session_id: str | None = None,
         assessment_state: Callable[[], Dict[str, Any]] | None = None,
         defer_evidence_forwarding: bool = False,
+        wall_clock: Callable[[], float] = time.time,
     ) -> "CourseModeRuntimeAdapter":
         if snapshot.get("snapshotVersion") != 1:
             raise ValueError("unsupported course mode snapshot")
@@ -688,9 +701,18 @@ class CourseModeRuntimeAdapter:
             contract, clock=clock, assignment_id=assignment_id, forwarder=forwarder,
             runtime_session_id=snapshot_session_id, assessment_state=assessment_state,
             defer_evidence_forwarding=defer_evidence_forwarding,
+            wall_clock=wall_clock,
         )
         value._started_at_ms = snapshot["startedAtMs"]
-        value.orchestrator = CourseOrchestrator.restore(contract, snapshot["orchestrator"])
+        orchestrator_snapshot = copy.deepcopy(snapshot["orchestrator"])
+        captured_monotonic = snapshot.get("monotonicCapturedAtMs")
+        captured_wall = snapshot.get("wallCapturedAtMs")
+        if type(captured_monotonic) is int and type(captured_wall) is int:
+            downtime_ms = max(0, int(wall_clock() * 1_000) - captured_wall)
+            offset_ms = int(clock() * 1_000) - captured_monotonic - downtime_ms
+            _rebase_course_orchestrator_snapshot(orchestrator_snapshot, offset_ms)
+            value._started_at_ms += offset_ms
+        value.orchestrator = CourseOrchestrator.restore(contract, orchestrator_snapshot)
         value._applied_plan_ids = set(snapshot["appliedPlanIds"])
         value._applied_decision_ids = set(snapshot["appliedDecisionIds"])
         value._consumed_operation_ids = set(snapshot["consumedOperationIds"])
@@ -709,7 +731,12 @@ class CourseModeRuntimeAdapter:
         value._latest_decision_id = snapshot["latestDecisionId"]
         value._next_turn_sequence_id = snapshot["nextTurnSequenceId"]
         value._response_plan_rollback = copy.deepcopy(snapshot["responsePlanRollback"])
+        if value._response_plan_rollback is not None and type(captured_monotonic) is int and type(captured_wall) is int:
+            _rebase_course_orchestrator_snapshot(
+                value._response_plan_rollback["orchestrator"], offset_ms,
+            )
         value._course_budget_started = snapshot["courseBudgetStarted"]
+        value._pending_evidence_batches = copy.deepcopy(snapshot.get("pendingEvidenceBatches", []))
         return value
 
 
@@ -720,6 +747,7 @@ def course_mode_runtime_from_manifest(
     authoritative_snapshot: Dict[str, Any] | None = None,
     assessment_state: Callable[[], Dict[str, Any]] | None = None,
     defer_evidence_forwarding: bool = False,
+    wall_clock: Callable[[], float] = time.time,
 ) -> CourseModeRuntimeAdapter | None:
     if not enabled or not isinstance(manifest, dict) or "courseModeContract" not in manifest:
         return None
@@ -730,12 +758,23 @@ def course_mode_runtime_from_manifest(
             forwarder=forwarder, runtime_session_id=runtime_session_id,
             assessment_state=assessment_state,
             defer_evidence_forwarding=defer_evidence_forwarding,
+            wall_clock=wall_clock,
         )
     return CourseModeRuntimeAdapter(
         contract, clock=clock, assignment_id=assignment_id, forwarder=forwarder,
         runtime_session_id=runtime_session_id, assessment_state=assessment_state,
         defer_evidence_forwarding=defer_evidence_forwarding,
+        wall_clock=wall_clock,
     )
+
+
+def _rebase_course_orchestrator_snapshot(snapshot: Dict[str, Any], offset_ms: int) -> None:
+    snapshot["startedAtMs"] += offset_ms
+    for mastery in snapshot.get("mastery", {}).values():
+        leakage = mastery.get("answerLeakage", {})
+        modeled_at = leakage.get("lastFullModelAtMs")
+        if type(modeled_at) is int:
+            leakage["lastFullModelAtMs"] = modeled_at + offset_ms
 
 
 def _course_mode_snapshot_is_terminal(snapshot: Any) -> bool:
@@ -2056,9 +2095,14 @@ class LessonRuntime:
                 runtime_session_id=self.session_id,
                 assessment_state=self.course_mode._assessment_state,
                 defer_evidence_forwarding=True,
+                wall_clock=self.course_mode._wall_clock,
             )
             return {"accepted": False, "code": "COURSE_SNAPSHOT_PERSIST_FAILED"}
         self.course_mode.flush_pending_evidence()
+        try:
+            await self.persist_course_mode_snapshot()
+        except Exception as exc:
+            self._log("warning", f"course mode evidence outbox clear failed: {type(exc).__name__}")
         return result
 
     async def persist_course_mode_snapshot(self) -> None:
@@ -2072,7 +2116,7 @@ class LessonRuntime:
         await self._course_mode_snapshot_store.store(
             self._course_mode_snapshot_device_id,
             self.assignment_id,
-            self.course_mode.snapshot(),
+            self.course_mode.durable_snapshot(),
         )
 
     async def course_observe_child(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -2110,6 +2154,7 @@ class LessonRuntime:
                     runtime_session_id=self.session_id,
                     assessment_state=self.course_mode._assessment_state,
                     defer_evidence_forwarding=True,
+                    wall_clock=self.course_mode._wall_clock,
                 )
                 restored.rollback_course_response_plan(arguments)
                 self.course_mode = restored
@@ -2308,6 +2353,15 @@ class LessonRuntime:
         if not preloaded and not await self.preload_only():
             return
         if self.course_mode is not None:
+            forwarded = self.course_mode.flush_pending_evidence()
+            if forwarded:
+                try:
+                    await self.persist_course_mode_snapshot()
+                except Exception as exc:
+                    self._log(
+                        "warning",
+                        f"course mode recovered evidence outbox clear failed: {type(exc).__name__}",
+                    )
             self.course_mode.start_course_budget()
         await self._emit("lesson_prepare", body=self._prepare_body())
 

@@ -731,6 +731,57 @@ async def test_evidence_is_not_forwarded_when_snapshot_persistence_fails() -> No
     assert forwarder.batches == []
 
 
+@pytest.mark.asyncio
+async def test_durable_snapshot_preserves_only_unforwarded_evidence_for_recovery() -> None:
+    forwarder = _Forwarder()
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 30.0,
+        assignment_id="a1", forwarder=forwarder, defer_evidence_forwarding=True,
+    )
+    runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
+    runtime.orchestrator.active_mastery.record_model(now_ms=1_000)
+    runtime.orchestrator.active_mastery.record_intervening_activity()
+    await runtime.course_observe_child({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "pending-evidence", "semanticClass": "target_en",
+        "speechClass": "exact", "language": "en", "intent": "answer",
+        "engagement": "engaged", "safetyClass": "normal", "assessmentEligible": True,
+        "confidenceBand": "high", "activityId": "cat-recall-visual-02",
+        "contextId": "cat_primary_visual_recall", "robotAudioContaminated": False,
+        "targetTextVisible": False,
+    })
+    snapshot = runtime.durable_snapshot()
+
+    restored_forwarder = _Forwarder()
+    restored = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 35.0,
+        assignment_id="a1", forwarder=restored_forwarder,
+        authoritative_snapshot=snapshot, defer_evidence_forwarding=True,
+    )
+    restored.flush_pending_evidence()
+
+    assert len(restored_forwarder.batches) == 1
+    assert restored_forwarder.batches[0]["events"][0]["type"] == "word_evidence_recorded"
+
+
+def test_durable_snapshot_rebases_monotonic_timing_across_replicas() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 100.0,
+        wall_clock=lambda: 1_000.0,
+    )
+    runtime.start_course_budget()
+    runtime.orchestrator.active_mastery.record_model(now_ms=90_000)
+    snapshot = runtime.durable_snapshot()
+
+    restored = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 5.0,
+        wall_clock=lambda: 1_030.0, authoritative_snapshot=snapshot,
+    )
+
+    assert restored.orchestrator.started_at_ms == -25_000
+    assert restored.orchestrator.active_mastery.answer_leakage.last_full_model_at_ms == -35_000
+
+
 def test_terminal_snapshot_starts_a_fresh_assignment_execution() -> None:
     manifest = {"courseModeContract": contract()}
     finished = LessonRuntime(

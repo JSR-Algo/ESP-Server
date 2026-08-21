@@ -133,6 +133,27 @@ def test_target_fact_wording_must_stay_within_authorized_teaching_forms() -> Non
     assert plan.target_facts_used == ("animals.cat",)
 
 
+@pytest.mark.parametrize(
+    ("field", "text", "question_count"),
+    [
+        ("acknowledgment", "Cats sleep sixteen hours every day.", 0),
+        ("invitation", "Do cats sleep sixteen hours every day?", 1),
+    ],
+)
+def test_target_related_facts_require_an_authorized_form(field, text, question_count) -> None:
+    overrides = {
+        "acknowledgment": "I hear you.", "relation": "", "guidance": "",
+        "invitation": "", "questionCount": question_count, "targetFactsUsed": [],
+    }
+    overrides[field] = text
+    with pytest.raises(CourseResponsePlanError, match="UNAPPROVED_FACT_WORDING"):
+        CourseResponsePlan.from_mapping(
+            valid(**overrides),
+            approved_fact_codes={"animals.cat"},
+            approved_fact_terms={"cat", "con mèo", "mèo"},
+        )
+
+
 def test_declarative_relation_without_an_authored_fact_fails_closed() -> None:
     with pytest.raises(CourseResponsePlanError, match="UNAPPROVED_FACT_WORDING"):
         CourseResponsePlan.from_mapping(
