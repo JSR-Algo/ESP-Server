@@ -8,9 +8,9 @@ that can be given to a fresh Codex task.
 
 Production-ready in this pack means the software is capability-gated,
 recoverable, observable, privacy-safe, regression-tested, hardware-validated,
-and deployable through a reversible canary. It does not mean the learning
+independently reviewed, and deployable through a reversible canary. It does not mean the learning
 method has been proven effective with children. That claim requires the
-supervised child pilot in Task 07.
+supervised child pilot in Task 09.
 
 ## Fixed Product Contract
 
@@ -53,11 +53,13 @@ geometry, renderer, checksum, and physical evidence after those artifacts exist.
 | 03 | Firmware lesson-owned embodied channel | 00, Task 02 wire contract | No |
 | 04 | Backend authoring, manifest, evidence, progress | 00, stable Task 01 contract | With Task 03 |
 | 05 | Production-quality pilot lesson and assets | 03, 04; Farm v9 evidence optional | No |
-| 06 | Cross-repository adversarial QA and hardware gates | 01-05 | No |
-| 07 | Controlled canary, educator review, child pilot | 06 | No |
+| 06 | Runtime, integration, recovery, and soak validation | 01-05 | No |
+| 07 | Physical robot HIL, comfort, audio, and safety validation | 03, 05, 06 | No |
+| 08 | Independent production-readiness review and GO/NO-GO | 00-07 | No |
+| 09 | Controlled canary, educator review, child pilot | 08 | No |
 
-Do not start Task 07 because code is merged. Start it only when Task 06 produces
-a signed release-candidate evidence bundle with no unresolved release blocker.
+Do not start Task 09 because code is merged. Start it only when Task 08 issues a
+signed GO verdict against the runtime and physical evidence from Tasks 06-07.
 
 ## Task Files
 
@@ -67,14 +69,17 @@ a signed release-candidate evidence bundle with no unresolved release blocker.
 4. [Task 03: firmware embodied channel](task-03-firmware-embodied-channel.md)
 5. [Task 04: backend authoring and progress](task-04-backend-authoring-progress.md)
 6. [Task 05: pilot lesson and asset authoring](task-05-pilot-lesson-authoring.md)
-7. [Task 06: release-candidate QA](task-06-release-candidate-qa.md)
-8. [Task 07: production canary and child pilot](task-07-production-canary-and-pilot.md)
+7. [Task 06: runtime and integration validation](task-06-runtime-integration-validation.md)
+8. [Task 07: physical robot validation](task-07-physical-robot-validation.md)
+9. [Task 08: independent production-readiness review](task-08-production-readiness-review.md)
+10. [Task 09: production canary and child pilot](task-09-production-canary-and-pilot.md)
 
 ## Definition of Done
 
 Course Mode V2 is technically production-ready only when:
 
-- every task through Task 06 is complete with committed evidence;
+- every task through Task 07 is complete with committed evidence;
+- Task 08 independently reproduces the critical gates and issues GO;
 - all three feature/capability gates default to off;
 - V1 regression vectors remain byte-for-byte compatible;
 - the same pilot manifest passes backend, ESP, and firmware contract tests;
@@ -85,4 +90,3 @@ Course Mode V2 is technically production-ready only when:
 - physical tests pass for audio contamination, motion comfort, power,
   temperature, cache recovery, and lesson completion;
 - rollback is rehearsed before canary enablement.
-

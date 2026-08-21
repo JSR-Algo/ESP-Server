@@ -54,7 +54,8 @@ Acceptance gates
 - Assessment never starts until the robot is settled and target text is hidden.
 - Independent/delayed evidence cannot be earned in modeled/revealed paths.
 - Content, pedagogy, child-safety, and Vietnamese/English reviews are signed.
-- The pilot remains unpublished and unassigned until Task 06 passes.
+- The pilot remains unpublished and unassigned in production until Task 08
+  independently reviews Tasks 06-07 and issues GO.
 
 Working method
 - Use new lesson/version identities; never modify a published lesson in place.
@@ -63,4 +64,3 @@ Working method
 - Finish with lesson/version/checksum, derivative evidence, visual captures,
   review records, test commands/results, and known content risks.
 ```
-

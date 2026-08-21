@@ -25,7 +25,8 @@
 The executable backlog and standalone master prompts live under
 `docs/course-mode/production-ready/`. That pack adds an explicit contract and
 visual-baseline task before the three implementation phases, followed by pilot
-authoring, adversarial QA, and a separately authorized production canary.
+authoring, runtime validation, physical HIL, independent production review, and
+a separately authorized production canary.
 
 Farm Journey v9 is the renderer-v4 visual pilot baseline only. Its approved
 `480x320` geometry is object `(20,168,95,95)` and robot `(118,160,150,150)`.

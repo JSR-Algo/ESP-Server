@@ -1,7 +1,7 @@
-# Task 07 Master Prompt: Production Canary and Child Pilot
+# Task 09 Master Prompt: Production Canary and Child Pilot
 
 ```text
-You are executing Task 07 only after Task 06 has a signed GO verdict and the
+You are executing Task 09 only after Task 08 has a signed GO verdict and the
 user has explicitly authorized production deployment, assignment, and a
 supervised child pilot.
 
@@ -11,7 +11,7 @@ educator-supervised usability and learning-quality evidence without overclaiming
 results or exposing child data.
 
 Preconditions
-- Exact release-candidate SHAs/checksums from Task 06 are approved.
+- Exact release-candidate SHAs/checksums from Task 08 are approved.
 - Backend, ESP, and firmware changes have passed their deployment procedures.
 - COURSE_MODE_V2_PUBLISH_ENABLED and LESSON_COURSE_MODE_V2_ENABLED remain off
   until health checks pass.
@@ -74,4 +74,3 @@ Working method
 - Report each state-changing action and verify its observed result before the
   next action. Stop on identity drift or unexpected concurrent deployment.
 ```
-
