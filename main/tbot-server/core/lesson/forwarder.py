@@ -99,11 +99,11 @@ class LessonEventForwarder:
         self.pending_terminal_batch: Optional[Dict[str, Any]] = None
         self._started_batches: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._terminal_store = terminal_store or get_terminal_replay_store()
-        self._queue: "asyncio.Queue[Optional[Tuple[Dict[str, Any], int]]]" = asyncio.Queue()
+        self._queue: "asyncio.Queue[Optional[Tuple[Dict[str, Any], int, Any, Any]]]" = asyncio.Queue()
         self._worker: Optional[asyncio.Task] = None
         self._closed = False
 
-    def enqueue(self, batch: Dict[str, Any]) -> None:
+    def enqueue(self, batch: Dict[str, Any], *, on_success=None, on_failure=None) -> bool:
         """Non-blocking; the worker drains and POSTs. Started lazily on first use.
 
         The queue is bounded: a backend that stops answering must not let a long
@@ -113,7 +113,7 @@ class LessonEventForwarder:
         ``dropped_events_total`` rather than being silent.
         """
         if self._closed:
-            return
+            return False
         terminal = self._is_terminal_batch(batch)
         if not terminal and self._queue.qsize() >= self.max_queue_size:
             self._dead_letter(batch)
@@ -122,7 +122,7 @@ class LessonEventForwarder:
                 f"lesson-events queue full (max={self.max_queue_size}); batch dropped",
                 batch,
             )
-            return
+            return False
         if self._is_started_batch(batch):
             self._remember_started_batch(batch)
         if terminal:
@@ -131,7 +131,8 @@ class LessonEventForwarder:
             _store_pending_terminal_batch(self.device_id, batch)
         if self._worker is None:
             self._worker = asyncio.create_task(self._run())
-        self._queue.put_nowait((batch, 0))
+        self._queue.put_nowait((batch, 0, on_success, on_failure))
+        return True
 
     async def _run(self) -> None:
         while True:
@@ -139,28 +140,35 @@ class LessonEventForwarder:
             if batch is None:  # poison pill
                 self._queue.task_done()
                 break
-            item, attempt = batch
+            item, attempt, on_success, on_failure = batch
             try:
                 if self._is_terminal_batch(item):
                     await self._store_terminal_batch(item)
                 await self._post(item)
+                if callable(on_success):
+                    result = on_success(item)
+                    if asyncio.iscoroutine(result):
+                        await result
                 if self.pending_terminal_batch is item:
                     self.pending_terminal_batch = None
                 await self._clear_terminal_batch(item)
             except Exception as exc:  # never let a forward failure kill the worker
-                await self._handle_post_failure(item, attempt, exc)
+                await self._handle_post_failure(
+                    item, attempt, exc, on_success=on_success, on_failure=on_failure,
+                )
             finally:
                 self._queue.task_done()
 
     async def _handle_post_failure(
-        self, batch: Dict[str, Any], attempt: int, exc: Exception
+        self, batch: Dict[str, Any], attempt: int, exc: Exception, *,
+        on_success=None, on_failure=None,
     ) -> None:
         detail = f"{type(exc).__name__}{self._failure_detail(exc)} {self._batch_events(batch)}"
         if attempt < self.max_reenqueue_attempts and self._is_retryable(exc):
             delay = self.retry_backoff_sec * (self.retry_backoff_multiplier ** attempt)
             if delay > 0:
                 await asyncio.sleep(delay)
-            self._queue.put_nowait((batch, attempt + 1))
+            self._queue.put_nowait((batch, attempt + 1, on_success, on_failure))
             self._log(
                 "warning",
                 "lesson-events POST failed; re-enqueued "
@@ -170,6 +178,10 @@ class LessonEventForwarder:
             return
 
         self._dead_letter(batch)
+        if callable(on_failure):
+            result = on_failure(batch)
+            if asyncio.iscoroutine(result):
+                await result
         self._log("warning", f"lesson-events POST dead-lettered: {detail}", batch)
 
     @staticmethod

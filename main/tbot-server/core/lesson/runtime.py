@@ -379,6 +379,16 @@ class CourseModeRuntimeAdapter:
             forwarded += 1
         return forwarded
 
+    def pending_evidence_batches(self) -> list[Dict[str, Any]]:
+        return copy.deepcopy(self._pending_evidence_batches)
+
+    def acknowledge_evidence_batch(self, batch: Dict[str, Any]) -> bool:
+        for index, pending in enumerate(self._pending_evidence_batches):
+            if pending == batch:
+                self._pending_evidence_batches.pop(index)
+                return True
+        return False
+
     async def course_observe_child(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         operation = "course_observe_child"
         replay = self._replay_operation(operation, arguments)
@@ -1945,6 +1955,7 @@ class LessonRuntime:
         )
         self._course_mode_snapshot_store = course_mode_snapshot_store
         self._course_mode_snapshot_device_id = course_mode_snapshot_device_id
+        self._queued_course_evidence_sequences: set[int] = set()
         self._trace_context = _lesson_trace_context_from_headers(getattr(conn, "headers", None))
         # Record the JOIN between the two identities this run carries. The hello ack
         # handed the device the connection session; the line above deliberately mints a
@@ -2109,6 +2120,19 @@ class LessonRuntime:
         before = self.course_mode.snapshot()
         result = await getattr(self.course_mode, name)(arguments)
         if result.get("accepted") is not True:
+            if self.course_mode.snapshot() != before:
+                try:
+                    await self.persist_course_mode_snapshot()
+                except Exception:
+                    self.course_mode = CourseModeRuntimeAdapter.restore(
+                        self.course_mode.contract, before, clock=self.course_mode._clock,
+                        assignment_id=self.assignment_id, forwarder=self.forwarder,
+                        runtime_session_id=self.session_id,
+                        assessment_state=self.course_mode._assessment_state,
+                        defer_evidence_forwarding=True, wall_clock=self.course_mode._wall_clock,
+                        retry_interrupted_delivery=False,
+                    )
+                    return {"accepted": False, "code": "COURSE_SNAPSHOT_PERSIST_FAILED"}
             return result
         if (
             name == "course_apply_response_plan"
@@ -2131,12 +2155,44 @@ class LessonRuntime:
                 retry_interrupted_delivery=False,
             )
             return {"accepted": False, "code": "COURSE_SNAPSHOT_PERSIST_FAILED"}
-        self.course_mode.flush_pending_evidence()
+        await self._flush_course_evidence_outbox()
+        return result
+
+    async def _ack_course_evidence_batch(self, batch: Dict[str, Any]) -> None:
+        if self.course_mode is None:
+            return
+        sequence = batch.get("events", [{}])[0].get("sequence")
+        self._queued_course_evidence_sequences.discard(sequence)
+        if not self.course_mode.acknowledge_evidence_batch(batch):
+            return
         try:
             await self.persist_course_mode_snapshot()
         except Exception as exc:
-            self._log("warning", f"course mode evidence outbox clear failed: {type(exc).__name__}")
-        return result
+            self._log("warning", f"course mode evidence acknowledgment persist failed: {type(exc).__name__}")
+
+    def _release_course_evidence_batch(self, batch: Dict[str, Any]) -> None:
+        sequence = batch.get("events", [{}])[0].get("sequence")
+        self._queued_course_evidence_sequences.discard(sequence)
+
+    async def _flush_course_evidence_outbox(self) -> None:
+        if self.course_mode is None:
+            return
+        for batch in self.course_mode.pending_evidence_batches():
+            sequence = batch.get("events", [{}])[0].get("sequence")
+            if sequence in self._queued_course_evidence_sequences:
+                continue
+            try:
+                accepted = self.forwarder.enqueue(
+                    batch,
+                    on_success=self._ack_course_evidence_batch,
+                    on_failure=self._release_course_evidence_batch,
+                )
+            except TypeError:
+                self.forwarder.enqueue(batch)
+                await self._ack_course_evidence_batch(batch)
+                continue
+            if accepted is not False:
+                self._queued_course_evidence_sequences.add(sequence)
 
     async def persist_course_mode_snapshot(self) -> None:
         if (
@@ -2191,6 +2247,9 @@ class LessonRuntime:
         before = self.course_mode.snapshot()
         committed = self.course_mode.commit_course_response_plan(arguments)
         if committed:
+            closing = self.course_mode.orchestrator.session_state is SessionState.CLOSING
+            if closing:
+                self.course_mode.orchestrator.session_state = SessionState.COMPLETE
             try:
                 await self.persist_course_mode_snapshot()
             except Exception:
@@ -2203,6 +2262,9 @@ class LessonRuntime:
                     retry_interrupted_delivery=False,
                 )
                 return False
+            if closing and not self._completion_stop_sent:
+                await self._emit("lesson_stop", body={"reason": "COMPLETED"})
+                self._completion_stop_sent = True
         return committed
 
     async def mark_response_plan_delivery_attempted(self, arguments: Dict[str, Any]) -> bool:
@@ -2418,15 +2480,7 @@ class LessonRuntime:
         if not preloaded and not await self.preload_only():
             return
         if self.course_mode is not None:
-            forwarded = self.course_mode.flush_pending_evidence()
-            if forwarded:
-                try:
-                    await self.persist_course_mode_snapshot()
-                except Exception as exc:
-                    self._log(
-                        "warning",
-                        f"course mode recovered evidence outbox clear failed: {type(exc).__name__}",
-                    )
+            await self._flush_course_evidence_outbox()
             self.course_mode.start_course_budget()
         await self._emit("lesson_prepare", body=self._prepare_body())
 

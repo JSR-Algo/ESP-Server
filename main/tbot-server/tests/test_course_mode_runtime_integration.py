@@ -53,6 +53,14 @@ class _Forwarder:
         self.batches.append(batch)
 
 
+class _AcknowledgingForwarder(_Forwarder):
+    def enqueue(self, batch, *, on_success=None, on_failure=None):
+        self.batches.append(batch)
+        self.on_success = on_success
+        self.on_failure = on_failure
+        return True
+
+
 def test_production_lesson_runtime_activates_v2_only_with_strict_flag() -> None:
     manifest = {"courseModeContract": contract()}
     enabled = LessonRuntime(
@@ -792,6 +800,74 @@ async def test_durable_snapshot_preserves_only_unforwarded_evidence_for_recovery
     assert restored_forwarder.batches[0]["events"][0]["type"] == "word_evidence_recorded"
 
 
+@pytest.mark.asyncio
+async def test_evidence_remains_durable_until_forwarder_acknowledges_backend_success() -> None:
+    store = MemoryCourseModeSnapshotStore()
+    forwarder = _AcknowledgingForwarder()
+    runtime = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest={"courseModeContract": contract()}, asset_cache=object(), forwarder=forwarder,
+        course_mode_snapshot_store=store, course_mode_snapshot_device_id="device-1",
+    )
+    runtime.course_mode.orchestrator.session_state = SessionState.WORD_ACTIVE
+    runtime.course_mode.orchestrator.active_mastery.record_model(now_ms=1_000)
+    runtime.course_mode.orchestrator.active_mastery.record_intervening_activity()
+
+    result = await runtime.course_observe_child({
+        "lessonSessionId": runtime.session_id, "turnSequenceId": 1,
+        "observationId": "durable-until-ack", "semanticClass": "target_en",
+        "speechClass": "exact", "language": "en", "intent": "answer",
+        "engagement": "engaged", "safetyClass": "normal", "assessmentEligible": True,
+        "confidenceBand": "high", "activityId": "cat-recall-visual-02",
+        "contextId": "cat_primary_visual_recall", "robotAudioContaminated": False,
+        "targetTextVisible": False,
+    })
+    assert result["accepted"] is True
+    pending = await store.load("device-1", "a1")
+    assert len(pending["pendingEvidenceBatches"]) == 1
+
+    await forwarder.on_success(forwarder.batches[0])
+    acknowledged = await store.load("device-1", "a1")
+    assert acknowledged["pendingEvidenceBatches"] == []
+
+
+@pytest.mark.asyncio
+async def test_rejected_consuming_operation_identity_survives_restart() -> None:
+    store = MemoryCourseModeSnapshotStore()
+    runtime = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest={"courseModeContract": contract()}, asset_cache=object(),
+        forwarder=_Forwarder(), course_mode_snapshot_store=store,
+        course_mode_snapshot_device_id="device-1",
+    )
+    decision = await runtime.course_continue({
+        "lessonSessionId": runtime.session_id, "turnSequenceId": 1,
+        "observationId": "decision-before-invalid-plan",
+    })
+    invalid = {
+        "lessonSessionId": runtime.session_id, "turnSequenceId": 2,
+        "observationId": "invalid-plan-before-restart", "planId": "invalid-plan",
+        "decisionId": decision["decisionId"], "acknowledgment": "Wrong.",
+        "relation": "", "guidance": "Try harder.", "invitation": "Again?",
+        "questionCount": 1, "embodiedIntent": decision["embodiedIntent"],
+        "targetFactsUsed": [], "praiseLevel": "engagement",
+        "safetyMode": False, "normalMiss": True,
+    }
+    assert await runtime.course_apply_response_plan(invalid) == {
+        "accepted": False, "code": "INVALID_RESPONSE_PLAN",
+    }
+    snapshot = await store.load("device-1", "a1")
+    restarted = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest={"courseModeContract": contract()}, asset_cache=object(),
+        forwarder=_Forwarder(), course_mode_snapshot_store=store,
+        course_mode_snapshot_device_id="device-1", course_mode_snapshot=snapshot,
+    )
+    assert await restarted.course_apply_response_plan(invalid) == {
+        "accepted": False, "code": "DUPLICATE_OPERATION_IGNORED",
+    }
+
+
 def test_durable_snapshot_rebases_monotonic_timing_across_replicas() -> None:
     runtime = course_mode_runtime_from_manifest(
         {"courseModeContract": contract()}, enabled=True, clock=lambda: 100.0,
@@ -1235,6 +1311,48 @@ async def test_course_continue_closes_when_soft_deadline_has_elapsed() -> None:
 
     assert decision["action"] == "CLOSE_WITHOUT_SECOND_WORD"
     assert decision["nextState"] == "CLOSING"
+
+
+@pytest.mark.asyncio
+async def test_committed_closing_plan_completes_parent_runtime_and_emits_stop() -> None:
+    now = [0.0]
+    sent = []
+
+    async def send(payload):
+        sent.append(json.loads(payload))
+
+    store = MemoryCourseModeSnapshotStore()
+    runtime = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest={"courseModeContract": contract()}, asset_cache=object(),
+        forwarder=_Forwarder(), send=send, course_mode_snapshot_store=store,
+        course_mode_snapshot_device_id="device-1",
+    )
+    runtime.course_mode._clock = lambda: now[0]
+    runtime.course_mode.orchestrator.started_at_ms = 0
+    runtime.course_mode.orchestrator.session_state = SessionState.WORD_ACTIVE
+    now[0] = 540.0
+    decision = await runtime.course_continue({
+        "lessonSessionId": runtime.session_id, "turnSequenceId": 1,
+        "observationId": "closing-decision",
+    })
+    plan = {
+        "lessonSessionId": runtime.session_id, "turnSequenceId": 2,
+        "observationId": "closing-plan", "planId": "closing-plan",
+        "decisionId": decision["decisionId"], "acknowledgment": "I hear you.",
+        "relation": "We can stop.", "guidance": "", "invitation": "",
+        "questionCount": 0, "embodiedIntent": decision["embodiedIntent"],
+        "targetFactsUsed": [], "praiseLevel": "engagement",
+        "safetyMode": False, "normalMiss": False,
+    }
+    assert (await runtime.course_apply_response_plan(plan))["accepted"] is True
+    assert await runtime.commit_course_response_plan(plan) is True
+    snapshot = await store.load("device-1", "a1")
+
+    assert runtime.course_mode.orchestrator.session_state is SessionState.COMPLETE
+    assert snapshot["orchestrator"]["sessionState"] == "COMPLETE"
+    assert sent[-1]["type"] == "lesson_stop"
+    assert sent[-1]["body"]["reason"] == "COMPLETED"
 
 
 @pytest.mark.asyncio
