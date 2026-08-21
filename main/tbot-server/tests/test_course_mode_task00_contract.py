@@ -21,6 +21,8 @@ V1_CANONICAL_SHA256 = "44f1dd88f44acd903c7196b7ad1245e5d2177c18f5dd7de49e137a045
 V1_MANIFEST_CHECKSUM = "bb7d4dcdf6318096c0b9224dc48bcdcb3ff78b325706cdc9c5d39bd4e7da94e4"
 CONTRACT_CHECKSUM = "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264"
 LAYOUT_CHECKSUM = "e61b56d1f8219a86c7f3986e7d5c70b91f512286604b5b206ef11e2c989d275c"
+CONTRACT_FILE_SHA256 = "05e18ae61aee0660c653a9386854552a23f90c8a1f8cfb9e7ff4e15d1d277470"
+LAYOUT_FILE_SHA256 = "031e69b82c33da87f5ec63c21cb1e756549b802e6a8bd567a1b76f51e4f77dc5"
 CHECKSUM_RULES = {
     "algorithm": "SHA-256",
     "canonicalization": "tbot-json-c14n.v1",
@@ -175,6 +177,7 @@ def validate_layout(document: dict[str, Any], expected_checksum: str = LAYOUT_CH
         "collisionLimits", "captionSafeArea", "focusAnchors", "listeningCue",
         "reducedMotion", "mirroring", "checksumRules", "contractChecksum",
     })
+    assert document["schemaVersion"] == 1
     assert document["contractVersion"] == "renderer-v4.course-mode-layout.v1"
     assert document["rendererId"] == "teebot-lesson-renderer.v4"
     assert document["checksumRules"] == CHECKSUM_RULES
@@ -238,6 +241,8 @@ def _find_sibling(relative: str) -> Path | None:
 
 
 def test_canonical_course_mode_fixture_is_strict_and_checksum_pinned() -> None:
+    assert hashlib.sha256(CONTRACT_PATH.read_bytes()).hexdigest() == CONTRACT_FILE_SHA256
+    assert hashlib.sha256(LAYOUT_PATH.read_bytes()).hexdigest() == LAYOUT_FILE_SHA256
     validate_contract(_load(CONTRACT_PATH))
 
 
@@ -259,6 +264,7 @@ def test_renderer_v4_static_composition_and_fail_closed_mutations() -> None:
     value = _load(LAYOUT_PATH)
     validate_layout(value)
     for mutation in (
+        lambda item: item.update({"schemaVersion": 99}),
         lambda item: item["layers"]["teachingObject"]["bounds"].update({"x": 450}),
         lambda item: item.update({"layerOrder": ["background", "robotOverlay", "teachingObject", "transientFocusCue"]}),
         lambda item: item["layers"]["robotOverlay"]["bounds"].update({"x": 100}),
