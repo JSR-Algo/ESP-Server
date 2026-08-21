@@ -1439,6 +1439,56 @@ async def test_failed_closing_stop_remains_resumable_until_stop_is_sent() -> Non
 
 
 @pytest.mark.asyncio
+async def test_persist_failure_after_closing_stop_does_not_replay_stop() -> None:
+    class FailCompleteStore(MemoryCourseModeSnapshotStore):
+        fail_complete = True
+
+        async def store(self, device_id, assignment_id, snapshot):
+            if self.fail_complete and snapshot["orchestrator"]["sessionState"] == "COMPLETE":
+                raise RuntimeError("snapshot unavailable")
+            await super().store(device_id, assignment_id, snapshot)
+
+    store = FailCompleteStore()
+    sent = []
+
+    async def send(raw):
+        sent.append(json.loads(raw))
+
+    runtime = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest={"courseModeContract": contract()}, asset_cache=object(),
+        forwarder=_Forwarder(), send=send,
+        course_mode_snapshot_store=store, course_mode_snapshot_device_id="device-1",
+    )
+    runtime.course_mode.orchestrator.session_state = SessionState.CLOSING
+    runtime.course_mode._latest_decision_id = "course-decision-1"
+    runtime.course_mode._applied_decision_ids.add("course-decision-1")
+    await runtime.persist_course_mode_snapshot()
+
+    assert await runtime._complete_course_mode_close() is False
+    assert [frame["type"] for frame in sent] == ["lesson_stop"]
+    snapshot = await store.load("device-1", "a1")
+    assert snapshot["orchestrator"]["sessionState"] == "CLOSING"
+    assert snapshot["completionStopDispatched"] is True
+
+    store.fail_complete = False
+    resumed_sent = []
+
+    async def resumed_send(raw):
+        resumed_sent.append(json.loads(raw))
+
+    resumed = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest={"courseModeContract": contract()}, asset_cache=object(),
+        forwarder=_Forwarder(), send=resumed_send, course_mode_snapshot=snapshot,
+        course_mode_snapshot_store=store, course_mode_snapshot_device_id="device-1",
+    )
+    assert await resumed._complete_course_mode_close() is True
+    assert resumed_sent == []
+    assert resumed.course_mode.orchestrator.session_state is SessionState.COMPLETE
+
+
+@pytest.mark.asyncio
 async def test_course_continue_closes_after_failed_delayed_recall() -> None:
     runtime = course_mode_runtime_from_manifest(
         {"courseModeContract": contract()}, enabled=True, clock=lambda: 70.0,

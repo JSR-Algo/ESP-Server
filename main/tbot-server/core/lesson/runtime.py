@@ -139,6 +139,7 @@ class CourseModeRuntimeAdapter:
         self._next_turn_sequence_id = 1
         self._response_plan_rollback: dict[str, Any] | None = None
         self._course_budget_started = False
+        self._completion_stop_dispatched = False
 
     def start_course_budget(self) -> None:
         if self._course_budget_started:
@@ -708,6 +709,7 @@ class CourseModeRuntimeAdapter:
             "nextTurnSequenceId": self._next_turn_sequence_id,
             "responsePlanRollback": copy.deepcopy(self._response_plan_rollback),
             "courseBudgetStarted": self._course_budget_started,
+            "completionStopDispatched": self._completion_stop_dispatched,
         }
 
     def durable_snapshot(self) -> Dict[str, Any]:
@@ -776,6 +778,7 @@ class CourseModeRuntimeAdapter:
                 value._response_plan_rollback["orchestrator"], offset_ms,
             )
         value._course_budget_started = snapshot["courseBudgetStarted"]
+        value._completion_stop_dispatched = snapshot.get("completionStopDispatched") is True
         value._pending_evidence_batches = copy.deepcopy(snapshot.get("pendingEvidenceBatches", []))
         return value
 
@@ -2070,7 +2073,10 @@ class LessonRuntime:
         # transitions (e.g. a late lesson_error after an earlier timeout) cannot
         # enqueue a second terminal event for the same run.
         self._failure_forwarded = False
-        self._completion_stop_sent = False
+        self._completion_stop_sent = bool(
+            self.course_mode is not None
+            and self.course_mode._completion_stop_dispatched
+        )
         self._completion_visual_pending = False
         self._sd_asset_pack_online_fallback = False
         self._cinematic_phase: Optional[Dict[str, Any]] = None
@@ -2278,12 +2284,23 @@ class LessonRuntime:
             return True
         if self.course_mode.orchestrator.session_state is not SessionState.CLOSING:
             return False
-        try:
-            if not self._completion_stop_sent:
+        if not self.course_mode._completion_stop_dispatched:
+            self.course_mode._completion_stop_dispatched = True
+            try:
+                await self.persist_course_mode_snapshot()
+            except Exception:
+                self.course_mode._completion_stop_dispatched = False
+                return False
+            try:
                 await self._emit("lesson_stop", body={"reason": "COMPLETED"})
                 self._completion_stop_sent = True
-        except Exception:
-            return False
+            except Exception:
+                self.course_mode._completion_stop_dispatched = False
+                try:
+                    await self.persist_course_mode_snapshot()
+                except Exception:
+                    pass
+                return False
         self.course_mode.orchestrator.session_state = SessionState.COMPLETE
         try:
             await self.persist_course_mode_snapshot()
