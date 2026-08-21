@@ -111,6 +111,7 @@ class CourseModeRuntimeAdapter:
         self.forwarder = forwarder
         self.orchestrator = CourseOrchestrator(
             contract, started_at_ms=self._started_at_ms, soft_deadline_ms=540_000,
+            lesson_session_id=self.lesson_session_id,
         )
         self._applied_plan_ids: set[str] = set()
         self._applied_decision_ids: set[str] = set()
@@ -293,6 +294,12 @@ class CourseModeRuntimeAdapter:
         except CourseResponsePlanError:
             return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
         if plan.embodied_intent is not decision.embodied_intent:
+            return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+        active_target = next(
+            target for target in (self.contract.primary, self.contract.secondary)
+            if target is not None and target.target_id == self.orchestrator.active_target_id
+        )
+        if not decision.may_model_target and plan.contains_target_word(active_target.target_word):
             return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
         protected_decision = decision.next_state in {
             SessionState.SAFETY_PAUSED, SessionState.REGULATION_BREAK,

@@ -201,6 +201,8 @@ def test_production_runtime_uses_unique_execution_session_identity() -> None:
     assert second.course_mode.lesson_session_id == second.session_id
     assert first.course_mode.lesson_session_id != second.course_mode.lesson_session_id
     assert first.conversation_tool_context()["identity"]["lessonSessionId"] == first.session_id
+    assert first.course_mode.orchestrator.snapshot()["lessonSessionId"] == first.session_id
+    assert second.course_mode.orchestrator.snapshot()["lessonSessionId"] == second.session_id
 
 
 @pytest.mark.asyncio
@@ -341,6 +343,32 @@ async def test_response_plan_must_pass_fail_closed_validator() -> None:
         "safetyMode": False, "normalMiss": True,
     })
     assert result == {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+
+
+@pytest.mark.asyncio
+async def test_response_plan_cannot_leak_target_when_decision_forbids_modeling() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    decision = await runtime.course_continue({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "no-model-decision",
+    })
+    assert decision["mayModelTarget"] is False
+
+    result = await runtime.course_apply_response_plan({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 2,
+        "observationId": "leaking-plan", "planId": "leaking-plan",
+        "decisionId": decision["decisionId"], "acknowledgment": "I hear you.",
+        "relation": "Let us look together.", "guidance": "The answer is cat.",
+        "invitation": "What do you see?", "questionCount": 1,
+        "embodiedIntent": decision["embodiedIntent"], "targetFactsUsed": [],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    })
+
+    assert result == {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+    assert runtime.orchestrator.active_mastery.answer_leakage.last_full_model_at_ms is None
 
 
 @pytest.mark.asyncio

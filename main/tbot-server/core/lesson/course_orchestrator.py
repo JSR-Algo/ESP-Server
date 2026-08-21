@@ -94,8 +94,12 @@ class CourseDecision:
 
 
 class CourseOrchestrator:
-    def __init__(self, contract: CourseModeContract, *, started_at_ms: int, soft_deadline_ms: int) -> None:
+    def __init__(
+        self, contract: CourseModeContract, *, started_at_ms: int, soft_deadline_ms: int,
+        lesson_session_id: str | None = None,
+    ) -> None:
         self.contract = contract
+        self.lesson_session_id = lesson_session_id or contract.lesson_session_id
         self.started_at_ms = started_at_ms
         self.soft_deadline_ms = soft_deadline_ms
         self.session_state = SessionState.PREPARING
@@ -325,7 +329,7 @@ class CourseOrchestrator:
 
     def snapshot(self) -> dict[str, Any]:
         return {
-            "lessonSessionId": self.contract.lesson_session_id, "sessionState": self.session_state.value,
+            "lessonSessionId": self.lesson_session_id, "sessionState": self.session_state.value,
             "startedAtMs": self.started_at_ms, "softDeadlineMs": self.soft_deadline_ms,
             "wordState": self.word_state.value, "activeTargetId": self.active_target_id,
             "openingStep": self._opening_step, "decisionSequence": self._decision_sequence,
@@ -339,6 +343,7 @@ class CourseOrchestrator:
         value = cls(
             contract, started_at_ms=snapshot["startedAtMs"],
             soft_deadline_ms=snapshot["softDeadlineMs"],
+            lesson_session_id=snapshot["lessonSessionId"],
         )
         value.session_state = SessionState(snapshot["sessionState"])
         value.word_state = WordState(snapshot["wordState"])

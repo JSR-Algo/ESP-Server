@@ -226,6 +226,19 @@ async def _execute_course(conn: Any, tool_name: str, arguments: Mapping[str, Any
     context = snapshot() if callable(snapshot) else None
     if isinstance(result, Mapping) and isinstance(context, Mapping):
         result = {**result, "context": dict(context)}
+    admission = _GOOGLE_LIVE_LESSON_ADMISSION.get()
+    receipt = admission[2] if isinstance(admission, tuple) and len(admission) == 3 else None
+    refreshed_identity = context.get("identity") if isinstance(context, Mapping) else None
+    if (
+        isinstance(result, Mapping)
+        and result.get("accepted") is True
+        and isinstance(receipt, dict)
+        and isinstance(refreshed_identity, Mapping)
+    ):
+        receipt.update({
+            "canonicalToolName": tool_name,
+            "refreshedIdentity": dict(refreshed_identity),
+        })
     return ActionResponse(action=Action.REQLLM, result=result)
 
 

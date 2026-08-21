@@ -5782,7 +5782,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         )
 
     @staticmethod
-    def _validation_tool_identity(source):
+    def _validation_tool_identity(source, *, course_mode=False):
         if not isinstance(source, Mapping):
             return None
         lesson_session_id = source.get("lessonSessionId")
@@ -5794,7 +5794,15 @@ class GoogleLiveProvider(VoiceSessionProvider):
             or not lesson_session_id
             or not isinstance(turn_sequence_id, int)
             or turn_sequence_id < 1
-            or not isinstance(attempt_id, str)
+        ):
+            return None
+        if course_mode:
+            return {
+                "lessonSessionId": lesson_session_id,
+                "turnSequenceId": turn_sequence_id,
+            }
+        if (
+            not isinstance(attempt_id, str)
             or not attempt_id
             or not isinstance(step_key, str)
             or not step_key
@@ -5832,10 +5840,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return
         context = response_payload.get("context")
         refreshed = context.get("identity") if isinstance(context, Mapping) else None
-        identity = self._validation_tool_identity(args)
-        refreshed_identity = self._validation_tool_identity(refreshed)
+        course_mode = name.startswith("course_")
+        identity = self._validation_tool_identity(args, course_mode=course_mode)
+        refreshed_identity = self._validation_tool_identity(refreshed, course_mode=course_mode)
         receipt_identity = self._validation_tool_identity(
-            validation_receipt.get("refreshedIdentity")
+            validation_receipt.get("refreshedIdentity"), course_mode=course_mode,
         )
         if identity is None or refreshed_identity is None:
             return

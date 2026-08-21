@@ -1313,6 +1313,35 @@ class LessonConversationProviderTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(conn.websocket.sent, [])
 
+    async def test_validation_tool_audit_accepts_course_mode_identity(self):
+        conn = _Conn()
+        conn.lesson_runtime = _CanonicalAuditRuntime()
+        conn.client_id = "soak-harness-client"
+        conn.features = {"googleLiveValidationToolAuditV1": True}
+        conn.websocket = _WebSocket()
+        conn.config["google_live"].update({
+            "validation_tool_audit_enabled": True,
+            "validation_tool_audit_mode": "local_soak",
+            "validation_tool_audit_client_ids": ["soak-harness-client"],
+            "validation_tool_audit_device_ids": ["robot-1"],
+        })
+        provider = GoogleLiveProvider(conn)
+        identity = {"lessonSessionId": "course-session", "turnSequenceId": 3}
+
+        await provider._emit_validation_tool_audit(
+            "course_continue",
+            {"lessonSessionId": "course-session", "turnSequenceId": 2, "observationId": "o1"},
+            {"accepted": True, "code": "ACCEPTED", "context": {"identity": identity}},
+            {"canonicalToolName": "course_continue", "refreshedIdentity": identity},
+        )
+
+        audit = json.loads(conn.websocket.sent[0])
+        self.assertEqual(audit["toolName"], "course_continue")
+        self.assertEqual(audit["identity"], {
+            "lessonSessionId": "course-session", "turnSequenceId": 2,
+        })
+        self.assertEqual(audit["refreshedIdentity"], identity)
+
     async def test_validation_tool_audit_fails_closed_for_general_clients(self):
         cases = [
             (False, "local_soak", True, "soak-harness-client", "robot-1", ["soak-harness-client"], ["robot-1"]),

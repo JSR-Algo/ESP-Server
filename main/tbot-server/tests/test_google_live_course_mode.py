@@ -94,6 +94,22 @@ async def test_admitted_current_generation_routes_exact_observation_without_raw_
 
 
 @pytest.mark.asyncio
+async def test_accepted_course_tool_populates_validation_audit_receipt() -> None:
+    conn = Conn()
+    receipt = {}
+    arguments = {"lessonSessionId": "s1", "turnSequenceId": 1, "observationId": "o1"}
+
+    with _google_live_lesson_tool_admission(conn.voice_provider, 4, receipt):
+        response = await course_continue(conn, **arguments)
+
+    assert response.result["accepted"] is True
+    assert receipt == {
+        "canonicalToolName": "course_continue",
+        "refreshedIdentity": {"lessonSessionId": "s1", "turnSequenceId": 2},
+    }
+
+
+@pytest.mark.asyncio
 async def test_stale_generation_extra_args_and_v1_runtime_fail_closed() -> None:
     conn = Conn()
     required = COURSE_MODE_TOOL_SPECS["course_observe_child"]["function"]["parameters"]["required"]

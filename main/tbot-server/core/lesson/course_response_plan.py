@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Set
 from dataclasses import dataclass
 from typing import Any
@@ -32,6 +33,13 @@ class CourseResponsePlan:
     praise_level: str
     safety_mode: bool
     normal_miss: bool
+
+    def contains_target_word(self, target_word: str) -> bool:
+        child_facing_text = " ".join((
+            self.acknowledgment, self.relation, self.guidance, self.invitation,
+        )).casefold()
+        pattern = rf"(?<!\w){re.escape(target_word.casefold())}(?!\w)"
+        return re.search(pattern, child_facing_text) is not None
 
     @classmethod
     def from_mapping(cls, value: Any, *, approved_fact_codes: Set[str]) -> "CourseResponsePlan":
