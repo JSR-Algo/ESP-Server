@@ -167,6 +167,8 @@ class CourseModeRuntimeAdapter:
         return self._decision_payload(decision)
 
     def _operation_allowed(self, operation: str) -> bool:
+        if operation != "course_apply_response_plan" and self._response_plan_pending():
+            return False
         state = self.orchestrator.session_state
         if operation == "course_apply_response_plan":
             return True
@@ -179,6 +181,16 @@ class CourseModeRuntimeAdapter:
         if state in {SessionState.CLOSING, SessionState.COMPLETE}:
             return False
         return operation in {"course_observe_child", "course_open_context", "course_continue"}
+
+    def _response_plan_pending(self) -> bool:
+        if self._latest_decision_id is None:
+            return False
+        decision = self._decisions.get(self._latest_decision_id)
+        return bool(
+            decision is not None
+            and decision.accepted
+            and decision.decision_id not in self._applied_decision_ids
+        )
 
     @staticmethod
     def _operation_not_allowed() -> Dict[str, Any]:

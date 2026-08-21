@@ -119,8 +119,31 @@ async def test_adapter_rejects_stale_turn_before_mutating_authoritative_state() 
     })
 
     assert first["nextState"] == "OPENING"
-    assert stale == {"accepted": False, "code": "STALE_TURN_SEQUENCE"}
+    assert stale == {"accepted": False, "code": "COURSE_OPERATION_NOT_ALLOWED"}
     assert runtime.orchestrator.session_state.name == "OPENING"
+
+
+@pytest.mark.asyncio
+async def test_pending_decision_blocks_progress_until_response_plan_is_applied() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+
+    first = await runtime.course_continue({
+        "lessonSessionId": runtime.lesson_session_id,
+        "turnSequenceId": 1,
+        "observationId": "first",
+    })
+    skipped = await runtime.course_continue({
+        "lessonSessionId": runtime.lesson_session_id,
+        "turnSequenceId": 2,
+        "observationId": "skip-greeting",
+    })
+
+    assert first["action"] == "GREET_AND_CHECK_IN"
+    assert skipped == {"accepted": False, "code": "COURSE_OPERATION_NOT_ALLOWED"}
+    assert runtime.orchestrator.session_state is SessionState.OPENING
 
 
 @pytest.mark.asyncio
@@ -197,14 +220,22 @@ async def test_adapter_implements_all_advertised_operations_and_forwards_safe_ev
         "turnSequenceId": 1,
         "observationId": "operation-1",
     }
-    assert (await runtime.course_continue(identity))["action"] == "GREET_AND_CHECK_IN"
+    greeted = await runtime.course_continue(identity)
+    assert greeted["action"] == "GREET_AND_CHECK_IN"
+    assert (await runtime.course_apply_response_plan({
+        **identity, "turnSequenceId": 2, "observationId": "operation-2", "planId": "greeting-plan",
+        "decisionId": greeted["decisionId"], "acknowledgment": "Hello.", "relation": "",
+        "guidance": "", "invitation": "Ready?", "questionCount": 1,
+        "embodiedIntent": greeted["embodiedIntent"], "targetFactsUsed": [],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    }))["accepted"] is True
     opened = await runtime.course_open_context({
-        **identity, "turnSequenceId": 2, "observationId": "operation-2",
+        **identity, "turnSequenceId": 3, "observationId": "operation-3",
         "branchType": "RELATED_STORY",
     })
     assert opened["accepted"] is True
     assert (await runtime.course_apply_response_plan({
-        **identity, "turnSequenceId": 3, "observationId": "operation-3", "planId": "plan-1",
+        **identity, "turnSequenceId": 4, "observationId": "operation-4", "planId": "plan-1",
         "decisionId": opened["decisionId"],
         "acknowledgment": "Robot heard you.", "relation": "We can keep learning.",
         "guidance": "Look at the picture.", "invitation": "What is it?",
@@ -213,12 +244,12 @@ async def test_adapter_implements_all_advertised_operations_and_forwards_safe_ev
         "safetyMode": False, "normalMiss": False,
     }))["accepted"] is True
     closed = await runtime.course_close_context({
-        **identity, "turnSequenceId": 4, "observationId": "operation-4", "branchId": opened["branchId"],
+        **identity, "turnSequenceId": 5, "observationId": "operation-5", "branchId": opened["branchId"],
         "bridgeIntent": "white_cat_visual", "childDetailCode": "grandmother_pet",
     })
     assert closed["accepted"] is True
     replayed_decision = await runtime.course_apply_response_plan({
-        **identity, "turnSequenceId": 5, "observationId": "operation-5", "planId": "plan-2",
+        **identity, "turnSequenceId": 6, "observationId": "operation-6", "planId": "plan-2",
         "decisionId": opened["decisionId"],
         "acknowledgment": "Robot heard you.", "relation": "We can keep learning.",
         "guidance": "Look at the picture.", "invitation": "What is it?",
@@ -227,13 +258,20 @@ async def test_adapter_implements_all_advertised_operations_and_forwards_safe_ev
         "safetyMode": False, "normalMiss": False,
     })
     assert replayed_decision == {"accepted": False, "code": "DECISION_ALREADY_APPLIED"}
-    duplicate = await runtime.course_continue({**identity, "observationId": "operation-1"})
+    assert (await runtime.course_apply_response_plan({
+        **identity, "turnSequenceId": 7, "observationId": "operation-7", "planId": "close-plan",
+        "decisionId": closed["decisionId"], "acknowledgment": "Thank you.", "relation": "",
+        "guidance": "Look at the picture.", "invitation": "Ready?", "questionCount": 1,
+        "embodiedIntent": closed["embodiedIntent"], "targetFactsUsed": ["animals.cat"],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    }))["accepted"] is True
+    duplicate = await runtime.course_continue({**identity, "turnSequenceId": 8, "observationId": "operation-1"})
     assert duplicate == {"accepted": False, "code": "DUPLICATE_OPERATION_IGNORED"}
 
     runtime.orchestrator.active_mastery.record_model(now_ms=1_000)
     runtime.orchestrator.active_mastery.record_intervening_activity()
     evidence = await runtime.course_observe_child({
-        **identity, "turnSequenceId": 6, "observationId": "evidence-1", "semanticClass": "target_en",
+        **identity, "turnSequenceId": 8, "observationId": "evidence-1", "semanticClass": "target_en",
         "speechClass": "exact", "language": "en", "intent": "answer",
         "engagement": "engaged", "safetyClass": "normal", "assessmentEligible": True,
         "confidenceBand": "high", "activityId": "cat-recall-visual-02",
@@ -285,8 +323,16 @@ async def test_course_continue_does_not_resume_vocabulary_from_protected_pause(
         "activityId": "cat-recall-visual-02", "contextId": "cat_primary_visual_recall",
         "robotAudioContaminated": False, "targetTextVisible": False,
     })
+    assert (await runtime.course_apply_response_plan({
+        "lessonSessionId": identity, "turnSequenceId": 2, "observationId": "pause-plan",
+        "planId": "pause-plan", "decisionId": paused["decisionId"],
+        "acknowledgment": "Robot is here.", "relation": "", "guidance": "",
+        "invitation": "Do you want to stop?", "questionCount": 1,
+        "embodiedIntent": paused["embodiedIntent"], "targetFactsUsed": [],
+        "praiseLevel": "engagement", "safetyMode": True, "normalMiss": False,
+    }))["accepted"] is True
     continued = await runtime.course_continue({
-        "lessonSessionId": identity, "turnSequenceId": 2, "observationId": "continue",
+        "lessonSessionId": identity, "turnSequenceId": 3, "observationId": "continue",
     })
 
     assert continued["nextState"] == paused["nextState"]
@@ -304,8 +350,16 @@ async def test_protected_state_blocks_context_mutation_and_stale_normal_plan() -
     normal = await runtime.course_continue({
         "lessonSessionId": identity, "turnSequenceId": 1, "observationId": "normal",
     })
+    await runtime.course_apply_response_plan({
+        "lessonSessionId": identity, "turnSequenceId": 2, "observationId": "normal-plan",
+        "planId": "normal-plan", "decisionId": normal["decisionId"],
+        "acknowledgment": "Hello.", "relation": "", "guidance": "",
+        "invitation": "Ready?", "questionCount": 1,
+        "embodiedIntent": normal["embodiedIntent"], "targetFactsUsed": [],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    })
     await runtime.course_observe_child({
-        "lessonSessionId": identity, "turnSequenceId": 2, "observationId": "safety",
+        "lessonSessionId": identity, "turnSequenceId": 3, "observationId": "safety",
         "semanticClass": "unknown", "speechClass": "not_applicable", "language": "vi",
         "intent": "answer", "engagement": "engaged", "safetyClass": "safety",
         "assessmentEligible": False, "confidenceBand": "high",
@@ -314,11 +368,11 @@ async def test_protected_state_blocks_context_mutation_and_stale_normal_plan() -
     })
 
     opened = await runtime.course_open_context({
-        "lessonSessionId": identity, "turnSequenceId": 3, "observationId": "branch",
+        "lessonSessionId": identity, "turnSequenceId": 4, "observationId": "branch",
         "branchType": "RELATED_STORY",
     })
     stale_plan = await runtime.course_apply_response_plan({
-        "lessonSessionId": identity, "turnSequenceId": 3, "observationId": "late-plan",
+        "lessonSessionId": identity, "turnSequenceId": 4, "observationId": "late-plan",
         "planId": "p1", "decisionId": normal["decisionId"],
         "acknowledgment": "Robot heard you.", "relation": "We can learn.",
         "guidance": "Look at the picture.", "invitation": "Ready?", "questionCount": 1,
@@ -327,7 +381,7 @@ async def test_protected_state_blocks_context_mutation_and_stale_normal_plan() -
     })
 
     assert opened == {"accepted": False, "code": "COURSE_OPERATION_NOT_ALLOWED"}
-    assert stale_plan == {"accepted": False, "code": "STALE_DECISION"}
+    assert stale_plan == {"accepted": False, "code": "DECISION_ALREADY_APPLIED"}
     assert "course_open_context" not in runtime.tool_context()["allowedTools"]
 
 
@@ -339,33 +393,20 @@ async def test_natural_runtime_operations_can_reach_mastered_today() -> None:
     )
     assert runtime is not None
 
-    def identity(observation_id: str, turn: int) -> dict:
+    turn = 0
+
+    def identity(observation_id: str) -> dict:
+        nonlocal turn
+        turn += 1
         return {
             "lessonSessionId": runtime.contract.lesson_session_id,
             "turnSequenceId": turn,
             "observationId": observation_id,
         }
 
-    for turn in range(1, 4):
-        await runtime.course_continue(identity(f"continue-{turn}", turn))
-
-    async def observe(observation_id, turn, activity_id, context_id, semantic_class, speech_class):
-        return await runtime.course_observe_child({
-            **identity(observation_id, turn), "semanticClass": semantic_class,
-            "speechClass": speech_class, "language": "en", "intent": "answer",
-            "engagement": "engaged", "safetyClass": "normal", "assessmentEligible": True,
-            "confidenceBand": "high", "activityId": activity_id, "contextId": context_id,
-            "robotAudioContaminated": False, "targetTextVisible": False,
-        })
-
-    now[0] = 5.0
-    await observe("meaning", 4, "cat-meaning-left-right-01", "cat_dog_visual_contrast", "meaning_vi", "not_applicable")
-    model = await observe("needs-model", 5, "cat-recall-visual-02", "cat_primary_visual_recall", "unknown", "silence")
-    assert model["mayModelTarget"] is True
-
-    async def apply(decision, observation_id, turn):
+    async def apply(decision, observation_id):
         return await runtime.course_apply_response_plan({
-            **identity(observation_id, turn), "planId": f"plan-{turn}",
+            **identity(observation_id), "planId": f"plan-{turn + 1}",
             "decisionId": decision["decisionId"], "acknowledgment": "Robot heard you.",
             "relation": "We can try another way.", "guidance": "Look at the picture.",
             "invitation": "Ready?", "questionCount": 1,
@@ -374,15 +415,35 @@ async def test_natural_runtime_operations_can_reach_mastered_today() -> None:
             "safetyMode": False, "normalMiss": False,
         })
 
-    await apply(model, "apply-model", 6)
-    alternate = await runtime.course_continue(identity("alternate", 7))
-    await apply(alternate, "apply-alternate", 8)
+    for index in range(1, 4):
+        opening = await runtime.course_continue(identity(f"continue-{index}"))
+        await apply(opening, f"apply-opening-{index}")
+
+    async def observe(observation_id, activity_id, context_id, semantic_class, speech_class):
+        return await runtime.course_observe_child({
+            **identity(observation_id), "semanticClass": semantic_class,
+            "speechClass": speech_class, "language": "en", "intent": "answer",
+            "engagement": "engaged", "safetyClass": "normal", "assessmentEligible": True,
+            "confidenceBand": "high", "activityId": activity_id, "contextId": context_id,
+            "robotAudioContaminated": False, "targetTextVisible": False,
+        })
+
+    now[0] = 5.0
+    meaning = await observe("meaning", "cat-meaning-left-right-01", "cat_dog_visual_contrast", "meaning_vi", "not_applicable")
+    await apply(meaning, "apply-meaning")
+    model = await observe("needs-model", "cat-recall-visual-02", "cat_primary_visual_recall", "unknown", "silence")
+    assert model["mayModelTarget"] is True
+    await apply(model, "apply-model")
+    alternate = await runtime.course_continue(identity("alternate"))
+    await apply(alternate, "apply-alternate")
     now[0] = 30.0
-    await observe("recall", 9, "cat-recall-visual-02", "cat_primary_visual_recall", "target_en", "exact")
+    recall = await observe("recall", "cat-recall-visual-02", "cat_primary_visual_recall", "target_en", "exact")
+    await apply(recall, "apply-recall")
     now[0] = 40.0
-    await observe("transfer", 10, "cat-transfer-scene-01", "cat_second_visual_scene", "target_en", "exact")
+    transfer = await observe("transfer", "cat-transfer-scene-01", "cat_second_visual_scene", "target_en", "exact")
+    await apply(transfer, "apply-transfer")
     now[0] = 70.0
-    result = await observe("delayed", 11, "cat-delayed-recall-01", "cat_delayed_callback", "target_en", "exact")
+    result = await observe("delayed", "cat-delayed-recall-01", "cat_delayed_callback", "target_en", "exact")
     assert result["evidenceEvent"]["evidenceLevel"] == "MASTERED_TODAY"
 
 

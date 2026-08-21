@@ -87,3 +87,24 @@ def test_empty_unbounded_or_non_string_child_text_fails_closed(value) -> None:
         CourseResponsePlan.from_mapping(
             value, approved_fact_codes={"animals.cat", "pet"},
         )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        valid(
+            acknowledgment="Perfect! You mastered cat.", relation="", guidance="",
+            invitation="", questionCount=0, praiseLevel="engagement",
+        ),
+        valid(
+            acknowledgment="Can you point to it. Can you say it.", relation="",
+            guidance="", invitation="", questionCount=0, targetFactsUsed=[],
+        ),
+        valid(invitation="Ready. Say it?", questionCount=1),
+    ],
+)
+def test_claims_and_questions_are_validated_from_spoken_text(value) -> None:
+    with pytest.raises(CourseResponsePlanError):
+        CourseResponsePlan.from_mapping(
+            value, approved_fact_codes={"animals.cat", "pet"},
+        )

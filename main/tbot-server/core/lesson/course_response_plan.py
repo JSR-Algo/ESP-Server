@@ -15,6 +15,14 @@ _FIELDS = {
     "embodiedIntent", "targetFactsUsed", "praiseLevel", "safetyMode", "normalMiss",
 }
 _PROHIBITED = ("wrong", "incorrect", "easy", "try harder", "sai rồi", "dễ mà", "cố hơn")
+_UNSUPPORTED_MASTERY_CLAIM_RE = re.compile(
+    r"(?<!\w)(mastered|mastery|đã thuộc|thuộc bài)(?!\w)", re.IGNORECASE,
+)
+_QUESTION_LEAD_RE = re.compile(
+    r"(?:^|[.!]\s+)(?:can|could|would|will|do|did|are|is|what|where|who|why|how|which|when)\b"
+    r"|(?:^|[.!]\s+)con\s+(?:có|muốn|thấy|nghĩ)\b",
+    re.IGNORECASE,
+)
 
 
 class CourseResponsePlanError(ValueError):
@@ -63,10 +71,22 @@ class CourseResponsePlan:
         text = " ".join(text_fields).casefold()
         if len(text) > 320:
             raise CourseResponsePlanError("RESPONSE_TEXT_TOO_LONG")
-        if text.count("?") != value["questionCount"]:
+        invitation = value["invitation"].strip()
+        non_invitation = " ".join(text_fields[:3]).strip()
+        if value["questionCount"] == 0 and invitation:
+            raise CourseResponsePlanError("QUESTION_COUNT_MISMATCH")
+        if value["questionCount"] == 1 and (
+            not invitation.endswith("?")
+            or invitation.count("?") != 1
+            or any(mark in invitation[:-1] for mark in ".!")
+        ):
+            raise CourseResponsePlanError("QUESTION_COUNT_MISMATCH")
+        if "?" in non_invitation or _QUESTION_LEAD_RE.search(non_invitation):
             raise CourseResponsePlanError("QUESTION_COUNT_MISMATCH")
         if any(token in text for token in _PROHIBITED):
             raise CourseResponsePlanError("PROHIBITED_WORDING")
+        if _UNSUPPORTED_MASTERY_CLAIM_RE.search(text):
+            raise CourseResponsePlanError("MASTERY_PRAISE_NOT_AUTHORIZED")
         try:
             embodied = EmbodiedIntent(value["embodiedIntent"])
         except (TypeError, ValueError) as exc:
