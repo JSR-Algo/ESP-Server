@@ -167,6 +167,69 @@ async def test_duplicate_decision_operation_replays_exact_pending_result() -> No
 
 
 @pytest.mark.asyncio
+async def test_duplicate_replay_requires_matching_session_operation_and_turn() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    arguments = {
+        "lessonSessionId": runtime.lesson_session_id,
+        "turnSequenceId": 1,
+        "observationId": "replay-identity",
+    }
+    await runtime.course_continue(arguments)
+
+    wrong_session = await runtime.course_continue({
+        **arguments, "lessonSessionId": "other-session",
+    })
+    wrong_operation = await runtime.course_open_context({
+        **arguments, "branchType": "RELATED_STORY",
+    })
+    wrong_turn = await runtime.course_continue({**arguments, "turnSequenceId": 99})
+
+    assert wrong_session == {"accepted": False, "code": "LESSON_SESSION_MISMATCH"}
+    assert wrong_operation == {"accepted": False, "code": "DUPLICATE_OPERATION_IGNORED"}
+    assert wrong_turn == {"accepted": False, "code": "STALE_TURN_SEQUENCE"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reporting_tool", ["observe", "open_context"])
+async def test_safety_disclosure_interrupts_pending_context_branch(
+    reporting_tool: str,
+) -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    identity = runtime.lesson_session_id
+    opened = await runtime.course_open_context({
+        "lessonSessionId": identity, "turnSequenceId": 1,
+        "observationId": "story", "branchType": "RELATED_STORY",
+    })
+    assert opened["nextState"] == "CONTEXT_BRANCH"
+
+    if reporting_tool == "observe":
+        safety = await runtime.course_observe_child({
+            "lessonSessionId": identity, "turnSequenceId": 2,
+            "observationId": "safety", "semanticClass": "unknown",
+            "speechClass": "not_applicable", "language": "vi", "intent": "answer",
+            "engagement": "engaged", "safetyClass": "safety",
+            "assessmentEligible": False, "confidenceBand": "high",
+            "activityId": "cat-recall-visual-02", "contextId": "cat_primary_visual_recall",
+            "robotAudioContaminated": False, "targetTextVisible": False,
+        })
+    else:
+        safety = await runtime.course_open_context({
+            "lessonSessionId": identity, "turnSequenceId": 2,
+            "observationId": "safety", "branchType": "SAFETY_DISCLOSURE",
+        })
+
+    assert safety["action"] == "PAUSE_FOR_SAFETY"
+    assert safety["nextState"] == "SAFETY_PAUSED"
+    assert runtime.tool_context()["allowedTools"] == ["course_apply_response_plan"]
+
+
+@pytest.mark.asyncio
 async def test_failed_delivery_rollback_keeps_exact_response_plan_retryable() -> None:
     runtime = course_mode_runtime_from_manifest(
         {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
@@ -286,7 +349,7 @@ async def test_adapter_implements_all_advertised_operations_and_forwards_safe_ev
         "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
     }))["accepted"] is True
     duplicate = await runtime.course_continue({**identity, "turnSequenceId": 8, "observationId": "operation-1"})
-    assert duplicate == greeted
+    assert duplicate == {"accepted": False, "code": "STALE_TURN_SEQUENCE"}
 
     runtime.orchestrator.active_mastery.record_model(now_ms=1_000)
     runtime.orchestrator.active_mastery.record_intervening_activity()

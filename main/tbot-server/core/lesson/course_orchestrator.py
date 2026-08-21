@@ -145,6 +145,13 @@ class CourseOrchestrator:
         if observation.observation_id in self._consumed_observations:
             return self._decision("DUPLICATE_IGNORED", accepted=False, acknowledgment="retain_authoritative_state")
         self._consumed_observations.add(observation.observation_id)
+        if observation.safety_class != "normal":
+            self.session_state = SessionState.SAFETY_PAUSED
+            self._active_branch_id = None
+            return self._decision(
+                "PAUSE_FOR_SAFETY", acknowledgment="acknowledge_safety",
+                embodied=EmbodiedIntent.COMFORT_CALM,
+            )
         if self.session_state is SessionState.REGULATION_BREAK:
             if observation.intent == "resume":
                 self.session_state = SessionState.WORD_ACTIVE
@@ -167,9 +174,6 @@ class CourseOrchestrator:
                     embodied=EmbodiedIntent.GOODBYE_SMALL,
                 )
             return self.hold_protected_pause()
-        if observation.safety_class != "normal":
-            self.session_state = SessionState.SAFETY_PAUSED
-            return self._decision("PAUSE_FOR_SAFETY", acknowledgment="acknowledge_safety", embodied=EmbodiedIntent.COMFORT_CALM)
         if observation.now_ms - self.started_at_ms >= self.soft_deadline_ms:
             self.session_state = SessionState.CLOSING
             return self._decision("CLOSE_WITHOUT_SECOND_WORD", embodied=EmbodiedIntent.GOODBYE_SMALL)

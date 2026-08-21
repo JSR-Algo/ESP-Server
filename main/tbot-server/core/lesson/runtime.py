@@ -116,7 +116,7 @@ class CourseModeRuntimeAdapter:
         self._applied_plan_ids: set[str] = set()
         self._applied_decision_ids: set[str] = set()
         self._consumed_operation_ids: set[str] = set()
-        self._operation_results: dict[str, Dict[str, Any]] = {}
+        self._operation_results: dict[tuple[str, str], Dict[str, Any]] = {}
         self._decisions: dict[str, CourseDecision] = {}
         self._latest_decision_id: str | None = None
         self._next_turn_sequence_id = 1
@@ -167,19 +167,55 @@ class CourseModeRuntimeAdapter:
         self._latest_decision_id = decision.decision_id
         return self._decision_payload(decision)
 
-    def _replay_operation(self, arguments: Dict[str, Any]) -> Dict[str, Any] | None:
-        result = self._operation_results.get(arguments.get("observationId"))
-        return copy.deepcopy(result) if result is not None else None
+    def _replay_operation(
+        self, operation: str, arguments: Dict[str, Any],
+    ) -> Dict[str, Any] | None:
+        lesson_session_id = arguments.get("lessonSessionId")
+        if lesson_session_id != self.lesson_session_id:
+            return {"accepted": False, "code": "LESSON_SESSION_MISMATCH"}
+        record = self._operation_results.get((lesson_session_id, arguments.get("observationId")))
+        if record is None:
+            return None
+        if record["operation"] != operation:
+            return {"accepted": False, "code": "DUPLICATE_OPERATION_IGNORED"}
+        if record["turnSequenceId"] != arguments.get("turnSequenceId"):
+            return {"accepted": False, "code": "STALE_TURN_SEQUENCE"}
+        return copy.deepcopy(record["result"])
 
     def _remember_operation(
-        self, arguments: Dict[str, Any], decision: CourseDecision,
+        self, operation: str, arguments: Dict[str, Any], decision: CourseDecision,
     ) -> Dict[str, Any]:
         result = self._remember(decision)
-        self._operation_results[arguments["observationId"]] = copy.deepcopy(result)
+        key = (arguments["lessonSessionId"], arguments["observationId"])
+        self._operation_results[key] = {
+            "operation": operation,
+            "turnSequenceId": arguments["turnSequenceId"],
+            "result": copy.deepcopy(result),
+        }
         return result
 
-    def _operation_allowed(self, operation: str) -> bool:
-        if operation != "course_apply_response_plan" and self._response_plan_pending():
+    @staticmethod
+    def _is_safety_interrupt(operation: str, arguments: Dict[str, Any] | None) -> bool:
+        return bool(
+            arguments is not None
+            and (
+                (operation == "course_observe_child" and arguments.get("safetyClass") != "normal")
+                or (
+                    operation == "course_open_context"
+                    and arguments.get("branchType") == "SAFETY_DISCLOSURE"
+                )
+            )
+        )
+
+    def _operation_allowed(
+        self, operation: str, arguments: Dict[str, Any] | None = None,
+    ) -> bool:
+        safety_interrupt = self._is_safety_interrupt(operation, arguments)
+        if (
+            operation != "course_apply_response_plan"
+            and self._response_plan_pending()
+            and not safety_interrupt
+        ):
             return False
         state = self.orchestrator.session_state
         if operation == "course_apply_response_plan":
@@ -189,7 +225,11 @@ class CourseModeRuntimeAdapter:
         if state is SessionState.REGULATION_BREAK:
             return operation in {"course_observe_child", "course_continue"}
         if state is SessionState.CONTEXT_BRANCH:
-            return operation == "course_close_context"
+            if arguments is None:
+                return operation in {
+                    "course_observe_child", "course_open_context", "course_close_context",
+                }
+            return operation == "course_close_context" or safety_interrupt
         if state in {SessionState.CLOSING, SessionState.COMPLETE}:
             return False
         return operation in {"course_observe_child", "course_open_context", "course_continue"}
@@ -260,10 +300,11 @@ class CourseModeRuntimeAdapter:
         })
 
     async def course_observe_child(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        replay = self._replay_operation(arguments)
+        operation = "course_observe_child"
+        replay = self._replay_operation(operation, arguments)
         if replay is not None:
             return replay
-        if not self._operation_allowed("course_observe_child"):
+        if not self._operation_allowed(operation, arguments):
             return self._operation_not_allowed()
         error = self._consume_operation(arguments)
         if error is not None:
@@ -280,24 +321,26 @@ class CourseModeRuntimeAdapter:
         )
         decision = self.orchestrator.observe(observation)
         self._forward_evidence(decision)
-        return self._remember_operation(arguments, decision)
+        return self._remember_operation(operation, arguments, decision)
 
     async def course_open_context(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        replay = self._replay_operation(arguments)
+        operation = "course_open_context"
+        replay = self._replay_operation(operation, arguments)
         if replay is not None:
             return replay
-        if not self._operation_allowed("course_open_context"):
+        if not self._operation_allowed(operation, arguments):
             return self._operation_not_allowed()
         error = self._consume_operation(arguments)
         if error is not None:
             return error
-        return self._remember_operation(arguments, self.orchestrator.open_context_branch(
+        return self._remember_operation(operation, arguments, self.orchestrator.open_context_branch(
             observation_id=arguments["observationId"], turn_sequence_id=arguments["turnSequenceId"],
             branch_type=arguments["branchType"],
         ))
 
     async def course_close_context(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        replay = self._replay_operation(arguments)
+        operation = "course_close_context"
+        replay = self._replay_operation(operation, arguments)
         if replay is not None:
             return replay
         if not self._operation_allowed("course_close_context"):
@@ -305,7 +348,7 @@ class CourseModeRuntimeAdapter:
         error = self._consume_operation(arguments)
         if error is not None:
             return error
-        return self._remember_operation(arguments, self.orchestrator.close_context_branch(
+        return self._remember_operation(operation, arguments, self.orchestrator.close_context_branch(
             branch_id=arguments["branchId"], bridge_intent=arguments["bridgeIntent"],
             child_detail_code=arguments["childDetailCode"],
         ))
@@ -396,7 +439,8 @@ class CourseModeRuntimeAdapter:
         return True
 
     async def course_continue(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        replay = self._replay_operation(arguments)
+        operation = "course_continue"
+        replay = self._replay_operation(operation, arguments)
         if replay is not None:
             return replay
         if not self._operation_allowed("course_continue"):
@@ -422,7 +466,7 @@ class CourseModeRuntimeAdapter:
             decision = self.orchestrator.continue_word()
         else:
             decision = self.orchestrator.maybe_advance_target(now_ms=int(self._clock() * 1_000))
-        return self._remember_operation(arguments, decision)
+        return self._remember_operation(operation, arguments, decision)
 
 
 def course_mode_runtime_from_manifest(

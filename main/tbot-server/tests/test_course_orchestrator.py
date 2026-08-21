@@ -106,6 +106,20 @@ def test_emotional_safety_refusal_and_fatigue_never_force_vocabulary() -> None:
         assert decision.embodied_intent in {EmbodiedIntent.COMFORT_CALM, EmbodiedIntent.PAUSE_CHOICE}
 
 
+def test_safety_disclosure_preempts_regulation_resume_intent() -> None:
+    runtime = course()
+    runtime.observe(observation(observation_id="fatigue", intent="fatigue"))
+
+    decision = runtime.observe(observation(
+        observation_id="safety", turn_sequence_id=2,
+        intent="resume", safety_class="safety",
+    ))
+
+    assert decision.action == "PAUSE_FOR_SAFETY"
+    assert decision.next_state is SessionState.SAFETY_PAUSED
+    assert decision.embodied_intent is EmbodiedIntent.COMFORT_CALM
+
+
 def test_low_confidence_and_contamination_do_not_mutate_mastery() -> None:
     runtime = course(); runtime.begin(); runtime.continue_opening(); runtime.continue_opening()
     before = runtime.active_mastery.level
