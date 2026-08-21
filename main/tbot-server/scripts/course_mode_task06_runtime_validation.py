@@ -191,7 +191,11 @@ def visual_evidence(backend_root: Path) -> dict[str, Any]:
     samples = []
     for capture in captures:
         with Image.open(capture) as image:
-            samples.append({"path": str(capture), "sha256": sha256(capture), "size": list(image.size)})
+            samples.append({
+                "path": capture.relative_to(backend_root).as_posix(),
+                "sha256": sha256(capture),
+                "size": list(image.size),
+            })
             if image.size != (480, 320):
                 raise AssertionError(f"unexpected capture size: {capture}")
     if len(captures) != 24:

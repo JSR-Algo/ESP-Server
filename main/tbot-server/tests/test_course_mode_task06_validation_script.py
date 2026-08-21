@@ -141,6 +141,19 @@ def test_candidate_revision_checks_both_sides_of_dirty_rename(tmp_path: Path) ->
     assert revision["runtimeTreeMatchesFrozenCandidate"] is False
 
 
+def test_visual_evidence_uses_repository_relative_paths(tmp_path: Path) -> None:
+    driver = load_driver()
+    captures = tmp_path / "src/lessons/fixtures/course-mode/pilot/v1/captures"
+    captures.mkdir(parents=True)
+    for index in range(24):
+        driver.Image.new("RGB", (480, 320)).save(captures / f"capture-{index:02d}.png")
+
+    evidence = driver.visual_evidence(tmp_path)
+
+    assert evidence["captureCount"] == 24
+    assert all(not Path(sample["path"]).is_absolute() for sample in evidence["samples"])
+
+
 def test_task06_driver_emits_cross_repository_soak_evidence(tmp_path: Path) -> None:
     backend_root = os.environ.get("TASK06_BACKEND_ROOT")
     firmware_root = os.environ.get("TASK06_FIRMWARE_ROOT")
