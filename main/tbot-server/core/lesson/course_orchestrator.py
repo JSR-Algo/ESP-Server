@@ -161,6 +161,22 @@ class CourseOrchestrator:
                 semantic_class=observation.semantic_class, speech_class=observation.speech_class,
                 assessment_eligible=observation.assessment_eligible, confidence_band=observation.confidence_band,
             )
+            if result.level is not EvidenceLevel.INDEPENDENT_RECALL:
+                self.session_state = SessionState.WORD_ACTIVE
+                return self._decision(
+                    "MODEL_AND_SUPPORT", teaching="model_target_once",
+                    question="invite_supported_speech", embodied=EmbodiedIntent.MODEL_WORD,
+                    may_model=True,
+                    evidence=(
+                        {
+                            "targetId": self.active_target_id, "evidenceLevel": result.level.value,
+                            "activityId": observation.activity_id, "contextId": observation.context_id,
+                            "assessmentConfidenceBand": observation.confidence_band,
+                            "reviewNeeded": result.review_needed,
+                        }
+                        if result.accepted and result.level is not before_level else None
+                    ),
+                )
         elif (
             activity.stage == "TRANSFER"
             and observation.semantic_class == "target_en"
@@ -217,6 +233,13 @@ class CourseOrchestrator:
         return self._decision(
             "RETURN_THROUGH_AUTHORED_BRIDGE", acknowledgment=f"acknowledge_{child_detail_code}",
             teaching=f"bridge_{bridge_intent}", question="resume_active_word", embodied=EmbodiedIntent.ACKNOWLEDGE_STORY,
+        )
+
+    def continue_word(self) -> CourseDecision:
+        self.session_state = SessionState.WORD_ACTIVE
+        return self._decision(
+            "PRESENT_INTERVENING_ACTIVITY", teaching="authored_non_answer_activity",
+            question="invite_observation", embodied=EmbodiedIntent.THINK_CURIOUS,
         )
 
     def maybe_advance_target(self, *, now_ms: int) -> CourseDecision:

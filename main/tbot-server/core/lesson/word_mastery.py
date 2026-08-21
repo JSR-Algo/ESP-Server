@@ -27,9 +27,13 @@ class AnswerLeakage:
 
     def independent_eligible(self, now_ms: int) -> bool:
         return (
-            self.last_full_model_at_ms is not None
-            and now_ms - self.last_full_model_at_ms >= 20_000
-            and self.intervening_activity_count >= 1
+            (
+                self.last_full_model_at_ms is None
+                or (
+                    now_ms - self.last_full_model_at_ms >= 20_000
+                    and self.intervening_activity_count >= 1
+                )
+            )
             and not self.target_text_visible
             and not self.robot_audio_contaminated
         )

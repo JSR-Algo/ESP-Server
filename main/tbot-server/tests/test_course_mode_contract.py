@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -56,3 +58,18 @@ def test_requires_primary_meaning_transfer_and_delayed_recall() -> None:
     with pytest.raises(CourseModeContractError) as raised:
         CourseModeContract.from_mapping(value, verify_checksum=False)
     assert raised.value.code == "MISSING_REQUIRED_ACTIVITY"
+
+
+def test_rejects_self_consistent_but_non_frozen_contract_checksum() -> None:
+    value = manifest()
+    value["targets"][0]["targetWord"] = "dog"
+    payload = {key: child for key, child in value.items() if key != "contractChecksum"}
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    value["contractChecksum"] = hashlib.sha256(
+        unicodedata.normalize("NFC", canonical).encode("utf-8")
+    ).hexdigest()
+    with pytest.raises(CourseModeContractError) as raised:
+        CourseModeContract.from_mapping(value)
+    assert raised.value.code == "UNSUPPORTED_CONTRACT_CHECKSUM"

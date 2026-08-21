@@ -76,6 +76,7 @@ from core.lesson.conversation_runtime import (
 )
 from core.lesson.course_mode_contract import CourseModeContract
 from core.lesson.course_orchestrator import ChildObservation, CourseDecision, CourseOrchestrator, SessionState
+from core.lesson.course_response_plan import CourseResponsePlan, CourseResponsePlanError
 from core.lesson.forwarder import serialize_word_evidence_event
 from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
 from core.utils.util import get_vision_url
@@ -110,6 +111,7 @@ class CourseModeRuntimeAdapter:
         )
         self._applied_plan_ids: set[str] = set()
         self._consumed_operation_ids: set[str] = set()
+        self._decisions: dict[str, CourseDecision] = {}
 
     def _identity_error(self, arguments: Dict[str, Any]) -> Dict[str, Any] | None:
         if arguments.get("lessonSessionId") != self.contract.lesson_session_id:
@@ -136,6 +138,10 @@ class CourseModeRuntimeAdapter:
             "embodiedIntent": decision.embodied_intent.value, "mayModelTarget": decision.may_model_target,
             "evidenceEvent": decision.evidence_event, "branchId": decision.branch_id,
         }
+
+    def _remember(self, decision: CourseDecision) -> Dict[str, Any]:
+        self._decisions[decision.decision_id] = decision
+        return self._decision_payload(decision)
 
     def _forward_evidence(self, decision: CourseDecision) -> None:
         if decision.evidence_event is None or self.forwarder is None or not self.assignment_id:
@@ -172,13 +178,13 @@ class CourseModeRuntimeAdapter:
         )
         decision = self.orchestrator.observe(observation)
         self._forward_evidence(decision)
-        return self._decision_payload(decision)
+        return self._remember(decision)
 
     async def course_open_context(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         error = self._consume_operation(arguments)
         if error is not None:
             return error
-        return self._decision_payload(self.orchestrator.open_context_branch(
+        return self._remember(self.orchestrator.open_context_branch(
             observation_id=arguments["observationId"], turn_sequence_id=arguments["turnSequenceId"],
             branch_type=arguments["branchType"],
         ))
@@ -187,7 +193,7 @@ class CourseModeRuntimeAdapter:
         error = self._consume_operation(arguments)
         if error is not None:
             return error
-        return self._decision_payload(self.orchestrator.close_context_branch(
+        return self._remember(self.orchestrator.close_context_branch(
             branch_id=arguments["branchId"], bridge_intent=arguments["bridgeIntent"],
             child_detail_code=arguments["childDetailCode"],
         ))
@@ -199,7 +205,30 @@ class CourseModeRuntimeAdapter:
         plan_id = arguments["planId"]
         if plan_id in self._applied_plan_ids:
             return {"accepted": False, "code": "DUPLICATE_PLAN_IGNORED", "planId": plan_id}
+        decision = self._decisions.get(arguments["decisionId"])
+        if decision is None:
+            return {"accepted": False, "code": "UNKNOWN_DECISION"}
+        plan_fields = {
+            key: value for key, value in arguments.items()
+            if key not in {"lessonSessionId", "turnSequenceId", "observationId", "planId", "decisionId"}
+        }
+        approved_facts = {
+            target.target_id
+            for target in (self.contract.primary, self.contract.secondary)
+            if target is not None
+        }
+        try:
+            plan = CourseResponsePlan.from_mapping(plan_fields, approved_fact_codes=approved_facts)
+        except CourseResponsePlanError:
+            return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+        if plan.embodied_intent is not decision.embodied_intent:
+            return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
         self._applied_plan_ids.add(plan_id)
+        now_ms = int(self._clock() * 1_000)
+        if decision.may_model_target:
+            self.orchestrator.active_mastery.record_model(now_ms=now_ms)
+        elif decision.action == "PRESENT_INTERVENING_ACTIVITY":
+            self.orchestrator.active_mastery.record_intervening_activity()
         return {"accepted": True, "code": "RESPONSE_PLAN_APPLIED", "planId": plan_id}
 
     async def course_continue(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -210,9 +239,11 @@ class CourseModeRuntimeAdapter:
             decision = self.orchestrator.begin()
         elif self.orchestrator.session_state is SessionState.OPENING:
             decision = self.orchestrator.continue_opening()
+        elif self.orchestrator.active_mastery.level.value != "MASTERED_TODAY":
+            decision = self.orchestrator.continue_word()
         else:
             decision = self.orchestrator.maybe_advance_target(now_ms=int(self._clock() * 1_000))
-        return self._decision_payload(decision)
+        return self._remember(decision)
 
 
 def course_mode_runtime_from_manifest(

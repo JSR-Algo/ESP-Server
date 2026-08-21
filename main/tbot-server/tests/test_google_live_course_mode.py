@@ -14,6 +14,7 @@ from plugins_func.functions.lesson_conversation import (
     course_observe_child,
     course_open_context,
 )
+from core.providers.tools.product_toolset import LESSON_SEMANTIC_TOOLS
 
 
 class Provider:
@@ -59,6 +60,7 @@ def test_v2_tool_schemas_are_separate_closed_and_cannot_submit_mastery_or_transc
         parameters = spec["function"]["parameters"]
         assert parameters["additionalProperties"] is False
         assert not forbidden.intersection(parameters["properties"])
+    assert set(COURSE_MODE_TOOL_SPECS) <= set(LESSON_SEMANTIC_TOOLS)
 
 
 def test_v1_specs_remain_byte_equal_when_v2_specs_are_used() -> None:
@@ -112,7 +114,13 @@ async def test_all_advertised_operations_route_to_active_runtime() -> None:
         (course_close_context, {
             **identity, "branchId": "b1", "bridgeIntent": "bridge", "childDetailCode": "detail",
         }, "close"),
-        (course_apply_response_plan, {**identity, "planId": "p1"}, "plan"),
+        (course_apply_response_plan, {
+            **identity, "planId": "p1", "decisionId": "d1",
+            "acknowledgment": "Heard.", "relation": "Okay.",
+            "guidance": "Look.", "invitation": "Ready?", "questionCount": 1,
+            "embodiedIntent": "INVITE_CHILD", "targetFactsUsed": [],
+            "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+        }, "plan"),
         (course_continue, identity, "continue"),
     )
     with _google_live_lesson_tool_admission(conn.voice_provider, 4):

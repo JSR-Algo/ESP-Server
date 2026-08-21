@@ -137,7 +137,16 @@ COURSE_MODE_TOOL_SPECS = {
     }),
     "course_open_context": _course_spec("course_open_context", {**_COURSE_IDENTITY, "branchType": {"type": "string"}}),
     "course_close_context": _course_spec("course_close_context", {**_COURSE_IDENTITY, "branchId": {"type": "string"}, "bridgeIntent": {"type": "string"}, "childDetailCode": {"type": "string"}}),
-    "course_apply_response_plan": _course_spec("course_apply_response_plan", {**_COURSE_IDENTITY, "planId": {"type": "string"}}),
+    "course_apply_response_plan": _course_spec("course_apply_response_plan", {
+        **_COURSE_IDENTITY, "planId": {"type": "string"}, "decisionId": {"type": "string"},
+        "acknowledgment": {"type": "string"}, "relation": {"type": "string"},
+        "guidance": {"type": "string"}, "invitation": {"type": "string"},
+        "questionCount": {"type": "integer", "minimum": 0, "maximum": 1},
+        "embodiedIntent": {"type": "string"},
+        "targetFactsUsed": {"type": "array", "items": {"type": "string"}},
+        "praiseLevel": {"type": "string"}, "safetyMode": {"type": "boolean"},
+        "normalMiss": {"type": "boolean"},
+    }),
     "course_continue": _course_spec("course_continue", _COURSE_IDENTITY),
 }
 

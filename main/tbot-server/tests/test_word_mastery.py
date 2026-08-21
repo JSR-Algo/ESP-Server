@@ -22,6 +22,16 @@ def test_immediate_repetition_is_supported_not_independent() -> None:
     assert result.level is EvidenceLevel.SUPPORTED_SPEECH
 
 
+def test_known_word_before_any_model_can_be_independent_recall() -> None:
+    mastery = WordMastery(target_id="animals.cat")
+    result = mastery.record_speech(
+        evidence_id="early", activity_id="recall", context_id="visual", now_ms=2_000,
+        semantic_class="target_en", speech_class="exact", assessment_eligible=True,
+        confidence_band="high",
+    )
+    assert result.level is EvidenceLevel.INDEPENDENT_RECALL
+
+
 def test_mastery_requires_meaning_independent_transfer_delayed_and_confidence() -> None:
     mastery = WordMastery(target_id="animals.cat")
     mastery.record_meaning(evidence_id="m", activity_id="meaning", context_id="choice")

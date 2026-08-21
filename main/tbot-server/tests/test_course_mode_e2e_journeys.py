@@ -22,13 +22,15 @@ def runtime() -> CourseOrchestrator:
 
 
 def observe(value: CourseOrchestrator, row: dict, observation_id: str = "o1", now_ms: int = 30_000):
+    meaning = row.get("semantic") == "meaning_vi"
     return value.observe(ChildObservation(
         observation_id=observation_id, turn_sequence_id=1,
         semantic_class=row.get("semantic", "unknown"), speech_class=row.get("speech", "not_applicable"),
         language="vi", intent=row.get("intent", "answer"), engagement="engaged",
         safety_class=row.get("safety", "normal"), assessment_eligible=row.get("eligible", True),
-        confidence_band=row.get("confidence", "high"), activity_id="cat-recall-visual-02",
-        context_id="cat_primary_visual_recall", now_ms=now_ms,
+        confidence_band=row.get("confidence", "high"),
+        activity_id="cat-meaning-left-right-01" if meaning else "cat-recall-visual-02",
+        context_id="cat_dog_visual_contrast" if meaning else "cat_primary_visual_recall", now_ms=now_ms,
         robot_audio_contaminated=row.get("contaminated", False), target_text_visible=row.get("visible", False),
     ))
 
@@ -56,6 +58,8 @@ def test_all_scripted_journeys_are_deterministic_and_truthful() -> None:
 
 def _run(row: dict):
     value = runtime()
+    if row["name"] == "repetition only":
+        value.active_mastery.record_model(now_ms=25_000)
     special = row.get("special")
     if special == "restore":
         restored = CourseOrchestrator.restore(CONTRACT, value.snapshot())

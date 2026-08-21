@@ -120,6 +120,12 @@ async def test_adapter_implements_all_advertised_operations_and_forwards_safe_ev
     assert closed["accepted"] is True
     assert (await runtime.course_apply_response_plan({
         **identity, "observationId": "operation-4", "planId": "plan-1",
+        "decisionId": opened["decisionId"],
+        "acknowledgment": "Robot heard you.", "relation": "We can keep learning.",
+        "guidance": "Look at the picture.", "invitation": "What is it?",
+        "questionCount": 1, "embodiedIntent": opened["embodiedIntent"],
+        "targetFactsUsed": ["animals.cat"], "praiseLevel": "engagement",
+        "safetyMode": False, "normalMiss": False,
     }))["accepted"] is True
     duplicate = await runtime.course_continue({**identity, "observationId": "operation-1"})
     assert duplicate == {"accepted": False, "code": "DUPLICATE_OPERATION_IGNORED"}
@@ -138,3 +144,79 @@ async def test_adapter_implements_all_advertised_operations_and_forwards_safe_ev
     assert forwarder.batches[0]["assignmentId"] == "a1"
     serialized = json.dumps(forwarder.batches[0]).casefold()
     assert not any(field in serialized for field in ("transcript", "utterance", "audio", "story"))
+
+
+@pytest.mark.asyncio
+async def test_natural_runtime_operations_can_reach_mastered_today() -> None:
+    now = [0.0]
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: now[0],
+    )
+    assert runtime is not None
+
+    def identity(observation_id: str, turn: int) -> dict:
+        return {
+            "lessonSessionId": runtime.contract.lesson_session_id,
+            "turnSequenceId": turn,
+            "observationId": observation_id,
+        }
+
+    for turn in range(1, 4):
+        await runtime.course_continue(identity(f"continue-{turn}", turn))
+
+    async def observe(observation_id, turn, activity_id, context_id, semantic_class, speech_class):
+        return await runtime.course_observe_child({
+            **identity(observation_id, turn), "semanticClass": semantic_class,
+            "speechClass": speech_class, "language": "en", "intent": "answer",
+            "engagement": "engaged", "safetyClass": "normal", "assessmentEligible": True,
+            "confidenceBand": "high", "activityId": activity_id, "contextId": context_id,
+            "robotAudioContaminated": False, "targetTextVisible": False,
+        })
+
+    now[0] = 5.0
+    await observe("meaning", 4, "cat-meaning-left-right-01", "cat_dog_visual_contrast", "meaning_vi", "not_applicable")
+    model = await observe("needs-model", 5, "cat-recall-visual-02", "cat_primary_visual_recall", "unknown", "silence")
+    assert model["mayModelTarget"] is True
+
+    async def apply(decision, observation_id, turn):
+        return await runtime.course_apply_response_plan({
+            **identity(observation_id, turn), "planId": f"plan-{turn}",
+            "decisionId": decision["decisionId"], "acknowledgment": "Robot heard you.",
+            "relation": "We can try another way.", "guidance": "Look at the picture.",
+            "invitation": "Ready?", "questionCount": 1,
+            "embodiedIntent": decision["embodiedIntent"],
+            "targetFactsUsed": ["animals.cat"], "praiseLevel": "engagement",
+            "safetyMode": False, "normalMiss": False,
+        })
+
+    await apply(model, "apply-model", 6)
+    alternate = await runtime.course_continue(identity("alternate", 7))
+    await apply(alternate, "apply-alternate", 8)
+    now[0] = 30.0
+    await observe("recall", 9, "cat-recall-visual-02", "cat_primary_visual_recall", "target_en", "exact")
+    now[0] = 40.0
+    await observe("transfer", 10, "cat-transfer-scene-01", "cat_second_visual_scene", "target_en", "exact")
+    now[0] = 70.0
+    result = await observe("delayed", 11, "cat-delayed-recall-01", "cat_delayed_callback", "target_en", "exact")
+    assert result["evidenceEvent"]["evidenceLevel"] == "MASTERED_TODAY"
+
+
+@pytest.mark.asyncio
+async def test_response_plan_must_pass_fail_closed_validator() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    decision = await runtime.course_continue({
+        "lessonSessionId": runtime.contract.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "decision-for-bad-plan",
+    })
+    result = await runtime.course_apply_response_plan({
+        "lessonSessionId": runtime.contract.lesson_session_id, "turnSequenceId": 2,
+        "observationId": "bad-plan", "planId": "invented", "decisionId": decision["decisionId"],
+        "acknowledgment": "Wrong.", "relation": "", "guidance": "Try harder.",
+        "invitation": "Again?", "questionCount": 1, "embodiedIntent": "INVITE_CHILD",
+        "targetFactsUsed": ["invented.fact"], "praiseLevel": "mastery",
+        "safetyMode": False, "normalMiss": True,
+    })
+    assert result == {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}

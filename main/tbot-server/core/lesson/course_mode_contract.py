@@ -29,6 +29,7 @@ _ANSWER_FIELDS = {
     "multipleChoiceContainsTarget", "minElapsedSinceFullModelMs", "minInterveningActivityCount",
 }
 _ASSESSMENT_STAGES = {"RECALL", "TRANSFER", "DELAYED_RECALL"}
+FROZEN_CONTRACT_CHECKSUM = "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264"
 
 
 class CourseModeContractError(ValueError):
@@ -187,6 +188,8 @@ class CourseModeContract:
                 _fail("ACTIVITY_IDENTITY_MISMATCH", "target activity IDs must match authored order")
         if verify_checksum and root["contractChecksum"] != _canonical_checksum(root):
             _fail("CHECKSUM_MISMATCH", "canonical checksum does not match")
+        if verify_checksum and root["contractChecksum"] != FROZEN_CONTRACT_CHECKSUM:
+            _fail("UNSUPPORTED_CONTRACT_CHECKSUM", "contract checksum is not the frozen Task 00 identity")
         return cls(
             contract_version=cast(str, root["contractVersion"]),
             contract_checksum=cast(str, root["contractChecksum"]), fixture_id=cast(str, root["fixtureId"]),

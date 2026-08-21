@@ -148,7 +148,6 @@ class ProductToolsetContractTest(unittest.TestCase):
         self.assertTrue(course_tools.isdisjoint(_classic_names(conn)))
 
         conn.config["lesson"]["course_mode_v2_enabled"] = True
-        conn.lesson_runtime = type("Runtime", (), {"course_mode_active": True})()
         self.assertTrue(course_tools <= _classic_names(conn))
 
     def test_child_product_toolset_allows_safe_realtime_tools_but_excludes_danger_tools(self):
