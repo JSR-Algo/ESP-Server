@@ -95,8 +95,16 @@ def candidate_revision(
         ["git", "status", "--porcelain=v1", "--untracked-files=all"],
         cwd=root, check=True, capture_output=True, text=True,
     ).stdout.splitlines()
-    dirty_rows = [row for row in status_rows if not row.startswith("?? ")]
-    dirty = [row[3:].split(" -> ")[-1] for row in dirty_rows]
+    dirty = sorted(set(
+        subprocess.run(
+            ["git", "diff", "--name-only", "--no-renames"],
+            cwd=root, check=True, capture_output=True, text=True,
+        ).stdout.splitlines()
+        + subprocess.run(
+            ["git", "diff", "--cached", "--name-only", "--no-renames"],
+            cwd=root, check=True, capture_output=True, text=True,
+        ).stdout.splitlines()
+    ))
     untracked = [row[3:] for row in status_rows if row.startswith("?? ")]
     ignored = subprocess.run(
         ["git", "ls-files", "--others", "--ignored", "--exclude-standard"],
@@ -107,7 +115,7 @@ def candidate_revision(
         check=False, capture_output=True, text=True,
     ).returncode == 0
     changed = subprocess.run(
-        ["git", "diff", "--name-only", f"{expected_sha}..{head}"], cwd=root,
+        ["git", "diff", "--name-only", "--no-renames", f"{expected_sha}..{head}"], cwd=root,
         check=True, capture_output=True, text=True,
     ).stdout.splitlines() if ancestor else []
     unexpected = [

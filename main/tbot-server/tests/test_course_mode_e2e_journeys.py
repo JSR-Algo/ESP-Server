@@ -92,14 +92,25 @@ def test_all_soak_journeys_reach_a_closing_session_state() -> None:
     for row in JOURNEYS:
         result = _run_full_session(row)
         assert result["finalState"] == "CLOSING", row["name"]
+        assert result["operations"][:3] == (
+            "GREET_AND_CHECK_IN",
+            "ACKNOWLEDGE_AND_BUILD_CURIOSITY",
+            "CLUE_AND_ELICIT",
+        ), row["name"]
+        assert result["steps"] == len(result["operations"]), row["name"]
         assert result["steps"] >= 4, row["name"]
         assert result["initialOutcome"] == EXPECTED_OUTCOMES[row["name"]], row["name"]
 
 
 def _run_full_session(row: dict) -> dict:
-    value = runtime()
+    value = CourseOrchestrator(CONTRACT, started_at_ms=0, soft_deadline_ms=540_000)
+    operations = [
+        value.begin().action,
+        value.continue_opening().action,
+        value.continue_opening().action,
+        f"RUN_SCENARIO:{row['name']}",
+    ]
     initial = _run(row, value=value)
-    steps = 4
     if row.get("special") == "restore":
         value = CourseOrchestrator.restore(CONTRACT, value.snapshot())
     if value.session_state.value == "CONTEXT_BRANCH":
@@ -108,9 +119,9 @@ def _run_full_session(row: dict) -> dict:
             bridge_intent="white_cat_visual",
             child_detail_code="no_personal_detail",
         )
-        steps += 1
+        operations.append("RETURN_THROUGH_AUTHORED_BRIDGE")
     if value.session_state.value in {"REGULATION_BREAK", "SAFETY_PAUSED"}:
-        value.observe(ChildObservation(
+        decision = value.observe(ChildObservation(
             observation_id=f"close-{row['name']}", turn_sequence_id=99,
             semantic_class="unknown", speech_class="not_applicable", language="vi",
             intent="stop", engagement="engaged", safety_class="normal",
@@ -118,9 +129,9 @@ def _run_full_session(row: dict) -> dict:
             activity_id="cat-recall-visual-02", context_id="cat_primary_visual_recall",
             now_ms=120_000, robot_audio_contaminated=False, target_text_visible=False,
         ))
-        steps += 1
+        operations.append(decision.action)
     elif value.session_state.value == "TECHNICAL_RECOVERY":
-        value.observe(ChildObservation(
+        decision = value.observe(ChildObservation(
             observation_id=f"deadline-{row['name']}", turn_sequence_id=99,
             semantic_class="unknown", speech_class="silence", language="vi",
             intent="answer", engagement="engaged", safety_class="normal",
@@ -128,14 +139,19 @@ def _run_full_session(row: dict) -> dict:
             activity_id="cat-recall-visual-02", context_id="cat_primary_visual_recall",
             now_ms=541_000, robot_audio_contaminated=False, target_text_visible=False,
         ))
-        steps += 1
+        operations.append(decision.action)
     if value.session_state.value == "WORD_ACTIVE":
-        value.maybe_advance_target(now_ms=500_000)
-        steps += 1
+        decision = value.maybe_advance_target(now_ms=500_000)
+        operations.append(decision.action)
         if value.session_state.value == "WORD_ACTIVE":
-            value.maybe_advance_target(now_ms=500_001)
-            steps += 1
-    return {"initialOutcome": initial, "finalState": value.session_state.value, "steps": steps}
+            decision = value.maybe_advance_target(now_ms=500_001)
+            operations.append(decision.action)
+    return {
+        "initialOutcome": initial,
+        "finalState": value.session_state.value,
+        "steps": len(operations),
+        "operations": tuple(operations),
+    }
 
 
 def _run(row: dict, *, value: CourseOrchestrator | None = None):
