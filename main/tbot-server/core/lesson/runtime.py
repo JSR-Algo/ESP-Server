@@ -116,6 +116,7 @@ class CourseModeRuntimeAdapter:
         self._applied_plan_ids: set[str] = set()
         self._applied_decision_ids: set[str] = set()
         self._consumed_operation_ids: set[str] = set()
+        self._operation_results: dict[str, Dict[str, Any]] = {}
         self._decisions: dict[str, CourseDecision] = {}
         self._latest_decision_id: str | None = None
         self._next_turn_sequence_id = 1
@@ -165,6 +166,17 @@ class CourseModeRuntimeAdapter:
         self._decisions[decision.decision_id] = decision
         self._latest_decision_id = decision.decision_id
         return self._decision_payload(decision)
+
+    def _replay_operation(self, arguments: Dict[str, Any]) -> Dict[str, Any] | None:
+        result = self._operation_results.get(arguments.get("observationId"))
+        return copy.deepcopy(result) if result is not None else None
+
+    def _remember_operation(
+        self, arguments: Dict[str, Any], decision: CourseDecision,
+    ) -> Dict[str, Any]:
+        result = self._remember(decision)
+        self._operation_results[arguments["observationId"]] = copy.deepcopy(result)
+        return result
 
     def _operation_allowed(self, operation: str) -> bool:
         if operation != "course_apply_response_plan" and self._response_plan_pending():
@@ -248,6 +260,9 @@ class CourseModeRuntimeAdapter:
         })
 
     async def course_observe_child(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        replay = self._replay_operation(arguments)
+        if replay is not None:
+            return replay
         if not self._operation_allowed("course_observe_child"):
             return self._operation_not_allowed()
         error = self._consume_operation(arguments)
@@ -265,26 +280,32 @@ class CourseModeRuntimeAdapter:
         )
         decision = self.orchestrator.observe(observation)
         self._forward_evidence(decision)
-        return self._remember(decision)
+        return self._remember_operation(arguments, decision)
 
     async def course_open_context(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        replay = self._replay_operation(arguments)
+        if replay is not None:
+            return replay
         if not self._operation_allowed("course_open_context"):
             return self._operation_not_allowed()
         error = self._consume_operation(arguments)
         if error is not None:
             return error
-        return self._remember(self.orchestrator.open_context_branch(
+        return self._remember_operation(arguments, self.orchestrator.open_context_branch(
             observation_id=arguments["observationId"], turn_sequence_id=arguments["turnSequenceId"],
             branch_type=arguments["branchType"],
         ))
 
     async def course_close_context(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        replay = self._replay_operation(arguments)
+        if replay is not None:
+            return replay
         if not self._operation_allowed("course_close_context"):
             return self._operation_not_allowed()
         error = self._consume_operation(arguments)
         if error is not None:
             return error
-        return self._remember(self.orchestrator.close_context_branch(
+        return self._remember_operation(arguments, self.orchestrator.close_context_branch(
             branch_id=arguments["branchId"], bridge_intent=arguments["bridgeIntent"],
             child_detail_code=arguments["childDetailCode"],
         ))
@@ -375,6 +396,9 @@ class CourseModeRuntimeAdapter:
         return True
 
     async def course_continue(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        replay = self._replay_operation(arguments)
+        if replay is not None:
+            return replay
         if not self._operation_allowed("course_continue"):
             return self._operation_not_allowed()
         error = self._consume_operation(arguments)
@@ -398,7 +422,7 @@ class CourseModeRuntimeAdapter:
             decision = self.orchestrator.continue_word()
         else:
             decision = self.orchestrator.maybe_advance_target(now_ms=int(self._clock() * 1_000))
-        return self._remember(decision)
+        return self._remember_operation(arguments, decision)
 
 
 def course_mode_runtime_from_manifest(

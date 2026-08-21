@@ -147,6 +147,26 @@ async def test_pending_decision_blocks_progress_until_response_plan_is_applied()
 
 
 @pytest.mark.asyncio
+async def test_duplicate_decision_operation_replays_exact_pending_result() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    arguments = {
+        "lessonSessionId": runtime.lesson_session_id,
+        "turnSequenceId": 1,
+        "observationId": "lost-response",
+    }
+
+    first = await runtime.course_continue(arguments)
+    replay = await runtime.course_continue(arguments)
+
+    assert replay == first
+    assert replay["decisionId"] == first["decisionId"]
+    assert runtime.tool_context()["identity"]["turnSequenceId"] == 2
+
+
+@pytest.mark.asyncio
 async def test_failed_delivery_rollback_keeps_exact_response_plan_retryable() -> None:
     runtime = course_mode_runtime_from_manifest(
         {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
@@ -266,7 +286,7 @@ async def test_adapter_implements_all_advertised_operations_and_forwards_safe_ev
         "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
     }))["accepted"] is True
     duplicate = await runtime.course_continue({**identity, "turnSequenceId": 8, "observationId": "operation-1"})
-    assert duplicate == {"accepted": False, "code": "DUPLICATE_OPERATION_IGNORED"}
+    assert duplicate == greeted
 
     runtime.orchestrator.active_mastery.record_model(now_ms=1_000)
     runtime.orchestrator.active_mastery.record_intervening_activity()
