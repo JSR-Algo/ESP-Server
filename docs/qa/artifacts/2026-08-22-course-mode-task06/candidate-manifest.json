@@ -33,10 +33,10 @@
     "featureFlagEnabled": false
   },
   "lanes": {
-    "deterministicJourneys": { "verdict": "PASS", "journeyTypes": 22, "explicitExpectedOutcomes": true, "measuredSessionOperations": true, "multiStepFullSessions": true, "iterations": 144737, "sessions": 3184214, "durationSeconds": 60.00031, "failures": 0 },
+    "deterministicJourneys": { "verdict": "PASS", "journeyTypes": 22, "explicitExpectedOutcomes": true, "measuredSessionOperations": true, "multiStepFullSessions": true, "iterations": 124692, "sessions": 2743224, "durationSeconds": 60.000406, "failures": 0 },
     "runtimeRecoveryPrivacy": { "verdict": "PASS", "espPassed": 304, "espSkipped": 2, "firmwareRuntimePassed": 243, "backendPrivacyPassed": 106 },
     "timing": { "verdict": "PASS", "testsPassed": 82, "actionAckTimeoutSeconds": 2.0, "settleBeforeListenSeconds": 0.25, "sessionSoftDeadlineSeconds": 540, "delayedRecallSimulatedSeconds": 70 },
-    "soakResources": { "verdict": "PASS", "threadDelta": 0, "fdDelta": 0, "heapCurrentDeltaBytes": 402, "maximumRetainedHeapGrowthBytes": 1048576, "heapPeakBytes": 5221, "maximumResidentSetBytes": 70877184 },
+    "soakResources": { "verdict": "PASS", "threadDelta": 0, "fdDelta": 0, "heapCurrentDeltaBytes": 544, "maximumRetainedHeapGrowthBytes": 1048576, "heapPeakBytes": 5240, "maximumResidentSetBytes": 70942720 },
     "visualSampling": { "verdict": "PASS", "cues": 8, "captures": 24, "width": 480, "height": 320, "contactSheetSha256": "6832327aba40098d2bb60bd3f729636b2a858f407c0a9fb62b7c8a07532e553e" },
     "v1AndParity": { "verdict": "PASS", "backendPassed": 130, "espPassed": 169, "vectorSha256": "95e35b3576656c08562d58ac818870fbc4620c9b9ebc1a418fe81a8c861a4ddb" },
     "broadRegression": { "verdict": "PASS", "backendPassed": 5916, "backendSkipped": 643, "firmwarePassed": 1269, "firmwareSkipped": 1, "espPassed": 4117, "espSkipped": 8, "espContentionRerunPassed": 1 },
@@ -54,8 +54,8 @@
     "v1VectorsUnchanged": true
   },
   "artifacts": {
-    "runtimeSoakMetrics": { "path": "metrics/runtime-soak-60s.json", "sha256": "b9db371444018eb9957db79d54bfc629c92a977cdee071d48d8b25e03af1e6f8" },
-    "runtimeSoakLog": { "path": "logs/runtime-soak-60s.log", "sha256": "42f5458846d62b3414a65f24e593a85f5aaef95a50207f032bc6ab07a29c6374" },
+    "runtimeSoakMetrics": { "path": "metrics/runtime-soak-60s.json", "sha256": "a1ce67323f5fe3d299a60a66548225edb6b7a285dfda37a810448bc85171de8a" },
+    "runtimeSoakLog": { "path": "logs/runtime-soak-60s.log", "sha256": "8d92aa345aef61eff9593a3b7edafa292a5d750c7fce65ea7d4ed521eefb85f5" },
     "contactSheet": { "path": "captures/all-cues-contact-sheet.png", "sha256": "6832327aba40098d2bb60bd3f729636b2a858f407c0a9fb62b7c8a07532e553e" },
     "backendFull": { "path": "logs/backend-full-rerun.log", "sha256": "f2206d32ad85a83352f9bac8c9eac2ea2cad49a4d4e0caf1c78c062d564ac9c9" },
     "firmwareFull": { "path": "logs/firmware-full-rerun.log", "sha256": "f9868be44bc921d0f8e3a33580f8ef5370b828e715b6e7962ae49d5651af3b67" },
@@ -103,7 +103,7 @@
     "firmware": "CLEAN",
     "espInitialFindingsAccepted": 3,
     "espBuiltInCommitFindingsAccepted": 2,
-    "espParentFindingsAccepted": 9,
+    "espParentFindingsAccepted": 11,
     "espFinal": "PENDING_REREVIEW"
   }
 }
