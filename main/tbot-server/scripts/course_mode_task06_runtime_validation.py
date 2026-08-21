@@ -67,13 +67,16 @@ def candidate_revision(
     allowed_paths: tuple[str, ...],
     *,
     allowed_dirty_paths: tuple[str, ...] = (),
+    allowed_untracked_paths: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     head = git_head(root)
-    dirty_rows = subprocess.run(
-        ["git", "status", "--porcelain=v1", "--untracked-files=no"],
+    status_rows = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
         cwd=root, check=True, capture_output=True, text=True,
     ).stdout.splitlines()
+    dirty_rows = [row for row in status_rows if not row.startswith("?? ")]
     dirty = [row[3:].split(" -> ")[-1] for row in dirty_rows]
+    untracked = [row[3:] for row in status_rows if row.startswith("?? ")]
     ancestor = subprocess.run(
         ["git", "merge-base", "--is-ancestor", expected_sha, head], cwd=root,
         check=False, capture_output=True, text=True,
@@ -93,6 +96,13 @@ def candidate_revision(
             for allowed in allowed_dirty_paths
         )
     ]
+    unexpected_untracked = [
+        path for path in untracked
+        if not any(
+            path == allowed or (allowed.endswith("/") and path.startswith(allowed))
+            for allowed in allowed_untracked_paths
+        )
+    ]
     return {
         "headSha": head,
         "expectedSha": expected_sha,
@@ -100,9 +110,13 @@ def candidate_revision(
         "trackedWorktreeClean": not dirty,
         "dirtyTrackedPaths": dirty,
         "unexpectedDirtyTrackedPaths": unexpected_dirty,
+        "untrackedPaths": untracked,
+        "unexpectedUntrackedPaths": unexpected_untracked,
         "trackedChanges": changed,
         "unexpectedTrackedChanges": unexpected,
-        "runtimeTreeMatchesFrozenCandidate": ancestor and not unexpected_dirty and not unexpected,
+        "runtimeTreeMatchesFrozenCandidate": (
+            ancestor and not unexpected_dirty and not unexpected_untracked and not unexpected
+        ),
     }
 
 

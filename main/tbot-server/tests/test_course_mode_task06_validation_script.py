@@ -68,6 +68,29 @@ def test_resource_gate_rejects_retained_heap_growth() -> None:
     }) is False
 
 
+def test_candidate_revision_rejects_untracked_runtime_file(tmp_path: Path) -> None:
+    driver = load_driver()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "config", "user.email", "task06@example.invalid")
+    git(repo, "config", "user.name", "Task 06")
+    tracked = repo / "runtime.py"
+    tracked.write_text("VALUE = 'tracked'\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    (repo / "shadow_runtime.py").write_text("VALUE = 'untracked'\n", encoding="utf-8")
+
+    revision = driver.candidate_revision(repo, base, ())
+
+    assert revision["untrackedPaths"] == ["shadow_runtime.py"]
+    assert revision["unexpectedUntrackedPaths"] == ["shadow_runtime.py"]
+    assert revision["runtimeTreeMatchesFrozenCandidate"] is False
+
+
 def test_task06_driver_emits_cross_repository_soak_evidence(tmp_path: Path) -> None:
     backend_root = os.environ.get("TASK06_BACKEND_ROOT")
     firmware_root = os.environ.get("TASK06_FIRMWARE_ROOT")
