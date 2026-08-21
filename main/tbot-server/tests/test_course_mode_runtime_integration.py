@@ -117,13 +117,8 @@ async def test_adapter_implements_all_advertised_operations_and_forwards_safe_ev
     assert (await runtime.course_continue(identity))["action"] == "GREET_AND_CHECK_IN"
     opened = await runtime.course_open_context({**identity, "observationId": "operation-2", "branchType": "RELATED_STORY"})
     assert opened["accepted"] is True
-    closed = await runtime.course_close_context({
-        **identity, "observationId": "operation-3", "branchId": opened["branchId"],
-        "bridgeIntent": "white_cat_visual", "childDetailCode": "grandmother_pet",
-    })
-    assert closed["accepted"] is True
     assert (await runtime.course_apply_response_plan({
-        **identity, "observationId": "operation-4", "planId": "plan-1",
+        **identity, "observationId": "operation-3", "planId": "plan-1",
         "decisionId": opened["decisionId"],
         "acknowledgment": "Robot heard you.", "relation": "We can keep learning.",
         "guidance": "Look at the picture.", "invitation": "What is it?",
@@ -131,6 +126,11 @@ async def test_adapter_implements_all_advertised_operations_and_forwards_safe_ev
         "targetFactsUsed": ["animals.cat"], "praiseLevel": "engagement",
         "safetyMode": False, "normalMiss": False,
     }))["accepted"] is True
+    closed = await runtime.course_close_context({
+        **identity, "observationId": "operation-4", "branchId": opened["branchId"],
+        "bridgeIntent": "white_cat_visual", "childDetailCode": "grandmother_pet",
+    })
+    assert closed["accepted"] is True
     replayed_decision = await runtime.course_apply_response_plan({
         **identity, "observationId": "operation-5", "planId": "plan-2",
         "decisionId": opened["decisionId"],
@@ -203,6 +203,43 @@ async def test_course_continue_does_not_resume_vocabulary_from_protected_pause(
     assert continued["nextState"] == paused["nextState"]
     assert continued["action"] == "HOLD_PROTECTED_PAUSE"
     assert continued["teachingIntent"] is None
+
+
+@pytest.mark.asyncio
+async def test_protected_state_blocks_context_mutation_and_stale_normal_plan() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    identity = runtime.lesson_session_id
+    normal = await runtime.course_continue({
+        "lessonSessionId": identity, "turnSequenceId": 1, "observationId": "normal",
+    })
+    await runtime.course_observe_child({
+        "lessonSessionId": identity, "turnSequenceId": 2, "observationId": "safety",
+        "semanticClass": "unknown", "speechClass": "not_applicable", "language": "vi",
+        "intent": "answer", "engagement": "engaged", "safetyClass": "safety",
+        "assessmentEligible": False, "confidenceBand": "high",
+        "activityId": "cat-recall-visual-02", "contextId": "cat_primary_visual_recall",
+        "robotAudioContaminated": False, "targetTextVisible": False,
+    })
+
+    opened = await runtime.course_open_context({
+        "lessonSessionId": identity, "turnSequenceId": 3, "observationId": "branch",
+        "branchType": "RELATED_STORY",
+    })
+    stale_plan = await runtime.course_apply_response_plan({
+        "lessonSessionId": identity, "turnSequenceId": 4, "observationId": "late-plan",
+        "planId": "p1", "decisionId": normal["decisionId"],
+        "acknowledgment": "Robot heard you.", "relation": "We can learn.",
+        "guidance": "Look at the picture.", "invitation": "Ready?", "questionCount": 1,
+        "embodiedIntent": normal["embodiedIntent"], "targetFactsUsed": ["animals.cat"],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    })
+
+    assert opened == {"accepted": False, "code": "COURSE_OPERATION_NOT_ALLOWED"}
+    assert stale_plan == {"accepted": False, "code": "STALE_DECISION"}
+    assert "course_open_context" not in runtime.tool_context()["allowedTools"]
 
 
 @pytest.mark.asyncio

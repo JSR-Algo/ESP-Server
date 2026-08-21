@@ -119,7 +119,27 @@ class CourseOrchestrator:
         if observation.now_ms - self.started_at_ms >= self.soft_deadline_ms:
             self.session_state = SessionState.CLOSING
             return self._decision("CLOSE_WITHOUT_SECOND_WORD", embodied=EmbodiedIntent.GOODBYE_SMALL)
-        if self.session_state in {SessionState.SAFETY_PAUSED, SessionState.REGULATION_BREAK}:
+        if self.session_state is SessionState.REGULATION_BREAK:
+            if observation.intent == "resume":
+                self.session_state = SessionState.WORD_ACTIVE
+                return self._decision(
+                    "RESUME_AFTER_REGULATION", acknowledgment="honor_resume_choice",
+                    question="invite_observation", embodied=EmbodiedIntent.THINK_CURIOUS,
+                )
+            if observation.intent == "stop":
+                self.session_state = SessionState.CLOSING
+                return self._decision(
+                    "CLOSE_BY_CHILD_CHOICE", acknowledgment="honor_stop_choice",
+                    embodied=EmbodiedIntent.GOODBYE_SMALL,
+                )
+            return self.hold_protected_pause()
+        if self.session_state is SessionState.SAFETY_PAUSED:
+            if observation.intent == "stop":
+                self.session_state = SessionState.CLOSING
+                return self._decision(
+                    "CLOSE_BY_SAFETY_CHOICE", acknowledgment="honor_safety_stop",
+                    embodied=EmbodiedIntent.GOODBYE_SMALL,
+                )
             return self.hold_protected_pause()
         if observation.safety_class != "normal":
             self.session_state = SessionState.SAFETY_PAUSED

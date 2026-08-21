@@ -153,6 +153,40 @@ def test_protected_pause_rejects_normal_learning_observations() -> None:
     assert runtime.active_mastery.level is before
 
 
+def test_regulation_break_requires_explicit_resume_or_stop_choice() -> None:
+    runtime = course()
+    runtime.begin(); runtime.continue_opening(); runtime.continue_opening()
+    runtime.observe(observation(observation_id="fatigue", intent="fatigue"))
+
+    held = runtime.observe(observation(observation_id="ordinary", intent="answer"))
+    resumed = runtime.observe(observation(observation_id="resume", intent="resume"))
+
+    assert held.action == "HOLD_PROTECTED_PAUSE"
+    assert resumed.action == "RESUME_AFTER_REGULATION"
+    assert resumed.next_state is SessionState.WORD_ACTIVE
+
+    runtime.observe(observation(observation_id="refusal", intent="refusal"))
+    stopped = runtime.observe(observation(observation_id="stop", intent="stop"))
+    assert stopped.action == "CLOSE_BY_CHILD_CHOICE"
+    assert stopped.next_state is SessionState.CLOSING
+
+
+def test_safety_pause_allows_only_explicit_stop_not_resume() -> None:
+    runtime = course()
+    runtime.begin(); runtime.continue_opening(); runtime.continue_opening()
+    runtime.observe(observation(
+        observation_id="safety", safety_class="safety", assessment_eligible=False,
+    ))
+
+    held = runtime.observe(observation(observation_id="resume", intent="resume"))
+    stopped = runtime.observe(observation(observation_id="stop", intent="stop"))
+
+    assert held.action == "HOLD_PROTECTED_PAUSE"
+    assert held.next_state is SessionState.SAFETY_PAUSED
+    assert stopped.action == "CLOSE_BY_SAFETY_CHOICE"
+    assert stopped.next_state is SessionState.CLOSING
+
+
 def test_time_budget_prefers_one_deep_word_and_does_not_rush_secondary() -> None:
     runtime = course(); runtime.begin(); runtime.continue_opening(); runtime.continue_opening()
     decision = runtime.observe(observation(intent="answer", now_ms=541_000))

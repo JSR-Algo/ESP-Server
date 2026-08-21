@@ -115,6 +115,7 @@ class CourseModeRuntimeAdapter:
         self._applied_decision_ids: set[str] = set()
         self._consumed_operation_ids: set[str] = set()
         self._decisions: dict[str, CourseDecision] = {}
+        self._latest_decision_id: str | None = None
 
     def _identity_error(self, arguments: Dict[str, Any]) -> Dict[str, Any] | None:
         if arguments.get("lessonSessionId") != self.lesson_session_id:
@@ -144,7 +145,26 @@ class CourseModeRuntimeAdapter:
 
     def _remember(self, decision: CourseDecision) -> Dict[str, Any]:
         self._decisions[decision.decision_id] = decision
+        self._latest_decision_id = decision.decision_id
         return self._decision_payload(decision)
+
+    def _operation_allowed(self, operation: str) -> bool:
+        state = self.orchestrator.session_state
+        if operation == "course_apply_response_plan":
+            return True
+        if state is SessionState.SAFETY_PAUSED:
+            return operation in {"course_observe_child", "course_continue"}
+        if state is SessionState.REGULATION_BREAK:
+            return operation in {"course_observe_child", "course_continue"}
+        if state is SessionState.CONTEXT_BRANCH:
+            return operation == "course_close_context"
+        if state in {SessionState.CLOSING, SessionState.COMPLETE}:
+            return False
+        return operation in {"course_observe_child", "course_open_context", "course_continue"}
+
+    @staticmethod
+    def _operation_not_allowed() -> Dict[str, Any]:
+        return {"accepted": False, "code": "COURSE_OPERATION_NOT_ALLOWED"}
 
     def tool_context(self) -> Dict[str, Any]:
         target = next(
@@ -160,6 +180,13 @@ class CourseModeRuntimeAdapter:
             for activity in self.contract.activities
             if activity.target_id == target.target_id
         ]
+        allowed_tools = [
+            operation for operation in (
+                "course_observe_child", "course_open_context", "course_close_context",
+                "course_apply_response_plan", "course_continue",
+            )
+            if self._operation_allowed(operation)
+        ]
         return {
             "courseMode": True,
             "identity": {
@@ -168,10 +195,7 @@ class CourseModeRuntimeAdapter:
             },
             "activeTargetId": target.target_id,
             "activities": activities,
-            "allowedTools": [
-                "course_observe_child", "course_open_context", "course_close_context",
-                "course_apply_response_plan", "course_continue",
-            ],
+            "allowedTools": allowed_tools,
         }
 
     def _forward_evidence(self, decision: CourseDecision) -> None:
@@ -194,6 +218,8 @@ class CourseModeRuntimeAdapter:
         })
 
     async def course_observe_child(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._operation_allowed("course_observe_child"):
+            return self._operation_not_allowed()
         error = self._consume_operation(arguments)
         if error is not None:
             return error
@@ -212,6 +238,8 @@ class CourseModeRuntimeAdapter:
         return self._remember(decision)
 
     async def course_open_context(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._operation_allowed("course_open_context"):
+            return self._operation_not_allowed()
         error = self._consume_operation(arguments)
         if error is not None:
             return error
@@ -221,6 +249,8 @@ class CourseModeRuntimeAdapter:
         ))
 
     async def course_close_context(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._operation_allowed("course_close_context"):
+            return self._operation_not_allowed()
         error = self._consume_operation(arguments)
         if error is not None:
             return error
@@ -241,6 +271,8 @@ class CourseModeRuntimeAdapter:
             return {"accepted": False, "code": "UNKNOWN_DECISION"}
         if decision.decision_id in self._applied_decision_ids:
             return {"accepted": False, "code": "DECISION_ALREADY_APPLIED"}
+        if decision.decision_id != self._latest_decision_id:
+            return {"accepted": False, "code": "STALE_DECISION"}
         plan_fields = {
             key: value for key, value in arguments.items()
             if key not in {"lessonSessionId", "turnSequenceId", "observationId", "planId", "decisionId"}
@@ -271,6 +303,8 @@ class CourseModeRuntimeAdapter:
         return {"accepted": True, "code": "RESPONSE_PLAN_APPLIED", "planId": plan_id}
 
     async def course_continue(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._operation_allowed("course_continue"):
+            return self._operation_not_allowed()
         error = self._consume_operation(arguments)
         if error is not None:
             return error
