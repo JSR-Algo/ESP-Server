@@ -1,7 +1,7 @@
 # Course Mode V2 Task 06 Runtime and Integration Validation
 
 Date: 2026-08-22
-Status: `REVIEW PENDING` (runtime lanes pass; final independent review not yet closed)
+Status: `RUNTIME PASS` (software runtime lanes and final independent review are closed)
 Data policy: synthetic scenarios only; no real-child audio, transcript, profile, or observation data was used.
 
 ## Frozen Candidate
@@ -79,7 +79,7 @@ The backend dependency manifests have a pre-existing reproducibility defect: `np
 
 ## Independent Review and Commit Handoff
 
-Three independent read-only reviews covered the complete scoped diffs. Backend and firmware reviews found no actionable issue and confirmed that the fixture changes preserve the original assertions. ESP reviews found that SHA identity was reported but not enforced, the validation test depended on disposable worktree paths, ignored evidence would not be committed, the evidence commit could not rerun its own harness, tracked rename sources and dirty/untracked/ignored runtime paths were not fully rejected, retained heap growth was measured but not gated, special journeys self-baselined, isolated transitions were mislabeled as complete sessions, the reconnect journey closed the pre-restore orchestrator, synthetic markers were counted as operations, delayed recall bypassed the orchestrator, and executable journey logic was not bound to a trusted reviewed revision. All findings were fixed: executable validation changes are anchored by the annotated Git tag `course-mode-task06-reviewed-validation-v1`, only evidence artifacts may change after that tag, rename sources and unexpected tracked/untracked/ignored runtime inputs fail the gate, generated caches/dependencies are explicitly inventoried, retained heap growth has a 1 MiB fail-closed bound, every special journey has an explicit expected result, every soak unit records its actual opening, scenario, recovery/bridge, and closing actions, reconnect continues entirely on the restored instance, and delayed recall runs through authored `CourseOrchestrator.observe` activities. Generated visual evidence uses repository-relative paths rather than machine-specific absolute paths. The opt-in cross-repository tests passed, and the final 60-second soak passed with all three runtime trees matching their frozen bases and ESP executable validation SHA `7c75ddf26ed2e495829b661c297894c2e5aa7813`. Security-pattern scans and `git diff --check` were clean.
+Three independent read-only reviews covered the complete scoped diffs. Backend and firmware reviews found no actionable issue and confirmed that the fixture changes preserve the original assertions. ESP reviews found that SHA identity was reported but not enforced, the validation test depended on disposable worktree paths, ignored evidence would not be committed, the evidence commit could not rerun its own harness, tracked rename sources and dirty/untracked/ignored runtime paths were not fully rejected, retained heap growth was measured but not gated, special journeys self-baselined, isolated transitions were mislabeled as complete sessions, the reconnect journey closed the pre-restore orchestrator, synthetic markers were counted as operations, delayed recall bypassed the orchestrator, and executable journey logic was not bound to a trusted reviewed revision. All findings were fixed: executable validation changes are anchored by the annotated Git tag `course-mode-task06-reviewed-validation-v1`, only evidence artifacts may change after that tag, rename sources and unexpected tracked/untracked/ignored runtime inputs fail the gate, generated caches/dependencies are explicitly inventoried, retained heap growth has a 1 MiB fail-closed bound, every special journey has an explicit expected result, every soak unit records its actual opening, scenario, recovery/bridge, and closing actions, reconnect continues entirely on the restored instance, and delayed recall runs through authored `CourseOrchestrator.observe` activities. Generated visual evidence uses repository-relative paths rather than machine-specific absolute paths. The opt-in cross-repository tests passed, and the final 60-second soak passed with all three runtime trees matching their frozen bases and ESP executable validation SHA `7c75ddf26ed2e495829b661c297894c2e5aa7813`. The final independent ESP rereview found no actionable regressions; its focused validation run passed 14 tests with 1 environment-dependent skip, and every candidate-manifest artifact hash matched the committed file. Security-pattern scans and `git diff --check` were clean.
 
 Task-owned branch commits for parent integration:
 
@@ -97,6 +97,6 @@ This is a software runtime gate. It does not prove physical TFT visibility, beze
 
 ## Verdict
 
-`REVIEW PENDING`
+`RUNTIME PASS`
 
-All software runtime lanes required by Task 06 passed on the frozen candidate, subject to the explicitly recorded environment limits. Task 07 is not authorized until the final independent ESP review is recorded clean. No production rollout or child-learning efficacy claim is authorized.
+All software runtime lanes required by Task 06 passed on the frozen candidate, subject to the explicitly recorded environment limits. This authorizes Task 07 physical testing only. No production rollout or child-learning efficacy claim is authorized.

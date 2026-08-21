@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "gate": "course-mode-v2-task-06-runtime-integration-validation",
   "generatedDate": "2026-08-22",
-  "verdict": "REVIEW_PENDING",
-  "authorizesOnPass": null,
+  "verdict": "RUNTIME_PASS",
+  "authorizesOnPass": "task-07-physical-testing-only",
   "candidate": {
     "espSha": "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268",
     "firmwareSha": "d47174daebe17b9c1a9d1a1eb506711a57cd3512",
@@ -104,6 +104,6 @@
     "espInitialFindingsAccepted": 3,
     "espBuiltInCommitFindingsAccepted": 2,
     "espParentFindingsAccepted": 13,
-    "espFinal": "PENDING_REREVIEW"
+    "espFinal": "CLEAN"
   }
 }
