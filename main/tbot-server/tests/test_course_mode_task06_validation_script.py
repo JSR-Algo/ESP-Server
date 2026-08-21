@@ -141,6 +141,31 @@ def test_candidate_revision_checks_both_sides_of_dirty_rename(tmp_path: Path) ->
     assert revision["runtimeTreeMatchesFrozenCandidate"] is False
 
 
+def test_candidate_revision_rejects_executable_changes_after_validation_pin(tmp_path: Path) -> None:
+    driver = load_driver()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "config", "user.email", "task06@example.invalid")
+    git(repo, "config", "user.name", "Task 06")
+    validator = repo / "scripts" / "validator.py"
+    validator.parent.mkdir()
+    validator.write_text("print('reviewed')\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "reviewed validator")
+    validation_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    validator.write_text("print('changed after review')\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "change validator")
+
+    revision = driver.candidate_revision(repo, validation_sha, ("docs/evidence/",))
+
+    assert revision["unexpectedTrackedChanges"] == ["scripts/validator.py"]
+    assert revision["runtimeTreeMatchesFrozenCandidate"] is False
+
+
 def test_visual_evidence_uses_repository_relative_paths(tmp_path: Path) -> None:
     driver = load_driver()
     captures = tmp_path / "src/lessons/fixtures/course-mode/pilot/v1/captures"
@@ -157,7 +182,8 @@ def test_visual_evidence_uses_repository_relative_paths(tmp_path: Path) -> None:
 def test_task06_driver_emits_cross_repository_soak_evidence(tmp_path: Path) -> None:
     backend_root = os.environ.get("TASK06_BACKEND_ROOT")
     firmware_root = os.environ.get("TASK06_FIRMWARE_ROOT")
-    if not backend_root or not firmware_root:
+    esp_validation_sha = os.environ.get("TASK06_ESP_VALIDATION_SHA")
+    if not backend_root or not firmware_root or not esp_validation_sha:
         pytest.skip("Task 06 cross-repository roots are not configured")
     output = tmp_path / "runtime.json"
     completed = subprocess.run(
@@ -168,6 +194,8 @@ def test_task06_driver_emits_cross_repository_soak_evidence(tmp_path: Path) -> N
             backend_root,
             "--firmware-root",
             firmware_root,
+            "--esp-validation-sha",
+            esp_validation_sha,
             "--iterations",
             "2",
             "--min-duration-seconds",
@@ -186,6 +214,7 @@ def test_task06_driver_emits_cross_repository_soak_evidence(tmp_path: Path) -> N
     assert report["verdict"] == "PASS"
     assert report["candidate"]["fixtureCopiesEqual"] is True
     assert report["candidate"]["runtimeTreesMatchFrozenCandidate"] is True
+    assert report["candidate"]["espValidationSha"] == esp_validation_sha
     assert all(
         not revision["unexpectedDirtyTrackedPaths"]
         for revision in report["candidate"]["revisions"].values()

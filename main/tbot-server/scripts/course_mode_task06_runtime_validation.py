@@ -29,14 +29,9 @@ EXPECTED_ESP_SHA = "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268"
 EXPECTED_FIRMWARE_SHA = "d47174daebe17b9c1a9d1a1eb506711a57cd3512"
 EXPECTED_BACKEND_SHA = "657474ff3b58fba2c3c31f2978d53370ffad8b11"
 MAX_RETAINED_HEAP_GROWTH_BYTES = 1024 * 1024
-ALLOWED_ESP_EVIDENCE_PATHS = (
-    ".gitattributes",
-    ".gitignore",
+ALLOWED_ESP_POST_VALIDATION_PATHS = (
     "docs/qa/ad-hoc/2026-08-22-course-mode-task06-runtime-validation.md",
     "docs/qa/artifacts/2026-08-22-course-mode-task06/",
-    "main/tbot-server/scripts/course_mode_task06_runtime_validation.py",
-    "main/tbot-server/tests/test_course_mode_e2e_journeys.py",
-    "main/tbot-server/tests/test_course_mode_task06_validation_script.py",
 )
 ALLOWED_ESP_DIRTY_PATHS = (
     "docs/qa/artifacts/2026-08-22-course-mode-task06/",
@@ -207,6 +202,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend-root", type=Path, required=True)
     parser.add_argument("--firmware-root", type=Path, required=True)
+    parser.add_argument("--esp-validation-sha", required=True)
     parser.add_argument("--iterations", type=int, default=250)
     parser.add_argument("--min-duration-seconds", type=float, default=0.0)
     parser.add_argument("--output", type=Path, required=True)
@@ -222,11 +218,16 @@ def main() -> int:
     pilot = json.loads(pilot_path.read_text(encoding="utf-8"))
     identity = pilot["identity"]
     release = pilot["release"]
+    if subprocess.run(
+        ["git", "merge-base", "--is-ancestor", EXPECTED_ESP_SHA, args.esp_validation_sha],
+        cwd=ROOT, check=False, capture_output=True, text=True,
+    ).returncode != 0:
+        raise AssertionError("ESP validation SHA must descend from the frozen ESP candidate")
     revisions = {
         "esp": candidate_revision(
             ROOT,
-            EXPECTED_ESP_SHA,
-            ALLOWED_ESP_EVIDENCE_PATHS,
+            args.esp_validation_sha,
+            ALLOWED_ESP_POST_VALIDATION_PATHS,
             allowed_dirty_paths=ALLOWED_ESP_DIRTY_PATHS,
             allowed_ignored_globs=ALLOWED_ESP_IGNORED_GLOBS,
         ),
@@ -311,6 +312,7 @@ def main() -> int:
         "verdict": "PASS" if passed else "FAIL",
         "candidate": {
             **candidate_shas,
+            "espValidationSha": args.esp_validation_sha,
             "expectedShas": {
                 "espSha": EXPECTED_ESP_SHA,
                 "firmwareSha": EXPECTED_FIRMWARE_SHA,
