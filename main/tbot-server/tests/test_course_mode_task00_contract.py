@@ -48,6 +48,14 @@ LISTEN_SEQUENCE = [
     "speech_complete", "gesture_settled", "head_centered", "arms_lowered",
     "motor_stopped", "assessment_window_open",
 ]
+ACTIVITY_IDENTITIES = [
+    ("cat-discover-center-01", "animals.cat", "DISCOVER", "single_visual_discovery", "EXPOSED", "cat_primary_visual", "PRESENT_CENTER", "focus.center.primary"),
+    ("cat-meaning-left-right-01", "animals.cat", "UNDERSTAND", "authored_two_choice_visual", "UNDERSTOOD", "cat_dog_visual_contrast", "PRESENT_LEFT", "focus.left.choice"),
+    ("cat-recall-visual-02", "animals.cat", "RECALL", "independent_visual_naming", "INDEPENDENT_RECALL", "cat_primary_visual_recall", "PRESENT_CENTER", "focus.center.primary"),
+    ("cat-transfer-scene-01", "animals.cat", "TRANSFER", "second_context_scene_naming", "TRANSFERRED", "cat_second_visual_scene", "PRESENT_RIGHT", "focus.right.choice"),
+    ("cat-delayed-recall-01", "animals.cat", "DELAYED_RECALL", "delayed_independent_naming", "MASTERED_TODAY", "cat_delayed_callback", "PRESENT_CENTER", "focus.center.primary"),
+    ("ball-discover-center-01", "toys.ball", "DISCOVER", "single_visual_discovery", "EXPOSED", "ball_primary_visual", "PRESENT_CENTER", "focus.center.primary"),
+]
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -125,11 +133,16 @@ def validate_contract(document: dict[str, Any], expected_checksum: str = CONTRAC
     ]
     for target in document["targets"]:
         _keys(target, {"targetId", "targetWord", "role", "vietnameseMeanings", "activityIds"})
-    activity_ids = {activity["activityId"] for activity in document["activities"]}
-    assert activity_ids == {
-        "cat-discover-center-01", "cat-meaning-left-right-01", "cat-recall-visual-02",
-        "cat-transfer-scene-01", "cat-delayed-recall-01", "ball-discover-center-01",
-    }
+    assert document["targets"][0]["activityIds"] == [identity[0] for identity in ACTIVITY_IDENTITIES[:5]]
+    assert document["targets"][1]["activityIds"] == [ACTIVITY_IDENTITIES[5][0]]
+    assert [
+        (
+            activity["activityId"], activity["targetId"], activity["stage"],
+            activity["activityType"], activity["evidenceName"], activity["contextId"],
+            activity["embodiedIntent"], activity["visualFocusRegion"],
+        )
+        for activity in document["activities"]
+    ] == ACTIVITY_IDENTITIES
     for activity in document["activities"]:
         _keys(activity, {
             "activityId", "targetId", "stage", "activityType", "evidenceName", "contextId",
@@ -253,6 +266,21 @@ def test_canonical_course_mode_fixture_is_strict_and_checksum_pinned() -> None:
     lambda value: value["activities"][2]["answerPolicy"].update({"targetTextVisible": True}),
 ])
 def test_contract_mutations_fail_closed(mutation) -> None:
+    value = _load(CONTRACT_PATH)
+    mutation(value)
+    value["contractChecksum"] = _checksum(value)
+    with pytest.raises(AssertionError):
+        validate_contract(value, value["contractChecksum"])
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda value: value["activities"][0].update({"targetId": "toys.ball"}),
+    lambda value: value["activities"][0].update({"stage": "BOGUS"}),
+    lambda value: value["activities"][0].update({"activityType": "bogus"}),
+    lambda value: value["activities"].append(copy.deepcopy(value["activities"][0])),
+    lambda value: value["targets"][0].update({"activityIds": ["ball-discover-center-01"]}),
+])
+def test_exact_activity_identity_mutations_fail_closed(mutation) -> None:
     value = _load(CONTRACT_PATH)
     mutation(value)
     value["contractChecksum"] = _checksum(value)
