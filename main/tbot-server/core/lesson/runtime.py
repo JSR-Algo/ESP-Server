@@ -754,6 +754,9 @@ class CourseModeRuntimeAdapter:
         value._latest_decision_id = snapshot["latestDecisionId"]
         value._next_turn_sequence_id = snapshot["nextTurnSequenceId"]
         value._response_plan_rollback = copy.deepcopy(snapshot["responsePlanRollback"])
+        if value._response_plan_rollback is not None:
+            # An attempted delivery is only trustworthy within the process that made it.
+            value._response_plan_rollback["deliveryAttempted"] = False
         if value._response_plan_rollback is not None and type(captured_monotonic) is int and type(captured_wall) is int:
             _rebase_course_orchestrator_snapshot(
                 value._response_plan_rollback["orchestrator"], offset_ms,

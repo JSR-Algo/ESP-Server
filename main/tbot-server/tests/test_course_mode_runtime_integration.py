@@ -710,6 +710,17 @@ async def test_failed_snapshot_write_after_delivery_does_not_replay_the_plan() -
 
     assert (await runtime.course_apply_response_plan(plan))["accepted"] is True
     assert await runtime.mark_response_plan_delivery_attempted(plan) is True
+    attempted_snapshot = await store.load("device-1", "a1")
+    restarted = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest={"courseModeContract": contract()}, asset_cache=object(),
+        forwarder=_Forwarder(), course_mode_snapshot_store=store,
+        course_mode_snapshot_device_id="device-1",
+        course_mode_snapshot=attempted_snapshot,
+    )
+    assert (await restarted.course_apply_response_plan(plan))["accepted"] is True
+    assert restarted.course_mode.response_plan_requires_delivery(plan) is True
+
     store.fail = True
     assert await runtime.commit_course_response_plan(plan) is False
     assert (await runtime.course_apply_response_plan(plan))["accepted"] is True
