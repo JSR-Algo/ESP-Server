@@ -109,7 +109,7 @@ def test_candidate_revision_rejects_ignored_runtime_config(tmp_path: Path) -> No
 
     revision = driver.candidate_revision(repo, base, ())
 
-    assert revision["ignoredPaths"] == [".config.yaml"]
+    assert revision["ignoredPathCount"] == 1
     assert revision["unexpectedIgnoredPaths"] == [".config.yaml"]
     assert revision["runtimeTreeMatchesFrozenCandidate"] is False
 

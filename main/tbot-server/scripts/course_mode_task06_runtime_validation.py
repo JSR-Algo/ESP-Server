@@ -141,7 +141,7 @@ def candidate_revision(
         "unexpectedDirtyTrackedPaths": unexpected_dirty,
         "untrackedPaths": untracked,
         "unexpectedUntrackedPaths": unexpected_untracked,
-        "ignoredPaths": ignored,
+        "ignoredPathCount": len(ignored),
         "unexpectedIgnoredPaths": unexpected_ignored,
         "trackedChanges": changed,
         "unexpectedTrackedChanges": unexpected,
