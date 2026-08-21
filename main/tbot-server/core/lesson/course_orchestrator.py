@@ -186,15 +186,20 @@ class CourseOrchestrator:
                 question="invite_one_story_detail" if related else "offer_resume_choice",
                 embodied=EmbodiedIntent.ACKNOWLEDGE_STORY, branch_id=self._active_branch_id,
             )
-        if observation.confidence_band != "high" or not observation.assessment_eligible or observation.robot_audio_contaminated:
-            self.session_state = SessionState.TECHNICAL_RECOVERY
-            return self._decision("OWN_ASR_UNCERTAINTY", acknowledgment="robot_ears_unclear", question="invite_retry", embodied=EmbodiedIntent.LISTEN_STILL)
         try:
             activity = self.contract.activity(observation.activity_id)
         except KeyError:
             return self._decision("INVALID_ACTIVITY_IGNORED", accepted=False, acknowledgment="retain_authoritative_state")
         if activity.target_id != self.active_target_id or activity.context_id != observation.context_id:
             return self._decision("INVALID_ACTIVITY_IGNORED", accepted=False, acknowledgment="retain_authoritative_state")
+        assessment_stage = activity.stage in {"RECALL", "TRANSFER", "DELAYED_RECALL"}
+        if (
+            observation.confidence_band != "high"
+            or observation.robot_audio_contaminated
+            or (assessment_stage and not observation.assessment_eligible)
+        ):
+            self.session_state = SessionState.TECHNICAL_RECOVERY
+            return self._decision("OWN_ASR_UNCERTAINTY", acknowledgment="robot_ears_unclear", question="invite_retry", embodied=EmbodiedIntent.LISTEN_STILL)
         mastery = self.active_mastery
         mastery.set_target_text_visible(observation.target_text_visible)
         mastery.set_robot_audio_contaminated(observation.robot_audio_contaminated)

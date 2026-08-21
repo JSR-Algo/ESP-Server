@@ -76,10 +76,11 @@ def product_tool_names(conn: Any) -> List[str]:
     names.extend(_configured_child_tools(conn))
     if lesson_start_enabled(conn):
         names.extend(ALWAYS_INCLUDE_WHEN_LESSON_ENABLED)
-    if lesson_runtime_enabled(conn):
-        names.extend(LESSON_CONVERSATION_TOOLS)
-    if course_mode_runtime_enabled(conn):
+    course_mode_enabled = course_mode_runtime_enabled(conn)
+    if course_mode_enabled:
         names.extend(COURSE_MODE_TOOLS)
+    elif lesson_runtime_enabled(conn):
+        names.extend(LESSON_CONVERSATION_TOOLS)
     return _dedupe(name for name in names if _is_child_allowed(name))
 
 

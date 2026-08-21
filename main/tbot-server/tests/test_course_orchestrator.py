@@ -104,6 +104,19 @@ def test_low_confidence_and_contamination_do_not_mutate_mastery() -> None:
     assert decision.action == "OWN_ASR_UNCERTAINTY"
 
 
+def test_non_assessment_understanding_turn_can_record_meaning() -> None:
+    runtime = course(); runtime.begin(); runtime.continue_opening(); runtime.continue_opening()
+
+    decision = runtime.observe(observation(
+        semantic_class="meaning_vi", assessment_eligible=False,
+        activity_id="cat-meaning-left-right-01", context_id="cat_dog_visual_contrast",
+    ))
+
+    assert decision.accepted is True
+    assert runtime.active_mastery.level.value == "UNDERSTOOD"
+    assert runtime.session_state is SessionState.WORD_ACTIVE
+
+
 def test_duplicate_observation_and_restored_pending_effects_are_not_replayed() -> None:
     runtime = course(); runtime.begin(); runtime.continue_opening(); runtime.continue_opening()
     first = runtime.observe(observation(
