@@ -11,6 +11,7 @@ Read in this order:
 4. [Embodied interaction: face, head, and arms](embodied-interaction.md)
 5. [Runtime and authoring contract](runtime-contract.md)
 6. [Measurement, safety, and validation](measurement-and-validation.md)
+7. [Production-ready task pack](production-ready/README.md)
 
 The package defines a proposed `courseCompanion.v2` preset. It does not alter
 the current `tvideoJourney.v1` runtime and is not an implementation plan.
@@ -32,10 +33,17 @@ the current `tvideoJourney.v1` runtime and is not an implementation plan.
 - Embodied teaching: coordinated face, head, arms, screen focus, and speech;
   still listening posture before child assessment.
 
+## Implementation Planning
+
+The production-ready task pack splits delivery into contract, semantic runtime,
+embodied dispatch, firmware, backend, pilot authoring, QA, and controlled canary
+tasks. Each task contains a standalone master prompt and explicit release gates.
+
 ## Explicitly Not Yet Done
 
 - No runtime code, backend schema, lesson authoring UI, or progress projection
   has been changed.
-- No implementation task breakdown has been approved.
+- The implementation task breakdown exists, but no task is complete merely
+  because its plan or prompt has been written.
 - No production data retention policy has been changed.
 - No pilot with children has been conducted.

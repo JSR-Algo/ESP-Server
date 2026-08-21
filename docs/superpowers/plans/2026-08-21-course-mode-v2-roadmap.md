@@ -18,6 +18,19 @@
 - `docs/course-mode/embodied-interaction.md`
 - `docs/course-mode/runtime-contract.md`
 - `docs/course-mode/measurement-and-validation.md`
+- `docs/course-mode/production-ready/README.md`
+
+## Production Task Pack
+
+The executable backlog and standalone master prompts live under
+`docs/course-mode/production-ready/`. That pack adds an explicit contract and
+visual-baseline task before the three implementation phases, followed by pilot
+authoring, adversarial QA, and a separately authorized production canary.
+
+Farm Journey v9 is the renderer-v4 visual pilot baseline only. Its approved
+`480x320` geometry is object `(20,168,95,95)` and robot `(118,160,150,150)`.
+Course Mode must not depend on, edit, or silently join the separate Farm v9
+production rollout. It may reuse final read-only evidence and geometry contracts.
 
 ## Delivery Order
 
