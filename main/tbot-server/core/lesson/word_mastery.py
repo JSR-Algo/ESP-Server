@@ -108,7 +108,8 @@ class WordMastery:
         )
         if independent:
             self._independent = True
-            self.level = EvidenceLevel.INDEPENDENT_RECALL
+            if self.level not in {EvidenceLevel.TRANSFERRED, EvidenceLevel.MASTERED_TODAY}:
+                self.level = EvidenceLevel.INDEPENDENT_RECALL
         elif correct and self.level.value not in {EvidenceLevel.INDEPENDENT_RECALL.value, EvidenceLevel.TRANSFERRED.value, EvidenceLevel.MASTERED_TODAY.value}:
             self.level = EvidenceLevel.SUPPORTED_SPEECH
         elif not correct and self._independent:

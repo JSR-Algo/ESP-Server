@@ -221,6 +221,20 @@ def test_time_budget_prefers_one_deep_word_and_does_not_rush_secondary() -> None
     assert decision.action == "CLOSE_WITHOUT_SECOND_WORD"
 
 
+def test_safety_disclosure_at_deadline_still_enters_protected_pause() -> None:
+    runtime = course()
+    runtime.begin(); runtime.continue_opening(); runtime.continue_opening()
+
+    decision = runtime.observe(observation(
+        observation_id="deadline-safety", safety_class="safety",
+        assessment_eligible=False, now_ms=540_000,
+    ))
+
+    assert decision.action == "PAUSE_FOR_SAFETY"
+    assert decision.next_state is SessionState.SAFETY_PAUSED
+    assert decision.embodied_intent is EmbodiedIntent.COMFORT_CALM
+
+
 def test_secondary_starts_only_after_primary_mastery_and_time_remaining() -> None:
     runtime = course(); runtime.begin(); runtime.continue_opening(); runtime.continue_opening()
     runtime.active_mastery.level = runtime.active_mastery.level.MASTERED_TODAY
