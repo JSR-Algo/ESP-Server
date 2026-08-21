@@ -389,6 +389,9 @@ class CourseModeRuntimeAdapter:
                 return True
         return False
 
+    def restore_pending_evidence_batches(self, batches: list[Dict[str, Any]]) -> None:
+        self._pending_evidence_batches = copy.deepcopy(batches)
+
     async def course_observe_child(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         operation = "course_observe_child"
         replay = self._replay_operation(operation, arguments)
@@ -2162,13 +2165,17 @@ class LessonRuntime:
         if self.course_mode is None:
             return
         sequence = batch.get("events", [{}])[0].get("sequence")
-        self._queued_course_evidence_sequences.discard(sequence)
+        pending_before = self.course_mode.pending_evidence_batches()
         if not self.course_mode.acknowledge_evidence_batch(batch):
+            self._queued_course_evidence_sequences.discard(sequence)
             return
         try:
             await self.persist_course_mode_snapshot()
         except Exception as exc:
+            self.course_mode.restore_pending_evidence_batches(pending_before)
             self._log("warning", f"course mode evidence acknowledgment persist failed: {type(exc).__name__}")
+            return
+        self._queued_course_evidence_sequences.discard(sequence)
 
     def _release_course_evidence_batch(self, batch: Dict[str, Any]) -> None:
         sequence = batch.get("events", [{}])[0].get("sequence")

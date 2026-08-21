@@ -832,6 +832,47 @@ async def test_evidence_remains_durable_until_forwarder_acknowledges_backend_suc
 
 
 @pytest.mark.asyncio
+async def test_failed_ack_snapshot_write_cannot_erase_durable_evidence_later() -> None:
+    class FailingAckStore(MemoryCourseModeSnapshotStore):
+        fail_next_store = False
+
+        async def store(self, device_id, assignment_id, snapshot):
+            if self.fail_next_store:
+                self.fail_next_store = False
+                raise RuntimeError("snapshot unavailable")
+            await super().store(device_id, assignment_id, snapshot)
+
+    store = FailingAckStore()
+    forwarder = _AcknowledgingForwarder()
+    runtime = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest={"courseModeContract": contract()}, asset_cache=object(),
+        forwarder=forwarder, course_mode_snapshot_store=store,
+        course_mode_snapshot_device_id="device-1",
+    )
+    runtime.course_mode.orchestrator.session_state = SessionState.WORD_ACTIVE
+    runtime.course_mode.orchestrator.active_mastery.record_model(now_ms=1_000)
+    runtime.course_mode.orchestrator.active_mastery.record_intervening_activity()
+    await runtime.course_observe_child({
+        "lessonSessionId": runtime.session_id, "turnSequenceId": 1,
+        "observationId": "ack-persist-failure", "semanticClass": "target_en",
+        "speechClass": "exact", "language": "en", "intent": "answer",
+        "engagement": "engaged", "safetyClass": "normal", "assessmentEligible": True,
+        "confidenceBand": "high", "activityId": "cat-recall-visual-02",
+        "contextId": "cat_primary_visual_recall", "robotAudioContaminated": False,
+        "targetTextVisible": False,
+    })
+
+    store.fail_next_store = True
+    await forwarder.on_success(forwarder.batches[0])
+    await runtime.persist_course_mode_snapshot()
+
+    assert len(runtime.course_mode.pending_evidence_batches()) == 1
+    durable = await store.load("device-1", "a1")
+    assert len(durable["pendingEvidenceBatches"]) == 1
+
+
+@pytest.mark.asyncio
 async def test_rejected_consuming_operation_identity_survives_restart() -> None:
     store = MemoryCourseModeSnapshotStore()
     runtime = LessonRuntime(
