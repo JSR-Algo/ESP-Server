@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "contractVersion": "lesson-embodied-action.v1",
+  "capability": {
+    "lessonCourseMode": {
+      "version": 2,
+      "embodiedActions": true,
+      "reducedMotion": false,
+      "faces": [
+        "neutral",
+        "happy",
+        "thinking",
+        "relaxed"
+      ]
+    }
+  },
+  "acceptedFrame": {
+    "type": "lesson_embodied_action",
+    "assignmentId": "assignment-1",
+    "sessionId": "session-1",
+    "stepId": "cat-meaning-left-right-01",
+    "sequence": 17,
+    "body": {
+      "actionId": "session-1:course-decision-1",
+      "actionGeneration": 1,
+      "intent": "PRESENT_LEFT",
+      "visualFocusRegion": "focus.left.choice",
+      "listenWindowPolicy": "complete_before_listening"
+    }
+  },
+  "acceptedCancelFrame": {
+    "type": "lesson_embodied_cancel",
+    "assignmentId": "assignment-1",
+    "sessionId": "session-1",
+    "stepId": "cat-meaning-left-right-01",
+    "sequence": 18,
+    "body": {
+      "actionId": "session-1:course-decision-1",
+      "actionGeneration": 1
+    }
+  },
+  "acceptedAck": {
+    "type": "lesson_ack",
+    "assignmentId": "assignment-1",
+    "sessionId": "session-1",
+    "stepId": "cat-meaning-left-right-01",
+    "sequence": 91,
+    "body": {
+      "acks": 17,
+      "embodiedAction": {
+        "actionId": "session-1:course-decision-1",
+        "actionGeneration": 1,
+        "outcome": "applied",
+        "returnedToRest": true
+      }
+    }
+  },
+  "ackOutcomes": [
+    "applied",
+    "degraded",
+    "rejected"
+  ],
+  "localTerminalOutcomes": [
+    "superseded",
+    "timed_out"
+  ],
+  "focusByIntent": {
+    "PRESENT_CENTER": "focus.center.primary",
+    "PRESENT_LEFT": "focus.left.choice",
+    "PRESENT_RIGHT": "focus.right.choice"
+  },
+  "defaultFocusRegion": "focus.center.primary",
+  "rejectedFrames": [
+    {
+      "reason": "unknownIntent",
+      "mutation": {
+        "body.intent": "WAVE_CUSTOM"
+      }
+    },
+    {
+      "reason": "rawServoField",
+      "mutation": {
+        "body.angle": 90
+      }
+    },
+    {
+      "reason": "staleSession",
+      "mutation": {
+        "sessionId": "old-session"
+      }
+    },
+    {
+      "reason": "staleGeneration",
+      "mutation": {
+        "body.actionGeneration": 0
+      }
+    },
+    {
+      "reason": "assessmentAlreadyOpen",
+      "precondition": {
+        "assessmentWindowOpen": true
+      }
+    }
+  ]
+}

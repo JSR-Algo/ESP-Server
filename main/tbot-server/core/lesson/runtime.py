@@ -87,6 +87,11 @@ from core.lesson.course_orchestrator import (
 from core.lesson.course_response_plan import CourseResponsePlan, CourseResponsePlanError
 from core.lesson.course_snapshot_store import get_course_mode_snapshot_store
 from core.lesson.embodied_intent import EmbodiedIntent
+from core.lesson.embodied_dispatcher import (
+    CourseEmbodiedDispatcher,
+    EmbodiedDispatchResult,
+    EmbodiedDispatchStatus,
+)
 from core.lesson.forwarder import serialize_word_evidence_event
 from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
 from core.utils.util import get_vision_url
@@ -1991,13 +1996,21 @@ class LessonRuntime:
         self.asset_cache = asset_cache
         self.forwarder = forwarder
         lesson_cfg = _lesson_config(getattr(conn, "config", {}) or {})
+        semantic_course_snapshot = (
+            {
+                key: copy.deepcopy(value)
+                for key, value in course_mode_snapshot.items()
+                if key != "embodiedDispatcher"
+            }
+            if isinstance(course_mode_snapshot, dict) else None
+        )
         self.course_mode = course_mode_runtime_from_manifest(
             manifest,
             enabled=lesson_cfg.get("course_mode_v2_enabled") is True,
             assignment_id=self.assignment_id,
             forwarder=forwarder,
             runtime_session_id=self.session_id,
-            authoritative_snapshot=course_mode_snapshot,
+            authoritative_snapshot=semantic_course_snapshot,
             defer_evidence_forwarding=True,
             assessment_state=lambda: {
                 "robotAudioContaminated": bool(
@@ -2029,6 +2042,25 @@ class LessonRuntime:
         self._alarm = alarm
 
         self._seq = 0  # S->F monotonic counter; first emitted frame is sequence 1.
+        self.last_embodied_result: EmbodiedDispatchResult | None = None
+        self._course_assessment_window_open = False
+        self._course_assessment_generation = 0
+        self.course_embodied_dispatcher = (
+            CourseEmbodiedDispatcher(
+                assignment_id=str(self.assignment_id or ""),
+                session_id=self.session_id,
+                step_id=lambda decision: self._step_id or decision.decision_id,
+                features=getattr(conn, "features", None),
+                next_sequence=self._next_seq,
+                send_frame=self._send_course_embodied_frame,
+                snapshot=(
+                    course_mode_snapshot.get("embodiedDispatcher")
+                    if isinstance(course_mode_snapshot, dict) else None
+                ),
+                before_send=self.persist_course_mode_snapshot,
+            )
+            if self.course_mode is not None else None
+        )
         self._outstanding: Dict[int, Dict[str, Any]] = {}  # S->F seq -> {type, stepId}
         self._last_inbound_sequence = 0  # F->S gap detector
         self.state = S_IDLE
@@ -2127,6 +2159,17 @@ class LessonRuntime:
         if self.course_mode is None:
             return {"accepted": False, "code": "COURSE_MODE_NOT_ACTIVE"}
         before = self.course_mode.snapshot()
+        operation_key = (
+            arguments.get("lessonSessionId"),
+            arguments.get("observationId"),
+        )
+        operation_was_recorded = operation_key in self.course_mode._operation_results
+        if (
+            not operation_was_recorded
+            and self.course_mode._identity_error(arguments) is None
+            and self._course_operation_interrupts_motion(name, arguments)
+        ):
+            await self._interrupt_course_embodied_action(name)
         result = await getattr(self.course_mode, name)(arguments)
         if result.get("accepted") is not True:
             if self.course_mode.snapshot() != before:
@@ -2165,7 +2208,113 @@ class LessonRuntime:
             )
             return {"accepted": False, "code": "COURSE_SNAPSHOT_PERSIST_FAILED"}
         await self._flush_course_evidence_outbox()
+        if name == "course_apply_response_plan" and self.course_mode.response_plan_requires_commit(arguments):
+            decision = self.course_mode._decisions.get(arguments.get("decisionId"))
+            if decision is not None:
+                await self._dispatch_course_embodied_decision(decision)
         return result
+
+    @staticmethod
+    def _course_operation_interrupts_motion(name: str, arguments: Dict[str, Any]) -> bool:
+        return bool(
+            (name == "course_observe_child" and (
+                arguments.get("safetyClass") != "normal"
+                or arguments.get("intent") in {"emotional_share", "refusal", "fatigue"}
+            ))
+            or (name == "course_open_context" and arguments.get("branchType") in {
+                "EMOTIONAL_SHARE", "HELP_REQUEST", "REFUSAL", "SAFETY_DISCLOSURE",
+            })
+        )
+
+    async def _send_course_embodied_frame(self, frame: Dict[str, Any]) -> None:
+        payload = json.dumps(frame, ensure_ascii=False)
+        if len(payload.encode("utf-8")) > MAX_LESSON_FRAME_BYTES:
+            raise ValueError("lesson embodied action frame is too large")
+        await self._send(payload)
+
+    async def _dispatch_course_embodied_decision(self, decision: CourseDecision) -> None:
+        dispatcher = self.course_embodied_dispatcher
+        if dispatcher is None:
+            return
+        self._course_assessment_generation += 1
+        self._close_course_assessment_window()
+        result = await dispatcher.dispatch(decision)
+        if result.status is not EmbodiedDispatchStatus.PENDING:
+            self.last_embodied_result = result
+
+    async def _cancel_course_embodied_action(self, reason: str) -> None:
+        dispatcher = self.course_embodied_dispatcher
+        if dispatcher is None or dispatcher.in_flight is None:
+            return
+        self.last_embodied_result = await dispatcher.cancel(reason)
+
+    async def _interrupt_course_embodied_action(self, reason: str) -> None:
+        self._course_assessment_generation += 1
+        self._close_course_assessment_window()
+        await self._cancel_course_embodied_action(reason)
+
+    async def _settle_course_embodied_action(
+        self,
+        decision: CourseDecision | None,
+        *,
+        opens_response_window: bool,
+    ) -> int | None:
+        dispatcher = self.course_embodied_dispatcher
+        action_id = (
+            f"{self.session_id}:{decision.decision_id}"
+            if decision is not None else None
+        )
+        assessment_generation = self._course_assessment_generation
+        if dispatcher is not None and action_id is not None:
+            self.last_embodied_result = await dispatcher.wait_until_listening_safe(action_id)
+        if (
+            decision is not None
+            and self.last_embodied_result is not None
+            and self.last_embodied_result.returned_to_rest
+            and opens_response_window
+            and self._course_assessment_generation == assessment_generation
+        ):
+            return assessment_generation
+        return None
+
+    @property
+    def course_assessment_window_open(self) -> bool:
+        return self._course_assessment_window_open
+
+    async def _open_course_assessment_window(self, assessment_generation: int) -> bool:
+        if self._course_assessment_generation != assessment_generation:
+            return False
+        await self._cancel_course_embodied_action("assessmentOpening")
+        provider = getattr(self.conn, "voice_provider", None)
+        opener = getattr(provider, "open_lesson_child_response_window", None)
+        try:
+            if callable(opener) and await opener() is False:
+                self._course_assessment_window_open = False
+                self._child_response_window_open = False
+                return False
+            if self._course_assessment_generation != assessment_generation:
+                self._close_course_assessment_window()
+                return False
+            self._course_assessment_window_open = True
+            self._child_response_window_open = True
+            return True
+        except Exception as exc:
+            self._course_assessment_window_open = False
+            self._child_response_window_open = False
+            self._log("warning", f"course assessment window failed: {exc}")
+            return False
+
+    def _close_course_assessment_window(self) -> None:
+        self._course_assessment_window_open = False
+        self._child_response_window_open = False
+        provider = getattr(self.conn, "voice_provider", None)
+        closer = getattr(provider, "close_lesson_child_response_window", None)
+        if not callable(closer):
+            return
+        try:
+            closer()
+        except Exception as exc:
+            self._log("warning", f"course assessment window close failed: {exc}")
 
     async def _ack_course_evidence_batch(self, batch: Dict[str, Any]) -> None:
         if self.course_mode is None:
@@ -2215,10 +2364,13 @@ class LessonRuntime:
             or not self.assignment_id
         ):
             return
+        snapshot = self.course_mode.durable_snapshot()
+        if self.course_embodied_dispatcher is not None:
+            snapshot["embodiedDispatcher"] = self.course_embodied_dispatcher.snapshot()
         await self._course_mode_snapshot_store.store(
             self._course_mode_snapshot_device_id,
             self.assignment_id,
-            self.course_mode.durable_snapshot(),
+            snapshot,
         )
 
     async def course_observe_child(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -2240,6 +2392,7 @@ class LessonRuntime:
         rolled_back = self.course_mode.rollback_course_response_plan(arguments)
         if not rolled_back:
             return False
+        await self._interrupt_course_embodied_action("responsePlanRollback")
         try:
             await self.persist_course_mode_snapshot()
         except Exception:
@@ -2258,6 +2411,11 @@ class LessonRuntime:
         if self.course_mode is None:
             return False
         before = self.course_mode.snapshot()
+        decision = self.course_mode._decisions.get(arguments.get("decisionId"))
+        assessment_generation = await self._settle_course_embodied_action(
+            decision,
+            opens_response_window=arguments.get("questionCount") == 1,
+        )
         committed = self.course_mode.commit_course_response_plan(arguments)
         if committed:
             closing = self.course_mode.orchestrator.session_state is SessionState.CLOSING
@@ -2273,6 +2431,8 @@ class LessonRuntime:
                     retry_interrupted_delivery=False,
                 )
                 return False
+            if assessment_generation is not None:
+                await self._open_course_assessment_window(assessment_generation)
             if closing:
                 return await self._complete_course_mode_close()
         return committed
@@ -2570,6 +2730,7 @@ class LessonRuntime:
 
     async def close(self) -> None:
         self._closed = True
+        await self._interrupt_course_embodied_action("runtimeClosed")
         self._emit_teardown_disposition()
         self._clear_conversation_fallback_ack()
         self._cancel_visual_waiters(increment_generation=True, reason="runtimeClosed")
@@ -2930,6 +3091,11 @@ class LessonRuntime:
         )
 
     async def conversation_interrupt_current(self) -> ConversationDecision:
+        if self.course_mode is not None:
+            if self._course_assessment_window_open:
+                return inactive_conversation_decision()
+            await self._interrupt_course_embodied_action("bargeIn")
+            return inactive_conversation_decision()
         conversation = self.conversation
         if conversation is None:
             return inactive_conversation_decision()
@@ -3805,6 +3971,16 @@ class LessonRuntime:
 
     async def _on_lesson_ack_impl(self, msg_json: Dict[str, Any]) -> None:
         if not self._is_active_runtime():
+            return
+        dispatcher = self.course_embodied_dispatcher
+        if dispatcher is not None and dispatcher.is_embodied_ack(msg_json):
+            if (
+                msg_json.get("assignmentId") == self.assignment_id
+                and msg_json.get("sessionId") == self.session_id
+            ):
+                if (await self._accept_inbound(msg_json.get("sequence"))) != "ok":
+                    return
+            await dispatcher.handle_ack(msg_json)
             return
         if await self._resolve_visual_ack(msg_json):
             return
@@ -6519,6 +6695,7 @@ class LessonRuntime:
         return result
 
     async def stop(self) -> None:
+        await self._interrupt_course_embodied_action("stopped")
         if self._cinematic_enabled():
             if self._cinematic_stop_sent or self._cinematic_pending_command is not None:
                 return
@@ -6585,9 +6762,11 @@ class LessonRuntime:
         await self._on_frame_acked(frame, body)
 
     async def on_disconnect(self) -> None:
+        await self._interrupt_course_embodied_action("disconnected")
         self._cancel_visual_waiters(increment_generation=True, reason="disconnected")
 
     async def on_replaced(self) -> None:
+        await self._interrupt_course_embodied_action("replaced")
         self._cancel_visual_waiters(increment_generation=True, reason="replaced")
 
     def _envelope(self, frame_type: str, *, step_id: Optional[str], sequence: int, body: Dict[str, Any]) -> Dict[str, Any]:
