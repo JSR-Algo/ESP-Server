@@ -1,0 +1,54 @@
+from __future__ import annotations
+
+import pytest
+
+from core.lesson.course_response_plan import CourseResponsePlan, CourseResponsePlanError
+
+
+def valid(**overrides):
+    value = {
+        "acknowledgment": "Một bạn mèo trắng ở nhà bà!",
+        "relation": "Robot nghe con kể rồi.",
+        "guidance": "Mình nhìn bạn trong hình nhé.",
+        "invitation": "Trong tiếng Anh, bạn mèo là gì nhỉ?",
+        "questionCount": 1,
+        "embodiedIntent": "ACKNOWLEDGE_STORY",
+        "targetFactsUsed": ["animals.cat", "pet"],
+        "praiseLevel": "engagement",
+        "safetyMode": False,
+        "normalMiss": False,
+    }
+    value.update(overrides)
+    return value
+
+
+def test_normal_plan_is_short_acknowledges_child_and_has_one_question() -> None:
+    plan = CourseResponsePlan.from_mapping(valid(), approved_fact_codes={"animals.cat", "pet"})
+    assert plan.question_count == 1
+    assert plan.acknowledgment.startswith("Một bạn mèo trắng")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        valid(questionCount=2),
+        valid(targetFactsUsed=["unapproved.fact"]),
+        valid(guidance="Sai rồi, cố hơn."),
+        valid(praiseLevel="mastery"),
+        valid(normalMiss=True, embodiedIntent="COMFORT_CALM"),
+        valid(safetyMode=True, guidance="Quay lại từ cat nhé", invitation="Cat là gì?"),
+        {**valid(), "transcript": "raw child text"},
+    ],
+)
+def test_invalid_or_overclaiming_plans_fail_closed(value) -> None:
+    with pytest.raises(CourseResponsePlanError):
+        CourseResponsePlan.from_mapping(value, approved_fact_codes={"animals.cat", "pet"})
+
+
+def test_safety_plan_may_pause_or_comfort_without_target_elicitation() -> None:
+    plan = CourseResponsePlan.from_mapping(valid(
+        acknowledgment="Robot đang nghe đây.", relation="Mình gọi người lớn ở gần nhé.",
+        guidance="Mình tạm dừng.", invitation="Con muốn robot ở yên không?",
+        embodiedIntent="COMFORT_CALM", targetFactsUsed=[], safetyMode=True,
+    ), approved_fact_codes={"animals.cat"})
+    assert plan.safety_mode is True
