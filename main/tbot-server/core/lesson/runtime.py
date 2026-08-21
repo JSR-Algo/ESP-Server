@@ -712,6 +712,7 @@ class CourseModeRuntimeAdapter:
         assessment_state: Callable[[], Dict[str, Any]] | None = None,
         defer_evidence_forwarding: bool = False,
         wall_clock: Callable[[], float] = time.time,
+        retry_interrupted_delivery: bool = True,
     ) -> "CourseModeRuntimeAdapter":
         if snapshot.get("snapshotVersion") != 1:
             raise ValueError("unsupported course mode snapshot")
@@ -754,7 +755,7 @@ class CourseModeRuntimeAdapter:
         value._latest_decision_id = snapshot["latestDecisionId"]
         value._next_turn_sequence_id = snapshot["nextTurnSequenceId"]
         value._response_plan_rollback = copy.deepcopy(snapshot["responsePlanRollback"])
-        if value._response_plan_rollback is not None:
+        if value._response_plan_rollback is not None and retry_interrupted_delivery:
             # An attempted delivery is only trustworthy within the process that made it.
             value._response_plan_rollback["deliveryAttempted"] = False
         if value._response_plan_rollback is not None and type(captured_monotonic) is int and type(captured_wall) is int:
@@ -2127,6 +2128,7 @@ class LessonRuntime:
                 assessment_state=self.course_mode._assessment_state,
                 defer_evidence_forwarding=True,
                 wall_clock=self.course_mode._wall_clock,
+                retry_interrupted_delivery=False,
             )
             return {"accepted": False, "code": "COURSE_SNAPSHOT_PERSIST_FAILED"}
         self.course_mode.flush_pending_evidence()
@@ -2178,6 +2180,7 @@ class LessonRuntime:
                 runtime_session_id=self.session_id,
                 assessment_state=self.course_mode._assessment_state,
                 defer_evidence_forwarding=True, wall_clock=self.course_mode._wall_clock,
+                retry_interrupted_delivery=False,
             )
             return False
         return True
@@ -2185,11 +2188,20 @@ class LessonRuntime:
     async def commit_course_response_plan(self, arguments: Dict[str, Any]) -> bool:
         if self.course_mode is None:
             return False
+        before = self.course_mode.snapshot()
         committed = self.course_mode.commit_course_response_plan(arguments)
         if committed:
             try:
                 await self.persist_course_mode_snapshot()
             except Exception:
+                self.course_mode = CourseModeRuntimeAdapter.restore(
+                    self.course_mode.contract, before, clock=self.course_mode._clock,
+                    assignment_id=self.assignment_id, forwarder=self.forwarder,
+                    runtime_session_id=self.session_id,
+                    assessment_state=self.course_mode._assessment_state,
+                    defer_evidence_forwarding=True, wall_clock=self.course_mode._wall_clock,
+                    retry_interrupted_delivery=False,
+                )
                 return False
         return committed
 
@@ -2209,6 +2221,7 @@ class LessonRuntime:
                 runtime_session_id=self.session_id,
                 assessment_state=self.course_mode._assessment_state,
                 defer_evidence_forwarding=True, wall_clock=self.course_mode._wall_clock,
+                retry_interrupted_delivery=False,
             )
             return False
         return True

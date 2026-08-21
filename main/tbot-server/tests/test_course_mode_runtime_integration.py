@@ -723,8 +723,10 @@ async def test_failed_snapshot_write_after_delivery_does_not_replay_the_plan() -
 
     store.fail = True
     assert await runtime.commit_course_response_plan(plan) is False
+    store.fail = False
     assert (await runtime.course_apply_response_plan(plan))["accepted"] is True
     assert runtime.course_mode.response_plan_requires_delivery(plan) is False
+    assert runtime.course_mode.response_plan_requires_commit(plan) is True
 
 
 @pytest.mark.asyncio
