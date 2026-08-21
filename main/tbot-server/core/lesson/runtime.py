@@ -191,6 +191,13 @@ class CourseModeRuntimeAdapter:
         if lesson_session_id != self.lesson_session_id:
             return {"accepted": False, "code": "LESSON_SESSION_MISMATCH"}
         record = self._operation_results.get((lesson_session_id, arguments.get("observationId")))
+        if (
+            record is None
+            and operation == "course_apply_response_plan"
+            and self._response_plan_rollback is not None
+            and self._response_plan_rollback["arguments"] == arguments
+        ):
+            return copy.deepcopy(self._response_plan_rollback["result"])
         if record is None:
             return None
         if record["operation"] != operation:
@@ -548,6 +555,7 @@ class CourseModeRuntimeAdapter:
             "arguments": dict(arguments),
             "orchestrator": self.orchestrator.snapshot(),
             "result": copy.deepcopy(result),
+            "deliveryAttempted": False,
         }
         self._applied_plan_ids.add(plan_id)
         self._applied_decision_ids.add(decision.decision_id)
@@ -584,7 +592,22 @@ class CourseModeRuntimeAdapter:
 
     def response_plan_requires_delivery(self, arguments: Dict[str, Any]) -> bool:
         rollback = self._response_plan_rollback
+        return bool(
+            rollback is not None
+            and rollback["arguments"] == arguments
+            and rollback.get("deliveryAttempted") is not True
+        )
+
+    def response_plan_requires_commit(self, arguments: Dict[str, Any]) -> bool:
+        rollback = self._response_plan_rollback
         return bool(rollback is not None and rollback["arguments"] == arguments)
+
+    def mark_response_plan_delivery_attempted(self, arguments: Dict[str, Any]) -> bool:
+        rollback = self._response_plan_rollback
+        if rollback is None or rollback["arguments"] != arguments:
+            return False
+        rollback["deliveryAttempted"] = True
+        return True
 
     async def course_continue(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         operation = "course_continue"
@@ -781,12 +804,14 @@ def _course_mode_snapshot_is_terminal(snapshot: Any) -> bool:
     if not isinstance(snapshot, dict):
         return False
     orchestrator = snapshot.get("orchestrator")
-    return bool(
-        isinstance(orchestrator, dict)
-        and orchestrator.get("sessionState") in {
-            SessionState.CLOSING.value,
-            SessionState.COMPLETE.value,
-        }
+    if not isinstance(orchestrator, dict) or orchestrator.get("sessionState") not in {
+        SessionState.CLOSING.value,
+        SessionState.COMPLETE.value,
+    }:
+        return False
+    latest_decision_id = snapshot.get("latestDecisionId")
+    return latest_decision_id is None or latest_decision_id in snapshot.get(
+        "appliedDecisionIds", []
     )
 
 
@@ -2081,7 +2106,10 @@ class LessonRuntime:
         result = await getattr(self.course_mode, name)(arguments)
         if result.get("accepted") is not True:
             return result
-        if name == "course_apply_response_plan":
+        if (
+            name == "course_apply_response_plan"
+            and not self.course_mode.response_plan_requires_commit(arguments)
+        ):
             return result
         try:
             await self.persist_course_mode_snapshot()
@@ -2134,32 +2162,53 @@ class LessonRuntime:
     async def rollback_course_response_plan(self, arguments: Dict[str, Any]) -> bool:
         if self.course_mode is None:
             return False
-        return self.course_mode.rollback_course_response_plan(arguments)
+        before = self.course_mode.snapshot()
+        rolled_back = self.course_mode.rollback_course_response_plan(arguments)
+        if not rolled_back:
+            return False
+        try:
+            await self.persist_course_mode_snapshot()
+        except Exception:
+            self.course_mode = CourseModeRuntimeAdapter.restore(
+                self.course_mode.contract, before, clock=self.course_mode._clock,
+                assignment_id=self.assignment_id, forwarder=self.forwarder,
+                runtime_session_id=self.session_id,
+                assessment_state=self.course_mode._assessment_state,
+                defer_evidence_forwarding=True, wall_clock=self.course_mode._wall_clock,
+            )
+            return False
+        return True
 
     async def commit_course_response_plan(self, arguments: Dict[str, Any]) -> bool:
         if self.course_mode is None:
             return False
-        before = self.course_mode.snapshot()
         committed = self.course_mode.commit_course_response_plan(arguments)
         if committed:
             try:
                 await self.persist_course_mode_snapshot()
             except Exception:
-                restored = CourseModeRuntimeAdapter.restore(
-                    self.course_mode.contract,
-                    before,
-                    clock=self.course_mode._clock,
-                    assignment_id=self.assignment_id,
-                    forwarder=self.forwarder,
-                    runtime_session_id=self.session_id,
-                    assessment_state=self.course_mode._assessment_state,
-                    defer_evidence_forwarding=True,
-                    wall_clock=self.course_mode._wall_clock,
-                )
-                restored.rollback_course_response_plan(arguments)
-                self.course_mode = restored
                 return False
         return committed
+
+    async def mark_response_plan_delivery_attempted(self, arguments: Dict[str, Any]) -> bool:
+        if self.course_mode is None:
+            return False
+        before = self.course_mode.snapshot()
+        marked = self.course_mode.mark_response_plan_delivery_attempted(arguments)
+        if not marked:
+            return False
+        try:
+            await self.persist_course_mode_snapshot()
+        except Exception:
+            self.course_mode = CourseModeRuntimeAdapter.restore(
+                self.course_mode.contract, before, clock=self.course_mode._clock,
+                assignment_id=self.assignment_id, forwarder=self.forwarder,
+                runtime_session_id=self.session_id,
+                assessment_state=self.course_mode._assessment_state,
+                defer_evidence_forwarding=True, wall_clock=self.course_mode._wall_clock,
+            )
+            return False
+        return True
 
     async def course_continue(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return await self._course_operation("course_continue", arguments)

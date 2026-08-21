@@ -244,6 +244,13 @@ async def _execute_course(conn: Any, tool_name: str, arguments: Mapping[str, Any
         delivery_check = getattr(runtime, "response_plan_requires_delivery", None)
         requires_delivery = not callable(delivery_check) or delivery_check(dict(arguments))
         if requires_delivery:
+            mark_attempted = getattr(runtime, "mark_response_plan_delivery_attempted", None)
+            if callable(mark_attempted):
+                marked = mark_attempted(dict(arguments))
+                if inspect.isawaitable(marked):
+                    marked = await marked
+                if marked is False:
+                    return _course_rejected(runtime, "COURSE_SNAPSHOT_PERSIST_FAILED")
             deliver = getattr(provider, "deliver_course_response_plan", None)
             delivered = False
             if callable(deliver):
@@ -268,6 +275,9 @@ async def _execute_course(conn: Any, tool_name: str, arguments: Mapping[str, Any
                 if isinstance(refreshed, Mapping):
                     result["context"] = dict(refreshed)
                 return ActionResponse(action=Action.REQLLM, result=result)
+        commit_check = getattr(runtime, "response_plan_requires_commit", None)
+        requires_commit = not callable(commit_check) or commit_check(dict(arguments))
+        if requires_commit:
             commit = getattr(runtime, "commit_course_response_plan", None)
             if callable(commit):
                 committed = commit(dict(arguments))

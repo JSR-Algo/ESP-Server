@@ -630,12 +630,18 @@ async def test_production_runtime_persists_and_restores_course_snapshot() -> Non
 
     assert restored.session_id == first.session_id
     assert restored.course_mode is not None
-    assert restored.course_mode.snapshot() == first.course_mode.snapshot()
+    restored_snapshot = restored.course_mode.snapshot()
+    first_snapshot = first.course_mode.snapshot()
+    restored_snapshot.pop("startedAtMs")
+    first_snapshot.pop("startedAtMs")
+    restored_snapshot["orchestrator"].pop("startedAtMs")
+    first_snapshot["orchestrator"].pop("startedAtMs")
+    assert restored_snapshot == first_snapshot
     assert await restored.course_apply_response_plan(plan) == await first.course_apply_response_plan(plan)
 
 
 @pytest.mark.asyncio
-async def test_provisional_response_plan_is_not_persisted_before_delivery_commit() -> None:
+async def test_provisional_response_plan_persists_as_retryable_before_delivery() -> None:
     store = MemoryCourseModeSnapshotStore()
     manifest = {"courseModeContract": contract()}
     runtime = LessonRuntime(
@@ -658,28 +664,35 @@ async def test_provisional_response_plan_is_not_persisted_before_delivery_commit
     }
 
     assert (await runtime.course_apply_response_plan(plan))["accepted"] is True
-    assert await store.load("device-1", "a1") == durable_before_plan
+    durable_plan = await store.load("device-1", "a1")
+    assert durable_plan != durable_before_plan
+    assert durable_plan["responsePlanRollback"]["deliveryAttempted"] is False
 
     restored = LessonRuntime(
         _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
         manifest=manifest, asset_cache=object(), forwarder=_Forwarder(),
         course_mode_snapshot_store=store, course_mode_snapshot_device_id="device-1",
-        course_mode_snapshot=durable_before_plan,
+        course_mode_snapshot=durable_plan,
     )
     assert (await restored.course_apply_response_plan(plan))["accepted"] is True
     assert restored.course_mode.response_plan_requires_delivery(plan) is True
 
 
 @pytest.mark.asyncio
-async def test_failed_delivery_commit_restores_the_plan_as_retryable() -> None:
+async def test_failed_snapshot_write_after_delivery_does_not_replay_the_plan() -> None:
     class FailingStore(MemoryCourseModeSnapshotStore):
-        async def store(self, device_id, assignment_id, snapshot) -> None:
-            raise RuntimeError("snapshot unavailable")
+        fail = False
 
+        async def store(self, device_id, assignment_id, snapshot) -> None:
+            if self.fail:
+                raise RuntimeError("snapshot unavailable")
+            await super().store(device_id, assignment_id, snapshot)
+
+    store = FailingStore()
     runtime = LessonRuntime(
         _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
         manifest={"courseModeContract": contract()}, asset_cache=object(),
-        forwarder=_Forwarder(), course_mode_snapshot_store=FailingStore(),
+        forwarder=_Forwarder(), course_mode_snapshot_store=store,
         course_mode_snapshot_device_id="device-1",
     )
     decision = await runtime.course_mode.course_continue({
@@ -696,9 +709,11 @@ async def test_failed_delivery_commit_restores_the_plan_as_retryable() -> None:
     }
 
     assert (await runtime.course_apply_response_plan(plan))["accepted"] is True
+    assert await runtime.mark_response_plan_delivery_attempted(plan) is True
+    store.fail = True
     assert await runtime.commit_course_response_plan(plan) is False
     assert (await runtime.course_apply_response_plan(plan))["accepted"] is True
-    assert runtime.course_mode.response_plan_requires_delivery(plan) is True
+    assert runtime.course_mode.response_plan_requires_delivery(plan) is False
 
 
 @pytest.mark.asyncio
@@ -799,6 +814,30 @@ def test_terminal_snapshot_starts_a_fresh_assignment_execution() -> None:
 
     assert restarted.session_id != finished.session_id
     assert restarted.course_mode.orchestrator.session_state is SessionState.PREPARING
+
+
+@pytest.mark.asyncio
+async def test_closing_snapshot_with_pending_response_resumes_same_execution() -> None:
+    now = [0.0]
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: now[0],
+    )
+    runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
+    now[0] = 540.0
+    decision = await runtime.course_continue({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "pending-close",
+    })
+
+    restored = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest={"courseModeContract": contract()}, asset_cache=object(),
+        forwarder=_Forwarder(), course_mode_snapshot=runtime.durable_snapshot(),
+    )
+
+    assert restored.session_id == runtime.lesson_session_id
+    assert restored.course_mode.orchestrator.session_state is SessionState.CLOSING
+    assert restored.course_mode.tool_context()["pendingDecision"]["decisionId"] == decision["decisionId"]
 
 
 @pytest.mark.asyncio
