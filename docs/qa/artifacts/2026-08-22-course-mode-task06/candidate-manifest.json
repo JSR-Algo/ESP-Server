@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "gate": "course-mode-v2-task-06-runtime-integration-validation",
   "generatedDate": "2026-08-22",
-  "verdict": "RUNTIME_PASS",
-  "authorizesOnPass": "task-07-physical-testing-only",
+  "verdict": "REVIEW_PENDING",
+  "authorizesOnPass": null,
   "candidate": {
     "espSha": "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268",
     "firmwareSha": "d47174daebe17b9c1a9d1a1eb506711a57cd3512",
@@ -33,10 +33,10 @@
     "featureFlagEnabled": false
   },
   "lanes": {
-    "deterministicJourneys": { "verdict": "PASS", "journeyTypes": 22, "explicitExpectedOutcomes": true, "measuredSessionOperations": true, "multiStepFullSessions": true, "iterations": 124692, "sessions": 2743224, "durationSeconds": 60.000406, "failures": 0 },
+    "deterministicJourneys": { "verdict": "PASS", "journeyTypes": 22, "explicitExpectedOutcomes": true, "measuredSessionOperations": true, "multiStepFullSessions": true, "espValidationSha": "985d55ddefdc3fb2ff00e06959929d793b9dceaf", "iterations": 126710, "sessions": 2787620, "durationSeconds": 60.000111, "failures": 0 },
     "runtimeRecoveryPrivacy": { "verdict": "PASS", "espPassed": 304, "espSkipped": 2, "firmwareRuntimePassed": 243, "backendPrivacyPassed": 106 },
     "timing": { "verdict": "PASS", "testsPassed": 82, "actionAckTimeoutSeconds": 2.0, "settleBeforeListenSeconds": 0.25, "sessionSoftDeadlineSeconds": 540, "delayedRecallSimulatedSeconds": 70 },
-    "soakResources": { "verdict": "PASS", "threadDelta": 0, "fdDelta": 0, "heapCurrentDeltaBytes": 544, "maximumRetainedHeapGrowthBytes": 1048576, "heapPeakBytes": 5240, "maximumResidentSetBytes": 70942720 },
+    "soakResources": { "verdict": "PASS", "threadDelta": 0, "fdDelta": 0, "heapCurrentDeltaBytes": 544, "maximumRetainedHeapGrowthBytes": 1048576, "heapPeakBytes": 5240, "maximumResidentSetBytes": 71057408 },
     "visualSampling": { "verdict": "PASS", "cues": 8, "captures": 24, "width": 480, "height": 320, "contactSheetSha256": "6832327aba40098d2bb60bd3f729636b2a858f407c0a9fb62b7c8a07532e553e" },
     "v1AndParity": { "verdict": "PASS", "backendPassed": 130, "espPassed": 169, "vectorSha256": "95e35b3576656c08562d58ac818870fbc4620c9b9ebc1a418fe81a8c861a4ddb" },
     "broadRegression": { "verdict": "PASS", "backendPassed": 5916, "backendSkipped": 643, "firmwarePassed": 1269, "firmwareSkipped": 1, "espPassed": 4117, "espSkipped": 8, "espContentionRerunPassed": 1 },
@@ -54,8 +54,8 @@
     "v1VectorsUnchanged": true
   },
   "artifacts": {
-    "runtimeSoakMetrics": { "path": "metrics/runtime-soak-60s.json", "sha256": "a1ce67323f5fe3d299a60a66548225edb6b7a285dfda37a810448bc85171de8a" },
-    "runtimeSoakLog": { "path": "logs/runtime-soak-60s.log", "sha256": "8d92aa345aef61eff9593a3b7edafa292a5d750c7fce65ea7d4ed521eefb85f5" },
+    "runtimeSoakMetrics": { "path": "metrics/runtime-soak-60s.json", "sha256": "281c3c40faddec5ae1f49d21fc746309427a589b80f5a65b7d1cc59e7015220a" },
+    "runtimeSoakLog": { "path": "logs/runtime-soak-60s.log", "sha256": "c8fa45e80d68b08df6a3246b28ae88fe2701453257b8b2c9ecb72fd26ef6484c" },
     "contactSheet": { "path": "captures/all-cues-contact-sheet.png", "sha256": "6832327aba40098d2bb60bd3f729636b2a858f407c0a9fb62b7c8a07532e553e" },
     "backendFull": { "path": "logs/backend-full-rerun.log", "sha256": "f2206d32ad85a83352f9bac8c9eac2ea2cad49a4d4e0caf1c78c062d564ac9c9" },
     "firmwareFull": { "path": "logs/firmware-full-rerun.log", "sha256": "f9868be44bc921d0f8e3a33580f8ef5370b828e715b6e7962ae49d5651af3b67" },
@@ -103,7 +103,7 @@
     "firmware": "CLEAN",
     "espInitialFindingsAccepted": 3,
     "espBuiltInCommitFindingsAccepted": 2,
-    "espParentFindingsAccepted": 11,
+    "espParentFindingsAccepted": 12,
     "espFinal": "PENDING_REREVIEW"
   }
 }

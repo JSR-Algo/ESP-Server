@@ -1,7 +1,7 @@
 # Course Mode V2 Task 06 Runtime and Integration Validation
 
 Date: 2026-08-22
-Status: `RUNTIME PASS`
+Status: `REVIEW PENDING` (runtime lanes pass; final independent review not yet closed)
 Data policy: synthetic scenarios only; no real-child audio, transcript, profile, or observation data was used.
 
 ## Frozen Candidate
@@ -24,13 +24,13 @@ Validation used task-owned clean worktrees pinned to these SHAs. The owning ESP 
 
 | Lane | Fresh command/evidence | Result |
 | --- | --- | --- |
-| Deterministic full sessions | `python3 scripts/course_mode_task06_runtime_validation.py --backend-root ... --firmware-root ... --iterations 2000 --min-duration-seconds 60 --output .../metrics/runtime-soak-60s.json` | PASS: 22 explicit-outcome, measured multi-step session types; 124,692 iterations; 2,743,224 sessions; 60.000406 s; zero failures |
+| Deterministic full sessions | `python3 scripts/course_mode_task06_runtime_validation.py --backend-root ... --firmware-root ... --esp-validation-sha 985d55dd... --iterations 2000 --min-duration-seconds 60 --output .../metrics/runtime-soak-60s.json` | PASS: 22 explicit-outcome, measured multi-step session types; 126,710 iterations; 2,787,620 sessions; 60.000111 s; zero failures |
 | ESP runtime, reconnect, cache, safety | `python3 -m pytest -q` over Course Mode runtime, embodied dispatcher, forwarder, cache, reconnect, state-machine, and branch-gap suites | PASS: 304 passed, 2 skipped in 62.42 s |
 | Firmware action/ACK/cancel/recovery | native embodied/handler harnesses plus firmware Python runtime suites | PASS: 219 + 2,851 native checks; runtime subset 243 passed; privacy subset 253 passed |
 | Backend manifest/package/privacy/flags | focused Vitest Course Mode, pilot, rollout, ingest, redaction, malformed-contract suites | PASS: focused 107; privacy/security rerun 106 |
 | Timing contracts | `pytest` dispatcher, orchestrator, mastery, and Google Live Course Mode suites | PASS: 82; action ACK timeout 2.0 s, rest settle 0.25 s, soft deadline 540 s, delayed recall at 70 s simulated |
 | Contract parity and V1 fallback | backend vector generation/check plus backend/ESP/firmware consumer suites | PASS: backend 130, ESP 169; vector SHA `95e35b3576656c08562d58ac818870fbc4620c9b9ebc1a418fe81a8c861a4ddb` |
-| Reliability/resource trend | 60-second bounded wall-clock soak with tracemalloc, FD, thread, and process metrics | PASS: thread delta 0, FD delta 0, heap current delta 544 B against a 1 MiB fail-closed bound, heap peak 5,240 B, max RSS 70,942,720 B |
+| Reliability/resource trend | 60-second bounded wall-clock soak with tracemalloc, FD, thread, and process metrics | PASS: thread delta 0, FD delta 0, heap current delta 544 B against a 1 MiB fail-closed bound, heap peak 5,240 B, max RSS 71,057,408 B |
 | Visual sampling | all eight cues sampled at start/middle/end and assembled into a contact sheet | PASS: 24/24 captures at 480x320; no clipping, overlap, unsafe z-order, hidden target, or answer leakage observed |
 | Broad regression | complete repository suites in the frozen worktrees | PASS with one resolved contention event: backend 5,916 passed/643 skipped; firmware 1,269 passed/1 skipped; ESP 4,117 passed/8 skipped and one nginx timing failure that passed alone in 4.70 s |
 | Static/build | backend typecheck, explicit JSON ESLint, Nest build; ESP compileall; firmware native coverage | PASS: ESLint 1,316 files/0 findings; firmware lines 3,467/3,467 (100%) |
@@ -79,7 +79,7 @@ The backend dependency manifests have a pre-existing reproducibility defect: `np
 
 ## Independent Review and Commit Handoff
 
-Three independent read-only reviews covered the complete scoped diffs. Backend and firmware reviews found no actionable issue and confirmed that the fixture changes preserve the original assertions. ESP reviews found that SHA identity was reported but not enforced, the validation test depended on disposable worktree paths, ignored evidence would not be committed, the evidence commit could not rerun its own harness, tracked rename sources and dirty/untracked/ignored runtime paths were not fully rejected, retained heap growth was measured but not gated, special journeys self-baselined, isolated transitions were mislabeled as complete sessions, the reconnect journey closed the pre-restore orchestrator, synthetic markers were counted as operations, and delayed recall bypassed the orchestrator. All findings were fixed: executable validation changes must be committed, only evidence artifacts may remain dirty during regeneration, rename sources and unexpected tracked/untracked/ignored runtime inputs fail the gate, generated caches/dependencies are explicitly inventoried, retained heap growth has a 1 MiB fail-closed bound, every special journey has an explicit expected result, every soak unit records its actual opening, scenario, recovery/bridge, and closing actions, reconnect continues entirely on the restored instance, and delayed recall runs through authored `CourseOrchestrator.observe` activities. Generated visual evidence uses repository-relative paths rather than machine-specific absolute paths. The opt-in cross-repository tests passed, and the final 60-second soak passed with all three runtime trees matching their frozen bases. Security-pattern scans and `git diff --check` were clean.
+Three independent read-only reviews covered the complete scoped diffs. Backend and firmware reviews found no actionable issue and confirmed that the fixture changes preserve the original assertions. ESP reviews found that SHA identity was reported but not enforced, the validation test depended on disposable worktree paths, ignored evidence would not be committed, the evidence commit could not rerun its own harness, tracked rename sources and dirty/untracked/ignored runtime paths were not fully rejected, retained heap growth was measured but not gated, special journeys self-baselined, isolated transitions were mislabeled as complete sessions, the reconnect journey closed the pre-restore orchestrator, synthetic markers were counted as operations, delayed recall bypassed the orchestrator, and executable journey logic was not bound to the reviewed revision. All findings were fixed: executable validation changes must be committed and pinned by `--esp-validation-sha`, only evidence artifacts may change after that pin, rename sources and unexpected tracked/untracked/ignored runtime inputs fail the gate, generated caches/dependencies are explicitly inventoried, retained heap growth has a 1 MiB fail-closed bound, every special journey has an explicit expected result, every soak unit records its actual opening, scenario, recovery/bridge, and closing actions, reconnect continues entirely on the restored instance, and delayed recall runs through authored `CourseOrchestrator.observe` activities. Generated visual evidence uses repository-relative paths rather than machine-specific absolute paths. The opt-in cross-repository tests passed, and the final 60-second soak passed with all three runtime trees matching their frozen bases and ESP executable validation SHA `985d55ddefdc3fb2ff00e06959929d793b9dceaf`. Security-pattern scans and `git diff --check` were clean.
 
 Task-owned branch commits for parent integration:
 
@@ -97,6 +97,6 @@ This is a software runtime gate. It does not prove physical TFT visibility, beze
 
 ## Verdict
 
-`RUNTIME PASS`
+`REVIEW PENDING`
 
-All software runtime gates required by Task 06 passed on the frozen candidate, subject to the explicitly recorded environment limits. This pass authorizes Task 07 physical testing only; it does not authorize production rollout or claim child-learning efficacy.
+All software runtime lanes required by Task 06 passed on the frozen candidate, subject to the explicitly recorded environment limits. Task 07 is not authorized until the final independent ESP review is recorded clean. No production rollout or child-learning efficacy claim is authorized.
