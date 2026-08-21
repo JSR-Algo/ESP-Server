@@ -91,6 +91,29 @@ def test_candidate_revision_rejects_untracked_runtime_file(tmp_path: Path) -> No
     assert revision["runtimeTreeMatchesFrozenCandidate"] is False
 
 
+def test_candidate_revision_rejects_ignored_runtime_config(tmp_path: Path) -> None:
+    driver = load_driver()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "config", "user.email", "task06@example.invalid")
+    git(repo, "config", "user.name", "Task 06")
+    (repo / ".gitignore").write_text(".config.yaml\n", encoding="utf-8")
+    (repo / "runtime.py").write_text("VALUE = 'tracked'\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    (repo / ".config.yaml").write_text("runtime: overridden\n", encoding="utf-8")
+
+    revision = driver.candidate_revision(repo, base, ())
+
+    assert revision["ignoredPaths"] == [".config.yaml"]
+    assert revision["unexpectedIgnoredPaths"] == [".config.yaml"]
+    assert revision["runtimeTreeMatchesFrozenCandidate"] is False
+
+
 def test_task06_driver_emits_cross_repository_soak_evidence(tmp_path: Path) -> None:
     backend_root = os.environ.get("TASK06_BACKEND_ROOT")
     firmware_root = os.environ.get("TASK06_FIRMWARE_ROOT")

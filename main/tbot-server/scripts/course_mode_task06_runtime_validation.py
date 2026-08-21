@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import importlib.util
 import json
@@ -40,6 +41,11 @@ ALLOWED_ESP_EVIDENCE_PATHS = (
 ALLOWED_ESP_DIRTY_PATHS = (
     "docs/qa/artifacts/2026-08-22-course-mode-task06/",
 )
+ALLOWED_ESP_IGNORED_GLOBS = (
+    "**/__pycache__/**",
+    "**/.pytest_cache/**",
+    "main/tbot-server/tmp/server.log",
+)
 ALLOWED_BACKEND_EVIDENCE_PATHS = (
     "src/lessons/authoring/esptft-publish-budget.logic.spec.ts",
     "src/lessons/authoring/lesson-authoring.service.extra-coverage.spec.ts",
@@ -49,6 +55,15 @@ ALLOWED_BACKEND_EVIDENCE_PATHS = (
 ALLOWED_FIRMWARE_EVIDENCE_PATHS = (
     "tests/test_lesson_dispatch_backward_compat.py",
     "tests/test_realtime_voice_state.py",
+)
+ALLOWED_FIRMWARE_IGNORED_GLOBS = (
+    "**/__pycache__/**",
+    "**/.pytest_cache/**",
+    "managed_components/**",
+)
+ALLOWED_BACKEND_IGNORED_GLOBS = (
+    "node_modules/**",
+    "dist/**",
 )
 
 
@@ -69,6 +84,7 @@ def candidate_revision(
     *,
     allowed_dirty_paths: tuple[str, ...] = (),
     allowed_untracked_paths: tuple[str, ...] = (),
+    allowed_ignored_globs: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     head = git_head(root)
     status_rows = subprocess.run(
@@ -78,6 +94,10 @@ def candidate_revision(
     dirty_rows = [row for row in status_rows if not row.startswith("?? ")]
     dirty = [row[3:].split(" -> ")[-1] for row in dirty_rows]
     untracked = [row[3:] for row in status_rows if row.startswith("?? ")]
+    ignored = subprocess.run(
+        ["git", "ls-files", "--others", "--ignored", "--exclude-standard"],
+        cwd=root, check=True, capture_output=True, text=True,
+    ).stdout.splitlines()
     ancestor = subprocess.run(
         ["git", "merge-base", "--is-ancestor", expected_sha, head], cwd=root,
         check=False, capture_output=True, text=True,
@@ -104,6 +124,10 @@ def candidate_revision(
             for allowed in allowed_untracked_paths
         )
     ]
+    unexpected_ignored = [
+        path for path in ignored
+        if not any(fnmatch.fnmatch(path, pattern) for pattern in allowed_ignored_globs)
+    ]
     return {
         "headSha": head,
         "expectedSha": expected_sha,
@@ -113,10 +137,16 @@ def candidate_revision(
         "unexpectedDirtyTrackedPaths": unexpected_dirty,
         "untrackedPaths": untracked,
         "unexpectedUntrackedPaths": unexpected_untracked,
+        "ignoredPaths": ignored,
+        "unexpectedIgnoredPaths": unexpected_ignored,
         "trackedChanges": changed,
         "unexpectedTrackedChanges": unexpected,
         "runtimeTreeMatchesFrozenCandidate": (
-            ancestor and not unexpected_dirty and not unexpected_untracked and not unexpected
+            ancestor
+            and not unexpected_dirty
+            and not unexpected_untracked
+            and not unexpected_ignored
+            and not unexpected
         ),
     }
 
@@ -182,12 +212,19 @@ def main() -> int:
             EXPECTED_ESP_SHA,
             ALLOWED_ESP_EVIDENCE_PATHS,
             allowed_dirty_paths=ALLOWED_ESP_DIRTY_PATHS,
+            allowed_ignored_globs=ALLOWED_ESP_IGNORED_GLOBS,
         ),
         "firmware": candidate_revision(
-            args.firmware_root, EXPECTED_FIRMWARE_SHA, ALLOWED_FIRMWARE_EVIDENCE_PATHS,
+            args.firmware_root,
+            EXPECTED_FIRMWARE_SHA,
+            ALLOWED_FIRMWARE_EVIDENCE_PATHS,
+            allowed_ignored_globs=ALLOWED_FIRMWARE_IGNORED_GLOBS,
         ),
         "backend": candidate_revision(
-            args.backend_root, EXPECTED_BACKEND_SHA, ALLOWED_BACKEND_EVIDENCE_PATHS,
+            args.backend_root,
+            EXPECTED_BACKEND_SHA,
+            ALLOWED_BACKEND_EVIDENCE_PATHS,
+            allowed_ignored_globs=ALLOWED_BACKEND_IGNORED_GLOBS,
         ),
     }
     candidate_shas = {
