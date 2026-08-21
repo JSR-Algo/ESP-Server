@@ -54,6 +54,15 @@ def test_safety_plan_may_pause_or_comfort_without_target_elicitation() -> None:
     assert plan.safety_mode is True
 
 
+def test_safety_plan_rejects_authored_vietnamese_target_meaning() -> None:
+    with pytest.raises(CourseResponsePlanError, match="SAFETY_REDIRECTION"):
+        CourseResponsePlan.from_mapping(valid(
+            acknowledgment="Robot đang nghe đây.", relation="",
+            guidance="Mèo là con vật đáng yêu.", invitation="Con muốn robot ở yên không?",
+            embodiedIntent="COMFORT_CALM", targetFactsUsed=[], safetyMode=True,
+        ), approved_fact_codes={"animals.cat"}, safety_forbidden_terms={"cat", "mèo"})
+
+
 def test_underreported_questions_fail_closed() -> None:
     with pytest.raises(CourseResponsePlanError):
         CourseResponsePlan.from_mapping(

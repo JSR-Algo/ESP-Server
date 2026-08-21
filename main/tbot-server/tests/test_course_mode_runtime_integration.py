@@ -493,6 +493,31 @@ async def test_response_plan_cannot_leak_target_when_decision_forbids_modeling()
 
 
 @pytest.mark.asyncio
+async def test_safety_disclosure_and_authored_meaning_remain_in_protected_pause() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    decision = await runtime.course_open_context({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "safety-disclosure", "branchType": "SAFETY_DISCLOSURE",
+    })
+    result = await runtime.course_apply_response_plan({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 2,
+        "observationId": "safety-plan", "planId": "safety-plan",
+        "decisionId": decision["decisionId"], "acknowledgment": "Robot nghe con.",
+        "relation": "", "guidance": "Mèo là con vật đáng yêu.",
+        "invitation": "Con muốn robot ở yên không?", "questionCount": 1,
+        "embodiedIntent": decision["embodiedIntent"], "targetFactsUsed": [],
+        "praiseLevel": "engagement", "safetyMode": True, "normalMiss": False,
+    })
+
+    assert decision["nextState"] == "SAFETY_PAUSED"
+    assert decision["branchId"] is None
+    assert result == {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+
+
+@pytest.mark.asyncio
 async def test_response_plan_rejects_rejected_decision_and_inactive_target_facts() -> None:
     runtime = course_mode_runtime_from_manifest(
         {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,

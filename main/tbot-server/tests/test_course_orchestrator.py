@@ -78,6 +78,20 @@ def test_context_branch_rejects_unbounded_model_invented_identifiers() -> None:
     assert runtime.session_state is SessionState.CONTEXT_BRANCH
 
 
+def test_safety_disclosure_context_enters_protected_pause_without_story_bridge() -> None:
+    runtime = course()
+
+    decision = runtime.open_context_branch(
+        observation_id="safety-disclosure", turn_sequence_id=1,
+        branch_type="SAFETY_DISCLOSURE",
+    )
+
+    assert decision.action == "PAUSE_FOR_SAFETY"
+    assert decision.next_state is SessionState.SAFETY_PAUSED
+    assert decision.embodied_intent is EmbodiedIntent.COMFORT_CALM
+    assert decision.branch_id is None
+
+
 def test_emotional_safety_refusal_and_fatigue_never_force_vocabulary() -> None:
     for intent, safety, expected_state in (
         ("emotional_share", "normal", SessionState.REGULATION_BREAK),

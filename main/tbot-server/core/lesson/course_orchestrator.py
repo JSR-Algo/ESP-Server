@@ -275,6 +275,13 @@ class CourseOrchestrator:
         if branch_type not in CONTEXT_BRANCH_TYPES:
             return self._decision("INVALID_CONTEXT_BRANCH_IGNORED", accepted=False)
         self._consumed_observations.add(observation_id)
+        if branch_type == "SAFETY_DISCLOSURE":
+            self.session_state = SessionState.SAFETY_PAUSED
+            self._active_branch_id = None
+            return self._decision(
+                "PAUSE_FOR_SAFETY", acknowledgment="acknowledge_safety",
+                embodied=EmbodiedIntent.COMFORT_CALM,
+            )
         self.session_state = SessionState.CONTEXT_BRANCH
         self._active_branch_id = f"branch-{turn_sequence_id}-{observation_id}"
         return self._decision(

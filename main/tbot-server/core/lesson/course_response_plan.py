@@ -42,7 +42,10 @@ class CourseResponsePlan:
         return re.search(pattern, child_facing_text) is not None
 
     @classmethod
-    def from_mapping(cls, value: Any, *, approved_fact_codes: Set[str]) -> "CourseResponsePlan":
+    def from_mapping(
+        cls, value: Any, *, approved_fact_codes: Set[str],
+        safety_forbidden_terms: Set[str] = frozenset(),
+    ) -> "CourseResponsePlan":
         if not isinstance(value, Mapping) or set(value) != _FIELDS:
             raise CourseResponsePlanError("INVALID_FIELDS")
         if type(value["questionCount"]) is not int or not 0 <= value["questionCount"] <= 1:
@@ -66,7 +69,12 @@ class CourseResponsePlan:
         if value["safetyMode"]:
             if embodied not in {EmbodiedIntent.COMFORT_CALM, EmbodiedIntent.PAUSE_CHOICE}:
                 raise CourseResponsePlanError("UNSAFE_SAFETY_INTENT")
-            if facts or any(token in text for token in ("cat", "ball", "tiếng anh")):
+            forbidden_terms = {"cat", "ball", "tiếng anh", *safety_forbidden_terms}
+            if facts or any(
+                re.search(rf"(?<!\w){re.escape(term.casefold())}(?!\w)", text)
+                for term in forbidden_terms
+                if isinstance(term, str) and term.strip()
+            ):
                 raise CourseResponsePlanError("SAFETY_REDIRECTION")
         return cls(
             *(str(value[key]) for key in ("acknowledgment", "relation", "guidance", "invitation")),

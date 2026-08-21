@@ -134,6 +134,7 @@ class WordMastery:
         eligible = (
             successful and assessment_eligible and confidence_band == "high"
             and self.answer_leakage.independent_eligible(now_ms)
+            and self.answer_leakage.intervening_activity_count >= 1
         )
         if self._meaning and self._independent and self._transfer and eligible:
             self._delayed = True

@@ -297,17 +297,27 @@ class CourseModeRuntimeAdapter:
             key: value for key, value in arguments.items()
             if key not in {"lessonSessionId", "turnSequenceId", "observationId", "planId", "decisionId"}
         }
-        approved_facts = {self.orchestrator.active_target_id}
-        try:
-            plan = CourseResponsePlan.from_mapping(plan_fields, approved_fact_codes=approved_facts)
-        except CourseResponsePlanError:
-            return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
-        if plan.embodied_intent is not decision.embodied_intent:
-            return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
         active_target = next(
             target for target in (self.contract.primary, self.contract.secondary)
             if target is not None and target.target_id == self.orchestrator.active_target_id
         )
+        approved_facts = {active_target.target_id}
+        safety_terms = {active_target.target_word, *active_target.vietnamese_meanings}
+        safety_terms.update(
+            meaning.split()[-1]
+            for meaning in active_target.vietnamese_meanings
+            if meaning.split()
+        )
+        try:
+            plan = CourseResponsePlan.from_mapping(
+                plan_fields,
+                approved_fact_codes=approved_facts,
+                safety_forbidden_terms=safety_terms,
+            )
+        except CourseResponsePlanError:
+            return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+        if plan.embodied_intent is not decision.embodied_intent:
+            return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
         if not decision.may_model_target and plan.contains_target_word(active_target.target_word):
             return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
         protected_decision = decision.next_state in {

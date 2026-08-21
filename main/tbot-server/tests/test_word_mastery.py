@@ -49,6 +49,25 @@ def test_mastery_requires_meaning_independent_transfer_delayed_and_confidence() 
     assert result.level is EvidenceLevel.MASTERED_TODAY
 
 
+def test_delayed_recall_requires_an_intervening_activity_without_prior_model() -> None:
+    mastery = WordMastery(target_id="animals.cat")
+    mastery.record_meaning(evidence_id="m", activity_id="meaning", context_id="choice")
+    mastery.record_speech(
+        evidence_id="r", activity_id="recall", context_id="visual", now_ms=1_000,
+        semantic_class="target_en", speech_class="exact", assessment_eligible=True,
+        confidence_band="high",
+    )
+    mastery.record_transfer(evidence_id="t", activity_id="transfer", context_id="scene")
+
+    result = mastery.record_delayed_recall(
+        evidence_id="d", activity_id="delayed", context_id="callback", now_ms=1_001,
+        assessment_eligible=True, confidence_band="high",
+    )
+
+    assert result.level is EvidenceLevel.TRANSFERRED
+    assert result.review_needed is True
+
+
 def test_ineligible_low_confidence_contaminated_visible_duplicate_or_stale_never_advances() -> None:
     mastery = WordMastery(target_id="animals.cat")
     mastery.record_model(now_ms=1_000)
