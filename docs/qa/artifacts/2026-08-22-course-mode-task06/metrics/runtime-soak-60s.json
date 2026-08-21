@@ -1,7 +1,7 @@
 {
   "candidate": {
     "backendSha": "1920586d48e5448dcf653dbfa2391c7ef346fcd9",
-    "espSha": "2c6e2309ec81f7214838084ff3908100d68c2571",
+    "espSha": "54f6854d0545dd95f0f69b3f22bc6fb108a47e81",
     "expectedShas": {
       "backendSha": "657474ff3b58fba2c3c31f2978d53370ffad8b11",
       "espSha": "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268",
@@ -33,7 +33,9 @@
         ],
         "trackedWorktreeClean": true,
         "unexpectedDirtyTrackedPaths": [],
-        "unexpectedTrackedChanges": []
+        "unexpectedTrackedChanges": [],
+        "unexpectedUntrackedPaths": [],
+        "untrackedPaths": []
       },
       "esp": {
         "dirtyTrackedPaths": [
@@ -41,7 +43,7 @@
         ],
         "expectedIsAncestor": true,
         "expectedSha": "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268",
-        "headSha": "2c6e2309ec81f7214838084ff3908100d68c2571",
+        "headSha": "54f6854d0545dd95f0f69b3f22bc6fb108a47e81",
         "runtimeTreeMatchesFrozenCandidate": true,
         "trackedChanges": [
           ".gitattributes",
@@ -87,11 +89,14 @@
           "docs/qa/artifacts/2026-08-22-course-mode-task06/metrics/runtime-soak-60s.json",
           "docs/qa/artifacts/2026-08-22-course-mode-task06/metrics/runtime-soak.json",
           "main/tbot-server/scripts/course_mode_task06_runtime_validation.py",
+          "main/tbot-server/tests/test_course_mode_e2e_journeys.py",
           "main/tbot-server/tests/test_course_mode_task06_validation_script.py"
         ],
         "trackedWorktreeClean": false,
         "unexpectedDirtyTrackedPaths": [],
-        "unexpectedTrackedChanges": []
+        "unexpectedTrackedChanges": [],
+        "unexpectedUntrackedPaths": [],
+        "untrackedPaths": []
       },
       "firmware": {
         "dirtyTrackedPaths": [],
@@ -105,14 +110,16 @@
         ],
         "trackedWorktreeClean": true,
         "unexpectedDirtyTrackedPaths": [],
-        "unexpectedTrackedChanges": []
+        "unexpectedTrackedChanges": [],
+        "unexpectedUntrackedPaths": [],
+        "untrackedPaths": []
       }
     },
     "runtimeTreesMatchFrozenCandidate": true,
     "semanticChecksum": "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264"
   },
   "dataPolicy": "synthetic-no-child-data",
-  "generatedAtUtc": "2026-08-21T22:26:06Z",
+  "generatedAtUtc": "2026-08-21T22:36:44Z",
   "journeys": {
     "journeyCount": 22,
     "names": [
@@ -144,7 +151,7 @@
     "fdAfter": 4,
     "fdBefore": 4,
     "fdDelta": 0,
-    "heapCurrentDeltaBytes": 208,
+    "heapCurrentDeltaBytes": 136,
     "heapPeakBytes": 4880,
     "maximumRetainedHeapGrowthBytes": 1048576,
     "threadAfter": 1,
@@ -153,12 +160,12 @@
   },
   "schemaVersion": 1,
   "soak": {
-    "durationSeconds": 60.000015,
+    "durationSeconds": 60.000031,
     "failureDetails": [],
     "failures": 0,
-    "iterations": 159927,
+    "iterations": 148144,
     "minimumIterations": 2000,
-    "sessions": 3518394
+    "sessions": 3259168
   },
   "verdict": "PASS",
   "visuals": {
