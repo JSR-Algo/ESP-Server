@@ -1,7 +1,7 @@
 {
   "candidate": {
     "backendSha": "1920586d48e5448dcf653dbfa2391c7ef346fcd9",
-    "espSha": "fb6c13eb45534421fa85a65d6c5aa740822473fd",
+    "espSha": "de9ff9ae9f9d78aed06ada4469fcbdd7bb452750",
     "expectedShas": {
       "backendSha": "657474ff3b58fba2c3c31f2978d53370ffad8b11",
       "espSha": "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268",
@@ -41,12 +41,11 @@
       },
       "esp": {
         "dirtyTrackedPaths": [
-          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/runtime-soak-60s.log",
-          "docs/qa/artifacts/2026-08-22-course-mode-task06/metrics/runtime-soak-60s.json"
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/runtime-soak-60s.log"
         ],
         "expectedIsAncestor": true,
         "expectedSha": "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268",
-        "headSha": "fb6c13eb45534421fa85a65d6c5aa740822473fd",
+        "headSha": "de9ff9ae9f9d78aed06ada4469fcbdd7bb452750",
         "ignoredPathCount": 496,
         "runtimeTreeMatchesFrozenCandidate": true,
         "trackedChanges": [
@@ -126,7 +125,7 @@
     "semanticChecksum": "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264"
   },
   "dataPolicy": "synthetic-no-child-data",
-  "generatedAtUtc": "2026-08-21T22:47:05Z",
+  "generatedAtUtc": "2026-08-21T22:53:11Z",
   "journeys": {
     "journeyCount": 22,
     "names": [
@@ -158,8 +157,8 @@
     "fdAfter": 4,
     "fdBefore": 4,
     "fdDelta": 0,
-    "heapCurrentDeltaBytes": 136,
-    "heapPeakBytes": 4880,
+    "heapCurrentDeltaBytes": 402,
+    "heapPeakBytes": 5221,
     "maximumRetainedHeapGrowthBytes": 1048576,
     "threadAfter": 1,
     "threadBefore": 1,
@@ -167,12 +166,12 @@
   },
   "schemaVersion": 1,
   "soak": {
-    "durationSeconds": 60.000208,
+    "durationSeconds": 60.000114,
     "failureDetails": [],
     "failures": 0,
-    "iterations": 147188,
+    "iterations": 132511,
     "minimumIterations": 2000,
-    "sessions": 3238136
+    "sessions": 2915242
   },
   "verdict": "PASS",
   "visuals": {
