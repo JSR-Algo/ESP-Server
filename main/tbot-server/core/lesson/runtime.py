@@ -277,6 +277,8 @@ class CourseModeRuntimeAdapter:
         decision = self._decisions.get(arguments["decisionId"])
         if decision is None:
             return {"accepted": False, "code": "UNKNOWN_DECISION"}
+        if not decision.accepted:
+            return {"accepted": False, "code": "REJECTED_DECISION"}
         if decision.decision_id in self._applied_decision_ids:
             return {"accepted": False, "code": "DECISION_ALREADY_APPLIED"}
         if decision.decision_id != self._latest_decision_id:
@@ -285,11 +287,7 @@ class CourseModeRuntimeAdapter:
             key: value for key, value in arguments.items()
             if key not in {"lessonSessionId", "turnSequenceId", "observationId", "planId", "decisionId"}
         }
-        approved_facts = {
-            target.target_id
-            for target in (self.contract.primary, self.contract.secondary)
-            if target is not None
-        }
+        approved_facts = {self.orchestrator.active_target_id}
         try:
             plan = CourseResponsePlan.from_mapping(plan_fields, approved_fact_codes=approved_facts)
         except CourseResponsePlanError:

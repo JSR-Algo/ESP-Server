@@ -162,19 +162,66 @@ COURSE_MODE_TOOL_SPECS = {
 }
 
 
+def _course_value_matches_schema(value: Any, schema: Mapping[str, Any]) -> bool:
+    value_type = schema.get("type")
+    if value_type == "string":
+        valid = isinstance(value, str)
+    elif value_type == "integer":
+        valid = type(value) is int
+    elif value_type == "boolean":
+        valid = type(value) is bool
+    elif value_type == "array":
+        valid = isinstance(value, list) and all(
+            _course_value_matches_schema(item, schema.get("items", {}))
+            for item in value
+        )
+    else:
+        valid = False
+    if not valid:
+        return False
+    if "enum" in schema and value not in schema["enum"]:
+        return False
+    if type(value) is int:
+        if "minimum" in schema and value < schema["minimum"]:
+            return False
+        if "maximum" in schema and value > schema["maximum"]:
+            return False
+    return True
+
+
+def _course_arguments_valid(tool_name: str, arguments: Mapping[str, Any]) -> bool:
+    parameters = COURSE_MODE_TOOL_SPECS[tool_name]["function"]["parameters"]
+    properties = parameters["properties"]
+    return set(arguments) == set(parameters["required"]) and all(
+        _course_value_matches_schema(arguments[key], properties[key])
+        for key in parameters["required"]
+    )
+
+
+def _course_rejected(runtime: Any, code: str) -> ActionResponse:
+    response = dict(_rejected(code).result)
+    snapshot = getattr(runtime, "conversation_tool_context", None)
+    context = snapshot() if callable(snapshot) else None
+    if isinstance(context, Mapping):
+        response["context"] = dict(context)
+    return ActionResponse(action=Action.REQLLM, result=response)
+
+
 async def _execute_course(conn: Any, tool_name: str, arguments: Mapping[str, Any]):
     runtime, rejected = _runtime(conn)
     if rejected is not None:
         return rejected
     if getattr(runtime, "course_mode_active", False) is not True:
         return _rejected("COURSE_MODE_NOT_ACTIVE")
-    required = COURSE_MODE_TOOL_SPECS[tool_name]["function"]["parameters"]["required"]
-    if set(arguments) != set(required):
-        return _rejected("INVALID_TOOL_ARGS")
+    if not _course_arguments_valid(tool_name, arguments):
+        return _course_rejected(runtime, "INVALID_TOOL_ARGS")
     operation = getattr(runtime, tool_name, None)
     if not callable(operation):
         return _rejected("COURSE_OPERATION_NOT_AVAILABLE")
-    result = await operation(dict(arguments))
+    try:
+        result = await operation(dict(arguments))
+    except (TypeError, ValueError):
+        return _course_rejected(runtime, "INVALID_TOOL_ARGS")
     snapshot = getattr(runtime, "conversation_tool_context", None)
     context = snapshot() if callable(snapshot) else None
     if isinstance(result, Mapping) and isinstance(context, Mapping):

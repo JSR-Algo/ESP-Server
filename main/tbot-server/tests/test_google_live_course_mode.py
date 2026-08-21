@@ -113,13 +113,36 @@ async def test_stale_generation_extra_args_and_v1_runtime_fail_closed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_malformed_course_argument_values_fail_closed_with_refreshed_context() -> None:
+    conn = Conn()
+    required = COURSE_MODE_TOOL_SPECS["course_observe_child"]["function"]["parameters"]["required"]
+    args = {
+        key: ({
+            "turnSequenceId": 1,
+            "assessmentEligible": True,
+            "robotAudioContaminated": False,
+            "targetTextVisible": False,
+        }.get(key, "x"))
+        for key in required
+    }
+    args["observationId"] = []
+
+    with _google_live_lesson_tool_admission(conn.voice_provider, 4):
+        response = await course_observe_child(conn, **args)
+
+    assert response.result["code"] == "INVALID_TOOL_ARGS"
+    assert response.result["context"] == conn.lesson_runtime.conversation_tool_context()
+
+
+@pytest.mark.asyncio
 async def test_all_advertised_operations_route_to_active_runtime() -> None:
     conn = Conn()
     identity = {"lessonSessionId": "s1", "turnSequenceId": 1, "observationId": "o1"}
     calls = (
         (course_open_context, {**identity, "branchType": "RELATED_STORY"}, "open"),
         (course_close_context, {
-            **identity, "branchId": "b1", "bridgeIntent": "bridge", "childDetailCode": "detail",
+            **identity, "branchId": "b1", "bridgeIntent": "white_cat_visual",
+            "childDetailCode": "grandmother_pet",
         }, "close"),
         (course_apply_response_plan, {
             **identity, "planId": "p1", "decisionId": "d1",

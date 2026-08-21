@@ -344,6 +344,47 @@ async def test_response_plan_must_pass_fail_closed_validator() -> None:
 
 
 @pytest.mark.asyncio
+async def test_response_plan_rejects_rejected_decision_and_inactive_target_facts() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    rejected = await runtime.course_observe_child({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "invalid-activity", "semanticClass": "target_en",
+        "speechClass": "exact", "language": "en", "intent": "answer",
+        "engagement": "engaged", "safetyClass": "normal", "assessmentEligible": True,
+        "confidenceBand": "high", "activityId": "invented", "contextId": "invented",
+        "robotAudioContaminated": False, "targetTextVisible": False,
+    })
+
+    common = {
+        "lessonSessionId": runtime.lesson_session_id,
+        "acknowledgment": "Robot heard you.", "relation": "We can learn.",
+        "guidance": "Look at the picture.", "invitation": "Ready?", "questionCount": 1,
+        "embodiedIntent": rejected["embodiedIntent"], "praiseLevel": "engagement",
+        "safetyMode": False, "normalMiss": False,
+    }
+    rejected_plan = await runtime.course_apply_response_plan({
+        **common, "turnSequenceId": 2, "observationId": "rejected-plan",
+        "planId": "rejected-plan", "decisionId": rejected["decisionId"],
+        "targetFactsUsed": ["animals.cat"],
+    })
+    active = await runtime.course_continue({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 3,
+        "observationId": "active-decision",
+    })
+    inactive_fact_plan = await runtime.course_apply_response_plan({
+        **common, "turnSequenceId": 4, "observationId": "inactive-fact-plan",
+        "planId": "inactive-fact-plan", "decisionId": active["decisionId"],
+        "embodiedIntent": active["embodiedIntent"], "targetFactsUsed": ["toys.ball"],
+    })
+
+    assert rejected_plan == {"accepted": False, "code": "REJECTED_DECISION"}
+    assert inactive_fact_plan == {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+
+
+@pytest.mark.asyncio
 async def test_safety_decision_rejects_plan_that_claims_normal_teaching_mode() -> None:
     runtime = course_mode_runtime_from_manifest(
         {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
