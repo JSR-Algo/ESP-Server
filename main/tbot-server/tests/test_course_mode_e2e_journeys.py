@@ -61,6 +61,20 @@ def observe(value: CourseOrchestrator, row: dict, observation_id: str = "o1", no
     ))
 
 
+def observe_activity(
+    value: CourseOrchestrator, *, observation_id: str, activity_id: str, context_id: str,
+    now_ms: int, semantic_class: str = "target_en", speech_class: str = "exact",
+):
+    return value.observe(ChildObservation(
+        observation_id=observation_id, turn_sequence_id=1,
+        semantic_class=semantic_class, speech_class=speech_class,
+        language="vi", intent="answer", engagement="engaged", safety_class="normal",
+        assessment_eligible=True, confidence_band="high", activity_id=activity_id,
+        context_id=context_id, now_ms=now_ms, robot_audio_contaminated=False,
+        target_text_visible=False,
+    ))
+
+
 def test_fixture_covers_all_required_deterministic_child_journeys_without_real_child_data() -> None:
     required = {
         "knows word early", "repetition only", "Vietnamese answer", "partial speech", "silence",
@@ -99,6 +113,7 @@ def test_all_soak_journeys_reach_a_closing_session_state() -> None:
         ), row["name"]
         assert result["steps"] == len(result["operations"]), row["name"]
         assert result["steps"] >= 4, row["name"]
+        assert not any(action.startswith("RUN_SCENARIO:") for action in result["operations"])
         assert result["initialOutcome"] == EXPECTED_OUTCOMES[row["name"]], row["name"]
 
 
@@ -129,22 +144,42 @@ def test_reconnect_soak_continues_on_the_restored_orchestrator(monkeypatch) -> N
     assert all(value is restored_instances[0] for value in advanced_instances)
 
 
+def test_delayed_recall_journeys_use_orchestrator_observations(monkeypatch) -> None:
+    activity_ids = []
+    original_observe = CourseOrchestrator.observe
+
+    def tracking_observe(self, observation):
+        activity_ids.append(observation.activity_id)
+        return original_observe(self, observation)
+
+    monkeypatch.setattr(CourseOrchestrator, "observe", tracking_observe)
+
+    row = next(row for row in JOURNEYS if row["name"] == "delayed recall success")
+    assert _run(row) == EXPECTED_OUTCOMES[row["name"]]
+    assert activity_ids == [
+        "cat-meaning-left-right-01",
+        "cat-recall-visual-02",
+        "cat-transfer-scene-01",
+        "cat-delayed-recall-01",
+    ]
+
+
 def _run_full_session(row: dict) -> dict:
     value = CourseOrchestrator(CONTRACT, started_at_ms=0, soft_deadline_ms=540_000)
     operations = [
         value.begin().action,
         value.continue_opening().action,
         value.continue_opening().action,
-        f"RUN_SCENARIO:{row['name']}",
     ]
-    initial, value = _run_scenario(row, value)
+    initial, value, scenario_operations = _run_scenario(row, value)
+    operations.extend(scenario_operations)
     if value.session_state.value == "CONTEXT_BRANCH":
-        value.close_context_branch(
+        decision = value.close_context_branch(
             branch_id=value.snapshot()["activeBranchId"],
             bridge_intent="white_cat_visual",
             child_detail_code="no_personal_detail",
         )
-        operations.append("RETURN_THROUGH_AUTHORED_BRIDGE")
+        operations.append(decision.action)
     if value.session_state.value in {"REGULATION_BREAK", "SAFETY_PAUSED"}:
         decision = value.observe(ChildObservation(
             observation_id=f"close-{row['name']}", turn_sequence_id=99,
@@ -181,7 +216,7 @@ def _run_full_session(row: dict) -> dict:
 
 def _run(row: dict, *, value: CourseOrchestrator | None = None):
     value = value or runtime()
-    result, _ = _run_scenario(row, value)
+    result, _, _ = _run_scenario(row, value)
     return result
 
 
@@ -191,42 +226,60 @@ def _run_scenario(row: dict, value: CourseOrchestrator):
     special = row.get("special")
     if special == "restore":
         restored = CourseOrchestrator.restore(CONTRACT, value.snapshot())
-        return (restored.session_state.value, restored.pending_effects), restored
+        return (restored.session_state.value, restored.pending_effects), restored, ("RESTORE_SNAPSHOT",)
     if special == "duplicate":
         first = observe(value, row)
         second = observe(value, row)
-        return (first.accepted, second.accepted, second.action), value
+        return (first.accepted, second.accepted, second.action), value, (first.action, second.action)
     if special == "deadline":
         decision = observe(value, row, now_ms=541_000)
-        return (decision.action, value.active_target_id), value
+        return (decision.action, value.active_target_id), value, (decision.action,)
     if special == "secondary":
         value.active_mastery.level = EvidenceLevel.MASTERED_TODAY
         decision = value.maybe_advance_target(now_ms=200_000)
-        return (decision.action, value.active_target_id), value
+        return (decision.action, value.active_target_id), value, (decision.action,)
     if special == "bridge":
         opened = observe(value, {"semantic": "related", "intent": "story"})
         closed = value.close_context_branch(
             branch_id=opened.branch_id, bridge_intent="white_cat_visual", child_detail_code="grandmother_pet",
         )
-        return (opened.action, closed.action, closed.teaching_intent), value
+        return (opened.action, closed.action, closed.teaching_intent), value, (opened.action, closed.action)
     if special in {"delayed_success", "delayed_failure"}:
         mastery = value.active_mastery
-        mastery.record_meaning(evidence_id="m", activity_id="meaning", context_id="choice")
-        mastery.record_model(now_ms=1_000); mastery.record_intervening_activity()
-        mastery.record_speech(
-            evidence_id="r", activity_id="recall", context_id="visual", now_ms=30_000,
-            semantic_class="target_en", speech_class="exact", assessment_eligible=True, confidence_band="high",
+        meaning = observe_activity(
+            value, observation_id="m", activity_id="cat-meaning-left-right-01",
+            context_id="cat_dog_visual_contrast", now_ms=1_000,
+            semantic_class="meaning_vi", speech_class="not_applicable",
         )
-        mastery.record_transfer(evidence_id="t", activity_id="transfer", context_id="scene")
-        result = mastery.record_delayed_recall(
-            evidence_id="d", activity_id="delayed", context_id="callback", now_ms=70_000,
-            assessment_eligible=special == "delayed_success", confidence_band="high",
+        mastery.record_model(now_ms=1_000)
+        mastery.record_intervening_activity()
+        recall = observe_activity(
+            value, observation_id="r", activity_id="cat-recall-visual-02",
+            context_id="cat_primary_visual_recall", now_ms=30_000,
         )
-        return (result.level.value, result.review_needed), value
+        transfer = observe_activity(
+            value, observation_id="t", activity_id="cat-transfer-scene-01",
+            context_id="cat_second_visual_scene", now_ms=50_000,
+        )
+        delayed = observe_activity(
+            value, observation_id="d", activity_id="cat-delayed-recall-01",
+            context_id="cat_delayed_callback", now_ms=70_000,
+            semantic_class="target_en" if special == "delayed_success" else "unknown",
+            speech_class="exact" if special == "delayed_success" else "silence",
+        )
+        return (
+            (mastery.level.value, bool(delayed.evidence_event and delayed.evidence_event["reviewNeeded"])),
+            value,
+            (meaning.action, recall.action, transfer.action, delayed.action),
+        )
     decision = observe(value, row)
     assert decision.action == row["expectedAction"], row["name"]
     if row["name"] in {"repetition only", "visible answer text"}:
         assert value.active_mastery.level is not EvidenceLevel.INDEPENDENT_RECALL
     if row["name"] in {"emotional share", "safety pause"}:
         assert decision.question_intent not in {"elicit_target", "recall_target"}
-    return (decision.action, decision.next_state.value, value.active_mastery.level.value), value
+    return (
+        (decision.action, decision.next_state.value, value.active_mastery.level.value),
+        value,
+        (decision.action,),
+    )
