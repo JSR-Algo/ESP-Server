@@ -1,13 +1,13 @@
 {
   "candidate": {
-    "backendSha": "657474ff3b58fba2c3c31f2978d53370ffad8b11",
-    "espSha": "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268",
+    "backendSha": "1920586d48e5448dcf653dbfa2391c7ef346fcd9",
+    "espSha": "78a41f2fce06ad5bfea303d1302917a0301054da",
     "expectedShas": {
       "backendSha": "657474ff3b58fba2c3c31f2978d53370ffad8b11",
       "espSha": "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268",
       "firmwareSha": "d47174daebe17b9c1a9d1a1eb506711a57cd3512"
     },
-    "firmwareSha": "d47174daebe17b9c1a9d1a1eb506711a57cd3512",
+    "firmwareSha": "df70b5a12c68f5a6ab07f981cb7c10113e7dbc01",
     "fixtureCopiesEqual": true,
     "fixtureSha256": "05e18ae61aee0660c653a9386854552a23f90c8a1f8cfb9e7ff4e15d1d277470",
     "layoutChecksum": "e61b56d1f8219a86c7f3986e7d5c70b91f512286604b5b206ef11e2c989d275c",
@@ -18,11 +18,101 @@
       "status": "draft"
     },
     "rendererId": "teebot-lesson-renderer.v4",
-    "semanticChecksum": "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264",
-    "shasMatchFrozenCandidate": true
+    "revisions": {
+      "backend": {
+        "dirtyTrackedPaths": [],
+        "expectedIsAncestor": true,
+        "expectedSha": "657474ff3b58fba2c3c31f2978d53370ffad8b11",
+        "headSha": "1920586d48e5448dcf653dbfa2391c7ef346fcd9",
+        "runtimeTreeMatchesFrozenCandidate": true,
+        "trackedChanges": [
+          "src/lessons/authoring/esptft-publish-budget.logic.spec.ts",
+          "src/lessons/authoring/lesson-authoring.service.extra-coverage.spec.ts",
+          "src/lessons/lesson-manifest.per-profile-checksum.spec.ts",
+          "src/lessons/lesson-manifest.shared-assets.spec.ts"
+        ],
+        "trackedWorktreeClean": true,
+        "unexpectedDirtyTrackedPaths": [],
+        "unexpectedTrackedChanges": []
+      },
+      "esp": {
+        "dirtyTrackedPaths": [
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/runtime-soak-60s.log"
+        ],
+        "expectedIsAncestor": true,
+        "expectedSha": "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268",
+        "headSha": "78a41f2fce06ad5bfea303d1302917a0301054da",
+        "runtimeTreeMatchesFrozenCandidate": true,
+        "trackedChanges": [
+          ".gitattributes",
+          ".gitignore",
+          "docs/qa/ad-hoc/2026-08-22-course-mode-task06-runtime-validation.md",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/candidate-manifest.json",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/captures/all-cues-contact-sheet.png",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/backend-deterministic-regeneration.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/backend-focused.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/backend-full-rerun.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/backend-full.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/backend-npm-ci.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/backend-pnpm-install-no-lockfile.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/backend-precommit-verification.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/backend-prisma-generate.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/backend-privacy-security-rerun.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/backend-privacy-security.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/backend-regression-fixes.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/backend-runtime-privacy-flags.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/backend-static-build-parity.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/candidate-flags-identity.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/esp-focused.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/esp-full.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/esp-nginx-timeout-rerun.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/esp-precommit-verification.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/esp-protected-main-independent.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/esp-runtime-recovery-privacy.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/esp-safety-security-expanded.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/esp-static-parity-v1.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/esp-task06-harness-review-rerun.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/esp-timing-contracts.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/firmware-focused.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/firmware-full-rerun.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/firmware-full.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/firmware-native-coverage.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/firmware-precommit-verification.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/firmware-privacy-security.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/firmware-regression-fixes.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/firmware-runtime-recovery-v1.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/runtime-soak-60s.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/runtime-soak.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/metrics/backend-eslint.json",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/metrics/runtime-soak-60s.json",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/metrics/runtime-soak.json",
+          "main/tbot-server/scripts/course_mode_task06_runtime_validation.py",
+          "main/tbot-server/tests/test_course_mode_task06_validation_script.py"
+        ],
+        "trackedWorktreeClean": false,
+        "unexpectedDirtyTrackedPaths": [],
+        "unexpectedTrackedChanges": []
+      },
+      "firmware": {
+        "dirtyTrackedPaths": [],
+        "expectedIsAncestor": true,
+        "expectedSha": "d47174daebe17b9c1a9d1a1eb506711a57cd3512",
+        "headSha": "df70b5a12c68f5a6ab07f981cb7c10113e7dbc01",
+        "runtimeTreeMatchesFrozenCandidate": true,
+        "trackedChanges": [
+          "tests/test_lesson_dispatch_backward_compat.py",
+          "tests/test_realtime_voice_state.py"
+        ],
+        "trackedWorktreeClean": true,
+        "unexpectedDirtyTrackedPaths": [],
+        "unexpectedTrackedChanges": []
+      }
+    },
+    "runtimeTreesMatchFrozenCandidate": true,
+    "semanticChecksum": "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264"
   },
   "dataPolicy": "synthetic-no-child-data",
-  "generatedAtUtc": "2026-08-21T22:08:26Z",
+  "generatedAtUtc": "2026-08-21T22:18:21Z",
   "journeys": {
     "journeyCount": 22,
     "names": [
@@ -62,12 +152,12 @@
   },
   "schemaVersion": 1,
   "soak": {
-    "durationSeconds": 60.000166,
+    "durationSeconds": 60.000052,
     "failureDetails": [],
     "failures": 0,
-    "iterations": 160114,
+    "iterations": 159407,
     "minimumIterations": 2000,
-    "sessions": 3522508
+    "sessions": 3506954
   },
   "verdict": "PASS",
   "visuals": {

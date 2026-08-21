@@ -1,19 +1,31 @@
-{"verdict": "PASS", "sessions": 3522508, "durationSeconds": 60.000166}
-       60.09 real        59.87 user         0.13 sys
-            32374784  maximum resident set size
+============================= test session starts ==============================
+platform darwin -- Python 3.14.6, pytest-9.1.1, pluggy-1.6.0
+rootdir: /Users/manhhodinh/Documents/TBOT/robot/esp32-server/.worktrees/task-06-runtime-validation/main/tbot-server
+configfile: pyproject.toml
+plugins: anyio-4.14.2, asyncio-1.3.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 3 items
+
+tests/test_course_mode_task06_validation_script.py .                     [ 33%]
+tests/test_course_mode_e2e_journeys.py ..                                [100%]
+
+============================== 3 passed in 0.22s ===============================
+{"verdict": "PASS", "sessions": 3506954, "durationSeconds": 60.000052}
+       60.17 real        59.87 user         0.19 sys
+            32751616  maximum resident set size
                    0  average shared memory size
                    0  average unshared data size
                    0  average unshared stack size
-                7751  page reclaims
-                  24  page faults
+               20096  page reclaims
+                  94  page faults
                    0  swaps
                    0  block input operations
                    0  block output operations
                    0  messages sent
                    0  messages received
                    0  signals received
-                   5  voluntary context switches
-               13045  involuntary context switches
-       1484505342314  instructions retired
-        241849435051  cycles elapsed
-            19480984  peak memory footprint
+                  13  voluntary context switches
+               15905  involuntary context switches
+       1477708832004  instructions retired
+        241413980464  cycles elapsed
+            19857816  peak memory footprint

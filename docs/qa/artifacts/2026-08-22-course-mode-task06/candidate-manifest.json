@@ -33,10 +33,10 @@
     "featureFlagEnabled": false
   },
   "lanes": {
-    "deterministicJourneys": { "verdict": "PASS", "journeyTypes": 22, "iterations": 160114, "sessions": 3522508, "durationSeconds": 60.000166, "failures": 0 },
+    "deterministicJourneys": { "verdict": "PASS", "journeyTypes": 22, "iterations": 159407, "sessions": 3506954, "durationSeconds": 60.000052, "failures": 0 },
     "runtimeRecoveryPrivacy": { "verdict": "PASS", "espPassed": 304, "espSkipped": 2, "firmwareRuntimePassed": 243, "backendPrivacyPassed": 106 },
     "timing": { "verdict": "PASS", "testsPassed": 82, "actionAckTimeoutSeconds": 2.0, "settleBeforeListenSeconds": 0.25, "sessionSoftDeadlineSeconds": 540, "delayedRecallSimulatedSeconds": 70 },
-    "soakResources": { "verdict": "PASS", "threadDelta": 0, "fdDelta": 0, "heapCurrentDeltaBytes": 208, "heapPeakBytes": 4880, "maximumResidentSetBytes": 32374784 },
+    "soakResources": { "verdict": "PASS", "threadDelta": 0, "fdDelta": 0, "heapCurrentDeltaBytes": 208, "heapPeakBytes": 4880, "maximumResidentSetBytes": 32751616 },
     "visualSampling": { "verdict": "PASS", "cues": 8, "captures": 24, "width": 480, "height": 320, "contactSheetSha256": "6832327aba40098d2bb60bd3f729636b2a858f407c0a9fb62b7c8a07532e553e" },
     "v1AndParity": { "verdict": "PASS", "backendPassed": 130, "espPassed": 169, "vectorSha256": "95e35b3576656c08562d58ac818870fbc4620c9b9ebc1a418fe81a8c861a4ddb" },
     "broadRegression": { "verdict": "PASS", "backendPassed": 5916, "backendSkipped": 643, "firmwarePassed": 1269, "firmwareSkipped": 1, "espPassed": 4117, "espSkipped": 8, "espContentionRerunPassed": 1 },
@@ -54,8 +54,8 @@
     "v1VectorsUnchanged": true
   },
   "artifacts": {
-    "runtimeSoakMetrics": { "path": "metrics/runtime-soak-60s.json", "sha256": "1c6ec3841f74098091dc6651ad2f3a302072f5f66d22959f4efc49a8eebff107" },
-    "runtimeSoakLog": { "path": "logs/runtime-soak-60s.log", "sha256": "f2e69dc0c6fb1f07dd352e98734c327f69b437c039abab0985cdfea0f965abe0" },
+    "runtimeSoakMetrics": { "path": "metrics/runtime-soak-60s.json", "sha256": "9fdac264ed9afbe721d64b2654ae05fa4ed96fa1744adc0eab64a73d62d7e510" },
+    "runtimeSoakLog": { "path": "logs/runtime-soak-60s.log", "sha256": "7706382ee9eb914b6d65d1b26fcd34267e57cfb4658c9d857e4a27e901a43928" },
     "contactSheet": { "path": "captures/all-cues-contact-sheet.png", "sha256": "6832327aba40098d2bb60bd3f729636b2a858f407c0a9fb62b7c8a07532e553e" },
     "backendFull": { "path": "logs/backend-full-rerun.log", "sha256": "f2206d32ad85a83352f9bac8c9eac2ea2cad49a4d4e0caf1c78c062d564ac9c9" },
     "firmwareFull": { "path": "logs/firmware-full-rerun.log", "sha256": "f9868be44bc921d0f8e3a33580f8ef5370b828e715b6e7962ae49d5651af3b67" },
@@ -102,6 +102,7 @@
     "backend": "CLEAN",
     "firmware": "CLEAN",
     "espInitialFindingsAccepted": 3,
+    "espBuiltInCommitFindingsAccepted": 2,
     "espFinal": "CLEAN"
   }
 }
