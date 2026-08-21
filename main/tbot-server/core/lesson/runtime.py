@@ -119,6 +119,15 @@ class CourseModeRuntimeAdapter:
         self._decisions: dict[str, CourseDecision] = {}
         self._latest_decision_id: str | None = None
         self._next_turn_sequence_id = 1
+        self._response_plan_rollback: dict[str, Any] | None = None
+        self._course_budget_started = False
+
+    def start_course_budget(self) -> None:
+        if self._course_budget_started:
+            return
+        self._started_at_ms = int(self._clock() * 1_000)
+        self.orchestrator.started_at_ms = self._started_at_ms
+        self._course_budget_started = True
 
     def _identity_error(self, arguments: Dict[str, Any]) -> Dict[str, Any] | None:
         if arguments.get("lessonSessionId") != self.lesson_session_id:
@@ -306,6 +315,10 @@ class CourseModeRuntimeAdapter:
         }
         if plan.safety_mode is not protected_decision:
             return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+        self._response_plan_rollback = {
+            "arguments": dict(arguments),
+            "orchestrator": self.orchestrator.snapshot(),
+        }
         self._applied_plan_ids.add(plan_id)
         self._applied_decision_ids.add(decision.decision_id)
         now_ms = int(self._clock() * 1_000)
@@ -317,6 +330,27 @@ class CourseModeRuntimeAdapter:
             "accepted": True, "code": "RESPONSE_PLAN_APPLIED", "planId": plan_id,
             "responseText": plan.response_text(),
         }
+
+    def rollback_course_response_plan(self, arguments: Dict[str, Any]) -> bool:
+        rollback = self._response_plan_rollback
+        if rollback is None or rollback["arguments"] != arguments:
+            return False
+        self.orchestrator = CourseOrchestrator.restore(
+            self.contract, rollback["orchestrator"],
+        )
+        self._applied_plan_ids.discard(arguments["planId"])
+        self._applied_decision_ids.discard(arguments["decisionId"])
+        self._consumed_operation_ids.discard(arguments["observationId"])
+        self._next_turn_sequence_id = arguments["turnSequenceId"]
+        self._response_plan_rollback = None
+        return True
+
+    def commit_course_response_plan(self, arguments: Dict[str, Any]) -> bool:
+        rollback = self._response_plan_rollback
+        if rollback is None or rollback["arguments"] != arguments:
+            return False
+        self._response_plan_rollback = None
+        return True
 
     async def course_continue(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         if not self._operation_allowed("course_continue"):
@@ -1632,6 +1666,16 @@ class LessonRuntime:
     async def course_apply_response_plan(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return await self._course_operation("course_apply_response_plan", arguments)
 
+    def rollback_course_response_plan(self, arguments: Dict[str, Any]) -> bool:
+        if self.course_mode is None:
+            return False
+        return self.course_mode.rollback_course_response_plan(arguments)
+
+    def commit_course_response_plan(self, arguments: Dict[str, Any]) -> bool:
+        if self.course_mode is None:
+            return False
+        return self.course_mode.commit_course_response_plan(arguments)
+
     async def course_continue(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return await self._course_operation("course_continue", arguments)
 
@@ -1823,6 +1867,8 @@ class LessonRuntime:
     async def start_protocol(self, *, preloaded: bool = False) -> None:
         if not preloaded and not await self.preload_only():
             return
+        if self.course_mode is not None:
+            self.course_mode.start_course_budget()
         await self._emit("lesson_prepare", body=self._prepare_body())
 
     def _teardown_disposition(self):

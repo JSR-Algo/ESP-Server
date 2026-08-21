@@ -113,7 +113,6 @@ async def test_adapter_rejects_stale_turn_before_mutating_authoritative_state() 
         "lessonSessionId": runtime.lesson_session_id,
         "turnSequenceId": 1,
     }
-
     first = await runtime.course_continue({**identity, "observationId": "first"})
     stale = await runtime.course_open_context({
         **identity, "observationId": "stale", "branchType": "RELATED_STORY",
@@ -122,6 +121,67 @@ async def test_adapter_rejects_stale_turn_before_mutating_authoritative_state() 
     assert first["nextState"] == "OPENING"
     assert stale == {"accepted": False, "code": "STALE_TURN_SEQUENCE"}
     assert runtime.orchestrator.session_state.name == "OPENING"
+
+
+@pytest.mark.asyncio
+async def test_failed_delivery_rollback_keeps_exact_response_plan_retryable() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    decision = await runtime.course_continue({
+        "lessonSessionId": runtime.lesson_session_id,
+        "turnSequenceId": 1,
+        "observationId": "decision",
+    })
+    arguments = {
+        "lessonSessionId": runtime.lesson_session_id,
+        "turnSequenceId": 2,
+        "observationId": "plan-operation",
+        "planId": "plan-1",
+        "decisionId": decision["decisionId"],
+        "acknowledgment": "I hear you.",
+        "relation": "Let us look together.",
+        "guidance": "Look at the picture.",
+        "invitation": "Ready?",
+        "questionCount": 1,
+        "embodiedIntent": decision["embodiedIntent"],
+        "targetFactsUsed": ["animals.cat"],
+        "praiseLevel": "engagement",
+        "safetyMode": False,
+        "normalMiss": False,
+    }
+    before = runtime.orchestrator.snapshot()
+
+    assert (await runtime.course_apply_response_plan(arguments))["accepted"] is True
+    assert runtime.rollback_course_response_plan(arguments) is True
+    assert runtime.orchestrator.snapshot() == before
+    assert (await runtime.course_apply_response_plan(arguments))["accepted"] is True
+    assert runtime.commit_course_response_plan(arguments) is True
+    assert runtime.rollback_course_response_plan(arguments) is False
+
+
+@pytest.mark.asyncio
+async def test_production_runtime_starts_course_budget_when_protocol_activates() -> None:
+    runtime = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest={"courseModeContract": contract()},
+        asset_cache=type("AssetCache", (), {"preload_timeout_sec": 90})(),
+        forwarder=_Forwarder(),
+    )
+    assert runtime.course_mode is not None
+    runtime.course_mode._clock = lambda: 600.0
+    emitted = []
+
+    async def emit(message_type, **kwargs):
+        emitted.append((message_type, kwargs))
+
+    runtime._emit = emit
+
+    await runtime.start_protocol(preloaded=True)
+
+    assert runtime.course_mode.orchestrator.started_at_ms == 600_000
+    assert emitted[0][0] == "lesson_prepare"
 
 
 @pytest.mark.asyncio

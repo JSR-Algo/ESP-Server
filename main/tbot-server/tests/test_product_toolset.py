@@ -153,6 +153,14 @@ class ProductToolsetContractTest(unittest.TestCase):
         self.assertTrue({
             "lesson_child_response", "lesson_pronunciation_outcome", "lesson_context_turn",
             "lesson_visual_reaction", "lesson_continue",
+        } <= names)
+
+        conn.lesson_runtime = type("Runtime", (), {"course_mode_active": True})()
+        names = _classic_names(conn)
+        self.assertTrue(course_tools <= names)
+        self.assertTrue({
+            "lesson_child_response", "lesson_pronunciation_outcome", "lesson_context_turn",
+            "lesson_visual_reaction", "lesson_continue",
         }.isdisjoint(names))
 
         conn.lesson_runtime = type("Runtime", (), {"course_mode_active": False})()

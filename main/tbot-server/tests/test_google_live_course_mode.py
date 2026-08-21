@@ -23,13 +23,14 @@ class Provider:
     def __init__(self, generation: int = 4) -> None:
         self.generation = generation
         self.lesson_text = []
+        self.send_result = True
 
     def current_response_id(self) -> int:
         return self.generation
 
     async def _send_live_text_ack(self, text, *, log_label, allow_lesson_output):
         self.lesson_text.append((text, log_label, allow_lesson_output))
-        return True
+        return self.send_result
 
 
 class Runtime:
@@ -53,6 +54,12 @@ class Runtime:
 
     async def course_apply_response_plan(self, arguments):
         return {"accepted": True, "operation": "plan", "arguments": arguments}
+
+    def rollback_course_response_plan(self, arguments):
+        self.rolled_back_plan = dict(arguments)
+
+    def commit_course_response_plan(self, arguments):
+        self.committed_plan = dict(arguments)
 
     async def course_continue(self, arguments):
         return {"accepted": True, "operation": "continue", "arguments": arguments}
@@ -209,6 +216,38 @@ async def test_approved_course_plan_uses_bounded_lesson_output_path() -> None:
     assert conn.voice_provider.lesson_text == [
         ("Heard. Okay. Look. Ready?", "course_response_plan", True),
     ]
+    assert conn.lesson_runtime.committed_plan == arguments
+
+
+@pytest.mark.asyncio
+async def test_failed_course_plan_delivery_rolls_back_and_reports_retryable_failure() -> None:
+    conn = Conn()
+    conn.voice_provider.send_result = False
+    arguments = {
+        "lessonSessionId": "s1", "turnSequenceId": 1, "observationId": "o1",
+        "planId": "p1", "decisionId": "d1", "acknowledgment": "Heard.",
+        "relation": "Okay.", "guidance": "Look.", "invitation": "Ready?",
+        "questionCount": 1, "embodiedIntent": "INVITE_CHILD", "targetFactsUsed": [],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    }
+
+    async def apply(_arguments):
+        return {
+            "accepted": True, "code": "RESPONSE_PLAN_APPLIED",
+            "responseText": "Heard. Okay. Look. Ready?",
+        }
+
+    conn.lesson_runtime.course_apply_response_plan = apply
+    with _google_live_lesson_tool_admission(conn.voice_provider, 4):
+        response = await course_apply_response_plan(conn, **arguments)
+
+    assert response.result == {
+        "accepted": False,
+        "code": "RESPONSE_DELIVERY_FAILED",
+        "retryable": True,
+        "context": conn.lesson_runtime.conversation_tool_context(),
+    }
+    assert conn.lesson_runtime.rolled_back_plan == arguments
 
 
 def test_audio_bridge_admits_course_tool_calls_during_lesson_mode() -> None:
