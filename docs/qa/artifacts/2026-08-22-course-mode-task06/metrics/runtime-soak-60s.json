@@ -1,7 +1,7 @@
 {
   "candidate": {
     "backendSha": "1920586d48e5448dcf653dbfa2391c7ef346fcd9",
-    "espSha": "54f6854d0545dd95f0f69b3f22bc6fb108a47e81",
+    "espSha": "fb6c13eb45534421fa85a65d6c5aa740822473fd",
     "expectedShas": {
       "backendSha": "657474ff3b58fba2c3c31f2978d53370ffad8b11",
       "espSha": "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268",
@@ -24,6 +24,7 @@
         "expectedIsAncestor": true,
         "expectedSha": "657474ff3b58fba2c3c31f2978d53370ffad8b11",
         "headSha": "1920586d48e5448dcf653dbfa2391c7ef346fcd9",
+        "ignoredPathCount": 73870,
         "runtimeTreeMatchesFrozenCandidate": true,
         "trackedChanges": [
           "src/lessons/authoring/esptft-publish-budget.logic.spec.ts",
@@ -33,17 +34,20 @@
         ],
         "trackedWorktreeClean": true,
         "unexpectedDirtyTrackedPaths": [],
+        "unexpectedIgnoredPaths": [],
         "unexpectedTrackedChanges": [],
         "unexpectedUntrackedPaths": [],
         "untrackedPaths": []
       },
       "esp": {
         "dirtyTrackedPaths": [
-          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/runtime-soak-60s.log"
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/runtime-soak-60s.log",
+          "docs/qa/artifacts/2026-08-22-course-mode-task06/metrics/runtime-soak-60s.json"
         ],
         "expectedIsAncestor": true,
         "expectedSha": "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268",
-        "headSha": "54f6854d0545dd95f0f69b3f22bc6fb108a47e81",
+        "headSha": "fb6c13eb45534421fa85a65d6c5aa740822473fd",
+        "ignoredPathCount": 496,
         "runtimeTreeMatchesFrozenCandidate": true,
         "trackedChanges": [
           ".gitattributes",
@@ -94,6 +98,7 @@
         ],
         "trackedWorktreeClean": false,
         "unexpectedDirtyTrackedPaths": [],
+        "unexpectedIgnoredPaths": [],
         "unexpectedTrackedChanges": [],
         "unexpectedUntrackedPaths": [],
         "untrackedPaths": []
@@ -103,6 +108,7 @@
         "expectedIsAncestor": true,
         "expectedSha": "d47174daebe17b9c1a9d1a1eb506711a57cd3512",
         "headSha": "df70b5a12c68f5a6ab07f981cb7c10113e7dbc01",
+        "ignoredPathCount": 146,
         "runtimeTreeMatchesFrozenCandidate": true,
         "trackedChanges": [
           "tests/test_lesson_dispatch_backward_compat.py",
@@ -110,6 +116,7 @@
         ],
         "trackedWorktreeClean": true,
         "unexpectedDirtyTrackedPaths": [],
+        "unexpectedIgnoredPaths": [],
         "unexpectedTrackedChanges": [],
         "unexpectedUntrackedPaths": [],
         "untrackedPaths": []
@@ -119,7 +126,7 @@
     "semanticChecksum": "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264"
   },
   "dataPolicy": "synthetic-no-child-data",
-  "generatedAtUtc": "2026-08-21T22:36:44Z",
+  "generatedAtUtc": "2026-08-21T22:47:05Z",
   "journeys": {
     "journeyCount": 22,
     "names": [
@@ -160,12 +167,12 @@
   },
   "schemaVersion": 1,
   "soak": {
-    "durationSeconds": 60.000031,
+    "durationSeconds": 60.000208,
     "failureDetails": [],
     "failures": 0,
-    "iterations": 148144,
+    "iterations": 147188,
     "minimumIterations": 2000,
-    "sessions": 3259168
+    "sessions": 3238136
   },
   "verdict": "PASS",
   "visuals": {
