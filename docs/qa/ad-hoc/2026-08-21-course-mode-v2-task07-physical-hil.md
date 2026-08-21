@@ -4,6 +4,65 @@ Date: 2026-08-21 (Asia/Ho_Chi_Minh)
 
 Verdict: **PHYSICAL BLOCKED**
 
+## Reopened prerequisite audit - 2026-08-22
+
+Task 06 is now closed with `RUNTIME_PASS`, clean independent ESP review, and
+15/15 committed artifact hashes verified locally. This opens the software gate
+for Task 07, but it does not clear the physical safety and equipment gates.
+The original 2026-08-21 blocked evidence below is preserved as the record of
+that earlier audit; this section records only the changed prerequisite state.
+
+### Exact candidate identity
+
+The authoritative post-merge repository heads match the Task 06 handoff:
+
+| Component | Final owning-repository main SHA |
+| --- | --- |
+| ESP server | `a714da67a3382999bed2c4132637352bb2a27eba` |
+| Backend | `1920586d48e5448dcf653dbfa2391c7ef346fcd9` |
+| Firmware | `df70b5a12c68f5a6ab07f981cb7c10113e7dbc01` |
+
+The committed Task 06 manifest separately freezes the validated source bases:
+ESP `7e2628a9b9b4c3c7bbde4b426455700a4e0b7268`, backend
+`657474ff3b58fba2c3c31f2978d53370ffad8b11`, and firmware
+`d47174daebe17b9c1a9d1a1eb506711a57cd3512`. Each frozen base is an ancestor of
+its final main SHA. The reviewed executable validation tag resolves to
+`7c75ddf26ed2e495829b661c297894c2e5aa7813`. The pilot remains
+`course-mode-pilot-cat-ball@v1`, renderer `teebot-lesson-renderer.v4`, draft,
+unpublished, unassigned, and production-disabled.
+
+No firmware image has been demonstrated as built from final firmware main
+`df70b5a1...`. Existing local build directories contain multiple mutually
+different application and bootloader hashes without a candidate-to-binary
+provenance manifest. Therefore the exact installable hardware candidate remains
+unavailable even though the source/runtime gate is open.
+
+### Fresh physical readiness result
+
+| Prerequisite | 2026-08-22 read-only evidence | Verdict |
+| --- | --- | --- |
+| Approved internal robot | One ESP32-S3 remains attached at `/dev/cu.usbmodem1101`, USB identity suffix `...:AC:20`, matching historical internal bench evidence | BLOCKED: no current approval binds this unit to the exact Task 06 candidate |
+| Sole physical lease | No serial holder, monitor, flasher, capture process, or current hardware-lock file was observed | BLOCKED: absence of a holder does not establish an authoritative sole lease or operator ownership |
+| Adult operators | No named HIL operator or independent adult safety observer is recorded | BLOCKED |
+| Physical E-stop | No attended inspection confirms the accessible E-stop, DRV8833 `TP_EN`, immediate power isolation, or safe motion envelope | BLOCKED |
+| Acoustic chain | OS inventory shows only built-in/virtual audio devices; no calibrated SLM, reference/measurement microphones, external interface, reference speaker, distance fixture, or required audio samples were identified; `sox` and Python `sounddevice` are unavailable | BLOCKED |
+| Power instrumentation | No INA219 attachment or real-hardware collector is confirmed; Python INA219 support is unavailable | BLOCKED |
+| Thermal instrumentation | No case/driver/ambient probe is confirmed; Python DHT support is unavailable | BLOCKED |
+| Approved numeric limits | Course timing limits are pinned at 250 ms settle-before-listen and two seconds to rest | BLOCKED: power, thermal, motor-noise, and leakage release limits remain unapproved; the older draft still conflicts between 1.2 A and 1.5/1.8 A motion-current values |
+| Rollback image | Historical logs prove a V1-era boot/flash, but no recoverable binary bundle is tied to a known-good V1 source SHA with complete SHA-256 values, offsets, and restore command | BLOCKED |
+
+### Current disposition
+
+No candidate install, serial capture, OTA, flash, reset, servo action,
+assignment, pilot publication, flag change, production mutation, or rollback
+rehearsal was performed. Task 07 remains **PHYSICAL BLOCKED** until every row
+above is closed in an attended session. The Task 06 pass authorizes physical
+testing only; it does not override lease, operator, safety, instrumentation, or
+rollback requirements and does not authorize Task 08 while this gate is
+blocked.
+
+## Original 2026-08-21 blocked evidence
+
 ## Scope and safety disposition
 
 This session performed read-only readiness only. No OTA, flash, assignment,
