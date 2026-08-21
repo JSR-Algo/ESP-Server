@@ -324,8 +324,10 @@ class CourseEmbodiedDispatcher:
             or message.get("sessionId") != self.session_id
             or message.get("stepId") != self._action_step_ids.get(active.action_id)
             or type(message.get("sequence")) is not int
+            or type(body.get("acks")) is not int
             or body.get("acks") != active.sequence
             or embodied.get("actionId") != active.action_id
+            or type(embodied.get("actionGeneration")) is not int
             or embodied.get("actionGeneration") != active.generation
             or embodied.get("outcome") not in ACK_OUTCOMES
             or type(embodied.get("returnedToRest")) is not bool

@@ -242,6 +242,24 @@ async def test_stale_session_generation_and_sequence_acks_are_ignored() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("acks", True), ("actionGeneration", True)],
+)
+async def test_boolean_ack_integers_are_rejected(field: str, value: bool) -> None:
+    harness = Harness()
+    receipt = await harness.dispatcher.dispatch(decision())
+    ack = harness.ack()
+    target = ack["body"] if field == "acks" else ack["body"]["embodiedAction"]
+    target[field] = value
+
+    assert await harness.dispatcher.handle_ack(ack) is True
+    assert harness.dispatcher.in_flight is not None
+    assert await harness.dispatcher.handle_ack(harness.ack()) is True
+    assert (await harness.dispatcher.wait(receipt.action_id)).status is EmbodiedDispatchStatus.APPLIED
+
+
+@pytest.mark.asyncio
 async def test_new_decision_supersedes_old_action_with_monotonic_generation() -> None:
     harness = Harness()
     old = await harness.dispatcher.dispatch(decision("course-decision-1"))
