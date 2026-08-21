@@ -75,7 +75,8 @@ from core.lesson.conversation_runtime import (
     inactive_conversation_decision,
 )
 from core.lesson.course_mode_contract import CourseModeContract
-from core.lesson.course_orchestrator import ChildObservation, CourseOrchestrator
+from core.lesson.course_orchestrator import ChildObservation, CourseDecision, CourseOrchestrator, SessionState
+from core.lesson.forwarder import serialize_word_evidence_event
 from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
 from core.utils.util import get_vision_url
 from core.lesson.interaction_templates import FUN_PATTERN_PROMPTS, SafeSpeakingSession, fun_pattern_prompt
@@ -95,36 +96,135 @@ SAMPLE_SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_sample_to_sd"
 class CourseModeRuntimeAdapter:
     course_mode_active = True
 
-    def __init__(self, contract: CourseModeContract) -> None:
+    def __init__(
+        self, contract: CourseModeContract, *, clock: Callable[[], float] = time.monotonic,
+        assignment_id: str | None = None, forwarder: Any = None,
+    ) -> None:
         self.contract = contract
-        self.orchestrator = CourseOrchestrator(contract, started_at_ms=0, soft_deadline_ms=540_000)
-
-    async def course_observe_child(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        observation = ChildObservation(
-            observation_id=arguments["observationId"], turn_sequence_id=arguments["turnSequenceId"],
-            semantic_class=arguments["semanticClass"], speech_class=arguments["speechClass"],
-            language=arguments["language"], intent=arguments["intent"], engagement=arguments["engagement"],
-            safety_class=arguments["safetyClass"], assessment_eligible=arguments["assessmentEligible"],
-            confidence_band=arguments["confidenceBand"], activity_id=arguments["activityId"],
-            context_id=arguments["contextId"], now_ms=arguments["turnSequenceId"] * 1_000,
-            robot_audio_contaminated=arguments["robotAudioContaminated"],
-            target_text_visible=arguments["targetTextVisible"],
+        self._clock = clock
+        self._started_at_ms = int(clock() * 1_000)
+        self.assignment_id = assignment_id
+        self.forwarder = forwarder
+        self.orchestrator = CourseOrchestrator(
+            contract, started_at_ms=self._started_at_ms, soft_deadline_ms=540_000,
         )
-        decision = self.orchestrator.observe(observation)
+        self._applied_plan_ids: set[str] = set()
+        self._consumed_operation_ids: set[str] = set()
+
+    def _identity_error(self, arguments: Dict[str, Any]) -> Dict[str, Any] | None:
+        if arguments.get("lessonSessionId") != self.contract.lesson_session_id:
+            return {"accepted": False, "code": "LESSON_SESSION_MISMATCH"}
+        return None
+
+    def _consume_operation(self, arguments: Dict[str, Any]) -> Dict[str, Any] | None:
+        error = self._identity_error(arguments)
+        if error is not None:
+            return error
+        observation_id = arguments["observationId"]
+        if observation_id in self._consumed_operation_ids:
+            return {"accepted": False, "code": "DUPLICATE_OPERATION_IGNORED"}
+        self._consumed_operation_ids.add(observation_id)
+        return None
+
+    @staticmethod
+    def _decision_payload(decision: CourseDecision) -> Dict[str, Any]:
         return {
             "accepted": decision.accepted, "decisionId": decision.decision_id,
             "nextState": decision.next_state.value, "action": decision.action,
             "acknowledgmentIntent": decision.acknowledgment_intent,
             "teachingIntent": decision.teaching_intent, "questionIntent": decision.question_intent,
             "embodiedIntent": decision.embodied_intent.value, "mayModelTarget": decision.may_model_target,
-            "evidenceEvent": decision.evidence_event,
+            "evidenceEvent": decision.evidence_event, "branchId": decision.branch_id,
         }
 
+    def _forward_evidence(self, decision: CourseDecision) -> None:
+        if decision.evidence_event is None or self.forwarder is None or not self.assignment_id:
+            return
+        mastery = self.orchestrator.active_mastery
+        leak = mastery.answer_leakage
+        elapsed = 0 if leak.last_full_model_at_ms is None else max(0, int(self._clock() * 1_000) - leak.last_full_model_at_ms)
+        event = serialize_word_evidence_event({
+            "sequence": int(decision.decision_id.rsplit("-", 1)[-1]),
+            **decision.evidence_event,
+            "supportCodesSinceLastModel": [],
+            "elapsedSinceFullModelMs": elapsed,
+            "interveningActivityCount": leak.intervening_activity_count,
+        })
+        self.forwarder.enqueue({
+            "assignmentId": self.assignment_id,
+            "sessionId": self.contract.lesson_session_id,
+            "events": [event],
+        })
 
-def course_mode_runtime_from_manifest(manifest: Any, *, enabled: bool) -> CourseModeRuntimeAdapter | None:
+    async def course_observe_child(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        error = self._identity_error(arguments)
+        if error is not None:
+            return error
+        observation = ChildObservation(
+            observation_id=arguments["observationId"], turn_sequence_id=arguments["turnSequenceId"],
+            semantic_class=arguments["semanticClass"], speech_class=arguments["speechClass"],
+            language=arguments["language"], intent=arguments["intent"], engagement=arguments["engagement"],
+            safety_class=arguments["safetyClass"], assessment_eligible=arguments["assessmentEligible"],
+            confidence_band=arguments["confidenceBand"], activity_id=arguments["activityId"],
+            context_id=arguments["contextId"], now_ms=int(self._clock() * 1_000),
+            robot_audio_contaminated=arguments["robotAudioContaminated"],
+            target_text_visible=arguments["targetTextVisible"],
+        )
+        decision = self.orchestrator.observe(observation)
+        self._forward_evidence(decision)
+        return self._decision_payload(decision)
+
+    async def course_open_context(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        error = self._consume_operation(arguments)
+        if error is not None:
+            return error
+        return self._decision_payload(self.orchestrator.open_context_branch(
+            observation_id=arguments["observationId"], turn_sequence_id=arguments["turnSequenceId"],
+            branch_type=arguments["branchType"],
+        ))
+
+    async def course_close_context(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        error = self._consume_operation(arguments)
+        if error is not None:
+            return error
+        return self._decision_payload(self.orchestrator.close_context_branch(
+            branch_id=arguments["branchId"], bridge_intent=arguments["bridgeIntent"],
+            child_detail_code=arguments["childDetailCode"],
+        ))
+
+    async def course_apply_response_plan(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        error = self._consume_operation(arguments)
+        if error is not None:
+            return error
+        plan_id = arguments["planId"]
+        if plan_id in self._applied_plan_ids:
+            return {"accepted": False, "code": "DUPLICATE_PLAN_IGNORED", "planId": plan_id}
+        self._applied_plan_ids.add(plan_id)
+        return {"accepted": True, "code": "RESPONSE_PLAN_APPLIED", "planId": plan_id}
+
+    async def course_continue(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        error = self._consume_operation(arguments)
+        if error is not None:
+            return error
+        if self.orchestrator.session_state is SessionState.PREPARING:
+            decision = self.orchestrator.begin()
+        elif self.orchestrator.session_state is SessionState.OPENING:
+            decision = self.orchestrator.continue_opening()
+        else:
+            decision = self.orchestrator.maybe_advance_target(now_ms=int(self._clock() * 1_000))
+        return self._decision_payload(decision)
+
+
+def course_mode_runtime_from_manifest(
+    manifest: Any, *, enabled: bool, clock: Callable[[], float] = time.monotonic,
+    assignment_id: str | None = None, forwarder: Any = None,
+) -> CourseModeRuntimeAdapter | None:
     if not enabled or not isinstance(manifest, dict) or "courseModeContract" not in manifest:
         return None
-    return CourseModeRuntimeAdapter(CourseModeContract.from_mapping(manifest["courseModeContract"]))
+    return CourseModeRuntimeAdapter(
+        CourseModeContract.from_mapping(manifest["courseModeContract"]), clock=clock,
+        assignment_id=assignment_id, forwarder=forwarder,
+    )
 
 
 class _SdSyncRealtimeBusyTimeoutError(Exception):
@@ -1266,6 +1366,14 @@ class LessonRuntime:
         self.negotiated_version = manifest.get("manifestVersion") or PROTOCOL_VERSION
         self.asset_cache = asset_cache
         self.forwarder = forwarder
+        lesson_cfg = _lesson_config(getattr(conn, "config", {}) or {})
+        self.course_mode = course_mode_runtime_from_manifest(
+            manifest,
+            enabled=lesson_cfg.get("course_mode_v2_enabled") is True,
+            assignment_id=self.assignment_id,
+            forwarder=forwarder,
+        )
+        self.course_mode_active = self.course_mode is not None
         self.preload_status_reporter = preload_status_reporter
         self._send = send or self._default_send
         self._sleep = sleep or asyncio.sleep
@@ -1373,6 +1481,26 @@ class LessonRuntime:
         self._preparing_phase_forwarded = False
 
     # ── lifecycle ──────────────────────────────────────────────────────────────
+
+    async def _course_operation(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        if self.course_mode is None:
+            return {"accepted": False, "code": "COURSE_MODE_NOT_ACTIVE"}
+        return await getattr(self.course_mode, name)(arguments)
+
+    async def course_observe_child(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._course_operation("course_observe_child", arguments)
+
+    async def course_open_context(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._course_operation("course_open_context", arguments)
+
+    async def course_close_context(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._course_operation("course_close_context", arguments)
+
+    async def course_apply_response_plan(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._course_operation("course_apply_response_plan", arguments)
+
+    async def course_continue(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._course_operation("course_continue", arguments)
 
     async def start(self) -> None:
         """Preload/attest first, then publish the first protocol frame."""

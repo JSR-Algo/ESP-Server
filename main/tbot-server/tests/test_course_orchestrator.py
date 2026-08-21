@@ -80,12 +80,21 @@ def test_low_confidence_and_contamination_do_not_mutate_mastery() -> None:
 
 def test_duplicate_observation_and_restored_pending_effects_are_not_replayed() -> None:
     runtime = course(); runtime.begin(); runtime.continue_opening(); runtime.continue_opening()
-    first = runtime.observe(observation(semantic_class="meaning_vi", activity_id="cat-meaning-left-right-01"))
-    duplicate = runtime.observe(observation(semantic_class="meaning_vi", activity_id="cat-meaning-left-right-01"))
+    first = runtime.observe(observation(
+        semantic_class="meaning_vi", activity_id="cat-meaning-left-right-01",
+        context_id="cat_dog_visual_contrast",
+    ))
+    duplicate = runtime.observe(observation(
+        semantic_class="meaning_vi", activity_id="cat-meaning-left-right-01",
+        context_id="cat_dog_visual_contrast",
+    ))
     assert first.accepted is True and duplicate.accepted is False
     snapshot = runtime.snapshot()
     restored = CourseOrchestrator.restore(runtime.contract, snapshot)
-    replay = restored.observe(observation(semantic_class="meaning_vi", activity_id="cat-meaning-left-right-01"))
+    replay = restored.observe(observation(
+        semantic_class="meaning_vi", activity_id="cat-meaning-left-right-01",
+        context_id="cat_dog_visual_contrast",
+    ))
     assert replay.accepted is False
     assert restored.pending_effects == ()
 
@@ -104,3 +113,30 @@ def test_secondary_starts_only_after_primary_mastery_and_time_remaining() -> Non
     decision = runtime.maybe_advance_target(now_ms=200_000)
     assert runtime.active_target_id == "toys.ball"
     assert decision.action == "START_OPTIONAL_SECONDARY"
+
+
+def test_only_authored_active_target_activity_and_stage_can_advance_evidence() -> None:
+    runtime = course(); runtime.begin(); runtime.continue_opening(); runtime.continue_opening()
+    runtime.active_mastery.record_model(now_ms=1_000)
+    runtime.active_mastery.record_intervening_activity()
+
+    discover = runtime.observe(observation(
+        observation_id="discover", semantic_class="target_en", speech_class="exact",
+        activity_id="cat-discover-center-01", context_id="cat_primary_visual", now_ms=30_000,
+    ))
+    assert discover.evidence_event is None
+    assert runtime.active_mastery.level.name == "EXPOSED"
+
+    wrong_target = runtime.observe(observation(
+        observation_id="wrong-target", semantic_class="target_en", speech_class="exact",
+        activity_id="ball-discover-center-01", context_id="ball_primary_visual", now_ms=31_000,
+    ))
+    assert wrong_target.accepted is False
+    assert wrong_target.action == "INVALID_ACTIVITY_IGNORED"
+
+    wrong_context = runtime.observe(observation(
+        observation_id="wrong-context", semantic_class="target_en", speech_class="exact",
+        activity_id="cat-recall-visual-02", context_id="invented", now_ms=32_000,
+    ))
+    assert wrong_context.accepted is False
+    assert runtime.active_mastery.level.name == "EXPOSED"

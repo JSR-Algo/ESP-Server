@@ -16,6 +16,7 @@ import plugins_func.functions.play_music_live  # noqa: F401
 import plugins_func.functions.raise_left_arm  # noqa: F401
 import plugins_func.functions.robot_arm_actions  # noqa: F401
 import plugins_func.functions.start_lesson  # noqa: F401
+import plugins_func.functions.lesson_conversation  # noqa: F401
 import plugins_func.functions.turn_head  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +72,7 @@ class _ToolsetConn:
             "lesson": {
                 "runtime_enabled": runtime_enabled,
                 "sample_lesson": sample_enabled,
+                "course_mode_v2_enabled": False,
                 "rollout_device_allowlist": ["robot-01"],
             },
             "plugins": {},
@@ -136,6 +138,18 @@ class ProductToolsetContractTest(unittest.TestCase):
         self.assertEqual(classic - music_exclusion, live)
         self.assertIn("start_lesson", classic)
         self.assertIn("start_lesson", live)
+
+    def test_course_mode_tools_require_flag_and_active_v2_runtime(self):
+        conn = _ToolsetConn(runtime_enabled=True)
+        course_tools = {
+            "course_observe_child", "course_open_context", "course_close_context",
+            "course_apply_response_plan", "course_continue",
+        }
+        self.assertTrue(course_tools.isdisjoint(_classic_names(conn)))
+
+        conn.config["lesson"]["course_mode_v2_enabled"] = True
+        conn.lesson_runtime = type("Runtime", (), {"course_mode_active": True})()
+        self.assertTrue(course_tools <= _classic_names(conn))
 
     def test_child_product_toolset_allows_safe_realtime_tools_but_excludes_danger_tools(self):
         conn = _ToolsetConn(runtime_enabled=True)

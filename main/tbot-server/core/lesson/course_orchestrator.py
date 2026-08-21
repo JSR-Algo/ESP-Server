@@ -138,29 +138,76 @@ class CourseOrchestrator:
         if observation.confidence_band != "high" or not observation.assessment_eligible or observation.robot_audio_contaminated:
             self.session_state = SessionState.TECHNICAL_RECOVERY
             return self._decision("OWN_ASR_UNCERTAINTY", acknowledgment="robot_ears_unclear", question="invite_retry", embodied=EmbodiedIntent.LISTEN_STILL)
+        try:
+            activity = self.contract.activity(observation.activity_id)
+        except KeyError:
+            return self._decision("INVALID_ACTIVITY_IGNORED", accepted=False, acknowledgment="retain_authoritative_state")
+        if activity.target_id != self.active_target_id or activity.context_id != observation.context_id:
+            return self._decision("INVALID_ACTIVITY_IGNORED", accepted=False, acknowledgment="retain_authoritative_state")
         mastery = self.active_mastery
         mastery.set_target_text_visible(observation.target_text_visible)
         mastery.set_robot_audio_contaminated(observation.robot_audio_contaminated)
         evidence = None
-        if observation.semantic_class == "meaning_vi":
+        before_level = mastery.level
+        if activity.stage == "UNDERSTAND" and observation.semantic_class == "meaning_vi":
             result = mastery.record_meaning(
                 evidence_id=observation.observation_id, activity_id=observation.activity_id, context_id=observation.context_id,
             )
             self.word_state = WordState.IMITATE
-        else:
+        elif activity.stage == "RECALL":
             result = mastery.record_speech(
                 evidence_id=observation.observation_id, activity_id=observation.activity_id,
                 context_id=observation.context_id, now_ms=observation.now_ms,
                 semantic_class=observation.semantic_class, speech_class=observation.speech_class,
                 assessment_eligible=observation.assessment_eligible, confidence_band=observation.confidence_band,
             )
-        if result.accepted and result.level is not EvidenceLevel.NOT_STARTED:
+        elif (
+            activity.stage == "TRANSFER"
+            and observation.semantic_class == "target_en"
+            and observation.speech_class in {"exact", "near"}
+            and mastery.answer_leakage.independent_eligible(observation.now_ms)
+        ):
+            result = mastery.record_transfer(
+                evidence_id=observation.observation_id, activity_id=observation.activity_id,
+                context_id=observation.context_id,
+            )
+            self.word_state = WordState.DELAYED_RECALL
+        elif (
+            activity.stage == "DELAYED_RECALL"
+            and observation.semantic_class == "target_en"
+            and observation.speech_class in {"exact", "near"}
+        ):
+            result = mastery.record_delayed_recall(
+                evidence_id=observation.observation_id, activity_id=observation.activity_id,
+                context_id=observation.context_id, now_ms=observation.now_ms,
+                assessment_eligible=observation.assessment_eligible,
+                confidence_band=observation.confidence_band,
+            )
+            self.word_state = WordState.DONE_FOR_SESSION
+        else:
+            self.session_state = SessionState.WORD_ACTIVE
+            return self._decision("ACKNOWLEDGE_GUIDE_INVITE", question="one_next_question")
+        if result.accepted and result.level is not before_level:
             evidence = {
                 "targetId": self.active_target_id, "evidenceLevel": result.level.value,
                 "activityId": observation.activity_id, "contextId": observation.context_id,
+                "assessmentConfidenceBand": observation.confidence_band,
+                "reviewNeeded": result.review_needed,
             }
         self.session_state = SessionState.WORD_ACTIVE
         return self._decision("ACKNOWLEDGE_GUIDE_INVITE", evidence=evidence, question="one_next_question")
+
+    def open_context_branch(self, *, observation_id: str, turn_sequence_id: int, branch_type: str) -> CourseDecision:
+        if observation_id in self._consumed_observations:
+            return self._decision("DUPLICATE_IGNORED", accepted=False, acknowledgment="retain_authoritative_state")
+        self._consumed_observations.add(observation_id)
+        self.session_state = SessionState.CONTEXT_BRANCH
+        self._active_branch_id = f"branch-{turn_sequence_id}-{observation_id}"
+        return self._decision(
+            "OPEN_CONTEXT_BRANCH", acknowledgment=f"acknowledge_{branch_type.casefold()}",
+            question="invite_one_story_detail", embodied=EmbodiedIntent.ACKNOWLEDGE_STORY,
+            branch_id=self._active_branch_id,
+        )
 
     def close_context_branch(self, *, branch_id: str | None, bridge_intent: str, child_detail_code: str) -> CourseDecision:
         if branch_id != self._active_branch_id:

@@ -8,7 +8,11 @@ from plugins_func.functions.lesson_conversation import (
     COURSE_MODE_TOOL_SPECS,
     LESSON_CONVERSATION_TOOL_SPECS,
     _google_live_lesson_tool_admission,
+    course_apply_response_plan,
+    course_close_context,
+    course_continue,
     course_observe_child,
+    course_open_context,
 )
 
 
@@ -25,6 +29,18 @@ class Runtime:
 
     async def course_observe_child(self, arguments):
         return {"accepted": True, "decisionId": "d1", "nextState": "WORD_ACTIVE", "arguments": arguments}
+
+    async def course_open_context(self, arguments):
+        return {"accepted": True, "operation": "open", "arguments": arguments}
+
+    async def course_close_context(self, arguments):
+        return {"accepted": True, "operation": "close", "arguments": arguments}
+
+    async def course_apply_response_plan(self, arguments):
+        return {"accepted": True, "operation": "plan", "arguments": arguments}
+
+    async def course_continue(self, arguments):
+        return {"accepted": True, "operation": "continue", "arguments": arguments}
 
 
 class Conn:
@@ -85,3 +101,21 @@ async def test_stale_generation_extra_args_and_v1_runtime_fail_closed() -> None:
     with _google_live_lesson_tool_admission(conn.voice_provider, 4):
         inactive = await course_observe_child(conn, **args)
     assert inactive.result["code"] == "COURSE_MODE_NOT_ACTIVE"
+
+
+@pytest.mark.asyncio
+async def test_all_advertised_operations_route_to_active_runtime() -> None:
+    conn = Conn()
+    identity = {"lessonSessionId": "s1", "turnSequenceId": 1, "observationId": "o1"}
+    calls = (
+        (course_open_context, {**identity, "branchType": "RELATED_STORY"}, "open"),
+        (course_close_context, {
+            **identity, "branchId": "b1", "bridgeIntent": "bridge", "childDetailCode": "detail",
+        }, "close"),
+        (course_apply_response_plan, {**identity, "planId": "p1"}, "plan"),
+        (course_continue, identity, "continue"),
+    )
+    with _google_live_lesson_tool_admission(conn.voice_provider, 4):
+        for operation, arguments, expected in calls:
+            response = await operation(conn, **arguments)
+            assert response.result["operation"] == expected

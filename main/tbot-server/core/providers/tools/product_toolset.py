@@ -43,7 +43,7 @@ COURSE_MODE_TOOLS = (
     "course_observe_child", "course_open_context", "course_close_context",
     "course_apply_response_plan", "course_continue",
 )
-LESSON_SEMANTIC_TOOLS = LESSON_CONVERSATION_TOOLS + COURSE_MODE_TOOLS
+LESSON_SEMANTIC_TOOLS = LESSON_CONVERSATION_TOOLS
 
 # Music remains a classic-pipeline allowance for existing product behavior. Live
 # removes it with its documented incompatibility filter before sending tools to
@@ -78,6 +78,8 @@ def product_tool_names(conn: Any) -> List[str]:
         names.extend(ALWAYS_INCLUDE_WHEN_LESSON_ENABLED)
     if lesson_runtime_enabled(conn):
         names.extend(LESSON_SEMANTIC_TOOLS)
+    if course_mode_runtime_enabled(conn):
+        names.extend(COURSE_MODE_TOOLS)
     return _dedupe(name for name in names if _is_child_allowed(name))
 
 
@@ -117,6 +119,15 @@ def lesson_runtime_config_enabled(conn: Any) -> bool:
         return False
     device_id = str(getattr(conn, "device_id", "") or "").strip().lower()
     return bool(device_id) and device_id in normalized
+
+
+def course_mode_runtime_enabled(conn: Any) -> bool:
+    config = getattr(conn, "config", None)
+    lesson_cfg = config.get("lesson", {}) if isinstance(config, Mapping) else {}
+    if not isinstance(lesson_cfg, Mapping) or lesson_cfg.get("course_mode_v2_enabled") is not True:
+        return False
+    runtime = getattr(conn, "lesson_runtime", None)
+    return getattr(runtime, "course_mode_active", False) is True
 
 
 def runtime_rollout_allows_device(conn: Any) -> bool:
