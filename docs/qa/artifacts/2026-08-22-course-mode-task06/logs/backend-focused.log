@@ -1,0 +1,40 @@
+[33mThe CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.[39m
+
+ RUN  v2.1.9 /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation
+
+ ✓ src/lessons/fixtures/course-mode/course-mode-task00.contract.spec.ts (17 tests) 31ms
+ ✓ src/lessons/course-mode/pilot/course-mode-pilot.spec.ts (13 tests) 176ms
+ ✓ src/lessons/authoring/lesson-authoring.course-mode.spec.ts (11 tests) 5ms
+ ✓ src/lessons/lesson-manifest.course-mode.spec.ts (7 tests) 5ms
+ ✓ src/lessons/course-mode/course-mode.contract.spec.ts (29 tests) 6ms
+ ✓ src/lessons/parent-learning-progress.course-mode.spec.ts (6 tests) 1ms
+ ✓ src/lessons/lesson-event-ingest.course-mode.spec.ts (16 tests) 1ms
+ ✓ src/lessons/course-mode/course-mode.repository.spec.ts (4 tests) 2ms
+ ✓ tests/course-mode-v2.migration.spec.ts (3 tests) 0ms
+ ✓ src/lessons/course-mode/course-mode.cross-contract.spec.ts (1 test) 14ms
+
+ Test Files  10 passed (10)
+      Tests  107 passed (107)
+   Start at  04:46:42
+   Duration  1.45s (transform 251ms, setup 473ms, collect 599ms, tests 240ms, environment 0ms, prepare 26ms)
+
+real 4.02
+user 1.46
+sys 0.34
+           203489280  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               42048  page reclaims
+                 751  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                1137  messages sent
+                1125  messages received
+                  36  signals received
+                3857  voluntary context switches
+                9248  involuntary context switches
+          1805281860  instructions retired
+           675364852  cycles elapsed
+            47897248  peak memory footprint

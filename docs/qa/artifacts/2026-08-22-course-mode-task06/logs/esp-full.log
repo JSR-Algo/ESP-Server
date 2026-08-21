@@ -1,0 +1,381 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.14.6, pytest-9.1.1, pluggy-1.6.0
+rootdir: /Users/manhhodinh/Documents/TBOT/robot/esp32-server/.worktrees/task-06-runtime-validation/main/tbot-server
+configfile: pyproject.toml
+testpaths: tests
+plugins: anyio-4.14.2, asyncio-1.3.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 4126 items
+
+tests/test_abort_voice_provider_interrupt.py ...                         [  0%]
+tests/test_activity_lease.py ........................................... [  1%]
+...........                                                              [  1%]
+tests/test_aec_processor.py ssss..                                       [  1%]
+tests/test_aec_required_raises.py .s...                                  [  1%]
+tests/test_analyze_google_live_log.py ...............                    [  2%]
+tests/test_app_auth_key.py ......                                        [  2%]
+tests/test_asr_base_edges.py ......                                      [  2%]
+tests/test_audio_rate_controller_cleanup.py ....                         [  2%]
+tests/test_audio_rate_controller_edges.py .........                      [  2%]
+tests/test_auth_manager.py .....                                         [  2%]
+tests/test_benchmark_google_live_audio_runtime.py .                      [  2%]
+tests/test_cache_manager.py ...                                          [  2%]
+tests/test_cache_output_asset_consent_helpers.py ......                  [  2%]
+tests/test_change_role_child_safety.py .                                 [  3%]
+tests/test_change_volume.py ....................                         [  3%]
+tests/test_child_safe_realtime_tools.py ............                     [  3%]
+tests/test_child_safety_output_coverage.py .........                     [  3%]
+tests/test_ci_docker_build_order.py .......                              [  4%]
+tests/test_classic_pipeline_provider.py .                                [  4%]
+tests/test_cloudflared_ingress_contract.py ........                      [  4%]
+tests/test_config_from_api_template.py .                                 [  4%]
+tests/test_config_loader_boot_guard.py .........                         [  4%]
+tests/test_config_loader_branch_gaps.py .........                        [  4%]
+tests/test_config_loader_edges.py ...................................... [  5%]
+                                                                         [  5%]
+tests/test_config_loader_lesson_coverage_gaps.py .........               [  5%]
+tests/test_config_loader_lesson_env_overrides.py ....................... [  6%]
+...................                                                      [  7%]
+tests/test_config_loader_lesson_posture.py .......                       [  7%]
+tests/test_config_loader_lesson_posture_branch_gaps.py .............     [  7%]
+tests/test_config_loader_lesson_sd_gc.py ......                          [  7%]
+tests/test_config_loader_production_boot_safe.py .....................   [  8%]
+tests/test_config_loader_round1_branch_gaps.py ...                       [  8%]
+tests/test_config_models_settings.py ........                            [  8%]
+tests/test_config_secret_literals.py .                                   [  8%]
+tests/test_config_voice_mode_merge.py ...........                        [  8%]
+tests/test_connection_edges.py ......................................... [  9%]
+...........................                                              [ 10%]
+tests/test_connection_voice_provider_routing.py ........................ [ 10%]
+.........                                                                [ 11%]
+tests/test_course_embodied_dispatcher.py ............................... [ 11%]
+.........                                                                [ 12%]
+tests/test_course_mode_contract.py ............                          [ 12%]
+tests/test_course_mode_e2e_journeys.py ..                                [ 12%]
+tests/test_course_mode_forwarder.py .....                                [ 12%]
+tests/test_course_mode_runtime_integration.py .......................... [ 13%]
+.......................                                                  [ 13%]
+tests/test_course_mode_task00_contract.py .............                  [ 14%]
+tests/test_course_mode_task06_validation_script.py .                     [ 14%]
+tests/test_course_orchestrator.py ....................                   [ 14%]
+tests/test_course_response_plan.py ...........................           [ 15%]
+tests/test_current_time_utils.py ..                                      [ 15%]
+tests/test_device_mcp_admin_handler.py ................................. [ 16%]
+............                                                             [ 16%]
+tests/test_device_mcp_client_executor.py .....                           [ 16%]
+tests/test_device_mcp_handler.py .............                           [ 16%]
+tests/test_device_token_client.py ............                           [ 17%]
+tests/test_dialogue_wakeup_utils.py ....                                 [ 17%]
+tests/test_docker_image_workflow.py .......                              [ 17%]
+tests/test_flattened_cinematic_contract.py ............................. [ 18%]
+............................................................             [ 19%]
+tests/test_gemini_asr_provider.py ...                                    [ 19%]
+tests/test_generation_retry_handler.py .......                           [ 19%]
+tests/test_get_weather.py ...........                                    [ 20%]
+tests/test_global_generation_poller.py ................................. [ 20%]
+........................................................................ [ 22%]
+..                                                                       [ 22%]
+tests/test_global_generation_sessions.py ............................... [ 23%]
+............                                                             [ 23%]
+tests/test_global_generation_status.py ...........................       [ 24%]
+tests/test_global_generation_store.py ......                             [ 24%]
+tests/test_global_generation_sync.py ............................        [ 25%]
+tests/test_google_live_audio_bridge_edges.py .......................     [ 25%]
+tests/test_google_live_bargein.py ...................................... [ 26%]
+...............................                                          [ 27%]
+tests/test_google_live_client.py ....................................... [ 28%]
+....                                                                     [ 28%]
+tests/test_google_live_course_mode.py .............                      [ 28%]
+tests/test_google_live_event_mapping.py ................................ [ 29%]
+.......                                                                  [ 29%]
+tests/test_google_live_interaction_controller.py ...                     [ 29%]
+tests/test_google_live_lesson_conversation.py .......................... [ 30%]
+...................................                                      [ 31%]
+tests/test_google_live_live_smoke.py s                                   [ 31%]
+tests/test_google_live_provider_edges.py ............................... [ 32%]
+........................................................................ [ 33%]
+.........................................................                [ 35%]
+tests/test_google_live_provider_fallback.py ............................ [ 35%]
+...................                                                      [ 36%]
+tests/test_google_live_reconnect.py .........................            [ 36%]
+tests/test_google_live_smoke_script.py .......                           [ 37%]
+tests/test_google_live_tool_calls.py ................................... [ 37%]
+...........................................                              [ 38%]
+tests/test_hello_audio_params.py .....                                   [ 39%]
+tests/test_http_server.py .............................................. [ 40%]
+.........                                                                [ 40%]
+tests/test_intent_handler.py ...............                             [ 40%]
+tests/test_layered_cinematic_contract.py ..............                  [ 41%]
+tests/test_lesson_asset_cache.py .......ss.............................. [ 42%]
+.........................................                                [ 43%]
+tests/test_lesson_asset_cache_branch_gaps.py ..                          [ 43%]
+tests/test_lesson_asset_cache_total_bytes_oserror.py .                   [ 43%]
+tests/test_lesson_assignment_console.py .................                [ 43%]
+tests/test_lesson_audio_drain_ack.py ...                                 [ 43%]
+tests/test_lesson_branch_coverage_gaps.py .........                      [ 43%]
+tests/test_lesson_cinematic_phase_routing.py ........................    [ 44%]
+tests/test_lesson_contract_vectors_parity.py ........................... [ 45%]
+........................................................................ [ 46%]
+.............................                                            [ 47%]
+tests/test_lesson_conversation_integration.py .......................... [ 48%]
+......................................                                   [ 49%]
+tests/test_lesson_conversation_runtime.py .............................. [ 49%]
+..........................................................               [ 51%]
+tests/test_lesson_e2e_flow.py ......                                     [ 51%]
+tests/test_lesson_e2e_sim_compose.py .                                   [ 51%]
+tests/test_lesson_e2e_sim_image_supply.py .........                      [ 51%]
+tests/test_lesson_error_helpers.py ..                                    [ 51%]
+tests/test_lesson_forwarder.py ..........................                [ 52%]
+tests/test_lesson_forwarder_branch_gaps.py .....                         [ 52%]
+tests/test_lesson_hardening.py ......                                    [ 52%]
+tests/test_lesson_narration.py .....                                     [ 52%]
+tests/test_lesson_nudge_handler.py ....................                  [ 53%]
+tests/test_lesson_observability_t62.py ....................              [ 53%]
+tests/test_lesson_passive_parity_with_esp.py ...                         [ 53%]
+tests/test_lesson_pii_key_parity.py .                                    [ 53%]
+tests/test_lesson_preload_voice_alarm.py ................                [ 54%]
+tests/test_lesson_preload_voice_alarm_branch_gaps.py .                   [ 54%]
+tests/test_lesson_pull_on_connect_branch_gaps.py .......                 [ 54%]
+tests/test_lesson_republish_on_connect.py ...........                    [ 54%]
+tests/test_lesson_rollout_controls.py ..........................         [ 55%]
+tests/test_lesson_runtime.py ........................................... [ 56%]
+........................................................................ [ 57%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+.....................                                                    [ 61%]
+tests/test_lesson_runtime_branch_gaps.py ............................... [ 62%]
+.......................                                                  [ 63%]
+tests/test_lesson_runtime_branch_gaps_round1.py .......                  [ 63%]
+tests/test_lesson_runtime_on_connect_branch_gaps.py ........             [ 63%]
+tests/test_lesson_runtime_state_machine_t21.py ......................... [ 64%]
+..                                                                       [ 64%]
+tests/test_lesson_safe_speaking_template.py ................             [ 64%]
+tests/test_lesson_sd_evict_handler.py .................................. [ 65%]
+............                                                             [ 65%]
+tests/test_lesson_sd_pack_evict.py ..................................... [ 66%]
+........................................................................ [ 68%]
+...                                                                      [ 68%]
+tests/test_lesson_sd_pack_fanout.py ..........................           [ 69%]
+tests/test_lesson_sd_pack_gc.py ............                             [ 69%]
+tests/test_lesson_sd_pack_lifecycle.py ............                      [ 69%]
+tests/test_lesson_sd_pack_materializer.py .............................. [ 70%]
+...............................                                          [ 71%]
+tests/test_lesson_sd_pack_mcp_payload.py ............................... [ 71%]
+............................                                             [ 72%]
+tests/test_lesson_sd_pack_sync.py ...................................... [ 73%]
+.....                                                                    [ 73%]
+tests/test_lesson_sd_pending_store.py ................                   [ 74%]
+tests/test_lesson_sd_retry_worker.py ............                        [ 74%]
+tests/test_lesson_studio_e2e_compose.py ......                           [ 74%]
+tests/test_lesson_studio_task14_hil_storage.py ......................... [ 75%]
+.......................                                                  [ 75%]
+tests/test_lesson_voice_nonregression.py ............................    [ 76%]
+tests/test_lesson_voice_output_discipline.py .................           [ 76%]
+tests/test_listen_message_voice_provider_interrupt.py ..........         [ 76%]
+tests/test_live_admission_edges.py .............                         [ 77%]
+tests/test_local_sample_demo_nudge.py .......                            [ 77%]
+tests/test_local_sample_demo_preflight.py .........                      [ 77%]
+tests/test_local_sample_demo_runner.py .........                         [ 77%]
+tests/test_local_sample_demo_server.py ...                               [ 77%]
+tests/test_logger_disk_full.py ...                                       [ 78%]
+tests/test_logger_helpers.py ......                                      [ 78%]
+tests/test_manage_api_client_branch_gaps.py .                            [ 78%]
+tests/test_manage_api_client_child_profile_leg.py .......                [ 78%]
+tests/test_manage_api_client_cleanup.py .                                [ 78%]
+tests/test_manage_api_client_edges.py ................                   [ 78%]
+tests/test_manage_api_client_lesson_legs.py ....................         [ 79%]
+tests/test_manage_api_client_normalize_assignment_gap.py ...             [ 79%]
+tests/test_manager_web_lesson_derivatives_runtime.py .                   [ 79%]
+tests/test_mcp_text_message_handler.py .                                 [ 79%]
+tests/test_mem_local_short_edges.py ....                                 [ 79%]
+tests/test_memory_provider_cleanup.py .                                  [ 79%]
+tests/test_modules_initialize_tts.py ..                                  [ 79%]
+tests/test_modules_opus_tts_edges.py ....                                [ 79%]
+tests/test_nginx_docker_ready_timeout.py ..                              [ 79%]
+tests/test_nginx_generation_cache_runtime.py F                           [ 79%]
+tests/test_nginx_sample_assets_runtime.py .                              [ 79%]
+tests/test_openai_asr_provider.py .                                      [ 79%]
+tests/test_ota_handler_edges.py ........................                 [ 80%]
+tests/test_ota_websocket_url.py ..................                       [ 80%]
+tests/test_output_judge_wiring.py .....                                  [ 80%]
+tests/test_output_safety_judge.py .........                              [ 81%]
+tests/test_physical_smoke_audit.py ..................................... [ 82%]
+........................................................                 [ 83%]
+tests/test_ping_message_handler.py ..                                    [ 83%]
+tests/test_play_music_live_flow.py ..........................            [ 84%]
+tests/test_plugin_executor_and_base_providers.py ......                  [ 84%]
+tests/test_plugin_registry_child_safety.py .....                         [ 84%]
+tests/test_product_toolset.py ........                                   [ 84%]
+tests/test_product_toolset_admission.py ..........                       [ 84%]
+tests/test_product_toolset_admission_error_branches.py ...               [ 84%]
+tests/test_product_toolset_round1_branch_gaps.py ......                  [ 85%]
+tests/test_prompt_child_profile.py .                                     [ 85%]
+tests/test_prompt_manager_edges.py ....                                  [ 85%]
+tests/test_public_global_generation_acceptance_contract.py ..            [ 85%]
+tests/test_python_runtime_preflight.py .......                           [ 85%]
+tests/test_raise_left_arm.py ............                                [ 85%]
+tests/test_receive_audio_handle.py ..................                    [ 86%]
+tests/test_reconnect_storm.py .......................................... [ 87%]
+.........                                                                [ 87%]
+tests/test_report_handle.py ...........                                  [ 87%]
+tests/test_robot_motion_tools.py .....................                   [ 88%]
+tests/test_sample_lesson.py ............................................ [ 89%]
+......                                                                   [ 89%]
+tests/test_scaleout_deploy_topology.py ................................. [ 90%]
+.....                                                                    [ 90%]
+tests/test_scaleout_redis_integration.py ...                             [ 90%]
+tests/test_send_audio_tts_stop.py .........................              [ 90%]
+tests/test_session_orchestrator.py ....................                  [ 91%]
+tests/test_shared_asset_store.py ....................................... [ 92%]
+                                                                         [ 92%]
+tests/test_small_factory_and_api_helpers.py ...                          [ 92%]
+tests/test_small_utils_edges.py .....                                    [ 92%]
+tests/test_start_lesson_failure_codes.py .....                           [ 92%]
+tests/test_start_lesson_tool.py ........................                 [ 93%]
+tests/test_synthetic_device_ws_e2e.py ..                                 [ 93%]
+tests/test_task14_esp_build_identity.py ...                              [ 93%]
+tests/test_task14_esp_connection_headers.py ...                          [ 93%]
+tests/test_task14_esp_device_mcp_build_identity.py ....                  [ 93%]
+tests/test_task14_esp_http_metrics_build_identity.py ..                  [ 93%]
+tests/test_task14_esp_websocket_header_boundary.py ....                  [ 93%]
+tests/test_task14_sd_hil_storage_identity.py .........                   [ 93%]
+tests/test_task14_sd_storage_identity_contract.py ..........             [ 94%]
+tests/test_text_message_handler_base.py .                                [ 94%]
+tests/test_text_message_processor_logging.py .......                     [ 94%]
+tests/test_text_utils_emotion.py ....                                    [ 94%]
+tests/test_toolset_helpers.py ......                                     [ 94%]
+tests/test_tts_base_segmentation.py ......                               [ 94%]
+tests/test_tts_provider_import.py .                                      [ 94%]
+tests/test_tvideo_farm_cross_repo_fixture.py ........                    [ 94%]
+tests/test_tvideo_farm_fixture_generator.py ......                       [ 95%]
+tests/test_tvideo_farm_validation_scripts.py ........................... [ 95%]
+...........                                                              [ 96%]
+tests/test_util_edges.py .....                                           [ 96%]
+tests/test_utils_auth_token.py ....                                      [ 96%]
+tests/test_uvloop_runtime.py .                                           [ 96%]
+tests/test_vision_handler.py ...............                             [ 96%]
+tests/test_voice_consent_gate.py ............                            [ 96%]
+tests/test_voice_mode_preflight.py .....                                 [ 97%]
+tests/test_voice_mode_websocket_audio_bargein.py ...                     [ 97%]
+tests/test_voice_mode_websocket_soak.py ......                           [ 97%]
+tests/test_voice_provider_factory.py ....................                [ 97%]
+tests/test_vps_voice_goal_proof_runner_script.py ......                  [ 97%]
+tests/test_vps_voice_goal_watcher_script.py ........                     [ 98%]
+tests/test_wakeup_words_reply.py .........                               [ 98%]
+tests/test_websocket_server_edges.py .......                             [ 98%]
+tests/test_websocket_server_manager_bootstrap.py ..........              [ 98%]
+tests/test_wifi_provisioning_boundary.py ...........                     [ 98%]
+tests/test_word_mastery.py .........                                     [ 99%]
+tests/test_ws_auth_token_roundtrip.py .........                          [ 99%]
+tests/test_ws_reconnect_lifecycle.py .........................           [100%]
+
+=================================== FAILURES ===================================
+____ test_public_generation_reads_are_uncached_bounded_and_origin_isolated _____
+tests/test_nginx_generation_cache_runtime.py:300: in test_public_generation_reads_are_uncached_bounded_and_origin_isolated
+    abusive_responses = list(
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/concurrent/futures/_base.py:645: in result_iterator
+    yield _result_or_cancel(fs.pop())
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/concurrent/futures/_base.py:312: in _result_or_cancel
+    return fut.result(timeout)
+           ^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/concurrent/futures/_base.py:454: in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/concurrent/futures/_base.py:396: in __get_result
+    raise self._exception
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/concurrent/futures/thread.py:86: in run
+    result = ctx.run(self.task)
+             ^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/concurrent/futures/thread.py:73: in run
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+tests/test_nginx_generation_cache_runtime.py:302: in <lambda>
+    lambda item: _request(
+tests/test_nginx_generation_cache_runtime.py:118: in _request
+    response = connection.getresponse()
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/http/client.py:1459: in getresponse
+    response.begin()
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/http/client.py:336: in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/http/client.py:297: in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/socket.py:729: in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+E   TimeoutError: timed out
+=============================== warnings summary ===============================
+../../../../../../../../../../Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/google/genai/types.py:34
+  /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/google/genai/types.py:34: DeprecationWarning: '_UnionGenericAlias' is deprecated and slated for removal in Python 3.17
+    VersionedUnionType = Union[builtin_types.UnionType, _UnionGenericAlias]
+
+core/api/ota_handler.py:505
+  /Users/manhhodinh/Documents/TBOT/robot/esp32-server/.worktrees/task-06-runtime-validation/main/tbot-server/core/api/ota_handler.py:505: SyntaxWarning: 'return' in a 'finally' block
+    return response
+
+core/api/ota_handler.py:522
+  /Users/manhhodinh/Documents/TBOT/robot/esp32-server/.worktrees/task-06-runtime-validation/main/tbot-server/core/api/ota_handler.py:522: SyntaxWarning: 'return' in a 'finally' block
+    return response
+
+core/api/ota_handler.py:583
+  /Users/manhhodinh/Documents/TBOT/robot/esp32-server/.worktrees/task-06-runtime-validation/main/tbot-server/core/api/ota_handler.py:583: SyntaxWarning: 'return' in a 'finally' block
+    return resp
+
+core/api/vision_handler.py:155
+  /Users/manhhodinh/Documents/TBOT/robot/esp32-server/.worktrees/task-06-runtime-validation/main/tbot-server/core/api/vision_handler.py:155: SyntaxWarning: 'return' in a 'finally' block
+    return response
+
+core/api/vision_handler.py:178
+  /Users/manhhodinh/Documents/TBOT/robot/esp32-server/.worktrees/task-06-runtime-validation/main/tbot-server/core/api/vision_handler.py:178: SyntaxWarning: 'return' in a 'finally' block
+    return response
+
+tests/test_uvloop_runtime.py::UvloopRuntimeTest::test_app_installs_uvloop_event_loop_policy_before_run
+  /Users/manhhodinh/Documents/TBOT/robot/esp32-server/.worktrees/task-06-runtime-validation/main/tbot-server/tests/test_uvloop_runtime.py:11: DeprecationWarning: 'asyncio.get_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    previous_policy = asyncio.get_event_loop_policy()
+
+tests/test_uvloop_runtime.py::UvloopRuntimeTest::test_app_installs_uvloop_event_loop_policy_before_run
+  /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/uvloop/__init__.py:164: DeprecationWarning: 'asyncio.AbstractEventLoopPolicy' is deprecated and slated for removal in Python 3.16
+    getattr(__asyncio, 'AbstractEventLoopPolicy')  # type: ignore[misc]
+
+tests/test_uvloop_runtime.py::UvloopRuntimeTest::test_app_installs_uvloop_event_loop_policy_before_run
+  /Users/manhhodinh/Documents/TBOT/robot/esp32-server/.worktrees/task-06-runtime-validation/main/tbot-server/app.py:53: DeprecationWarning: 'asyncio.set_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+
+tests/test_uvloop_runtime.py::UvloopRuntimeTest::test_app_installs_uvloop_event_loop_policy_before_run
+  /Users/manhhodinh/Documents/TBOT/robot/esp32-server/.worktrees/task-06-runtime-validation/main/tbot-server/tests/test_uvloop_runtime.py:14: DeprecationWarning: 'asyncio.get_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    self.assertIsInstance(asyncio.get_event_loop_policy(), uvloop.EventLoopPolicy)
+
+tests/test_uvloop_runtime.py::UvloopRuntimeTest::test_app_installs_uvloop_event_loop_policy_before_run
+  /Users/manhhodinh/Documents/TBOT/robot/esp32-server/.worktrees/task-06-runtime-validation/main/tbot-server/tests/test_uvloop_runtime.py:16: DeprecationWarning: 'asyncio.set_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    asyncio.set_event_loop_policy(previous_policy)
+
+tests/test_wifi_provisioning_boundary.py::test_esp_server_has_no_home_wifi_credential_endpoint
+  <unknown>:107: SyntaxWarning: "\`" is an invalid escape sequence. Such sequences will not work in the future. Did you mean "\\`"? A raw string is also an option.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_nginx_generation_cache_runtime.py::test_public_generation_reads_are_uncached_bounded_and_origin_isolated
+====== 1 failed, 4117 passed, 8 skipped, 12 warnings in 222.03s (0:03:42) ======
+real 222.63
+user 40.61
+sys 44.24
+           298237952  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1138927  page reclaims
+               26957  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                2754  messages sent
+                2453  messages received
+                2191  signals received
+               26247  voluntary context switches
+              144123  involuntary context switches
+       1314732711363  instructions retired
+        298293594157  cycles elapsed
+           251937560  peak memory footprint

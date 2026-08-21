@@ -1,0 +1,263 @@
+{
+  "candidate": {
+    "backendSha": "657474ff3b58fba2c3c31f2978d53370ffad8b11",
+    "espSha": "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268",
+    "firmwareSha": "d47174daebe17b9c1a9d1a1eb506711a57cd3512",
+    "fixtureCopiesEqual": true,
+    "fixtureSha256": "05e18ae61aee0660c653a9386854552a23f90c8a1f8cfb9e7ff4e15d1d277470",
+    "layoutChecksum": "e61b56d1f8219a86c7f3986e7d5c70b91f512286604b5b206ef11e2c989d275c",
+    "releaseState": {
+      "assigned": false,
+      "productionEnabled": false,
+      "published": false,
+      "status": "draft"
+    },
+    "rendererId": "teebot-lesson-renderer.v4",
+    "semanticChecksum": "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264"
+  },
+  "dataPolicy": "synthetic-no-child-data",
+  "generatedAtUtc": "2026-08-21T21:49:31Z",
+  "journeys": {
+    "journeyCount": 22,
+    "names": [
+      "knows word early",
+      "repetition only",
+      "Vietnamese answer",
+      "partial speech",
+      "silence",
+      "low confidence",
+      "unrelated story",
+      "emotional share",
+      "refusal",
+      "fatigue",
+      "question",
+      "barge-in",
+      "reconnect",
+      "duplicate tool call",
+      "delayed recall success",
+      "delayed recall failure",
+      "one-word close",
+      "two-word success",
+      "safety pause",
+      "technical recovery",
+      "visible answer text",
+      "routine related story bridge"
+    ]
+  },
+  "resources": {
+    "fdAfter": 4,
+    "fdBefore": 4,
+    "fdDelta": 0,
+    "heapCurrentDeltaBytes": 208,
+    "heapPeakBytes": 4880,
+    "threadAfter": 1,
+    "threadBefore": 1,
+    "threadDelta": 0
+  },
+  "schemaVersion": 1,
+  "soak": {
+    "durationSeconds": 0.720799,
+    "failureDetails": [],
+    "failures": 0,
+    "iterations": 2000,
+    "sessions": 44000
+  },
+  "verdict": "PASS",
+  "visuals": {
+    "captureCount": 24,
+    "samples": [
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/ball-discover-end.png",
+        "sha256": "ff7e1baf308ead76f282f6440163f8aa075f789ab90f9496873385674f305a08",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/ball-discover-middle.png",
+        "sha256": "ff7e1baf308ead76f282f6440163f8aa075f789ab90f9496873385674f305a08",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/ball-discover-start.png",
+        "sha256": "ff7e1baf308ead76f282f6440163f8aa075f789ab90f9496873385674f305a08",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/ball-meaning-end.png",
+        "sha256": "29c897d9c14d793208b151f39eac434b28d5f44800449c44906ad0957fff372e",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/ball-meaning-middle.png",
+        "sha256": "29c897d9c14d793208b151f39eac434b28d5f44800449c44906ad0957fff372e",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/ball-meaning-start.png",
+        "sha256": "29c897d9c14d793208b151f39eac434b28d5f44800449c44906ad0957fff372e",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/cat-delayed-end.png",
+        "sha256": "23733564cf7adfc267788c7538609c9e4313e3fa8818aa169a5f885e26964502",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/cat-delayed-middle.png",
+        "sha256": "23733564cf7adfc267788c7538609c9e4313e3fa8818aa169a5f885e26964502",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/cat-delayed-start.png",
+        "sha256": "23733564cf7adfc267788c7538609c9e4313e3fa8818aa169a5f885e26964502",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/cat-discover-end.png",
+        "sha256": "e4b8e5e7767ed5f08699dfdf12f7ae75caf1f37d5e09a78989b4573713bdc831",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/cat-discover-middle.png",
+        "sha256": "e4b8e5e7767ed5f08699dfdf12f7ae75caf1f37d5e09a78989b4573713bdc831",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/cat-discover-start.png",
+        "sha256": "e4b8e5e7767ed5f08699dfdf12f7ae75caf1f37d5e09a78989b4573713bdc831",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/cat-joint-speech-end.png",
+        "sha256": "e4b8e5e7767ed5f08699dfdf12f7ae75caf1f37d5e09a78989b4573713bdc831",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/cat-joint-speech-middle.png",
+        "sha256": "e4b8e5e7767ed5f08699dfdf12f7ae75caf1f37d5e09a78989b4573713bdc831",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/cat-joint-speech-start.png",
+        "sha256": "e4b8e5e7767ed5f08699dfdf12f7ae75caf1f37d5e09a78989b4573713bdc831",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/cat-meaning-end.png",
+        "sha256": "db71da43f3b1d58a99e0c3060362d382d81bb6c795ae07912a3af829c9373962",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/cat-meaning-middle.png",
+        "sha256": "db71da43f3b1d58a99e0c3060362d382d81bb6c795ae07912a3af829c9373962",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/cat-meaning-start.png",
+        "sha256": "db71da43f3b1d58a99e0c3060362d382d81bb6c795ae07912a3af829c9373962",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/cat-recall-end.png",
+        "sha256": "db71da43f3b1d58a99e0c3060362d382d81bb6c795ae07912a3af829c9373962",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/cat-recall-middle.png",
+        "sha256": "db71da43f3b1d58a99e0c3060362d382d81bb6c795ae07912a3af829c9373962",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/cat-recall-start.png",
+        "sha256": "db71da43f3b1d58a99e0c3060362d382d81bb6c795ae07912a3af829c9373962",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/cat-transfer-end.png",
+        "sha256": "5f715f65156dbf31dcafd683a45a415ace1aa48b76936c0dbc3b07368bada63e",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/cat-transfer-middle.png",
+        "sha256": "5f715f65156dbf31dcafd683a45a415ace1aa48b76936c0dbc3b07368bada63e",
+        "size": [
+          480,
+          320
+        ]
+      },
+      {
+        "path": "/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/captures/cat-transfer-start.png",
+        "sha256": "5f715f65156dbf31dcafd683a45a415ace1aa48b76936c0dbc3b07368bada63e",
+        "size": [
+          480,
+          320
+        ]
+      }
+    ]
+  }
+}

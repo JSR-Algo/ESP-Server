@@ -1,0 +1,29 @@
+
+> tbot-backend@0.1.0 typecheck
+> tsc --noEmit
+
+
+> tbot-backend@0.1.0 build
+> nest build
+
+
+> tbot-backend@0.1.0 lesson:contract-parity
+> npm run lesson:contract-vectors:check && vitest run src/lessons/lesson-contract-vectors.spec.ts src/lessons/lesson-manifest.checksum-parity.spec.ts
+
+
+> tbot-backend@0.1.0 lesson:contract-vectors:check
+> node scripts/generate-lesson-contract-vectors.mjs --check
+
+vectors up to date  sha256=95e35b3576656c08562d58ac818870fbc4620c9b9ebc1a418fe81a8c861a4ddb
+[33mThe CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.[39m
+
+ RUN  v2.1.9 /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation
+
+ ✓ src/lessons/lesson-manifest.checksum-parity.spec.ts (7 tests) 3ms
+ ✓ src/lessons/lesson-contract-vectors.spec.ts (123 tests) 52ms
+
+ Test Files  2 passed (2)
+      Tests  130 passed (130)
+   Start at  04:56:14
+   Duration  571ms (transform 85ms, setup 217ms, collect 185ms, tests 56ms, environment 0ms, prepare 27ms)
+

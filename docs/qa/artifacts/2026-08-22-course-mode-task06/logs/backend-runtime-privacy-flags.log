@@ -1,0 +1,15 @@
+[33mThe CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.[39m
+
+ RUN  v2.1.9 /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation
+
+ ✓ src/lessons/course-mode/pilot/course-mode-pilot.spec.ts (13 tests) 182ms
+ ✓ src/lessons/lesson-manifest.course-mode.spec.ts (7 tests) 7ms
+ ✓ src/lessons/lesson-rollout.config.spec.ts (7 tests) 1ms
+ ✓ src/lessons/parent-learning-progress.course-mode.spec.ts (6 tests) 1ms
+ ✓ src/lessons/lesson-event-ingest.course-mode.spec.ts (16 tests) 1ms
+
+ Test Files  5 passed (5)
+      Tests  49 passed (49)
+   Start at  04:57:00
+   Duration  706ms (transform 137ms, setup 169ms, collect 205ms, tests 192ms, environment 0ms, prepare 27ms)
+

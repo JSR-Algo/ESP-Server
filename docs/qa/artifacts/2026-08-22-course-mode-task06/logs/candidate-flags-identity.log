@@ -1,0 +1,50 @@
+ESP_HEAD=7e2628a9b9b4c3c7bbde4b426455700a4e0b7268
+FIRMWARE_HEAD=d47174daebe17b9c1a9d1a1eb506711a57cd3512
+BACKEND_HEAD=657474ff3b58fba2c3c31f2978d53370ffad8b11
+ESP_FLAG
+main/tbot-server/config.yaml:466:  course_mode_v2_enabled: false
+main/tbot-server/config/config_loader.py:530:        "course_mode_v2_enabled",
+main/tbot-server/config/config_loader.py:670:        lesson_cfg.setdefault("course_mode_v2_enabled", False)
+main/tbot-server/config/config_loader.py:687:            or lesson_cfg.get("course_mode_v2_enabled") is True
+main/tbot-server/config/config_loader.py:703:    lesson_cfg.setdefault("course_mode_v2_enabled", False)
+main/tbot-server/config/config_loader.py:732:    lesson_cfg["course_mode_v2_enabled"] = (
+main/tbot-server/config/config_loader.py:733:        course_mode_v2_flag if course_mode_v2_flag is not None else lesson_cfg["course_mode_v2_enabled"]
+main/tbot-server/config/config_loader.py:809:        or lesson_cfg.get("course_mode_v2_enabled") is True
+BACKEND_FLAG
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-rollout.config.spec.ts:11:  'COURSE_MODE_V2_PUBLISH_ENABLED',
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-rollout.config.spec.ts:22:      courseModeV2PublishEnabled: false,
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-rollout.config.spec.ts:27:    process.env.COURSE_MODE_V2_PUBLISH_ENABLED = 'TRUE';
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-rollout.config.spec.ts:28:    expect(new LessonRolloutConfig().courseModeV2PublishEnabled).toBe(false);
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-rollout.config.spec.ts:29:    process.env.COURSE_MODE_V2_PUBLISH_ENABLED = 'true';
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-rollout.config.spec.ts:30:    expect(new LessonRolloutConfig().courseModeV2PublishEnabled).toBe(true);
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-manifest.course-mode.spec.ts:124:    process.env.COURSE_MODE_V2_PUBLISH_ENABLED = 'true';
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-manifest.course-mode.spec.ts:134:    delete process.env.COURSE_MODE_V2_PUBLISH_ENABLED;
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-manifest.course-mode.spec.ts:144:    process.env.COURSE_MODE_V2_PUBLISH_ENABLED = 'true';
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-manifest.course-mode.spec.ts:155:  delete process.env.COURSE_MODE_V2_PUBLISH_ENABLED;
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-manifest.service.ts:46:import { courseModeV2PublishEnabled } from './lesson-rollout.config';
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-manifest.service.ts:101:    if (courseModeContract && !courseModeV2PublishEnabled()) {
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/authoring/lesson-authoring.course-mode.spec.ts:36:    delete process.env.COURSE_MODE_V2_PUBLISH_ENABLED;
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/authoring/lesson-authoring.course-mode.spec.ts:131:    delete process.env.COURSE_MODE_V2_PUBLISH_ENABLED;
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/authoring/lesson-authoring.course-mode.spec.ts:143:    process.env.COURSE_MODE_V2_PUBLISH_ENABLED = 'true';
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/authoring/lesson-authoring.course-mode.spec.ts:157:    delete process.env.COURSE_MODE_V2_PUBLISH_ENABLED;
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/authoring/lesson-authoring.service.ts:85:import { courseModeV2PublishEnabled } from '../lesson-rollout.config';
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/authoring/lesson-authoring.service.ts:3227:      if (courseMode && !courseModeV2PublishEnabled()) {
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-rollout.config.ts:9:export function courseModeV2PublishEnabled(): boolean { return enabled('COURSE_MODE_V2_PUBLISH_ENABLED'); }
+/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-rollout.config.ts:20:  readonly courseModeV2PublishEnabled = courseModeV2PublishEnabled();
+PILOT_RELEASE
+{
+  "fixtureId": "course-mode-pilot-cat-ball",
+  "lessonVersion": 1,
+  "packageVersion": 1,
+  "rendererId": "teebot-lesson-renderer.v4",
+  "semanticChecksum": "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264",
+  "layoutChecksum": "e61b56d1f8219a86c7f3986e7d5c70b91f512286604b5b206ef11e2c989d275c"
+}
+{
+  "status": "draft",
+  "published": false,
+  "assigned": false,
+  "productionEnabled": false
+}
+PROTECTED_MAIN_HASH
+08f77b5452301224b17b4b333d2d032fff40c06aa2eaea97fa90932dae7d97e3  /Users/manhhodinh/Documents/TBOT/robot/esp32-server/main/tbot-server/tests/test_lesson_voice_output_discipline.py

@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "gate": "course-mode-v2-task-06-runtime-integration-validation",
+  "generatedDate": "2026-08-22",
+  "verdict": "RUNTIME_PASS",
+  "authorizesOnPass": "task-07-physical-testing-only",
+  "candidate": {
+    "espSha": "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268",
+    "firmwareSha": "d47174daebe17b9c1a9d1a1eb506711a57cd3512",
+    "backendSha": "657474ff3b58fba2c3c31f2978d53370ffad8b11",
+    "fixtureId": "course-mode-pilot-cat-ball",
+    "fixtureSha256": "05e18ae61aee0660c653a9386854552a23f90c8a1f8cfb9e7ff4e15d1d277470",
+    "fixtureCopiesEqual": true,
+    "lessonVersion": 1,
+    "packageVersion": 1,
+    "rendererId": "teebot-lesson-renderer.v4",
+    "semanticChecksum": "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264",
+    "layoutChecksum": "e61b56d1f8219a86c7f3986e7d5c70b91f512286604b5b206ef11e2c989d275c",
+    "release": {
+      "status": "draft",
+      "published": false,
+      "assigned": false,
+      "productionEnabled": false
+    }
+  },
+  "dataPolicy": "synthetic-no-real-child-data",
+  "productionActions": {
+    "deployed": false,
+    "published": false,
+    "assigned": false,
+    "migrationApplied": false,
+    "otaOrFlashPerformed": false,
+    "featureFlagEnabled": false
+  },
+  "lanes": {
+    "deterministicJourneys": { "verdict": "PASS", "journeyTypes": 22, "iterations": 160114, "sessions": 3522508, "durationSeconds": 60.000166, "failures": 0 },
+    "runtimeRecoveryPrivacy": { "verdict": "PASS", "espPassed": 304, "espSkipped": 2, "firmwareRuntimePassed": 243, "backendPrivacyPassed": 106 },
+    "timing": { "verdict": "PASS", "testsPassed": 82, "actionAckTimeoutSeconds": 2.0, "settleBeforeListenSeconds": 0.25, "sessionSoftDeadlineSeconds": 540, "delayedRecallSimulatedSeconds": 70 },
+    "soakResources": { "verdict": "PASS", "threadDelta": 0, "fdDelta": 0, "heapCurrentDeltaBytes": 208, "heapPeakBytes": 4880, "maximumResidentSetBytes": 32374784 },
+    "visualSampling": { "verdict": "PASS", "cues": 8, "captures": 24, "width": 480, "height": 320, "contactSheetSha256": "6832327aba40098d2bb60bd3f729636b2a858f407c0a9fb62b7c8a07532e553e" },
+    "v1AndParity": { "verdict": "PASS", "backendPassed": 130, "espPassed": 169, "vectorSha256": "95e35b3576656c08562d58ac818870fbc4620c9b9ebc1a418fe81a8c861a4ddb" },
+    "broadRegression": { "verdict": "PASS", "backendPassed": 5916, "backendSkipped": 643, "firmwarePassed": 1269, "firmwareSkipped": 1, "espPassed": 4117, "espSkipped": 8, "espContentionRerunPassed": 1 },
+    "staticBuild": { "verdict": "PASS_WITH_ENVIRONMENT_LIMIT", "backendTypecheck": true, "backendEslintFiles": 1316, "backendEslintFindings": 0, "backendNestBuild": true, "espCompileall": true, "firmwareNativeLineCoveragePercent": 100.0, "firmwareEspIdfRebuildAvailable": false }
+  },
+  "hardAssertions": {
+    "repetitionNeverBecomesMastery": true,
+    "assessmentNeverOverlapsUnsettledMotion": true,
+    "normalMissNeverUsesShamingFeedback": true,
+    "motionFailureCannotMutateEvidence": true,
+    "resumeDuplicatePraiseCount": 0,
+    "resumeDuplicateMotionCount": 0,
+    "resumeDuplicateEvidenceCount": 0,
+    "unsupportedCapabilityFailsBeforeAdmission": true,
+    "v1VectorsUnchanged": true
+  },
+  "artifacts": {
+    "runtimeSoakMetrics": { "path": "metrics/runtime-soak-60s.json", "sha256": "1c6ec3841f74098091dc6651ad2f3a302072f5f66d22959f4efc49a8eebff107" },
+    "runtimeSoakLog": { "path": "logs/runtime-soak-60s.log", "sha256": "f2e69dc0c6fb1f07dd352e98734c327f69b437c039abab0985cdfea0f965abe0" },
+    "contactSheet": { "path": "captures/all-cues-contact-sheet.png", "sha256": "6832327aba40098d2bb60bd3f729636b2a858f407c0a9fb62b7c8a07532e553e" },
+    "backendFull": { "path": "logs/backend-full-rerun.log", "sha256": "f2206d32ad85a83352f9bac8c9eac2ea2cad49a4d4e0caf1c78c062d564ac9c9" },
+    "firmwareFull": { "path": "logs/firmware-full-rerun.log", "sha256": "f9868be44bc921d0f8e3a33580f8ef5370b828e715b6e7962ae49d5651af3b67" },
+    "espFull": { "path": "logs/esp-full.log", "sha256": "585e2ee26486097419ba7161c0f8fafc10745c26fe43fe470c3430008cd16603" },
+    "espContentionRerun": { "path": "logs/esp-nginx-timeout-rerun.log", "sha256": "5b793439c48c5b8b798eed48985093b117c756e8a28c9a8dbd161f1d49f5639a" },
+    "backendStaticParity": { "path": "logs/backend-static-build-parity.log", "sha256": "3f303eaa09c81d7deb4503806eed44484c3e719ba2cbc28f37d00bd5fa60c51f" },
+    "espStaticParity": { "path": "logs/esp-static-parity-v1.log", "sha256": "6be8b9a5c0c7e8a1884de51c5c123d25b733c47d5b4524994e22246b1328f9bb" },
+    "firmwareNativeCoverage": { "path": "logs/firmware-native-coverage.log", "sha256": "2597b334e8a54ab001bdd32aa04d3b614a7037520a74281490086d201bf1af79" },
+    "backendPrivacy": { "path": "logs/backend-privacy-security-rerun.log", "sha256": "05e138a83f686a40dc9b4811d29f3c4a364bcaae8008e7f71adba5ef06534fef" },
+    "espSafetyPrivacy": { "path": "logs/esp-safety-security-expanded.log", "sha256": "122c63f02b5a1a623da1612cfdb61614579f50857e9a3dd97773b2dcf2ac21ce" },
+    "firmwarePrivacy": { "path": "logs/firmware-privacy-security.log", "sha256": "e1b812c233cfbd21b25fb10431ef5b2d06dd61958f5045280935694b1d4c8a4d" },
+    "timing": { "path": "logs/esp-timing-contracts.log", "sha256": "b7ea172e76265979caeac3e31ae67b2e71fabc561626c6b771add84d606af536" },
+    "flagsAndProtectedHash": { "path": "logs/candidate-flags-identity.log", "sha256": "11e001e7b4c921f5fbde6e9307c602be47cddf127ccf3dcbb460959d8e830c97" }
+  },
+  "residualRisks": [
+    "Backend package lockfiles are stale relative to package.json; immutable validation required a no-lockfile install.",
+    "Fresh ESP-IDF rebuild is unavailable because IDF_PATH/idf5.5_py3.14_env is absent; native and Python firmware gates passed.",
+    "PostgreSQL-required integration tests are skipped without dedicated test database URLs.",
+    "Physical display, audio, motion comfort, power, thermal, and real-device conditions remain Task 07 gates."
+  ],
+  "protectedExternalEspChange": {
+    "path": "main/tbot-server/tests/test_lesson_voice_output_discipline.py",
+    "sha256": "08f77b5452301224b17b4b333d2d032fff40c06aa2eaea97fa90932dae7d97e3",
+    "independentTestsPassed": 16,
+    "includedInCandidate": false,
+    "mutatedByTask06": false
+  },
+  "task06Commits": {
+    "backend": {
+      "branch": "validation/course-mode-task06-regression-fixes",
+      "sha": "1920586d48e5448dcf653dbfa2391c7ef346fcd9"
+    },
+    "firmware": {
+      "branch": "validation/course-mode-task06-regression-fixes",
+      "sha": "df70b5a12c68f5a6ab07f981cb7c10113e7dbc01"
+    },
+    "esp": {
+      "branch": "validation/course-mode-task06-runtime-evidence",
+      "sha": null,
+      "note": "The final ESP evidence commit SHA is recorded in the human handoff because a commit cannot contain its own SHA."
+    }
+  },
+  "independentReview": {
+    "backend": "CLEAN",
+    "firmware": "CLEAN",
+    "espInitialFindingsAccepted": 3,
+    "espFinal": "CLEAN"
+  }
+}

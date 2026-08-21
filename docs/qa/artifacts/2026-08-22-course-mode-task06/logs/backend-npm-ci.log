@@ -1,0 +1,44 @@
+npm error code EUSAGE
+npm error
+npm error `npm ci` can only install packages when your package.json and package-lock.json or npm-shrinkwrap.json are in sync. Please update your lock file with `npm install` before continuing.
+npm error
+npm error Missing: openapi-types@12.1.3 from lock file
+npm error
+npm error Clean install a project
+npm error
+npm error Usage:
+npm error npm ci
+npm error
+npm error Options:
+npm error [--install-strategy <hoisted|nested|shallow|linked>] [--legacy-bundling]
+npm error [--global-style] [--omit <dev|optional|peer> [--omit <dev|optional|peer> ...]]
+npm error [--include <prod|dev|optional|peer> [--include <prod|dev|optional|peer> ...]]
+npm error [--strict-peer-deps] [--foreground-scripts] [--ignore-scripts] [--no-audit]
+npm error [--no-bin-links] [--no-fund] [--dry-run]
+npm error [-w|--workspace <workspace-name> [-w|--workspace <workspace-name> ...]]
+npm error [-ws|--workspaces] [--include-workspace-root] [--install-links]
+npm error
+npm error aliases: clean-install, ic, install-clean, isntall-clean
+npm error
+npm error Run "npm help ci" for more info
+npm error A complete log of this run can be found in: /Users/manhhodinh/.npm/_logs/2026-08-21T21_45_33_397Z-debug-0.log
+real 0.58
+user 0.43
+sys 0.06
+           133431296  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                8578  page reclaims
+                   7  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  22  messages sent
+                  44  messages received
+                   0  signals received
+                  94  voluntary context switches
+                1746  involuntary context switches
+          5781565825  instructions retired
+          1876371905  cycles elapsed
+            92335144  peak memory footprint

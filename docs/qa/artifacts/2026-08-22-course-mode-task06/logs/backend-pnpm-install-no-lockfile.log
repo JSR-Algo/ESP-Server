@@ -1,0 +1,113 @@
+[WARN] A pnpm-lock.yaml file exists. The current configuration prohibits to read or write a lockfile
+Progress: resolved 1, reused 0, downloaded 0, added 0
+[WARN] deprecated elevenlabs@1.59.0: This package has moved to @elevenlabs/elevenlabs-js
+[WARN] deprecated eslint@9.39.5: This version is no longer supported. Please see https://eslint.org/version-support for other options.
+Progress: resolved 87, reused 66, downloaded 15, added 0
+Progress: resolved 217, reused 179, downloaded 22, added 0
+Progress: resolved 356, reused 301, downloaded 35, added 0
+Progress: resolved 447, reused 378, downloaded 44, added 0
+Progress: resolved 587, reused 514, downloaded 56, added 0
+Progress: resolved 811, reused 730, downloaded 65, added 0
+Progress: resolved 928, reused 805, downloaded 68, added 0
+Progress: resolved 949, reused 816, downloaded 74, added 0
+Progress: resolved 951, reused 816, downloaded 76, added 0
+Progress: resolved 1093, reused 958, downloaded 76, added 0
+Progress: resolved 1103, reused 968, downloaded 76, added 0
+Progress: resolved 1103, reused 968, downloaded 77, added 0
+[WARN] 6 deprecated subdependencies found: glob@10.5.0, glob@7.2.3, inflight@1.0.6, node-domexception@1.0.0, sourcemap-codec@1.4.8, uuid@9.0.1
+Packages: +1045
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+Progress: resolved 1103, reused 968, downloaded 77, added 1
+Packages are cloned from the content-addressable store to the virtual store.
+  Content-addressable store is at: /Users/manhhodinh/Library/pnpm/store/v11
+  Virtual store is at:             node_modules/.pnpm
+Progress: resolved 1103, reused 968, downloaded 77, added 552
+Progress: resolved 1103, reused 968, downloaded 77, added 830
+Progress: resolved 1103, reused 968, downloaded 77, added 1045, done
+
+dependencies:
++ @anthropic-ai/sdk 0.37.0 (0.120.0 is available)
++ @aws-sdk/client-cloudwatch 3.1115.0
++ @aws-sdk/client-kms 3.1115.0
++ @aws-sdk/client-s3 3.1115.0
++ @aws-sdk/client-ses 3.1115.0
++ @aws-sdk/client-sqs 3.1115.0
++ @deepgram/sdk 3.13.0 (5.8.0 is available)
++ @google/generative-ai 0.24.1
++ @nestjs/common 11.2.1
++ @nestjs/core 11.2.1
++ @nestjs/platform-express 11.2.1
++ @nestjs/platform-socket.io 11.2.1
++ @nestjs/platform-ws 11.2.1
++ @nestjs/swagger 11.4.7
++ @nestjs/websockets 11.2.1
++ @opentelemetry/api 1.9.1
++ @opentelemetry/auto-instrumentations-node 0.78.0 (0.79.0 is available)
++ @opentelemetry/exporter-trace-otlp-http 0.220.0 (0.221.0 is available)
++ @opentelemetry/sdk-node 0.220.0 (0.221.0 is available)
++ @prisma/client 6.19.3 (7.9.1 is available)
++ @tbot/contracts 1.1.0
++ @types/ws 8.18.1
++ argon2 0.44.0 (0.45.1 is available)
++ class-transformer 0.5.1
++ class-validator 0.14.4 (0.15.1 is available)
++ cloudinary 2.10.1
++ elevenlabs 1.59.0 deprecated
++ express 5.2.1
++ firebase-admin 13.10.0 (14.3.0 is available)
++ image-size 2.0.2
++ ioredis 5.11.1 (6.0.0 is available)
++ jose 6.2.9
++ jsonwebtoken 9.0.3
++ multer 2.2.0
++ pg 8.23.0
++ reflect-metadata 0.2.2
++ rxjs 7.8.2
++ stripe 21.0.1 (22.5.0 is available)
++ ws 8.21.3
++ zod 4.4.3
+
+devDependencies:
++ @apidevtools/swagger-parser 12.1.0
++ @nestjs/cli 11.0.24
++ @nestjs/testing 11.2.1
++ @stoplight/spectral-cli 6.16.3
++ @swc/core 1.16.1
++ @types/express 5.0.6
++ @types/ioredis 4.28.10 (5.0.0 is available)
++ @types/jsonwebtoken 9.0.10
++ @types/multer 2.2.0
++ @types/node 22.20.1 (26.2.0 is available)
++ @types/pg 8.23.1
++ @types/supertest 7.2.1
++ @vitest/coverage-v8 2.1.9 (4.1.11 is available)
++ eslint 9.39.5 deprecated
++ prisma 6.19.3 (7.9.1 is available)
++ supertest 7.2.2
++ typescript 5.9.3 (7.0.2 is available)
++ typescript-eslint 8.67.0
++ unplugin-swc 1.5.11
++ vitest 2.1.9 (4.1.11 is available)
++ yaml 2.9.0
+
+Done in 18s using pnpm v11.19.0
+real 18.16
+user 8.73
+sys 11.10
+          1658748928  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              142652  page reclaims
+                2463  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                1303  messages sent
+               16150  messages received
+                   0  signals received
+               18536  voluntary context switches
+              124223  involuntary context switches
+        177735165644  instructions retired
+         69995122500  cycles elapsed
+          1734981088  peak memory footprint

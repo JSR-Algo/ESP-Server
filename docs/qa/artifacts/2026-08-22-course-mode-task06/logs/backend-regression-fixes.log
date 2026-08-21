@@ -1,0 +1,14 @@
+[33mThe CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.[39m
+
+ RUN  v2.1.9 /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation
+
+ ✓ src/lessons/authoring/esptft-publish-budget.logic.spec.ts (40 tests) 15ms
+ ✓ src/lessons/authoring/lesson-authoring.service.extra-coverage.spec.ts (18 tests) 9ms
+ ✓ src/lessons/lesson-manifest.per-profile-checksum.spec.ts (5 tests) 3ms
+ ✓ src/lessons/lesson-manifest.shared-assets.spec.ts (6 tests) 3ms
+
+ Test Files  4 passed (4)
+      Tests  69 passed (69)
+   Start at  04:53:34
+   Duration  627ms (transform 196ms, setup 150ms, collect 315ms, tests 30ms, environment 0ms, prepare 26ms)
+

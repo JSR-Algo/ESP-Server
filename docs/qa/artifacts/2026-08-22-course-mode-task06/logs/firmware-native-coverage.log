@@ -1,0 +1,22 @@
+lesson layer state test OK (34 checks)
+lesson host test OK (2851 checks)
+(INFO) Reading coverage data...
+(INFO) Writing coverage report...
+------------------------------------------------------------------------------
+                           GCC Code Coverage Report
+Directory: .
+------------------------------------------------------------------------------
+File                                       Lines     Exec  Cover   Missing
+------------------------------------------------------------------------------
+/var/folders/9y/vzstyvwx0q73f_kfmf1vg3380000gn/T/tbot-host-native-lesson-coverage.wWRPaQ/src/lesson_handler.cc
+                                            3291     3291   100%
+/var/folders/9y/vzstyvwx0q73f_kfmf1vg3380000gn/T/tbot-host-native-lesson-coverage.wWRPaQ/src/lesson_layer_state.cc
+                                              90       90   100%
+/var/folders/9y/vzstyvwx0q73f_kfmf1vg3380000gn/T/tbot-host-native-lesson-coverage.wWRPaQ/src/lesson_motion_presets.cc
+                                              86       86   100%
+------------------------------------------------------------------------------
+TOTAL                                       3467     3467   100%
+------------------------------------------------------------------------------
+lines: 100.0% (3467 out of 3467)
+functions: 95.6% (196 out of 205)
+branches: 70.4% (3289 out of 4675)

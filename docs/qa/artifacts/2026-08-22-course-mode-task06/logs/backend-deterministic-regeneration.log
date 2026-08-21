@@ -1,0 +1,10 @@
+BEFORE_STATUS
+ M src/lessons/authoring/esptft-publish-budget.logic.spec.ts
+ M src/lessons/authoring/lesson-authoring.service.extra-coverage.spec.ts
+ M src/lessons/lesson-manifest.per-profile-checksum.spec.ts
+ M src/lessons/lesson-manifest.shared-assets.spec.ts
+AFTER_STATUS
+ M src/lessons/authoring/esptft-publish-budget.logic.spec.ts
+ M src/lessons/authoring/lesson-authoring.service.extra-coverage.spec.ts
+ M src/lessons/lesson-manifest.per-profile-checksum.spec.ts
+ M src/lessons/lesson-manifest.shared-assets.spec.ts

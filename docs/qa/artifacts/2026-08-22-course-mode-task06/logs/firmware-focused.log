@@ -1,0 +1,65 @@
+lesson embodied action host test OK (219 checks)
+lesson embodied application authority source contract OK
+real 1.72
+user 0.59
+sys 0.36
+           119685120  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               26243  page reclaims
+                4182  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                2192  voluntary context switches
+                1229  involuntary context switches
+            23299879  instructions retired
+            12864395  cycles elapsed
+             1360136  peak memory footprint
+lesson host test OK (2851 checks)
+real 5.21
+user 3.94
+sys 0.52
+           335118336  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              148218  page reclaims
+                2008  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 885  voluntary context switches
+                3283  involuntary context switches
+            30122554  instructions retired
+            15846657  cycles elapsed
+             1392904  peak memory footprint
+...........................s........                                     [100%]
+35 passed, 1 skipped in 0.06s
+real 0.19
+user 0.16
+sys 0.02
+            54362112  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                4984  page reclaims
+                   6  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  12  voluntary context switches
+                  38  involuntary context switches
+          2378543865  instructions retired
+           795131568  cycles elapsed
+            40927688  peak memory footprint

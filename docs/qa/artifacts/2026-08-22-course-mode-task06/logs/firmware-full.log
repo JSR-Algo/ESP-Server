@@ -1,0 +1,138 @@
+........................................................................ [  5%]
+........................................................................ [ 11%]
+........................................................................ [ 17%]
+........................................................................ [ 22%]
+........................................................................ [ 28%]
+........................................................................ [ 34%]
+..............................................................s......... [ 39%]
+............................................F..................F........ [ 45%]
+........................................................................ [ 51%]
+........................................................................ [ 56%]
+........................................................................ [ 62%]
+........................................................F............... [ 68%]
+........................................................................ [ 73%]
+........................................................................ [ 79%]
+........................................................................ [ 85%]
+........................................................................ [ 90%]
+........................................................................ [ 96%]
+..............................................                           [100%]
+=================================== FAILURES ===================================
+__ test_unowned_prepare_refusal_uses_isolated_sequence_without_owner_mutation __
+
+    def test_unowned_prepare_refusal_uses_isolated_sequence_without_owner_mutation():
+        h = read("main/lesson_handler.cc")
+        helper_start = h.index("auto emit_isolated_prepare_error")
+        helper_end = h.index("const bool is_prepare =", helper_start)
+        helper = h[helper_start:helper_end]
+        assert "BuildFrame(in, \"lesson_error\", 1, frame_body)" in helper
+>       assert "g_session.fs_sequence" not in helper
+E       assert 'g_session.fs_sequence' not in 'auto emit_i...   }\n\n    '
+E         
+E         'g_session.fs_sequence' is contained here:
+E           equence = g_session.fs_sequence + 1;
+E                       const std::string ack = BuildLessonEmbodiedAck(
+E                           outbound_sequence, sequence, assignment_id, session_id,
+E                           Str(root, "stepId"), rejected_action_id,
+E                           static_cast<std::uint64_t>(rejected_generation), "rejected", false);...
+E         
+E         ...Full output truncated (828 lines hidden), use '-vv' to show
+
+tests/test_lesson_dispatch_backward_compat.py:609: AssertionError
+____ test_rom_decoder_component_is_direct_and_new_jpeg_remains_encoder_only ____
+
+    def test_rom_decoder_component_is_direct_and_new_jpeg_remains_encoder_only():
+        decoder = DECODER_SOURCE.read_text(encoding="utf-8")
+        encoder = ENCODER_SOURCE.read_text(encoding="utf-8")
+        manifest = COMPONENT_MANIFEST.read_text(encoding="utf-8")
+>       decoder_kconfig = DECODER_KCONFIG.read_text(encoding="utf-8")
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_lesson_jpeg_decode_contract.py:93: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py:787: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = PosixPath('/Users/manhhodinh/Documents/TBOT/robot/TBOT-Firmware/.worktrees/task-06-runtime-validation/managed_components/espressif__esp_jpeg/Kconfig')
+mode = 'r', buffering = -1, encoding = 'utf-8', errors = None, newline = None
+
+    def open(self, mode='r', buffering=-1, encoding=None,
+             errors=None, newline=None):
+        """
+        Open the file pointed to by this path and return a file object, as
+        the built-in open() function does.
+        """
+        if "b" not in mode:
+            encoding = io.text_encoding(encoding)
+>       return io.open(self, mode, buffering, encoding, errors, newline)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/manhhodinh/Documents/TBOT/robot/TBOT-Firmware/.worktrees/task-06-runtime-validation/managed_components/espressif__esp_jpeg/Kconfig'
+
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py:771: FileNotFoundError
+______ test_lesson_runtime_defers_heartbeat_auth_failure_until_lesson_end ______
+
+    def test_lesson_runtime_defers_heartbeat_auth_failure_until_lesson_end():
+        app_cc = read("main/application.cc")
+        app_h = read("main/application.h")
+    
+        assert "deferred_heartbeat_auth_failure_status_" in app_h
+    
+        start = app_cc.index("void Application::HandleHeartbeatAuthFailure")
+        end = app_cc.index("void Application::EnterRepairPairingMode", start)
+        body = app_cc[start:end]
+    
+        assert "lesson_runtime_active_.load()" in body
+        assert "deferred_heartbeat_auth_failure_status_.store(status_code)" in body
+        assert body.index("lesson_runtime_active_.load()") < body.index("CloseAudioChannelByIntent();")
+        assert body.index("lesson_runtime_active_.load()") < body.index('backend_settings.SetString("device_secret", "");')
+        assert body.index("lesson_runtime_active_.load()") < body.index('claim_state.SetInt("confirmed", 0);')
+        assert body.index("lesson_runtime_active_.load()") < body.index("RenderClaimSubstate(claim_substate_);")
+        guard = body[
+            body.index("lesson_runtime_active_.load()") :
+            body.index("CloseAudioChannelByIntent();")
+        ]
+        assert "StopHeartbeat();" in guard
+        assert "return;" in guard
+        assert 'SetString("device_secret", "")' not in guard
+        assert 'SetInt("confirmed", 0)' not in guard
+        assert "RenderClaimSubstate" not in guard
+    
+        start = app_cc.index("void Application::SetLessonRuntimeActive")
+        end = app_cc.index("bool Application::IsLessonRuntimeActive", start)
+        setter = app_cc[start:end]
+    
+        assert "deferred_heartbeat_auth_failure_status_.exchange(0)" in setter
+        assert "HandleHeartbeatAuthFailure(status_code)" in setter
+>       assert setter.index("lesson_runtime_active_.store(active);") < setter.index(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            "deferred_heartbeat_auth_failure_status_.exchange(0)"
+        )
+E       ValueError: substring not found
+
+tests/test_realtime_voice_state.py:606: ValueError
+=========================== short test summary info ============================
+FAILED tests/test_lesson_dispatch_backward_compat.py::test_unowned_prepare_refusal_uses_isolated_sequence_without_owner_mutation
+FAILED tests/test_lesson_jpeg_decode_contract.py::test_rom_decoder_component_is_direct_and_new_jpeg_remains_encoder_only
+FAILED tests/test_realtime_voice_state.py::test_lesson_runtime_defers_heartbeat_auth_failure_until_lesson_end
+3 failed, 1266 passed, 1 skipped in 13.87s
+real 14.11
+user 6.98
+sys 2.17
+           795508736  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              487522  page reclaims
+               11877  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   5  signals received
+               49680  voluntary context switches
+               25229  involuntary context switches
+         40203217110  instructions retired
+         12574579587  cycles elapsed
+           797328392  peak memory footprint

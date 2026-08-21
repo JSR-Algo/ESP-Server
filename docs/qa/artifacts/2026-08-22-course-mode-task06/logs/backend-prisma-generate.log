@@ -1,0 +1,95 @@
+✓ Lockfile passes supply-chain policies (verified 1d ago)
+Progress: resolved 1, reused 0, downloaded 0, added 0
+[WARN] deprecated elevenlabs@1.59.0: This package has moved to @elevenlabs/elevenlabs-js
+[WARN] deprecated eslint@9.39.5: This version is no longer supported. Please see https://eslint.org/version-support for other options.
+Progress: resolved 678, reused 603, downloaded 0, added 0
+[WARN] 7 deprecated subdependencies found: @aws-sdk/core@3.977.2, glob@10.5.0, glob@7.2.3, inflight@1.0.6, node-domexception@1.0.0, sourcemap-codec@1.4.8, uuid@9.0.1
+Packages: +126 -125
+++++++++++++++++++++++++++++++++++++++++----------------------------------------
+Progress: resolved 1102, reused 1045, downloaded 0, added 63
+Progress: resolved 1102, reused 1045, downloaded 0, added 126, done
+
+dependencies:
+- @aws-sdk/client-cloudwatch 3.1115.0
++ @aws-sdk/client-cloudwatch 3.1097.0
+- @aws-sdk/client-kms 3.1115.0
++ @aws-sdk/client-kms 3.1097.0
+- @aws-sdk/client-s3 3.1115.0
++ @aws-sdk/client-s3 3.1097.0
+- @aws-sdk/client-ses 3.1115.0
++ @aws-sdk/client-ses 3.1097.0
+- @aws-sdk/client-sqs 3.1115.0
++ @aws-sdk/client-sqs 3.1097.0
+- @nestjs/common 11.2.1
++ @nestjs/common 11.1.28 (11.2.1 is available)
+- @nestjs/core 11.2.1
++ @nestjs/core 11.1.28 (11.2.1 is available)
+- @nestjs/platform-express 11.2.1
++ @nestjs/platform-express 11.1.28 (11.2.1 is available)
+- @nestjs/platform-socket.io 11.2.1
++ @nestjs/platform-socket.io 11.1.28 (11.2.1 is available)
+- @nestjs/platform-ws 11.2.1
++ @nestjs/platform-ws 11.1.28 (11.2.1 is available)
+- @nestjs/swagger 11.4.7
++ @nestjs/swagger 11.4.6 (11.4.7 is available)
+- @nestjs/websockets 11.2.1
++ @nestjs/websockets 11.1.28 (11.2.1 is available)
+- cloudinary 2.10.1
++ cloudinary 2.10.0 (2.10.1 is available)
+- jose 6.2.9
++ jose 6.2.4
+- pg 8.23.0
++ pg 8.22.0 (8.23.0 is available)
+- ws 8.21.3
++ ws 8.21.1 (8.21.3 is available)
+
+devDependencies:
+- @nestjs/testing 11.2.1
++ @nestjs/testing 11.1.28 (11.2.1 is available)
+- @stoplight/spectral-cli 6.16.3
++ @stoplight/spectral-cli 6.16.2 (6.16.3 is available)
+- @swc/core 1.16.1
++ @swc/core 1.15.46 (1.16.1 is available)
+- @types/pg 8.23.1
++ @types/pg 8.20.0 (8.23.1 is available)
+- typescript-eslint 8.67.0
++ typescript-eslint 8.65.0 (8.67.0 is available)
+- unplugin-swc 1.5.11
++ unplugin-swc 1.5.9 (1.5.11 is available)
+
+[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: @firebase/util@1.15.1, @swc/core@1.15.46
+
+Run "pnpm approve-builds" to pick which dependencies should be allowed to run scripts.
+[ERROR] Command failed with exit code 1: /Users/manhhodinh/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node /Users/manhhodinh/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/pnpm/bin/pnpm.mjs install
+
+pnpm: Command failed with exit code 1: /Users/manhhodinh/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node /Users/manhhodinh/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/pnpm/bin/pnpm.mjs install
+    at getFinalError (file:///Users/manhhodinh/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/pnpm/dist/pnpm.mjs:88973:14)
+    at makeError (file:///Users/manhhodinh/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/pnpm/dist/pnpm.mjs:91280:21)
+    at getSyncResult (file:///Users/manhhodinh/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/pnpm/dist/pnpm.mjs:93124:10)
+    at spawnSubprocessSync (file:///Users/manhhodinh/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/pnpm/dist/pnpm.mjs:93084:14)
+    at execaCoreSync (file:///Users/manhhodinh/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/pnpm/dist/pnpm.mjs:93014:23)
+    at callBoundExeca (file:///Users/manhhodinh/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/pnpm/dist/pnpm.mjs:95542:23)
+    at boundExeca (file:///Users/manhhodinh/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/pnpm/dist/pnpm.mjs:95519:49)
+    at sync2 (file:///Users/manhhodinh/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/pnpm/dist/pnpm.mjs:95678:10)
+    at runPnpmCli (file:///Users/manhhodinh/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/pnpm/dist/pnpm.mjs:252207:5)
+    at runDepsStatusCheck (file:///Users/manhhodinh/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/pnpm/dist/pnpm.mjs:253973:7)
+real 3.25
+user 4.55
+sys 3.08
+          1551826944  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              109019  page reclaims
+                5361  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   8  messages sent
+                   4  messages received
+                   0  signals received
+               11582  voluntary context switches
+               47755  involuntary context switches
+          3521405916  instructions retired
+          1116376962  cycles elapsed
+           135146944  peak memory footprint

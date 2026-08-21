@@ -1,0 +1,1189 @@
+[33mThe CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.[39m
+
+ RUN  v2.1.9 /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation
+
+ ✓ src/lessons/authoring/esptft-publish-budget.logic.spec.ts (40 tests) 16ms
+ ✓ src/lessons/authoring/lesson-authoring.service.extra-coverage.spec.ts (18 tests) 4ms
+ ✓ src/lessons/lesson-manifest.per-profile-checksum.spec.ts (5 tests) 3ms
+ ✓ src/lessons/lesson-manifest.shared-assets.spec.ts (6 tests) 3ms
+
+ Test Files  4 passed (4)
+      Tests  69 passed (69)
+   Start at  05:09:56
+   Duration  645ms (transform 213ms, setup 175ms, collect 318ms, tests 26ms, environment 0ms, prepare 28ms)
+
+[33mThe CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.[39m
+
+ RUN  v2.1.9 /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation
+
+ ↓ tests/integration/modular.live-postgres.spec.ts (35 tests | 35 skipped)
+ ✓ tests/modules/app.modular-backend-runtime.spec.ts (29 tests) 80ms
+ ✓ src/lessons/tvideo-journey/farm-v7-bootstrap.spec.ts (78 tests) 49ms
+ ✓ src/lessons/visual-assets/shared-visual-asset.spec.ts (109 tests) 11ms
+ ↓ tests/lessons.authoring.integration.spec.ts (23 tests | 23 skipped)
+ ✓ src/lessons/authoring/lesson-authoring.service.coverage.spec.ts (80 tests) 25ms
+ ✓ tests/device-child-profile-sync-outbox.postgres.spec.ts (34 tests | 33 skipped) 0ms
+ ✓ tests/device-registry.integration.spec.ts (48 tests) 113ms
+ ✓ src/lessons/lesson-asset-generation.repository.spec.ts (55 tests) 15ms
+ ✓ tests/identity.integration.spec.ts (35 tests | 2 skipped) 465ms
+ ✓ src/lessons/lesson-event-ingest.service.spec.ts (42 tests) 20ms
+ ✓ tests/consumer-provisioning.service.spec.ts (41 tests) 368ms
+ ↓ tests/identity.reward-coppa-lifecycle.integration.spec.ts (23 tests | 23 skipped)
+ ✓ src/lessons/lesson-manifest.logic.validation.spec.ts (84 tests) 72ms
+ ↓ tests/live-postgres-integration.spec.ts (18 tests | 18 skipped)
+ ↓ tests/devices.firmware-provisioning-status.integration.spec.ts (27 tests | 27 skipped)
+ ✓ tests/modules/auth.service.spec.ts (26 tests) 5ms
+ ✓ src/lessons/tvideo-journey/farm-v9-geometry-rollout.spec.ts (104 tests) 14ms
+ ✓ tests/lesson-asset-generation.repository.postgres.spec.ts (43 tests | 7 skipped) 5ms
+ ✓ tests/canonical-demo-v6-asset-repair.spec.ts (45 tests) 33ms
+ ✓ src/lessons/lesson-asset-sync.repository.spec.ts (31 tests) 5ms
+ ✓ src/lessons/lesson-assignment.post-commit-guard.spec.ts (32 tests) 11ms
+ ✓ src/lessons/lesson-manifest.logic.spec.ts (45 tests) 5ms
+ ✓ src/lessons/derivatives/flattened-cinematic.repository.spec.ts (43 tests) 7ms
+ ✓ tests/course-enrollment.service.spec.ts (23 tests) 5ms
+ ✓ src/lessons/authoring/esptft-publish-budget.logic.spec.ts (40 tests) 8ms
+ ✓ src/lessons/authoring/lesson-authoring.controller.coverage.spec.ts (75 tests) 48ms
+ ✓ src/lessons/derivatives/flattened-cinematic-media.spec.ts (22 tests) 554ms
+ ✓ src/lessons/authoring/lesson-authoring.publish-concurrency.spec.ts (13 tests) 8ms
+ ↓ tests/e2e/api-contract-domain-flows.e2e.spec.ts (11 tests | 11 skipped)
+ ✓ src/lessons/derivatives/flattened-cinematic-source.spec.ts (50 tests) 91ms
+ ✓ src/lessons/rewards/leaderboard.service.spec.ts (26 tests) 11ms
+ ✓ src/lessons/parent-learning-projection.service.spec.ts (13 tests) 4ms
+ ✓ tests/session.integration.spec.ts (19 tests) 19ms
+ ✓ src/lessons/lesson-asset-generation-rebuild-main.spec.ts (47 tests) 8ms
+ ✓ src/lessons/authoring/lesson-authoring.tvideo-journey.spec.ts (26 tests) 45ms
+ ✓ src/lessons/authoring/lesson-authoring.flattened-derivatives.spec.ts (28 tests) 16ms
+ ✓ tests/modules/users.account-deletion-executor-prisma-repository.spec.ts (8 tests) 4ms
+ ✓ tests/learning.unit.spec.ts (35 tests) 8ms
+ ↓ tests/identity.auth-household-scope.integration.spec.ts (18 tests | 18 skipped)
+stderr | src/lessons/authoring/lesson-authoring.tvideo-journey-api.spec.ts > LessonAuthoringController TVideo journey API > preserves typed service error INTERNAL_ERROR and does not collapse it to 500
+[5xx] INTERNAL_ERROR {"traceId":null,"message":"typed failure","name":"AppError","stack":["AppError: typed failure","    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/authoring/lesson-authoring.tvideo-journey-api.spec.ts:246:39","    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:629:21","    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:146:14","    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:533:11","    at runWithTimeout (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:39:7)"],"exception":{"code":"INTERNAL_ERROR","statusCode":503,"retryable":false,"name":"AppError"}}
+
+ ✓ src/lessons/authoring/lesson-authoring.tvideo-journey-api.spec.ts (26 tests) 88ms
+stderr | src/lessons/lesson-asset-generation.controller.spec.ts > LessonAssetGenerationController HTTP contract > returns a sanitized retryable 503 when no generation is available
+[5xx] generation_unavailable {"traceId":null,"message":"Lesson asset generation is temporarily unavailable","name":"AppError","stack":["AppError: Lesson asset generation is temporarily unavailable","    at publicUnavailable (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:767:10)","    at PublicLessonAssetGenerationController.latest (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:464:24)","    at processTicksAndRejections (node:internal/process/task_queues:103:5)"],"exception":{"code":"generation_unavailable","statusCode":503,"retryable":true,"name":"AppError"}}
+
+stderr | src/lessons/lesson-asset-generation.controller.spec.ts > LessonAssetGenerationController HTTP contract > rejects unsafe public generation URLs: signed query
+[5xx] generation_unavailable {"traceId":null,"message":"Lesson asset generation is temporarily unavailable","name":"AppError","stack":["AppError: Lesson asset generation is temporarily unavailable","    at publicUnavailable (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:767:10)","    at PublicLessonAssetGenerationController.latest (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:469:13)","    at processTicksAndRejections (node:internal/process/task_queues:103:5)"],"exception":{"code":"generation_unavailable","statusCode":503,"retryable":true,"name":"AppError"}}
+
+stderr | src/lessons/lesson-asset-generation.controller.spec.ts > LessonAssetGenerationController HTTP contract > rejects unsafe public generation URLs: credentials
+[5xx] generation_unavailable {"traceId":null,"message":"Lesson asset generation is temporarily unavailable","name":"AppError","stack":["AppError: Lesson asset generation is temporarily unavailable","    at publicUnavailable (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:767:10)","    at PublicLessonAssetGenerationController.latest (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:469:13)","    at processTicksAndRejections (node:internal/process/task_queues:103:5)"],"exception":{"code":"generation_unavailable","statusCode":503,"retryable":true,"name":"AppError"}}
+
+stderr | src/lessons/lesson-asset-generation.controller.spec.ts > LessonAssetGenerationController HTTP contract > rejects unsafe public generation URLs: fragment
+[5xx] generation_unavailable {"traceId":null,"message":"Lesson asset generation is temporarily unavailable","name":"AppError","stack":["AppError: Lesson asset generation is temporarily unavailable","    at publicUnavailable (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:767:10)","    at PublicLessonAssetGenerationController.latest (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:469:13)","    at processTicksAndRejections (node:internal/process/task_queues:103:5)"],"exception":{"code":"generation_unavailable","statusCode":503,"retryable":true,"name":"AppError"}}
+
+stderr | src/lessons/lesson-asset-generation.controller.spec.ts > LessonAssetGenerationController HTTP contract > rejects unsafe public generation URLs: http
+[5xx] generation_unavailable {"traceId":null,"message":"Lesson asset generation is temporarily unavailable","name":"AppError","stack":["AppError: Lesson asset generation is temporarily unavailable","    at publicUnavailable (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:767:10)","    at PublicLessonAssetGenerationController.latest (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:469:13)","    at processTicksAndRejections (node:internal/process/task_queues:103:5)"],"exception":{"code":"generation_unavailable","statusCode":503,"retryable":true,"name":"AppError"}}
+
+stderr | src/lessons/lesson-asset-generation.controller.spec.ts > LessonAssetGenerationController HTTP contract > rejects unsafe public generation URLs: disallowed origin
+[5xx] generation_unavailable {"traceId":null,"message":"Lesson asset generation is temporarily unavailable","name":"AppError","stack":["AppError: Lesson asset generation is temporarily unavailable","    at publicUnavailable (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:767:10)","    at PublicLessonAssetGenerationController.latest (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:469:13)","    at processTicksAndRejections (node:internal/process/task_queues:103:5)"],"exception":{"code":"generation_unavailable","statusCode":503,"retryable":true,"name":"AppError"}}
+
+stderr | src/lessons/lesson-asset-generation.controller.spec.ts > LessonAssetGenerationController HTTP contract > logs only a stable diagnostic code for signed query URL rejection
+[5xx] generation_unavailable {"traceId":null,"message":"Lesson asset generation is temporarily unavailable","name":"AppError","stack":["AppError: Lesson asset generation is temporarily unavailable","    at publicUnavailable (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:767:10)","    at PublicLessonAssetGenerationController.latest (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:469:13)","    at processTicksAndRejections (node:internal/process/task_queues:103:5)"],"exception":{"code":"generation_unavailable","statusCode":503,"retryable":true,"name":"AppError"}}
+
+stderr | src/lessons/lesson-asset-generation.controller.spec.ts > LessonAssetGenerationController HTTP contract > rejects url and onlineUrl mismatches before publishing
+[5xx] generation_unavailable {"traceId":null,"message":"Lesson asset generation is temporarily unavailable","name":"AppError","stack":["AppError: Lesson asset generation is temporarily unavailable","    at publicUnavailable (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:767:10)","    at PublicLessonAssetGenerationController.latest (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:469:13)","    at processTicksAndRejections (node:internal/process/task_queues:103:5)"],"exception":{"code":"generation_unavailable","statusCode":503,"retryable":true,"name":"AppError"}}
+
+stderr | src/lessons/lesson-asset-generation.controller.spec.ts > LessonAssetGenerationController HTTP contract > rejects checksum mismatch as unavailable
+[5xx] generation_unavailable {"traceId":null,"message":"Lesson asset generation is temporarily unavailable","name":"AppError","stack":["AppError: Lesson asset generation is temporarily unavailable","    at publicUnavailable (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:767:10)","    at PublicLessonAssetGenerationController.latest (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:469:13)","    at processTicksAndRejections (node:internal/process/task_queues:103:5)"],"exception":{"code":"generation_unavailable","statusCode":503,"retryable":true,"name":"AppError"}}
+
+stderr | src/lessons/lesson-asset-generation.controller.spec.ts > LessonAssetGenerationController HTTP contract > rejects curriculum count mismatch as unavailable
+[5xx] generation_unavailable {"traceId":null,"message":"Lesson asset generation is temporarily unavailable","name":"AppError","stack":["AppError: Lesson asset generation is temporarily unavailable","    at publicUnavailable (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:767:10)","    at PublicLessonAssetGenerationController.latest (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:469:13)","    at processTicksAndRejections (node:internal/process/task_queues:103:5)"],"exception":{"code":"generation_unavailable","statusCode":503,"retryable":true,"name":"AppError"}}
+
+stderr | src/lessons/lesson-asset-generation.controller.spec.ts > LessonAssetGenerationController HTTP contract > rejects pack count mismatch as unavailable
+[5xx] generation_unavailable {"traceId":null,"message":"Lesson asset generation is temporarily unavailable","name":"AppError","stack":["AppError: Lesson asset generation is temporarily unavailable","    at publicUnavailable (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:767:10)","    at PublicLessonAssetGenerationController.latest (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:469:13)","    at processTicksAndRejections (node:internal/process/task_queues:103:5)"],"exception":{"code":"generation_unavailable","statusCode":503,"retryable":true,"name":"AppError"}}
+
+stderr | src/lessons/lesson-asset-generation.controller.spec.ts > LessonAssetGenerationController HTTP contract > logs checksum mismatch with a distinguishable stable diagnostic code
+[5xx] generation_unavailable {"traceId":null,"message":"Lesson asset generation is temporarily unavailable","name":"AppError","stack":["AppError: Lesson asset generation is temporarily unavailable","    at publicUnavailable (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:767:10)","    at PublicLessonAssetGenerationController.latest (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:469:13)","    at processTicksAndRejections (node:internal/process/task_queues:103:5)"],"exception":{"code":"generation_unavailable","statusCode":503,"retryable":true,"name":"AppError"}}
+
+stderr | src/lessons/lesson-asset-generation.controller.spec.ts > LessonAssetGenerationController HTTP contract > logs origin rejection with a distinguishable stable diagnostic code
+[5xx] generation_unavailable {"traceId":null,"message":"Lesson asset generation is temporarily unavailable","name":"AppError","stack":["AppError: Lesson asset generation is temporarily unavailable","    at publicUnavailable (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:767:10)","    at PublicLessonAssetGenerationController.latest (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:469:13)","    at processTicksAndRejections (node:internal/process/task_queues:103:5)"],"exception":{"code":"generation_unavailable","statusCode":503,"retryable":true,"name":"AppError"}}
+
+stderr | src/lessons/lesson-asset-generation.controller.spec.ts > LessonAssetGenerationController HTTP contract > logs invalid config with a distinguishable stable diagnostic code
+[5xx] generation_unavailable {"traceId":null,"message":"Lesson asset generation is temporarily unavailable","name":"AppError","stack":["AppError: Lesson asset generation is temporarily unavailable","    at publicUnavailable (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:767:10)","    at PublicLessonAssetGenerationController.latest (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:469:13)","    at processTicksAndRejections (node:internal/process/task_queues:103:5)"],"exception":{"code":"generation_unavailable","statusCode":503,"retryable":true,"name":"AppError"}}
+
+stderr | src/lessons/lesson-asset-generation.controller.spec.ts > LessonAssetGenerationController HTTP contract > collapses unexpected validation exceptions to a generic diagnostic code
+[5xx] generation_unavailable {"traceId":null,"message":"Lesson asset generation is temporarily unavailable","name":"AppError","stack":["AppError: Lesson asset generation is temporarily unavailable","    at publicUnavailable (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:767:10)","    at PublicLessonAssetGenerationController.latest (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:469:13)","    at processTicksAndRejections (node:internal/process/task_queues:103:5)"],"exception":{"code":"generation_unavailable","statusCode":503,"retryable":true,"name":"AppError"}}
+
+stderr | src/lessons/lesson-asset-generation.controller.spec.ts > LessonAssetGenerationController HTTP contract > rejects production public access when no allowlist or base is configured
+[5xx] generation_unavailable {"traceId":null,"message":"Lesson asset generation is temporarily unavailable","name":"AppError","stack":["AppError: Lesson asset generation is temporarily unavailable","    at publicUnavailable (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:767:10)","    at PublicLessonAssetGenerationController.latest (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-asset-generation.controller.ts:469:13)","    at processTicksAndRejections (node:internal/process/task_queues:103:5)"],"exception":{"code":"generation_unavailable","statusCode":503,"retryable":true,"name":"AppError"}}
+
+ ✓ src/lessons/lesson-asset-generation.controller.spec.ts (41 tests) 83ms
+ ✓ tests/firmware-provisioning-status.service.spec.ts (25 tests) 299ms
+ ✓ tests/modules/auth.prisma-repository.spec.ts (16 tests) 2ms
+ ✓ src/lessons/authoring/lesson-authoring.lesson-visuals.spec.ts (22 tests) 7ms
+ ✓ src/lessons/public/public-catalog.service.spec.ts (16 tests) 2ms
+ ✓ tests/modules/payments.subscriptions-service.spec.ts (14 tests) 3ms
+ ✓ src/lessons/lesson-assignment.shared-assets.spec.ts (9 tests) 3ms
+[Nest] 24122  - 08/22/2026, 5:10:03 AM   ERROR [LessonAssetSyncWorkerService] lesson asset sync crashed code=esp_unavailable jobId=33333333-3333-4333-8333-333333333333 lessonKey=w01-d01-barn-say-it lessonVersion=1 cacheKey=w01-d01-barn-say-it/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+ ✓ src/lessons/lesson-asset-sync-worker.service.spec.ts (26 tests) 10ms
+ ✓ src/lessons/lesson-assignment.service.coverage.spec.ts (19 tests) 4ms
+ ↓ src/lessons/rewards/reward.service.postgres.spec.ts (11 tests | 11 skipped)
+ ✓ tests/openapi-contract.spec.ts (89 tests) 79ms
+ ✓ tests/integration/modular.http-mobile-contract.e2e.spec.ts (7 tests) 28ms
+stderr | tests/learning.integration.spec.ts > POST /learning/children/:childId/session/complete > does not mark a session completed when required progression work fails
+[5xx] INTERNAL_ERROR {"traceId":null,"message":"progression unavailable","name":"Error","stack":["Error: progression unavailable","    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/tests/learning.integration.spec.ts:538:39","    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:146:14","    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:533:11","    at runWithTimeout (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:39:7)","    at runTest (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1056:17)"],"exception":{}}
+
+ ✓ tests/learning.integration.spec.ts (29 tests) 32ms
+ ✓ src/lessons/course-enrollment.shared-device-multichild.spec.ts (4 tests) 4ms
+ ↓ tests/lessons.assignment.integration.spec.ts (20 tests | 20 skipped)
+ ✓ tests/manager-child-profile-projection.client.spec.ts (24 tests) 7856ms
+   ✓ ManagerChildProfileProjectionClient > loads from the CommonJS production build when jose is ESM-only 7649ms
+ ✓ tests/modules/external-provider-contracts.spec.ts (8 tests) 2ms
+ ✓ tests/gateway/provisioning-auth-guards.spec.ts (25 tests) 2ms
+ ✓ tests/modules/auth.admin-auth-service-adapter.spec.ts (14 tests) 622ms
+   ✓ pg admin audit logs repository > writes fallback JSONL after database audit append fails three times 607ms
+ ↓ src/lessons/rewards/leaderboard.service.postgres.spec.ts (6 tests | 6 skipped)
+ ✓ tests/bootstrap-token.residual.spec.ts (15 tests) 23ms
+ ✓ tests/ga-certification.spec.ts (22 tests) 17ms
+ ↓ src/lessons/rewards/reward-contract-migration.postgres.spec.ts (7 tests | 7 skipped)
+ ✓ tests/modules/users.child-profiles-service.spec.ts (13 tests) 3ms
+ ↓ src/lessons/lesson-event-ingest.rewards.postgres.spec.ts (9 tests | 9 skipped)
+ ✓ src/lessons/course-enrollment.service.edge-coverage.spec.ts (10 tests) 3ms
+ ✓ src/lessons/renderer-v2-backfill.spec.ts (22 tests) 12ms
+ ✓ tests/modules/notifications.dispatch-orchestration-service.spec.ts (10 tests) 2ms
+ ✓ tests/modules/common.routes.spec.ts (18 tests) 4ms
+ ✓ tests/rate-limiter.spec.ts (26 tests) 13ms
+ ✓ tests/bootstrap-token.service.spec.ts (18 tests) 14ms
+ ↓ tests/devices.consumer-provisioning.integration.spec.ts (15 tests | 15 skipped)
+ ✓ src/lessons/parent-learning-outbox.worker.spec.ts (8 tests) 2ms
+ ✓ src/lessons/tvideo-journey/farm-v9-geometry-rollout-main.spec.ts (25 tests) 19ms
+ ✓ src/lessons/tvideo-journey/farm-v7-h264-preview-backfill.spec.ts (23 tests) 22ms
+ ↓ tests/integration/backend-live-contract.spec.ts (5 tests | 5 skipped)
+ ✓ tests/consumer-provisioning.controller.spec.ts (29 tests) 2ms
+ ✓ tests/modules/users.account-delete-service.spec.ts (13 tests) 3ms
+ ✓ tests/modules/payments.stripe-billing-projection-prisma-repository.spec.ts (10 tests) 2ms
+ ✓ renderer/tvideo-journey/render-entry.spec.ts (14 tests) 5ms
+ ✓ tests/identity.security.spec.ts (13 tests | 4 skipped) 45ms
+ ✓ tests/render-tbot-connect-config.spec.ts (27 tests) 309ms
+ ↓ tests/claim.physical-confirm.integration.spec.ts (12 tests | 12 skipped)
+ ✓ src/lessons/course-enrollment.service.null-rowcount.spec.ts (11 tests) 2ms
+ ✓ src/lessons/authoring/lesson-authoring.logic.spec.ts (47 tests) 3ms
+ ✓ src/lessons/fixtures/course-mode/course-mode-task00.contract.spec.ts (17 tests) 28ms
+ ✓ src/lessons/lesson-asset-sync-backfill-main.spec.ts (12 tests) 4ms
+ ✓ src/lessons/derivatives/flattened-cinematic-worker.service.spec.ts (19 tests) 111ms
+ ↓ src/lessons/tvideo-journey/farm-v7-h264-preview-backfill.postgres.spec.ts (5 tests | 5 skipped)
+ ✓ tests/devices.lesson-mint.integration.spec.ts (11 tests) 8ms
+[Nest] 24122  - 07/24/2026, 7:00:00 AM   ERROR [LessonAssetGenerationWorkerService] lesson_asset_generation_poison_job_parked
+[Nest] 24122  - 07/24/2026, 7:00:00 AM   ERROR [LessonAssetGenerationWorkerService] lesson_asset_generation_poison_job_parked
+[Nest] 24122  - 07/24/2026, 7:00:00 AM   ERROR [LessonAssetGenerationWorkerService] lesson_asset_generation_poison_job_parked
+ ✓ src/lessons/lesson-asset-generation-worker.service.spec.ts (29 tests) 57ms
+ ✓ src/lessons/migration-076-seed-checksum.drift.spec.ts (6 tests) 13ms
+ ✓ src/gateway/parent-progress.gateway.spec.ts (10 tests) 16ms
+ ✓ src/lessons/authoring/lesson-authoring.service.rowcount-null-guards.spec.ts (15 tests) 41ms
+ ↓ tests/devices.bootstrap-token.integration.spec.ts (12 tests | 12 skipped)
+ ✓ src/lessons/lesson-manifest.service.resolve.spec.ts (16 tests) 3ms
+ ✓ src/lessons/tvideo-journey/farm-v7-asset-repair.spec.ts (21 tests) 7ms
+ ✓ src/lessons/authoring/lesson-authoring.service.extra-coverage.spec.ts (18 tests) 55ms
+ ✓ src/lessons/lesson-sd-pack.contract.spec.ts (71 tests) 4ms
+ ✓ tests/modules/payments.stripe-billing-event-processor.spec.ts (8 tests) 2ms
+ ✓ src/lessons/course-enrollment.advance-silent-stall.spec.ts (6 tests) 21ms
+ ✓ src/lessons/parent-learning-progress.service.spec.ts (12 tests | 1 skipped) 2ms
+ ✓ tests/modules/common.express-app.spec.ts (16 tests) 14ms
+ ✓ tests/firmware-provisioning-status.dto.spec.ts (40 tests) 3ms
+ ✓ tests/claim.setup-signal.spec.ts (19 tests) 2ms
+ ✓ src/lessons/authoring/lesson-authoring.republish-refresh-checksum.spec.ts (5 tests) 26ms
+ ✓ tests/modules/billing.refund-review-service.spec.ts (7 tests) 1ms
+ ✓ src/lessons/lesson-manifest.completion-class.spec.ts (5 tests) 2ms
+ ✓ src/lessons/lesson-assignment.reassign-after-terminal.spec.ts (6 tests) 2ms
+ ✓ src/lessons/lesson-manifest.per-profile-checksum.spec.ts (5 tests) 2ms
+ ↓ src/lessons/rewards/reward-authorization.service.postgres.spec.ts (14 tests | 14 skipped)
+ ✓ src/lessons/admin-lesson-assignment-create.service.spec.ts (9 tests) 2ms
+ ↓ tests/lessons.per-profile-checksum.integration.spec.ts (9 tests | 9 skipped)
+ ✓ tests/metrics-histogram.spec.ts (34 tests) 12ms
+ ✓ tests/migration.spec.ts (33 tests) 18ms
+ ✓ src/lessons/lesson-manifest.checksum-parity.spec.ts (7 tests) 1ms
+ ✓ src/lessons/authoring/lesson-asset-upload.service.spec.ts (24 tests) 2ms
+ ✓ src/lessons/derivatives/tvideo-frame-renderer.spec.ts (11 tests) 37ms
+ ✓ src/lessons/lesson-event-ingest.stuck-slot.spec.ts (6 tests) 1ms
+ ↓ tests/lessons.public-catalog.integration.spec.ts (9 tests | 9 skipped)
+[Nest] 24122  - 08/22/2026, 5:10:15 AM   ERROR [CertValidator] TBOT_CA_BUNDLE_PATH is not set but cert validation mode is strict. Device registration will reject ALL certificates.
+[Nest] 24122  - 08/22/2026, 5:10:15 AM   ERROR [CertValidator] TBOT_CA_BUNDLE_PATH is not set but cert validation mode is strict. Device registration will reject ALL certificates.
+[Nest] 24122  - 08/22/2026, 5:10:15 AM   ERROR [CertValidator] TBOT_CA_BUNDLE_PATH is not set but cert validation mode is strict. Device registration will reject ALL certificates.
+ ✓ tests/cert-validator.spec.ts (15 tests) 208ms
+ ✓ src/lessons/lesson-asset-sync.controller.spec.ts (17 tests) 52ms
+ ✓ src/lessons/derivatives/flattened-cinematic-identity.spec.ts (74 tests) 8ms
+ ✓ src/lessons/lesson-event-ingest.logic.spec.ts (26 tests) 2ms
+ ✓ tests/robot-esp-client.spec.ts (13 tests) 5ms
+ ✓ tests/controls.unit.spec.ts (26 tests) 2ms
+ ✓ src/lessons/authoring/lesson-authoring.playability-gate.spec.ts (8 tests) 2ms
+ ↓ tests/identity.pin-recovery.integration.spec.ts (14 tests | 14 skipped)
+ ✓ src/lessons/public/public-catalog.service.round2-coverage.spec.ts (5 tests) 1ms
+[Nest] 24122  - 08/22/2026, 5:10:15 AM   ERROR [AnalyticsAggregationService] Nightly aggregation failed
+[Nest] 24122  - 08/22/2026, 5:10:15 AM   ERROR [AnalyticsAggregationService] Error: db unavailable
+    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/tests/critical-backend-unit-coverage.spec.ts:265:30
+    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:146:14
+    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:533:11
+    at runWithTimeout (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:39:7)
+    at runTest (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1056:17)
+    at processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at runSuite (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1205:15)
+    at runSuite (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1205:15)
+    at runFiles (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1262:5)
+    at startTests (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1271:3)
+[Nest] 24122  - 08/22/2026, 5:10:15 AM   ERROR [LearningWorkerService] Failed to enqueue learning update
+[Nest] 24122  - 08/22/2026, 5:10:15 AM   ERROR [LearningWorkerService] Error: redis down
+    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/tests/critical-backend-unit-coverage.spec.ts:337:40
+    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:146:14
+    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:533:11
+    at runWithTimeout (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:39:7)
+    at runTest (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1056:17)
+    at processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at runSuite (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1205:15)
+    at runSuite (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1205:15)
+    at runFiles (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1262:5)
+    at startTests (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1271:3)
+ ✓ tests/critical-backend-unit-coverage.spec.ts (12 tests) 3ms
+ ✓ tests/prod-posture.spec.ts (53 tests) 32ms
+ ↓ tests/analytics.integration.spec.ts (9 tests | 9 skipped)
+ ✓ tests/cert-validator-production-smoke.spec.ts (7 tests) 309ms
+ ✓ src/lessons/tvideo-journey/farm-v8-local-preview-mirror.spec.ts (10 tests) 12ms
+stderr | tests/device-swagger-contract.spec.ts > Swagger-compatible device facade > does not leak ESP URL/IP/stack in normalized errors
+[5xx] robot_unreachable {"traceId":null,"message":"Robot is unreachable","name":"AppError","stack":["AppError: Robot is unreachable","    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/tests/device-swagger-contract.spec.ts:145:52","    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:146:14","    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:533:11","    at runWithTimeout (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:39:7)","    at runTest (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1056:17)"],"exception":{"code":"robot_unreachable","statusCode":502,"details":{"errorCode":"robot_unreachable","messageKey":"robot.error.robot_unreachable","diagnostics":{"requestId":"req-1","rawDetail":{"code":"ROBOT_ESP_NETWORK_ERROR"}}},"name":"AppError"}}
+
+ ✓ tests/device-swagger-contract.spec.ts (8 tests) 55ms
+ ✓ tests/modules/billing.order-cancel-service.spec.ts (7 tests) 2ms
+ ✓ tests/device-goal-contract-routes.spec.ts (12 tests) 11ms
+ ✓ src/lessons/admin-course-insights.service.round2-coverage.spec.ts (9 tests) 1ms
+ ✓ tests/consumer-provisioning.dto.spec.ts (35 tests) 4ms
+ ✓ tests/dashboard.unit.spec.ts (26 tests) 51ms
+ ✓ tests/robot-mobile-contract.spec.ts (13 tests) 25ms
+ ✓ src/lessons/migration-095-age3-guided-speaking.spec.ts (5 tests | 1 skipped) 1ms
+ ✓ src/lessons/tvideo-journey/tvideo-journey.repository.spec.ts (13 tests) 3ms
+ ✓ tests/claim.confirm-auth.spec.ts (10 tests) 2ms
+ ✓ src/lessons/tvideo-journey/farm-v8-h264-terminal-recovery.spec.ts (28 tests) 7ms
+ ✓ tests/device-child-profile-sync-worker.postgres.spec.ts (5 tests | 4 skipped) 0ms
+ ↓ tests/lessons.asset-upload.integration.spec.ts (5 tests | 5 skipped)
+ ↓ tests/lessons.authoring-publish-read.integration.spec.ts (1 test | 1 skipped)
+ ✓ tests/modules/billing.checkout-service.spec.ts (6 tests) 1ms
+ ✓ src/lessons/lesson-assignment.ageband-gate.spec.ts (4 tests) 2ms
+ ✓ tests/modules/billing.refund-requests-service.spec.ts (4 tests) 1ms
+ ✓ src/lessons/course-mode/pilot/course-mode-pilot.spec.ts (13 tests) 148ms
+ ↓ tests/identity.child-status.integration.spec.ts (12 tests | 12 skipped)
+ ✓ src/lessons/authoring/lesson-authoring.publish-generation.spec.ts (7 tests) 29ms
+ ✓ src/safety/tone-validator.spec.ts (12 tests) 3ms
+ ✓ tests/modules/auth.controller.spec.ts (16 tests) 2ms
+ ✓ tests/modules/payments.dunning-sweep-service.spec.ts (4 tests) 1ms
+[Nest] 24122  - 08/22/2026, 5:10:17 AM   ERROR [DeviceChildProfileSyncWorkerService] Child profile projection readiness failed code=manager_readiness_failed
+[Nest] 24122  - 08/22/2026, 5:10:17 AM   ERROR [DeviceChildProfileSyncWorkerService] Child profile projection failed code=worker_database_error deviceId=123e4567-e89b-12d3-a456-426614174000
+[Nest] 24122  - 08/22/2026, 5:10:17 AM   ERROR [DeviceChildProfileSyncWorkerService] Child profile projection failed code=worker_database_error deviceId=123e4567-e89b-12d3-a456-426614174000
+[Nest] 24122  - 08/22/2026, 5:10:17 AM   ERROR [DeviceChildProfileSyncWorkerService] Child profile projection failed code=worker_database_error deviceId=123e4567-e89b-12d3-a456-426614174000
+[Nest] 24122  - 08/22/2026, 5:10:17 AM   ERROR [DeviceChildProfileSyncWorkerService] Child profile projection failed code=profile_lock_timeout deviceId=123e4567-e89b-12d3-a456-426614174000
+[Nest] 24122  - 08/22/2026, 5:10:17 AM   ERROR [DeviceChildProfileSyncWorkerService] Child profile projection failed code=profile_lock_cancelled deviceId=123e4567-e89b-12d3-a456-426614174000
+[Nest] 24122  - 08/22/2026, 5:10:17 AM   ERROR [DeviceChildProfileSyncWorkerService] Child profile projection failed code=profile_lock_cancelled deviceId=123e4567-e89b-12d3-a456-426614174000
+[Nest] 24122  - 08/22/2026, 5:10:17 AM   ERROR [DeviceChildProfileSyncWorkerService] Child profile projection failed code=profile_lock_cancelled deviceId=123e4567-e89b-12d3-a456-426614174000
+[Nest] 24122  - 08/22/2026, 5:10:17 AM   ERROR [DeviceChildProfileSyncWorkerService] Child profile projection failed code=profile_lock_cancelled deviceId=123e4567-e89b-12d3-a456-426614174000
+[Nest] 24122  - 08/22/2026, 5:10:17 AM   ERROR [DeviceChildProfileSyncWorkerService] Child profile projection failed code=profile_lock_cancelled deviceId=123e4567-e89b-12d3-a456-426614174000
+[Nest] 24122  - 08/22/2026, 5:10:17 AM   ERROR [DeviceChildProfileSyncWorkerService] Child profile projection failed code=worker_database_error deviceId=123e4567-e89b-12d3-a456-426614174000
+ ✓ tests/device-child-profile-sync-worker.spec.ts (17 tests) 64ms
+ ↓ tests/identity.account-delete.integration.spec.ts (14 tests | 14 skipped)
+ ✓ tests/device-token-guard.spec.ts (18 tests) 1ms
+ ✓ tests/modules/notifications.dispatches-prisma-repository.spec.ts (9 tests) 1ms
+ ↓ src/lessons/lesson-lifecycle-hardening.postgres.spec.ts (5 tests | 5 skipped)
+ ✓ src/lessons/lesson-assignment.profile-capability-gate.spec.ts (7 tests) 2ms
+ ✓ src/lessons/templates/flattened-mjpeg-cinematic.contract.spec.ts (58 tests) 3ms
+ ✓ src/lessons/authoring/lesson-authoring.publish-active-assignment.spec.ts (6 tests) 3ms
+ ✓ src/lessons/templates/lesson-variant-batch.service.spec.ts (6 tests) 2ms
+ ✓ src/lessons/parent-learning-notification.service.spec.ts (5 tests) 1ms
+fixture assets materialized: 13 files in /var/folders/9y/vzstyvwx0q73f_kfmf1vg3380000gn/T/tbot-production-fixture-cli-Nd1xoq
+fixture valid: production-farm-english-358 (3/5/8)
+ ✓ src/lessons/task14-production-fixture.spec.ts (9 tests | 1 skipped) 29ms
+ ✓ tests/request-validator.spec.ts (21 tests) 2ms
+ ✓ tests/modules/auth.pin-recovery-service.spec.ts (9 tests) 1ms
+ ✓ tests/modules/notifications.queue-worker-service.spec.ts (6 tests) 1ms
+ ✓ src/lessons/renderer-v2-production-migrations.spec.ts (15 tests) 5ms
+ ✓ src/lessons/fixtures/tvideo-raw-code/tvideo-raw-code.fixture.spec.ts (6 tests) 99ms
+ ✓ src/lessons/authoring/lesson-authoring.publish-sd-fanout.spec.ts (4 tests) 18ms
+ ✓ src/lessons/authoring/lesson-authoring.service.round2-coverage.spec.ts (8 tests) 34ms
+ ✓ src/lessons/lesson-assignment.household-drift.spec.ts (4 tests) 1ms
+ ✓ src/lessons/authoring/lesson-asset-attach-orphan-guard.spec.ts (8 tests) 1ms
+ ✓ tests/modules/users.coppa-consent-service.spec.ts (5 tests) 1ms
+ ✓ src/lessons/lesson-manifest.frame-budget.spec.ts (6 tests) 9ms
+ ✓ tests/tone-judge.spec.ts (21 tests) 1ms
+ ↓ tests/lessons.manifest-version.integration.spec.ts (7 tests | 7 skipped)
+ ✓ src/lessons/device-assignment.authz.spec.ts (15 tests) 2ms
+ ✓ tests/modules/notifications.service.spec.ts (6 tests) 1ms
+ ↓ tests/identity.household-invite.integration.spec.ts (11 tests | 11 skipped)
+ ✓ src/lessons/admin-lesson-assignment-create.controller.spec.ts (5 tests) 15ms
+ ✓ src/lessons/admin-course-insights.service.coverage.spec.ts (10 tests) 1ms
+ ✓ src/lessons/authoring/lesson-authoring.authored-checksum-roundtrip.spec.ts (2 tests) 2ms
+ ↓ tests/identity.transfer-primary.integration.spec.ts (9 tests | 9 skipped)
+ ✓ src/lessons/rewards/reward-authorization.service.spec.ts (14 tests) 2ms
+ ✓ src/lessons/authoring/lesson-authoring.tvideo-manifest-flow.spec.ts (5 tests) 8ms
+ ✓ tests/qa-automation-audit.spec.ts (7 tests) 174ms
+ ↓ tests/identity.account-export.integration.spec.ts (11 tests | 11 skipped)
+ ✓ src/lessons/tvideo-journey/tvideo-journey.frame-state.spec.ts (12 tests) 2ms
+ ✓ src/lessons/lesson-asset-generation-build.spec.ts (9 tests) 2ms
+ ✓ src/lessons/child-lesson-progress.controller.spec.ts (9 tests) 1ms
+ ✓ src/lessons/lesson-rollout.drill.spec.ts (13 tests) 1ms
+ ✓ tests/parent-learning-progress.postgres.spec.ts (4 tests | 3 skipped) 0ms
+ ✓ src/lessons/tvideo-journey/farm-v8-published-manifest-repair.spec.ts (21 tests) 5ms
+ ↓ tests/identity.parent-gate.integration.spec.ts (10 tests | 10 skipped)
+ ✓ src/lessons/tvideo-journey/farm-v8-generation-bootstrap.spec.ts (20 tests) 4ms
+ ✓ tests/identity.live-consent-gate.integration.spec.ts (11 tests) 1ms
+ ✓ src/lessons/lesson-event-ingest.advisory-identity.spec.ts (4 tests) 1ms
+ ↓ src/lessons/derivatives/flattened-cinematic.repository.postgres.spec.ts (3 tests | 3 skipped)
+ ↓ src/lessons/progress-events-session-dedup.integration.spec.ts (2 tests | 2 skipped)
+ ✓ tests/claim.fallback-token.spec.ts (8 tests) 105ms
+ ✓ src/lessons/authoring/lesson-authoring.service.round3-coverage.spec.ts (8 tests) 30ms
+ ✓ src/lessons/lesson-operations-metrics.spec.ts (10 tests) 2ms
+ ✓ src/lessons/lesson-assignment.cross-household.spec.ts (4 tests) 1ms
+ ↓ tests/admin.auth.integration.spec.ts (11 tests | 11 skipped)
+ ✓ tests/modules/auth.identity-email-outbox-queue.spec.ts (4 tests) 1ms
+ ✓ src/lessons/authoring/lesson-authoring.course-mode.spec.ts (11 tests) 4ms
+ ✓ tests/modules/billing.orders-service.spec.ts (7 tests) 2ms
+ ✓ tests/modules/notifications.fcm-delivery-worker-runtime.spec.ts (7 tests) 1ms
+ ✓ tests/modules/notifications.queue-consumer-service.spec.ts (7 tests) 1ms
+ ✓ src/lessons/lesson-event-ingest.service.null-rowcount.spec.ts (5 tests) 25ms
+ ↓ tests/identity.lockout.integration.spec.ts (3 tests | 3 skipped)
+ ✓ tests/modules/billing.lost-transit-refund-sweep-service.spec.ts (7 tests) 1ms
+stderr | tests/error-envelope-contract.spec.ts > ErrorResponse envelope — contract test (task-s2-error-handling AC3) > /v1/probes/generic-error → 500 conforms to ErrorResponseSchema
+[5xx] INTERNAL_ERROR {"traceId":null,"message":"completely uncaught","name":"Error","stack":["Error: completely uncaught","    at ProbeController.genericError (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/tests/error-envelope-contract.spec.ts:127:11)","    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@nestjs+core@11.1.28_@nestjs+common@11.1.28_class-transformer@0.5.1_class-validator@0.1_4215537fb01f44f790cd3a5ae1dfc379/node_modules/@nestjs/core/router/router-execution-context.js:38:29","    at InterceptorsConsumer.intercept (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@nestjs+core@11.1.28_@nestjs+common@11.1.28_class-transformer@0.5.1_class-validator@0.1_4215537fb01f44f790cd3a5ae1dfc379/node_modules/@nestjs/core/interceptors/interceptors-consumer.js:12:20)","    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@nestjs+core@11.1.28_@nestjs+common@11.1.28_class-transformer@0.5.1_class-validator@0.1_4215537fb01f44f790cd3a5ae1dfc379/node_modules/@nestjs/core/router/router-execution-context.js:46:64","    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@nestjs+core@11.1.28_@nestjs+common@11.1.28_class-transformer@0.5.1_class-validator@0.1_4215537fb01f44f790cd3a5ae1dfc379/node_modules/@nestjs/core/router/router-proxy.js:9:23"],"exception":{}}
+
+stderr | tests/error-envelope-contract.spec.ts > ErrorResponse envelope — contract test (task-s2-error-handling AC3) > /v1/probes/non-error-throw → 500 conforms to ErrorResponseSchema
+[5xx] INTERNAL_ERROR {"traceId":null,"exception":"a bare string"}
+
+ ✓ tests/error-envelope-contract.spec.ts (13 tests) 10ms
+stderr | tests/error-envelope-contract.spec.ts > ErrorResponse envelope — contract test (task-s2-error-handling AC3) > traceId is propagated from the correlation context
+[5xx] INTERNAL_ERROR {"traceId":"corr-xyz","message":"boom","name":"AppError","stack":["AppError: boom","    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/tests/error-envelope-contract.spec.ts:249:20","    at AsyncLocalStorage.run (node:internal/async_local_storage/async_hooks:91:14)","    at Module.runWithCorrelation (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/logging/correlation.context.ts:25:20)","    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/tests/error-envelope-contract.spec.ts:248:5","    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:146:14"],"exception":{"code":"INTERNAL_ERROR","statusCode":500,"name":"AppError"}}
+
+ ✓ tests/auth.guard.spec.ts (12 tests) 20ms
+ ✓ src/lessons/authoring/admin-session.guard.auth-disabled-bypass.spec.ts (7 tests) 1ms
+ ✓ tests/modules/payments.subscriptions-prisma-repository.spec.ts (8 tests) 1ms
+ ✓ src/lessons/lesson-manifest.course-mode.spec.ts (7 tests) 3ms
+ ✓ tests/modules/common.stripe-billing-gateways.spec.ts (9 tests) 1ms
+ ↓ tests/identity.sessions.integration.spec.ts (9 tests | 9 skipped)
+ ↓ tests/notifications.ses-events.integration.spec.ts (8 tests | 8 skipped)
+ ✓ tests/modules/billing.orders-prisma-repository.spec.ts (8 tests) 1ms
+ ✓ src/lessons/authoring/lesson-authoring.new-version.spec.ts (5 tests) 1ms
+ ✓ src/lessons/lesson-manifest.shared-assets.spec.ts (6 tests) 2ms
+ ↓ tests/identity.coppa-consent.integration.spec.ts (10 tests | 10 skipped)
+ ✓ src/lessons/lesson-assignment.service.branch-coverage.spec.ts (4 tests) 1ms
+ ↓ tests/identity.refresh-race.integration.spec.ts (2 tests | 2 skipped)
+ ✓ src/lessons/course-enrollment.advance-republished-version.spec.ts (1 test) 9ms
+ ✓ src/lessons/course-enrollment.controller.spec.ts (10 tests) 59ms
+ ✓ src/lessons/lesson-rollout.followup.spec.ts (15 tests) 6ms
+ ✓ src/lessons/public/public-catalog.version-dedup.spec.ts (3 tests) 1ms
+ ✓ tests/modules/config.app-config.spec.ts (16 tests) 2ms
+ ✓ src/lessons/render-step-registry.spec.ts (10 tests) 1ms
+ ✓ tests/modules/users.account-delete-prisma-repository.spec.ts (4 tests) 1ms
+ ✓ src/lessons/lesson-handoff.service.spec.ts (11 tests) 33ms
+ ↓ tests/identity.security-events.integration.spec.ts (6 tests | 6 skipped)
+ ✓ src/lessons/authoring/lesson-authoring.publish-happy-path.spec.ts (3 tests) 18ms
+ ✓ tests/modules/users.child-profiles-prisma-repository.spec.ts (4 tests) 1ms
+ ✓ src/lessons/lesson-asset-generation-retry.service.spec.ts (13 tests) 2ms
+ ✓ tests/sprint2/dashboard.integration.spec.ts (9 tests) 15ms
+ ✓ tests/esp-device-adapter.spec.ts (9 tests) 2ms
+ ✓ src/lessons/lesson-sd-fanout.service.spec.ts (15 tests) 64ms
+ ↓ src/lessons/render-step-registry.firmware-parity.spec.ts (6 tests | 6 skipped)
+ ✓ tests/device-child-profile-sync-wiring.spec.ts (22 tests) 5ms
+ ✓ tests/modules/users.email-change-service.spec.ts (5 tests) 1ms
+ ✓ src/lessons/derivatives/tbot-rgb565.spec.ts (20 tests) 1384ms
+   ✓ TRGB V1 indexed RGB565 container > round-trips two fixed-size frames and exposes canonical metadata 530ms
+   ✓ TRGB V1 indexed RGB565 container > reuses a parsed index for sequential reads without rescanning unrelated payloads 522ms
+ ✓ src/lessons/lesson-contract-vectors.spec.ts (123 tests) 51ms
+ ✓ src/lessons/lesson-preload-status.no-http-report.spec.ts (7 tests) 1ms
+ ✓ tests/modules/notifications.templates-service.spec.ts (4 tests) 1ms
+[Nest] 24122  - 08/22/2026, 5:10:23 AM   ERROR [DatabaseModule] Database connection failed at startup (attempt 1/1, code=3D000, retryable=false)
+[Nest] 24122  - 08/22/2026, 5:10:23 AM   ERROR [DatabaseModule] error: database "manhhodinh" does not exist
+    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/pg-pool@3.14.0_pg@8.22.0/node_modules/pg-pool/index.js:45:11
+    at processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at DatabaseModule.onApplicationBootstrap (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/database/database.module.ts:108:9)
+    at callModuleBootstrapHook (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@nestjs+core@11.1.28_@nestjs+common@11.1.28_class-transformer@0.5.1_class-validator@0.1_4215537fb01f44f790cd3a5ae1dfc379/node_modules/@nestjs/core/hooks/on-app-bootstrap.hook.js:51:9)
+    at Proxy.callBootstrapHook (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@nestjs+core@11.1.28_@nestjs+common@11.1.28_class-transformer@0.5.1_class-validator@0.1_4215537fb01f44f790cd3a5ae1dfc379/node_modules/@nestjs/core/nest-application-context.js:274:13)
+    at Proxy.init (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@nestjs+core@11.1.28_@nestjs+common@11.1.28_class-transformer@0.5.1_class-validator@0.1_4215537fb01f44f790cd3a5ae1dfc379/node_modules/@nestjs/core/nest-application.js:107:9)
+    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/tests/gateway.integration.spec.ts:71:3
+    at callSuiteHook (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:964:22)
+    at runSuite (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1175:29)
+    at runFiles (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1262:5) {
+  length: 96,
+  severity: 'FATAL',
+  code: '3D000',
+  detail: undefined,
+  hint: undefined,
+  position: undefined,
+  internalPosition: undefined,
+  internalQuery: undefined,
+  where: undefined,
+  schema: undefined,
+  table: undefined,
+  column: undefined,
+  dataType: undefined,
+  constraint: undefined,
+  file: 'postinit.c',
+  line: '1023',
+  routine: 'InitPostgres'
+}
+{"timestamp":"2026-08-21T22:10:23.147Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=b4b7c0c5-224e-4e18-b252-d39817b36aa5 span=48abc665-9968-4f]","correlation_id":"bf0dca08-7263-41ac-8625-3dd7c2f9c313"}
+{"timestamp":"2026-08-21T22:10:23.148Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 1ms","correlation_id":"bf0dca08-7263-41ac-8625-3dd7c2f9c313"}
+{"timestamp":"2026-08-21T22:10:23.149Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming POST / [trace=5a7a880b-e5df-4325-bea9-fd813bfd85d9 span=f6a72e90-3fd3-48]","correlation_id":"0bd48e4c-b671-4562-a2f2-2f0b9e8e62b5"}
+{"timestamp":"2026-08-21T22:10:23.149Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed POST /v1/llm/chat 401 in 0ms","correlation_id":"0bd48e4c-b671-4562-a2f2-2f0b9e8e62b5"}
+{"timestamp":"2026-08-21T22:10:23.150Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming POST / [trace=7457da2d-7515-4ec8-836e-627814d97a60 span=87038142-54bc-45]","correlation_id":"b628be78-a7c4-42be-8255-074cd4343c28"}
+{"timestamp":"2026-08-21T22:10:23.151Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed POST /v1/llm/chat 401 in 1ms","correlation_id":"b628be78-a7c4-42be-8255-074cd4343c28"}
+{"timestamp":"2026-08-21T22:10:23.152Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming POST / [trace=111d15cf-e2b3-4368-a4d8-dc08c4cb5d27 span=170b1e68-98e8-4b]","correlation_id":"ce769204-e699-4ce6-98c3-1fb6e3ce2d0e"}
+{"timestamp":"2026-08-21T22:10:23.153Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed POST /v1/llm/chat 401 in 1ms","correlation_id":"ce769204-e699-4ce6-98c3-1fb6e3ce2d0e"}
+{"timestamp":"2026-08-21T22:10:23.154Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming POST / [trace=a642a66f-2c3e-44d5-bce1-ab227ab3f444 span=f40c99af-1142-45]","correlation_id":"5a3a8121-6556-4952-a1a8-7370a2ae58bd"}
+{"timestamp":"2026-08-21T22:10:23.154Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed POST /v1/llm/chat 200 in 0ms","correlation_id":"5a3a8121-6556-4952-a1a8-7370a2ae58bd"}
+{"timestamp":"2026-08-21T22:10:23.155Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming POST / [trace=a715570f-32b2-4a2e-9773-7702f4db3e28 span=20a30419-7744-4e]","correlation_id":"aea9739f-db7f-47ae-abca-b638b688c974"}
+{"timestamp":"2026-08-21T22:10:23.155Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed POST / 400 in 0ms","correlation_id":"aea9739f-db7f-47ae-abca-b638b688c974"}
+{"timestamp":"2026-08-21T22:10:23.156Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming POST / [trace=419faa4e-9d2c-4148-b72b-f0bffeaf475d span=a926c08d-6f74-42]","correlation_id":"4128ad29-2091-4592-99ec-2c2a9e797f3c"}
+{"timestamp":"2026-08-21T22:10:23.156Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed POST / 400 in 0ms","correlation_id":"4128ad29-2091-4592-99ec-2c2a9e797f3c"}
+{"timestamp":"2026-08-21T22:10:23.157Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming POST / [trace=29f7aed1-d73c-48ab-9244-abf2e57babc9 span=04565f8b-78bd-47]","correlation_id":"28ca6233-37ab-453f-9a89-b6c8f0335a0b"}
+{"timestamp":"2026-08-21T22:10:23.157Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed POST / 415 in 0ms","correlation_id":"28ca6233-37ab-453f-9a89-b6c8f0335a0b"}
+{"timestamp":"2026-08-21T22:10:23.158Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=a1cf18ac-c1c9-4376-afd4-ed11d7fa2bb1 span=b5d5019b-12e3-4f]","correlation_id":"cc39ecfa-5a60-4d2c-bc81-7a7b3fa11e7f"}
+{"timestamp":"2026-08-21T22:10:23.158Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"cc39ecfa-5a60-4d2c-bc81-7a7b3fa11e7f"}
+{"timestamp":"2026-08-21T22:10:23.159Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=9c054eee-3d50-422b-83db-36f461237eac span=0387c276-0665-4e]","correlation_id":"8d412cfc-9839-4a8f-867c-7745c3336966"}
+{"timestamp":"2026-08-21T22:10:23.159Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"8d412cfc-9839-4a8f-867c-7745c3336966"}
+{"timestamp":"2026-08-21T22:10:23.159Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=c77455f7-7b95-4351-a8fe-0b6248be1b13 span=e28ac9dd-0ae8-4e]","correlation_id":"93383831-451f-453f-91bb-3f338c214df6"}
+{"timestamp":"2026-08-21T22:10:23.160Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 1ms","correlation_id":"93383831-451f-453f-91bb-3f338c214df6"}
+{"timestamp":"2026-08-21T22:10:23.160Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=c71d519b-458f-4e0a-b111-952e356e60ad span=71d2b26f-7c93-47]","correlation_id":"15d20eeb-9eb2-4103-8a39-e15f1ab20415"}
+{"timestamp":"2026-08-21T22:10:23.160Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"15d20eeb-9eb2-4103-8a39-e15f1ab20415"}
+{"timestamp":"2026-08-21T22:10:23.161Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=ce2b311f-dae7-4900-bc08-c6a085d4d0e4 span=4951a5c0-fe17-45]","correlation_id":"5a1932d6-8ead-43ed-88af-df5d0202f774"}
+{"timestamp":"2026-08-21T22:10:23.161Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"5a1932d6-8ead-43ed-88af-df5d0202f774"}
+{"timestamp":"2026-08-21T22:10:23.161Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=7d9ae6c9-9b1e-4a4f-a34f-6cfcf2334f55 span=f1f24313-9da5-47]","correlation_id":"7cb37fef-e058-457e-8bba-7a5a53c9f9b5"}
+{"timestamp":"2026-08-21T22:10:23.161Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"7cb37fef-e058-457e-8bba-7a5a53c9f9b5"}
+{"timestamp":"2026-08-21T22:10:23.162Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=aa004e2d-6dbf-459b-9ffd-0e3f7e7d46d2 span=064bbd96-fdd0-47]","correlation_id":"519f8988-6ae1-4628-87a7-68ff6d6117ed"}
+{"timestamp":"2026-08-21T22:10:23.162Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"519f8988-6ae1-4628-87a7-68ff6d6117ed"}
+{"timestamp":"2026-08-21T22:10:23.162Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=5aea449f-b369-45a0-a248-80317ab83a05 span=c5a9a5dc-fc9b-4f]","correlation_id":"c9387e23-48c1-46ed-9e1e-4f2cb7862287"}
+{"timestamp":"2026-08-21T22:10:23.163Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 1ms","correlation_id":"c9387e23-48c1-46ed-9e1e-4f2cb7862287"}
+{"timestamp":"2026-08-21T22:10:23.163Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=29ca0972-f7cf-481b-b178-bc2f491bcb64 span=036105c8-ea55-4b]","correlation_id":"65e3a325-f531-4b3e-a09f-b6d14389579a"}
+{"timestamp":"2026-08-21T22:10:23.163Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"65e3a325-f531-4b3e-a09f-b6d14389579a"}
+{"timestamp":"2026-08-21T22:10:23.163Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=338b566a-3b47-44fa-ba03-f5781b2ecfaf span=23fb1f29-fae3-49]","correlation_id":"eabeeb63-a568-4f20-96d4-28bc9e5cfb25"}
+{"timestamp":"2026-08-21T22:10:23.163Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"eabeeb63-a568-4f20-96d4-28bc9e5cfb25"}
+{"timestamp":"2026-08-21T22:10:23.164Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=06fd363b-8e3b-4ff5-95fa-24f6984bf947 span=f1405157-f574-47]","correlation_id":"0c97444d-197f-4173-9c40-fbfc6ee847c6"}
+{"timestamp":"2026-08-21T22:10:23.164Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"0c97444d-197f-4173-9c40-fbfc6ee847c6"}
+{"timestamp":"2026-08-21T22:10:23.164Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=7c67d19d-a497-438e-b307-6cefe7fac705 span=63711702-77e8-41]","correlation_id":"347da5f9-8033-4ede-8938-0d461ec08b3f"}
+{"timestamp":"2026-08-21T22:10:23.164Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"347da5f9-8033-4ede-8938-0d461ec08b3f"}
+{"timestamp":"2026-08-21T22:10:23.164Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=da9fd8f7-e225-4b9b-a910-73c0fea6d711 span=f1e9eb40-8ed2-4b]","correlation_id":"45466b64-1aeb-4d34-837f-3014f9c69338"}
+{"timestamp":"2026-08-21T22:10:23.165Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 1ms","correlation_id":"45466b64-1aeb-4d34-837f-3014f9c69338"}
+{"timestamp":"2026-08-21T22:10:23.165Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=73f4777f-3d63-48a4-a87d-01309a153788 span=68a385fa-da76-42]","correlation_id":"fe7eed13-d537-4f85-b52a-788549dab56f"}
+{"timestamp":"2026-08-21T22:10:23.165Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"fe7eed13-d537-4f85-b52a-788549dab56f"}
+{"timestamp":"2026-08-21T22:10:23.165Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=3e1db8d4-746f-457f-8dd2-7b664c8a8cab span=e46964b8-d50f-4b]","correlation_id":"84102ef1-cc28-4d18-ae67-49a86d017287"}
+{"timestamp":"2026-08-21T22:10:23.165Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"84102ef1-cc28-4d18-ae67-49a86d017287"}
+{"timestamp":"2026-08-21T22:10:23.166Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=85525a8f-c491-4436-90b4-2a1ea58d51cd span=ed72137b-7711-45]","correlation_id":"f78b03bb-fae9-453b-ac23-6cb47c1b2f48"}
+{"timestamp":"2026-08-21T22:10:23.166Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"f78b03bb-fae9-453b-ac23-6cb47c1b2f48"}
+{"timestamp":"2026-08-21T22:10:23.166Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=147d9cd3-138b-4fee-b9f1-29ac4a2564dd span=6cd09e1c-8203-4c]","correlation_id":"49f9e962-6826-403a-b784-e174ff1f91d1"}
+{"timestamp":"2026-08-21T22:10:23.166Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"49f9e962-6826-403a-b784-e174ff1f91d1"}
+{"timestamp":"2026-08-21T22:10:23.167Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=aca6568f-396b-448a-8c64-2bdf708e6c7a span=30ea561b-1d62-4d]","correlation_id":"e1d8e551-9672-4ce0-8b57-ee431e643031"}
+{"timestamp":"2026-08-21T22:10:23.167Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"e1d8e551-9672-4ce0-8b57-ee431e643031"}
+{"timestamp":"2026-08-21T22:10:23.167Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=83a20346-e6b9-446b-9919-804882a80dad span=d1eb0e4f-abd9-4b]","correlation_id":"0466c763-7fe9-4ca7-9987-02ac158a03d0"}
+{"timestamp":"2026-08-21T22:10:23.167Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"0466c763-7fe9-4ca7-9987-02ac158a03d0"}
+{"timestamp":"2026-08-21T22:10:23.168Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=25260e6b-c435-4737-a87d-f3afc0fd4b7d span=293be9ab-ab05-46]","correlation_id":"5f68f669-34cb-49ba-b2ac-ac15e527dcbe"}
+{"timestamp":"2026-08-21T22:10:23.168Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"5f68f669-34cb-49ba-b2ac-ac15e527dcbe"}
+{"timestamp":"2026-08-21T22:10:23.168Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=7e5657ed-8332-43a7-90a0-4bc7a46f4459 span=f0030230-7889-41]","correlation_id":"8685be5e-215d-462f-b004-314489e80e6c"}
+{"timestamp":"2026-08-21T22:10:23.168Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"8685be5e-215d-462f-b004-314489e80e6c"}
+{"timestamp":"2026-08-21T22:10:23.169Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=96d99029-7d55-41ea-b4bd-6e4e75adbed4 span=0934df4a-8585-41]","correlation_id":"e1a608b1-b66f-4c9a-b023-21a548170a7f"}
+{"timestamp":"2026-08-21T22:10:23.169Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"e1a608b1-b66f-4c9a-b023-21a548170a7f"}
+{"timestamp":"2026-08-21T22:10:23.169Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=35ebae94-4b43-44f6-8f49-e4f612c04a61 span=fe48f464-461e-40]","correlation_id":"6c9f443f-c515-4277-beb3-33e52e889b9f"}
+{"timestamp":"2026-08-21T22:10:23.169Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"6c9f443f-c515-4277-beb3-33e52e889b9f"}
+{"timestamp":"2026-08-21T22:10:23.169Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=d9f50aeb-05aa-4b28-b9c3-13c0ac2d4162 span=304673a4-805f-4f]","correlation_id":"1b2dd2e9-1d63-4b6b-b12b-9399308ee843"}
+{"timestamp":"2026-08-21T22:10:23.170Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 1ms","correlation_id":"1b2dd2e9-1d63-4b6b-b12b-9399308ee843"}
+{"timestamp":"2026-08-21T22:10:23.170Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=b5e25800-62a0-4821-897b-0aae74fc2486 span=4a8323ef-de1d-45]","correlation_id":"04ce8e28-bd99-4890-83f7-15fdc713b251"}
+{"timestamp":"2026-08-21T22:10:23.170Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"04ce8e28-bd99-4890-83f7-15fdc713b251"}
+{"timestamp":"2026-08-21T22:10:23.170Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=cad096cd-7ddd-4e3b-b6bd-07610907ef0a span=8efdbf92-a0ef-4c]","correlation_id":"be056348-2efd-4567-9a15-13b9cc69e3a5"}
+{"timestamp":"2026-08-21T22:10:23.171Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 1ms","correlation_id":"be056348-2efd-4567-9a15-13b9cc69e3a5"}
+{"timestamp":"2026-08-21T22:10:23.171Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=b6803a74-7c6d-4d7a-b368-895acd6813ea span=752e3870-a0fa-40]","correlation_id":"be6758e1-50b9-49e9-bf07-81df96101a98"}
+{"timestamp":"2026-08-21T22:10:23.171Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"be6758e1-50b9-49e9-bf07-81df96101a98"}
+{"timestamp":"2026-08-21T22:10:23.171Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=d2d8fed2-1fe3-4697-acf6-fceb83f13a61 span=8ef9f601-4c31-4d]","correlation_id":"d15dc877-2d1f-44ea-957c-33de6b00abaa"}
+{"timestamp":"2026-08-21T22:10:23.171Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"d15dc877-2d1f-44ea-957c-33de6b00abaa"}
+{"timestamp":"2026-08-21T22:10:23.172Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=b157ee26-b3f8-4147-8ff7-26d8f27fa61f span=fa64e8a6-572e-45]","correlation_id":"ce503808-feed-4754-b127-9e408891e94b"}
+{"timestamp":"2026-08-21T22:10:23.172Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"ce503808-feed-4754-b127-9e408891e94b"}
+{"timestamp":"2026-08-21T22:10:23.172Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=fb79684e-c27a-4cb0-886b-86b9ba6a487c span=0a75fade-c205-42]","correlation_id":"5162d8a9-c9c1-4f85-8281-7b3706f4791e"}
+{"timestamp":"2026-08-21T22:10:23.172Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"5162d8a9-c9c1-4f85-8281-7b3706f4791e"}
+{"timestamp":"2026-08-21T22:10:23.172Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=9ea27fd5-7b5e-47a0-a1f1-432de75844aa span=d069af73-3e2b-44]","correlation_id":"6547f506-05f5-42b1-a773-8e73fc1e1b0e"}
+{"timestamp":"2026-08-21T22:10:23.173Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 1ms","correlation_id":"6547f506-05f5-42b1-a773-8e73fc1e1b0e"}
+{"timestamp":"2026-08-21T22:10:23.173Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=6b88c02a-beb2-44e7-b347-bd4aae844c65 span=eb4b0c34-43c4-4e]","correlation_id":"cf6d62fa-93ca-4432-b92a-404f9032b906"}
+{"timestamp":"2026-08-21T22:10:23.173Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"cf6d62fa-93ca-4432-b92a-404f9032b906"}
+{"timestamp":"2026-08-21T22:10:23.173Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=ccf0c5ff-f1b5-47b6-99bc-4dfefc853abb span=f20b08ec-ca6e-44]","correlation_id":"5b982d58-6d0d-4e07-b4d1-58b1a19b3bbe"}
+{"timestamp":"2026-08-21T22:10:23.174Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 1ms","correlation_id":"5b982d58-6d0d-4e07-b4d1-58b1a19b3bbe"}
+{"timestamp":"2026-08-21T22:10:23.174Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=69f348d3-9c77-433a-af33-50191178252b span=ead0434f-9ed2-4a]","correlation_id":"c752d98f-cd1e-4335-9d53-a2775c97b014"}
+{"timestamp":"2026-08-21T22:10:23.174Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"c752d98f-cd1e-4335-9d53-a2775c97b014"}
+{"timestamp":"2026-08-21T22:10:23.174Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=6ed2cc49-9736-45a8-8a5b-d9cd6955a984 span=5f6e8569-cbcd-41]","correlation_id":"7bac04da-322b-4dd1-86aa-480e904855d4"}
+{"timestamp":"2026-08-21T22:10:23.174Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"7bac04da-322b-4dd1-86aa-480e904855d4"}
+{"timestamp":"2026-08-21T22:10:23.175Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=4044d485-fd1b-4606-bb52-11e2acbde9c4 span=94ffd778-7182-4d]","correlation_id":"c6c144a7-6c55-4627-91e5-e4d74a2e7080"}
+{"timestamp":"2026-08-21T22:10:23.175Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"c6c144a7-6c55-4627-91e5-e4d74a2e7080"}
+{"timestamp":"2026-08-21T22:10:23.176Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=d15eae1f-d4f3-4b63-b719-773c7151f476 span=6127a821-0d87-45]","correlation_id":"3d4c4bf3-7098-4e07-b507-cd5481c01c21"}
+{"timestamp":"2026-08-21T22:10:23.176Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"3d4c4bf3-7098-4e07-b507-cd5481c01c21"}
+{"timestamp":"2026-08-21T22:10:23.176Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=be1fca65-5fb6-40cd-a370-43192050aa17 span=9eae7fbd-4305-4e]","correlation_id":"de6d338b-66c7-448b-894c-c511f4caa496"}
+{"timestamp":"2026-08-21T22:10:23.176Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"de6d338b-66c7-448b-894c-c511f4caa496"}
+{"timestamp":"2026-08-21T22:10:23.176Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=536f7076-8f9a-4797-8ff0-6af05a5b7e87 span=a9b0dfa5-fec0-45]","correlation_id":"3b01d2f8-66a0-475d-bac6-73ff746d74a2"}
+{"timestamp":"2026-08-21T22:10:23.177Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 1ms","correlation_id":"3b01d2f8-66a0-475d-bac6-73ff746d74a2"}
+{"timestamp":"2026-08-21T22:10:23.177Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=564941fe-ca23-466b-bf7e-0b5231257e0d span=fd1f69e5-d668-4f]","correlation_id":"8fc0f9b2-3015-4c64-ade4-361fd7d5a0cf"}
+{"timestamp":"2026-08-21T22:10:23.177Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"8fc0f9b2-3015-4c64-ade4-361fd7d5a0cf"}
+{"timestamp":"2026-08-21T22:10:23.177Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=8b90b682-7801-4e53-b0b4-4fdefc567f7d span=8784ef5a-0d88-4f]","correlation_id":"26300e75-6c59-414f-b63b-01733a04c814"}
+{"timestamp":"2026-08-21T22:10:23.177Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"26300e75-6c59-414f-b63b-01733a04c814"}
+{"timestamp":"2026-08-21T22:10:23.178Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=501f350a-d2cd-4c47-b960-476970307917 span=795a7f8c-2450-40]","correlation_id":"ef66eb1b-93f8-46b8-9d6b-bbbb3ca9f9b7"}
+{"timestamp":"2026-08-21T22:10:23.178Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"ef66eb1b-93f8-46b8-9d6b-bbbb3ca9f9b7"}
+{"timestamp":"2026-08-21T22:10:23.178Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=456b77a3-9755-45f0-bfd5-ab2604123719 span=7b36f68e-5a93-48]","correlation_id":"852743c5-3e95-420d-9b85-46c5c36a8085"}
+{"timestamp":"2026-08-21T22:10:23.178Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"852743c5-3e95-420d-9b85-46c5c36a8085"}
+{"timestamp":"2026-08-21T22:10:23.179Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=07cd0c27-6364-49f7-8335-e01e93f924d9 span=0b1585bf-5931-48]","correlation_id":"a67e7a52-7946-4ea9-bd25-537743305f91"}
+{"timestamp":"2026-08-21T22:10:23.179Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"a67e7a52-7946-4ea9-bd25-537743305f91"}
+{"timestamp":"2026-08-21T22:10:23.179Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=ff8262a3-4716-45a0-881f-377d6fb09a8f span=06608d6d-7d06-40]","correlation_id":"35dc451e-1c62-4af8-aa4a-ae14ac0d70f1"}
+{"timestamp":"2026-08-21T22:10:23.179Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"35dc451e-1c62-4af8-aa4a-ae14ac0d70f1"}
+{"timestamp":"2026-08-21T22:10:23.179Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=17a1cae4-a337-4159-b749-f9c879dcbe58 span=9aa29186-6b71-4e]","correlation_id":"7cf8b8ce-c16a-4733-a2cc-230a18d9b4be"}
+{"timestamp":"2026-08-21T22:10:23.180Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 1ms","correlation_id":"7cf8b8ce-c16a-4733-a2cc-230a18d9b4be"}
+{"timestamp":"2026-08-21T22:10:23.180Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=aae2ae83-461e-4a92-b1bc-fb2f5463505c span=703c182e-576e-48]","correlation_id":"2b82f482-aa21-4d45-8731-74be263dfe98"}
+{"timestamp":"2026-08-21T22:10:23.180Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"2b82f482-aa21-4d45-8731-74be263dfe98"}
+{"timestamp":"2026-08-21T22:10:23.183Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=0d13bc7a-a280-42f6-9acf-401a0bcde681 span=82e9eba9-1dc2-4e]","correlation_id":"49976e6c-04ac-425a-b5e9-53a0056b0c53"}
+{"timestamp":"2026-08-21T22:10:23.183Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"49976e6c-04ac-425a-b5e9-53a0056b0c53"}
+{"timestamp":"2026-08-21T22:10:23.184Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=a2818c6a-ec59-44ab-9ca0-4422459d3886 span=16e6d801-1ca4-43]","correlation_id":"be4ddacc-7487-41cc-8c8c-decb30c0cf18"}
+{"timestamp":"2026-08-21T22:10:23.184Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"be4ddacc-7487-41cc-8c8c-decb30c0cf18"}
+{"timestamp":"2026-08-21T22:10:23.184Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=216c1309-e256-40d7-989d-29c25baeacc2 span=41e1837d-aec5-4f]","correlation_id":"1f8841b2-f0cb-4b06-830d-4152edc9c9c0"}
+{"timestamp":"2026-08-21T22:10:23.184Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"1f8841b2-f0cb-4b06-830d-4152edc9c9c0"}
+{"timestamp":"2026-08-21T22:10:23.185Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=0cfc1b1f-7ebf-4e0c-8518-918e3354d3bc span=810a5c9c-50b8-4c]","correlation_id":"dbcc3832-2e80-427e-8ba6-3f22b7ffeeed"}
+{"timestamp":"2026-08-21T22:10:23.185Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"dbcc3832-2e80-427e-8ba6-3f22b7ffeeed"}
+{"timestamp":"2026-08-21T22:10:23.185Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=5753506e-2ff9-40ca-992f-a90597f0a534 span=d9d99f51-d1d4-41]","correlation_id":"aa3a09db-84ac-4b56-b8d9-130cb81f6a4a"}
+{"timestamp":"2026-08-21T22:10:23.185Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"aa3a09db-84ac-4b56-b8d9-130cb81f6a4a"}
+{"timestamp":"2026-08-21T22:10:23.186Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=9309c568-17ac-4087-b78d-334c55fdc1a6 span=113747af-3fc2-4a]","correlation_id":"f515fe4e-5b9f-4ea3-82d9-515260fb26ce"}
+{"timestamp":"2026-08-21T22:10:23.186Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"f515fe4e-5b9f-4ea3-82d9-515260fb26ce"}
+{"timestamp":"2026-08-21T22:10:23.186Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=65c1ad48-ed6c-4a92-a7cd-548d196c5d2a span=be487695-b250-44]","correlation_id":"918cc034-027f-4c5b-9303-4f280e29cfcb"}
+{"timestamp":"2026-08-21T22:10:23.186Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"918cc034-027f-4c5b-9303-4f280e29cfcb"}
+{"timestamp":"2026-08-21T22:10:23.186Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=e7fb479c-90a3-49a3-b3cf-cd06e8bcb3e6 span=f9b4ca15-edfd-40]","correlation_id":"a3b81cec-b1a6-4b7c-9ad1-20a3651741c6"}
+{"timestamp":"2026-08-21T22:10:23.187Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 1ms","correlation_id":"a3b81cec-b1a6-4b7c-9ad1-20a3651741c6"}
+{"timestamp":"2026-08-21T22:10:23.187Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=4435f54b-ed86-48a5-b58b-01fbba03c54f span=448c8c73-78b8-4d]","correlation_id":"364107bb-8708-46ea-8239-ede15f60a7a4"}
+{"timestamp":"2026-08-21T22:10:23.187Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"364107bb-8708-46ea-8239-ede15f60a7a4"}
+{"timestamp":"2026-08-21T22:10:23.188Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=ab4ec316-0904-4585-a685-2aea1ed4385f span=70cc134a-d704-43]","correlation_id":"6b00d216-7c67-4a54-88aa-5ea53f32146d"}
+{"timestamp":"2026-08-21T22:10:23.188Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"6b00d216-7c67-4a54-88aa-5ea53f32146d"}
+{"timestamp":"2026-08-21T22:10:23.188Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=3856123f-d527-40b9-8f6e-efb58dae6cf2 span=f6f2b319-37a7-43]","correlation_id":"a737ee1c-b85f-4b08-be33-786c236e4939"}
+{"timestamp":"2026-08-21T22:10:23.188Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"a737ee1c-b85f-4b08-be33-786c236e4939"}
+{"timestamp":"2026-08-21T22:10:23.188Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=586a03be-38bf-4138-8b38-314c97d432c9 span=00d64bf5-de54-45]","correlation_id":"614ca777-e477-440c-8260-440eb63f4af3"}
+{"timestamp":"2026-08-21T22:10:23.189Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 1ms","correlation_id":"614ca777-e477-440c-8260-440eb63f4af3"}
+{"timestamp":"2026-08-21T22:10:23.189Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=43f01a22-0ead-48fc-a407-7c6fff5da8a3 span=dbbcb534-67c9-48]","correlation_id":"789bc25e-8732-4208-9b1a-6b8ad7f17880"}
+{"timestamp":"2026-08-21T22:10:23.189Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"789bc25e-8732-4208-9b1a-6b8ad7f17880"}
+{"timestamp":"2026-08-21T22:10:23.189Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=fbf6a3e5-4462-4ee4-814e-cf241a41e69c span=80f56735-3456-43]","correlation_id":"d3793084-d752-4c8f-bf3c-75747c3af2da"}
+{"timestamp":"2026-08-21T22:10:23.189Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"d3793084-d752-4c8f-bf3c-75747c3af2da"}
+{"timestamp":"2026-08-21T22:10:23.190Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=8a92f7f7-7d47-468f-95b1-2e05cda27f91 span=2b971138-977e-45]","correlation_id":"161a4557-e4c1-4765-b945-c6342db6e16e"}
+{"timestamp":"2026-08-21T22:10:23.190Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"161a4557-e4c1-4765-b945-c6342db6e16e"}
+{"timestamp":"2026-08-21T22:10:23.190Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=2a96eb8a-b692-42d9-9abe-d19b1e508b9c span=f3cc06a6-eabc-46]","correlation_id":"c147e832-53ec-4ac6-b8e9-85d51785a134"}
+{"timestamp":"2026-08-21T22:10:23.190Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"c147e832-53ec-4ac6-b8e9-85d51785a134"}
+{"timestamp":"2026-08-21T22:10:23.190Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=50a93f16-5957-4e77-a18a-bc1106c635f0 span=88c98c15-8d15-41]","correlation_id":"4b6a07f6-84be-4475-95b0-1e5e240612ec"}
+{"timestamp":"2026-08-21T22:10:23.191Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 1ms","correlation_id":"4b6a07f6-84be-4475-95b0-1e5e240612ec"}
+{"timestamp":"2026-08-21T22:10:23.191Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=ddb56c0c-659b-47c6-987d-339be96c564e span=42a44d32-4c3f-47]","correlation_id":"ddd683a8-f475-46fa-8800-1b72aec00712"}
+{"timestamp":"2026-08-21T22:10:23.191Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"ddd683a8-f475-46fa-8800-1b72aec00712"}
+{"timestamp":"2026-08-21T22:10:23.191Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=0005d00a-8231-4bcf-9565-1fcc46fd48c1 span=a521e351-dabb-49]","correlation_id":"eb34c617-ce65-4b3b-8b2d-92cd707a2e6a"}
+{"timestamp":"2026-08-21T22:10:23.191Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"eb34c617-ce65-4b3b-8b2d-92cd707a2e6a"}
+{"timestamp":"2026-08-21T22:10:23.192Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=4c8112bc-c563-4896-a478-da2168a48b74 span=00e7deaa-83ec-42]","correlation_id":"c62f4592-c1fd-4efb-af55-c52890e05d42"}
+{"timestamp":"2026-08-21T22:10:23.192Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"c62f4592-c1fd-4efb-af55-c52890e05d42"}
+{"timestamp":"2026-08-21T22:10:23.193Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=a8e93ce6-345f-4df6-8028-d5373e0adea0 span=c912c786-0e61-4f]","correlation_id":"d0ab47a7-0860-42a8-92a3-a361647a24b4"}
+{"timestamp":"2026-08-21T22:10:23.193Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"d0ab47a7-0860-42a8-92a3-a361647a24b4"}
+{"timestamp":"2026-08-21T22:10:23.193Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=ebb21713-de49-49d7-a456-12c8adc87155 span=3d24f693-308f-43]","correlation_id":"c8e0023e-8612-4dbe-bf35-8f8fd56c9a05"}
+{"timestamp":"2026-08-21T22:10:23.193Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"c8e0023e-8612-4dbe-bf35-8f8fd56c9a05"}
+{"timestamp":"2026-08-21T22:10:23.193Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=acf2ebc5-a3c6-41c5-8449-7d6488d0e8a2 span=9b092738-4a30-47]","correlation_id":"9ad27a35-a3f8-4b42-b741-70446a82217f"}
+{"timestamp":"2026-08-21T22:10:23.194Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 1ms","correlation_id":"9ad27a35-a3f8-4b42-b741-70446a82217f"}
+{"timestamp":"2026-08-21T22:10:23.194Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=d1a52d50-8bd1-4aa6-bf51-c53d16929e2d span=45532b0d-5aee-4e]","correlation_id":"61de3e17-49dc-4a65-acbe-074f15e058a8"}
+{"timestamp":"2026-08-21T22:10:23.194Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"61de3e17-49dc-4a65-acbe-074f15e058a8"}
+{"timestamp":"2026-08-21T22:10:23.195Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=468b9cce-72c9-47ff-ab05-43011297af99 span=a6570a41-f7c9-45]","correlation_id":"dd06e7f1-3bb9-413b-800d-c6fa54334c50"}
+{"timestamp":"2026-08-21T22:10:23.195Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"dd06e7f1-3bb9-413b-800d-c6fa54334c50"}
+{"timestamp":"2026-08-21T22:10:23.195Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=3e0eff12-a90f-4746-a145-b8f1a3f903cc span=7c1b32e7-ad9f-43]","correlation_id":"b6bd0bd8-2008-4da3-be3f-822dcde82ed1"}
+{"timestamp":"2026-08-21T22:10:23.195Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"b6bd0bd8-2008-4da3-be3f-822dcde82ed1"}
+{"timestamp":"2026-08-21T22:10:23.195Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=3fdae0ab-9ec1-4f95-941f-c51336f671f1 span=59e4584c-1b54-4b]","correlation_id":"85f1616b-7c24-46d2-bd99-d80161f14ed8"}
+{"timestamp":"2026-08-21T22:10:23.196Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 1ms","correlation_id":"85f1616b-7c24-46d2-bd99-d80161f14ed8"}
+{"timestamp":"2026-08-21T22:10:23.196Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=aad632ce-1983-441c-be61-66b369bed1e3 span=c02490e4-f684-41]","correlation_id":"5722073d-1e66-4a11-aaf0-c28bace80bc0"}
+{"timestamp":"2026-08-21T22:10:23.196Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"5722073d-1e66-4a11-aaf0-c28bace80bc0"}
+{"timestamp":"2026-08-21T22:10:23.196Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=012fdc94-a997-47bb-b87a-53d366800506 span=2719276e-ea14-4f]","correlation_id":"7cc33423-2a45-4c3e-95da-5c05720ee455"}
+{"timestamp":"2026-08-21T22:10:23.197Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 1ms","correlation_id":"7cc33423-2a45-4c3e-95da-5c05720ee455"}
+{"timestamp":"2026-08-21T22:10:23.197Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=cf23e054-941c-4817-9323-c9b8d074d885 span=e3d7a4d8-ee94-48]","correlation_id":"dc146f8e-446e-416e-9909-fef61f6c71e4"}
+{"timestamp":"2026-08-21T22:10:23.197Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"dc146f8e-446e-416e-9909-fef61f6c71e4"}
+{"timestamp":"2026-08-21T22:10:23.197Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=27e1c250-6746-46b8-aa5f-d5759e07b027 span=6e3f4a81-d3fc-40]","correlation_id":"87f28686-caa5-407e-9505-7a2ff8633ce2"}
+{"timestamp":"2026-08-21T22:10:23.197Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"87f28686-caa5-407e-9505-7a2ff8633ce2"}
+{"timestamp":"2026-08-21T22:10:23.198Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=d00478df-0154-40da-b6c8-67a356b06986 span=f9d0e781-2b2d-45]","correlation_id":"246fbe4e-b4c5-4483-a0f8-fd1b48af49e2"}
+{"timestamp":"2026-08-21T22:10:23.198Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"246fbe4e-b4c5-4483-a0f8-fd1b48af49e2"}
+{"timestamp":"2026-08-21T22:10:23.198Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=d2032665-4b38-4244-ab50-bda433ecf091 span=787bcc14-0960-48]","correlation_id":"67b4fdbd-68ff-4b9e-af2c-30aa15b8441b"}
+{"timestamp":"2026-08-21T22:10:23.198Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"67b4fdbd-68ff-4b9e-af2c-30aa15b8441b"}
+{"timestamp":"2026-08-21T22:10:23.199Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=9e85b7b5-71b0-4be3-934c-9d624e94cb57 span=3888cee4-efa5-48]","correlation_id":"4b033eaf-c790-40f6-8cd5-a457e8fff263"}
+{"timestamp":"2026-08-21T22:10:23.199Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"4b033eaf-c790-40f6-8cd5-a457e8fff263"}
+{"timestamp":"2026-08-21T22:10:23.199Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=0d2d1411-fbe1-4a8c-baac-d3fa9e77069d span=897e11de-8a02-43]","correlation_id":"c08080dd-fcc6-4f7e-8c89-6d7d9dfd9348"}
+{"timestamp":"2026-08-21T22:10:23.199Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"c08080dd-fcc6-4f7e-8c89-6d7d9dfd9348"}
+{"timestamp":"2026-08-21T22:10:23.200Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=9b493060-e2a9-40ca-bbbe-b16b4356656d span=e7ed5d4f-767c-46]","correlation_id":"397195ef-9d78-4e4c-b13d-2384ec03eca8"}
+{"timestamp":"2026-08-21T22:10:23.200Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"397195ef-9d78-4e4c-b13d-2384ec03eca8"}
+{"timestamp":"2026-08-21T22:10:23.200Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=61ca4ff4-2b6c-4b6d-935d-e18ab016bed5 span=38331f95-e655-45]","correlation_id":"09ec8679-6f60-475f-adf0-62a1a4b22291"}
+{"timestamp":"2026-08-21T22:10:23.200Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"09ec8679-6f60-475f-adf0-62a1a4b22291"}
+{"timestamp":"2026-08-21T22:10:23.201Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=3d5727b8-7dde-4f24-b153-3a3d0e52e8a1 span=31b904c4-56f4-40]","correlation_id":"4d357db4-5c6c-4495-b01f-d5e83d8d31cd"}
+{"timestamp":"2026-08-21T22:10:23.201Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"4d357db4-5c6c-4495-b01f-d5e83d8d31cd"}
+{"timestamp":"2026-08-21T22:10:23.201Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=bff04a26-1eda-431c-a499-49546384a010 span=c3c7e18c-027e-4b]","correlation_id":"eaf6be34-e647-4ba3-9e99-1cfa21501dc6"}
+{"timestamp":"2026-08-21T22:10:23.201Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"eaf6be34-e647-4ba3-9e99-1cfa21501dc6"}
+{"timestamp":"2026-08-21T22:10:23.201Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=96a5df8c-ec0f-443e-a6b3-f94bdcb85cc8 span=ed0f2565-8e74-45]","correlation_id":"1a6063e3-ae74-48b7-9559-fb1e73f27e3f"}
+{"timestamp":"2026-08-21T22:10:23.202Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 1ms","correlation_id":"1a6063e3-ae74-48b7-9559-fb1e73f27e3f"}
+{"timestamp":"2026-08-21T22:10:23.202Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=1e3fd0bc-5963-4156-ad09-f12e4f2429b3 span=e69140ed-9e28-4e]","correlation_id":"9b4f2372-28ce-485c-b7d4-415160d3af6a"}
+{"timestamp":"2026-08-21T22:10:23.202Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"9b4f2372-28ce-485c-b7d4-415160d3af6a"}
+{"timestamp":"2026-08-21T22:10:23.202Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=fab05de7-2a19-4a4d-9349-56744904be87 span=cb7151a7-1d86-43]","correlation_id":"19802e29-cb92-4594-a875-a9fa92e1fd1f"}
+{"timestamp":"2026-08-21T22:10:23.203Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 1ms","correlation_id":"19802e29-cb92-4594-a875-a9fa92e1fd1f"}
+{"timestamp":"2026-08-21T22:10:23.203Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=33eca4ba-11df-47d6-b115-47d97cf317f6 span=b7173e08-2a8a-4d]","correlation_id":"91a85b72-f549-41a4-996a-88efac569ab9"}
+{"timestamp":"2026-08-21T22:10:23.203Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"91a85b72-f549-41a4-996a-88efac569ab9"}
+{"timestamp":"2026-08-21T22:10:23.203Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=f0b335ba-690a-4e7d-afe4-0a36f44c2304 span=96f6db4f-b4e8-49]","correlation_id":"fbbeca07-3ba6-4114-b7be-728af3223514"}
+{"timestamp":"2026-08-21T22:10:23.203Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"fbbeca07-3ba6-4114-b7be-728af3223514"}
+{"timestamp":"2026-08-21T22:10:23.204Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=5ebe4eb4-11b0-4d52-82e3-39cda5923ada span=945fce78-6ceb-45]","correlation_id":"7d6eb76b-5319-482f-847c-f803207c57bc"}
+{"timestamp":"2026-08-21T22:10:23.204Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"7d6eb76b-5319-482f-847c-f803207c57bc"}
+{"timestamp":"2026-08-21T22:10:23.204Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=388444cc-91c9-4104-9ece-afba149f3ffb span=5692ffb0-b319-42]","correlation_id":"71cbe7c9-8585-48e4-ba21-a493d4c821ee"}
+{"timestamp":"2026-08-21T22:10:23.204Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"71cbe7c9-8585-48e4-ba21-a493d4c821ee"}
+{"timestamp":"2026-08-21T22:10:23.205Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=a7ddc8aa-b705-4748-8f79-6ddf935295b4 span=30212cf9-e67f-49]","correlation_id":"4b8d5b41-e314-4846-a205-6632b8f7cc06"}
+{"timestamp":"2026-08-21T22:10:23.205Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"4b8d5b41-e314-4846-a205-6632b8f7cc06"}
+{"timestamp":"2026-08-21T22:10:23.205Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=869aa2a2-948a-43a4-a7e6-ec0a4c1b9c44 span=2ed0ccd5-76e5-44]","correlation_id":"c9456c8d-4dea-4d81-9496-a2c40e6507ba"}
+{"timestamp":"2026-08-21T22:10:23.205Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"c9456c8d-4dea-4d81-9496-a2c40e6507ba"}
+{"timestamp":"2026-08-21T22:10:23.206Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=b114a5fe-8d7a-49c0-a80d-429f49848732 span=c2f091a5-5fcf-4f]","correlation_id":"ec0239bf-c7ac-4f09-bb93-d7952222a577"}
+{"timestamp":"2026-08-21T22:10:23.206Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"ec0239bf-c7ac-4f09-bb93-d7952222a577"}
+{"timestamp":"2026-08-21T22:10:23.206Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=40b0a523-c0f1-4b18-998b-8d1ddd08be08 span=543b5af3-26c2-45]","correlation_id":"56fb21b5-866a-4d47-9094-76e67815ded2"}
+{"timestamp":"2026-08-21T22:10:23.206Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"56fb21b5-866a-4d47-9094-76e67815ded2"}
+{"timestamp":"2026-08-21T22:10:23.206Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=059e776b-e2ae-4b62-93a1-de43190bce09 span=036bc0e0-48a6-4b]","correlation_id":"5629e865-4eb2-4f03-a87d-59981108f63a"}
+{"timestamp":"2026-08-21T22:10:23.207Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 1ms","correlation_id":"5629e865-4eb2-4f03-a87d-59981108f63a"}
+{"timestamp":"2026-08-21T22:10:23.207Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=3f5ceaeb-6ef2-401f-a816-784679b2b6b7 span=90b73e11-a3db-4d]","correlation_id":"c99ba390-066c-4c45-ae4b-04130073626c"}
+{"timestamp":"2026-08-21T22:10:23.207Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 200 in 0ms","correlation_id":"c99ba390-066c-4c45-ae4b-04130073626c"}
+{"timestamp":"2026-08-21T22:10:23.207Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=f2d8a3f9-8ef8-4962-96b7-b55f2a86036a span=e02533ff-1fe0-43]","correlation_id":"b24725d0-0275-4a42-8424-fe7a3a61aeb5"}
+{"timestamp":"2026-08-21T22:10:23.208Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /v1/health 429 in 1ms","correlation_id":"b24725d0-0275-4a42-8424-fe7a3a61aeb5"}
+ ✓ tests/gateway.integration.spec.ts (10 tests) 97ms
+ ✓ src/lessons/rewards/reward-migration.spec.ts (12 tests) 2ms
+ ✓ tests/modules/notifications.deferred-dispatch-sweep-service.spec.ts (5 tests) 1ms
+ ✓ tests/modules/payments.payment-method-service.spec.ts (6 tests) 2ms
+ ✓ tests/devices-service-db-rate-limit.spec.ts (6 tests) 2ms
+ ✓ tests/modules/users.account-export-service.spec.ts (7 tests) 1ms
+ ✓ src/lessons/templates/direct-mp4-cinematic.contract.spec.ts (23 tests) 2ms
+ ✓ tests/modules/notifications.rendering-service.spec.ts (5 tests) 1ms
+ ✓ tests/modules/notifications.preferences-policy-service.spec.ts (8 tests) 1ms
+ ↓ tests/devices.transfer.integration.spec.ts (7 tests | 7 skipped)
+ ↓ tests/identity.household-revoke.integration.spec.ts (8 tests | 8 skipped)
+ ↓ tests/devices.decommission.integration.spec.ts (8 tests | 8 skipped)
+ ✓ src/lessons/authoring/lesson-authoring.attach-existing-budget.spec.ts (4 tests) 1ms
+ ✓ tests/docker-production-dependencies.spec.ts (11 tests) 3ms
+ ✓ tests/modules/common.stripe-webhook-gateways.spec.ts (6 tests) 1ms
+ ✓ tests/onboarding-pairing.error-codes.spec.ts (6 tests) 1ms
+ ✓ tests/workers.background-safety.spec.ts (9 tests) 42ms
+ ✓ tests/identity.no-verification.spec.ts (5 tests) 156ms
+ ✓ tests/sprint2/progression.unit.spec.ts (16 tests) 0ms
+ ↓ tests/identity.session-expiry.integration.spec.ts (3 tests | 3 skipped)
+ ✓ tests/modules/notifications.push-dispatch-execution-service.spec.ts (4 tests) 1ms
+ ✓ tests/bootstrap-config.spec.ts (16 tests) 1ms
+ ✓ tests/bootstrap-preflight.spec.ts (7 tests) 1ms
+ ✓ tests/modules/payments.subscriptions-controller.spec.ts (8 tests) 1ms
+ ✓ src/lessons/authoring/lesson-authoring.ageband-update-guard.spec.ts (7 tests) 2ms
+ ✓ src/lessons/admin-lesson-assignment-operation.service.spec.ts (10 tests) 2ms
+stderr | tests/global-error-filter.spec.ts > GlobalExceptionFilter > formats unknown exceptions as 500 INTERNAL_ERROR
+[5xx] INTERNAL_ERROR {"traceId":"corr-500","message":"Something exploded","name":"Error","stack":["Error: Something exploded","    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/tests/global-error-filter.spec.ts:119:23","    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:146:14","    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:533:11","    at runWithTimeout (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:39:7)","    at runTest (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1056:17)"],"exception":{}}
+
+stderr | tests/global-error-filter.spec.ts > GlobalExceptionFilter > includes correlation_id as null when outside ALS context
+[5xx] INTERNAL_ERROR {"traceId":null,"message":"no context","name":"Error","stack":["Error: no context","    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/tests/global-error-filter.spec.ts:137:23","    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:146:14","    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:533:11","    at runWithTimeout (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:39:7)","    at runTest (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1056:17)"],"exception":{}}
+
+stderr | tests/global-error-filter.spec.ts > GlobalExceptionFilter > dual-shape envelope: flat DoD fields + nested back-compat fields
+[5xx] INTERNAL_ERROR {"traceId":null,"message":"test","name":"Error","stack":["Error: test","    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/tests/global-error-filter.spec.ts:152:18","    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:146:14","    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:533:11","    at runWithTimeout (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:39:7)","    at runTest (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1056:17)"],"exception":{}}
+
+ ✓ tests/global-error-filter.spec.ts (10 tests) 1ms
+ ↓ tests/workers.transcript-redaction.integration.spec.ts (5 tests | 5 skipped)
+ ↓ tests/controls.version-concurrency.integration.spec.ts (6 tests | 6 skipped)
+ ✓ tests/modules/notifications.push-tokens-service.spec.ts (8 tests) 1ms
+ ✓ tests/modules/common.express-routes.spec.ts (2 tests) 1ms
+ ✓ src/lessons/authoring/admin-session.guard.nullish-rowcount.spec.ts (4 tests) 1ms
+ ✓ src/lessons/admin-course-insights.service.spec.ts (3 tests) 1ms
+ ✓ tests/modules/payments.billing-plan-service.spec.ts (4 tests) 1ms
+ ✓ tests/modules/users.child-profiles-controller.spec.ts (7 tests) 1ms
+ ✓ src/lessons/admin-lesson-assignment-eligibility.service.spec.ts (4 tests) 1ms
+ ✓ tests/modules/common.notification-provider-gateways.spec.ts (7 tests) 1ms
+ ✓ src/lessons/lesson-manifest.checksum.spec.ts (5 tests | 1 skipped) 1ms
+ ↓ tests/identity.concurrent-login.integration.spec.ts (3 tests | 3 skipped)
+ ✓ src/lessons/rewards/reward.service.spec.ts (7 tests) 2ms
+ ✓ tests/modules/auth.pin-recovery-prisma-repository.spec.ts (2 tests) 1ms
+ ✓ tests/sns-signature-verifier.spec.ts (7 tests) 2ms
+ ✓ tests/session-metrics.spec.ts (13 tests) 1ms
+ ↓ tests/config-delivery.config-fetch.integration.spec.ts (8 tests | 8 skipped)
+ ✓ src/lessons/lesson-rollout.capabilities.spec.ts (8 tests) 1ms
+stdout | tests/integration-runner.spec.ts > integration test runner > uses caller-provided Postgres and Redis together without starting containers
+[integration] Using explicitly configured external test services
+
+stdout | tests/integration-runner.spec.ts > integration test runner > does not reuse pre-set service URLs without explicit integration opt-in
+[integration] Starting disposable Postgres (postgres:16-alpine) and Redis (redis:7-alpine)
+[integration] Applying repository migrations to disposable Postgres
+[integration] Running complete integration suite with live contracts enabled
+
+ ✓ tests/integration-runner.spec.ts (6 tests) 3ms
+stdout | tests/integration-runner.spec.ts > integration test runner > provisions, migrates, tests, and removes disposable Postgres and Redis
+[integration] Starting disposable Postgres (postgres:16-alpine) and Redis (redis:7-alpine)
+[integration] Applying repository migrations to disposable Postgres
+[integration] Running complete integration suite with live contracts enabled
+
+stdout | tests/integration-runner.spec.ts > integration test runner > cleans up both containers when migration fails
+[integration] Starting disposable Postgres (postgres:16-alpine) and Redis (redis:7-alpine)
+[integration] Applying repository migrations to disposable Postgres
+
+stdout | tests/integration-runner.spec.ts > integration test runner > cleans up and exits with the cancellation status on termination
+[integration] Starting disposable Postgres (postgres:16-alpine) and Redis (redis:7-alpine)
+
+ ✓ tests/sprint2/curriculum.unit.spec.ts (12 tests) 0ms
+ ↓ tests/devices.factory-cert.integration.spec.ts (6 tests | 6 skipped)
+ ✓ src/lessons/rewards/reward.controller.spec.ts (10 tests) 3ms
+ ✓ src/lessons/course-enrollment.v3-playability.spec.ts (2 tests) 1ms
+ ✓ tests/claim.fallback-code.spec.ts (4 tests) 188ms
+ ✓ tests/modules/notifications.email-dispatch-execution-service.spec.ts (4 tests) 1ms
+ ✓ src/lessons/tvideo-journey/fixtures/farm/farm-goldens.spec.ts (4 tests) 15ms
+ ↓ tests/identity.household-leave.integration.spec.ts (6 tests | 6 skipped)
+ ✓ tests/modules/notifications.fcm-delivery-worker.spec.ts (3 tests) 1ms
+ ↓ tests/admin-course-insights-version-space.postgres.spec.ts (4 tests | 4 skipped)
+ ↓ tests/lessons.monitoring-read.integration.spec.ts (1 test | 1 skipped)
+ ✓ tests/devices.admin-force-unpair.spec.ts (9 tests) 1ms
+ ↓ tests/identity.freshness-refresh.integration.spec.ts (7 tests | 7 skipped)
+[Nest] 24122  - 08/22/2026, 5:10:26 AM   ERROR [FactoryGuard] TBOT_FACTORY_TOKEN is not set — refusing factory endpoint access
+[Nest] 24122  - 08/22/2026, 5:10:26 AM   ERROR [FactoryGuard] TBOT_FACTORY_TOKEN is not set — refusing factory endpoint access
+[Nest] 24122  - 08/22/2026, 5:10:26 AM   ERROR [FactoryGuard] TBOT_FACTORY_TOKEN is not set — refusing factory endpoint access
+ ✓ tests/factory-guard.spec.ts (14 tests) 1ms
+ ✓ tests/modules/billing.refund-review-notification-queue.spec.ts (5 tests) 1ms
+ ✓ tests/session-timeout-graceful-shutdown.spec.ts (6 tests) 1ms
+ ✓ tests/modules/common.idempotency-prisma-repository.spec.ts (4 tests) 1ms
+ ✓ src/lessons/authoring/cloudinary.service.coverage.spec.ts (10 tests) 1ms
+ ✓ tests/dashboard.integration.spec.ts (6 tests) 11ms
+ ✓ tests/modules/notifications.ses-events-service.spec.ts (5 tests) 1ms
+ ✓ src/lessons/lesson-manifest.logic.branch-coverage.spec.ts (6 tests) 1ms
+ ✓ src/lessons/public/public-catalog.service.coverage.spec.ts (4 tests) 1ms
+ ✓ tests/e2e/realtime-e2e.spec.ts (11 tests) 1ms
+ ↓ src/lessons/rewards/reward-leaderboard-index-migration.postgres.spec.ts (3 tests | 3 skipped)
+ ✓ tests/modules/notifications.queue-worker-main.spec.ts (5 tests) 3ms
+ ✓ src/lessons/tvideo-journey/tvideo-journey.contract.spec.ts (39 tests) 3ms
+ ✓ src/lessons/lesson-route-authz.inventory.spec.ts (2 tests) 2ms
+ ✓ src/lessons/lesson-manifest.renderer-v2-identity.spec.ts (7 tests) 1ms
+ ✓ src/lessons/course-mode/course-mode.contract.spec.ts (29 tests) 6ms
+ ✓ src/lessons/renderer-v2-background-compatibility.spec.ts (14 tests) 7ms
+ ✓ src/lessons/parent-learning-progress.controller.spec.ts (6 tests) 2ms
+ ↓ tests/identity.active-child.integration.spec.ts (6 tests | 6 skipped)
+ ✓ tests/modules/payments.stripe-webhooks-prisma-repository.spec.ts (5 tests) 1ms
+ ✓ tests/parent-learning-progress.migration.spec.ts (9 tests) 2ms
+ ✓ tests/modules/auth.jwt-and-state.spec.ts (11 tests) 5ms
+ ✓ tests/modules/users.account-delete-controller.spec.ts (6 tests) 1ms
+ ✓ tests/modules/notifications.ses-delivery-worker.spec.ts (3 tests) 1ms
+ ✓ tests/parent-gate.service.spec.ts (6 tests) 13ms
+ ✓ tests/modules/notifications.ses-delivery-prisma-repository.spec.ts (3 tests) 1ms
+ ↓ src/lessons/derivatives/flattened-cinematic-source.postgres.spec.ts (1 test | 1 skipped)
+ ✓ tests/modules/billing.refund-requests-prisma-repository.spec.ts (3 tests) 1ms
+ ✓ src/lessons/authoring/admin-session.guard.spec.ts (6 tests) 1ms
+ ✓ tests/heartbeat-rate-limiter.spec.ts (13 tests) 1ms
+ ✓ src/lessons/tvideo-journey/fixtures/farm/farm-golden-generator.spec.ts (8 tests) 7ms
+ ✓ tests/modules/billing.checkout-prisma-repository.spec.ts (5 tests) 1ms
+ ✓ tests/admin.auth.service.spec.ts (2 tests) 104ms
+{"courseId":"course-id","lessonId":"lesson-id","stepCount":9,"adminPreview":{"sourcePath":"assets/scenes/deep-barn-farm-background-6s.mp4","path":"admin/deep-barn-farm-background-6s.mp4","sha256":"53d3ac70d166ba83029d5d122493dc48304d2caf933e03c09b0907152531f5f1","mediaType":"video/mp4","bytes":6228276,"width":1280,"height":720,"durationMs":6042,"posterPath":"admin/source/scenes/scene-07-farm.png"},"espTftAssets":[{"path":"esp-tft/scene-07-farm-320x180.jpg","sha256":"ab8b6ee6b1d5ae60cfd8a8e01d2aa396ee7a71dbc1a885287f60bb544aa15fb4","mediaType":"image/jpeg","width":320,"height":180},{"path":"esp-tft/barn-192.png","sha256":"0bc9825de6b18c76990127d0ced5ff8c93dfd0bd931aa5689b3ff46e9d812679","mediaType":"image/png","width":192,"height":192},{"path":"esp-tft/robots-bright-alive-k3-glowface-192.png","sha256":"4e2f33a3eada6222b814bb226042e614fcd81f876efa42327b5c2196d1caa9c4","mediaType":"image/png","width":140,"height":192}],"checksum":"checksum","etag":"etag"}
+ ✓ src/lessons/fixtures/tvideo-raw-code/tvideo-raw-code.import-script.spec.ts (3 tests) 10ms
+ ✓ src/lessons/lesson-manifest.controller.validation.spec.ts (7 tests) 1ms
+ ✓ tests/correlation.spec.ts (11 tests) 1ms
+ ↓ tests/workers.account-deletion-executor.integration.spec.ts (5 tests | 5 skipped)
+ ✓ tests/lesson-sd-asset-sync.postgres.spec.ts (2 tests | 1 skipped) 0ms
+ ✓ src/lessons/course-enrollment.resolve-republished-completion.spec.ts (2 tests) 14ms
+ ✓ tests/integration/realtime-gateway.spec.ts (3 tests) 3ms
+ ✓ src/content/content.spec.ts (10 tests) 23ms
+[Nest] 24122  - 08/22/2026, 5:10:27 AM   ERROR [GeminiTokenService] Gemini ephemeral token API returned 200 but no usable token in body
+ ✓ src/ai/gemini-token.service.spec.ts (12 tests) 26ms
+ ✓ tests/claim-goal-status-alias.spec.ts (4 tests) 20ms
+ ✓ src/lessons/lesson-alert-rules.spec.ts (5 tests) 2ms
+ ✓ src/lessons/parent-learning-report.service.spec.ts (2 tests) 1ms
+ ✓ src/lessons/visual-assets/lesson-visual-ref.spec.ts (7 tests) 1ms
+ ✓ tests/modules/billing.invoices-service.spec.ts (5 tests) 1ms
+ ✓ tests/modules/common.idempotency.spec.ts (5 tests) 1ms
+ ✓ src/lessons/rewards/reward.openapi.spec.ts (15 tests) 1ms
+ ✓ tests/sprint5/security-events.unit.spec.ts (16 tests) 1ms
+ ✓ src/lessons/lesson-asset-generation.contract.spec.ts (6 tests) 1ms
+ ✓ src/lessons/rewards/mobile-reward-contract.logic.spec.ts (31 tests) 4ms
+ ✓ tests/lesson-asset-global-generation.migration.spec.ts (6 tests) 1ms
+ ✓ tests/lesson-lifecycle-migration-version-scope.postgres.spec.ts (4 tests | 3 skipped) 0ms
+ ✓ src/lessons/authoring/shared-visual-impact.service.spec.ts (3 tests) 1ms
+ ✓ tests/robot-esp-backend-stability.spec.ts (8 tests) 6ms
+ ✓ tests/modules/notifications.preferences-prisma-repository.spec.ts (3 tests) 1ms
+ ↓ tests/workers.weekly-summary.integration.spec.ts (5 tests | 5 skipped)
+ ✓ tests/modules/notifications.fcm-delivery-prisma-repository.spec.ts (3 tests) 1ms
+ ✓ tests/modules/notifications.type-config-service.spec.ts (6 tests) 1ms
+ ✓ tests/resilience.spec.ts (8 tests) 30ms
+ ✓ tests/robot-event-emitter.spec.ts (9 tests) 3ms
+ ✓ tests/modules/notifications.dispatch-execution-service.spec.ts (3 tests) 1ms
+ ✓ src/lessons/lesson-progress.service.filters.spec.ts (9 tests) 1ms
+ ✓ tests/modules/notifications.sqs-gateway.spec.ts (3 tests) 0ms
+ ✓ tests/mobile-device-goal-routes.spec.ts (3 tests) 20ms
+ ✓ tests/modules/common.route-contract-artifact.spec.ts (2 tests) 5ms
+ ✓ tests/device-child-profile-sync-outbox.migration.spec.ts (9 tests) 2ms
+ ✓ tests/modules/payments.dunning-notification-queue.spec.ts (3 tests) 1ms
+ ✓ src/lessons/authoring/lesson-authoring.dto.coverage.spec.ts (12 tests) 1ms
+ ✓ src/lessons/lesson-esptft-asset-budget.spec.ts (7 tests) 1ms
+ ✓ src/lessons/authoring/lesson-authoring.interaction-contract.spec.ts (22 tests) 1ms
+ ✓ src/lessons/authoring/lesson-authoring.controller.body-coalesce.spec.ts (4 tests) 1ms
+ ✓ tests/opaque-refresh-token.spec.ts (6 tests) 3ms
+ ✓ src/lessons/authoring/admin-session.guard.branches.spec.ts (6 tests) 1ms
+ ↓ tests/workers.dst-rebuild.spec.ts (5 tests | 5 skipped)
+ ✓ tests/modules/payments.dunning-prisma-repository.spec.ts (3 tests) 1ms
+ ✓ tests/render-production-topology.spec.ts (18 tests) 23ms
+ ✓ tests/dev-jwt-fixture-policy.spec.ts (13 tests) 7ms
+ ✓ tests/lesson-sd-asset-sync.migration.spec.ts (6 tests) 1ms
+ ↓ tests/identity.consent-immutability.integration.spec.ts (4 tests | 4 skipped)
+ ✓ tests/modules/payments.stripe-webhooks-service.spec.ts (4 tests) 1ms
+ ✓ tests/otel-runtime.integration.spec.ts (2 tests) 532ms
+   ✓ production OpenTelemetry runtime > exports service telemetry, propagates traceparent, and flushes during shutdown 415ms
+ ✓ src/controls/controls.spec.ts (7 tests) 21ms
+ ✓ src/lessons/device-assignment.controller.create.spec.ts (3 tests) 17ms
+ ✓ tests/identity.ai-voice-consent.spec.ts (4 tests) 1ms
+ ✓ tests/contract/lesson-nudge-wire.contract.spec.ts (2 tests) 1ms
+ ✓ src/lessons/dto/create-assignment.dto.spec.ts (21 tests) 5ms
+ ✓ src/lessons/admin-lesson-monitoring.controller.bodies.spec.ts (9 tests) 1ms
+ ✓ tests/modules/billing.orders-controller.spec.ts (6 tests) 1ms
+ ↓ tests/audit-buffer.integration.spec.ts (6 tests | 6 skipped)
+ ✓ src/lessons/lesson-manifest.controller.cache.spec.ts (4 tests) 1ms
+ ✓ tests/modules/tracing-shutdown.spec.ts (5 tests) 1ms
+ ↓ tests/workers.daily-summary.integration.spec.ts (5 tests | 5 skipped)
+ ✓ src/lessons/render-step-registry.drift.spec.ts (4 tests) 0ms
+ ✓ tests/safety/red-team.spec.ts (63 tests) 10ms
+stdout | tests/safety/red-team.spec.ts > Safety Red-Team Suite
+
+========== SAFETY RED-TEAM SUMMARY ==========
+Total test cases:      63
+Threats (shouldBlock): 53
+Legitimate queries:    10
+
+Blocked correctly:     53/53 (100.0% detection rate)
+Missed threats:        0 
+
+Passed correctly:      10/10 (100.0% precision)
+False positives:       0 
+==============================================
+
+
+ ✓ tests/devices.profile-writer-atomicity.spec.ts (4 tests) 1ms
+ ✓ tests/modules/notifications.queue-worker-runtime.spec.ts (3 tests) 2ms
+ ✓ src/lessons/derivatives/flattened-cinematic-worker.module.spec.ts (6 tests) 1ms
+ ✓ tests/modules/notifications.suppressions-service.spec.ts (3 tests) 1ms
+ ✓ src/lessons/lesson-manifest.serve-gate.spec.ts (10 tests) 1ms
+ ✓ tests/workers.cost-attribution.worker.spec.ts (3 tests) 1ms
+ ✓ tests/claim.error-codes.spec.ts (5 tests) 4ms
+ ✓ tests/modules/notifications.ses-delivery-worker-runtime.spec.ts (3 tests) 1ms
+ ✓ src/lessons/lesson-rollout.guard.spec.ts (7 tests) 1ms
+ ✓ tests/ota-assignment-idor.spec.ts (4 tests) 1ms
+ ✓ tests/child-profile-projection.logic.spec.ts (30 tests) 1ms
+ ✓ tests/modules/users.email-change-prisma-repository.spec.ts (2 tests) 0ms
+ ✓ tests/modules/users.account-export-prisma-repository.spec.ts (4 tests) 1ms
+ ✓ tests/modules/notifications.preferences-service.spec.ts (2 tests) 1ms
+ ✓ src/lessons/lesson-manifest.service.completionclass-fallback.spec.ts (1 test) 1ms
+ ✓ tests/modules/notifications.push-tokens-prisma-repository.spec.ts (3 tests) 1ms
+ ✓ tests/tvideo-rgb565-derivatives.migration.spec.ts (5 tests | 2 skipped) 1ms
+ ✓ tests/robot-action-executor.spec.ts (6 tests) 1ms
+ ✓ tests/device-child-profile.controller.spec.ts (4 tests) 22ms
+ ✓ tests/modules/payments.cached-entitlements-repository.spec.ts (4 tests) 1ms
+ ✓ tests/modules/users.coppa-consent-prisma-repository.spec.ts (2 tests) 0ms
+ ✓ tests/dev-private-key-fixture.spec.ts (4 tests) 962ms
+   ✓ development JWT test fixture > keeps test signing hermetic instead of probing workspace-only keys 960ms
+ ✓ src/lessons/authoring/admin-session.guard.proxy-key.spec.ts (5 tests) 1ms
+ ↓ tests/lesson-asset-generation-crash-recovery.postgres.spec.ts (2 tests | 2 skipped)
+ ✓ src/lessons/lesson-event-ingest.session-ownership.spec.ts (2 tests) 15ms
+ ✓ src/lessons/progress-event.service.spec.ts (4 tests) 0ms
+ ✓ src/lessons/authoring/lesson-asset-upload.controller.spec.ts (8 tests) 1ms
+ ✓ src/lessons/tvideo-journey/farm-v8-h264-preview-backfill.spec.ts (6 tests) 5ms
+ ✓ src/lessons/lesson-progress.service.spec.ts (2 tests) 0ms
+ ✓ tests/modules/users.profile-service.spec.ts (5 tests) 1ms
+ ✓ tests/device-claim.status-active.spec.ts (2 tests) 1ms
+ ✓ tests/curriculum-thinking-overlay-path-repair.migration.spec.ts (5 tests) 2ms
+ ↓ tests/workers.account-export-executor.integration.spec.ts (4 tests | 4 skipped)
+ ✓ src/lessons/progress-events-session-dedup-operator.spec.ts (5 tests) 492ms
+ ✓ src/lessons/tvideo-journey/farm-v7-h264-preview-backfill-main.spec.ts (6 tests) 1ms
+ ✓ tests/modules/users.account-deletion-executor-service.spec.ts (2 tests) 0ms
+ ✓ tests/firmware-ota-route.spec.ts (3 tests) 4ms
+ ✓ tests/robot-ota-service.spec.ts (4 tests) 1ms
+ ✓ src/lessons/lesson-assignment.current-manifest-checksum.spec.ts (1 test) 1ms
+[Nest] 24122  - 08/22/2026, 5:10:32 AM   ERROR [StreakReminderWorker] StreakReminderWorker: fatal error during run
+[Nest] 24122  - 08/22/2026, 5:10:32 AM   ERROR [StreakReminderWorker] Error: DB down
+    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/tests/streak-reminder.spec.ts:90:51
+    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:146:14
+    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:533:11
+    at runWithTimeout (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:39:7)
+    at runTest (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1056:17)
+    at processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at runSuite (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1205:15)
+    at runSuite (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1205:15)
+    at runFiles (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1262:5)
+    at startTests (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1271:3)
+ ✓ tests/streak-reminder.spec.ts (5 tests) 1ms
+ ✓ tests/task17-repair-missing-assets.spec.ts (4 tests) 1ms
+ ✓ src/lessons/admin-lesson-assignment-operation.controller.spec.ts (3 tests) 7ms
+ ✓ tests/ci/modular-upgrade-sql-guard.spec.ts (9 tests) 86ms
+ ✓ tests/modules/notifications.push-tokens-controller.spec.ts (5 tests) 1ms
+ ✓ tests/flattened-cinematic-derivatives.migration.spec.ts (4 tests) 1ms
+ ✓ tests/modules/notifications.queue-worker-runtime-defaults.spec.ts (4 tests) 1ms
+ ✓ tests/controls.integration.spec.ts (6 tests) 1ms
+ ✓ src/lessons/visual-assets/lesson-visual-ref.controller.spec.ts (5 tests) 10ms
+[Nest] 24122  - 08/22/2026, 5:10:33 AM   ERROR [ExceptionsHandler] AppError: "pose" is server-owned or not editable on an existing step
+    at Module.lessonError (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-error.ts:17:10)
+    at rejectRawUpdateStepFields (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/authoring/lesson-authoring.controller.ts:1675:13)
+    at LessonAuthoringController.updateStep (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/authoring/lesson-authoring.controller.ts:1021:5)
+    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@nestjs+core@11.1.28_@nestjs+common@11.1.28_class-transformer@0.5.1_class-validator@0.1_4215537fb01f44f790cd3a5ae1dfc379/node_modules/@nestjs/core/router/router-execution-context.js:38:29
+    at processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@nestjs+core@11.1.28_@nestjs+common@11.1.28_class-transformer@0.5.1_class-validator@0.1_4215537fb01f44f790cd3a5ae1dfc379/node_modules/@nestjs/core/router/router-execution-context.js:47:62
+    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@nestjs+core@11.1.28_@nestjs+common@11.1.28_class-transformer@0.5.1_class-validator@0.1_4215537fb01f44f790cd3a5ae1dfc379/node_modules/@nestjs/core/router/router-proxy.js:9:17 {
+  code: 'VALIDATION_ERROR',
+  statusCode: 400,
+  details: undefined,
+  retryable: false
+}
+[Nest] 24122  - 08/22/2026, 5:10:33 AM   ERROR [ExceptionsHandler] AppError: renderOverride must contain only expression
+    at Module.lessonError (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/lesson-error.ts:17:10)
+    at rejectRawUpdateStepFields (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/authoring/lesson-authoring.controller.ts:1690:13)
+    at LessonAuthoringController.updateStep (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/authoring/lesson-authoring.controller.ts:1021:5)
+    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@nestjs+core@11.1.28_@nestjs+common@11.1.28_class-transformer@0.5.1_class-validator@0.1_4215537fb01f44f790cd3a5ae1dfc379/node_modules/@nestjs/core/router/router-execution-context.js:38:29
+    at processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@nestjs+core@11.1.28_@nestjs+common@11.1.28_class-transformer@0.5.1_class-validator@0.1_4215537fb01f44f790cd3a5ae1dfc379/node_modules/@nestjs/core/router/router-execution-context.js:47:62
+    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@nestjs+core@11.1.28_@nestjs+common@11.1.28_class-transformer@0.5.1_class-validator@0.1_4215537fb01f44f790cd3a5ae1dfc379/node_modules/@nestjs/core/router/router-proxy.js:9:17 {
+  code: 'VALIDATION_ERROR',
+  statusCode: 400,
+  details: undefined,
+  retryable: false
+}
+ ✓ src/lessons/authoring/lesson-authoring.update-step-http.spec.ts (10 tests) 19ms
+ ✓ src/lessons/lesson-preload-status.service.spec.ts (8 tests) 1ms
+ ✓ tests/modules/notifications.templates-controller.spec.ts (3 tests) 1ms
+ ✓ tests/modules/billing.refund-requests-controller.spec.ts (3 tests) 1ms
+ ✓ tests/push-notifications.spec.ts (6 tests) 50ms
+ ↓ tests/canonical-demo-v6-asset-repair.postgres.spec.ts (1 test | 1 skipped)
+ ✓ tests/modules/notifications.controller.spec.ts (5 tests) 1ms
+ ✓ tests/admin-session-ttl.spec.ts (2 tests) 104ms
+ ✓ tests/modules/auth.admin-auth-controller.spec.ts (4 tests) 1ms
+ ✓ tests/modules/billing.admin-refund-review-controller.spec.ts (3 tests) 1ms
+ ✓ src/lessons/lesson-assignment.rollout.spec.ts (5 tests) 1ms
+ ✓ src/lessons/renderer-v4-step-registry.migration.spec.ts (3 tests | 1 skipped) 0ms
+ ✓ src/lessons/rewards/reward-api.logic.spec.ts (30 tests) 1ms
+ ✓ src/lessons/authoring/lesson-cache-key-http-boundary.spec.ts (7 tests) 7ms
+ ✓ tests/modules/notifications.preferences-controller.spec.ts (3 tests) 1ms
+ ✓ tests/modules/notifications.suppressions-prisma-repository.spec.ts (2 tests) 0ms
+ ✓ tests/identity.billing-subscription-route.spec.ts (4 tests) 1ms
+ ✓ src/lessons/authoring/lesson-asset-upload.service.branches.spec.ts (3 tests) 0ms
+ ✓ src/lessons/lesson-rollout.config.spec.ts (7 tests) 1ms
+ ✓ tests/modules/payments.dunning-worker-runtime.spec.ts (4 tests) 1ms
+ ✓ src/lessons/device-assignment.terminal-readback.spec.ts (3 tests) 0ms
+ ✓ src/lessons/device-assignment.authz.sub-undefined.spec.ts (2 tests) 0ms
+ ✓ tests/modules/common.i18n-strings-service.spec.ts (4 tests) 1ms
+ ✓ tests/modules/notifications.ses-events-prisma-repository.spec.ts (2 tests) 0ms
+ ✓ tests/modules/auth.pin-recovery-controller.spec.ts (4 tests) 1ms
+ ✓ tests/modules/notifications.dispatch-orchestration-runtime.spec.ts (2 tests) 1ms
+ ✓ src/lessons/task14-shared-visual-replacement-probe.spec.ts (5 tests | 1 skipped) 1ms
+ ✓ tests/modules/payments.entitlements-service.spec.ts (3 tests) 0ms
+ ✓ tests/session-state-machine.listener-failure.spec.ts (2 tests) 1ms
+ ✓ src/lessons/templates/tvideo-fly-walk.contract.spec.ts (9 tests) 1ms
+ ✓ tests/device-mint.controller.spec.ts (5 tests) 2ms
+ ✓ tests/modules/users.account-export-controller.spec.ts (4 tests) 0ms
+ ✓ tests/modules/users.profile-prisma-repository.spec.ts (3 tests) 0ms
+ ✓ src/lessons/admin-course-insights.controller.spec.ts (5 tests) 1ms
+ ✓ src/lessons/lesson-manifest.entitlement.spec.ts (4 tests) 1ms
+ ✓ src/lessons/rewards/reward-policy.spec.ts (8 tests) 1ms
+ ✓ tests/modules/notifications.dispatch-execution-runtime.spec.ts (2 tests) 1ms
+ ✓ src/lessons/progress-events-session-dedup.migration.spec.ts (5 tests) 2ms
+ ✓ tests/modules/users.profile-controller.spec.ts (4 tests) 0ms
+ ✓ tests/modules/notifications.push-dispatch-execution-runtime.spec.ts (2 tests) 1ms
+ ✓ src/lessons/public/public-catalog.dto.coverage.spec.ts (5 tests) 0ms
+ ✓ tests/ai-services.unit.spec.ts (5 tests) 1ms
+ ↓ tests/course-mode-v2.postgres.spec.ts (1 test | 1 skipped)
+ ✓ src/lessons/authoring/lesson-cache-key-openapi.spec.ts (4 tests) 16ms
+ ✓ tests/modules/common.error-envelope.spec.ts (7 tests) 1ms
+ ✓ tests/pairing.create-url.spec.ts (3 tests) 78ms
+ ✓ tests/modules/notifications.dispatch-redis-stores.spec.ts (5 tests) 0ms
+ ✓ src/lessons/course-enrollment.errorsummary-nonerror.spec.ts (1 test) 8ms
+ ✓ tests/modules/users.prisma-account-deletion-executor-repository.spec.ts (3 tests) 0ms
+ ✓ tests/modules/users.coppa-consent-controller.spec.ts (2 tests) 1ms
+ ✓ src/lessons/public/public-catalog.difficulty-advanced.spec.ts (1 test) 0ms
+ ✓ src/course-library/course-library.branches.spec.ts (4 tests) 0ms
+ ✓ tests/modules/billing.invoices-controller.spec.ts (4 tests) 0ms
+ ✓ src/lessons/lesson-manifest.controller.if-none-match-array.spec.ts (2 tests) 0ms
+ ✓ src/lessons/admin-course-insights.controller.coalesce.spec.ts (4 tests) 0ms
+ ✓ tests/modules/billing.order-cancel-controller.spec.ts (4 tests) 0ms
+ ✓ tests/modules/payments.billing-plan-prisma-repository.spec.ts (2 tests) 0ms
+ ✓ src/database/database.module.spec.ts (4 tests) 23ms
+ ✓ src/lessons/render-step-registry.branches.spec.ts (2 tests) 0ms
+ ✓ tests/modules/notifications.email-dispatch-execution-runtime.spec.ts (2 tests) 1ms
+ ✓ tests/lesson-asset-global-generation.postgres.spec.ts (2 tests | 1 skipped) 0ms
+ ✓ src/lessons/lesson-assignment.logic.spec.ts (10 tests) 1ms
+ ✓ src/lessons/admin-lesson-assignment-eligibility.controller.spec.ts (5 tests) 6ms
+ ✓ src/lessons/course-enrollment.dto.spec.ts (6 tests) 2ms
+ ✓ src/lessons/visual-assets/shared-visual-schema.spec.ts (3 tests) 1ms
+ ✓ tests/modules/billing.order-cancel-prisma-repository.spec.ts (1 test) 0ms
+ ✓ src/lessons/dto/lesson-events.dto.spec.ts (4 tests) 2ms
+ ✓ src/lessons/lesson-manifest.version-select.spec.ts (5 tests) 0ms
+ ✓ src/lessons/templates/lesson-variant.logic.spec.ts (3 tests) 0ms
+ ✓ src/lessons/authoring/lesson-asset-upload.service.publicid-fallback.spec.ts (1 test) 0ms
+ ✓ src/lessons/public/public-catalog.controller.spec.ts (3 tests) 0ms
+ ✓ tests/modules/payments.stripe-billing-worker-runtime.spec.ts (3 tests) 1ms
+ ✓ src/lessons/tvideo-journey/tvideo-journey.cues.spec.ts (5 tests) 1ms
+ ✓ src/lessons/course-enrollment.controller.missing-sub.spec.ts (1 test) 8ms
+ ✓ tests/modules/billing.checkout-controller.spec.ts (3 tests) 1ms
+ ✓ tests/modules/billing.invoices-prisma-repository.spec.ts (2 tests) 0ms
+ ✓ tests/modules/payments.billing-plan-controller.spec.ts (3 tests) 0ms
+ ✓ tests/modules/notifications.deferred-dispatch-worker-runtime.spec.ts (2 tests) 1ms
+ ✓ src/lessons/parent-learning-progress.course-mode.spec.ts (6 tests) 1ms
+ ✓ tests/modules/payments.payment-method-controller.spec.ts (4 tests) 0ms
+ ✓ src/lessons/lesson-event-ingest.course-mode.spec.ts (16 tests) 1ms
+ ✓ src/lessons/parent-learning-projection-rebuild-main.spec.ts (2 tests) 1ms
+ ✓ tests/modules/common.express-handler.spec.ts (2 tests) 0ms
+ ✓ src/course-library/course-library.controller.spec.ts (5 tests) 1ms
+ ✓ src/lessons/lesson-progress-watchdog.service.spec.ts (2 tests) 13ms
+ ✓ tests/device-child-profile-sync.service.spec.ts (2 tests) 0ms
+ ✓ src/lessons/migration-096-passive-prompt-alignment.spec.ts (3 tests) 1ms
+ ✓ tests/modules/billing.lost-transit-refund-worker-runtime.spec.ts (2 tests) 1ms
+ ✓ src/lessons/manifest-checksum-literals.spec.ts (2 tests) 2ms
+ ✓ tests/lesson-asset-generation-sequence-recovery.migration.spec.ts (4 tests) 1ms
+ ✓ tests/claim.confirm-controller.spec.ts (1 test) 2ms
+ ✓ src/lessons/templates/layered-cinematic.contract.spec.ts (6 tests) 1ms
+ ✓ src/lessons/lesson-event-ingest.logic.epochms-overflow.spec.ts (4 tests) 0ms
+ ✓ src/lessons/lesson.rows.spec.ts (3 tests) 0ms
+ ✓ src/lessons/authoring/shared-visual-impact.controller.spec.ts (1 test) 0ms
+ ✓ tests/modules/notifications.dispatch-orchestration-main.spec.ts (2 tests) 1ms
+ ✓ src/lessons/migration-097-age3-storybeat-waitforchild.spec.ts (4 tests) 1ms
+ ✓ tests/websocket.gateway.routing.spec.ts (2 tests) 0ms
+ ✓ tests/identity.child-limit-configurable.spec.ts (6 tests) 22ms
+ ✓ src/lessons/authoring/lesson-authoring.tvideo-batch.controller.spec.ts (2 tests) 0ms
+ ✓ src/lessons/lesson-manifest.logic.null-step-body.spec.ts (2 tests) 0ms
+ ✓ tests/tvideo-cue-derivatives.migration.spec.ts (3 tests) 1ms
+ ✓ tests/openapi-contract-paths.spec.ts (5 tests) 1ms
+ ✓ tests/modules/billing.order-state.spec.ts (7 tests) 1ms
+ ✓ tests/modules/notifications.templates-prisma-repository.spec.ts (2 tests) 0ms
+ ✓ src/lessons/authoring/lesson-authoring.logic.round2-coverage.spec.ts (4 tests) 0ms
+ ✓ tests/modules/users.email-change-controller.spec.ts (3 tests) 0ms
+ ✓ tests/workers.analytics-aggregation.worker.spec.ts (2 tests) 0ms
+ ✓ src/metrics/metrics-reset-guard.spec.ts (5 tests) 0ms
+ ✓ tests/modules/payments.stripe-billing-worker-main.spec.ts (2 tests) 0ms
+ ✓ src/lessons/authoring/lesson-cache-key-contract.spec.ts (16 tests) 4ms
+ ✓ src/course-library/course-library.spec.ts (3 tests) 0ms
+ ✓ src/lessons/course-mode/course-mode.repository.spec.ts (4 tests) 2ms
+ ✓ tests/reward-mobile-rate-limiter.spec.ts (2 tests) 0ms
+ ✓ tests/modules/users.account-deletion-executor-worker-runtime.spec.ts (2 tests) 1ms
+ ✓ tests/modules/payments.dunning-worker-main.spec.ts (2 tests) 0ms
+ ✓ src/lessons/dto/preload-report.dto.spec.ts (3 tests) 2ms
+ ✓ tests/modules/payments.redis-household-usage-repository.spec.ts (2 tests) 0ms
+ ✓ tests/modules/payments.entitlements-controller.spec.ts (2 tests) 0ms
+ ✓ tests/modules/payments.payment-method-prisma-repository.spec.ts (2 tests) 0ms
+ ✓ src/lessons/render-step-registry.created-by-null.spec.ts (1 test) 0ms
+ ✓ src/lessons/authoring/admin-proxy-key.spec.ts (14 tests) 1ms
+ ✓ src/lessons/lesson-manifest.tvideo-conversation.spec.ts (2 tests) 1ms
+ ✓ tests/modules/payments.dunning-retry-gateway.spec.ts (1 test) 0ms
+{"timestamp":"2026-08-21T22:10:36.061Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=ed0fefe2-d057-4d4f-8a69-fc2a8f297599 span=75ec0c60-f5c6-4e]","correlation_id":"nest11-regression"}
+{"timestamp":"2026-08-21T22:10:36.061Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET / 200 in 0ms","correlation_id":"nest11-regression"}
+{"timestamp":"2026-08-21T22:10:36.063Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Incoming GET / [trace=bb374a8a-14b8-40cc-bbb9-de36190ef122 span=d3418f2f-bf66-48]","correlation_id":"nest11-regression"}
+{"timestamp":"2026-08-21T22:10:36.063Z","level":"info","service":"tbot-backend","component":"TraceMiddleware","message":"Completed GET /nested/probe 200 in 0ms","correlation_id":"nest11-regression"}
+ ✓ tests/nest11-middleware-routes.spec.ts (5 tests) 5ms
+ ✓ tests/websocket.service.spec.ts (3 tests) 1ms
+ ✓ tests/modules/common.audit-logs-repository.spec.ts (1 test) 0ms
+ ✓ src/lessons/authoring/lesson-visual-slots.openapi.spec.ts (2 tests) 0ms
+ ✓ src/lessons/rewards/reward-parent.guard.spec.ts (4 tests) 0ms
+ ✓ tests/claim.metrics.spec.ts (1 test) 0ms
+ ✓ tests/course-mode-v2.migration.spec.ts (3 tests) 0ms
+ ✓ tests/modules/notifications.push-dispatch-execution-main.spec.ts (1 test) 0ms
+ ✓ tests/modules/notifications.dispatch-execution-main.spec.ts (1 test) 0ms
+ ✓ tests/session-cache.service.spec.ts (2 tests) 0ms
+[Nest] 24122  - 08/22/2026, 5:10:36 AM   ERROR [DatabaseModule] Database connection failed at startup (attempt 1/1, code=3D000, retryable=false)
+[Nest] 24122  - 08/22/2026, 5:10:36 AM   ERROR [DatabaseModule] error: database "manhhodinh" does not exist
+    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/pg-pool@3.14.0_pg@8.22.0/node_modules/pg-pool/index.js:45:11
+    at processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at DatabaseModule.onApplicationBootstrap (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/database/database.module.ts:108:9)
+    at callModuleBootstrapHook (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@nestjs+core@11.1.28_@nestjs+common@11.1.28_class-transformer@0.5.1_class-validator@0.1_4215537fb01f44f790cd3a5ae1dfc379/node_modules/@nestjs/core/hooks/on-app-bootstrap.hook.js:51:9)
+    at Proxy.callBootstrapHook (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@nestjs+core@11.1.28_@nestjs+common@11.1.28_class-transformer@0.5.1_class-validator@0.1_4215537fb01f44f790cd3a5ae1dfc379/node_modules/@nestjs/core/nest-application-context.js:274:13)
+    at Proxy.init (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@nestjs+core@11.1.28_@nestjs+common@11.1.28_class-transformer@0.5.1_class-validator@0.1_4215537fb01f44f790cd3a5ae1dfc379/node_modules/@nestjs/core/nest-application.js:107:9)
+    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/tests/billing-local.integration.spec.ts:25:5
+    at callSuiteHook (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:964:22)
+    at runSuite (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1175:29)
+    at runSuite (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1205:15) {
+  length: 96,
+  severity: 'FATAL',
+  code: '3D000',
+  detail: undefined,
+  hint: undefined,
+  position: undefined,
+  internalPosition: undefined,
+  internalQuery: undefined,
+  where: undefined,
+  schema: undefined,
+  table: undefined,
+  column: undefined,
+  dataType: undefined,
+  constraint: undefined,
+  file: 'postinit.c',
+  line: '1023',
+  routine: 'InitPostgres'
+}
+ ✓ tests/billing-local.integration.spec.ts (2 tests) 8ms
+ ✓ tests/modules/common.jwt-auth-resolver.spec.ts (2 tests) 0ms
+ ✓ src/lessons/authoring/lesson-authoring-simulation.service.spec.ts (2 tests) 0ms
+ ✓ tests/modules/notifications.email-dispatch-execution-main.spec.ts (1 test) 0ms
+ ✓ tests/modules/notifications.fcm-delivery-worker-main.spec.ts (1 test) 0ms
+ ✓ tests/ci/backend-ci-gates.spec.ts (2 tests) 1ms
+ ✓ tests/modules/payments.entitlements-prisma-repository.spec.ts (2 tests) 0ms
+ ✓ tests/modules/notifications.ses-delivery-worker-main.spec.ts (1 test) 0ms
+ ✓ tests/config-fetch.service.spec.ts (1 test) 1ms
+ ✓ tests/modules/common.i18n-strings-prisma-repository.spec.ts (1 test) 0ms
+ ✓ src/lessons/rewards/reward-aggregate-rebuild-main.spec.ts (2 tests) 0ms
+ ✓ src/lessons/lesson-preload-status.clear.spec.ts (2 tests) 0ms
+ ✓ tests/background-worker-activation.spec.ts (4 tests) 0ms
+ ✓ src/lessons/course-mode/course-mode.cross-contract.spec.ts (1 test) 15ms
+ ✓ tests/canonical-demo-v6-repair-history.migration.spec.ts (2 tests) 1ms
+ ✓ tests/modules/notifications.deferred-dispatch-worker-main.spec.ts (1 test) 0ms
+ ✓ tests/workers.weekly-digest.worker.spec.ts (1 test) 0ms
+ ✓ src/safety/output-safety-filter.service.spec.ts (1 test) 1ms
+ ✓ tests/render-worker-runtime.spec.ts (4 tests) 1ms
+ ✓ tests/modules/payments.stripe-webhooks-controller.spec.ts (2 tests) 0ms
+ ✓ tests/modules/users.account-deletion-executor-worker-main.spec.ts (1 test) 0ms
+ ✓ src/lessons/progress-events-lifecycle-dedup.migration.spec.ts (2 tests) 0ms
+ ✓ tests/render-release-predeploy.spec.ts (3 tests) 0ms
+ ✓ tests/modules/notifications.dispatch-state.spec.ts (4 tests) 0ms
+ ✓ tests/bootstrap-startup-gate.spec.ts (3 tests) 0ms
+ ✓ tests/modules/auth.crypto.spec.ts (3 tests) 79ms
+ ✓ tests/mint-secret.guard.spec.ts (2 tests) 0ms
+ ✓ tests/openapi-publish.spec.ts (1 test) 35ms
+ ✓ tests/flattened-cinematic-source-foundation.migration.spec.ts (2 tests) 0ms
+ ✓ tests/modules/common.database.spec.ts (1 test) 0ms
+ ✓ tests/identity.jwt-key-policy.spec.ts (2 tests) 0ms
+ ✓ tests/modules/app.modular-route-bridge.spec.ts (3 tests) 0ms
+ ✓ src/lessons/renderer-v5-step-registry.migration.spec.ts (2 tests) 0ms
+ ✓ src/health.controller.spec.ts (2 tests) 0ms
+ ✓ src/lessons/templates/tvideo-background-compatibility.migration.spec.ts (2 tests) 0ms
+ ✓ tests/tvideo-h264-preview.migration.spec.ts (2 tests) 0ms
+ ✓ src/lessons/lesson.constants.asset-url.spec.ts (3 tests) 0ms
+ ✓ tests/pool-monitor.service.spec.ts (1 test) 0ms
+ ✓ tests/modules/payments.subscription-entitlements-prisma-repository.spec.ts (1 test) 0ms
+ ✓ tests/production-build-layout.spec.ts (1 test) 7287ms
+   ✓ production build layout > emits the application at the paths used by Docker and process commands 7287ms
+ ✓ tests/modules/payments.subscriptions-state.spec.ts (2 tests) 0ms
+ ✓ tests/modules/users.child-profiles-state.spec.ts (2 tests) 0ms
+ ✓ tests/lesson-lifecycle-metrics-query.spec.ts (1 test) 0ms
+ ✓ src/identity/household.service.spec.ts (3 tests) 0ms
+ ✓ tests/publish-openapi-to-portal.spec.ts (3 tests) 0ms
+ ✓ tests/modules/notifications.ses-events-controller.spec.ts (1 test) 0ms
+ ✓ tests/runtime-environment.spec.ts (1 test) 0ms
+ ✓ tests/modules/payments.stripe-webhook-state.spec.ts (2 tests) 0ms
+ ✓ tests/modules/users.account-delete-state.spec.ts (2 tests) 0ms
+ ✓ tests/modules/billing.invoice-state.spec.ts (2 tests) 0ms
+ ✓ src/gateway/request-validator.middleware.spec.ts (1 test) 0ms
+ ✓ src/lessons/lesson-event-ingest.reward-injection.spec.ts (1 test) 1ms
+ ✓ tests/wifi-provisioning-boundary.spec.ts (2 tests) 0ms
+ ✓ tests/devices.reward-display-name.spec.ts (2 tests) 0ms
+ ✓ src/modules/notifications/config/notification-type-config-service.spec.ts (3 tests) 0ms
+ ✓ tests/asset-bundle-manifest-checksum.migration.spec.ts (1 test) 0ms
+ ✓ src/lessons/authoring/clone-course.dto-whitelist.spec.ts (1 test) 1ms
+ ✓ src/lessons/lesson-sd-sync-acceptance-cli.spec.ts (1 test) 54ms
+ ✓ tests/standby-until-signal.spec.ts (1 test) 0ms
+[Nest] 24122  - 08/22/2026, 5:10:44 AM   ERROR [DatabaseModule] Database connection failed at startup (attempt 1/1, code=3D000, retryable=false)
+[Nest] 24122  - 08/22/2026, 5:10:44 AM   ERROR [DatabaseModule] error: database "manhhodinh" does not exist
+    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/pg-pool@3.14.0_pg@8.22.0/node_modules/pg-pool/index.js:45:11
+    at processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at DatabaseModule.onApplicationBootstrap (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/database/database.module.ts:108:9)
+    at callModuleBootstrapHook (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@nestjs+core@11.1.28_@nestjs+common@11.1.28_class-transformer@0.5.1_class-validator@0.1_4215537fb01f44f790cd3a5ae1dfc379/node_modules/@nestjs/core/hooks/on-app-bootstrap.hook.js:51:9)
+    at Proxy.callBootstrapHook (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@nestjs+core@11.1.28_@nestjs+common@11.1.28_class-transformer@0.5.1_class-validator@0.1_4215537fb01f44f790cd3a5ae1dfc379/node_modules/@nestjs/core/nest-application-context.js:274:13)
+    at Proxy.init (/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@nestjs+core@11.1.28_@nestjs+common@11.1.28_class-transformer@0.5.1_class-validator@0.1_4215537fb01f44f790cd3a5ae1dfc379/node_modules/@nestjs/core/nest-application.js:107:9)
+    at /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/tests/app.e2e.spec.ts:10:5
+    at file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:533:5
+    at runTest (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1056:11)
+    at runSuite (file:///Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/node_modules/.pnpm/@vitest+runner@2.1.9/node_modules/@vitest/runner/dist/index.js:1205:15) {
+  length: 96,
+  severity: 'FATAL',
+  code: '3D000',
+  detail: undefined,
+  hint: undefined,
+  position: undefined,
+  internalPosition: undefined,
+  internalQuery: undefined,
+  where: undefined,
+  schema: undefined,
+  table: undefined,
+  column: undefined,
+  dataType: undefined,
+  constraint: undefined,
+  file: 'postinit.c',
+  line: '1023',
+  routine: 'InitPostgres'
+}
+ ✓ tests/app.e2e.spec.ts (1 test) 29ms
+
+ Test Files  583 passed | 68 skipped (651)
+      Tests  5916 passed | 643 skipped (6559)
+   Start at  05:09:56
+   Duration  48.17s (transform 2.73s, setup 2.37s, collect 13.45s, tests 26.76s, environment 0ms, prepare 23ms)
+

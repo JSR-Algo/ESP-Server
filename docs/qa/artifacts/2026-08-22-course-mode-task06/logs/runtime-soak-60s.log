@@ -1,0 +1,19 @@
+{"verdict": "PASS", "sessions": 3522508, "durationSeconds": 60.000166}
+       60.09 real        59.87 user         0.13 sys
+            32374784  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                7751  page reclaims
+                  24  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   5  voluntary context switches
+               13045  involuntary context switches
+       1484505342314  instructions retired
+        241849435051  cycles elapsed
+            19480984  peak memory footprint

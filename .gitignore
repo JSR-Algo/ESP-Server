@@ -198,6 +198,11 @@ uploadfile
 .worktrees/
 *.log
 
+# Task 06's synthetic runtime gate is a committed, reproducible evidence bundle.
+!docs/qa/artifacts/2026-08-22-course-mode-task06/logs/*.log
+!docs/qa/artifacts/2026-08-22-course-mode-task06/metrics/*.json
+!docs/qa/artifacts/2026-08-22-course-mode-task06/candidate-manifest.json
+
 # Python bytecode caches at any depth
 **/__pycache__/
 

@@ -1,0 +1,48 @@
+[33mThe CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.[39m
+
+ RUN  v2.1.9 /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation
+
+ ✓ src/lessons/lesson-event-ingest.logic.spec.ts (26 tests) 4ms
+ ❯ src/lessons/course-mode/pilot/course-mode-pilot.spec.ts (13 tests | 2 failed) 9ms
+   × Course Mode Task 05 pilot package > pins renderer-v4 cue derivatives, cache identities, and visual samples 2ms
+     → ENOENT: no such file or directory, open '/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/derivatives/index.json'
+   × Course Mode Task 05 pilot package > includes educator-readable transcript maps and scoped review sign-offs 1ms
+     → expected false to be true // Object.is equality
+ ✓ src/lessons/lesson-rollout.followup.spec.ts (15 tests) 6ms
+ ✓ src/lessons/course-mode/course-mode.contract.spec.ts (29 tests) 8ms
+ ✓ src/lessons/lesson-rollout.config.spec.ts (7 tests) 1ms
+ ✓ src/lessons/lesson-event-ingest.course-mode.spec.ts (16 tests) 1ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lessons/course-mode/pilot/course-mode-pilot.spec.ts > Course Mode Task 05 pilot package > pins renderer-v4 cue derivatives, cache identities, and visual samples
+Error: ENOENT: no such file or directory, open '/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/task-06-runtime-validation/src/lessons/fixtures/course-mode/pilot/v1/derivatives/index.json'
+ ❯ src/lessons/course-mode/pilot/course-mode-pilot.spec.ts:107:30
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  src/lessons/course-mode/pilot/course-mode-pilot.spec.ts > Course Mode Task 05 pilot package > includes educator-readable transcript maps and scoped review sign-offs
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ src/lessons/course-mode/pilot/course-mode-pilot.spec.ts:187:88
+    185|       expect(review.reviewerRole).toMatch(/^task05-/u);
+    186|       expect(review.evidence.length).toBeGreaterThan(0);
+    187|       for (const evidence of review.evidence) expect(existsSync(join(R…
+       |                                                                                        ^
+    188|     }
+    189|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+ Test Files  1 failed | 5 passed (6)
+      Tests  2 failed | 104 passed (106)
+   Start at  05:00:19
+   Duration  772ms (transform 223ms, setup 225ms, collect 340ms, tests 30ms, environment 0ms, prepare 36ms)
+
