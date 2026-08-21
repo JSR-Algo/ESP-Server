@@ -623,7 +623,10 @@ class StartLessonToolTest(unittest.IsolatedAsyncioTestCase):
                 if conn.lesson_pull_task is not primary_task:
                     break
             await asyncio.gather(conn.lesson_pull_task, return_exceptions=True)
-            await asyncio.sleep(0)
+            for _ in range(10):
+                await asyncio.sleep(0)
+                if not leases:
+                    break
 
         self.assertEqual(leases, set())
 

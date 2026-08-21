@@ -8,6 +8,13 @@ SIM_DEVICE = ROOT / "docs" / "docker" / "lesson-e2e-sim" / "sim_device.py"
 MERGE_TIMELINE = ROOT / "docs" / "docker" / "lesson-e2e-sim" / "merge_timeline.py"
 
 
+def _tbot_root() -> Path:
+    for candidate in (ROOT, *ROOT.parents):
+        if (candidate / "tbot-backend").is_dir() and (candidate / "robot").is_dir():
+            return candidate
+    raise AssertionError("could not locate TBOT workspace root")
+
+
 def _run_up_with_fake_docker(
     tmp_path: Path,
     *,
@@ -79,7 +86,7 @@ def test_default_simulation_builds_checkout_local_base_before_runtime(tmp_path: 
     assert "main-dd48f39d-local-20260805" not in commands
     assert "local/tbot-backend:lesson-studio-e2e" in commands
     assert "local/tbot-server-web:lesson-studio-e2e" in commands
-    assert str(ROOT.parents[3] / "tbot-backend" / "Dockerfile") in commands
+    assert str(_tbot_root() / "tbot-backend" / "Dockerfile") in commands
     assert str(ROOT / "Dockerfile-web") in commands
     assert "WEB_NODE_IMAGE=node:20" in commands
 

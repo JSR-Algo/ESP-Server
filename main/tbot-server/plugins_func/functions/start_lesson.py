@@ -257,6 +257,20 @@ def start_lesson(conn: "ConnectionHandler"):
                 restore_conversation=restore_conversation,
             )
 
+        async def sample_fallback():
+            from core.lesson.sample import start_sample_lesson
+
+            try:
+                return await start_sample_lesson(conn)
+            finally:
+                release = getattr(conn, "release_lesson_start_handoff", None)
+                if sample_fallback_handoff_token is not None and callable(release):
+                    await release(
+                        sample_fallback_handoff_token,
+                        outcome="sample_fallback_task_done_cleanup",
+                        restore_conversation=True,
+                    )
+
         def _handle_done(fut):
             try:
                 runtime = fut.result()
@@ -268,12 +282,10 @@ def start_lesson(conn: "ConnectionHandler"):
                     # it as a new task and re-track it on the connection so close() can
                     # cancel it and a later spoken trigger can supersede it. Do NOT emit
                     # the audible setup/no-assignment feedback here — the sample takes over.
-                    from core.lesson.sample import start_sample_lesson
-
                     conn.logger.bind(tag=TAG).info(
                         "start_lesson: no backend assignment, falling back to sample lesson"
                     )
-                    fallback_task = loop.create_task(start_sample_lesson(conn))
+                    fallback_task = loop.create_task(sample_fallback())
                     conn.lesson_pull_task = fallback_task
                     conn.lesson_pull_task_origin = _SPOKEN_START_ORIGIN
                     conn.lesson_pull_task_handoff_token = (
@@ -326,6 +338,8 @@ def start_lesson(conn: "ConnectionHandler"):
                     f"start_lesson: sample fallback task error: {type(exc).__name__}: {exc}"
                 )
             finally:
+                # A task cancelled before its first coroutine step never enters the
+                # wrapper's finally block, so keep this idempotent callback fallback.
                 _release_sample_fallback_reserve(
                     outcome="sample_fallback_task_done_cleanup",
                     restore_conversation=True,
