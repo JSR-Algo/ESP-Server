@@ -27,6 +27,24 @@ EXPECTED_LAYOUT = "e61b56d1f8219a86c7f3986e7d5c70b91f512286604b5b206ef11e2c989d2
 EXPECTED_ESP_SHA = "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268"
 EXPECTED_FIRMWARE_SHA = "d47174daebe17b9c1a9d1a1eb506711a57cd3512"
 EXPECTED_BACKEND_SHA = "657474ff3b58fba2c3c31f2978d53370ffad8b11"
+ALLOWED_ESP_EVIDENCE_PATHS = (
+    ".gitattributes",
+    ".gitignore",
+    "docs/qa/ad-hoc/2026-08-22-course-mode-task06-runtime-validation.md",
+    "docs/qa/artifacts/2026-08-22-course-mode-task06/",
+    "main/tbot-server/scripts/course_mode_task06_runtime_validation.py",
+    "main/tbot-server/tests/test_course_mode_task06_validation_script.py",
+)
+ALLOWED_BACKEND_EVIDENCE_PATHS = (
+    "src/lessons/authoring/esptft-publish-budget.logic.spec.ts",
+    "src/lessons/authoring/lesson-authoring.service.extra-coverage.spec.ts",
+    "src/lessons/lesson-manifest.per-profile-checksum.spec.ts",
+    "src/lessons/lesson-manifest.shared-assets.spec.ts",
+)
+ALLOWED_FIRMWARE_EVIDENCE_PATHS = (
+    "tests/test_lesson_dispatch_backward_compat.py",
+    "tests/test_realtime_voice_state.py",
+)
 
 
 def sha256(path: Path) -> str:
@@ -37,6 +55,35 @@ def git_head(root: Path) -> str:
     return subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True,
     ).stdout.strip()
+
+
+def candidate_revision(root: Path, expected_sha: str, allowed_paths: tuple[str, ...]) -> dict[str, Any]:
+    head = git_head(root)
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=no"],
+        cwd=root, check=True, capture_output=True, text=True,
+    ).stdout.splitlines()
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", expected_sha, head], cwd=root,
+        check=False, capture_output=True, text=True,
+    ).returncode == 0
+    changed = subprocess.run(
+        ["git", "diff", "--name-only", f"{expected_sha}..{head}"], cwd=root,
+        check=True, capture_output=True, text=True,
+    ).stdout.splitlines() if ancestor else []
+    unexpected = [
+        path for path in changed
+        if not any(path == allowed or (allowed.endswith("/") and path.startswith(allowed)) for allowed in allowed_paths)
+    ]
+    return {
+        "headSha": head,
+        "expectedSha": expected_sha,
+        "expectedIsAncestor": ancestor,
+        "trackedWorktreeClean": not dirty,
+        "trackedChanges": changed,
+        "unexpectedTrackedChanges": unexpected,
+        "runtimeTreeMatchesFrozenCandidate": ancestor and not dirty and not unexpected,
+    }
 
 
 def load_journey_module():
@@ -86,10 +133,19 @@ def main() -> int:
     pilot = json.loads(pilot_path.read_text(encoding="utf-8"))
     identity = pilot["identity"]
     release = pilot["release"]
+    revisions = {
+        "esp": candidate_revision(ROOT, EXPECTED_ESP_SHA, ALLOWED_ESP_EVIDENCE_PATHS),
+        "firmware": candidate_revision(
+            args.firmware_root, EXPECTED_FIRMWARE_SHA, ALLOWED_FIRMWARE_EVIDENCE_PATHS,
+        ),
+        "backend": candidate_revision(
+            args.backend_root, EXPECTED_BACKEND_SHA, ALLOWED_BACKEND_EVIDENCE_PATHS,
+        ),
+    }
     candidate_shas = {
-        "espSha": git_head(ROOT),
-        "firmwareSha": git_head(args.firmware_root),
-        "backendSha": git_head(args.backend_root),
+        "espSha": revisions["esp"]["headSha"],
+        "firmwareSha": revisions["firmware"]["headSha"],
+        "backendSha": revisions["backend"]["headSha"],
     }
 
     journey_module = load_journey_module()
@@ -128,11 +184,7 @@ def main() -> int:
         and identity["layoutChecksum"] == EXPECTED_LAYOUT
         and identity["rendererId"] == "teebot-lesson-renderer.v4"
         and release == {"status": "draft", "published": False, "assigned": False, "productionEnabled": False}
-        and candidate_shas == {
-            "espSha": EXPECTED_ESP_SHA,
-            "firmwareSha": EXPECTED_FIRMWARE_SHA,
-            "backendSha": EXPECTED_BACKEND_SHA,
-        }
+        and all(revision["runtimeTreeMatchesFrozenCandidate"] for revision in revisions.values())
     )
     visuals = visual_evidence(args.backend_root)
     passed = candidate_ok and not failures and resources["threadDelta"] == 0 and resources["fdDelta"] == 0
@@ -147,11 +199,10 @@ def main() -> int:
                 "firmwareSha": EXPECTED_FIRMWARE_SHA,
                 "backendSha": EXPECTED_BACKEND_SHA,
             },
-            "shasMatchFrozenCandidate": candidate_shas == {
-                "espSha": EXPECTED_ESP_SHA,
-                "firmwareSha": EXPECTED_FIRMWARE_SHA,
-                "backendSha": EXPECTED_BACKEND_SHA,
-            },
+            "runtimeTreesMatchFrozenCandidate": all(
+                revision["runtimeTreeMatchesFrozenCandidate"] for revision in revisions.values()
+            ),
+            "revisions": revisions,
             "fixtureSha256": fixture_hashes[0],
             "fixtureCopiesEqual": len(set(fixture_hashes)) == 1,
             "semanticChecksum": identity["semanticChecksum"],

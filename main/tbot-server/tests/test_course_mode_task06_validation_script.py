@@ -44,7 +44,11 @@ def test_task06_driver_emits_cross_repository_soak_evidence(tmp_path: Path) -> N
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report["verdict"] == "PASS"
     assert report["candidate"]["fixtureCopiesEqual"] is True
-    assert report["candidate"]["shasMatchFrozenCandidate"] is True
+    assert report["candidate"]["runtimeTreesMatchFrozenCandidate"] is True
+    assert all(
+        revision["trackedWorktreeClean"]
+        for revision in report["candidate"]["revisions"].values()
+    )
     assert report["candidate"]["releaseState"] == {
         "assigned": False,
         "productionEnabled": False,
