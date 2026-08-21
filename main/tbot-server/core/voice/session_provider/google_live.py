@@ -1835,6 +1835,37 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return True
         return False
 
+    async def deliver_course_response_plan(self, text):
+        """Send a semantic response and confirm playback before state commits."""
+        text = str(text or "").strip()
+        if not text or not await self._send_live_text_ack(
+            text,
+            log_label="course_response_plan",
+            allow_lesson_output=True,
+        ):
+            return False
+        config = self._get_live_config()
+        estimate = self._lesson_prompt_duration_estimate_sec(config)
+        adaptive_timeout = min(9.0, max(3.0, estimate + 1.0))
+        for attempt in range(2):
+            delivered = await self._wait_for_lesson_prompt_output_idle(
+                config,
+                output_timeout_override=adaptive_timeout,
+                timeout_log_label="course_response_plan_output_guard_timeout",
+            )
+            needs_resend = bool(
+                getattr(self.conn, "google_live_lesson_prompt_needs_resend", False)
+            )
+            if delivered and not needs_resend and self._lesson_prompt_heard_audio():
+                return True
+            if not needs_resend or attempt >= 1:
+                self.conn.google_live_lesson_prompt_needs_resend = False
+                return False
+            self.conn.google_live_lesson_prompt_needs_resend = False
+            if not await self._resend_last_lesson_prompt(reason="course_response_interrupted"):
+                return False
+        return False
+
     async def wait_lesson_step_prompt_idle(self):
         config = self._get_live_config()
         estimate = self._lesson_prompt_duration_estimate_sec(config)

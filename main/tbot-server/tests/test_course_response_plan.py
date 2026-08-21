@@ -144,3 +144,20 @@ def test_declarative_relation_without_an_authored_fact_fails_closed() -> None:
             approved_fact_codes={"animals.cat"},
             approved_fact_terms={"cat", "con mèo", "mèo"},
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "text"),
+    [
+        ("acknowledgment", "Cats can fly."),
+        ("guidance", "Look, cats can fly."),
+        ("invitation", "Cats live on Mars?"),
+    ],
+)
+def test_unauthorized_facts_fail_closed_in_every_response_slot(field, text) -> None:
+    with pytest.raises(CourseResponsePlanError, match="UNAPPROVED_FACT_WORDING"):
+        CourseResponsePlan.from_mapping(
+            valid(**{field: text}),
+            approved_fact_codes={"animals.cat", "pet"},
+            approved_fact_terms={"cat", "con mèo", "mèo"},
+        )

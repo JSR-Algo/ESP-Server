@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +17,7 @@ from plugins_func.functions.lesson_conversation import (
 )
 from core.providers.tools.product_toolset import LESSON_SEMANTIC_TOOLS
 from core.voice.google_live.audio_bridge import GoogleLiveAudioBridge
+from core.voice.session_provider.google_live import GoogleLiveProvider
 from core.voice.session_orchestrator import SessionMode
 
 
@@ -24,6 +26,7 @@ class Provider:
         self.generation = generation
         self.lesson_text = []
         self.send_result = True
+        self.delivery_result = True
 
     def current_response_id(self) -> int:
         return self.generation
@@ -31,6 +34,10 @@ class Provider:
     async def _send_live_text_ack(self, text, *, log_label, allow_lesson_output):
         self.lesson_text.append((text, log_label, allow_lesson_output))
         return self.send_result
+
+    async def deliver_course_response_plan(self, text):
+        self.lesson_text.append((text, "course_response_plan", True))
+        return self.send_result and self.delivery_result
 
 
 class Runtime:
@@ -280,6 +287,65 @@ async def test_failed_course_plan_delivery_rolls_back_and_reports_retryable_fail
         "context": conn.lesson_runtime.conversation_tool_context(),
     }
     assert conn.lesson_runtime.rolled_back_plan == arguments
+
+
+@pytest.mark.asyncio
+async def test_course_plan_commits_only_after_durable_audio_delivery() -> None:
+    conn = Conn()
+    conn.voice_provider.delivery_result = False
+    arguments = {
+        "lessonSessionId": "s1", "turnSequenceId": 1, "observationId": "o1",
+        "planId": "p1", "decisionId": "d1", "acknowledgment": "Heard.",
+        "relation": "Okay.", "guidance": "Look.", "invitation": "Ready?",
+        "questionCount": 1, "embodiedIntent": "INVITE_CHILD", "targetFactsUsed": [],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    }
+
+    async def apply(_arguments):
+        return {
+            "accepted": True, "code": "RESPONSE_PLAN_APPLIED",
+            "responseText": "Heard. Okay. Look. Ready?",
+        }
+
+    conn.lesson_runtime.course_apply_response_plan = apply
+    with _google_live_lesson_tool_admission(conn.voice_provider, 4):
+        response = await course_apply_response_plan(conn, **arguments)
+
+    assert response.result["code"] == "RESPONSE_DELIVERY_FAILED"
+    assert conn.lesson_runtime.rolled_back_plan == arguments
+    assert not hasattr(conn.lesson_runtime, "committed_plan")
+
+
+@pytest.mark.asyncio
+async def test_live_provider_retries_interrupted_course_plan_before_confirming_delivery() -> None:
+    provider = GoogleLiveProvider.__new__(GoogleLiveProvider)
+    provider.conn = SimpleNamespace(google_live_lesson_prompt_needs_resend=False)
+    provider._get_live_config = lambda: {}
+    provider._lesson_prompt_duration_estimate_sec = lambda _config: 1.0
+    provider._lesson_prompt_heard_audio = lambda: True
+    sends = []
+
+    async def send(text, **_kwargs):
+        sends.append(text)
+        return True
+
+    waits = iter((False, True))
+
+    async def wait(_config, **_kwargs):
+        delivered = next(waits)
+        provider.conn.google_live_lesson_prompt_needs_resend = not delivered
+        return delivered
+
+    async def resend(**_kwargs):
+        sends.append("resend")
+        return True
+
+    provider._send_live_text_ack = send
+    provider._wait_for_lesson_prompt_output_idle = wait
+    provider._resend_last_lesson_prompt = resend
+
+    assert await provider.deliver_course_response_plan("Heard. Ready?") is True
+    assert sends == ["Heard. Ready?", "resend"]
 
 
 def test_audio_bridge_admits_course_tool_calls_during_lesson_mode() -> None:

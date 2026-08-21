@@ -147,15 +147,29 @@ class CourseResponsePlan:
             rf"|(?:{target_re.pattern})\s+(?:means|là)\s+(?:{target_re.pattern}))$",
             re.IGNORECASE,
         )
+        unsupported_declaration_re = re.compile(
+            rf"(?:^|[,;:]\s*)(?:(?:this|that|it|they|he|she)|"
+            rf"(?:(?:a|an|the|một|con|quả)\s+)?(?:{target_re.pattern}))\s+"
+            rf"(?:is|are|was|were|can|could|will|would|has|have|"
+            rf"live|lives|eat|eats|fly|flies|like|likes|là|sống|bay|ăn|có|thích)\b"
+            rf"|^(?:can|could|do|does|is|are)\s+"
+            rf"(?:(?:a|an|the)\s+)?(?:{target_re.pattern})\s+\w+",
+            re.IGNORECASE,
+        )
         for field_index, field in enumerate(text_fields):
             for raw_clause in _FACT_CLAUSE_SPLIT_RE.split(field.strip()):
                 clause = raw_clause.strip()
-                if not clause or field_index in {0, 3}:
+                if not clause:
                     continue
                 normalized = clause.rstrip(".!?").strip()
+                if identity_re.fullmatch(normalized):
+                    continue
+                if unsupported_declaration_re.search(normalized):
+                    raise CourseResponsePlanError("UNAPPROVED_FACT_WORDING")
+                if field_index in {0, 3}:
+                    continue
                 if (
-                    identity_re.fullmatch(normalized)
-                    or (field_index == 1 and _FACT_RELATION_LEAD_RE.match(normalized))
+                    (field_index == 1 and _FACT_RELATION_LEAD_RE.match(normalized))
                     or (field_index == 2 and (
                         _FACT_GUIDANCE_LEAD_RE.match(normalized)
                         or _FACT_RELATION_LEAD_RE.match(normalized)

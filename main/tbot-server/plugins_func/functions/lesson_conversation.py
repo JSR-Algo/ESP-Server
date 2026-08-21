@@ -243,15 +243,11 @@ async def _execute_course(conn: Any, tool_name: str, arguments: Mapping[str, Any
         delivery_check = getattr(runtime, "response_plan_requires_delivery", None)
         requires_delivery = not callable(delivery_check) or delivery_check(dict(arguments))
         if requires_delivery:
-            sender = getattr(provider, "_send_live_text_ack", None)
+            deliver = getattr(provider, "deliver_course_response_plan", None)
             delivered = False
-            if callable(sender):
+            if callable(deliver):
                 try:
-                    delivered = bool(await sender(
-                        result["responseText"],
-                        log_label="course_response_plan",
-                        allow_lesson_output=True,
-                    ))
+                    delivered = bool(await deliver(result["responseText"]))
                 except Exception:
                     delivered = False
             if not delivered:
