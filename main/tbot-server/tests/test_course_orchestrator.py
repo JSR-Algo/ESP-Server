@@ -189,6 +189,7 @@ def test_failed_delayed_recall_records_review_without_losing_transfer() -> None:
         confidence_band="high",
     )
     mastery.record_transfer(evidence_id="transfer", activity_id="transfer", context_id="scene")
+    runtime.word_state = WordState.DELAYED_RECALL
 
     decision = runtime.observe(observation(
         observation_id="delayed-miss", semantic_class="unknown", speech_class="silence",
@@ -199,6 +200,22 @@ def test_failed_delayed_recall_records_review_without_losing_transfer() -> None:
     assert mastery.snapshot()["missesAfterRecall"] == 1
     assert decision.evidence_event is not None
     assert decision.evidence_event["reviewNeeded"] is True
+
+
+def test_delayed_recall_is_rejected_before_transfer_stage() -> None:
+    runtime = course()
+    runtime.begin(); runtime.continue_opening(); runtime.continue_opening()
+
+    decision = runtime.observe(observation(
+        observation_id="early-delayed", semantic_class="target_en", speech_class="exact",
+        activity_id="cat-delayed-recall-01", context_id="cat_delayed_callback",
+        now_ms=70_000,
+    ))
+
+    assert decision.accepted is False
+    assert decision.action == "INVALID_ACTIVITY_IGNORED"
+    assert runtime.word_state is WordState.DISCOVER
+    assert runtime.active_mastery.level.name == "NOT_STARTED"
 
 
 def test_protected_pause_rejects_normal_learning_observations() -> None:

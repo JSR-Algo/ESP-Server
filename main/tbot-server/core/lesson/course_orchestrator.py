@@ -249,6 +249,15 @@ class CourseOrchestrator:
             )
             self.word_state = WordState.DELAYED_RECALL
         elif activity.stage == "DELAYED_RECALL":
+            if (
+                self.word_state is not WordState.DELAYED_RECALL
+                or mastery.level is not EvidenceLevel.TRANSFERRED
+            ):
+                self.session_state = SessionState.WORD_ACTIVE
+                return self._decision(
+                    "INVALID_ACTIVITY_IGNORED", accepted=False,
+                    acknowledgment="retain_authoritative_state",
+                )
             result = mastery.record_delayed_recall(
                 evidence_id=observation.observation_id, activity_id=observation.activity_id,
                 context_id=observation.context_id, now_ms=observation.now_ms,

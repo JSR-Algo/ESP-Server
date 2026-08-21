@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -253,7 +254,11 @@ async def _execute_course(conn: Any, tool_name: str, arguments: Mapping[str, Any
             if not delivered:
                 rollback = getattr(runtime, "rollback_course_response_plan", None)
                 if callable(rollback):
-                    rollback(dict(arguments))
+                    rolled_back = rollback(dict(arguments))
+                    if inspect.isawaitable(rolled_back):
+                        rolled_back = await rolled_back
+                    if rolled_back is False:
+                        return _course_rejected(runtime, "COURSE_SNAPSHOT_PERSIST_FAILED")
                 refreshed = snapshot() if callable(snapshot) else None
                 result = {
                     "accepted": False,
@@ -265,7 +270,11 @@ async def _execute_course(conn: Any, tool_name: str, arguments: Mapping[str, Any
                 return ActionResponse(action=Action.REQLLM, result=result)
             commit = getattr(runtime, "commit_course_response_plan", None)
             if callable(commit):
-                commit(dict(arguments))
+                committed = commit(dict(arguments))
+                if inspect.isawaitable(committed):
+                    committed = await committed
+                if committed is False:
+                    return _course_rejected(runtime, "COURSE_SNAPSHOT_PERSIST_FAILED")
     if (
         isinstance(result, Mapping)
         and result.get("accepted") is True

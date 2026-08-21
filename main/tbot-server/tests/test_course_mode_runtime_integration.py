@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from core.lesson.course_orchestrator import SessionState
+from core.lesson.course_orchestrator import SessionState, WordState
+from core.lesson.course_snapshot_store import MemoryCourseModeSnapshotStore
 from core.lesson.runtime import LessonRuntime, course_mode_runtime_from_manifest
 from core.lesson.word_mastery import EvidenceLevel
 
@@ -333,6 +334,13 @@ async def test_adapter_snapshot_restore_replays_committed_results_without_effect
     assert restored.tool_context()["identity"]["turnSequenceId"] == 3
     assert restored.orchestrator.snapshot() == runtime.orchestrator.snapshot()
 
+    mismatched = {**persisted_snapshot, "contractChecksum": "0" * 64}
+    with pytest.raises(ValueError, match="contract mismatch"):
+        course_mode_runtime_from_manifest(
+            {"courseModeContract": contract()}, enabled=True,
+            authoritative_snapshot=mismatched,
+        )
+
 
 @pytest.mark.asyncio
 async def test_preparing_rejects_normal_observation_without_consuming_opening_turn() -> None:
@@ -586,6 +594,44 @@ def test_production_runtime_uses_unique_execution_session_identity() -> None:
     assert first.conversation_tool_context()["identity"]["lessonSessionId"] == first.session_id
     assert first.course_mode.orchestrator.snapshot()["lessonSessionId"] == first.session_id
     assert second.course_mode.orchestrator.snapshot()["lessonSessionId"] == second.session_id
+
+
+@pytest.mark.asyncio
+async def test_production_runtime_persists_and_restores_course_snapshot() -> None:
+    store = MemoryCourseModeSnapshotStore()
+    manifest = {"courseModeContract": contract()}
+    first = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest=manifest, asset_cache=object(), forwarder=_Forwarder(),
+        course_mode_snapshot_store=store, course_mode_snapshot_device_id="device-1",
+    )
+    decision = await first.course_continue({
+        "lessonSessionId": first.session_id, "turnSequenceId": 1,
+        "observationId": "opening-before-reconnect",
+    })
+    plan = {
+        "lessonSessionId": first.session_id, "turnSequenceId": 2,
+        "observationId": "plan-before-reconnect", "planId": "plan-before-reconnect",
+        "decisionId": decision["decisionId"], "acknowledgment": "Hello.",
+        "relation": "", "guidance": "", "invitation": "Ready?", "questionCount": 1,
+        "embodiedIntent": decision["embodiedIntent"], "targetFactsUsed": [],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    }
+    assert (await first.course_apply_response_plan(plan))["accepted"] is True
+    assert await first.commit_course_response_plan(plan) is True
+    snapshot = await store.load("device-1", "a1")
+
+    restored = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest=manifest, asset_cache=object(), forwarder=_Forwarder(),
+        course_mode_snapshot_store=store, course_mode_snapshot_device_id="device-1",
+        course_mode_snapshot=snapshot,
+    )
+
+    assert restored.session_id == first.session_id
+    assert restored.course_mode is not None
+    assert restored.course_mode.snapshot() == first.course_mode.snapshot()
+    assert await restored.course_apply_response_plan(plan) == await first.course_apply_response_plan(plan)
 
 
 @pytest.mark.asyncio
@@ -987,6 +1033,7 @@ async def test_course_continue_closes_after_failed_delayed_recall() -> None:
         confidence_band="high",
     )
     mastery.record_transfer(evidence_id="transfer", activity_id="transfer", context_id="scene")
+    runtime.orchestrator.word_state = WordState.DELAYED_RECALL
     observed = await runtime.course_observe_child({
         "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
         "observationId": "delayed-miss", "semanticClass": "unknown",

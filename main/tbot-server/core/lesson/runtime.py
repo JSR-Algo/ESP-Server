@@ -85,6 +85,7 @@ from core.lesson.course_orchestrator import (
     WordState,
 )
 from core.lesson.course_response_plan import CourseResponsePlan, CourseResponsePlanError
+from core.lesson.course_snapshot_store import get_course_mode_snapshot_store
 from core.lesson.embodied_intent import EmbodiedIntent
 from core.lesson.forwarder import serialize_word_evidence_event
 from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
@@ -626,6 +627,7 @@ class CourseModeRuntimeAdapter:
     def snapshot(self) -> Dict[str, Any]:
         return {
             "snapshotVersion": 1,
+            "contractChecksum": self.contract.contract_checksum,
             "lessonSessionId": self.lesson_session_id,
             "startedAtMs": self._started_at_ms,
             "orchestrator": self.orchestrator.snapshot(),
@@ -659,6 +661,8 @@ class CourseModeRuntimeAdapter:
     ) -> "CourseModeRuntimeAdapter":
         if snapshot.get("snapshotVersion") != 1:
             raise ValueError("unsupported course mode snapshot")
+        if snapshot.get("contractChecksum") != contract.contract_checksum:
+            raise ValueError("course mode snapshot contract mismatch")
         snapshot_session_id = snapshot["lessonSessionId"]
         if runtime_session_id is not None and runtime_session_id != snapshot_session_id:
             raise ValueError("course mode snapshot session mismatch")
@@ -1807,6 +1811,9 @@ class LessonRuntime:
         alarm: Any = None,
         preload_status_reporter: Optional[Callable[[Dict[str, Any]], Awaitable[Any]]] = None,
         graceful_inactivity_finish: bool = False,
+        course_mode_snapshot_store: Any = None,
+        course_mode_snapshot_device_id: str | None = None,
+        course_mode_snapshot: Dict[str, Any] | None = None,
     ) -> None:
         self.conn = conn
         # Demo-only: when a child stays silent through an interactive step, model the
@@ -1819,10 +1826,20 @@ class LessonRuntime:
         self.lesson_id = assignment.get("lessonId")
         self.lesson_version = int(assignment.get("lessonVersion", 1))
         self.profile = assignment.get("profile", "espTft")
-        # A lesson run owns its protocol/event identity. It must not inherit either
-        # the conversational websocket session or a historical assignment payload,
-        # because a reconnect or republish starts a fresh sequence namespace.
-        self.session_id = str(uuid.uuid4())
+        # A new lesson run owns a fresh protocol/event identity. Course Mode reconnects
+        # restore the active assignment's authoritative identity so semantic dedup and
+        # evidence sequencing survive transport replacement.
+        snapshot_session_id = (
+            course_mode_snapshot.get("lessonSessionId")
+            if isinstance(course_mode_snapshot, dict) else None
+        )
+        self.session_id = (
+            snapshot_session_id
+            if isinstance(snapshot_session_id, str) and snapshot_session_id
+            else str(uuid.uuid4())
+        )
+        self._course_mode_snapshot_store = course_mode_snapshot_store
+        self._course_mode_snapshot_device_id = course_mode_snapshot_device_id
         self._trace_context = _lesson_trace_context_from_headers(getattr(conn, "headers", None))
         # Record the JOIN between the two identities this run carries. The hello ack
         # handed the device the connection session; the line above deliberately mints a
@@ -1858,6 +1875,7 @@ class LessonRuntime:
             assignment_id=self.assignment_id,
             forwarder=forwarder,
             runtime_session_id=self.session_id,
+            authoritative_snapshot=course_mode_snapshot,
             assessment_state=lambda: {
                 "robotAudioContaminated": bool(
                     getattr(self.conn, "client_is_speaking", False)
@@ -1982,7 +2000,38 @@ class LessonRuntime:
     async def _course_operation(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         if self.course_mode is None:
             return {"accepted": False, "code": "COURSE_MODE_NOT_ACTIVE"}
-        return await getattr(self.course_mode, name)(arguments)
+        before = self.course_mode.snapshot()
+        result = await getattr(self.course_mode, name)(arguments)
+        if result.get("accepted") is not True:
+            return result
+        try:
+            await self.persist_course_mode_snapshot()
+        except Exception:
+            self.course_mode = CourseModeRuntimeAdapter.restore(
+                self.course_mode.contract,
+                before,
+                clock=self.course_mode._clock,
+                assignment_id=self.assignment_id,
+                forwarder=self.forwarder,
+                runtime_session_id=self.session_id,
+                assessment_state=self.course_mode._assessment_state,
+            )
+            return {"accepted": False, "code": "COURSE_SNAPSHOT_PERSIST_FAILED"}
+        return result
+
+    async def persist_course_mode_snapshot(self) -> None:
+        if (
+            self.course_mode is None
+            or self._course_mode_snapshot_store is None
+            or not self._course_mode_snapshot_device_id
+            or not self.assignment_id
+        ):
+            return
+        await self._course_mode_snapshot_store.store(
+            self._course_mode_snapshot_device_id,
+            self.assignment_id,
+            self.course_mode.snapshot(),
+        )
 
     async def course_observe_child(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return await self._course_operation("course_observe_child", arguments)
@@ -1996,15 +2045,47 @@ class LessonRuntime:
     async def course_apply_response_plan(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return await self._course_operation("course_apply_response_plan", arguments)
 
-    def rollback_course_response_plan(self, arguments: Dict[str, Any]) -> bool:
+    async def rollback_course_response_plan(self, arguments: Dict[str, Any]) -> bool:
         if self.course_mode is None:
             return False
-        return self.course_mode.rollback_course_response_plan(arguments)
+        before = self.course_mode.snapshot()
+        rolled_back = self.course_mode.rollback_course_response_plan(arguments)
+        if rolled_back:
+            try:
+                await self.persist_course_mode_snapshot()
+            except Exception:
+                self.course_mode = CourseModeRuntimeAdapter.restore(
+                    self.course_mode.contract,
+                    before,
+                    clock=self.course_mode._clock,
+                    assignment_id=self.assignment_id,
+                    forwarder=self.forwarder,
+                    runtime_session_id=self.session_id,
+                    assessment_state=self.course_mode._assessment_state,
+                )
+                return False
+        return rolled_back
 
-    def commit_course_response_plan(self, arguments: Dict[str, Any]) -> bool:
+    async def commit_course_response_plan(self, arguments: Dict[str, Any]) -> bool:
         if self.course_mode is None:
             return False
-        return self.course_mode.commit_course_response_plan(arguments)
+        before = self.course_mode.snapshot()
+        committed = self.course_mode.commit_course_response_plan(arguments)
+        if committed:
+            try:
+                await self.persist_course_mode_snapshot()
+            except Exception:
+                self.course_mode = CourseModeRuntimeAdapter.restore(
+                    self.course_mode.contract,
+                    before,
+                    clock=self.course_mode._clock,
+                    assignment_id=self.assignment_id,
+                    forwarder=self.forwarder,
+                    runtime_session_id=self.session_id,
+                    assessment_state=self.course_mode._assessment_state,
+                )
+                return False
+        return committed
 
     async def course_continue(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return await self._course_operation("course_continue", arguments)
@@ -8118,6 +8199,16 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         token_refresh_fn=_refresh_event_token,
         logger=logger,
     )
+    course_mode_snapshot_store = get_course_mode_snapshot_store()
+    course_mode_snapshot = None
+    if lesson_cfg.get("course_mode_v2_enabled") is True and "courseModeContract" in manifest:
+        try:
+            course_mode_snapshot = await course_mode_snapshot_store.load(
+                backend_device_id, assignment["assignmentId"],
+            )
+        except Exception as exc:
+            _log("warning", f"course mode snapshot load failed: {type(exc).__name__}")
+            return republish_previous
 
     async def _report_preload_status(report: Dict[str, Any]) -> None:
         timeout_sec = _finite_float_or_default(lesson_cfg.get("preload_status_timeout_sec", 5.0), 5.0)
@@ -8165,6 +8256,9 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         min_step_timeout_sec=lesson_cfg.get("step_timeout_floor_sec", 0),
         alarm=alarm,
         preload_status_reporter=_report_preload_status,
+        course_mode_snapshot_store=course_mode_snapshot_store,
+        course_mode_snapshot_device_id=backend_device_id,
+        course_mode_snapshot=course_mode_snapshot,
     )
     # Terminal same-assignment rebuilds may already have closed their runtime. Live
     # current runtimes, including a different assignment, stay open as the fallback
