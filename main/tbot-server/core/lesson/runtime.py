@@ -82,6 +82,7 @@ from core.lesson.course_orchestrator import (
     CourseDecision,
     CourseOrchestrator,
     SessionState,
+    WordState,
 )
 from core.lesson.course_response_plan import CourseResponsePlan, CourseResponsePlanError
 from core.lesson.embodied_intent import EmbodiedIntent
@@ -499,7 +500,17 @@ class CourseModeRuntimeAdapter:
             return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
         if plan.embodied_intent is not decision.embodied_intent:
             return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
-        if not decision.may_model_target and plan.contains_target_word(active_target.target_word):
+        protected_target_terms = {
+            active_target.target_word, *active_target.vietnamese_meanings,
+        }
+        protected_target_terms.update(
+            meaning.split()[-1]
+            for meaning in active_target.vietnamese_meanings
+            if meaning.split()
+        )
+        if not decision.may_model_target and any(
+            plan.contains_target_word(term) for term in protected_target_terms
+        ):
             return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
         protected_decision = decision.next_state in {
             SessionState.SAFETY_PAUSED, SessionState.REGULATION_BREAK,
@@ -570,6 +581,8 @@ class CourseModeRuntimeAdapter:
             SessionState.SAFETY_PAUSED, SessionState.REGULATION_BREAK,
         }:
             decision = self.orchestrator.hold_protected_pause()
+        elif self.orchestrator.word_state is WordState.DONE_FOR_SESSION:
+            decision = self.orchestrator.maybe_advance_target(now_ms=int(self._clock() * 1_000))
         elif (
             self.contract.secondary is not None
             and self.orchestrator.active_target_id == self.contract.secondary.target_id
@@ -577,7 +590,7 @@ class CourseModeRuntimeAdapter:
         ):
             decision = self.orchestrator.maybe_advance_target(now_ms=int(self._clock() * 1_000))
         elif self.orchestrator.active_mastery.level.value != "MASTERED_TODAY":
-            decision = self.orchestrator.continue_word()
+            decision = self.orchestrator.continue_word(now_ms=int(self._clock() * 1_000))
         else:
             decision = self.orchestrator.maybe_advance_target(now_ms=int(self._clock() * 1_000))
         return self._remember_operation(operation, arguments, decision)

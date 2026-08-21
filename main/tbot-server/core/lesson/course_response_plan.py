@@ -18,6 +18,16 @@ _PROHIBITED = ("wrong", "incorrect", "easy", "try harder", "sai rồi", "dễ m�
 _UNSUPPORTED_MASTERY_CLAIM_RE = re.compile(
     r"(?<!\w)(mastered|mastery|đã thuộc|thuộc bài)(?!\w)", re.IGNORECASE,
 )
+_SAFETY_LANGUAGE_RE = re.compile(
+    r"^(?:"
+    r"(?:robot|i|mình)\s+(?:is here|hear(?:d)? you|am listening|đang nghe(?: đây)?|nghe con)"
+    r"|(?:we|mình|chúng mình)\s+(?:can\s+)?(?:pause|stop|stay here|tạm dừng|dừng|ở yên)"
+    r"|(?:do you want (?:robot )?to |con muốn robot )(?:pause|stop|stay still|tạm dừng|dừng|ở yên)(?: không)?"
+    r"|(?:let's|we can|mình|chúng mình)\s+(?:call|gọi)\s+.*(?:adult|grown-up|parent|bố|mẹ|người lớn).*"
+    r"|(?:it sounds like|có vẻ)\s+.*(?:sad|upset|worried|buồn|lo|khó chịu).*"
+    r")$",
+    re.IGNORECASE,
+)
 _QUESTION_LEAD_RE = re.compile(
     r"(?:^|[.!]\s+)(?:can|could|would|will|do|did|are|is|what|where|who|why|how|which|when)\b"
     r"|(?:^|[.!]\s+)con\s+(?:có|muốn|thấy|nghĩ)\b",
@@ -60,7 +70,8 @@ class CourseResponsePlan:
         child_facing_text = " ".join((
             self.acknowledgment, self.relation, self.guidance, self.invitation,
         )).casefold()
-        pattern = rf"(?<!\w){re.escape(target_word.casefold())}(?!\w)"
+        suffix = "s?" if target_word.isascii() and target_word.isalpha() else ""
+        pattern = rf"(?<!\w){re.escape(target_word.casefold())}{suffix}(?!\w)"
         return re.search(pattern, child_facing_text) is not None
 
     @classmethod
@@ -119,6 +130,13 @@ class CourseResponsePlan:
                 re.search(rf"(?<!\w){re.escape(term.casefold())}(?!\w)", text)
                 for term in forbidden_terms
                 if isinstance(term, str) and term.strip()
+            ):
+                raise CourseResponsePlanError("SAFETY_REDIRECTION")
+            if any(
+                not _SAFETY_LANGUAGE_RE.fullmatch(clause.rstrip(".!?").strip())
+                for field in text_fields
+                for clause in _FACT_CLAUSE_SPLIT_RE.split(field.strip())
+                if clause.strip()
             ):
                 raise CourseResponsePlanError("SAFETY_REDIRECTION")
         return cls(

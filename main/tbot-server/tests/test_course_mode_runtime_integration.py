@@ -838,6 +838,30 @@ async def test_response_plan_cannot_leak_target_when_decision_forbids_modeling()
 
 
 @pytest.mark.asyncio
+async def test_response_plan_cannot_leak_authored_target_meaning_during_assessment() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    decision = await runtime.course_continue({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "no-meaning-model-decision",
+    })
+
+    result = await runtime.course_apply_response_plan({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 2,
+        "observationId": "meaning-leaking-plan", "planId": "meaning-leaking-plan",
+        "decisionId": decision["decisionId"], "acknowledgment": "I hear you.",
+        "relation": "Robot is here.", "guidance": "The answer is con mèo.",
+        "invitation": "Ready?", "questionCount": 1,
+        "embodiedIntent": decision["embodiedIntent"], "targetFactsUsed": [],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    })
+
+    assert result == {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+
+
+@pytest.mark.asyncio
 async def test_safety_disclosure_and_authored_meaning_remain_in_protected_pause() -> None:
     runtime = course_mode_runtime_from_manifest(
         {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
@@ -927,6 +951,69 @@ async def test_safety_decision_rejects_plan_that_claims_normal_teaching_mode() -
         "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
     })
     assert result == {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+
+
+@pytest.mark.asyncio
+async def test_course_continue_closes_when_soft_deadline_has_elapsed() -> None:
+    now = [0.0]
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: now[0],
+    )
+    assert runtime is not None
+    runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
+    now[0] = 540.0
+
+    decision = await runtime.course_continue({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "deadline-continue",
+    })
+
+    assert decision["action"] == "CLOSE_WITHOUT_SECOND_WORD"
+    assert decision["nextState"] == "CLOSING"
+
+
+@pytest.mark.asyncio
+async def test_course_continue_closes_after_failed_delayed_recall() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 70.0,
+    )
+    assert runtime is not None
+    runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
+    mastery = runtime.orchestrator.active_mastery
+    mastery.record_meaning(evidence_id="meaning", activity_id="meaning", context_id="choice")
+    mastery.record_speech(
+        evidence_id="recall", activity_id="recall", context_id="visual", now_ms=1_000,
+        semantic_class="target_en", speech_class="exact", assessment_eligible=True,
+        confidence_band="high",
+    )
+    mastery.record_transfer(evidence_id="transfer", activity_id="transfer", context_id="scene")
+    observed = await runtime.course_observe_child({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "delayed-miss", "semanticClass": "unknown",
+        "speechClass": "silence", "language": "en", "intent": "answer",
+        "engagement": "engaged", "safetyClass": "normal", "assessmentEligible": True,
+        "confidenceBand": "high", "activityId": "cat-delayed-recall-01",
+        "contextId": "cat_delayed_callback", "robotAudioContaminated": False,
+        "targetTextVisible": False,
+    })
+    applied = await runtime.course_apply_response_plan({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 2,
+        "observationId": "delayed-miss-plan", "planId": "delayed-miss-plan",
+        "decisionId": observed["decisionId"], "acknowledgment": "I hear you.",
+        "relation": "We can stop.", "guidance": "",
+        "invitation": "", "questionCount": 0,
+        "embodiedIntent": observed["embodiedIntent"], "targetFactsUsed": [],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    })
+    assert applied["accepted"] is True
+
+    decision = await runtime.course_continue({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 3,
+        "observationId": "after-delayed-miss",
+    })
+
+    assert decision["action"] == "CLOSE_AFTER_PRIMARY"
+    assert decision["nextState"] == "CLOSING"
 
 
 def test_course_tool_context_exposes_only_authoritative_bounded_identifiers() -> None:

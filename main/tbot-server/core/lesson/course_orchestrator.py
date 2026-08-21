@@ -309,7 +309,12 @@ class CourseOrchestrator:
             teaching=f"bridge_{bridge_intent}", question="resume_active_word", embodied=EmbodiedIntent.ACKNOWLEDGE_STORY,
         )
 
-    def continue_word(self) -> CourseDecision:
+    def continue_word(self, *, now_ms: int) -> CourseDecision:
+        if now_ms - self.started_at_ms >= self.soft_deadline_ms:
+            self.session_state = SessionState.CLOSING
+            return self._decision(
+                "CLOSE_WITHOUT_SECOND_WORD", embodied=EmbodiedIntent.GOODBYE_SMALL,
+            )
         self.session_state = SessionState.WORD_ACTIVE
         return self._decision(
             "PRESENT_INTERVENING_ACTIVITY", teaching="authored_non_answer_activity",

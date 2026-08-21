@@ -161,3 +161,29 @@ def test_unauthorized_facts_fail_closed_in_every_response_slot(field, text) -> N
             approved_fact_codes={"animals.cat", "pet"},
             approved_fact_terms={"cat", "con mèo", "mèo"},
         )
+
+
+def test_target_leakage_detection_includes_simple_english_inflections() -> None:
+    plan = CourseResponsePlan.from_mapping(
+        valid(
+            acknowledgment="I hear you.", relation="", guidance="This is cats.",
+            invitation="Ready?", targetFactsUsed=[],
+        ),
+        approved_fact_codes={"animals.cat"},
+        approved_fact_terms={"cat", "con mèo", "mèo"},
+    )
+
+    assert plan.contains_target_word("cat") is True
+
+
+def test_safety_plan_rejects_arbitrary_teaching_redirect() -> None:
+    with pytest.raises(CourseResponsePlanError, match="SAFETY_REDIRECTION"):
+        CourseResponsePlan.from_mapping(
+            valid(
+                acknowledgment="Let's learn dogs.", relation="Robot is here.",
+                guidance="We can pause.", invitation="", questionCount=0,
+                embodiedIntent="COMFORT_CALM", targetFactsUsed=[], safetyMode=True,
+            ),
+            approved_fact_codes={"animals.cat"},
+            approved_fact_terms={"cat", "con mèo", "mèo"},
+        )
