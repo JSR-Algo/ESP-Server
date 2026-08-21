@@ -1,8 +1,9 @@
 {
   "candidate": {
     "backendSha": "1920586d48e5448dcf653dbfa2391c7ef346fcd9",
-    "espSha": "985d55ddefdc3fb2ff00e06959929d793b9dceaf",
-    "espValidationSha": "985d55ddefdc3fb2ff00e06959929d793b9dceaf",
+    "espSha": "7c75ddf26ed2e495829b661c297894c2e5aa7813",
+    "espValidationRef": "refs/tags/course-mode-task06-reviewed-validation-v1",
+    "espValidationSha": "7c75ddf26ed2e495829b661c297894c2e5aa7813",
     "expectedShas": {
       "backendSha": "657474ff3b58fba2c3c31f2978d53370ffad8b11",
       "espSha": "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268",
@@ -45,8 +46,8 @@
           "docs/qa/artifacts/2026-08-22-course-mode-task06/logs/runtime-soak-60s.log"
         ],
         "expectedIsAncestor": true,
-        "expectedSha": "985d55ddefdc3fb2ff00e06959929d793b9dceaf",
-        "headSha": "985d55ddefdc3fb2ff00e06959929d793b9dceaf",
+        "expectedSha": "7c75ddf26ed2e495829b661c297894c2e5aa7813",
+        "headSha": "7c75ddf26ed2e495829b661c297894c2e5aa7813",
         "ignoredPathCount": 496,
         "runtimeTreeMatchesFrozenCandidate": true,
         "trackedChanges": [],
@@ -80,7 +81,7 @@
     "semanticChecksum": "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264"
   },
   "dataPolicy": "synthetic-no-child-data",
-  "generatedAtUtc": "2026-08-21T23:17:19Z",
+  "generatedAtUtc": "2026-08-21T23:25:10Z",
   "journeys": {
     "journeyCount": 22,
     "names": [
@@ -121,12 +122,12 @@
   },
   "schemaVersion": 1,
   "soak": {
-    "durationSeconds": 60.000111,
+    "durationSeconds": 60.000408,
     "failureDetails": [],
     "failures": 0,
-    "iterations": 126710,
+    "iterations": 125182,
     "minimumIterations": 2000,
-    "sessions": 2787620
+    "sessions": 2754004
   },
   "verdict": "PASS",
   "visuals": {
