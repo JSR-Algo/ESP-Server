@@ -28,6 +28,7 @@ EXPECTED_LAYOUT = "e61b56d1f8219a86c7f3986e7d5c70b91f512286604b5b206ef11e2c989d2
 EXPECTED_ESP_SHA = "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268"
 EXPECTED_FIRMWARE_SHA = "d47174daebe17b9c1a9d1a1eb506711a57cd3512"
 EXPECTED_BACKEND_SHA = "657474ff3b58fba2c3c31f2978d53370ffad8b11"
+REVIEWED_ESP_VALIDATION_REF = "refs/tags/course-mode-task06-reviewed-validation-v1"
 MAX_RETAINED_HEAP_GROWTH_BYTES = 1024 * 1024
 ALLOWED_ESP_POST_VALIDATION_PATHS = (
     "docs/qa/ad-hoc/2026-08-22-course-mode-task06-runtime-validation.md",
@@ -73,6 +74,18 @@ def sha256(path: Path) -> str:
 def git_head(root: Path) -> str:
     return subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def reviewed_validation_sha(root: Path, ref: str = REVIEWED_ESP_VALIDATION_REF) -> str:
+    object_type = subprocess.run(
+        ["git", "cat-file", "-t", ref], cwd=root, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    if object_type != "tag":
+        raise AssertionError(f"reviewed validation ref must be an annotated tag: {ref}")
+    return subprocess.run(
+        ["git", "rev-parse", f"{ref}^{{commit}}"], cwd=root,
+        check=True, capture_output=True, text=True,
     ).stdout.strip()
 
 
@@ -202,7 +215,6 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend-root", type=Path, required=True)
     parser.add_argument("--firmware-root", type=Path, required=True)
-    parser.add_argument("--esp-validation-sha", required=True)
     parser.add_argument("--iterations", type=int, default=250)
     parser.add_argument("--min-duration-seconds", type=float, default=0.0)
     parser.add_argument("--output", type=Path, required=True)
@@ -218,15 +230,16 @@ def main() -> int:
     pilot = json.loads(pilot_path.read_text(encoding="utf-8"))
     identity = pilot["identity"]
     release = pilot["release"]
+    esp_validation_sha = reviewed_validation_sha(ROOT)
     if subprocess.run(
-        ["git", "merge-base", "--is-ancestor", EXPECTED_ESP_SHA, args.esp_validation_sha],
+        ["git", "merge-base", "--is-ancestor", EXPECTED_ESP_SHA, esp_validation_sha],
         cwd=ROOT, check=False, capture_output=True, text=True,
     ).returncode != 0:
-        raise AssertionError("ESP validation SHA must descend from the frozen ESP candidate")
+        raise AssertionError("reviewed ESP validation tag must descend from the frozen ESP candidate")
     revisions = {
         "esp": candidate_revision(
             ROOT,
-            args.esp_validation_sha,
+            esp_validation_sha,
             ALLOWED_ESP_POST_VALIDATION_PATHS,
             allowed_dirty_paths=ALLOWED_ESP_DIRTY_PATHS,
             allowed_ignored_globs=ALLOWED_ESP_IGNORED_GLOBS,
@@ -312,7 +325,8 @@ def main() -> int:
         "verdict": "PASS" if passed else "FAIL",
         "candidate": {
             **candidate_shas,
-            "espValidationSha": args.esp_validation_sha,
+            "espValidationRef": REVIEWED_ESP_VALIDATION_REF,
+            "espValidationSha": esp_validation_sha,
             "expectedShas": {
                 "espSha": EXPECTED_ESP_SHA,
                 "firmwareSha": EXPECTED_FIRMWARE_SHA,
