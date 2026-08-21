@@ -140,7 +140,8 @@ class LessonEventForwarder:
             if batch is None:  # poison pill
                 self._queue.task_done()
                 break
-            item, attempt, on_success, on_failure = batch
+            item, attempt, *callbacks = batch
+            on_success, on_failure = callbacks if len(callbacks) == 2 else (None, None)
             try:
                 if self._is_terminal_batch(item):
                     await self._store_terminal_batch(item)
