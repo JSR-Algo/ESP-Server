@@ -25,7 +25,16 @@ _QUESTION_LEAD_RE = re.compile(
 )
 _FACT_CLAUSE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 _FACT_GUIDANCE_LEAD_RE = re.compile(
-    r"^(?:look|find|point|say|repeat|listen|show|nhìn|chỉ|nói|lặp|nghe)\b",
+    r"^(?:look|find|point|say|repeat|listen|show|nhìn|chỉ|nói|lặp|nghe)\b"
+    r"|^(?:mình|we)\s+(?:can\s+)?(?:nhìn|thử|học|tạm dừng|look|try|learn|pause)\b",
+    re.IGNORECASE,
+)
+_FACT_RELATION_LEAD_RE = re.compile(
+    r"^(?:(?:robot|i|mình)\s+(?:hear|heard|am listening|nghe)\b.*"
+    r"|robot is here"
+    r"|(?:let us|let's|we can|we will|mình|chúng mình)\s+"
+    r"(?:look(?: together)?|learn|keep learning|try another way|pause|stop|continue)"
+    r"|here is another word|okay)$",
     re.IGNORECASE,
 )
 
@@ -138,16 +147,19 @@ class CourseResponsePlan:
             rf"|(?:{target_re.pattern})\s+(?:means|là)\s+(?:{target_re.pattern}))$",
             re.IGNORECASE,
         )
-        for field in text_fields:
+        for field_index, field in enumerate(text_fields):
             for raw_clause in _FACT_CLAUSE_SPLIT_RE.split(field.strip()):
                 clause = raw_clause.strip()
-                if not clause or target_re.search(clause) is None:
+                if not clause or field_index in {0, 3}:
                     continue
                 normalized = clause.rstrip(".!?").strip()
                 if (
-                    clause.endswith("?")
-                    or _FACT_GUIDANCE_LEAD_RE.match(normalized)
-                    or identity_re.fullmatch(normalized)
+                    identity_re.fullmatch(normalized)
+                    or (field_index == 1 and _FACT_RELATION_LEAD_RE.match(normalized))
+                    or (field_index == 2 and (
+                        _FACT_GUIDANCE_LEAD_RE.match(normalized)
+                        or _FACT_RELATION_LEAD_RE.match(normalized)
+                    ))
                 ):
                     continue
                 raise CourseResponsePlanError("UNAPPROVED_FACT_WORDING")

@@ -75,7 +75,14 @@ from core.lesson.conversation_runtime import (
     inactive_conversation_decision,
 )
 from core.lesson.course_mode_contract import CourseModeContract
-from core.lesson.course_orchestrator import ChildObservation, CourseDecision, CourseOrchestrator, SessionState
+from core.lesson.course_orchestrator import (
+    CONTEXT_BRIDGE_INTENTS,
+    CONTEXT_CHILD_DETAIL_CODES,
+    ChildObservation,
+    CourseDecision,
+    CourseOrchestrator,
+    SessionState,
+)
 from core.lesson.course_response_plan import CourseResponsePlan, CourseResponsePlanError
 from core.lesson.embodied_intent import EmbodiedIntent
 from core.lesson.forwarder import serialize_word_evidence_event
@@ -287,7 +294,7 @@ class CourseModeRuntimeAdapter:
             )
             if self._operation_allowed(operation)
         ]
-        return {
+        context = {
             "courseMode": True,
             "identity": {
                 "lessonSessionId": self.lesson_session_id,
@@ -297,6 +304,28 @@ class CourseModeRuntimeAdapter:
             "activities": activities,
             "allowedTools": allowed_tools,
         }
+        if self._response_plan_pending():
+            decision = self._decisions[self._latest_decision_id]
+            context["pendingDecision"] = {
+                "decisionId": decision.decision_id,
+                "acknowledgmentIntent": decision.acknowledgment_intent,
+                "teachingIntent": decision.teaching_intent,
+                "questionIntent": decision.question_intent,
+                "embodiedIntent": decision.embodied_intent.value,
+                "mayModelTarget": decision.may_model_target,
+                "safetyMode": decision.next_state in {
+                    SessionState.SAFETY_PAUSED, SessionState.REGULATION_BREAK,
+                },
+                "allowedTargetFactCodes": [target.target_id],
+            }
+        branch_id = self.orchestrator.snapshot()["activeBranchId"]
+        if branch_id is not None:
+            context["activeContext"] = {
+                "branchId": branch_id,
+                "bridgeIntents": list(CONTEXT_BRIDGE_INTENTS),
+                "childDetailCodes": list(CONTEXT_CHILD_DETAIL_CODES),
+            }
+        return context
 
     def _forward_evidence(self, decision: CourseDecision) -> None:
         if decision.evidence_event is None or self.forwarder is None or not self.assignment_id:

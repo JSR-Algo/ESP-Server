@@ -131,3 +131,16 @@ def test_target_fact_wording_must_stay_within_authorized_teaching_forms() -> Non
         approved_fact_terms={"cat", "con mèo", "mèo"},
     )
     assert plan.target_facts_used == ("animals.cat",)
+
+
+def test_declarative_relation_without_an_authored_fact_fails_closed() -> None:
+    with pytest.raises(CourseResponsePlanError, match="UNAPPROVED_FACT_WORDING"):
+        CourseResponsePlan.from_mapping(
+            valid(
+                acknowledgment="I hear you.", relation="It lives on Mars.",
+                guidance="Look at the picture.", invitation="Ready?",
+                targetFactsUsed=[],
+            ),
+            approved_fact_codes={"animals.cat"},
+            approved_fact_terms={"cat", "con mèo", "mèo"},
+        )

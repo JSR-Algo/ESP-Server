@@ -170,7 +170,58 @@ async def test_response_plan_is_advertised_and_consumed_only_for_a_pending_decis
 
     assert premature == {"accepted": False, "code": "COURSE_OPERATION_NOT_ALLOWED"}
     assert opening["action"] == "GREET_AND_CHECK_IN"
-    assert "course_apply_response_plan" in runtime.tool_context()["allowedTools"]
+    pending_context = runtime.tool_context()
+    assert "course_apply_response_plan" in pending_context["allowedTools"]
+    assert pending_context["pendingDecision"] == {
+        "decisionId": opening["decisionId"],
+        "acknowledgmentIntent": opening["acknowledgmentIntent"],
+        "teachingIntent": opening["teachingIntent"],
+        "questionIntent": opening["questionIntent"],
+        "embodiedIntent": opening["embodiedIntent"],
+        "mayModelTarget": opening["mayModelTarget"],
+        "safetyMode": False,
+        "allowedTargetFactCodes": ["animals.cat"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_context_snapshot_republishes_opaque_branch_resume_identity() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
+    opened = await runtime.course_open_context({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "branch-before-reconnect", "branchType": "RELATED_STORY",
+    })
+
+    context = runtime.tool_context()
+    assert context["allowedTools"] == ["course_apply_response_plan"]
+    assert context["activeContext"] == {
+        "branchId": opened["branchId"],
+        "bridgeIntents": [
+            "white_cat_visual", "pet_sound_clue", "resume_active_word_visual",
+            "resume_active_word_choice",
+        ],
+        "childDetailCodes": [
+            "grandmother_pet", "related_pet", "child_choice", "current_visual",
+            "earlier_session_detail", "no_personal_detail",
+        ],
+    }
+    applied = await runtime.course_apply_response_plan({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 2,
+        "observationId": "branch-plan", "planId": "branch-plan",
+        "decisionId": opened["decisionId"], "acknowledgment": "I hear you.",
+        "relation": "Let us look together.", "guidance": "Look at the picture.",
+        "invitation": "Ready?", "questionCount": 1,
+        "embodiedIntent": opened["embodiedIntent"], "targetFactsUsed": [],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    })
+    assert applied["accepted"] is True
+    resumed_context = runtime.tool_context()
+    assert "course_close_context" in resumed_context["allowedTools"]
+    assert resumed_context["activeContext"] == context["activeContext"]
 
 
 @pytest.mark.asyncio
