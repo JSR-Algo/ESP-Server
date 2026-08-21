@@ -42,9 +42,11 @@ ALLOWED_ESP_DIRTY_PATHS = (
     "docs/qa/artifacts/2026-08-22-course-mode-task06/",
 )
 ALLOWED_ESP_IGNORED_GLOBS = (
+    "__pycache__/**",
     "**/__pycache__/**",
+    ".pytest_cache/**",
     "**/.pytest_cache/**",
-    "main/tbot-server/tmp/server.log",
+    "tmp/server.log",
 )
 ALLOWED_BACKEND_EVIDENCE_PATHS = (
     "src/lessons/authoring/esptft-publish-budget.logic.spec.ts",
@@ -57,7 +59,9 @@ ALLOWED_FIRMWARE_EVIDENCE_PATHS = (
     "tests/test_realtime_voice_state.py",
 )
 ALLOWED_FIRMWARE_IGNORED_GLOBS = (
+    "__pycache__/**",
     "**/__pycache__/**",
+    ".pytest_cache/**",
     "**/.pytest_cache/**",
     "managed_components/**",
 )
