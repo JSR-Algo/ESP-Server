@@ -313,7 +313,10 @@ class CourseModeRuntimeAdapter:
             self.orchestrator.active_mastery.record_model(now_ms=now_ms)
         elif decision.action == "PRESENT_INTERVENING_ACTIVITY":
             self.orchestrator.active_mastery.record_intervening_activity()
-        return {"accepted": True, "code": "RESPONSE_PLAN_APPLIED", "planId": plan_id}
+        return {
+            "accepted": True, "code": "RESPONSE_PLAN_APPLIED", "planId": plan_id,
+            "responseText": plan.response_text(),
+        }
 
     async def course_continue(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         if not self._operation_allowed("course_continue"):

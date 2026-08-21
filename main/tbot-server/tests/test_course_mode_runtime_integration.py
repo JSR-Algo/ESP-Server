@@ -382,6 +382,31 @@ async def test_response_plan_must_pass_fail_closed_validator() -> None:
 
 
 @pytest.mark.asyncio
+async def test_approved_response_plan_returns_exact_bounded_child_speech() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    decision = await runtime.course_continue({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "speech-decision",
+    })
+    result = await runtime.course_apply_response_plan({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 2,
+        "observationId": "speech-plan", "planId": "speech-plan",
+        "decisionId": decision["decisionId"], "acknowledgment": "I hear you.",
+        "relation": "Let us look together.", "guidance": "Look at the picture.",
+        "invitation": "What do you see?", "questionCount": 1,
+        "embodiedIntent": decision["embodiedIntent"], "targetFactsUsed": ["animals.cat"],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    })
+
+    assert result["responseText"] == (
+        "I hear you. Let us look together. Look at the picture. What do you see?"
+    )
+
+
+@pytest.mark.asyncio
 async def test_response_plan_cannot_leak_target_when_decision_forbids_modeling() -> None:
     runtime = course_mode_runtime_from_manifest(
         {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,

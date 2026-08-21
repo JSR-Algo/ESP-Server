@@ -227,6 +227,7 @@ async def _execute_course(conn: Any, tool_name: str, arguments: Mapping[str, Any
     if isinstance(result, Mapping) and isinstance(context, Mapping):
         result = {**result, "context": dict(context)}
     admission = _GOOGLE_LIVE_LESSON_ADMISSION.get()
+    provider = admission[0] if isinstance(admission, tuple) and len(admission) == 3 else None
     receipt = admission[2] if isinstance(admission, tuple) and len(admission) == 3 else None
     refreshed_identity = context.get("identity") if isinstance(context, Mapping) else None
     if (
@@ -239,6 +240,19 @@ async def _execute_course(conn: Any, tool_name: str, arguments: Mapping[str, Any
             "canonicalToolName": tool_name,
             "refreshedIdentity": dict(refreshed_identity),
         })
+    if (
+        tool_name == "course_apply_response_plan"
+        and isinstance(result, Mapping)
+        and result.get("accepted") is True
+        and isinstance(result.get("responseText"), str)
+    ):
+        sender = getattr(provider, "_send_live_text_ack", None)
+        if callable(sender):
+            await sender(
+                result["responseText"],
+                log_label="course_response_plan",
+                allow_lesson_output=True,
+            )
     return ActionResponse(action=Action.REQLLM, result=result)
 
 

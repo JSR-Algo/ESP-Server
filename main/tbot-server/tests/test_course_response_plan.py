@@ -52,3 +52,11 @@ def test_safety_plan_may_pause_or_comfort_without_target_elicitation() -> None:
         embodiedIntent="COMFORT_CALM", targetFactsUsed=[], safetyMode=True,
     ), approved_fact_codes={"animals.cat"})
     assert plan.safety_mode is True
+
+
+def test_underreported_questions_fail_closed() -> None:
+    with pytest.raises(CourseResponsePlanError):
+        CourseResponsePlan.from_mapping(
+            valid(guidance="What is it? Can you say it?", invitation="Ready?", questionCount=1),
+            approved_fact_codes={"animals.cat", "pet"},
+        )

@@ -17,7 +17,7 @@ import time
 from core.utils import textUtils
 from core.voice.child_safety import SAFE_DEFLECTION_LINE, screen_model_output
 from core.voice.session_orchestrator import SessionMode, normalize_session_mode
-from core.providers.tools.product_toolset import LESSON_CONVERSATION_TOOLS  # noqa: E402
+from core.providers.tools.product_toolset import LESSON_SEMANTIC_TOOLS  # noqa: E402
 from core.lesson.log_context import with_lesson_log_context
 
 
@@ -671,7 +671,7 @@ class GoogleLiveAudioBridge:
                 return False
             if any(
                 isinstance(call, Mapping)
-                and call.get("name") in LESSON_CONVERSATION_TOOLS
+                and call.get("name") in LESSON_SEMANTIC_TOOLS
                 for call in calls
             ):
                 return False

@@ -15,14 +15,21 @@ from plugins_func.functions.lesson_conversation import (
     course_open_context,
 )
 from core.providers.tools.product_toolset import LESSON_SEMANTIC_TOOLS
+from core.voice.google_live.audio_bridge import GoogleLiveAudioBridge
+from core.voice.session_orchestrator import SessionMode
 
 
 class Provider:
     def __init__(self, generation: int = 4) -> None:
         self.generation = generation
+        self.lesson_text = []
 
     def current_response_id(self) -> int:
         return self.generation
+
+    async def _send_live_text_ack(self, text, *, log_label, allow_lesson_output):
+        self.lesson_text.append((text, log_label, allow_lesson_output))
+        return True
 
 
 class Runtime:
@@ -174,3 +181,46 @@ async def test_all_advertised_operations_route_to_active_runtime() -> None:
             response = await operation(conn, **arguments)
             assert response.result["operation"] == expected
             assert response.result["context"]["activeTargetId"] == "toys.ball"
+
+
+@pytest.mark.asyncio
+async def test_approved_course_plan_uses_bounded_lesson_output_path() -> None:
+    conn = Conn()
+    arguments = {
+        "lessonSessionId": "s1", "turnSequenceId": 1, "observationId": "o1",
+        "planId": "p1", "decisionId": "d1", "acknowledgment": "Heard.",
+        "relation": "Okay.", "guidance": "Look.", "invitation": "Ready?",
+        "questionCount": 1, "embodiedIntent": "INVITE_CHILD", "targetFactsUsed": [],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    }
+    conn.lesson_runtime.course_apply_response_plan = lambda _arguments: None
+
+    async def apply(_arguments):
+        return {
+            "accepted": True, "code": "RESPONSE_PLAN_APPLIED",
+            "responseText": "Heard. Okay. Look. Ready?",
+        }
+
+    conn.lesson_runtime.course_apply_response_plan = apply
+    with _google_live_lesson_tool_admission(conn.voice_provider, 4):
+        response = await course_apply_response_plan(conn, **arguments)
+
+    assert response.result["accepted"] is True
+    assert conn.voice_provider.lesson_text == [
+        ("Heard. Okay. Look. Ready?", "course_response_plan", True),
+    ]
+
+
+def test_audio_bridge_admits_course_tool_calls_during_lesson_mode() -> None:
+    conn = Conn()
+    conn.session_mode = SessionMode.LESSON
+    conn.lesson_runtime.state = "RUNNING"
+    conn.google_live_lesson_prompt_output_allowed = False
+    bridge = GoogleLiveAudioBridge.__new__(GoogleLiveAudioBridge)
+    bridge.conn = conn
+    bridge._active_response_id = 1
+    bridge._response_id_getter = lambda: 1
+
+    assert bridge._should_drop_lesson_model_output(
+        "tool_call", {"calls": [{"name": "course_continue"}]},
+    ) is False

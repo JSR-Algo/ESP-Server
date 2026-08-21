@@ -76,8 +76,9 @@ def product_tool_names(conn: Any) -> List[str]:
     names.extend(_configured_child_tools(conn))
     if lesson_start_enabled(conn):
         names.extend(ALWAYS_INCLUDE_WHEN_LESSON_ENABLED)
-    course_mode_enabled = course_mode_runtime_enabled(conn)
-    if course_mode_enabled:
+    runtime = getattr(conn, "lesson_runtime", None)
+    active_course_mode = getattr(runtime, "course_mode_active", False) is True
+    if active_course_mode or (runtime is None and course_mode_runtime_enabled(conn)):
         names.extend(COURSE_MODE_TOOLS)
     elif lesson_runtime_enabled(conn):
         names.extend(LESSON_CONVERSATION_TOOLS)

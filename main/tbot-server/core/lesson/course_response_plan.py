@@ -51,6 +51,8 @@ class CourseResponsePlan:
         if not isinstance(facts, list) or any(fact not in approved_fact_codes for fact in facts):
             raise CourseResponsePlanError("UNAPPROVED_FACT")
         text = " ".join(str(value[key]) for key in ("acknowledgment", "relation", "guidance", "invitation")).casefold()
+        if text.count("?") != value["questionCount"]:
+            raise CourseResponsePlanError("QUESTION_COUNT_MISMATCH")
         if any(token in text for token in _PROHIBITED):
             raise CourseResponsePlanError("PROHIBITED_WORDING")
         try:
@@ -72,3 +74,9 @@ class CourseResponsePlan:
             target_facts_used=tuple(facts), praise_level=str(value["praiseLevel"]),
             safety_mode=bool(value["safetyMode"]), normal_miss=bool(value["normalMiss"]),
         )
+
+    def response_text(self) -> str:
+        return " ".join(filter(None, (
+            self.acknowledgment.strip(), self.relation.strip(),
+            self.guidance.strip(), self.invitation.strip(),
+        )))

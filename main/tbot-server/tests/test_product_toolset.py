@@ -155,6 +155,11 @@ class ProductToolsetContractTest(unittest.TestCase):
             "lesson_visual_reaction", "lesson_continue",
         }.isdisjoint(names))
 
+        conn.lesson_runtime = type("Runtime", (), {"course_mode_active": False})()
+        names = _classic_names(conn)
+        self.assertTrue(course_tools.isdisjoint(names))
+        self.assertIn("lesson_continue", names)
+
     def test_child_product_toolset_allows_safe_realtime_tools_but_excludes_danger_tools(self):
         conn = _ToolsetConn(runtime_enabled=True)
         child_names = _classic_names(conn)
