@@ -240,33 +240,36 @@ async def _execute_course(conn: Any, tool_name: str, arguments: Mapping[str, Any
         and result.get("accepted") is True
         and isinstance(result.get("responseText"), str)
     ):
-        sender = getattr(provider, "_send_live_text_ack", None)
-        delivered = False
-        if callable(sender):
-            try:
-                delivered = bool(await sender(
-                    result["responseText"],
-                    log_label="course_response_plan",
-                    allow_lesson_output=True,
-                ))
-            except Exception:
-                delivered = False
-        if not delivered:
-            rollback = getattr(runtime, "rollback_course_response_plan", None)
-            if callable(rollback):
-                rollback(dict(arguments))
-            refreshed = snapshot() if callable(snapshot) else None
-            result = {
-                "accepted": False,
-                "code": "RESPONSE_DELIVERY_FAILED",
-                "retryable": True,
-            }
-            if isinstance(refreshed, Mapping):
-                result["context"] = dict(refreshed)
-            return ActionResponse(action=Action.REQLLM, result=result)
-        commit = getattr(runtime, "commit_course_response_plan", None)
-        if callable(commit):
-            commit(dict(arguments))
+        delivery_check = getattr(runtime, "response_plan_requires_delivery", None)
+        requires_delivery = not callable(delivery_check) or delivery_check(dict(arguments))
+        if requires_delivery:
+            sender = getattr(provider, "_send_live_text_ack", None)
+            delivered = False
+            if callable(sender):
+                try:
+                    delivered = bool(await sender(
+                        result["responseText"],
+                        log_label="course_response_plan",
+                        allow_lesson_output=True,
+                    ))
+                except Exception:
+                    delivered = False
+            if not delivered:
+                rollback = getattr(runtime, "rollback_course_response_plan", None)
+                if callable(rollback):
+                    rollback(dict(arguments))
+                refreshed = snapshot() if callable(snapshot) else None
+                result = {
+                    "accepted": False,
+                    "code": "RESPONSE_DELIVERY_FAILED",
+                    "retryable": True,
+                }
+                if isinstance(refreshed, Mapping):
+                    result["context"] = dict(refreshed)
+                return ActionResponse(action=Action.REQLLM, result=result)
+            commit = getattr(runtime, "commit_course_response_plan", None)
+            if callable(commit):
+                commit(dict(arguments))
     if (
         isinstance(result, Mapping)
         and result.get("accepted") is True

@@ -61,6 +61,9 @@ class Runtime:
     def commit_course_response_plan(self, arguments):
         self.committed_plan = dict(arguments)
 
+    def response_plan_requires_delivery(self, arguments):
+        return True
+
     async def course_continue(self, arguments):
         return {"accepted": True, "operation": "continue", "arguments": arguments}
 
@@ -220,6 +223,32 @@ async def test_approved_course_plan_uses_bounded_lesson_output_path() -> None:
         ("Heard. Okay. Look. Ready?", "course_response_plan", True),
     ]
     assert conn.lesson_runtime.committed_plan == arguments
+
+
+@pytest.mark.asyncio
+async def test_committed_course_plan_replay_does_not_repeat_child_speech() -> None:
+    conn = Conn()
+    arguments = {
+        "lessonSessionId": "s1", "turnSequenceId": 1, "observationId": "o1",
+        "planId": "p1", "decisionId": "d1", "acknowledgment": "Heard.",
+        "relation": "Okay.", "guidance": "Look.", "invitation": "Ready?",
+        "questionCount": 1, "embodiedIntent": "INVITE_CHILD", "targetFactsUsed": [],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    }
+
+    async def replay(_arguments):
+        return {
+            "accepted": True, "code": "RESPONSE_PLAN_APPLIED",
+            "planId": "p1", "responseText": "Heard. Okay. Look. Ready?",
+        }
+
+    conn.lesson_runtime.course_apply_response_plan = replay
+    conn.lesson_runtime.response_plan_requires_delivery = lambda _arguments: False
+    with _google_live_lesson_tool_admission(conn.voice_provider, 4):
+        response = await course_apply_response_plan(conn, **arguments)
+
+    assert response.result["accepted"] is True
+    assert conn.voice_provider.lesson_text == []
 
 
 @pytest.mark.asyncio

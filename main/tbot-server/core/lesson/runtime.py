@@ -186,13 +186,18 @@ class CourseModeRuntimeAdapter:
         self, operation: str, arguments: Dict[str, Any], decision: CourseDecision,
     ) -> Dict[str, Any]:
         result = self._remember(decision)
+        self._store_operation_result(operation, arguments, result)
+        return result
+
+    def _store_operation_result(
+        self, operation: str, arguments: Dict[str, Any], result: Dict[str, Any],
+    ) -> None:
         key = (arguments["lessonSessionId"], arguments["observationId"])
         self._operation_results[key] = {
             "operation": operation,
             "turnSequenceId": arguments["turnSequenceId"],
             "result": copy.deepcopy(result),
         }
-        return result
 
     @staticmethod
     def _is_safety_interrupt(operation: str, arguments: Dict[str, Any] | None) -> bool:
@@ -224,6 +229,18 @@ class CourseModeRuntimeAdapter:
             return operation in {"course_observe_child", "course_continue"}
         if state is SessionState.REGULATION_BREAK:
             return operation in {"course_observe_child", "course_continue"}
+        if state is SessionState.PREPARING:
+            if arguments is None:
+                return operation in {
+                    "course_observe_child", "course_open_context", "course_continue",
+                }
+            return operation == "course_continue" or safety_interrupt
+        if state is SessionState.OPENING:
+            if operation == "course_observe_child":
+                return True
+            if arguments is None:
+                return operation in {"course_observe_child", "course_open_context", "course_continue"}
+            return operation == "course_continue" or safety_interrupt
         if state is SessionState.CONTEXT_BRANCH:
             if arguments is None:
                 return operation in {
@@ -309,6 +326,15 @@ class CourseModeRuntimeAdapter:
         error = self._consume_operation(arguments)
         if error is not None:
             return error
+        if (
+            self.orchestrator.session_state is SessionState.OPENING
+            and arguments.get("safetyClass") == "normal"
+            and arguments.get("intent") == "answer"
+            and arguments.get("semanticClass") not in {"related", "unrelated"}
+        ):
+            return self._remember_operation(
+                operation, arguments, self.orchestrator.continue_opening(),
+            )
         observation = ChildObservation(
             observation_id=arguments["observationId"], turn_sequence_id=arguments["turnSequenceId"],
             semantic_class=arguments["semanticClass"], speech_class=arguments["speechClass"],
@@ -354,6 +380,10 @@ class CourseModeRuntimeAdapter:
         ))
 
     async def course_apply_response_plan(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        operation = "course_apply_response_plan"
+        replay = self._replay_operation(operation, arguments)
+        if replay is not None:
+            return replay
         error = self._consume_operation(arguments)
         if error is not None:
             return error
@@ -401,9 +431,14 @@ class CourseModeRuntimeAdapter:
         }
         if plan.safety_mode is not protected_decision:
             return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+        result = {
+            "accepted": True, "code": "RESPONSE_PLAN_APPLIED", "planId": plan_id,
+            "responseText": plan.response_text(),
+        }
         self._response_plan_rollback = {
             "arguments": dict(arguments),
             "orchestrator": self.orchestrator.snapshot(),
+            "result": copy.deepcopy(result),
         }
         self._applied_plan_ids.add(plan_id)
         self._applied_decision_ids.add(decision.decision_id)
@@ -412,10 +447,7 @@ class CourseModeRuntimeAdapter:
             self.orchestrator.active_mastery.record_model(now_ms=now_ms)
         elif decision.action == "PRESENT_INTERVENING_ACTIVITY":
             self.orchestrator.active_mastery.record_intervening_activity()
-        return {
-            "accepted": True, "code": "RESPONSE_PLAN_APPLIED", "planId": plan_id,
-            "responseText": plan.response_text(),
-        }
+        return result
 
     def rollback_course_response_plan(self, arguments: Dict[str, Any]) -> bool:
         rollback = self._response_plan_rollback
@@ -435,8 +467,15 @@ class CourseModeRuntimeAdapter:
         rollback = self._response_plan_rollback
         if rollback is None or rollback["arguments"] != arguments:
             return False
+        self._store_operation_result(
+            "course_apply_response_plan", arguments, rollback["result"],
+        )
         self._response_plan_rollback = None
         return True
+
+    def response_plan_requires_delivery(self, arguments: Dict[str, Any]) -> bool:
+        rollback = self._response_plan_rollback
+        return bool(rollback is not None and rollback["arguments"] == arguments)
 
     async def course_continue(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         operation = "course_continue"

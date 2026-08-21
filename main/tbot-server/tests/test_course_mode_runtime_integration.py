@@ -90,6 +90,7 @@ async def test_adapter_rejects_cross_session_and_uses_elapsed_server_clock() -> 
     })
     assert wrong == {"accepted": False, "code": "LESSON_SESSION_MISMATCH"}
 
+    runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
     runtime.orchestrator.active_mastery.record_model(now_ms=10_000)
     runtime.orchestrator.active_mastery.record_intervening_activity()
     accepted = await runtime.course_observe_child({
@@ -193,6 +194,57 @@ async def test_duplicate_replay_requires_matching_session_operation_and_turn() -
 
 
 @pytest.mark.asyncio
+async def test_preparing_rejects_normal_observation_without_consuming_opening_turn() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    rejected = await runtime.course_observe_child({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "premature-meaning", "semanticClass": "meaning_vi",
+        "speechClass": "not_applicable", "language": "vi", "intent": "answer",
+        "engagement": "engaged", "safetyClass": "normal", "assessmentEligible": True,
+        "confidenceBand": "high", "activityId": "cat-meaning-left-right-01",
+        "contextId": "cat_dog_visual_contrast", "robotAudioContaminated": False,
+        "targetTextVisible": False,
+    })
+    opening = await runtime.course_continue({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "opening",
+    })
+
+    assert rejected == {"accepted": False, "code": "COURSE_OPERATION_NOT_ALLOWED"}
+    assert opening["action"] == "GREET_AND_CHECK_IN"
+    assert runtime.orchestrator.active_mastery.level is EvidenceLevel.NOT_STARTED
+
+
+@pytest.mark.asyncio
+async def test_opening_observation_advances_social_sequence_without_mastery() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    greeting = await runtime.course_continue({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "opening",
+    })
+    runtime._applied_decision_ids.add(greeting["decisionId"])
+    response = await runtime.course_observe_child({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 2,
+        "observationId": "check-in-answer", "semanticClass": "meaning_vi",
+        "speechClass": "not_applicable", "language": "vi", "intent": "answer",
+        "engagement": "engaged", "safetyClass": "normal", "assessmentEligible": True,
+        "confidenceBand": "high", "activityId": "cat-meaning-left-right-01",
+        "contextId": "cat_dog_visual_contrast", "robotAudioContaminated": False,
+        "targetTextVisible": False,
+    })
+
+    assert response["action"] == "ACKNOWLEDGE_AND_BUILD_CURIOSITY"
+    assert response["nextState"] == "OPENING"
+    assert runtime.orchestrator.active_mastery.level is EvidenceLevel.NOT_STARTED
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("reporting_tool", ["observe", "open_context"])
 async def test_safety_disclosure_interrupts_pending_context_branch(
     reporting_tool: str,
@@ -202,6 +254,7 @@ async def test_safety_disclosure_interrupts_pending_context_branch(
     )
     assert runtime is not None
     identity = runtime.lesson_session_id
+    runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
     opened = await runtime.course_open_context({
         "lessonSessionId": identity, "turnSequenceId": 1,
         "observationId": "story", "branchType": "RELATED_STORY",
@@ -266,6 +319,11 @@ async def test_failed_delivery_rollback_keeps_exact_response_plan_retryable() ->
     assert runtime.commit_course_response_plan(arguments) is True
     assert runtime.rollback_course_response_plan(arguments) is False
 
+    replay = await runtime.course_apply_response_plan(arguments)
+    assert replay["accepted"] is True
+    assert replay["responseText"] == "I hear you. Let us look together. Look at the picture. Ready?"
+    assert runtime.response_plan_requires_delivery(arguments) is False
+
 
 @pytest.mark.asyncio
 async def test_production_runtime_starts_course_budget_when_protocol_activates() -> None:
@@ -312,6 +370,7 @@ async def test_adapter_implements_all_advertised_operations_and_forwards_safe_ev
         "embodiedIntent": greeted["embodiedIntent"], "targetFactsUsed": [],
         "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
     }))["accepted"] is True
+    runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
     opened = await runtime.course_open_context({
         **identity, "turnSequenceId": 3, "observationId": "operation-3",
         "branchType": "RELATED_STORY",
@@ -398,6 +457,7 @@ async def test_course_continue_does_not_resume_vocabulary_from_protected_pause(
     )
     assert runtime is not None
     identity = runtime.contract.lesson_session_id
+    runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
     paused = await runtime.course_observe_child({
         "lessonSessionId": identity, "turnSequenceId": 1, "observationId": "pause",
         "semanticClass": "unknown", "speechClass": "not_applicable", "language": "vi",
@@ -667,6 +727,7 @@ async def test_response_plan_rejects_rejected_decision_and_inactive_target_facts
         {"courseModeContract": contract()}, enabled=True, clock=lambda: 0.0,
     )
     assert runtime is not None
+    runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
     rejected = await runtime.course_observe_child({
         "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
         "observationId": "invalid-activity", "semanticClass": "target_en",
