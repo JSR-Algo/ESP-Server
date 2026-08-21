@@ -113,11 +113,14 @@ class CourseModeRuntimeAdapter:
         assignment_id: str | None = None, forwarder: Any = None,
         runtime_session_id: str | None = None,
         assessment_state: Callable[[], Dict[str, Any]] | None = None,
+        defer_evidence_forwarding: bool = False,
     ) -> None:
         self.contract = contract
         self.lesson_session_id = runtime_session_id or contract.lesson_session_id
         self._clock = clock
         self._assessment_state = assessment_state or (lambda: {})
+        self._defer_evidence_forwarding = defer_evidence_forwarding
+        self._pending_evidence_batches: list[Dict[str, Any]] = []
         self._started_at_ms = int(clock() * 1_000)
         self.assignment_id = assignment_id
         self.forwarder = forwarder
@@ -331,9 +334,9 @@ class CourseModeRuntimeAdapter:
             }
         return context
 
-    def _forward_evidence(self, decision: CourseDecision) -> None:
+    def _evidence_batch(self, decision: CourseDecision) -> Dict[str, Any] | None:
         if decision.evidence_event is None or self.forwarder is None or not self.assignment_id:
-            return
+            return None
         mastery = self.orchestrator.active_mastery
         leak = mastery.answer_leakage
         elapsed = 0 if leak.last_full_model_at_ms is None else max(0, int(self._clock() * 1_000) - leak.last_full_model_at_ms)
@@ -344,11 +347,25 @@ class CourseModeRuntimeAdapter:
             "elapsedSinceFullModelMs": elapsed,
             "interveningActivityCount": leak.intervening_activity_count,
         })
-        self.forwarder.enqueue({
+        return {
             "assignmentId": self.assignment_id,
             "sessionId": self.lesson_session_id,
             "events": [event],
-        })
+        }
+
+    def _forward_evidence(self, decision: CourseDecision) -> None:
+        batch = self._evidence_batch(decision)
+        if batch is None:
+            return
+        if self._defer_evidence_forwarding:
+            self._pending_evidence_batches.append(batch)
+            return
+        self.forwarder.enqueue(batch)
+
+    def flush_pending_evidence(self) -> None:
+        batches, self._pending_evidence_batches = self._pending_evidence_batches, []
+        for batch in batches:
+            self.forwarder.enqueue(batch)
 
     async def course_observe_child(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         operation = "course_observe_child"
@@ -658,6 +675,7 @@ class CourseModeRuntimeAdapter:
         clock: Callable[[], float] = time.monotonic, assignment_id: str | None = None,
         forwarder: Any = None, runtime_session_id: str | None = None,
         assessment_state: Callable[[], Dict[str, Any]] | None = None,
+        defer_evidence_forwarding: bool = False,
     ) -> "CourseModeRuntimeAdapter":
         if snapshot.get("snapshotVersion") != 1:
             raise ValueError("unsupported course mode snapshot")
@@ -669,6 +687,7 @@ class CourseModeRuntimeAdapter:
         value = cls(
             contract, clock=clock, assignment_id=assignment_id, forwarder=forwarder,
             runtime_session_id=snapshot_session_id, assessment_state=assessment_state,
+            defer_evidence_forwarding=defer_evidence_forwarding,
         )
         value._started_at_ms = snapshot["startedAtMs"]
         value.orchestrator = CourseOrchestrator.restore(contract, snapshot["orchestrator"])
@@ -700,6 +719,7 @@ def course_mode_runtime_from_manifest(
     runtime_session_id: str | None = None,
     authoritative_snapshot: Dict[str, Any] | None = None,
     assessment_state: Callable[[], Dict[str, Any]] | None = None,
+    defer_evidence_forwarding: bool = False,
 ) -> CourseModeRuntimeAdapter | None:
     if not enabled or not isinstance(manifest, dict) or "courseModeContract" not in manifest:
         return None
@@ -709,10 +729,25 @@ def course_mode_runtime_from_manifest(
             contract, authoritative_snapshot, clock=clock, assignment_id=assignment_id,
             forwarder=forwarder, runtime_session_id=runtime_session_id,
             assessment_state=assessment_state,
+            defer_evidence_forwarding=defer_evidence_forwarding,
         )
     return CourseModeRuntimeAdapter(
         contract, clock=clock, assignment_id=assignment_id, forwarder=forwarder,
         runtime_session_id=runtime_session_id, assessment_state=assessment_state,
+        defer_evidence_forwarding=defer_evidence_forwarding,
+    )
+
+
+def _course_mode_snapshot_is_terminal(snapshot: Any) -> bool:
+    if not isinstance(snapshot, dict):
+        return False
+    orchestrator = snapshot.get("orchestrator")
+    return bool(
+        isinstance(orchestrator, dict)
+        and orchestrator.get("sessionState") in {
+            SessionState.CLOSING.value,
+            SessionState.COMPLETE.value,
+        }
     )
 
 
@@ -1815,6 +1850,8 @@ class LessonRuntime:
         course_mode_snapshot_device_id: str | None = None,
         course_mode_snapshot: Dict[str, Any] | None = None,
     ) -> None:
+        if _course_mode_snapshot_is_terminal(course_mode_snapshot):
+            course_mode_snapshot = None
         self.conn = conn
         # Demo-only: when a child stays silent through an interactive step, model the
         # answer aloud and advance instead of abandoning with a sad face. Real assigned
@@ -1876,6 +1913,7 @@ class LessonRuntime:
             forwarder=forwarder,
             runtime_session_id=self.session_id,
             authoritative_snapshot=course_mode_snapshot,
+            defer_evidence_forwarding=True,
             assessment_state=lambda: {
                 "robotAudioContaminated": bool(
                     getattr(self.conn, "client_is_speaking", False)
@@ -2004,6 +2042,8 @@ class LessonRuntime:
         result = await getattr(self.course_mode, name)(arguments)
         if result.get("accepted") is not True:
             return result
+        if name == "course_apply_response_plan":
+            return result
         try:
             await self.persist_course_mode_snapshot()
         except Exception:
@@ -2015,8 +2055,10 @@ class LessonRuntime:
                 forwarder=self.forwarder,
                 runtime_session_id=self.session_id,
                 assessment_state=self.course_mode._assessment_state,
+                defer_evidence_forwarding=True,
             )
             return {"accepted": False, "code": "COURSE_SNAPSHOT_PERSIST_FAILED"}
+        self.course_mode.flush_pending_evidence()
         return result
 
     async def persist_course_mode_snapshot(self) -> None:
@@ -2048,23 +2090,7 @@ class LessonRuntime:
     async def rollback_course_response_plan(self, arguments: Dict[str, Any]) -> bool:
         if self.course_mode is None:
             return False
-        before = self.course_mode.snapshot()
-        rolled_back = self.course_mode.rollback_course_response_plan(arguments)
-        if rolled_back:
-            try:
-                await self.persist_course_mode_snapshot()
-            except Exception:
-                self.course_mode = CourseModeRuntimeAdapter.restore(
-                    self.course_mode.contract,
-                    before,
-                    clock=self.course_mode._clock,
-                    assignment_id=self.assignment_id,
-                    forwarder=self.forwarder,
-                    runtime_session_id=self.session_id,
-                    assessment_state=self.course_mode._assessment_state,
-                )
-                return False
-        return rolled_back
+        return self.course_mode.rollback_course_response_plan(arguments)
 
     async def commit_course_response_plan(self, arguments: Dict[str, Any]) -> bool:
         if self.course_mode is None:
@@ -2075,7 +2101,7 @@ class LessonRuntime:
             try:
                 await self.persist_course_mode_snapshot()
             except Exception:
-                self.course_mode = CourseModeRuntimeAdapter.restore(
+                restored = CourseModeRuntimeAdapter.restore(
                     self.course_mode.contract,
                     before,
                     clock=self.course_mode._clock,
@@ -2083,7 +2109,10 @@ class LessonRuntime:
                     forwarder=self.forwarder,
                     runtime_session_id=self.session_id,
                     assessment_state=self.course_mode._assessment_state,
+                    defer_evidence_forwarding=True,
                 )
+                restored.rollback_course_response_plan(arguments)
+                self.course_mode = restored
                 return False
         return committed
 
@@ -8206,6 +8235,11 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
             course_mode_snapshot = await course_mode_snapshot_store.load(
                 backend_device_id, assignment["assignmentId"],
             )
+            if _course_mode_snapshot_is_terminal(course_mode_snapshot):
+                await course_mode_snapshot_store.clear(
+                    backend_device_id, assignment["assignmentId"],
+                )
+                course_mode_snapshot = None
         except Exception as exc:
             _log("warning", f"course mode snapshot load failed: {type(exc).__name__}")
             return republish_previous

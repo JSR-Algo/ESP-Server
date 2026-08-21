@@ -635,6 +635,122 @@ async def test_production_runtime_persists_and_restores_course_snapshot() -> Non
 
 
 @pytest.mark.asyncio
+async def test_provisional_response_plan_is_not_persisted_before_delivery_commit() -> None:
+    store = MemoryCourseModeSnapshotStore()
+    manifest = {"courseModeContract": contract()}
+    runtime = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest=manifest, asset_cache=object(), forwarder=_Forwarder(),
+        course_mode_snapshot_store=store, course_mode_snapshot_device_id="device-1",
+    )
+    decision = await runtime.course_continue({
+        "lessonSessionId": runtime.session_id, "turnSequenceId": 1,
+        "observationId": "opening-before-delivery",
+    })
+    durable_before_plan = await store.load("device-1", "a1")
+    plan = {
+        "lessonSessionId": runtime.session_id, "turnSequenceId": 2,
+        "observationId": "plan-before-delivery", "planId": "plan-before-delivery",
+        "decisionId": decision["decisionId"], "acknowledgment": "Hello.",
+        "relation": "", "guidance": "", "invitation": "Ready?", "questionCount": 1,
+        "embodiedIntent": decision["embodiedIntent"], "targetFactsUsed": [],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    }
+
+    assert (await runtime.course_apply_response_plan(plan))["accepted"] is True
+    assert await store.load("device-1", "a1") == durable_before_plan
+
+    restored = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest=manifest, asset_cache=object(), forwarder=_Forwarder(),
+        course_mode_snapshot_store=store, course_mode_snapshot_device_id="device-1",
+        course_mode_snapshot=durable_before_plan,
+    )
+    assert (await restored.course_apply_response_plan(plan))["accepted"] is True
+    assert restored.course_mode.response_plan_requires_delivery(plan) is True
+
+
+@pytest.mark.asyncio
+async def test_failed_delivery_commit_restores_the_plan_as_retryable() -> None:
+    class FailingStore(MemoryCourseModeSnapshotStore):
+        async def store(self, device_id, assignment_id, snapshot) -> None:
+            raise RuntimeError("snapshot unavailable")
+
+    runtime = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest={"courseModeContract": contract()}, asset_cache=object(),
+        forwarder=_Forwarder(), course_mode_snapshot_store=FailingStore(),
+        course_mode_snapshot_device_id="device-1",
+    )
+    decision = await runtime.course_mode.course_continue({
+        "lessonSessionId": runtime.session_id, "turnSequenceId": 1,
+        "observationId": "opening-before-failed-commit",
+    })
+    plan = {
+        "lessonSessionId": runtime.session_id, "turnSequenceId": 2,
+        "observationId": "failed-commit-plan", "planId": "failed-commit-plan",
+        "decisionId": decision["decisionId"], "acknowledgment": "Hello.",
+        "relation": "", "guidance": "", "invitation": "Ready?", "questionCount": 1,
+        "embodiedIntent": decision["embodiedIntent"], "targetFactsUsed": [],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    }
+
+    assert (await runtime.course_apply_response_plan(plan))["accepted"] is True
+    assert await runtime.commit_course_response_plan(plan) is False
+    assert (await runtime.course_apply_response_plan(plan))["accepted"] is True
+    assert runtime.course_mode.response_plan_requires_delivery(plan) is True
+
+
+@pytest.mark.asyncio
+async def test_evidence_is_not_forwarded_when_snapshot_persistence_fails() -> None:
+    class FailingStore(MemoryCourseModeSnapshotStore):
+        async def store(self, device_id, assignment_id, snapshot) -> None:
+            raise RuntimeError("snapshot unavailable")
+
+    forwarder = _Forwarder()
+    runtime = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest={"courseModeContract": contract()}, asset_cache=object(), forwarder=forwarder,
+        course_mode_snapshot_store=FailingStore(), course_mode_snapshot_device_id="device-1",
+    )
+    runtime.course_mode.orchestrator.session_state = SessionState.WORD_ACTIVE
+    runtime.course_mode.orchestrator.active_mastery.record_model(now_ms=1_000)
+    runtime.course_mode.orchestrator.active_mastery.record_intervening_activity()
+
+    result = await runtime.course_observe_child({
+        "lessonSessionId": runtime.session_id, "turnSequenceId": 1,
+        "observationId": "evidence-with-failed-snapshot", "semanticClass": "target_en",
+        "speechClass": "exact", "language": "en", "intent": "answer",
+        "engagement": "engaged", "safetyClass": "normal", "assessmentEligible": True,
+        "confidenceBand": "high", "activityId": "cat-recall-visual-02",
+        "contextId": "cat_primary_visual_recall", "robotAudioContaminated": False,
+        "targetTextVisible": False,
+    })
+
+    assert result == {"accepted": False, "code": "COURSE_SNAPSHOT_PERSIST_FAILED"}
+    assert forwarder.batches == []
+
+
+def test_terminal_snapshot_starts_a_fresh_assignment_execution() -> None:
+    manifest = {"courseModeContract": contract()}
+    finished = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest=manifest, asset_cache=object(), forwarder=_Forwarder(),
+    )
+    finished.course_mode.orchestrator.session_state = SessionState.CLOSING
+    terminal_snapshot = finished.course_mode.snapshot()
+
+    restarted = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest=manifest, asset_cache=object(), forwarder=_Forwarder(),
+        course_mode_snapshot=terminal_snapshot,
+    )
+
+    assert restarted.session_id != finished.session_id
+    assert restarted.course_mode.orchestrator.session_state is SessionState.PREPARING
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("safety_class,intent", [("safety", "answer"), ("normal", "fatigue")])
 async def test_course_continue_does_not_resume_vocabulary_from_protected_pause(
     safety_class: str, intent: str,
