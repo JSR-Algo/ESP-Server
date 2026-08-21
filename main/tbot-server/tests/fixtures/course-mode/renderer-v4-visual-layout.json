@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "contractVersion": "renderer-v4.course-mode-layout.v1",
+  "contractChecksum": "e61b56d1f8219a86c7f3986e7d5c70b91f512286604b5b206ef11e2c989d275c",
+  "checksumRules": {
+    "algorithm": "SHA-256",
+    "canonicalization": "tbot-json-c14n.v1",
+    "encoding": "UTF-8",
+    "unicodeNormalization": "NFC",
+    "objectKeyOrder": "lexicographic",
+    "arrayOrder": "preserved",
+    "whitespace": "none",
+    "excludedJsonPointers": [
+      "/contractChecksum"
+    ]
+  },
+  "rendererId": "teebot-lesson-renderer.v4",
+  "canvas": {
+    "width": 480,
+    "height": 320
+  },
+  "layerOrder": [
+    "background",
+    "teachingObject",
+    "robotOverlay",
+    "transientFocusCue"
+  ],
+  "layers": {
+    "background": {
+      "zIndex": 0,
+      "bounds": {
+        "x": 0,
+        "y": 0,
+        "width": 480,
+        "height": 320
+      }
+    },
+    "teachingObject": {
+      "zIndex": 1,
+      "bounds": {
+        "x": 20,
+        "y": 168,
+        "width": 95,
+        "height": 95
+      }
+    },
+    "robotOverlay": {
+      "zIndex": 2,
+      "bounds": {
+        "x": 118,
+        "y": 160,
+        "width": 150,
+        "height": 150
+      }
+    },
+    "transientFocusCue": {
+      "zIndex": 3,
+      "bounds": {
+        "x": 0,
+        "y": 0,
+        "width": 480,
+        "height": 320
+      }
+    }
+  },
+  "collisionLimits": {
+    "robotTeachingObjectMaxOverlapPixels": 0,
+    "minimumHorizontalGapPixels": 3
+  },
+  "captionSafeArea": {
+    "x": 16,
+    "y": 16,
+    "width": 448,
+    "height": 52
+  },
+  "focusAnchors": {
+    "focus.center.primary": {
+      "x": 67,
+      "y": 215
+    },
+    "focus.left.choice": {
+      "x": 67,
+      "y": 215
+    },
+    "focus.right.choice": {
+      "x": 366,
+      "y": 215
+    }
+  },
+  "listeningCue": {
+    "bounds": {
+      "x": 282,
+      "y": 168,
+      "width": 182,
+      "height": 52
+    },
+    "minimumTextHeightPixels": 24,
+    "textKey": "course_mode.listening"
+  },
+  "reducedMotion": {
+    "fallback": "face_and_transient_focus_cue",
+    "preservesLearningMeaning": true,
+    "requiresServoMotion": false
+  },
+  "mirroring": {
+    "mode": "authored_focus_regions_only",
+    "automaticWholeCompositionMirror": false,
+    "inferDirectionFromModelText": false
+  }
+}

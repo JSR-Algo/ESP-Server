@@ -43,6 +43,58 @@ The active Farm v9 rollout belongs to Codex task
 not edit, reset, deploy, or republish that worktree. They may consume its final
 geometry, renderer, checksum, and physical evidence after those artifacts exist.
 
+## Task 00 Frozen Baseline
+
+Task 00 freezes `courseCompanion.v2.contract.v1` for fixture
+`course-mode-pilot-cat-ball`. Its canonical SHA-256 is
+`cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264`.
+The renderer layout contract is `renderer-v4.course-mode-layout.v1` with
+canonical SHA-256
+`e61b56d1f8219a86c7f3986e7d5c70b91f512286604b5b206ef11e2c989d275c`.
+
+Canonicalization is `tbot-json-c14n.v1`: remove only the top-level
+`contractChecksum`, normalize strings to NFC, recursively sort object keys
+lexicographically, preserve array order, serialize UTF-8 JSON with no
+insignificant whitespace, and hash the resulting bytes with SHA-256. The JSON
+artifacts declare these rules in `checksumRules`.
+
+Semantic fixture paths:
+
+- ESP: `main/tbot-server/tests/fixtures/course-mode/course-mode-pilot-cat-ball.json`
+- Firmware: `tests/fixtures/course-mode/course-mode-pilot-cat-ball.json`
+- Backend: `src/lessons/fixtures/course-mode/course-mode-pilot-cat-ball.json`
+
+Visual-layout fixture paths:
+
+- ESP: `main/tbot-server/tests/fixtures/course-mode/renderer-v4-visual-layout.json`
+- Firmware: `tests/fixtures/course-mode/renderer-v4-visual-layout.json`
+- Backend: `src/lessons/fixtures/course-mode/renderer-v4-visual-layout.json`
+
+Focused verification commands:
+
+```bash
+cd robot/esp32-server
+python3 -m pytest \
+  main/tbot-server/tests/test_course_mode_task00_contract.py \
+  main/tbot-server/tests/test_lesson_conversation_runtime.py -q
+
+cd robot/TBOT-Firmware
+python3 -m pytest \
+  tests/test_course_mode_task00_contract.py \
+  tests/test_lesson_cinematic_evidence_renderer_contract.py \
+  tests/test_lesson_content_contract.py -q
+
+cd tbot-backend
+npx vitest run \
+  src/lessons/fixtures/course-mode/course-mode-task00.contract.spec.ts \
+  src/lessons/lesson-manifest.checksum-parity.spec.ts \
+  src/lessons/tvideo-journey/fixtures/farm/farm-goldens.spec.ts \
+  src/lessons/lesson-manifest.logic.validation.spec.ts
+```
+
+The visual rationale and static composition rules are documented in
+[Course Mode renderer-v4 visual layout](../visual-layout-contract.md).
+
 ## Dependency Order
 
 | Task | Deliverable | Depends on | May run in parallel |

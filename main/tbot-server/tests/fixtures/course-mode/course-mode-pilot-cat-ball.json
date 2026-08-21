@@ -1,0 +1,261 @@
+{
+  "schemaVersion": 1,
+  "contractVersion": "courseCompanion.v2.contract.v1",
+  "contractChecksum": "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264",
+  "checksumRules": {
+    "algorithm": "SHA-256",
+    "canonicalization": "tbot-json-c14n.v1",
+    "encoding": "UTF-8",
+    "unicodeNormalization": "NFC",
+    "objectKeyOrder": "lexicographic",
+    "arrayOrder": "preserved",
+    "whitespace": "none",
+    "excludedJsonPointers": [
+      "/contractChecksum"
+    ]
+  },
+  "fixtureId": "course-mode-pilot-cat-ball",
+  "preset": {
+    "presetId": "courseCompanion",
+    "presetVersion": 2
+  },
+  "lesson": {
+    "lessonId": "course-mode-pilot-cat-ball",
+    "lessonVersion": 1,
+    "lessonSessionId": "00000000-0000-4000-8000-000000000201"
+  },
+  "targets": [
+    {
+      "targetId": "animals.cat",
+      "targetWord": "cat",
+      "role": "primary",
+      "vietnameseMeanings": [
+        "con mèo"
+      ],
+      "activityIds": [
+        "cat-discover-center-01",
+        "cat-meaning-left-right-01",
+        "cat-recall-visual-02",
+        "cat-transfer-scene-01",
+        "cat-delayed-recall-01"
+      ]
+    },
+    {
+      "targetId": "toys.ball",
+      "targetWord": "ball",
+      "role": "optional_secondary",
+      "vietnameseMeanings": [
+        "quả bóng"
+      ],
+      "activityIds": [
+        "ball-discover-center-01"
+      ]
+    }
+  ],
+  "evidenceNames": [
+    "NOT_STARTED",
+    "EXPOSED",
+    "UNDERSTOOD",
+    "SUPPORTED_SPEECH",
+    "INDEPENDENT_RECALL",
+    "TRANSFERRED",
+    "MASTERED_TODAY",
+    "REVIEW_NEEDED"
+  ],
+  "embodiedIntentNames": [
+    "REST_WARM",
+    "GREET_SMALL",
+    "INVITE_CHILD",
+    "PRESENT_CENTER",
+    "PRESENT_LEFT",
+    "PRESENT_RIGHT",
+    "LISTEN_STILL",
+    "THINK_CURIOUS",
+    "ACKNOWLEDGE_STORY",
+    "MODEL_WORD",
+    "ENCOURAGE_SMALL",
+    "TRY_DIFFERENT_WAY",
+    "CELEBRATE_RECALL",
+    "CELEBRATE_MASTERY",
+    "COMFORT_CALM",
+    "PAUSE_CHOICE",
+    "GOODBYE_SMALL"
+  ],
+  "visualFocus": {
+    "directionSource": "authored_visual_focus_region",
+    "regions": [
+      "focus.center.primary",
+      "focus.left.choice",
+      "focus.right.choice"
+    ],
+    "presentCenterTarget": "single_teaching_object"
+  },
+  "activities": [
+    {
+      "activityId": "cat-discover-center-01",
+      "targetId": "animals.cat",
+      "stage": "DISCOVER",
+      "activityType": "single_visual_discovery",
+      "evidenceName": "EXPOSED",
+      "contextId": "cat_primary_visual",
+      "embodiedIntent": "PRESENT_CENTER",
+      "visualFocusRegion": "focus.center.primary",
+      "answerPolicy": {
+        "targetTextVisible": false,
+        "targetAudioBeforeAssessment": false,
+        "spokenTargetInPrompt": false,
+        "multipleChoiceContainsTarget": false,
+        "minElapsedSinceFullModelMs": 0,
+        "minInterveningActivityCount": 0
+      },
+      "listeningTransition": [
+        "speech_complete",
+        "gesture_settled",
+        "head_centered",
+        "arms_lowered",
+        "motor_stopped",
+        "assessment_window_open"
+      ],
+      "reducedMotionFallback": "face_and_transient_focus_cue"
+    },
+    {
+      "activityId": "cat-meaning-left-right-01",
+      "targetId": "animals.cat",
+      "stage": "UNDERSTAND",
+      "activityType": "authored_two_choice_visual",
+      "evidenceName": "UNDERSTOOD",
+      "contextId": "cat_dog_visual_contrast",
+      "embodiedIntent": "PRESENT_LEFT",
+      "visualFocusRegion": "focus.left.choice",
+      "answerPolicy": {
+        "targetTextVisible": false,
+        "targetAudioBeforeAssessment": false,
+        "spokenTargetInPrompt": false,
+        "multipleChoiceContainsTarget": false,
+        "minElapsedSinceFullModelMs": 0,
+        "minInterveningActivityCount": 0
+      },
+      "listeningTransition": [
+        "speech_complete",
+        "gesture_settled",
+        "head_centered",
+        "arms_lowered",
+        "motor_stopped",
+        "assessment_window_open"
+      ],
+      "reducedMotionFallback": "face_and_transient_focus_cue"
+    },
+    {
+      "activityId": "cat-recall-visual-02",
+      "targetId": "animals.cat",
+      "stage": "RECALL",
+      "activityType": "independent_visual_naming",
+      "evidenceName": "INDEPENDENT_RECALL",
+      "contextId": "cat_primary_visual_recall",
+      "embodiedIntent": "PRESENT_CENTER",
+      "visualFocusRegion": "focus.center.primary",
+      "answerPolicy": {
+        "targetTextVisible": false,
+        "targetAudioBeforeAssessment": false,
+        "spokenTargetInPrompt": false,
+        "multipleChoiceContainsTarget": false,
+        "minElapsedSinceFullModelMs": 20000,
+        "minInterveningActivityCount": 1
+      },
+      "listeningTransition": [
+        "speech_complete",
+        "gesture_settled",
+        "head_centered",
+        "arms_lowered",
+        "motor_stopped",
+        "assessment_window_open"
+      ],
+      "reducedMotionFallback": "face_and_transient_focus_cue"
+    },
+    {
+      "activityId": "cat-transfer-scene-01",
+      "targetId": "animals.cat",
+      "stage": "TRANSFER",
+      "activityType": "second_context_scene_naming",
+      "evidenceName": "TRANSFERRED",
+      "contextId": "cat_second_visual_scene",
+      "embodiedIntent": "PRESENT_RIGHT",
+      "visualFocusRegion": "focus.right.choice",
+      "answerPolicy": {
+        "targetTextVisible": false,
+        "targetAudioBeforeAssessment": false,
+        "spokenTargetInPrompt": false,
+        "multipleChoiceContainsTarget": false,
+        "minElapsedSinceFullModelMs": 20000,
+        "minInterveningActivityCount": 1
+      },
+      "listeningTransition": [
+        "speech_complete",
+        "gesture_settled",
+        "head_centered",
+        "arms_lowered",
+        "motor_stopped",
+        "assessment_window_open"
+      ],
+      "reducedMotionFallback": "face_and_transient_focus_cue"
+    },
+    {
+      "activityId": "cat-delayed-recall-01",
+      "targetId": "animals.cat",
+      "stage": "DELAYED_RECALL",
+      "activityType": "delayed_independent_naming",
+      "evidenceName": "MASTERED_TODAY",
+      "contextId": "cat_delayed_callback",
+      "embodiedIntent": "PRESENT_CENTER",
+      "visualFocusRegion": "focus.center.primary",
+      "answerPolicy": {
+        "targetTextVisible": false,
+        "targetAudioBeforeAssessment": false,
+        "spokenTargetInPrompt": false,
+        "multipleChoiceContainsTarget": false,
+        "minElapsedSinceFullModelMs": 20000,
+        "minInterveningActivityCount": 1
+      },
+      "listeningTransition": [
+        "speech_complete",
+        "gesture_settled",
+        "head_centered",
+        "arms_lowered",
+        "motor_stopped",
+        "assessment_window_open"
+      ],
+      "reducedMotionFallback": "face_and_transient_focus_cue"
+    },
+    {
+      "activityId": "ball-discover-center-01",
+      "targetId": "toys.ball",
+      "stage": "DISCOVER",
+      "activityType": "single_visual_discovery",
+      "evidenceName": "EXPOSED",
+      "contextId": "ball_primary_visual",
+      "embodiedIntent": "PRESENT_CENTER",
+      "visualFocusRegion": "focus.center.primary",
+      "answerPolicy": {
+        "targetTextVisible": false,
+        "targetAudioBeforeAssessment": false,
+        "spokenTargetInPrompt": false,
+        "multipleChoiceContainsTarget": false,
+        "minElapsedSinceFullModelMs": 0,
+        "minInterveningActivityCount": 0
+      },
+      "listeningTransition": [
+        "speech_complete",
+        "gesture_settled",
+        "head_centered",
+        "arms_lowered",
+        "motor_stopped",
+        "assessment_window_open"
+      ],
+      "reducedMotionFallback": "face_and_transient_focus_cue"
+    }
+  ],
+  "renderer": {
+    "rendererId": "teebot-lesson-renderer.v4",
+    "visualLayoutContract": "renderer-v4.course-mode-layout.v1"
+  }
+}
