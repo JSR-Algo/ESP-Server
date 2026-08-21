@@ -154,6 +154,19 @@ def test_target_related_facts_require_an_authorized_form(field, text, question_c
         )
 
 
+def test_invitation_cannot_introduce_an_unapproved_curriculum_subject() -> None:
+    with pytest.raises(CourseResponsePlanError, match="UNAPPROVED_FACT_WORDING"):
+        CourseResponsePlan.from_mapping(
+            valid(
+                acknowledgment="I hear you.", relation="", guidance="",
+                invitation="What color is the dinosaur?", questionCount=1,
+                targetFactsUsed=[],
+            ),
+            approved_fact_codes={"animals.cat"},
+            approved_fact_terms={"cat", "con mèo", "mèo"},
+        )
+
+
 def test_declarative_relation_without_an_authored_fact_fails_closed() -> None:
     with pytest.raises(CourseResponsePlanError, match="UNAPPROVED_FACT_WORDING"):
         CourseResponsePlan.from_mapping(

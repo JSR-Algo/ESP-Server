@@ -53,6 +53,14 @@ _FACT_INVITATION_LEAD_RE = re.compile(
     r"|^(?:trong\s+tiếng\s+anh|.+\s+là\s+gì)\b",
     re.IGNORECASE,
 )
+_FACT_FREE_INVITATION_RE = re.compile(
+    r"^(?:ready|again|what is it|what do you see|which one"
+    r"|do you want to (?:pause|stop|continue|try again)"
+    r"|(?:can|could|would) you (?:say|repeat|point|find|show) "
+    r"(?:it|this|that|again)"
+    r"|con muốn robot (?:ở yên|tạm dừng|dừng)(?: không)?)$",
+    re.IGNORECASE,
+)
 _TARGET_FACT_VERB_RE = re.compile(
     r"\b(?:is|are|was|were|can|could|will|would|has|have|"
     r"live|lives|eat|eats|fly|flies|sleep|sleeps|like|likes|"
@@ -206,7 +214,13 @@ class CourseResponsePlan:
                         raise CourseResponsePlanError("UNAPPROVED_FACT_WORDING")
                     continue
                 if field_index == 3:
-                    if contains_target and not _FACT_INVITATION_LEAD_RE.match(normalized):
+                    if (
+                        contains_target
+                        and not _FACT_INVITATION_LEAD_RE.match(normalized)
+                    ) or (
+                        not contains_target
+                        and not _FACT_FREE_INVITATION_RE.fullmatch(normalized)
+                    ):
                         raise CourseResponsePlanError("UNAPPROVED_FACT_WORDING")
                     continue
                 if (
