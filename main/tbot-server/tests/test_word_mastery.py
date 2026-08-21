@@ -96,3 +96,25 @@ def test_snapshot_restore_preserves_consumed_evidence_without_raw_child_content(
     replay = restored.record_meaning(evidence_id="m", activity_id="meaning", context_id="choice")
     assert replay.accepted is False
     assert restored.level is EvidenceLevel.UNDERSTOOD
+
+
+def test_later_transfer_cannot_downgrade_mastered_today() -> None:
+    mastery = WordMastery(target_id="animals.cat")
+    mastery.record_meaning(evidence_id="m", activity_id="meaning", context_id="choice")
+    eligible(mastery)
+    mastery.record_speech(
+        evidence_id="r", activity_id="recall", context_id="visual", now_ms=30_000,
+        semantic_class="target_en", speech_class="exact", assessment_eligible=True,
+        confidence_band="high",
+    )
+    mastery.record_transfer(evidence_id="t", activity_id="transfer", context_id="scene")
+    mastery.record_delayed_recall(
+        evidence_id="d", activity_id="delayed", context_id="callback", now_ms=70_000,
+        assessment_eligible=True, confidence_band="high",
+    )
+
+    result = mastery.record_transfer(
+        evidence_id="later-transfer", activity_id="transfer", context_id="scene",
+    )
+
+    assert result.level is EvidenceLevel.MASTERED_TODAY

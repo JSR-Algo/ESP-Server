@@ -120,7 +120,8 @@ class WordMastery:
             return self._result(False)
         if self._independent:
             self._transfer = True
-            self.level = EvidenceLevel.TRANSFERRED
+            if self.level is not EvidenceLevel.MASTERED_TODAY:
+                self.level = EvidenceLevel.TRANSFERRED
         return self._result()
 
     def record_delayed_recall(

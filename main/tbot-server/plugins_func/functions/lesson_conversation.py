@@ -163,7 +163,12 @@ async def _execute_course(conn: Any, tool_name: str, arguments: Mapping[str, Any
     operation = getattr(runtime, tool_name, None)
     if not callable(operation):
         return _rejected("COURSE_OPERATION_NOT_AVAILABLE")
-    return ActionResponse(action=Action.REQLLM, result=await operation(dict(arguments)))
+    result = await operation(dict(arguments))
+    snapshot = getattr(runtime, "conversation_tool_context", None)
+    context = snapshot() if callable(snapshot) else None
+    if isinstance(result, Mapping) and isinstance(context, Mapping):
+        result = {**result, "context": dict(context)}
+    return ActionResponse(action=Action.REQLLM, result=result)
 
 
 @register_function("course_observe_child", COURSE_MODE_TOOL_SPECS["course_observe_child"], ToolType.SYSTEM_CTL)

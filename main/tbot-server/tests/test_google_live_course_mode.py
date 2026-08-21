@@ -28,6 +28,13 @@ class Provider:
 class Runtime:
     course_mode_active = True
 
+    def conversation_tool_context(self):
+        return {
+            "identity": {"lessonSessionId": "s1", "turnSequenceId": 2},
+            "activeTargetId": "toys.ball",
+            "activities": [{"activityId": "ball-discover-center-01"}],
+        }
+
     async def course_observe_child(self, arguments):
         return {"accepted": True, "decisionId": "d1", "nextState": "WORD_ACTIVE", "arguments": arguments}
 
@@ -127,3 +134,4 @@ async def test_all_advertised_operations_route_to_active_runtime() -> None:
         for operation, arguments, expected in calls:
             response = await operation(conn, **arguments)
             assert response.result["operation"] == expected
+            assert response.result["context"]["activeTargetId"] == "toys.ball"

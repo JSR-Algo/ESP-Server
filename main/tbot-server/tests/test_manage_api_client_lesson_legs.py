@@ -368,6 +368,24 @@ class PostLessonEventContractTest(unittest.IsolatedAsyncioTestCase):
         # _normalize_lesson_event DROPS an emptied detail (it is not sent as {}).
         self.assertNotIn("detail", sent_event)
 
+    async def test_preserves_exact_privacy_safe_word_evidence_fields(self):
+        client = _RecordingClient([_FakeResponse(json_body={"data": {"accepted": 1}})])
+        event = {
+            "type": "word_evidence_recorded", "sequence": 12,
+            "targetId": "animals.cat", "evidenceLevel": "INDEPENDENT_RECALL",
+            "activityId": "cat-recall-visual-02", "contextId": "cat_primary_visual_recall",
+            "supportCodesSinceLastModel": [], "elapsedSinceFullModelMs": 32_000,
+            "interveningActivityCount": 1, "assessmentConfidenceBand": "high",
+            "reviewNeeded": False,
+        }
+
+        await MAC.post_lesson_event(
+            client, BASE, "dev1", {"assignmentId": "a1", "sessionId": "s1", "events": [event]},
+            token=TOKEN,
+        )
+
+        self.assertEqual(client.last["json"]["events"], [event])
+
     async def test_no_token_post_omits_authorization(self):
         client = _RecordingClient([_FakeResponse(json_body={"data": {"accepted": 0}})])
 

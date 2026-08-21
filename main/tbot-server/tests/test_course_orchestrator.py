@@ -134,6 +134,25 @@ def test_failed_delayed_recall_records_review_without_losing_transfer() -> None:
     assert decision.evidence_event["reviewNeeded"] is True
 
 
+def test_protected_pause_rejects_normal_learning_observations() -> None:
+    runtime = course()
+    runtime.begin(); runtime.continue_opening(); runtime.continue_opening()
+    runtime.observe(observation(
+        observation_id="safety", safety_class="safety", assessment_eligible=False,
+    ))
+    before = runtime.active_mastery.level
+
+    decision = runtime.observe(observation(
+        observation_id="normal-after-safety", semantic_class="meaning_vi",
+        activity_id="cat-meaning-left-right-01", context_id="cat_dog_visual_contrast",
+    ))
+
+    assert decision.action == "HOLD_PROTECTED_PAUSE"
+    assert decision.next_state is SessionState.SAFETY_PAUSED
+    assert decision.evidence_event is None
+    assert runtime.active_mastery.level is before
+
+
 def test_time_budget_prefers_one_deep_word_and_does_not_rush_secondary() -> None:
     runtime = course(); runtime.begin(); runtime.continue_opening(); runtime.continue_opening()
     decision = runtime.observe(observation(intent="answer", now_ms=541_000))

@@ -461,8 +461,15 @@ def _normalize_lesson_event(event: Dict) -> Dict:
     """
     if not isinstance(event, dict):
         return {}
+    event_type = event.get("type")
+    if event_type == "word_evidence_recorded":
+        fields = (
+            "type", "sequence", "targetId", "evidenceLevel", "activityId", "contextId",
+            "supportCodesSinceLastModel", "elapsedSinceFullModelMs",
+            "interveningActivityCount", "assessmentConfidenceBand", "reviewNeeded",
+        )
+        return {key: event[key] for key in fields if key in event and event[key] is not None}
     sanitized = _strip_lesson_sensitive_fields(event)
-    event_type = sanitized.get("type")
     out: Dict = {}
     _copy_lesson_event_fields(
         out,
