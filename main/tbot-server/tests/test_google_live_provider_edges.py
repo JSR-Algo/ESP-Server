@@ -3,6 +3,7 @@ import json
 import time
 import unittest
 from collections import deque
+from contextvars import ContextVar
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -12,6 +13,7 @@ from core.activity_lease import (
     ExclusiveDisposition,
 )
 from plugins_func.register import Action
+from plugins_func.functions import start_lesson as start_lesson_module
 from core.voice.live_admission import AdmissionDecision, AdmissionReason
 from core.voice.session_orchestrator import SessionMode
 import core.voice.session_provider.google_live as google_live_module
@@ -83,6 +85,13 @@ class _Conn:
         self.google_live_turn_started_at = None
         self.google_live_session_resumption_handle = None
         self._lesson_asset_last_audio_at = 0.0
+        self._lesson_start_handoff_generation = 0
+        self._lesson_start_handoff_holder_serial = 0
+        self._lesson_start_handoff_holders = set()
+        self._lesson_start_handoff_context = ContextVar(
+            f"provider_edge_handoff_{id(self):x}", default=None
+        )
+        self.handoff_releases = []
         self.voice_consent_client = _Consent(True)
         self.voice_provider = None
         self.clear_queue_calls = 0
@@ -98,6 +107,36 @@ class _Conn:
     def clearSpeakStatus(self):
         self.clear_speak_calls += 1
         self.client_is_speaking = False
+
+    def begin_lesson_start_handoff(self, *, reason):
+        if not self._lesson_start_handoff_holders:
+            self._lesson_start_handoff_generation += 1
+        self._lesson_start_handoff_holder_serial += 1
+        lease = (
+            self._lesson_start_handoff_generation,
+            self._lesson_start_handoff_holder_serial,
+        )
+        self._lesson_start_handoff_holders.add(lease)
+        self._lesson_start_handoff_context.set(lease)
+        return lease
+
+    def lesson_start_handoff_token(self):
+        lease = self._lesson_start_handoff_context.get()
+        return lease if lease in self._lesson_start_handoff_holders else None
+
+    def lesson_start_handoff_active(self):
+        return bool(self._lesson_start_handoff_holders)
+
+    async def release_lesson_start_handoff(
+        self, token, *, outcome, restore_conversation
+    ):
+        if token not in self._lesson_start_handoff_holders:
+            return False
+        self._lesson_start_handoff_holders.remove(token)
+        if self._lesson_start_handoff_context.get() == token:
+            self._lesson_start_handoff_context.set(None)
+        self.handoff_releases.append((token, outcome, restore_conversation))
+        return True
 
 
 class _Fallback:
@@ -4004,6 +4043,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(conn.client_abort)
         self.assertFalse(conn.client_is_speaking)
+        self.assertTrue(conn.lesson_start_handoff_active())
 
     async def test_lesson_transition_uses_terminal_voice_stop(self):
         conn = _Conn()
@@ -4099,6 +4139,262 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(admitted)
         provider._begin_user_interrupt.assert_awaited_once_with("lesson_start_intent")
+        self.assertFalse(conn.lesson_start_handoff_active())
+        self.assertEqual(conn.handoff_releases, [((1, 1), "live_transition_timeout", True)])
+
+    async def test_lesson_transition_exception_releases_handoff(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        provider._begin_user_interrupt = AsyncMock(side_effect=RuntimeError("stop failed"))
+
+        with self.assertRaisesRegex(RuntimeError, "stop failed"):
+            await provider.transition_to_lesson_start()
+
+        self.assertFalse(conn.lesson_start_handoff_active())
+        self.assertEqual(conn.handoff_releases, [((1, 1), "live_transition_failed", True)])
+
+    async def test_lesson_transition_cancellation_releases_handoff(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        interrupt_started = asyncio.Event()
+
+        async def block_interrupt(_reason):
+            interrupt_started.set()
+            await asyncio.Event().wait()
+
+        provider._begin_user_interrupt = block_interrupt
+        task = asyncio.create_task(provider.transition_to_lesson_start())
+        await interrupt_started.wait()
+        task.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertFalse(conn.lesson_start_handoff_active())
+        self.assertEqual(conn.handoff_releases, [((1, 1), "cancelled", True)])
+
+    async def test_failed_lesson_start_handoff_restores_connected_live_input(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._interaction.transition(google_live_module.InteractionState.WAITING_MODEL)
+        provider._open_user_audio_window = AsyncMock()
+        conn.client_abort = True
+
+        await provider.restore_after_lesson_start_handoff(outcome="START_REFUSED")
+
+        self.assertEqual(
+            provider._interaction.state,
+            google_live_module.InteractionState.LISTENING,
+        )
+        self.assertFalse(conn.client_abort)
+        provider._open_user_audio_window.assert_awaited_once_with(
+            "lesson_start_failed"
+        )
+        restored = json.loads(conn.websocket.sent[-1])
+        self.assertEqual(restored["type"], "tts")
+        self.assertEqual(restored["state"], "stop")
+        self.assertTrue(restored["continue_listening"])
+        self.assertEqual(restored["listen_mode"], "realtime")
+
+    async def test_spoken_start_keeps_manual_handoff_while_pull_task_is_pending(self):
+        conn = _Conn()
+
+        class _SchedulingHandler(_FuncHandler):
+            async def handle_llm_function_call(self, probe_conn, payload):
+                probe_conn.lesson_pull_task = asyncio.create_task(asyncio.sleep(60))
+                probe_conn.lesson_pull_task_origin = "spoken_start"
+                probe_conn.lesson_pull_task_handoff_token = (
+                    probe_conn.lesson_start_handoff_token()
+                )
+                return await super().handle_llm_function_call(probe_conn, payload)
+
+        conn.func_handler = _SchedulingHandler()
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._bridge.stop_output_for_lesson = AsyncMock()
+        provider._open_user_audio_window = AsyncMock()
+        conn.voice_provider = provider
+        conn.is_realtime_busy = lambda: False
+        original_product_tool_names = google_live_module.product_tool_names
+        google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
+        try:
+            handled = await provider._dispatch_lesson_start_intent("bắt đầu bài học")
+        finally:
+            google_live_module.product_tool_names = original_product_tool_names
+
+        self.assertTrue(handled)
+        self.assertTrue(conn.lesson_start_handoff_active())
+        provider._open_user_audio_window.assert_not_awaited()
+        conn.lesson_pull_task.cancel()
+        await asyncio.gather(conn.lesson_pull_task, return_exceptions=True)
+
+    async def test_spoken_start_does_not_release_handoff_when_pull_finishes_during_dispatch(self):
+        conn = _Conn()
+
+        class _FastSchedulingHandler(_FuncHandler):
+            async def handle_llm_function_call(self, probe_conn, payload):
+                probe_conn.lesson_pull_task = asyncio.create_task(asyncio.sleep(0))
+                probe_conn.lesson_pull_task_origin = "spoken_start"
+                probe_conn.lesson_pull_task_handoff_token = (
+                    probe_conn.lesson_start_handoff_token()
+                )
+                await probe_conn.lesson_pull_task
+                return await super().handle_llm_function_call(probe_conn, payload)
+
+        conn.func_handler = _FastSchedulingHandler()
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._bridge.stop_output_for_lesson = AsyncMock()
+        conn.voice_provider = provider
+        conn.is_realtime_busy = lambda: False
+        original_product_tool_names = google_live_module.product_tool_names
+        google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
+        try:
+            handled = await provider._dispatch_lesson_start_intent("bắt đầu bài học")
+        finally:
+            google_live_module.product_tool_names = original_product_tool_names
+
+        self.assertTrue(handled)
+        self.assertEqual(conn.handoff_releases, [])
+        self.assertTrue(conn.lesson_start_handoff_active())
+
+    async def test_stale_parent_cleanup_does_not_fall_back_to_another_tasks_lease(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        stale_lease = conn.begin_lesson_start_handoff(reason="spoken_start")
+        await conn.release_lesson_start_handoff(
+            stale_lease,
+            outcome="lesson_started",
+            restore_conversation=False,
+        )
+        concurrent_lease = conn.begin_lesson_start_handoff(reason="protected_nudge")
+        provider._lesson_start_handoff_token = concurrent_lease
+        conn.lesson_start_handoff_token = lambda: None
+
+        released = await provider._release_lesson_start_handoff(
+            outcome="stale_parent_cleanup",
+            restore_conversation=True,
+        )
+
+        self.assertFalse(released)
+        self.assertIn(concurrent_lease, conn._lesson_start_handoff_holders)
+
+    async def test_concurrent_spoken_dispatch_releases_coalesced_holder_without_task_ownership(self):
+        conn = _Conn()
+        both_dispatching = asyncio.Event()
+        dispatch_count = 0
+
+        class _ConcurrentSchedulingHandler(_FuncHandler):
+            async def handle_llm_function_call(self, probe_conn, payload):
+                nonlocal dispatch_count
+                dispatch_count += 1
+                if dispatch_count == 2:
+                    both_dispatching.set()
+                await both_dispatching.wait()
+                task = getattr(probe_conn, "lesson_pull_task", None)
+                if task is None or task.done():
+                    probe_conn.lesson_pull_task = asyncio.create_task(asyncio.sleep(60))
+                    probe_conn.lesson_pull_task_origin = "spoken_start"
+                    probe_conn.lesson_pull_task_handoff_token = (
+                        probe_conn.lesson_start_handoff_token()
+                    )
+                return await super().handle_llm_function_call(probe_conn, payload)
+
+        conn.func_handler = _ConcurrentSchedulingHandler()
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._bridge.stop_output_for_lesson = AsyncMock()
+        conn.voice_provider = provider
+        conn.is_realtime_busy = lambda: False
+        original_product_tool_names = google_live_module.product_tool_names
+        google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
+        try:
+            results = await asyncio.gather(
+                provider._dispatch_lesson_start_intent("bắt đầu bài học"),
+                provider._dispatch_lesson_start_intent("bắt đầu bài học"),
+            )
+            active_holders = len(conn._lesson_start_handoff_holders)
+        finally:
+            google_live_module.product_tool_names = original_product_tool_names
+            conn.lesson_pull_task.cancel()
+            await asyncio.gather(conn.lesson_pull_task, return_exceptions=True)
+
+        self.assertEqual(results, [True, True])
+        self.assertEqual(active_holders, 1)
+
+    async def test_sample_fallback_reserve_survives_google_live_post_dispatch_cleanup(self):
+        conn = _Conn()
+        conn.loop = asyncio.get_running_loop()
+        conn.lesson_runtime = None
+        conn.lesson_start_status = None
+        conn.features = {"lesson": True, "renderer": "teebot-lesson-renderer.v5"}
+        conn.config["lesson"] = {
+            "runtime_enabled": True,
+            "sample_lesson": True,
+            "rollout_device_allowlist": [conn.device_id],
+        }
+        sample_saw_active = []
+
+        async def pull_without_assignment():
+            primary_lease = conn.lesson_start_handoff_token()
+            conn.lesson_start_status = {
+                "code": "NO_CURRENT_ASSIGNMENT",
+                "message": "Robot chưa có bài học nào được giao.",
+            }
+            await conn.release_lesson_start_handoff(
+                primary_lease,
+                outcome="NO_CURRENT_ASSIGNMENT",
+                restore_conversation=True,
+            )
+            return None
+
+        async def sample_fallback(_conn):
+            sample_saw_active.append(conn.lesson_start_handoff_active())
+            reserve_lease = conn.lesson_start_handoff_token()
+            await conn.release_lesson_start_handoff(
+                reserve_lease,
+                outcome="lesson_started",
+                restore_conversation=False,
+            )
+            return object()
+
+        conn._lesson_runtime_enabled = lambda: True
+        conn._sample_lesson_enabled = lambda: True
+        conn._lesson_pull_on_connect = pull_without_assignment
+
+        class _RealStartLessonHandler(_FuncHandler):
+            async def handle_llm_function_call(self, probe_conn, payload):
+                self.calls.append((probe_conn, payload))
+                return start_lesson_module.start_lesson(probe_conn)
+
+        conn.func_handler = _RealStartLessonHandler()
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._bridge.stop_output_for_lesson = AsyncMock()
+        conn.voice_provider = provider
+        conn.is_realtime_busy = lambda: False
+        original_product_tool_names = google_live_module.product_tool_names
+        google_live_module.product_tool_names = lambda _conn: ["start_lesson"]
+        try:
+            with patch("core.lesson.sample.start_sample_lesson", sample_fallback):
+                handled = await provider._dispatch_lesson_start_intent(
+                    "bắt đầu bài học"
+                )
+                for _ in range(20):
+                    if sample_saw_active:
+                        break
+                    await asyncio.sleep(0)
+        finally:
+            google_live_module.product_tool_names = original_product_tool_names
+
+        self.assertTrue(handled)
+        self.assertEqual(sample_saw_active, [True])
+        self.assertFalse(conn.lesson_start_handoff_active())
 
     async def test_audio_routing_private_branch_edges(self):
         conn = _Conn()

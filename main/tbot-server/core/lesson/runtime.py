@@ -6261,6 +6261,9 @@ class LessonRuntime:
                     state = "unknown"
             return _SdSyncRealtimeBusyTimeoutError(busy_timeout, state)
 
+        def is_transient_firmware_busy_error(exc: Exception) -> bool:
+            return "lesson asset sync busy or worker unavailable" in str(exc)
+
         async def call_sync() -> Any:
             foreground_started = asyncio.Event()
             deadline = time.monotonic() + busy_timeout
@@ -6282,14 +6285,23 @@ class LessonRuntime:
                 else:
                     busy_check = getattr(self.conn, "is_realtime_busy", None)
                 foreground_started.set()
-                while callable(busy_check) and busy_check():
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
+                while True:
+                    while callable(busy_check) and busy_check():
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise realtime_busy_timeout_error()
+                        await asyncio.sleep(min(busy_poll, remaining))
+                    if time.monotonic() >= deadline:
                         raise realtime_busy_timeout_error()
-                    await asyncio.sleep(min(busy_poll, remaining))
-                if time.monotonic() >= deadline:
-                    raise realtime_busy_timeout_error()
-                return await call_sync_once()
+                    try:
+                        return await call_sync_once()
+                    except Exception as exc:
+                        if not is_transient_firmware_busy_error(exc):
+                            raise
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise realtime_busy_timeout_error() from exc
+                        await asyncio.sleep(min(busy_poll, remaining))
 
             cache_key = str(
                 (mcp_pack or pack or {}).get("cacheKey")
@@ -6761,6 +6773,41 @@ async def maybe_start_lesson_on_connect(conn: Any) -> Optional[LessonRuntime]:
     await between the getattr and the assignment), so two schedulers racing here both
     end up using the same lock, then run the impl serially — the loser re-reads
     conn.lesson_runtime and returns the winner's session instead of duplicating it."""
+    token_getter = getattr(conn, "lesson_start_handoff_token", None)
+    handoff_token = token_getter() if callable(token_getter) else None
+    release_handoff = getattr(conn, "release_lesson_start_handoff", None)
+    started = False
+    outcome = "lesson_start_failed"
+    try:
+        runtime = await _maybe_start_lesson_on_connect_serialized(conn)
+        mode = getattr(conn, "session_mode", None)
+        mode_value = getattr(mode, "value", mode)
+        started = runtime is not None and str(mode_value or "").upper() == "LESSON"
+        status = getattr(conn, "lesson_start_status", None) or {}
+        outcome = (
+            "lesson_started"
+            if started
+            else str(status.get("code") or "lesson_start_failed")
+        )
+        return runtime
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
+    except Exception:
+        outcome = "lesson_start_exception"
+        raise
+    finally:
+        if handoff_token is not None and callable(release_handoff):
+            await release_handoff(
+                handoff_token,
+                outcome=outcome,
+                restore_conversation=not started,
+            )
+
+
+async def _maybe_start_lesson_on_connect_serialized(
+    conn: Any,
+) -> Optional[LessonRuntime]:
     from core.providers.tools.product_toolset import lesson_runtime_enabled
 
     if not lesson_runtime_enabled(conn):

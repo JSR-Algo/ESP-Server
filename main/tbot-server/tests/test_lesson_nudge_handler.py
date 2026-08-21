@@ -169,7 +169,11 @@ class LessonNudgeHandlerTest(unittest.IsolatedAsyncioTestCase):
             events.append("new-transition")
             return True
 
-        old_conn = SimpleNamespace(transition_to_lesson_start=old_transition)
+        old_conn = SimpleNamespace(
+            transition_to_lesson_start=old_transition,
+            lesson_start_handoff_token=lambda: 41,
+            release_lesson_start_handoff=AsyncMock(return_value=True),
+        )
         new_conn = SimpleNamespace(transition_to_lesson_start=new_transition)
         connections = {"device-1": old_conn}
 
@@ -193,6 +197,11 @@ class LessonNudgeHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             events,
             ["old-transition", "new-transition", ("pull", new_conn)],
+        )
+        old_conn.release_lesson_start_handoff.assert_awaited_once_with(
+            41,
+            outcome="connection_replaced",
+            restore_conversation=False,
         )
 
     async def test_live_transition_timeout_is_retryable_and_does_not_pull(self):

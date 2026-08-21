@@ -184,7 +184,12 @@ def start_lesson(conn: "ConnectionHandler"):
         #
         # The wrapped assignment-pull entry point already swallows exceptions so a lesson
         # failure can never crash the connection or touch the voice path.
+        handoff_token_getter = getattr(conn, "lesson_start_handoff_token", None)
+        task_handoff_token = (
+            handoff_token_getter() if callable(handoff_token_getter) else None
+        )
         sample_fallback_enabled = bool(sample_on) and runtime_admitted
+        sample_fallback_handoff_token = None
         if runtime_disabled and sample_on:
             # runtime OFF -> the assignment pull is gated dark; the sample is the ONLY
             # admitted lesson path, so it runs directly (no real assignment to prefer).
@@ -200,6 +205,21 @@ def start_lesson(conn: "ConnectionHandler"):
 
                 task = loop.create_task(maybe_start_lesson_on_connect(conn))
 
+        # create_task cannot begin executing until this synchronous tool handler
+        # yields back to the loop. Reserve the optional sample-fallback holder only
+        # after scheduling succeeds, so a scheduling exception cannot strand it.
+        if sample_fallback_enabled:
+            handoff_active = getattr(conn, "lesson_start_handoff_active", None)
+            begin_handoff = getattr(conn, "begin_lesson_start_handoff", None)
+            if (
+                callable(handoff_active)
+                and handoff_active()
+                and callable(begin_handoff)
+            ):
+                sample_fallback_handoff_token = begin_handoff(
+                    reason="sample_fallback_reserve"
+                )
+
         # Track the task on the connection so close() cancels it (deep-audit #9: it
         # was a local var, so a disconnect mid-pull left it running -> leak / use-
         # after-close now that the lesson HTTP layer is restored). Supersede any
@@ -209,10 +229,33 @@ def start_lesson(conn: "ConnectionHandler"):
             prior_task.cancel()
         conn.lesson_pull_task = task
         conn.lesson_pull_task_origin = _SPOKEN_START_ORIGIN
+        conn.lesson_pull_task_handoff_token = (
+            sample_fallback_handoff_token or task_handoff_token
+        )
 
         def _clear_spoken_start_origin(fut) -> None:
             if getattr(conn, "lesson_pull_task", None) is fut:
                 conn.lesson_pull_task_origin = None
+                conn.lesson_pull_task_handoff_token = None
+
+        def _release_handoff_token(token, *, outcome, restore_conversation):
+            release = getattr(conn, "release_lesson_start_handoff", None)
+            if token is None or not callable(release):
+                return
+            cleanup = release(
+                token,
+                outcome=outcome,
+                restore_conversation=restore_conversation,
+            )
+            if asyncio.iscoroutine(cleanup):
+                loop.create_task(cleanup)
+
+        def _release_sample_fallback_reserve(*, outcome, restore_conversation):
+            _release_handoff_token(
+                sample_fallback_handoff_token,
+                outcome=outcome,
+                restore_conversation=restore_conversation,
+            )
 
         def _handle_done(fut):
             try:
@@ -233,18 +276,43 @@ def start_lesson(conn: "ConnectionHandler"):
                     fallback_task = loop.create_task(start_sample_lesson(conn))
                     conn.lesson_pull_task = fallback_task
                     conn.lesson_pull_task_origin = _SPOKEN_START_ORIGIN
+                    conn.lesson_pull_task_handoff_token = (
+                        sample_fallback_handoff_token
+                    )
                     fallback_task.add_done_callback(_handle_sample_done)
                     return
+                if sample_fallback_handoff_token is not None:
+                    _release_sample_fallback_reserve(
+                        outcome=(
+                            "lesson_started"
+                            if runtime is not None
+                            else (code or "lesson_start_failed")
+                        ),
+                        restore_conversation=runtime is None,
+                    )
                 if runtime is None and code in _FAILURE_STATUS_CODES:
                     _schedule_lesson_start_feedback(conn, status.get("message") or "Robot chưa bắt đầu bài học được.")
                 conn.logger.bind(tag=TAG).info("start_lesson: lesson pull task finished")
             except asyncio.CancelledError:
+                _release_sample_fallback_reserve(
+                    outcome="cancelled",
+                    restore_conversation=True,
+                )
                 conn.logger.bind(tag=TAG).info("start_lesson: lesson pull task cancelled")
             except Exception as exc:  # pragma: no cover - already logged inside pull
+                _release_sample_fallback_reserve(
+                    outcome="lesson_start_exception",
+                    restore_conversation=True,
+                )
                 conn.logger.bind(tag=TAG).warning(
                     f"start_lesson: lesson pull task error: {type(exc).__name__}: {exc}"
                 )
             finally:
+                _release_handoff_token(
+                    task_handoff_token,
+                    outcome="lesson_pull_task_done_cleanup",
+                    restore_conversation=True,
+                )
                 _clear_spoken_start_origin(fut)
 
         def _handle_sample_done(fut):
@@ -258,6 +326,10 @@ def start_lesson(conn: "ConnectionHandler"):
                     f"start_lesson: sample fallback task error: {type(exc).__name__}: {exc}"
                 )
             finally:
+                _release_sample_fallback_reserve(
+                    outcome="sample_fallback_task_done_cleanup",
+                    restore_conversation=True,
+                )
                 _clear_spoken_start_origin(fut)
 
         task.add_done_callback(_handle_done)

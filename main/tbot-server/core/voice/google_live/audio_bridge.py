@@ -641,22 +641,34 @@ class GoogleLiveAudioBridge:
             ) == SessionMode.LESSON
         except Exception:
             in_lesson = False
+        handoff_active = getattr(self.conn, "lesson_start_handoff_active", None)
+        in_handoff = bool(callable(handoff_active) and handoff_active())
         runtime = getattr(self.conn, "lesson_runtime", None)
         in_lesson = in_lesson or str(getattr(runtime, "state", "")).upper() in {
             "PRELOADING",
             "RUNNING",
         }
+        in_lesson = in_lesson or in_handoff
         if not in_lesson:
             return False
         if (
+            not in_handoff
+            and
             event_type == "audio_end"
             and getattr(self.conn, "google_live_lesson_prompt_output_inferred_idle", False)
         ):
             return False
-        if getattr(self.conn, "google_live_lesson_prompt_output_allowed", False):
+        if not in_handoff and getattr(
+            self.conn, "google_live_lesson_prompt_output_allowed", False
+        ):
             return False
         if event_type == "tool_call" and isinstance(event, Mapping):
             calls = event.get("calls") or []
+            if in_handoff and any(
+                isinstance(call, Mapping) and call.get("name") == "start_lesson"
+                for call in calls
+            ):
+                return False
             if any(
                 isinstance(call, Mapping)
                 and call.get("name") in LESSON_CONVERSATION_TOOLS

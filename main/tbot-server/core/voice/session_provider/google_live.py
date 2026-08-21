@@ -1696,6 +1696,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 await self._ensure_func_handler()
         func_handler = getattr(self.conn, "func_handler", None)
         if func_handler is None:
+            await self._release_lesson_start_handoff(
+                outcome="tool_handler_unavailable",
+                restore_conversation=True,
+            )
             return False
         try:
             with self._lesson_start_tool_dispatch_scope():
@@ -1704,16 +1708,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 time.monotonic() + self._START_LESSON_DUPLICATE_TOOL_WINDOW_SEC
             )
             await self._send_lesson_start_ack(result)
-            # The local tool dispatch finished: release the realtime busy/interrupt
-            # latch set by _begin_user_interrupt so the controller does not stay
-            # stuck in INTERRUPTING with client_abort latched.
-            self._interaction.transition(InteractionState.LISTENING)
-            self.conn.client_abort = False
-            # Keep mic open so the child can answer after greeting without re-wake.
-            try:
-                await self._open_user_audio_window("lesson_start")
-            except Exception:
-                pass
+            if not self._spoken_lesson_start_dispatched():
+                await self._release_lesson_start_handoff(
+                    outcome="lesson_start_not_scheduled",
+                    restore_conversation=True,
+                )
             self.conn.logger.bind(tag="GoogleLive").info(
                 with_lesson_log_context(
                     "Google Live lesson_start_intent tool={} chars={}",
@@ -1724,6 +1723,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             )
             return True
         except Exception as exc:
+            await self._release_lesson_start_handoff(
+                outcome="lesson_start_dispatch_failed",
+                restore_conversation=True,
+            )
             self.conn.logger.bind(tag="GoogleLive").warning(
                 with_lesson_log_context(
                     "Google Live lesson_start_intent failed tool={} error={}",
@@ -1740,6 +1743,17 @@ class GoogleLiveProvider(VoiceSessionProvider):
             pending_task is not None
             and not pending_task.done()
             and getattr(self.conn, "lesson_pull_task_origin", None) == "spoken_start"
+        )
+
+    def _spoken_lesson_start_dispatched(self):
+        token_getter = getattr(self.conn, "lesson_start_handoff_token", None)
+        current_token = token_getter() if callable(token_getter) else None
+        return (
+            getattr(self.conn, "lesson_pull_task", None) is not None
+            and getattr(self.conn, "lesson_pull_task_origin", None) == "spoken_start"
+            and current_token is not None
+            and getattr(self.conn, "lesson_pull_task_handoff_token", None)
+            == current_token
         )
 
     @contextmanager
@@ -5835,6 +5849,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
         calls = event.get("calls") if isinstance(event, Mapping) else None
         if not calls:
             return
+        handoff_active = getattr(self.conn, "lesson_start_handoff_active", None)
+        in_handoff = bool(callable(handoff_active) and handoff_active())
         in_lesson = (
             normalize_session_mode(getattr(self.conn, "session_mode", SessionMode.DORMANT)) == SessionMode.LESSON
             or self._lesson_runtime_active()
@@ -5854,6 +5870,32 @@ class GoogleLiveProvider(VoiceSessionProvider):
         for call in calls:
             call_id = call.get("id") if isinstance(call, Mapping) else None
             name = call.get("name") if isinstance(call, Mapping) else None
+            if name == "start_lesson" and not in_lesson and not in_handoff:
+                if not await self.transition_to_lesson_start():
+                    responses.append(
+                        {
+                            "id": call_id,
+                            "name": name,
+                            "response": self._tool_error(
+                                "LESSON_START_TRANSITION_TIMEOUT",
+                                "Lesson start is waiting for the current voice turn to stop.",
+                            ),
+                        }
+                    )
+                    continue
+                in_handoff = True
+            if in_handoff and name != "start_lesson":
+                responses.append(
+                    {
+                        "id": call_id,
+                        "name": name,
+                        "response": self._tool_error(
+                            "LESSON_MODE_TOOL_BLOCKED",
+                            "Tool calls are blocked while lesson startup owns the child interaction.",
+                        ),
+                    }
+                )
+                continue
             if in_lesson and name not in LESSON_CONVERSATION_TOOLS:
                 responses.append(
                     {
@@ -5939,6 +5981,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 lesson_admission_generation=event_generation if in_lesson else None,
                 lesson_validation_receipt=validation_receipt,
             )
+            if name == "start_lesson" and not self._spoken_lesson_start_dispatched():
+                await self._release_lesson_start_handoff(
+                    outcome="lesson_start_not_scheduled",
+                    restore_conversation=True,
+                )
             latency_ms = (time.monotonic() - started_at) * 1000
             if call_id is not None and call_id in self._cancelled_tool_call_ids:
                 self._pending_tool_calls.discard(call_id)
@@ -6226,40 +6273,126 @@ class GoogleLiveProvider(VoiceSessionProvider):
         except (TypeError, ValueError):
             timeout_sec = 2.0
 
-        await self._begin_user_interrupt("lesson_start_intent")
+        begin_handoff = getattr(self.conn, "begin_lesson_start_handoff", None)
+        handoff_token = (
+            begin_handoff(reason="lesson_start_intent")
+            if callable(begin_handoff)
+            else None
+        )
+        self._lesson_start_handoff_token = handoff_token
+        try:
+            await self._begin_user_interrupt("lesson_start_intent")
+            clear_speaking = getattr(self.conn, "clearSpeakStatus", None)
+            if callable(clear_speaking):
+                clear_speaking()
+            self._interaction.transition(InteractionState.LISTENING)
+            self.conn.client_abort = False
+
+            busy = getattr(self.conn, "is_realtime_busy", None)
+            if not callable(busy):
+                return True
+            deadline = time.monotonic() + timeout_sec
+            while True:
+                # A final audio callback can publish an echo-tail-derived state after
+                # the terminal stop selected LISTENING. With the microphone closed,
+                # no later callback exists to clear that transient state, so settle it
+                # from the real output/VAD flags before consulting the busy guard.
+                if (
+                    self._interaction.state
+                    in {
+                        InteractionState.USER_STREAMING,
+                        InteractionState.MODEL_SPEAKING,
+                        InteractionState.MUTED,
+                    }
+                    and not self._has_active_output()
+                    and not getattr(self.conn, "client_is_speaking", False)
+                    and not getattr(self.conn, "client_have_voice", False)
+                ):
+                    self._interaction.transition(InteractionState.LISTENING)
+                    self.conn.client_abort = False
+                if not busy():
+                    return True
+                if time.monotonic() >= deadline:
+                    await self._release_lesson_start_handoff(
+                        outcome="live_transition_timeout",
+                        restore_conversation=True,
+                    )
+                    return False
+                await asyncio.sleep(0.01)
+        except asyncio.CancelledError:
+            await self._release_lesson_start_handoff(
+                outcome="cancelled",
+                restore_conversation=True,
+            )
+            raise
+        except Exception:
+            await self._release_lesson_start_handoff(
+                outcome="live_transition_failed",
+                restore_conversation=True,
+            )
+            raise
+
+    async def _release_lesson_start_handoff(
+        self,
+        *,
+        outcome: str,
+        restore_conversation: bool,
+    ) -> bool:
+        token_getter = getattr(self.conn, "lesson_start_handoff_token", None)
+        if callable(token_getter):
+            token = token_getter()
+        else:
+            token = getattr(self, "_lesson_start_handoff_token", None)
+        release = getattr(self.conn, "release_lesson_start_handoff", None)
+        if token is None or not callable(release):
+            return False
+        released = bool(
+            await release(
+                token,
+                outcome=outcome,
+                restore_conversation=restore_conversation,
+            )
+        )
+        if released:
+            self._lesson_start_handoff_token = None
+        return released
+
+    async def restore_after_lesson_start_handoff(self, *, outcome: str) -> None:
+        stop_event = getattr(self.conn, "stop_event", None)
+        if stop_event is not None and stop_event.is_set():
+            return
+        client = self._client
+        if client is None or not getattr(client, "connected", False):
+            return
+        self._interaction.transition(InteractionState.LISTENING)
+        self.conn.client_abort = False
         clear_speaking = getattr(self.conn, "clearSpeakStatus", None)
         if callable(clear_speaking):
             clear_speaking()
-        self._interaction.transition(InteractionState.LISTENING)
-        self.conn.client_abort = False
-
-        busy = getattr(self.conn, "is_realtime_busy", None)
-        if not callable(busy):
-            return True
-        deadline = time.monotonic() + timeout_sec
-        while True:
-            # A final audio callback can publish an echo-tail-derived state after
-            # the terminal stop selected LISTENING. With the microphone closed,
-            # no later callback exists to clear that transient state, so settle it
-            # from the real output/VAD flags before consulting the busy guard.
-            if (
-                self._interaction.state
-                in {
-                    InteractionState.USER_STREAMING,
-                    InteractionState.MODEL_SPEAKING,
-                    InteractionState.MUTED,
-                }
-                and not self._has_active_output()
-                and not getattr(self.conn, "client_is_speaking", False)
-                and not getattr(self.conn, "client_have_voice", False)
-            ):
-                self._interaction.transition(InteractionState.LISTENING)
-                self.conn.client_abort = False
-            if not busy():
-                return True
-            if time.monotonic() >= deadline:
-                return False
-            await asyncio.sleep(0.01)
+        try:
+            await self._open_user_audio_window("lesson_start_failed")
+            websocket = getattr(self.conn, "websocket", None)
+            if websocket is not None:
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "tts",
+                            "state": "stop",
+                            "session_id": getattr(self.conn, "session_id", None),
+                            "continue_listening": True,
+                            "listen_mode": "realtime",
+                        }
+                    )
+                )
+        except Exception as exc:
+            self.conn.logger.bind(tag="GoogleLive").warning(
+                with_lesson_log_context(
+                    "Google Live lesson_start_handoff_restore_failed outcome={} error={}",
+                    self.conn,
+                ),
+                outcome,
+                self._safe_error_message(exc),
+            )
 
     async def _begin_user_interrupt(self, reason):
         # Music-protection gate: keep ambient/raw audio from interrupting music,

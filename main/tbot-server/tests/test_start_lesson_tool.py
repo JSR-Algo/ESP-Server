@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from contextvars import ContextVar
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -63,6 +64,125 @@ class _VoiceProvider:
 
 
 class StartLessonToolTest(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _install_handoff_leases(conn):
+        leases = set()
+        context = ContextVar(f"start_lesson_test_handoff_{id(conn):x}", default=None)
+        serial = 0
+
+        def begin(*, reason):
+            nonlocal serial
+            serial += 1
+            lease = (1, serial)
+            leases.add(lease)
+            context.set(lease)
+            return lease
+
+        def token():
+            lease = context.get()
+            return lease if lease in leases else None
+
+        async def release(lease, *, outcome, restore_conversation):
+            if lease not in leases:
+                return False
+            leases.remove(lease)
+            if context.get() == lease:
+                context.set(None)
+            return True
+
+        conn.begin_lesson_start_handoff = begin
+        conn.lesson_start_handoff_token = token
+        conn.lesson_start_handoff_active = lambda: bool(leases)
+        conn.release_lesson_start_handoff = release
+        return leases
+
+    async def test_sample_start_transfers_and_releases_inherited_handoff(self):
+        from core.lesson import sample as sample_module
+
+        releases = []
+        conn = _Conn(loop=asyncio.get_running_loop(), enabled=False, sample=True)
+        conn.session_mode = "CONVERSATION"
+        conn.activity_leases = None
+        conn._lesson_pull_lock = asyncio.Lock()
+        conn.lesson_start_handoff_token = lambda: 17
+
+        async def release(token, *, outcome, restore_conversation):
+            releases.append((token, outcome, restore_conversation, conn.session_mode))
+            return True
+
+        async def start_impl(_conn):
+            conn.session_mode = "LESSON"
+            return object()
+
+        conn.release_lesson_start_handoff = release
+        with patch(
+            "core.providers.tools.product_toolset.sample_lesson_config_enabled",
+            return_value=True,
+        ), patch.object(sample_module, "_start_sample_lesson_impl", start_impl):
+            runtime = await sample_module.start_sample_lesson(conn)
+
+        self.assertIsNotNone(runtime)
+        self.assertEqual(releases, [(17, "lesson_started", False, "LESSON")])
+
+    async def test_assignment_to_sample_fallback_retains_handoff_without_restore_gap(self):
+        restore_events = []
+        sample_saw_active = []
+
+        conn = _Conn(loop=asyncio.get_running_loop(), enabled=True, sample=True)
+        conn.lesson_start_status = {}
+        leases = self._install_handoff_leases(conn)
+        conn.begin_lesson_start_handoff(reason="spoken_start")
+        release_lease = conn.release_lesson_start_handoff
+
+        async def release(lease, *, outcome, restore_conversation):
+            released = await release_lease(
+                lease,
+                outcome=outcome,
+                restore_conversation=restore_conversation,
+            )
+            if released and not leases and restore_conversation:
+                restore_events.append(outcome)
+            return released
+
+        async def pull_without_assignment():
+            conn.lesson_start_status = {
+                "code": "NO_CURRENT_ASSIGNMENT",
+                "message": "Robot chưa có bài học nào được giao.",
+            }
+            await release(
+                conn.lesson_start_handoff_token(),
+                outcome="NO_CURRENT_ASSIGNMENT",
+                restore_conversation=True,
+            )
+            return None
+
+        async def sample_fallback(_conn):
+            sample_saw_active.append(conn.lesson_start_handoff_active())
+            await release(
+                conn.lesson_start_handoff_token(),
+                outcome="lesson_started",
+                restore_conversation=False,
+            )
+            return object()
+
+        conn._pull = pull_without_assignment
+        conn.release_lesson_start_handoff = release
+
+        with patch("core.lesson.sample.start_sample_lesson", sample_fallback):
+            response = start_lesson_module.start_lesson(conn)
+            for _ in range(20):
+                task = conn.lesson_pull_task
+                if task is not None:
+                    await asyncio.gather(task, return_exceptions=True)
+                if sample_saw_active:
+                    break
+                await asyncio.sleep(0)
+
+        self.assertEqual(response.action, Action.RECORD)
+        self.assertEqual(sample_saw_active, [True])
+        self.assertEqual(restore_events, [])
+        self.assertEqual(leases, set())
+
     async def test_sample_with_no_allowlist_is_blocked_even_when_runtime_is_off(self):
         from core.lesson import sample as sample_module
 
@@ -420,6 +540,7 @@ class StartLessonToolTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_coalesces_duplicate_tool_call_while_spoken_start_is_pending(self):
         release = asyncio.Event()
+        handoff_token = (1, 1)
 
         async def _pending_pull():
             await release.wait()
@@ -430,6 +551,7 @@ class StartLessonToolTest(unittest.IsolatedAsyncioTestCase):
             enabled=True,
             pull=_pending_pull,
         )
+        conn.lesson_start_handoff_token = lambda: handoff_token
 
         first_response = start_lesson_module.start_lesson(conn)
         first_task = conn.lesson_pull_task
@@ -439,11 +561,71 @@ class StartLessonToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_response.action, Action.RECORD)
         self.assertEqual(second_response.action, Action.RECORD)
         self.assertIs(conn.lesson_pull_task, first_task)
+        self.assertEqual(conn.lesson_pull_task_handoff_token, handoff_token)
         self.assertFalse(first_task.cancelled())
         self.assertEqual(conn.pull_calls, 1)
 
         release.set()
         await first_task
+
+    async def test_cancel_before_primary_task_starts_safety_releases_handoff(self):
+        conn = _Conn(loop=asyncio.get_running_loop(), enabled=True)
+        leases = self._install_handoff_leases(conn)
+        conn.begin_lesson_start_handoff(reason="spoken_start")
+
+        start_lesson_module.start_lesson(conn)
+        conn.lesson_pull_task.cancel()
+        await asyncio.gather(conn.lesson_pull_task, return_exceptions=True)
+        await asyncio.sleep(0)
+
+        self.assertEqual(leases, set())
+
+    async def test_cancel_before_sample_fallback_starts_safety_releases_reserve(self):
+        loop = asyncio.get_running_loop()
+        conn = _Conn(loop=loop, enabled=True, sample=True)
+        leases = self._install_handoff_leases(conn)
+        conn.lesson_start_status = None
+        conn.begin_lesson_start_handoff(reason="spoken_start")
+
+        async def no_assignment():
+            primary_lease = conn.lesson_start_handoff_token()
+            conn.lesson_start_status = {
+                "code": "NO_CURRENT_ASSIGNMENT",
+                "message": "Robot chưa có bài học nào được giao.",
+            }
+            await conn.release_lesson_start_handoff(
+                primary_lease,
+                outcome="NO_CURRENT_ASSIGNMENT",
+                restore_conversation=True,
+            )
+            return None
+
+        async def sample_fallback(_conn):
+            await asyncio.sleep(60)
+
+        conn._pull = no_assignment
+        original_create_task = loop.create_task
+
+        def create_task(coro, *args, **kwargs):
+            task = original_create_task(coro, *args, **kwargs)
+            if getattr(getattr(coro, "cr_code", None), "co_name", "") == "sample_fallback":
+                task.cancel()
+            return task
+
+        with patch("core.lesson.sample.start_sample_lesson", sample_fallback), patch.object(
+            loop, "create_task", side_effect=create_task
+        ):
+            start_lesson_module.start_lesson(conn)
+            primary_task = conn.lesson_pull_task
+            await primary_task
+            for _ in range(10):
+                await asyncio.sleep(0)
+                if conn.lesson_pull_task is not primary_task:
+                    break
+            await asyncio.gather(conn.lesson_pull_task, return_exceptions=True)
+            await asyncio.sleep(0)
+
+        self.assertEqual(leases, set())
 
     async def test_cancelled_lesson_pull_task_is_not_reported_as_unhandled_loop_error(self):
         loop = asyncio.get_running_loop()

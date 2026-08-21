@@ -12,6 +12,7 @@ import threading
 import traceback
 import subprocess
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from types import SimpleNamespace
 import websockets
@@ -275,6 +276,14 @@ class ConnectionHandler:
         self.superseded_by = None
         self.lesson_pull_task = None
         self.lesson_pull_task_origin = None
+        self.lesson_pull_task_handoff_token = None
+        self._lesson_start_handoff_generation = 0
+        self._lesson_start_handoff_holder_serial = 0
+        self._lesson_start_handoff_active_generation = None
+        self._lesson_start_handoff_holders = set()
+        self._lesson_start_handoff_context = ContextVar(
+            f"lesson_start_handoff_{id(self):x}", default=None
+        )
         self._lesson_preload_reset_waiter = None
         self.sd_pack_sync_task = None
         self.safety_event_forwarder = None
@@ -657,6 +666,8 @@ class ConnectionHandler:
         `DORMANT` lazily enters conversation mode before the selected voice
         provider handles audio.
         """
+        if self.lesson_start_handoff_active():
+            return True
         if self._lesson_runtime_active():
             if normalize_session_mode(self.session_mode) != SessionMode.LESSON:
                 self._set_session_mode(SessionMode.LESSON, reason="lesson_runtime_active")
@@ -2481,6 +2492,113 @@ class ConnectionHandler:
             return bool(await transition())
         return True
 
+    def begin_lesson_start_handoff(self, *, reason: str):
+        if not self._lesson_start_handoff_holders:
+            self._lesson_start_handoff_generation += 1
+            self._lesson_start_handoff_active_generation = (
+                self._lesson_start_handoff_generation
+            )
+            event = "acquired"
+        else:
+            event = "coalesced"
+        self._lesson_start_handoff_holder_serial += 1
+        lease = (
+            self._lesson_start_handoff_active_generation,
+            self._lesson_start_handoff_holder_serial,
+        )
+        self._lesson_start_handoff_holders.add(lease)
+        self._lesson_start_handoff_context.set(lease)
+        try:
+            self.logger.bind(tag=TAG).info(
+                with_lesson_log_context(
+                    "lesson_start_handoff_{} lease={} reason={}", self
+                ),
+                event,
+                lease,
+                reason,
+            )
+        except Exception:
+            pass
+        return lease
+
+    def lesson_start_handoff_token(self):
+        lease = self._lesson_start_handoff_context.get()
+        return lease if lease in self._lesson_start_handoff_holders else None
+
+    def lesson_start_handoff_active(self) -> bool:
+        return bool(self._lesson_start_handoff_holders)
+
+    async def release_lesson_start_handoff(
+        self,
+        lease,
+        *,
+        outcome: str,
+        restore_conversation: bool,
+        force: bool = False,
+    ) -> bool:
+        if lease is None or lease not in self._lesson_start_handoff_holders:
+            try:
+                self.logger.bind(tag=TAG).info(
+                    with_lesson_log_context(
+                        "lesson_start_handoff_release_ignored lease={} activeGeneration={} outcome={}",
+                        self,
+                    ),
+                    lease,
+                    self._lesson_start_handoff_active_generation,
+                    outcome,
+                )
+            except Exception:
+                pass
+            return False
+        if self._lesson_start_handoff_context.get() == lease:
+            self._lesson_start_handoff_context.set(None)
+        if force:
+            self._lesson_start_handoff_holders.clear()
+        else:
+            self._lesson_start_handoff_holders.remove(lease)
+        if self._lesson_start_handoff_holders:
+            try:
+                self.logger.bind(tag=TAG).info(
+                    with_lesson_log_context(
+                        "lesson_start_handoff_release_deferred lease={} outcome={} holders={}",
+                        self,
+                    ),
+                    lease,
+                    outcome,
+                    len(self._lesson_start_handoff_holders),
+                )
+            except Exception:
+                pass
+            return True
+        self._lesson_start_handoff_active_generation = None
+        durable_lesson_owner = (
+            normalize_session_mode(getattr(self, "session_mode", SessionMode.DORMANT))
+            == SessionMode.LESSON
+            or self._lesson_runtime_active()
+        )
+        restore_conversation = restore_conversation and not durable_lesson_owner
+        try:
+            self.logger.bind(tag=TAG).info(
+                with_lesson_log_context(
+                    "lesson_start_handoff_released lease={} outcome={} restoreConversation={}",
+                    self,
+                ),
+                lease,
+                outcome,
+                restore_conversation,
+            )
+        except Exception:
+            pass
+        if restore_conversation:
+            restore = getattr(
+                self.voice_provider,
+                "restore_after_lesson_start_handoff",
+                None,
+            )
+            if callable(restore):
+                await restore(outcome=outcome)
+        return True
+
     def lesson_start_sd_sync_admission_token(self):
         marker = getattr(self, "_lesson_start_tool_dispatch_context", None)
         try:
@@ -2708,6 +2826,14 @@ class ConnectionHandler:
     async def _close_connection_owned_mcp_callers(self):
         """Stop every connection-owned path that can use device/server MCP."""
         await self._close_lesson_control_tasks()
+        handoff_lease = next(iter(self._lesson_start_handoff_holders), None)
+        if handoff_lease is not None:
+            await self.release_lesson_start_handoff(
+                handoff_lease,
+                outcome="connection_closed",
+                restore_conversation=False,
+                force=True,
+            )
         await self._close_mcp_background_tasks()
 
         tasks = []
@@ -2718,6 +2844,8 @@ class ConnectionHandler:
                 if not task.done():
                     task.cancel()
                 tasks.append(task)
+        self.lesson_pull_task_origin = None
+        self.lesson_pull_task_handoff_token = None
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 

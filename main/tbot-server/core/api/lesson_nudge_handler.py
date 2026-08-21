@@ -157,8 +157,17 @@ class LessonNudgeHandler:
             transition = getattr(conn, "transition_to_lesson_start", None)
             if callable(transition) and not await transition():
                 return None, "live-transition-timeout"
+            token_getter = getattr(conn, "lesson_start_handoff_token", None)
+            handoff_token = token_getter() if callable(token_getter) else None
             if self._connection_is_active(conn):
                 return conn, None
+            release = getattr(conn, "release_lesson_start_handoff", None)
+            if handoff_token is not None and callable(release):
+                await release(
+                    handoff_token,
+                    outcome="connection_replaced",
+                    restore_conversation=False,
+                )
             current = await self._find_connection(device_id)
             if current is None:
                 return None, "device-offline"

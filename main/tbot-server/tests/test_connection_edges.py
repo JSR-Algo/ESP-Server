@@ -250,6 +250,143 @@ def _action_response(action, *, result=None, response=None):
 
 
 class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_lesson_start_handoff_uses_generation_token_and_rejects_stale_release(self):
+        handler = _build_handler()
+        handler.voice_provider = types.SimpleNamespace(
+            restore_after_lesson_start_handoff=AsyncMock()
+        )
+
+        lease = handler.begin_lesson_start_handoff(reason="spoken_start")
+
+        self.assertEqual(handler.lesson_start_handoff_token(), lease)
+        self.assertTrue(handler.lesson_start_handoff_active())
+        self.assertFalse(
+            await handler.release_lesson_start_handoff(
+                (lease[0] + 1, lease[1]),
+                outcome="stale",
+                restore_conversation=True,
+            )
+        )
+        self.assertTrue(handler.lesson_start_handoff_active())
+        self.assertTrue(
+            await handler.release_lesson_start_handoff(
+                lease,
+                outcome="failed",
+                restore_conversation=True,
+            )
+        )
+        self.assertFalse(handler.lesson_start_handoff_active())
+        handler.voice_provider.restore_after_lesson_start_handoff.assert_awaited_once_with(
+            outcome="failed"
+        )
+
+    async def test_lesson_start_handoff_consumes_late_microphone_audio(self):
+        handler = _build_handler()
+        handler.voice_provider = types.SimpleNamespace(handle_audio_bytes=AsyncMock(return_value=True))
+        handler.begin_lesson_start_handoff(reason="spoken_start")
+
+        self.assertTrue(await handler._route_audio_message_impl(b"late-mic"))
+
+        handler.voice_provider.handle_audio_bytes.assert_not_awaited()
+
+    async def test_coalesced_lesson_start_handoff_stays_active_until_all_holders_release(self):
+        handler = _build_handler()
+        handler.voice_provider = types.SimpleNamespace(
+            restore_after_lesson_start_handoff=AsyncMock()
+        )
+
+        first_token = handler.begin_lesson_start_handoff(reason="spoken_start")
+        second_token = handler.begin_lesson_start_handoff(reason="protected_nudge")
+
+        self.assertNotEqual(second_token, first_token)
+        self.assertEqual(second_token[0], first_token[0])
+        self.assertTrue(
+            await handler.release_lesson_start_handoff(
+                first_token,
+                outcome="START_REFUSED",
+                restore_conversation=True,
+            )
+        )
+        self.assertTrue(handler.lesson_start_handoff_active())
+        handler.voice_provider.restore_after_lesson_start_handoff.assert_not_awaited()
+
+        self.assertTrue(
+            await handler.release_lesson_start_handoff(
+                second_token,
+                outcome="lesson_started",
+                restore_conversation=False,
+            )
+        )
+        self.assertFalse(handler.lesson_start_handoff_active())
+        handler.voice_provider.restore_after_lesson_start_handoff.assert_not_awaited()
+
+    async def test_disconnect_force_clears_all_coalesced_handoff_holders(self):
+        handler = _build_handler()
+        handler.begin_lesson_start_handoff(reason="spoken_start")
+        handler.begin_lesson_start_handoff(reason="protected_nudge")
+
+        await handler._close_connection_owned_mcp_callers()
+
+        self.assertFalse(handler.lesson_start_handoff_active())
+
+    async def test_late_failed_holder_cannot_restore_realtime_after_lesson_transfer(self):
+        handler = _build_handler()
+        handler.voice_provider = types.SimpleNamespace(
+            restore_after_lesson_start_handoff=AsyncMock()
+        )
+        first_lease = handler.begin_lesson_start_handoff(reason="spoken_start")
+        second_lease = handler.begin_lesson_start_handoff(reason="protected_nudge")
+        handler.session_mode = connection_module.SessionMode.LESSON
+
+        self.assertTrue(
+            await handler.release_lesson_start_handoff(
+                first_lease,
+                outcome="lesson_started",
+                restore_conversation=False,
+            )
+        )
+        self.assertTrue(
+            await handler.release_lesson_start_handoff(
+                second_lease,
+                outcome="live_transition_timeout",
+                restore_conversation=True,
+            )
+        )
+
+        self.assertFalse(handler.lesson_start_handoff_active())
+        handler.voice_provider.restore_after_lesson_start_handoff.assert_not_awaited()
+
+    async def test_duplicate_holder_release_cannot_consume_coalesced_holder(self):
+        handler = _build_handler()
+        first_lease = handler.begin_lesson_start_handoff(reason="spoken_start")
+        second_lease = handler.begin_lesson_start_handoff(reason="protected_nudge")
+
+        self.assertNotEqual(first_lease, second_lease)
+        self.assertTrue(
+            await handler.release_lesson_start_handoff(
+                first_lease,
+                outcome="lesson_started",
+                restore_conversation=False,
+            )
+        )
+        self.assertFalse(
+            await handler.release_lesson_start_handoff(
+                first_lease,
+                outcome="duplicate_release",
+                restore_conversation=True,
+            )
+        )
+        self.assertTrue(handler.lesson_start_handoff_active())
+
+        self.assertTrue(
+            await handler.release_lesson_start_handoff(
+                second_lease,
+                outcome="lesson_started",
+                restore_conversation=False,
+            )
+        )
+        self.assertFalse(handler.lesson_start_handoff_active())
+
     async def test_activity_lease_drops_voice_ingress_but_dispatches_control_and_abort(self):
         handler = _build_handler()
         handler.bind_completed_event.set()
