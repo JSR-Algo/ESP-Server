@@ -329,6 +329,12 @@ class CourseModeRuntimeAdapter:
             SessionState.SAFETY_PAUSED, SessionState.REGULATION_BREAK,
         }:
             decision = self.orchestrator.hold_protected_pause()
+        elif (
+            self.contract.secondary is not None
+            and self.orchestrator.active_target_id == self.contract.secondary.target_id
+            and self.orchestrator.active_mastery.level.value != "NOT_STARTED"
+        ):
+            decision = self.orchestrator.maybe_advance_target(now_ms=int(self._clock() * 1_000))
         elif self.orchestrator.active_mastery.level.value != "MASTERED_TODAY":
             decision = self.orchestrator.continue_word()
         else:

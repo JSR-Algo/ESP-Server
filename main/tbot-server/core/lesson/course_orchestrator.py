@@ -328,9 +328,18 @@ class CourseOrchestrator:
             self.active_target_id = self.contract.secondary.target_id
             self.word_state = WordState.DISCOVER
             self.session_state = SessionState.WORD_ACTIVE
-            return self._decision("START_OPTIONAL_SECONDARY", teaching="secondary_curiosity", question="invite_secondary")
+            return self._decision(
+                "START_OPTIONAL_SECONDARY", teaching="secondary_curiosity",
+                question="invite_secondary", may_model=True,
+            )
         self.session_state = SessionState.CLOSING
-        return self._decision("CLOSE_AFTER_PRIMARY", embodied=EmbodiedIntent.GOODBYE_SMALL)
+        action = (
+            "CLOSE_AFTER_OPTIONAL_SECONDARY"
+            if self.contract.secondary is not None
+            and self.active_target_id == self.contract.secondary.target_id
+            else "CLOSE_AFTER_PRIMARY"
+        )
+        return self._decision(action, embodied=EmbodiedIntent.GOODBYE_SMALL)
 
     def snapshot(self) -> dict[str, Any]:
         return {

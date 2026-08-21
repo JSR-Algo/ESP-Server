@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from core.lesson.course_orchestrator import SessionState
 from core.lesson.runtime import LessonRuntime, course_mode_runtime_from_manifest
+from core.lesson.word_mastery import EvidenceLevel
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "course-mode" / "course-mode-pilot-cat-ball.json"
@@ -322,6 +324,40 @@ async def test_natural_runtime_operations_can_reach_mastered_today() -> None:
     now[0] = 70.0
     result = await observe("delayed", 11, "cat-delayed-recall-01", "cat_delayed_callback", "target_en", "exact")
     assert result["evidenceEvent"]["evidenceLevel"] == "MASTERED_TODAY"
+
+
+@pytest.mark.asyncio
+async def test_optional_secondary_discovery_closes_after_one_authored_exposure() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": contract()}, enabled=True, clock=lambda: 300.0,
+    )
+    assert runtime is not None
+    runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
+    runtime.orchestrator.active_mastery.level = EvidenceLevel.MASTERED_TODAY
+
+    secondary = await runtime.course_continue({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "start-secondary",
+    })
+    applied = await runtime.course_apply_response_plan({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 2,
+        "observationId": "apply-secondary", "planId": "secondary-plan",
+        "decisionId": secondary["decisionId"], "acknowledgment": "I hear you.",
+        "relation": "Here is another word.", "guidance": "This is a ball.",
+        "invitation": "Ready?", "questionCount": 1,
+        "embodiedIntent": secondary["embodiedIntent"], "targetFactsUsed": ["toys.ball"],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    })
+    closed = await runtime.course_continue({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 3,
+        "observationId": "close-secondary",
+    })
+
+    assert secondary["action"] == "START_OPTIONAL_SECONDARY"
+    assert secondary["mayModelTarget"] is True
+    assert applied["accepted"] is True
+    assert closed["action"] == "CLOSE_AFTER_OPTIONAL_SECONDARY"
+    assert closed["nextState"] == "CLOSING"
 
 
 @pytest.mark.asyncio
