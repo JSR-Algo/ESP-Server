@@ -85,4 +85,3 @@ async def test_stale_generation_extra_args_and_v1_runtime_fail_closed() -> None:
     with _google_live_lesson_tool_admission(conn.voice_provider, 4):
         inactive = await course_observe_child(conn, **args)
     assert inactive.result["code"] == "COURSE_MODE_NOT_ACTIVE"
-

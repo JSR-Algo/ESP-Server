@@ -104,4 +104,3 @@ def test_secondary_starts_only_after_primary_mastery_and_time_remaining() -> Non
     decision = runtime.maybe_advance_target(now_ms=200_000)
     assert runtime.active_target_id == "toys.ball"
     assert decision.action == "START_OPTIONAL_SECONDARY"
-

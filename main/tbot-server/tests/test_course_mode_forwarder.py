@@ -33,4 +33,3 @@ def test_private_or_free_form_fields_are_rejected(field: str) -> None:
             "elapsedSinceFullModelMs": 0, "interveningActivityCount": 0,
             "assessmentConfidenceBand": "high", "reviewNeeded": False, field: "private",
         })
-
