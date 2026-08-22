@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "gate": "course-mode-v2-task-07-physical-evidence",
-  "generatedAt": "2026-08-22T09:00:00+07:00",
+  "generatedAt": "2026-08-22T12:53:11+07:00",
   "verdict": "PHYSICAL_BLOCKED",
   "dataPolicy": "adult-only-redacted-no-real-child-data",
   "candidate": {
     "backendSha": "657474ff3b58fba2c3c31f2978d53370ffad8b11",
     "espSha": "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268",
-    "firmwareSha": "d47174daebe17b9c1a9d1a1eb506711a57cd3512",
+    "firmwareSha": "3d4a1e2a32359278124c61e56fd459fac618506e",
     "reviewedExecutableSha": "7c75ddf26ed2e495829b661c297894c2e5aa7813",
     "task06ManifestSha256": "732af1c9f4ec69f00a4c05076e7dc74f0894ae88ea266b477369db8e62a01c62",
-    "firmwareIdentitySha256": "e03942e6b0c9069a98363821209cdc62ea141b52d7b6529632eb156ff2a37938",
-    "installed": false
+    "firmwareIdentitySha256": "7f802d9482bd1ace45875663fb2711cc61a34232f9a56a8ec7b87fb287a6f574",
+    "installed": true
   },
   "robot": {
     "identitySuffix": "...:AC:20",
@@ -20,13 +20,13 @@
     "formalCurrentBindingVerified": false
   },
   "operators": [
-    {"role": "adult-operator", "present": false},
-    {"role": "adult-safety-observer", "present": false}
+    {"role": "adult-operator", "present": true},
+    {"role": "adult-safety-observer", "present": true, "redactedName": "David"}
   ],
   "environment": {
     "location": "REDACTED_INTERNAL_LAB",
-    "motionEnvelopeClear": false,
-    "immediatePowerIsolationAvailable": false,
+    "motionEnvelopeClear": true,
+    "immediatePowerIsolationAvailable": true,
     "productionAssignmentOff": true,
     "globalV2FlagsOff": true
   },
@@ -36,10 +36,10 @@
     "stopConditionsObserved": []
   },
   "privacy": {
-    "safeIdleUplinkVerified": false,
-    "openUnauthorizedUplinkFinding": true,
+    "safeIdleUplinkVerified": true,
+    "openUnauthorizedUplinkFinding": false,
     "containmentVerified": true,
-    "evidence": "Redacted 2026-08-22 adult-operated preflight observed unauthorized ambient microphone uplink; application execution was contained and zero subsequent serial bytes were observed while left in bootloader. Candidate fix has not been physically verified."
+    "evidence": "The original unauthorized idle-uplink finding remains preserved in the HIL report. After installing the reviewed remediated candidate, a 25-second adult-operated raw serial observation with DTR/RTS false found zero queued or sent microphone uplink markers and retained no raw audio or content."
   },
   "rollback": {
     "manifestSha256": "3de432f3c0fb7ae29d40d1d50a720e2cd36aeb175d8413a66d1875967e4dc7db",
@@ -62,10 +62,11 @@
     "attended E-stop and TP_EN safety-path verification",
     "calibrated acoustic, power, and thermal instruments with calibration evidence",
     "approved numeric hardware limits",
-    "current explicit point-of-use candidate installation authorization and exact cross-repo HIL candidate binding",
-    "candidate installation and all seven physical lanes",
+    "persisted exact install/readback command transcript with execution timestamps",
+    "operator-confirmed display state and documented safe-rest pose after candidate boot",
+    "remaining visual, embodied, listening, thermal/power, recovery, cache, stop/rest, and adult journey cells",
     "physically rehearsed known-good V1 rollback",
-    "physical verification of zero microphone uplink at idle after reconnect/startup"
+    "formal candidate-install/readback command evidence accepted by the validator"
   ],
   "task08Locked": true
 }

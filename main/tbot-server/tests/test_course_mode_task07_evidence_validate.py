@@ -23,12 +23,41 @@ def load_validator():
     return module
 
 
+def test_reviewed_privacy_remediated_candidate_is_the_default_approved_bundle():
+    validator = load_validator()
+
+    bundle = validator._approved_candidate_bundle()
+
+    assert bundle["identity"] == {
+        "backendSha": "657474ff3b58fba2c3c31f2978d53370ffad8b11",
+        "espSha": "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268",
+        "firmwareSha": "3d4a1e2a32359278124c61e56fd459fac618506e",
+        "reviewedExecutableSha": "7c75ddf26ed2e495829b661c297894c2e5aa7813",
+        "task06ManifestSha256": "732af1c9f4ec69f00a4c05076e7dc74f0894ae88ea266b477369db8e62a01c62",
+        "firmwareIdentitySha256": "7f802d9482bd1ace45875663fb2711cc61a34232f9a56a8ec7b87fb287a6f574",
+    }
+    assert bundle["readbacks"] == (
+        ("0x0", "16256", "readback/bootloader.bin"),
+        ("0x8000", "3072", "readback/partition-table.bin"),
+        ("0xd000", "8192", "readback/ota-data.bin"),
+        ("0x20000", "3612672", "readback/xiaozhi.bin"),
+        ("0x800000", "5693495", "readback/generated-assets.bin"),
+    )
+    assert bundle["readbackHashes"]["readback/xiaozhi.bin"] == (
+        3612672,
+        "84c999ece0c90eb6e69a410e335c7791f330e9c0fd39c30dfd4162bb7c4cfc6e",
+    )
+
+
 def blocked_template():
     return json.loads(TEMPLATE.read_text(encoding="utf-8"))
 
 
 def passing_evidence():
+    validator = load_validator()
+    approved_bundle = validator._approved_candidate_bundle()
     evidence = blocked_template()
+    evidence["candidate"].update(approved_bundle["identity"])
     evidence["verdict"] = "PHYSICAL_PASS"
     evidence["candidate"]["installed"] = True
     evidence["rollback"]["physicallyRehearsedKnownGoodV1"] = True
@@ -75,13 +104,7 @@ def passing_evidence():
                 "artifactManifestSha256": evidence["candidate"]["firmwareIdentitySha256"],
                 "argv": ["esptool", "read_flash", offset, size, output],
             }
-            for offset, size, output in (
-                ("0x0", "16256", "readback/bootloader.bin"),
-                ("0x8000", "3072", "readback/partition-table.bin"),
-                ("0xd000", "8192", "readback/ota_data_initial.bin"),
-                ("0x20000", "3611920", "readback/xiaozhi.bin"),
-                ("0x800000", "5693495", "readback/generated_assets.bin"),
-            )
+            for offset, size, output in approved_bundle["readbacks"]
         ],
         {
             "actionClass": "rollback",
@@ -138,7 +161,7 @@ def passing_evidence():
     return evidence
 
 
-def test_structurally_complete_pass_remains_locked_until_remediated_candidate_is_approved(tmp_path):
+def test_structurally_complete_pass_remains_locked_without_approved_hardware_limits(tmp_path):
     validator = load_validator()
     evidence = passing_evidence()
     capture = tmp_path / "captures/lane-1.json"
@@ -151,9 +174,8 @@ def test_structurally_complete_pass_remains_locked_until_remediated_candidate_is
 
     assert result["valid"] is False
     assert result["verdict"] == "PHYSICAL_PASS"
-    assert result["errors"] == [
-        "PHYSICAL_PASS is locked until a privacy-remediated candidate identity is approved"
-    ]
+    assert not any("privacy-remediated candidate identity is approved" in error for error in result["errors"])
+    assert "PHYSICAL_PASS has no approved hardware limit for baseline-hardware-health/supply-voltage" in result["errors"]
     assert result["deferredBlockers"] == []
 
 
@@ -168,9 +190,8 @@ def test_evidence_root_verifies_capture_bytes_and_hash(tmp_path):
 
     result = validator.validate_document(evidence, evidence_root=tmp_path)
 
-    assert result["errors"] == [
-        "PHYSICAL_PASS is locked until a privacy-remediated candidate identity is approved"
-    ]
+    assert not any("privacy-remediated candidate identity is approved" in error for error in result["errors"])
+    assert "PHYSICAL_PASS has no approved hardware limit for baseline-hardware-health/supply-voltage" in result["errors"]
 
 
 def test_evidence_root_rejects_missing_or_changed_capture(tmp_path):
@@ -488,7 +509,7 @@ def test_physical_pass_requires_exact_approved_candidate_identity(field):
     result = validator.validate_document(evidence)
 
     assert result["valid"] is False
-    assert f"PHYSICAL_PASS candidate.{field} does not match the approved Task 06 candidate" in result["errors"]
+    assert f"PHYSICAL_PASS candidate.{field} does not match the approved privacy-remediated candidate" in result["errors"]
 
 
 def test_unlocked_pass_requires_the_submitted_remediated_candidate_digest():
@@ -532,7 +553,7 @@ def test_unlocked_pass_uses_the_complete_replacement_candidate_mapping():
     for command in evidence["commands"]:
         if command["actionClass"] in {"candidate-install", "readback"} and command[
             "artifactManifestSha256"
-        ] == validator.APPROVED_CANDIDATE["firmwareIdentitySha256"]:
+        ] == validator._approved_candidate_bundle()["identity"]["firmwareIdentitySha256"]:
             command["artifactManifestSha256"] = replacement["firmwareIdentitySha256"]
             if command["actionClass"] == "candidate-install":
                 command["argv"] = [
@@ -686,9 +707,9 @@ def test_physical_pass_accepts_documented_python_launched_esptool_form(tmp_path)
 
     result = validator.validate_document(evidence, evidence_root=tmp_path)
 
-    assert result["errors"] == [
-        "PHYSICAL_PASS is locked until a privacy-remediated candidate identity is approved"
-    ]
+    assert not any("privacy-remediated candidate identity is approved" in error for error in result["errors"])
+    assert "PHYSICAL_PASS requires verified candidate-install esptool operation" not in result["errors"]
+    assert "PHYSICAL_PASS requires successful verified candidate-install esptool operation" not in result["errors"]
 
 
 def test_evidence_redacts_hyphen_separated_full_mac_identity():
@@ -729,7 +750,7 @@ def test_physical_pass_requires_every_candidate_readback_region():
     evidence["commands"] = [
         command
         for command in evidence["commands"]
-        if command["argv"] != ["esptool", "read_flash", "0x800000", "5693495", "readback/generated_assets.bin"]
+        if command["argv"] != ["esptool", "read_flash", "0x800000", "5693495", "readback/generated-assets.bin"]
     ]
 
     result = validator.validate_document(evidence)

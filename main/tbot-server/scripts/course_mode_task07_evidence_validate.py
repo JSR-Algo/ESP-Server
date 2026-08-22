@@ -42,9 +42,6 @@ APPROVED_CANDIDATE = {
     "firmwareIdentitySha256": "e03942e6b0c9069a98363821209cdc62ea141b52d7b6529632eb156ff2a37938",
 }
 APPROVED_ROLLBACK_MANIFEST_SHA256 = "3de432f3c0fb7ae29d40d1d50a720e2cd36aeb175d8413a66d1875967e4dc7db"
-# The Task 06 artifact predates the Task 07 microphone-uplink remediation.
-# Populate the complete replacement bundle only after independent review.
-APPROVED_PRIVACY_REMEDIATED_CANDIDATE: dict[str, Any] | None = None
 APPROVED_FLASH_MAP = (
     ("0x0", "bootloader/bootloader.bin"),
     ("0x8000", "partition_table/partition-table.bin"),
@@ -72,6 +69,28 @@ APPROVED_CANDIDATE_READBACK_HASHES = {
     "readback/ota_data_initial.bin": (8192, "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"),
     "readback/xiaozhi.bin": (3611920, "8182dcbb3d23eac255614bf8eafac455053d4f9d5965670257d9071f6ff5e059"),
     "readback/generated_assets.bin": (5693495, "d03b074c39d78601b2a2f6c3438620adc1cf779d634825385e63cafc4528a52b"),
+}
+APPROVED_PRIVACY_REMEDIATED_CANDIDATE: dict[str, Any] = {
+    "identity": {
+        **APPROVED_CANDIDATE,
+        "firmwareSha": "3d4a1e2a32359278124c61e56fd459fac618506e",
+        "firmwareIdentitySha256": "7f802d9482bd1ace45875663fb2711cc61a34232f9a56a8ec7b87fb287a6f574",
+    },
+    "flashMap": APPROVED_FLASH_MAP,
+    "readbacks": (
+        ("0x0", "16256", "readback/bootloader.bin"),
+        ("0x8000", "3072", "readback/partition-table.bin"),
+        ("0xd000", "8192", "readback/ota-data.bin"),
+        ("0x20000", "3612672", "readback/xiaozhi.bin"),
+        ("0x800000", "5693495", "readback/generated-assets.bin"),
+    ),
+    "readbackHashes": {
+        "readback/bootloader.bin": (16256, "0674a1eb42206a0f1713f7ac8fa41d7fbd09f91c6f691dc2b4a73a4c70b495fa"),
+        "readback/partition-table.bin": (3072, "4811619cacae08ef2e0e71b7220c6033a346ca5da7ca179082408c963ef530b5"),
+        "readback/ota-data.bin": (8192, "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"),
+        "readback/xiaozhi.bin": (3612672, "84c999ece0c90eb6e69a410e335c7791f330e9c0fd39c30dfd4162bb7c4cfc6e"),
+        "readback/generated-assets.bin": (5693495, "d03b074c39d78601b2a2f6c3438620adc1cf779d634825385e63cafc4528a52b"),
+    },
 }
 APPROVED_ROLLBACK_READBACK_HASHES = {
     "rollback-readback/bootloader.bin": (16256, "03eab6ea72837189f6f95e6119b40e099b1282bd3029693f8882953d3c63cc1e"),

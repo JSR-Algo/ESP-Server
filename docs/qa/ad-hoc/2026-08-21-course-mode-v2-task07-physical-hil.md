@@ -4,6 +4,77 @@ Date: 2026-08-21 (Asia/Ho_Chi_Minh)
 
 Verdict: **PHYSICAL BLOCKED**
 
+## Authorized candidate installation and safe-idle rerun - 2026-08-22
+
+The adult operator, independent adult safety observer David, sole physical
+lease, clear motion envelope, and immediate power-isolation authority were
+confirmed for the approved internal robot with redacted identity suffix
+`...:AC:20`. The exact independently reviewed privacy-remediated bundle root
+was `9ef3729d0faec7b02d867cedb3ab30d110b845b1c0133738c588bba0e0c16be6`.
+
+With explicit point-of-use authorization, esptool 5.3.1 installed the five split
+regions from that bundle. The installed application SHA-256 is
+`84c999ece0c90eb6e69a410e335c7791f330e9c0fd39c30dfd4162bb7c4cfc6e`,
+built from firmware `3d4a1e2a32359278124c61e56fd459fac618506e`. Independent
+offline comparison of the retained readbacks found exact byte equality for the
+bootloader, partition table, OTA data, application, and generated assets. The
+NVS before/after files are byte-identical with SHA-256
+`a7a87f72416be20388298cb70cfff306ec78e77f0e8b09231d16113f3d82404e`.
+
+After candidate boot, an authorized 25-second raw serial observation kept
+DTR/RTS false. It recorded `uplink_queued=0`, `websocket_audio_send=0`, and
+`MAIN_EVENT_SEND_AUDIO=0`. Two internal AudioService/processor markers and 57
+startup/ready markers were observed; no raw audio, content, or transcript was
+persisted. This closes the candidate-specific safe-idle privacy rerun, while the
+original pre-remediation stop finding remains preserved below as historical
+evidence.
+
+The durable redacted session document is
+`task-artifacts/course-mode-task07/physical-session-2026-08-22-ac20/session-evidence.json`
+(SHA-256 `9f859733a04849645c1df6f448b9a438504b3d479c0a3bb9719b405f722a4451`).
+The retained checksum list is `READBACK-SHA256.txt` (SHA-256
+`645e07ec5ce46d5ae535cc840311e339fe40047d34b7bcbd7099650700bbbf1b`).
+
+### Safely executable next lanes
+
+No second serial reader may start while another process owns the USB port.
+After the current reader exits, the existing capture tooling may first run its
+non-mutating exclusivity preflight:
+
+```bash
+cd /Users/manhhodinh/Documents/TBOT/robot
+python3 scripts/lesson_e2e_live_capture.py --preflight
+```
+
+This preflight was executed at `2026-08-22T12:55:20+07:00` after the prior raw
+reader exited. It returned `ok=true`, resolved the current port as
+`/dev/cu.usbmodem101`, found no holders, and confirmed both pyserial and the
+fallback serial command were available. It did not open serial or reset the
+robot.
+
+Do not run the full lesson capture yet: it requires a valid synthetic/adult-only
+assignment identity, may reset the ESP32-S3 when opening USB serial, and the
+Course Mode production assignment and global flags must remain off. Unrestricted
+voice/MCP servo commands are not substitutes for the lesson-owned embodied
+channel and cannot close the direction, settle, cancellation, or safe-rest
+cells.
+
+The following observations are safe without issuing a robot command and should
+be recorded by both adults: stable idle/ready display with no private content or
+corruption; head centered; both arms lowered; no continued movement, chatter,
+binding, abnormal vibration, odor, unusual heat, or unstable power. These are
+observations only and cannot produce numeric power, thermal, acoustic, lighting,
+or cutoff-latency PASS results.
+
+Rollback commands remain staged in the checksum-pinned V1 bundle, but a physical
+rollback rehearsal must wait for exclusive serial ownership and must include
+post-boot adult observation plus restoration and readback of this exact candidate.
+No quantitative acoustic, power, thermal, E-stop latency, or representative
+lighting lane may PASS until calibrated instruments and approved numeric limits
+exist.
+
+The physical verdict remains **PHYSICAL BLOCKED**. Task 08 remains locked.
+
 ## Privacy stop condition: unauthorized idle microphone uplink - 2026-08-22
 
 During an adult-operated preflight on the approved internal robot with redacted
