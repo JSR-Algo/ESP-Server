@@ -83,15 +83,25 @@ identity suffix `...:AC:20` and the candidate board family:
   wiring/source provenance, not evidence of the servo models currently fitted
   to the observed robot.
 
+The adult operator now explicitly attests that the connected device with the
+matching redacted suffix is the same main robot they routinely use and that its
+hardware has never been changed from the historically evidenced configuration.
+This first-party operational-history attestation strengthens continuity and
+does not require disassembly. It is not independent proof of concealed or
+unlabeled details such as the PCB revision, servo manufacturer/models and
+linkage, power-supply model/rating, or E-stop and `TP_EN` implementation.
+
 These independently preserved records make accidental selection of an unrelated
-board family unlikely and provide strong identity/board-family provenance for
+board family unlikely. Together with the operator attestation, they provide
+strong identity, board-family, and operational-continuity provenance for
 planning the attended HIL session. They do **not** establish the formal current
-candidate-manifest binding required before installation. No attended inspection
-has recorded the physical PCB revision label, current servo manufacturer/model
-and linkage, power-supply model/rating, E-stop or DRV8833 `TP_EN` path, or the
-current display, microphone, speaker, SD, motor-driver, and servo peripherals as
-unchanged since the historical capture. The time-bounded lease record also
-remains outstanding. Formal hardware binding therefore remains **BLOCKED**.
+candidate-manifest binding required before installation. No independent current
+record establishes the physical PCB revision label, servo manufacturer/models
+and linkage, power-supply model/rating, E-stop or DRV8833 `TP_EN` path, or a
+current labeled inventory of the display, microphone, speaker, SD, motor-driver,
+and servo peripherals. The time-bounded lease record and attended safety-path
+verification also remain outstanding. Formal hardware binding therefore remains
+**BLOCKED**.
 
 Evidence reviewed without opening the serial port or touching the device:
 
