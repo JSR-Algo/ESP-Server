@@ -4,6 +4,34 @@ Date: 2026-08-21 (Asia/Ho_Chi_Minh)
 
 Verdict: **PHYSICAL BLOCKED**
 
+## Software-only blocker reduction - 2026-08-22
+
+The exact final firmware source
+`df70b5a12c68f5a6ab07f981cb7c10113e7dbc01` now has a successful isolated
+no-flash LCDWiki build. The checksum-pinned five-artifact flash identity,
+toolchain identity, generated configuration hashes, and offsets are recorded in
+`docs/qa/artifacts/2026-08-22-course-mode-task07/candidate-firmware-identity.json`.
+This supersedes the earlier statement in the reopened audit that no final-main
+binary had been demonstrated. It does not prove installation or physical
+behavior and does not authorize flashing.
+
+The companion software-readiness record at
+`docs/qa/artifacts/2026-08-22-course-mode-task07/software-readiness.md` contains
+the two-adult operator checklist and the complete numeric-limit authority table.
+It also records that a valid known-good V1 rollback bundle still cannot be
+produced: the historical known-good application lacks a verified source SHA and
+V1 designation, while the older 2.2.74 backup is missing all referenced binary
+files.
+
+No serial port was opened. No candidate install, OTA, flash, reset, motion,
+assignment, publication, flag change, production mutation, readback, or
+rollback rehearsal occurred. Task 07 remains **PHYSICAL BLOCKED** on the sole
+physical lease, named adult operators, approved internal robot binding,
+attended E-stop/`TP_EN` verification, calibrated instruments and calibration
+evidence, approved numeric hardware limits, and the recoverable checksum-pinned
+known-good V1 rollback bundle. The preserved original blocked evidence remains
+unchanged below and **PHYSICAL BLOCKED does not authorize Task 08**.
+
 ## Reopened prerequisite audit - 2026-08-22
 
 Task 06 is now closed with `RUNTIME_PASS`, clean independent ESP review, and

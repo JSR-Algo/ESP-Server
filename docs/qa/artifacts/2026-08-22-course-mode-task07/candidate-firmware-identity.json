@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "gate": "course-mode-v2-task-07-software-readiness",
+  "generatedDate": "2026-08-22",
+  "disposition": "IDENTITY_ASSEMBLED_NOT_FLASHED",
+  "authorizesFlash": false,
+  "source": {
+    "repository": "TBOT-Firmware",
+    "sha": "df70b5a12c68f5a6ab07f981cb7c10113e7dbc01",
+    "projectName": "xiaozhi",
+    "projectVersion": "2.2.89",
+    "target": "esp32s3",
+    "board": "lcdwiki-es3c35p"
+  },
+  "toolchain": {
+    "espIdfVersion": "5.5.4",
+    "espIdfSha": "8e48797f0c7e5849050e88e42100164f5898f9db",
+    "compiler": "xtensa-esp-elf-g++ 14.2.0 (esp-14.2.0_20260121)",
+    "python": "3.9.6",
+    "cmake": "4.3.1",
+    "ninja": "1.13.2"
+  },
+  "configuration": {
+    "sdkconfigSha256": "2d9949bef4d0000a1e8d2abd49812020118bc85ebe140c60484bf0602368c008",
+    "sdkconfigDefaultsSha256": "85d07725a6650acd127e39fe2bca86794f13bd248cec67aca16db2643ab8d385",
+    "sdkconfigDefaultsEsp32s3Sha256": "9e2d9d7c5bb6245676b7cc16c29162d2871db3633e14f0d611b409ee8123f04d",
+    "sdkconfigDefaultsLocalSha256": "774c575b633cb3039a96d0e5969cb7e8a0f221fbfb01a809746d1a652df302ee",
+    "dependenciesLockSha256": "56b48029f8a53b51d96cf3285c265605edac24d28dff903e6ad641fb3482eb62",
+    "productionConfigAssertion": "PASS"
+  },
+  "flashSettings": {
+    "mode": "dio",
+    "size": "16MB",
+    "frequency": "80m",
+    "before": "default_reset",
+    "after": "hard_reset"
+  },
+  "artifacts": [
+    {
+      "role": "bootloader",
+      "offset": "0x0",
+      "file": "bootloader/bootloader.bin",
+      "bytes": 16256,
+      "sha256": "aaa1bfe9535e78e567bc472ee5cbbfca312e50631fa407c87e36329c52d9dac6"
+    },
+    {
+      "role": "partition-table",
+      "offset": "0x8000",
+      "file": "partition_table/partition-table.bin",
+      "bytes": 3072,
+      "sha256": "4811619cacae08ef2e0e71b7220c6033a346ca5da7ca179082408c963ef530b5"
+    },
+    {
+      "role": "ota-data",
+      "offset": "0xd000",
+      "file": "ota_data_initial.bin",
+      "bytes": 8192,
+      "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"
+    },
+    {
+      "role": "application",
+      "offset": "0x20000",
+      "file": "xiaozhi.bin",
+      "bytes": 3611920,
+      "sha256": "8182dcbb3d23eac255614bf8eafac455053d4f9d5965670257d9071f6ff5e059",
+      "espImageValidationHash": "4e53f4b865e4357bc05f51a95abe6fb334d38ceb37c720991b5cb775b463655c"
+    },
+    {
+      "role": "generated-assets",
+      "offset": "0x800000",
+      "file": "generated_assets.bin",
+      "bytes": 5693495,
+      "sha256": "d03b074c39d78601b2a2f6c3438620adc1cf779d634825385e63cafc4528a52b"
+    }
+  ],
+  "metadataHashes": {
+    "flasherArgsJsonSha256": "63028ddbc257333116502a529c4798b249384208a66f5fa952dea25ba33e2ac9",
+    "flashArgsSha256": "36e8f9f8cb9ba93f3afe161f85eecf55b4d814e794cc33b48613bc76e9c86f22",
+    "flashAppArgsSha256": "08294bbb0f2a24aa76355419dcfc147796510b27a594acf228d7813e98e393bf"
+  },
+  "verification": {
+    "cleanOfflineBuild": "PASS",
+    "incrementalRebuildHashStable": true,
+    "imageStructure": "PASS",
+    "hardwareInstalled": false,
+    "physicalValidation": "NOT_RUN"
+  }
+}
