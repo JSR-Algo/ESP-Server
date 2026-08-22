@@ -25,7 +25,8 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
     raw = OVERLAY_COMPOSE.read_text(encoding="utf-8")
     overlay = yaml.load(raw, Loader=ComposeLoader)
 
-    assert set(overlay) == {"services"}
+    assert set(overlay) == {"name", "services"}
+    assert overlay["name"] == "tbot-course-mode-physical-tft"
     assert set(overlay["services"]) == {"backend"}
     assert "volumes" not in overlay
     assert "volumes" not in overlay["services"]["backend"]
@@ -34,9 +35,14 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
     ] == "${TBOT_DEVICE_MINT_SECRET:?export the shared local device mint secret}"
 
     env = os.environ.copy()
+    for variable in (
+        "COMPOSE_PROJECT_NAME",
+        "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME",
+        "LESSON_STUDIO_E2E_RESOURCE_PREFIX",
+    ):
+        env.pop(variable, None)
     env.update(
         {
-            "COMPOSE_PROJECT_NAME": "tbot-physical-tft-contract",
             "JWT_PUBLIC_KEY": "dummy-local-public-key",
             "TBOT_DEVICE_MINT_SECRET": "dummy-local-mint-secret",
             "LESSON_ASSET_ORIGIN_BASE": "http://127.0.0.1:8102/tvideo-demo",
@@ -61,8 +67,22 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
         env=env,
         text=True,
     )
-    backend = json.loads(result.stdout)["services"]["backend"]
+    compose = json.loads(result.stdout)
+    backend = compose["services"]["backend"]
 
+    assert compose["name"] == "tbot-course-mode-physical-tft"
+    assert backend["container_name"] == "tbot-course-mode-physical-tft-backend"
+    assert compose["networks"]["lesson-studio-e2e"]["name"] == (
+        "tbot-course-mode-physical-tft"
+    )
+    assert {
+        volume["name"] for volume in compose["volumes"].values()
+    } == {
+        "tbot-course-mode-physical-tft-pg-data",
+        "tbot-course-mode-physical-tft-redis-data",
+        "tbot-course-mode-physical-tft-mysql-data",
+    }
+    assert "tbot-ls-e2e" not in result.stdout
     assert backend["ports"] == [
         {
             "mode": "ingress",
