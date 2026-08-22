@@ -56,6 +56,63 @@ The checksum-pinned rollback bundle remains only a **SOFTWARE-QUALIFIED
 ROLLBACK CANDIDATE**. Task 07 therefore remains **PHYSICAL BLOCKED**, and this
 preflight does not authorize Task 08.
 
+## Historical hardware-binding provenance assessment - 2026-08-22
+
+Read-only review found strong historical continuity for the redacted device
+identity suffix `...:AC:20` and the candidate board family:
+
+- The 2026-08-06 configuration audit identifies the matching full device
+  identity as the real lab robot. A later mobile discovery snapshot labels the
+  same identity as `TBOT-...AC20`.
+- At log time `2026-08-16 01:11:14`, preserved server evidence records an OTA
+  request carrying the same device identity in its device and affinity headers
+  and payload; the following WebSocket connection carries a redacted
+  authorization header and matching build identity. The robot self-reported
+  board type/name `lcdwiki-es3c35p`, a 480x320 color display, ESP32-S3 chip
+  revision `2`,
+  16 MB flash, and firmware `2.2.89`. The server selected the
+  `lcdwiki-es3c35p` model and reported that firmware `2.2.89` was current.
+- The current authorized security preflight independently observed the matching
+  redacted identity suffix, ESP32-S3 revision v0.2, 8 MB embedded PSRAM, and
+  USB-Serial/JTAG. The Task 07 candidate identity targets ESP32-S3 board
+  `lcdwiki-es3c35p`, project version `2.2.89`, and 16 MB flash settings. Matching
+  project-version labels do not establish that the historical and candidate
+  application binaries are identical.
+- Firmware history and the current servant-controller source map head, left-arm,
+  and right-arm servo signals to GPIO 11, 12, and 13 respectively. This is
+  wiring/source provenance, not evidence of the servo models currently fitted
+  to the observed robot.
+
+These independently preserved records make accidental selection of an unrelated
+board family unlikely and provide strong identity/board-family provenance for
+planning the attended HIL session. They do **not** establish the formal current
+candidate-manifest binding required before installation. No attended inspection
+has recorded the physical PCB revision label, current servo manufacturer/model
+and linkage, power-supply model/rating, E-stop or DRV8833 `TP_EN` path, or the
+current display, microphone, speaker, SD, motor-driver, and servo peripherals as
+unchanged since the historical capture. The time-bounded lease record also
+remains outstanding. Formal hardware binding therefore remains **BLOCKED**.
+
+Evidence reviewed without opening the serial port or touching the device:
+
+The configuration audit and captured server logs are the primary historical
+records. The untracked mobile XML snapshot is corroborative only and is not
+treated as a durable binding record.
+
+| Redacted evidence source | SHA-256 |
+| --- | --- |
+| `robot/docs/qa/ad-hoc/2026-08-06-t03-config-audit.md` | `1ee9e6122e011a1cfa28c3c33baf5ce8632175e6a2d5a257e8d42e17eed11c66` |
+| `tmp/tbot-found.xml` | `5c51ce0fa3d33ceb803a0a17581141f20295852d3144e107f02186d4ea088998` |
+| `robot/docs/evidence/t54-live-20260816-v7-render-task-boot-smoke/timeline.log` | `f60ca906c29a8fbb0d4d2c55150c6a64bd6a56982cd18a310b575971cac9889e` |
+| `robot/docs/evidence/t54-live-20260816-v7-render-task-boot-smoke/esp-server.log` | `c7d18b11b6c77c6b93dd7f46dee62f6c1fb8b1dd08065cf1cba3a9121ac0b9a7` |
+| `docs/qa/artifacts/2026-08-22-course-mode-task07/candidate-firmware-identity.json` | `e03942e6b0c9069a98363821209cdc62ea141b52d7b6529632eb156ff2a37938` |
+| `TBOT-Servant-Firmware` main `1be3ff13ee5e75056d48defc02ca62415384b84d`, `main/main.c` | `478781702b04fea9edd0e145813e8c9edc87989ff528aea4316d0273da6abab9` |
+
+This assessment is documentation-only. It does not authorize serial access,
+reset, flash, readback, motion, audio, assignment, deployment, or any other
+physical or production action. Task 07 remains **PHYSICAL BLOCKED**, and Task 08
+remains locked.
+
 ## Software-only blocker reduction - 2026-08-22
 
 The tagged pre-Course Mode firmware source
