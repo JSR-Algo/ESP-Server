@@ -4,6 +4,58 @@ Date: 2026-08-21 (Asia/Ho_Chi_Minh)
 
 Verdict: **PHYSICAL BLOCKED**
 
+## Authorized serial identity/security preflight - 2026-08-22
+
+Evidence was recorded in this report at `2026-08-22T08:17:37+07:00`
+(Asia/Ho_Chi_Minh). The operator did not supply a separate wall-clock timestamp
+for the command, so none is inferred. This section appends the newly authorized
+preflight evidence; it does not rewrite or relabel the historical blocked
+evidence below.
+
+The user confirmed the intended internal test robot, confirmed that they are an
+adult HIL operator holding the sole physical lease, and named David as the
+independent adult safety observer. The operator also confirmed immediate power
+isolation and a clear motion envelope. Authorization was limited to serial
+identity/security preflight; it did not authorize candidate installation,
+readback, reset after the preflight, motion, audio, or production changes.
+
+Read-only enumeration identified one Espressif USB JTAG/serial debug unit at
+`/dev/cu.usbmodem1101`, VID:PID `0x303a:0x1001`, with redacted USB serial/MAC
+suffix `...:AC:20`. No process owned the port at enumeration time. With the
+operator's explicit authority, `esptool` v5.3.1 ran the equivalent of:
+
+```bash
+esptool --chip esp32s3 --port /dev/cu.usbmodem1101 \
+  --before default-reset --after no-reset get-security-info
+```
+
+The command exited `0`, loaded its stub, and reported ESP32-S3 QFN56 revision
+v0.2, Wi-Fi/BT5, 8 MB embedded PSRAM, 40 MHz crystal, USB-Serial/JTAG, and the
+same redacted identity suffix `...:AC:20`. Security flags were `0`: Secure Boot
+was disabled, Flash Encryption was disabled, and `SPI_BOOT_CRYPT_CNT` was `0`.
+The device was intentionally left in the bootloader because `--after no-reset`
+was used. That resulting state is evidence only and is not authorization for a
+follow-up serial command, reset, flash, readback, or run command.
+
+No flash, OTA, firmware readback, motor or servo command, audio action,
+assignment, feature-flag change, deployment, or other production mutation
+occurred. No further physical or serial action was taken while recording this
+evidence.
+
+This preflight reduces the connection, robot-identity, and security-state
+blockers and records the operator's sole-use assertion, the two named adult
+roles, immediate power isolation, and a clear motion envelope. It does not yet
+provide the formal candidate-manifest binding record for board revision, servo
+models, and power supply, or the time-bounded sole-lease record required before
+candidate installation. It also does **not** demonstrate an accessible physical
+E-stop or DRV8833 `TP_EN` cutoff, calibrated acoustic, power, or thermal
+instruments and calibration evidence, approved numeric hardware limits,
+candidate installation, any visual/audio/motion/thermal/power/cache/stop/rest
+behavior, or a physically rehearsed known-good V1 rollback.
+The checksum-pinned rollback bundle remains only a **SOFTWARE-QUALIFIED
+ROLLBACK CANDIDATE**. Task 07 therefore remains **PHYSICAL BLOCKED**, and this
+preflight does not authorize Task 08.
+
 ## Software-only blocker reduction - 2026-08-22
 
 The tagged pre-Course Mode firmware source
