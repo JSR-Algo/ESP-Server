@@ -500,6 +500,7 @@ def test_unlocked_pass_requires_the_submitted_remediated_candidate_digest():
         },
         "flashMap": validator.APPROVED_FLASH_MAP,
         "readbacks": validator.APPROVED_CANDIDATE_READBACKS,
+        "readbackHashes": validator.APPROVED_CANDIDATE_READBACK_HASHES,
     }
 
     result = validator.validate_document(passing_evidence())
@@ -551,7 +552,10 @@ def test_unlocked_pass_uses_the_complete_replacement_candidate_mapping():
         "identity": replacement,
         "flashMap": replacement_flash_map,
         "readbacks": replacement_readbacks,
-        "readbackHashes": {},
+        "readbackHashes": {
+            output: (int(size, 0), str(index + 1) * 64)
+            for index, (_offset, size, output) in enumerate(replacement_readbacks)
+        },
     }
 
     result = validator.validate_document(evidence)
@@ -560,6 +564,25 @@ def test_unlocked_pass_uses_the_complete_replacement_candidate_mapping():
     assert "PHYSICAL_PASS candidate does not match the approved privacy-remediated identity" not in result["errors"]
     assert "PHYSICAL_PASS requires verified candidate-install esptool operation" not in result["errors"]
     assert "PHYSICAL_PASS requires successful readback for candidate region 0x20000 size 3612000" not in result["errors"]
+
+
+def test_incomplete_replacement_candidate_bundle_fails_closed():
+    validator = load_validator()
+    evidence = passing_evidence()
+    evidence["candidate"]["espSha"] = "1" * 40
+    validator.APPROVED_PRIVACY_REMEDIATED_CANDIDATE = {
+        "identity": {
+            "firmwareIdentitySha256": evidence["candidate"]["firmwareIdentitySha256"]
+        },
+        "flashMap": (),
+        "readbacks": (),
+        "readbackHashes": {},
+    }
+
+    result = validator.validate_document(evidence)
+
+    assert "PHYSICAL_PASS replacement candidate approval bundle is incomplete" in result["errors"]
+    assert any("approved Task 06 candidate" in error for error in result["errors"])
 
 
 def test_physical_pass_rejects_measurement_bounds_without_pinned_limit_authority():

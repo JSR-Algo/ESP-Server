@@ -183,7 +183,7 @@ def _numeric(value: Any) -> bool:
 
 
 def _approved_candidate_bundle() -> dict[str, Any]:
-    if APPROVED_PRIVACY_REMEDIATED_CANDIDATE is not None:
+    if _replacement_candidate_bundle_error() is None and APPROVED_PRIVACY_REMEDIATED_CANDIDATE is not None:
         return APPROVED_PRIVACY_REMEDIATED_CANDIDATE
     return {
         "identity": APPROVED_CANDIDATE,
@@ -191,6 +191,78 @@ def _approved_candidate_bundle() -> dict[str, Any]:
         "readbacks": APPROVED_CANDIDATE_READBACKS,
         "readbackHashes": APPROVED_CANDIDATE_READBACK_HASHES,
     }
+
+
+def _replacement_candidate_bundle_error() -> str | None:
+    bundle = APPROVED_PRIVACY_REMEDIATED_CANDIDATE
+    if bundle is None:
+        return "missing"
+    if not _is_dict(bundle):
+        return "bundle must be an object"
+    identity = bundle.get("identity")
+    if not _is_dict(identity) or set(identity) != set(APPROVED_CANDIDATE):
+        return "identity must contain the complete approved candidate field set"
+    for field in ("backendSha", "espSha", "firmwareSha", "reviewedExecutableSha"):
+        if not _git_sha(identity.get(field)):
+            return f"identity.{field} must be a full Git SHA"
+    for field in ("task06ManifestSha256", "firmwareIdentitySha256"):
+        if not _sha256(identity.get(field)):
+            return f"identity.{field} must be a SHA-256"
+
+    flash_map = bundle.get("flashMap")
+    readbacks = bundle.get("readbacks")
+    hashes = bundle.get("readbackHashes")
+    required_offsets = {offset for offset, _path in APPROVED_FLASH_MAP}
+    if not isinstance(flash_map, (list, tuple)) or not flash_map:
+        return "flashMap must be non-empty"
+    if not all(
+        isinstance(item, (list, tuple))
+        and len(item) == 2
+        and OFFSET_RE.fullmatch(item[0])
+        and isinstance(item[1], str)
+        and item[1]
+        for item in flash_map
+    ):
+        return "flashMap entries must be offset/file pairs"
+    if {item[0] for item in flash_map} != required_offsets:
+        return "flashMap must cover every approved partition offset exactly once"
+    if len({item[0] for item in flash_map}) != len(flash_map):
+        return "flashMap offsets must be unique"
+
+    if not isinstance(readbacks, (list, tuple)) or not readbacks:
+        return "readbacks must be non-empty"
+    if not all(
+        isinstance(item, (list, tuple))
+        and len(item) == 3
+        and OFFSET_RE.fullmatch(item[0])
+        and SIZE_RE.fullmatch(item[1])
+        and int(item[1], 0) > 0
+        and isinstance(item[2], str)
+        and item[2]
+        and not Path(item[2]).is_absolute()
+        and ".." not in Path(item[2]).parts
+        for item in readbacks
+    ):
+        return "readback entries must be safe offset/size/output triples"
+    if {item[0] for item in readbacks} != required_offsets:
+        return "readbacks must cover every approved partition offset exactly once"
+    if len({item[0] for item in readbacks}) != len(readbacks):
+        return "readback offsets must be unique"
+    outputs = {item[2] for item in readbacks}
+    if len(outputs) != len(readbacks):
+        return "readback outputs must be unique"
+    if not _is_dict(hashes) or set(hashes) != outputs:
+        return "readbackHashes must exactly cover every readback output"
+    for output, expected in hashes.items():
+        if (
+            not isinstance(expected, (list, tuple))
+            or len(expected) != 2
+            or type(expected[0]) is not int
+            or expected[0] < 1
+            or not _sha256(expected[1])
+        ):
+            return f"readbackHashes[{output}] must pin positive bytes and SHA-256"
+    return None
 
 
 def _approved_readbacks(manifest_sha256: Any) -> tuple[tuple[str, str, str], ...]:
@@ -481,12 +553,16 @@ def validate_document(document: Any, *, evidence_root: Path | None = None) -> di
     if verdict == "PHYSICAL_BLOCKED" and not deferred:
         errors.append("PHYSICAL_BLOCKED requires explicit deferred blockers")
     if verdict == "PHYSICAL_PASS":
+        replacement_error = _replacement_candidate_bundle_error()
+        replacement_approved = replacement_error is None
         approved_bundle = _approved_candidate_bundle()
         approved_candidate = approved_bundle["identity"]
         if APPROVED_PRIVACY_REMEDIATED_CANDIDATE is None:
             errors.append(
                 "PHYSICAL_PASS is locked until a privacy-remediated candidate identity is approved"
             )
+        elif not replacement_approved:
+            errors.append("PHYSICAL_PASS replacement candidate approval bundle is incomplete")
         elif (
             candidate.get("firmwareIdentitySha256")
             != approved_candidate.get("firmwareIdentitySha256")
@@ -502,7 +578,7 @@ def validate_document(document: Any, *, evidence_root: Path | None = None) -> di
             errors.append("PHYSICAL_PASS requires the exact candidate to be installed")
         candidate_label = (
             "approved Task 06 candidate"
-            if APPROVED_PRIVACY_REMEDIATED_CANDIDATE is None
+            if not replacement_approved
             else "approved privacy-remediated candidate"
         )
         for field, approved_value in approved_candidate.items():
@@ -510,7 +586,7 @@ def validate_document(document: Any, *, evidence_root: Path | None = None) -> di
                 errors.append(
                     f"PHYSICAL_PASS candidate.{field} does not match the {candidate_label}"
                 )
-        if APPROVED_PRIVACY_REMEDIATED_CANDIDATE is not None:
+        if replacement_approved:
             for lane_id, (measurement_name, unit) in REQUIRED_LANE_MEASUREMENTS.items():
                 approved_limit = APPROVED_HARDWARE_LIMITS.get(lane_id)
                 if approved_limit is None:
@@ -606,7 +682,7 @@ def validate_document(document: Any, *, evidence_root: Path | None = None) -> di
                 errors.append(
                     f"PHYSICAL_PASS requires successful readback for candidate region {offset} size {size}"
                 )
-            if APPROVED_PRIVACY_REMEDIATED_CANDIDATE is not None:
+            if replacement_approved:
                 expected_capture = approved_bundle.get("readbackHashes", {}).get(output)
                 capture = next((item for item in captures if _is_dict(item) and item.get("path") == output), None)
                 if (
@@ -623,7 +699,7 @@ def validate_document(document: Any, *, evidence_root: Path | None = None) -> di
                 errors.append(
                     f"PHYSICAL_PASS requires successful readback for rollback region {offset} size {size}"
                 )
-            if APPROVED_PRIVACY_REMEDIATED_CANDIDATE is not None:
+            if replacement_approved:
                 expected_capture = APPROVED_ROLLBACK_READBACK_HASHES.get(output)
                 capture = next((item for item in captures if _is_dict(item) and item.get("path") == output), None)
                 if capture is None or (capture.get("bytes"), capture.get("sha256")) != expected_capture:
