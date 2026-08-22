@@ -585,6 +585,48 @@ def test_incomplete_replacement_candidate_bundle_fails_closed():
     assert any("approved Task 06 candidate" in error for error in result["errors"])
 
 
+def test_replacement_bundle_rejects_readback_hash_byte_mismatch():
+    validator = load_validator()
+    evidence = passing_evidence()
+    hashes = dict(validator.APPROVED_CANDIDATE_READBACK_HASHES)
+    output = validator.APPROVED_CANDIDATE_READBACKS[0][2]
+    hashes[output] = (1, hashes[output][1])
+    validator.APPROVED_PRIVACY_REMEDIATED_CANDIDATE = {
+        "identity": validator.APPROVED_CANDIDATE,
+        "flashMap": validator.APPROVED_FLASH_MAP,
+        "readbacks": validator.APPROVED_CANDIDATE_READBACKS,
+        "readbackHashes": hashes,
+    }
+
+    result = validator.validate_document(evidence)
+
+    assert "PHYSICAL_PASS replacement candidate approval bundle is incomplete" in result["errors"]
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("flashMap", ((0, "bootloader.bin"),)),
+        ("readbacks", (("0x0", 1, "readback/bootloader.bin"),)),
+    ],
+)
+def test_replacement_bundle_rejects_non_string_flash_operands(field, bad_value):
+    validator = load_validator()
+    evidence = passing_evidence()
+    bundle = {
+        "identity": validator.APPROVED_CANDIDATE,
+        "flashMap": validator.APPROVED_FLASH_MAP,
+        "readbacks": validator.APPROVED_CANDIDATE_READBACKS,
+        "readbackHashes": validator.APPROVED_CANDIDATE_READBACK_HASHES,
+    }
+    bundle[field] = bad_value
+    validator.APPROVED_PRIVACY_REMEDIATED_CANDIDATE = bundle
+
+    result = validator.validate_document(evidence)
+
+    assert "PHYSICAL_PASS replacement candidate approval bundle is incomplete" in result["errors"]
+
+
 def test_physical_pass_rejects_measurement_bounds_without_pinned_limit_authority():
     validator = load_validator()
     validator.APPROVED_PRIVACY_REMEDIATED_CANDIDATE = {

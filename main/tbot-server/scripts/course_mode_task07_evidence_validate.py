@@ -218,6 +218,7 @@ def _replacement_candidate_bundle_error() -> str | None:
     if not all(
         isinstance(item, (list, tuple))
         and len(item) == 2
+        and isinstance(item[0], str)
         and OFFSET_RE.fullmatch(item[0])
         and isinstance(item[1], str)
         and item[1]
@@ -234,7 +235,9 @@ def _replacement_candidate_bundle_error() -> str | None:
     if not all(
         isinstance(item, (list, tuple))
         and len(item) == 3
+        and isinstance(item[0], str)
         and OFFSET_RE.fullmatch(item[0])
+        and isinstance(item[1], str)
         and SIZE_RE.fullmatch(item[1])
         and int(item[1], 0) > 0
         and isinstance(item[2], str)
@@ -253,12 +256,14 @@ def _replacement_candidate_bundle_error() -> str | None:
         return "readback outputs must be unique"
     if not _is_dict(hashes) or set(hashes) != outputs:
         return "readbackHashes must exactly cover every readback output"
+    readback_sizes = {item[2]: int(item[1], 0) for item in readbacks}
     for output, expected in hashes.items():
         if (
             not isinstance(expected, (list, tuple))
             or len(expected) != 2
             or type(expected[0]) is not int
             or expected[0] < 1
+            or expected[0] != readback_sizes[output]
             or not _sha256(expected[1])
         ):
             return f"readbackHashes[{output}] must pin positive bytes and SHA-256"
