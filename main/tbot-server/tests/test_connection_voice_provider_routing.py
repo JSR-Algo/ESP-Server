@@ -749,6 +749,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
     async def test_route_message_waits_for_bind_then_forwards_to_provider(self):
         handler = self._build_handler()
         handler.voice_provider = _RecordingVoiceProvider()
+        handler.client_audio_input_authorized = True
 
         route_task = asyncio.create_task(handler._route_message(b"opus-frame"))
         await asyncio.sleep(0.05)
@@ -780,9 +781,51 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         handler.config["voice_mode"] = {"type": "google_live"}
         handler.voice_provider = _RecordingVoiceProvider()
 
+        await handler._route_message('{"type":"listen","state":"start","mode":"auto"}')
+
         await asyncio.wait_for(handler._route_message(b"opus-frame"), timeout=1.5)
 
         self.assertEqual(handler.voice_provider.audio_calls, [b"opus-frame"])
+
+    async def test_idle_audio_is_rejected_until_explicit_listen_start_and_after_stop(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.voice_provider = _RecordingVoiceProvider()
+
+        await handler._route_message(b"\xff\x00idle-audio")
+        await handler._route_message('{"type":"listen","state":"start","mode":"realtime"}')
+        await handler._route_message(b"authorized-audio")
+        await handler._route_message('{"type":"listen","state":"stop","mode":"manual"}')
+        await handler._route_message(b"late-audio")
+
+        self.assertEqual(handler.voice_provider.audio_calls, [b"authorized-audio"])
+        self.assertFalse(handler.client_audio_input_authorized)
+
+    async def test_google_live_wake_detect_authorizes_its_following_audio_window(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.voice_provider = _RecordingVoiceProvider()
+
+        await handler._route_message(
+            '{"type":"listen","state":"detect","text":"Hi ESP"}'
+        )
+        await handler._route_message(b"wake-window-audio")
+
+        self.assertTrue(handler.client_audio_input_authorized)
+        self.assertEqual(handler.voice_provider.audio_calls, [b"wake-window-audio"])
+
+    async def test_classic_audio_is_authorized_only_after_admitted_listen_start(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "classic_pipeline"}
+        handler.bind_completed_event.set()
+        handler.voice_provider = _RecordingVoiceProvider()
+
+        await handler._route_message(b"idle-audio")
+        await handler._route_message('{"type":"listen","state":"start","mode":"auto"}')
+        await handler._route_message(b"authorized-audio")
+
+        self.assertTrue(handler.client_audio_input_authorized)
+        self.assertEqual(handler.voice_provider.audio_calls, [b"authorized-audio"])
 
     async def test_lesson_interactive_voice_input_routes_to_provider(self):
         handler = self._build_handler()
@@ -790,6 +833,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         handler.voice_provider = _RecordingVoiceProvider()
         handler.session_mode = connection_module.SessionMode.LESSON
         handler.lesson_runtime = _LessonRuntimeStub(passive=False, completed=False)
+        handler.client_audio_input_authorized = True
 
         await handler._route_message(b"child-opus-frame")
 
@@ -803,6 +847,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         handler.voice_provider = _RecordingVoiceProvider()
         handler.session_mode = connection_module.SessionMode.LESSON
         handler.lesson_runtime = _LessonRuntimeStub(passive=True, completed=False)
+        handler.client_audio_input_authorized = True
 
         await handler._route_message(b"narration-opus-frame")
 
@@ -815,6 +860,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         handler.voice_provider = _RecordingVoiceProvider()
         handler.session_mode = connection_module.SessionMode.DORMANT
         handler.lesson_runtime = _LessonRuntimeStub(passive=False, completed=False)
+        handler.client_audio_input_authorized = True
 
         await handler._route_message(b"child-opus-frame")
 
@@ -827,6 +873,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         handler.voice_provider = _RecordingVoiceProvider()
         handler.session_mode = connection_module.SessionMode.DORMANT
         handler.lesson_runtime = _LessonRuntimeStub(passive=True, completed=False)
+        handler.client_audio_input_authorized = True
 
         await handler._route_message(b"narration-opus-frame")
 
@@ -1240,6 +1287,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         handler = self._build_handler()
         handler.config["voice_mode"] = {"type": "classic_pipeline"}
         handler.bind_completed_event.set()
+        handler.client_audio_input_authorized = True
 
         classic_provider = _ClassicLifecycleVoiceProvider()
         google_live_provider = _GoogleLiveLifecycleVoiceProvider()
@@ -1272,6 +1320,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         handler.config["read_config_from_api"] = True
         handler.config["voice_mode"] = {"type": "classic_pipeline"}
         handler.bind_completed_event.set()
+        handler.client_audio_input_authorized = True
 
         classic_provider = _ClassicLifecycleVoiceProvider()
         google_live_provider = _DelayedLifecycleVoiceProvider()

@@ -223,6 +223,7 @@ class ConnectionHandler:
         self.client_abort = False
         self.client_is_speaking = False
         self.client_listen_mode = "auto"
+        self.client_audio_input_authorized = False
         self.google_live_audio_out_started_at = None
         self.google_live_turn_started_at = None
         self.voice_metric_samples = deque(maxlen=100)
@@ -546,6 +547,19 @@ class ConnectionHandler:
 
     async def _route_message(self, message):
         """Message routing"""
+        listen_state = self._listen_control_state(message)
+        if listen_state in {"stop", "detect"}:
+            self.client_audio_input_authorized = False
+        if (
+            isinstance(message, bytes)
+            and self._google_live_mode_configured()
+            and not getattr(self, "client_audio_input_authorized", False)
+        ):
+            self.logger.bind(tag=TAG).warning(
+                "audio_input_dropped reason=no_explicit_listen_start bytes={}",
+                len(message),
+            )
+            return
         self.last_activity_time = time.time() * 1000
         if (
             isinstance(message, str)
@@ -556,6 +570,8 @@ class ConnectionHandler:
                 if not allowed:
                     self._discard_refused_voice_input(message)
                     return
+                if listen_state in {"start", "detect"}:
+                    self.client_audio_input_authorized = True
                 await self._wait_for_voice_provider_ready()
                 if self.voice_provider is not None:
                     await self.voice_provider.handle_text_message(message)
@@ -608,6 +624,15 @@ class ConnectionHandler:
             await self._discard_message_with_bind_prompt()
             return
 
+        if isinstance(message, bytes) and not getattr(
+            self, "client_audio_input_authorized", False
+        ):
+            self.logger.bind(tag=TAG).warning(
+                "audio_input_dropped reason=no_explicit_listen_start bytes={}",
+                len(message),
+            )
+            return
+
         if isinstance(message, str):
             operation = (
                 ActivityOperation.CONNECTION_LISTEN
@@ -618,6 +643,8 @@ class ConnectionHandler:
                 if not allowed:
                     self._discard_refused_voice_input(message)
                     return
+                if listen_state == "start":
+                    self.client_audio_input_authorized = True
                 await self._wait_for_voice_provider_ready()
                 if self.voice_provider is not None:
                     handled = await self.voice_provider.handle_text_message(message)
@@ -1045,11 +1072,18 @@ class ConnectionHandler:
         return isinstance(payload, dict) and payload.get("type") == "mcp"
 
     def _is_listen_control_message(self, message):
+        return self._listen_control_state(message) is not None
+
+    @staticmethod
+    def _listen_control_state(message):
         try:
             payload = json.loads(message)
         except (TypeError, json.JSONDecodeError):
-            return False
-        return isinstance(payload, dict) and payload.get("type") == "listen"
+            return None
+        if not isinstance(payload, dict) or payload.get("type") != "listen":
+            return None
+        state = payload.get("state")
+        return state if state in {"start", "stop", "detect"} else None
 
     def _is_lesson_control_message(self, message):
         return ConnectionHandler._lesson_control_message_type(message) is not None

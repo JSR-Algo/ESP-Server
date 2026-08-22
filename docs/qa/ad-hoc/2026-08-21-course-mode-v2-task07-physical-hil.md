@@ -4,6 +4,69 @@ Date: 2026-08-21 (Asia/Ho_Chi_Minh)
 
 Verdict: **PHYSICAL BLOCKED**
 
+## Privacy stop condition: unauthorized idle microphone uplink - 2026-08-22
+
+During an adult-operated preflight on the approved internal robot with redacted
+identity suffix `...:AC:20`, the application was found already running after
+USB reconnect. No lesson, child interaction, or intentional voice turn had been
+started. An eight-second read-only serial capture, opened with Darwin
+`O_RDONLY|O_NONBLOCK` and without DTR, RTS, or reset, repeatedly reported voice
+processor output, queued microphone uplink packets, successful WebSocket audio
+sends, and firmware audio-send events. Packet counters advanced from roughly
+5,725 to 5,850. No audio payload or transcript was captured or retained.
+
+This is a material privacy and safe-idle stop condition: ambient microphone
+uplink was active without a current intentional interaction. The failed
+`esptool run --before no-reset` attempt (`Invalid head 0x49`) did not start the
+application; the read-only capture established that it was already running.
+The exact wall-clock time of those device actions was not supplied, so this
+report records the evidence date without inventing a timestamp.
+
+Under the user's explicit containment authority, the previously reviewed
+identity/security preflight was repeated with `--before default-reset --after
+no-reset`, leaving the device in the bootloader. Identity and security state
+matched the earlier redacted record. A subsequent three-second read-only raw
+capture returned zero bytes, confirming that application execution and the
+observed audio activity had stopped. No flash, OTA, firmware readback, motion,
+audio playback, assignment, feature-flag change, or deployment occurred. The
+device was not touched again.
+
+Software audit identified three fail-open paths in the Task 06 firmware:
+
+1. realtime listening was exempt from the listening watchdog and could remain
+   open indefinitely after a missed stop or stale conversation;
+2. the main audio-send loop transmitted queued microphone packets without an
+   independent authorization check for an owned listening turn;
+3. a server `tts stop` carrying `continue_listening=true` could reopen the mic
+   from an idle/passive socket without proving a current owned voice turn.
+
+Historical retained logs contain the same sustained queued/sent-audio shape
+after `mic_loop_resumed`, supporting a stale realtime turn rather than a
+startup-only diagnostic artifact. Firmware remediation now adds an explicit
+fail-closed uplink authorization latch, queue drain on unauthorized/expired
+input, rejection of unowned continue-listen requests, and a realtime no-speech
+watchdog only when VAD is available. The production device-AEC configuration
+disables VAD, so its realtime privacy boundary is the authorization latch and
+server admission gate rather than an inferred-silence timer. The ESP server
+independently rejects binary microphone frames unless an explicit `listen
+start` has opened the connection input gate and closes that gate on `listen
+stop` or `listen detect`.
+
+These software changes are not physical evidence. Before any Task 07 PASS, an
+authorized attended rerun must prove that reconnect/startup with no intentional
+lesson or voice action produces zero microphone uplink. Any queued or sent mic
+packet, voice-processor uplink output, or server acceptance before an explicit
+listen start is an immediate FAIL/stop condition. Task 07 remains **PHYSICAL
+BLOCKED**, and Task 08 remains locked.
+
+The checksum-pinned Task 06 firmware artifact was built before this remediation
+and is now retained as historical evidence only; it is not eligible for Task 07
+installation. Firmware `main` contains the software fix at
+`039ded40387edbb8907b551dd957bde45b1b1fb6`, but no independently reviewed,
+checksum-pinned replacement candidate identity has yet superseded the Task 06
+artifact. This is an additional software release blocker. No local build output
+is promoted by this report, and no flash is authorized.
+
 ## Authorized serial identity/security preflight - 2026-08-22
 
 Evidence was recorded in this report at `2026-08-22T08:17:37+07:00`

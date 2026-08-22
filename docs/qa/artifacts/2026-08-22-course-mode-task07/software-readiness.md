@@ -216,6 +216,27 @@ Every box is mandatory before any candidate install or physical lane begins.
   exact app readback command, and hash verifier are staged.
 - [ ] No child participates, no real child data is used, and pilot publication,
   assignment, production flags, and production-wide deployment remain off.
+- [ ] Safe-idle privacy preflight is prepared: after reconnect/startup and
+  before any intentional voice or lesson action, observe zero microphone
+  processor uplink, zero queued/sent mic packets, and zero server-accepted audio
+  for the approved observation window. Any occurrence is an immediate
+  FAIL/stop; do not continue other lanes.
+
+If serial logs are needed for that proof, open the port read-only with Darwin
+`O_RDONLY|O_NONBLOCK` and do not assert DTR/RTS or issue a reset. Record only
+event names, counters, and timestamps; never retain audio payloads, transcripts,
+full device identities, credentials, or real child data. A serial tool that
+implicitly toggles reset lines is a state-changing action and requires separate
+authorization. The 2026-08-22 incident remains open until the reviewed candidate
+is physically rerun and the safe-idle zero-uplink result is checksum-pinned.
+
+The ESP and firmware fixes add defense in depth: the server accepts binary mic
+frames only after an explicit `listen start`, while firmware requires a live
+owned turn, online non-passive transport, and a valid lesson window where
+applicable. A realtime no-speech watchdog applies only when VAD is available;
+the production device-AEC configuration uses the explicit authorization and
+server admission gates because VAD is disabled. These controls reduce software
+risk but do not substitute for the physical safe-idle rerun.
 
 Absence of a competing process is not proof of lease ownership. Instrument
 model names without current calibration certificates and preflight checks are
@@ -249,3 +270,15 @@ fixture values are listed only to expose conflicts and are not promoted.
 
 Any row marked `NEEDS_HUMAN_APPROVAL` blocks a measurement PASS. It may not be
 waived or replaced by native, simulated, mock-instrument, or subjective evidence.
+
+## Post-finding candidate status
+
+The Task 06 firmware identity remains authoritative historical evidence for the
+runtime-approved preflight candidate, but it predates the fail-closed microphone
+uplink remediation committed on firmware `main` as
+`039ded40387edbb8907b551dd957bde45b1b1fb6`. It must not be installed or accepted
+as the Task 07 HIL candidate after the privacy stop condition. The offline
+evidence validator therefore keeps `PHYSICAL_PASS` locked until a replacement
+privacy-remediated artifact identity is checksum-pinned and independently
+reviewed. A local no-flash build alone does not establish that replacement
+release identity or authorize a flash.

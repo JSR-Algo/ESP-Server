@@ -424,6 +424,8 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
             await handler._route_message('{"type":"listen","state":"start"}')
             await handler._route_message('{"type":"listen","state":"detect","text":"TeeBot"}')
             await handler._route_message('{"type":"listen","state":"stop"}')
+            await handler._route_message('{"type":"listen","state":"start"}')
+            await handler._route_message(b"audio-after-refused-start")
             for message in (
                 '{"type":"hello"}',
                 '{"type":"ping"}',
@@ -443,6 +445,7 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(dispatched), 7)
         self.assertEqual(handler.client_audio_buffer, bytearray())
         self.assertEqual(handler.asr_audio, [])
+        self.assertFalse(handler.client_audio_input_authorized)
 
     async def test_activity_lease_refuses_conversation_mode_without_mutating_mode(self):
         handler = _build_handler()
@@ -1302,6 +1305,7 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         handler.vad = object()
         handler.asr = object()
         handler.conn_from_mqtt_gateway = True
+        handler.client_audio_input_authorized = True
         handler._process_mqtt_audio_message = lambda message: asyncio.sleep(0, result=False)
         await handler._route_message(b"1234567890123456raw")
         self.assertEqual(handler.asr_audio_queue.get_nowait(), b"1234567890123456raw")

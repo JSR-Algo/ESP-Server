@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "gate": "course-mode-v2-task-07-physical-evidence",
+  "generatedAt": "2026-08-22T09:00:00+07:00",
+  "verdict": "PHYSICAL_BLOCKED",
+  "dataPolicy": "adult-only-redacted-no-real-child-data",
+  "candidate": {
+    "backendSha": "657474ff3b58fba2c3c31f2978d53370ffad8b11",
+    "espSha": "7e2628a9b9b4c3c7bbde4b426455700a4e0b7268",
+    "firmwareSha": "d47174daebe17b9c1a9d1a1eb506711a57cd3512",
+    "reviewedExecutableSha": "7c75ddf26ed2e495829b661c297894c2e5aa7813",
+    "task06ManifestSha256": "732af1c9f4ec69f00a4c05076e7dc74f0894ae88ea266b477369db8e62a01c62",
+    "firmwareIdentitySha256": "e03942e6b0c9069a98363821209cdc62ea141b52d7b6529632eb156ff2a37938",
+    "installed": false
+  },
+  "robot": {
+    "identitySuffix": "...:AC:20",
+    "boardFamily": "lcdwiki-es3c35p",
+    "operatorContinuityAttested": true,
+    "formalCurrentBindingVerified": false
+  },
+  "operators": [
+    {"role": "adult-operator", "present": false},
+    {"role": "adult-safety-observer", "present": false}
+  ],
+  "environment": {
+    "location": "REDACTED_INTERNAL_LAB",
+    "motionEnvelopeClear": false,
+    "immediatePowerIsolationAvailable": false,
+    "productionAssignmentOff": true,
+    "globalV2FlagsOff": true
+  },
+  "safety": {
+    "stopPathVerified": false,
+    "safeRestVerified": false,
+    "stopConditionsObserved": []
+  },
+  "privacy": {
+    "safeIdleUplinkVerified": false,
+    "openUnauthorizedUplinkFinding": true,
+    "containmentVerified": true,
+    "evidence": "Redacted 2026-08-22 adult-operated preflight observed unauthorized ambient microphone uplink; application execution was contained and zero subsequent serial bytes were observed while left in bootloader. Candidate fix has not been physically verified."
+  },
+  "rollback": {
+    "manifestSha256": "3de432f3c0fb7ae29d40d1d50a720e2cd36aeb175d8413a66d1875967e4dc7db",
+    "classification": "SOFTWARE_QUALIFIED_ROLLBACK_CANDIDATE",
+    "physicallyRehearsedKnownGoodV1": false
+  },
+  "lanes": [
+    {"id": "baseline-hardware-health", "verdict": "BLOCKED", "startedAt": null, "endedAt": null, "capturePaths": [], "measurements": []},
+    {"id": "visual-inspection", "verdict": "BLOCKED", "startedAt": null, "endedAt": null, "capturePaths": [], "measurements": []},
+    {"id": "embodied-behavior", "verdict": "BLOCKED", "startedAt": null, "endedAt": null, "capturePaths": [], "measurements": []},
+    {"id": "listening-integrity", "verdict": "BLOCKED", "startedAt": null, "endedAt": null, "capturePaths": [], "measurements": []},
+    {"id": "thermal-power-comfort", "verdict": "BLOCKED", "startedAt": null, "endedAt": null, "capturePaths": [], "measurements": []},
+    {"id": "recovery", "verdict": "BLOCKED", "startedAt": null, "endedAt": null, "capturePaths": [], "measurements": []},
+    {"id": "adult-end-to-end-journeys", "verdict": "BLOCKED", "startedAt": null, "endedAt": null, "capturePaths": [], "measurements": []}
+  ],
+  "captures": [],
+  "commands": [],
+  "deferredBlockers": [
+    "formal current PCB, servo, power-supply, and peripheral label record",
+    "attended E-stop and TP_EN safety-path verification",
+    "calibrated acoustic, power, and thermal instruments with calibration evidence",
+    "approved numeric hardware limits",
+    "independently reviewed privacy-remediated candidate identity replacing the pre-fix Task 06 firmware artifact",
+    "candidate installation and all seven physical lanes",
+    "physically rehearsed known-good V1 rollback",
+    "physical verification of zero microphone uplink at idle after reconnect/startup"
+  ],
+  "task08Locked": true
+}
