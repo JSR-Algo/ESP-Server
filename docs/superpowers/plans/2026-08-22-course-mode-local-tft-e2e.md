@@ -81,7 +81,13 @@ git add docs/docker/docker-compose.course-mode-physical-tft.yml main/tbot-server
 git commit -m "test(task07): isolate local physical TFT backend"
 ```
 
-### Task 2: Seed the exact canonical pilot and synthetic assignment
+### Task 2: Materialize the exact canonical pilot and synthetic assignment
+
+The rejected ESP-owned seed commits are superseded. The physical overlay invokes
+the reviewed backend-owned compiled materializer, which parses the canonical
+persistence fixture, computes the normal manifest checksum, and writes Course Mode
+contract/cue rows through backend repositories. The ESP repository contains no
+Course Mode seed SQL, checksum implementation, or schema reconstruction.
 
 **Files:**
 - Create: `docs/docker/course-mode-physical-tft/seed-course-mode-pilot.mjs`
