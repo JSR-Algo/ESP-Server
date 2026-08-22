@@ -30,6 +30,9 @@ test('builds the exact canonical local pilot plan', () => {
     'cat-transfer', 'ball-discover', 'ball-meaning', 'cat-delayed',
   ]);
   assert.equal(plan.childData, undefined);
+  assert.equal(plan.flattenedPhases.length, 8);
+  assert.equal(plan.manifestChecksum.length, 64);
+  assert.notEqual(plan.manifestChecksum, plan.contractChecksum);
 });
 
 test('rejects canonical identity drift', () => {
@@ -64,8 +67,12 @@ test('executes deterministic SQL in one transaction', async () => {
   assert.match(calls.map(([sql]) => sql).join('\n'), /INSERT INTO lesson_course_mode_contracts/);
   assert.match(calls.map(([sql]) => sql).join('\n'), /INSERT INTO lesson_steps/);
   assert.match(calls.map(([sql]) => sql).join('\n'), /INSERT INTO lesson_assignments/);
+  assert.match(calls.map(([sql]) => sql).join('\n'), /INSERT INTO flattened_cinematic_derivatives/);
+  assert.equal(calls.map(([sql]) => sql).join('\n').includes('email_verified'), false);
   assert.ok(calls.flatMap(([, params]) => params).includes(DEVICE_ID));
   assert.ok(calls.flatMap(([, params]) => params).includes(plan.contractChecksum));
+  assert.ok(calls.flatMap(([, params]) => params).includes(plan.manifestChecksum));
+  assert.equal(calls.flatMap(([, params]) => params).filter((value) => value === plan.contractChecksum).length, 1);
   assert.equal(JSON.stringify(calls).includes('production'), false);
 });
 

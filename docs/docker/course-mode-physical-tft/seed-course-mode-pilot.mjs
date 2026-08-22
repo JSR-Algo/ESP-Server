@@ -62,6 +62,9 @@ export function buildSeedPlan({ deviceId, backendRoot = process.env.TBOT_BACKEND
   assertOrdered(pilot.activities?.map(({ activityId }) => activityId), EXACT.authoredActivityIds, 'authored activity identities');
 
   const provenance = readJson(join(pilotRoot, 'assets/provenance.json'));
+  const derivativeIndex = readJson(join(pilotRoot, 'derivatives/index.json'));
+  assertExact(derivativeIndex.rendererId, EXACT.rendererVersion, 'derivative renderer identity');
+  assertOrdered(derivativeIndex.cues?.map(({ cueId }) => cueId), EXACT.authoredActivityIds, 'derivative cue identities');
   const assets = provenance.assets.map((asset) => ({
     assetKey: asset.assetId,
     path: `course-mode/pilot/v1/${asset.generatedPath}`,
@@ -71,6 +74,12 @@ export function buildSeedPlan({ deviceId, backendRoot = process.env.TBOT_BACKEND
     height: asset.height,
     ...assetKind(asset.assetId),
   }));
+  const steps = pilot.activities.map((activity, index) => seedStep(activity, pilot.turns[index] ?? pilot.turns[0], index));
+  const { flattenedPhases, sourceVisuals } = buildFlattenedPhases(derivativeIndex.cues, root);
+  steps[0].stepBody.cinematicPhases = flattenedPhases.map((phase) => phase.authored);
+  const manifestChecksum = computeManifestChecksum(root, buildManifestIdentity({
+    assets, steps, flattenedPhases, contract,
+  }));
 
   return Object.freeze({
     ...EXACT,
@@ -78,8 +87,11 @@ export function buildSeedPlan({ deviceId, backendRoot = process.env.TBOT_BACKEND
     ids: IDS,
     contract,
     authoredActivities: pilot.activities,
-    turns: pilot.turns,
+    steps,
     assets,
+    flattenedPhases,
+    sourceVisuals,
+    manifestChecksum,
   });
 }
 
@@ -87,8 +99,8 @@ export async function executeSeedPlan(plan, client) {
   await client.query('BEGIN');
   try {
     await client.query(
-      `INSERT INTO parent_accounts (id,email,password_hash,coppa_verified,email_verified)
-       VALUES ($1,$2,$3,true,true)
+      `INSERT INTO parent_accounts (id,email,password_hash,coppa_verified)
+       VALUES ($1,$2,$3,true)
        ON CONFLICT (id) DO UPDATE SET email=EXCLUDED.email`,
       [plan.ids.owner, 'course-mode-pilot-adult@local.invalid', 'disabled-local-synthetic-owner'],
     );
@@ -111,7 +123,7 @@ export async function executeSeedPlan(plan, client) {
          course_id=EXCLUDED.course_id,manifest_version=EXCLUDED.manifest_version,title=EXCLUDED.title,
          manifest_checksum=EXCLUDED.manifest_checksum,status='published',published_at=COALESCE(lessons.published_at,NOW()),created_by=EXCLUDED.created_by`,
       [plan.ids.lesson, plan.ids.course, plan.lessonKey, plan.lessonVersion, plan.rendererVersion,
-        'Course Mode Pilot: Cat and Ball', plan.contractChecksum, plan.ids.owner],
+        'Course Mode Pilot: Cat and Ball', plan.manifestChecksum, plan.ids.owner],
     );
     await client.query(
       `INSERT INTO lesson_course_mode_contracts
@@ -120,8 +132,7 @@ export async function executeSeedPlan(plan, client) {
        ON CONFLICT (lesson_id) DO UPDATE SET contract=EXCLUDED.contract,contract_checksum=EXCLUDED.contract_checksum,updated_at=NOW()`,
       [plan.ids.lesson, JSON.stringify(plan.contract), plan.contractChecksum],
     );
-    for (const [index, activity] of plan.authoredActivities.entries()) {
-      const turn = plan.turns[index] ?? plan.turns[0];
+    for (const [index, step] of plan.steps.entries()) {
       await client.query(
         `INSERT INTO lesson_steps
            (id,lesson_id,step_key,step_index,step_type,entrance,robot_state,pose,expression,phase,prompt,subject,step_body)
@@ -130,16 +141,15 @@ export async function executeSeedPlan(plan, client) {
            step_index=EXCLUDED.step_index,step_type=EXCLUDED.step_type,entrance=EXCLUDED.entrance,
            robot_state=EXCLUDED.robot_state,pose=EXCLUDED.pose,expression=EXCLUDED.expression,
            phase=EXCLUDED.phase,prompt=EXCLUDED.prompt,subject=EXCLUDED.subject,step_body=EXCLUDED.step_body`,
-        [stepUuid(index), plan.ids.lesson, activity.activityId, index, 'model', index === 0 ? 'flyIn' : 'none',
-          activity.assessed ? 'listening' : 'modeling', 'teach', 'teaching', activity.stage.toLowerCase(),
-          turn.text, activity.targetId, JSON.stringify({ courseModeActivity: activity })],
+        [stepUuid(index), plan.ids.lesson, step.stepKey, index, step.stepType, step.entrance,
+          step.robotState, step.pose, step.expression, step.phase, step.prompt, step.subject, JSON.stringify(step.stepBody)],
       );
     }
     await client.query(
       `INSERT INTO asset_bundles (id,lesson_id,lesson_version,profile,manifest_checksum)
        VALUES ($1,$2,$3,$4,$5)
        ON CONFLICT (lesson_id,lesson_version,profile) DO UPDATE SET manifest_checksum=EXCLUDED.manifest_checksum`,
-      [plan.ids.bundle, plan.ids.lesson, plan.lessonVersion, plan.profile, plan.contractChecksum],
+      [plan.ids.bundle, plan.ids.lesson, plan.lessonVersion, plan.profile, plan.manifestChecksum],
     );
     for (const [index, asset] of plan.assets.entries()) {
       await client.query(
@@ -151,6 +161,46 @@ export async function executeSeedPlan(plan, client) {
            is_critical=EXCLUDED.is_critical,media_type=EXCLUDED.media_type,bytes=EXCLUDED.bytes,width=EXCLUDED.width,height=EXCLUDED.height`,
         [assetUuid(index), plan.ids.bundle, asset.assetKey, asset.layer, asset.role, asset.path, asset.sha256,
           asset.isCritical, asset.bytes, asset.width, asset.height],
+      );
+    }
+    for (const source of plan.sourceVisuals) {
+      await client.query(
+        `INSERT INTO shared_visual_assets (id,asset_key,category,title)
+         VALUES ($1,$2,$3,$4) ON CONFLICT (asset_key) DO NOTHING`,
+        [source.assetId, source.assetKey, source.category, source.title],
+      );
+      await client.query(
+        `INSERT INTO shared_visual_asset_versions
+           (id,asset_id,version,profile,storage_path,sha256,mime_type,bytes,width,height,
+            publication_state,published_at,compatibility_metadata)
+         VALUES ($1,$2,1,'espTft',$3,$4,'video/mp4',$5,480,320,'published',NOW(),$6::jsonb)
+         ON CONFLICT (asset_id,version) DO NOTHING`,
+        [source.versionId, source.assetId, source.storagePath, source.sha256, source.bytes,
+          JSON.stringify(source.compatibilityMetadata)],
+      );
+    }
+    for (const phase of plan.flattenedPhases) {
+      for (const ref of phase.refs) {
+        await client.query(
+          `INSERT INTO lesson_visual_refs (id,lesson_id,step_key,slot,asset_version_id)
+           VALUES ($1,$2,$3,$4,$5)
+           ON CONFLICT (lesson_id,step_key,slot) DO UPDATE SET asset_version_id=EXCLUDED.asset_version_id`,
+          [ref.id, plan.ids.lesson, plan.steps[0].stepKey, ref.slot, ref.assetVersionId],
+        );
+      }
+    }
+    for (const phase of plan.flattenedPhases) {
+      await client.query(
+        `INSERT INTO flattened_cinematic_derivatives
+           (derivative_id,lesson_id,lesson_version,phase_id,source_revision,is_current,status,
+            output_path,output_url,output_sha256,output_bytes,output_metadata,completed_at)
+         VALUES ($1,$2,$3,$4,1,true,'ready',$5,$6,$7,$8,$9::jsonb,NOW())
+         ON CONFLICT (derivative_id) DO UPDATE SET
+           is_current=true,status='ready',output_path=EXCLUDED.output_path,output_url=EXCLUDED.output_url,
+           output_sha256=EXCLUDED.output_sha256,output_bytes=EXCLUDED.output_bytes,
+           output_metadata=EXCLUDED.output_metadata,completed_at=NOW(),updated_at=NOW()`,
+        [phase.derivativeId, plan.ids.lesson, plan.lessonVersion, phase.phaseId, phase.path, phase.url,
+          phase.sha256, phase.bytes, JSON.stringify(phase.metadata)],
       );
     }
     await client.query(
@@ -216,12 +266,153 @@ function assetKind(assetId) {
   return { layer: 'robotOverlay', role: 'pose', isCritical: false };
 }
 
+function seedStep(activity, turn, index) {
+  return {
+    stepKey: activity.activityId,
+    stepType: 'model',
+    entrance: index === 0 ? 'flyIn' : 'none',
+    robotState: activity.assessed ? 'listening' : 'modeling',
+    pose: 'teach',
+    expression: 'teaching',
+    phase: activity.stage.toLowerCase(),
+    prompt: turn.text,
+    subject: activity.targetId,
+    stepBody: { courseModeActivity: activity },
+  };
+}
+
+function buildFlattenedPhases(cues, backendRoot) {
+  const require = createRequire(join(backendRoot, 'package.json'));
+  const { buildFlattenedCinematicSourceDescriptor } = require(join(
+    backendRoot, 'dist/lessons/derivatives/flattened-cinematic-source.js',
+  ));
+  const phaseIds = ['opening', 'greet', 'teach', 'listen', 'thinking', 'correct', 'retry', 'celebrate'];
+  const sourceVisuals = [
+    sourceVisual(cues[0], 0, 'scene', 'local.course-mode.scene'),
+    sourceVisual(cues[1], 1, 'teachingObject', 'local.course-mode.object'),
+    sourceVisual(cues[2], 2, 'robotPose', 'local.course-mode.robot'),
+  ];
+  const flattenedPhases = cues.map((cue, index) => {
+    const phaseId = phaseIds[index];
+    const authoredLayers = {
+      background: `${sourceVisuals[0].assetKey}@v1`,
+      teachingObject: `${sourceVisuals[1].assetKey}@v1`,
+      robotOverlay: `${sourceVisuals[2].assetKey}@v1`,
+    };
+    const refs = sourceVisuals.map((source, layerIndex) => ({
+      id: visualRefUuid(index, layerIndex),
+      assetVersionId: source.versionId,
+      slot: `${['backgroundScene', 'teachingObject', 'robotOverlay'][layerIndex]}.${phaseId}`,
+      asset_version_id: source.versionId,
+      step_key: EXACT.authoredActivityIds[0],
+      category: source.category,
+      asset_key: source.assetKey,
+      version: 1,
+      profile: 'espTft',
+      publication_state: 'published',
+      storage_path: source.storagePath,
+      sha256: source.sha256,
+      mime_type: 'video/mp4',
+      bytes: String(source.bytes),
+      width: 480,
+      height: 320,
+      compatibility_metadata: source.compatibilityMetadata,
+    }));
+    const descriptor = buildFlattenedCinematicSourceDescriptor({
+      lessonId: IDS.lesson,
+      lessonVersion: EXACT.lessonVersion,
+      sourceRevision: 1,
+      phaseId,
+      durationMs: cue.durationMs,
+      authoredLayers,
+      refs,
+    });
+    const path = `lessons/derivatives/${descriptor.derivativeId}/${phaseId}.mp4`;
+    return {
+      phaseId,
+      derivativeId: descriptor.derivativeId,
+      path,
+      url: `https://course-mode-assets.local.invalid/${path}`,
+      sha256: cue.sha256,
+      bytes: cue.bytes,
+      metadata: { codec: 'mjpeg', fps: 10, durationMs: cue.durationMs, frameCount: cue.frameCount, hasAudio: false },
+      authored: { phaseId, timing: { durationMs: cue.durationMs }, layers: authoredLayers },
+      refs,
+    };
+  });
+  return { flattenedPhases, sourceVisuals };
+}
+
+function sourceVisual(cue, index, category, assetKey) {
+  return {
+    assetId: `73000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+    versionId: `74000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+    assetKey,
+    category,
+    title: `Local Course Mode ${category}`,
+    storagePath: `course-mode/pilot/v1/${cue.path}`,
+    sha256: cue.sha256,
+    bytes: cue.bytes,
+    compatibilityMetadata: {
+      codec: 'mjpeg', width: 480, height: 320, durationMs: cue.durationMs,
+      frameCount: cue.frameCount, fpsNumerator: 10, fpsDenominator: 1, hasAudio: false,
+      rect: { x: 0, y: 0, width: 480, height: 320 },
+      chromaKey: category === 'scene' ? null : { color: { r: 0, g: 255, b: 0 }, tolerance: 20, feather: 4 },
+    },
+  };
+}
+
+function buildManifestIdentity({ assets, steps, flattenedPhases, contract }) {
+  return {
+    manifestVersion: EXACT.rendererVersion,
+    courseId: 'local-course-mode-physical-tft',
+    lessonId: EXACT.lessonKey,
+    lessonVersion: EXACT.lessonVersion,
+    locale: 'en-US',
+    ageBand: '18+',
+    profile: EXACT.profile,
+    assets: [...assets].sort((a, b) => layerRank(a.layer) - layerRank(b.layer) || a.assetKey.localeCompare(b.assetKey)).map((asset) => ({
+      id: asset.assetKey, layer: asset.layer, role: asset.role, mediaType: 'image/png', path: asset.path,
+      sha256: asset.sha256, bytes: asset.bytes, dimensions: { width: asset.width, height: asset.height }, critical: asset.isCritical,
+    })),
+    steps: steps.map((step) => ({
+      id: step.stepKey, type: step.stepType, prompt: step.prompt, robotState: step.robotState,
+      pose: step.pose, expression: step.expression, phase: step.phase, entrance: step.entrance, subject: step.subject,
+    })),
+    protocolVersion: EXACT.rendererVersion,
+    cinematicPhases: flattenedPhases.map((phase) => ({
+      templateId: 'flattenedMjpegCinematic', templateVersion: 1, phaseId: phase.phaseId,
+      timing: { durationMs: phase.metadata.durationMs },
+      asset: { derivativeId: phase.derivativeId, path: phase.path, url: phase.path, sha256: phase.sha256,
+        bytes: phase.bytes, mediaType: 'video/mp4', width: 480, height: 320, metadata: phase.metadata },
+    })),
+    features: { lessonRendererV4: { flattenedMjpegCinematic: true, assetSource: 'publishedFlattenedDerivative' } },
+    courseModeContract: contract,
+  };
+}
+
+function computeManifestChecksum(backendRoot, identity) {
+  const require = createRequire(join(backendRoot, 'package.json'));
+  const { computeManifestChecksum: compute } = require(join(
+    backendRoot, 'dist/lessons/lesson-manifest.canonical.cjs',
+  ));
+  return compute(identity);
+}
+
+function layerRank(layer) {
+  return { backgroundScene: 0, teachingObject: 1, robotOverlay: 2 }[layer] ?? 99;
+}
+
 function stepUuid(index) {
   return `71000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`;
 }
 
 function assetUuid(index) {
   return `72000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`;
+}
+
+function visualRefUuid(phaseIndex, layerIndex) {
+  return `75000000-0000-4000-8000-${String(phaseIndex * 3 + layerIndex + 1).padStart(12, '0')}`;
 }
 
 function assertLocalDatabaseUrl(databaseUrl) {
