@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Strictly roll the physical-TFT preflight active-lab firmware identity to reviewed SHA `5b6121b7933cda25908cc5bd07f1b494f00728ca`.
+**Goal:** Strictly roll the physical-TFT preflight active-lab firmware identity to reviewed SHA `812f5d3e71d326b350e5b0d1df878d47ac60400e`.
 
 **Architecture:** Change the single authoritative firmware pin in both the preflight and attended-ledger validators and their direct fixtures. Preserve independent caller-supplied lowercase application and bundle-root SHA-256 validation and every unrelated gate.
 
@@ -19,13 +19,13 @@
 
 ```python
 ACTIVE_LAB_APP = {
-    "firmwareSha": "5b6121b7933cda25908cc5bd07f1b494f00728ca",
+    "firmwareSha": "812f5d3e71d326b350e5b0d1df878d47ac60400e",
     "applicationSha256": "c" * 64,
     "bundleRootSha256": "d" * 64,
 }
 ```
 
-Add a mutation asserting superseded SHA `aef1034f859b35efc93215106eb3be89f10f6c66`
+Add a mutation asserting superseded SHA `5b6121b7933cda25908cc5bd07f1b494f00728ca`
 produces `input.activeLabApp.firmwareSha`. Keep the existing test that supplies
 different exact lowercase application and bundle-root SHA-256 values.
 
@@ -48,7 +48,7 @@ Expected: failures because the validator still requires the superseded SHA.
 - [ ] **Step 1: Replace the single source pin**
 
 Set `ACTIVE_LAB_FIRMWARE_SHA` to
-`5b6121b7933cda25908cc5bd07f1b494f00728ca` in both validators.
+`812f5d3e71d326b350e5b0d1df878d47ac60400e` in both validators.
 
 Do not change application/bundle validation, production identity, NVS,
 protected-test, Compose, endpoint, or output gates.
@@ -79,7 +79,7 @@ physical smoke audit, Course Mode contract, and runtime integration modules.
 - [ ] **Step 2: Run compile and integrity gates**
 
 Compile the preflight script; run `git diff --check`; verify the branch is based
-on `c0bf9f41f6b43c6272e2891329db6830ee17ec04`; verify canonical main and the
+on `79b03b08edb3365d8a0349a39879be56abad5a8d`; verify canonical main and the
 protected test hash remain unchanged; inspect the diff for unrelated gate drift.
 
 - [ ] **Step 3: Commit**

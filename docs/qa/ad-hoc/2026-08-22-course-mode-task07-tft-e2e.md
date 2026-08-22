@@ -71,7 +71,7 @@ immutable three-field `productionCandidateTarget`, the separate
 full current pre-install digest, the separate `activeLabApp`, the
 canonical protected path/hash above, the concrete session directory, and a UTC
 session start. The active lab source must be
-`5b6121b7933cda25908cc5bd07f1b494f00728ca`; supply the exact qualified
+`812f5d3e71d326b350e5b0d1df878d47ac60400e`; supply the exact qualified
 application and bundle-root SHA-256 values at point of use. Do not copy
 preliminary hashes into tooling or substitute the production target identity.
 Do not infer a lab IP from current network state and do not add command,

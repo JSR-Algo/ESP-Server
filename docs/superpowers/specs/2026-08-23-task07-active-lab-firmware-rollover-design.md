@@ -3,8 +3,8 @@
 ## Goal
 
 Roll the physical-TFT preflight's authoritative active local-lab firmware source
-from superseded SHA `aef1034f859b35efc93215106eb3be89f10f6c66` to reviewed SHA
-`5b6121b7933cda25908cc5bd07f1b494f00728ca`.
+from superseded SHA `5b6121b7933cda25908cc5bd07f1b494f00728ca` to reviewed SHA
+`812f5d3e71d326b350e5b0d1df878d47ac60400e`.
 
 ## Contract
 

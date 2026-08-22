@@ -196,7 +196,7 @@ preserved-NVS digest but must not constrain the current session.
 `sessionNvsBaseline` must contain only a caller-supplied lowercase
 `beforeInstallSha256`; the preflight must not read a device or infer the value.
 `activeLabApp` must bind exact firmware
-main `5b6121b7933cda25908cc5bd07f1b494f00728ca` and caller-supplied lowercase
+main `812f5d3e71d326b350e5b0d1df878d47ac60400e` and caller-supplied lowercase
 application/bundle SHA-256 values; preliminary artifact hashes must not be
 hard-coded. `protectedTest` must equal the protected path/hash in the design.
 The implementation validates the fixed argv, hashes the protected file

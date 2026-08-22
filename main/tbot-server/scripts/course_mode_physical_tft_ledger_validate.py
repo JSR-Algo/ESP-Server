@@ -22,7 +22,7 @@ EXPECTED_PRODUCTION_CANDIDATE_TARGET = {
 EXPECTED_HISTORICAL_INSTALLATION_PROVENANCE = {
     "preservedNvsSha256": "a7a87f72416be20388298cb70cfff306ec78e77f0e8b09231d16113f3d82404e",
 }
-ACTIVE_LAB_FIRMWARE_SHA = "5b6121b7933cda25908cc5bd07f1b494f00728ca"
+ACTIVE_LAB_FIRMWARE_SHA = "812f5d3e71d326b350e5b0d1df878d47ac60400e"
 EXPECTED_PROTECTED = {
     "path": "/Users/manhhodinh/Documents/TBOT/robot/esp32-server/main/tbot-server/tests/test_lesson_voice_output_discipline.py",
     "sha256": "08f77b5452301224b17b4b333d2d032fff40c06aa2eaea97fa90932dae7d97e3",
