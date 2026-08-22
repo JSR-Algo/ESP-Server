@@ -4,6 +4,23 @@ Date: 2026-08-21 (Asia/Ho_Chi_Minh)
 
 Verdict: **PHYSICAL BLOCKED**
 
+## Physical-TFT software tooling - 2026-08-22
+
+The reviewed software-only tooling design and implementation plan are recorded
+in `docs/course-mode/task-07-physical-tft-tooling-design.md` and
+`docs/course-mode/task-07-physical-tft-tooling-implementation-plan.md`. The
+operator-facing, non-triggering attended ledger is
+`docs/qa/ad-hoc/2026-08-22-course-mode-task07-tft-e2e.md`, and its initial
+redacted manifest is
+`docs/qa/artifacts/2026-08-22-course-mode-task07/physical-tft-ledger-template.json`.
+
+The three validators prepare or verify local configuration, materializer
+receipts, and attended evidence without starting Docker services, opening
+serial, contacting a robot, triggering a lesson, capturing media, or changing
+production state. The protected hash binds the canonical shared ESP main path,
+not the frozen implementation-worktree copy. None of this is physical evidence:
+the Task 07 verdict remains **PHYSICAL BLOCKED**, and Task 08 remains locked.
+
 ## Task-owned dependency and isolation repair - 2026-08-22
 
 The Course Mode backend task worktree had the only broken dependency link: its
