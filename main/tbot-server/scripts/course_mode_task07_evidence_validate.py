@@ -30,7 +30,14 @@ GIT_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z")
 FULL_MAC_RE = re.compile(r"(?i)(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}")
 SHELL_PROGRAMS = {"bash", "dash", "fish", "sh", "zsh"}
-UNSAFE_TOKENS = {"erase_flash", "erase-flash", "erase_region", "erase-region"}
+UNSAFE_TOKENS = {
+    "erase_flash",
+    "erase-flash",
+    "erase_region",
+    "erase-region",
+    "--erase-all",
+    "-e",
+}
 REQUIRED_PASS_ACTIONS = {"candidate-install", "readback", "rollback"}
 APPROVED_DATA_POLICY = "adult-only-redacted-no-real-child-data"
 APPROVED_CANDIDATE = {

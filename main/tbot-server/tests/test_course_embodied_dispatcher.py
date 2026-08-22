@@ -369,6 +369,33 @@ async def test_reconnect_snapshot_never_replays_an_inflight_action() -> None:
 
 
 @pytest.mark.asyncio
+async def test_explicit_plan_retry_rearms_a_transport_interrupted_action() -> None:
+    first = Harness()
+    pending = await first.dispatcher.dispatch(decision())
+
+    restored = Harness()
+    restored.dispatcher = CourseEmbodiedDispatcher(
+        assignment_id="assignment-1",
+        session_id="session-1",
+        step_id=lambda _decision: "cat-meaning-left-right-01",
+        features=capability(),
+        next_sequence=restored.next_sequence,
+        send_frame=restored.send_frame,
+        snapshot=first.dispatcher.snapshot(),
+    )
+
+    retried = await restored.dispatcher.dispatch(
+        decision(),
+        retry_transport_interrupted=True,
+    )
+
+    assert retried.action_id == pending.action_id
+    assert retried.status is EmbodiedDispatchStatus.PENDING
+    assert retried.generation == 2
+    assert len(restored.frames) == 1
+
+
+@pytest.mark.asyncio
 async def test_dispatcher_accepts_only_authoritative_decisions_and_frozen_intents() -> None:
     harness = Harness()
     with pytest.raises(TypeError):
@@ -530,6 +557,67 @@ async def test_runtime_emits_embodied_frame_before_delivery_and_opens_assessment
         require_audio_window=False,
         require_explicit_runtime_window=True,
     ) is True
+
+
+@pytest.mark.asyncio
+async def test_provisional_plan_retries_interrupted_embodied_action_after_reconnect() -> None:
+    store = MemoryCourseModeSnapshotStore()
+    first_sent: list[dict] = []
+
+    async def first_send(payload: str) -> None:
+        first_sent.append(json.loads(payload))
+
+    first = LessonRuntime(
+        RuntimeConn([]),
+        assignment={"assignmentId": "assignment-1", "lessonId": "lesson-1"},
+        manifest={"courseModeContract": semantic_contract()},
+        asset_cache=RuntimeAssetCache(),
+        forwarder=RuntimeForwarder(),
+        send=first_send,
+        course_mode_snapshot_store=store,
+        course_mode_snapshot_device_id="device-1",
+    )
+    first.state = "RUNNING"
+    first._step_id = "cat-discover-center-01"
+    first.course_embodied_dispatcher.ack_timeout_sec = 10
+    plan = response_plan(first, await opening_decision(first))
+
+    assert (await first.course_apply_response_plan(plan))["accepted"] is True
+    snapshot = await store.load("device-1", "assignment-1")
+    assert len(first_sent) == 1
+    assert snapshot["embodiedDispatcher"]["results"][0]["reason"] == "transportInterrupted"
+
+    restored_events: list[str] = []
+    restored_sent: list[dict] = []
+
+    async def restored_send(payload: str) -> None:
+        restored_sent.append(json.loads(payload))
+
+    restored = LessonRuntime(
+        RuntimeConn(restored_events),
+        assignment={"assignmentId": "assignment-1", "lessonId": "lesson-1"},
+        manifest={"courseModeContract": semantic_contract()},
+        asset_cache=RuntimeAssetCache(),
+        forwarder=RuntimeForwarder(),
+        send=restored_send,
+        course_mode_snapshot_store=store,
+        course_mode_snapshot_device_id="device-1",
+        course_mode_snapshot=snapshot,
+    )
+    restored.state = "RUNNING"
+    restored._step_id = "cat-discover-center-01"
+    restored.course_embodied_dispatcher.ack_timeout_sec = 10
+
+    assert (await restored.course_apply_response_plan(plan))["accepted"] is True
+    assert len(restored_sent) == 1
+    assert restored_sent[0]["body"]["actionGeneration"] == 2
+
+    commit = asyncio.create_task(restored.commit_course_response_plan(plan))
+    await asyncio.sleep(0)
+    await restored.on_lesson_ack(runtime_ack(restored_sent[0]))
+    assert await commit is True
+    assert restored.course_assessment_window_open is True
+    first.course_embodied_dispatcher.teardown("test-complete")
 
 
 @pytest.mark.asyncio

@@ -787,6 +787,8 @@ def test_physical_pass_requires_every_rollback_readback_region():
         ["env", "sh", "capture.sh"],
         ["sudo", "bash", "capture.sh"],
         ["esptool", "erase_flash"],
+        ["esptool", "write_flash", "--erase-all", "0x0", "bootloader.bin"],
+        ["esptool", "write_flash", "-e", "0x0", "bootloader.bin"],
         ["esptool", "write_flash", "0x0", "merged-binary.bin"],
     ],
 )

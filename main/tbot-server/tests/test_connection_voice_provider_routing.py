@@ -761,6 +761,16 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(handler.voice_provider.audio_calls, [b"opus-frame"])
 
+    async def test_authorized_binary_audio_with_invalid_utf8_is_not_parsed_as_json(self):
+        handler = self._build_handler()
+        handler.voice_provider = _RecordingVoiceProvider()
+        handler.client_audio_input_authorized = True
+        handler.bind_completed_event.set()
+
+        await handler._route_message(b"\x80")
+
+        self.assertEqual(handler.voice_provider.audio_calls, [b"\x80"])
+
     async def test_google_live_listen_start_bypasses_pending_bind_gate(self):
         handler = self._build_handler()
         handler.config["voice_mode"] = {"type": "google_live"}

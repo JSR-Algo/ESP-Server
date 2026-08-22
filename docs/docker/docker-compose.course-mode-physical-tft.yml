@@ -3,6 +3,8 @@ name: tbot-course-mode-physical-tft
 services:
   backend:
     image: ${TBOT_LESSON_STUDIO_BACKEND_IMAGE:?run docs/docker/course-mode-physical-tft/up.sh}
+    extra_hosts:
+      - host.docker.internal:host-gateway
     ports: !override
       - "127.0.0.1:3000:3000"
     environment:
@@ -10,6 +12,8 @@ services:
       COURSE_MODE_LOCAL_PHYSICAL_TFT_ENABLED: "true"
       LESSON_STUDIO_NEW_ASSIGNMENTS_ENABLED: "true"
       LESSON_ROLLOUT_DEVICE_ALLOWLIST: "14:c1:9f:d1:ac:20"
+      ROBOT_ESP_BASE_URL: http://host.docker.internal:8003
+      TBOT_ESP_SERVER_URL: http://host.docker.internal:8003
       TBOT_DEVICE_MINT_SECRET: ${TBOT_DEVICE_MINT_SECRET:?export the shared local device mint secret}
       LESSON_ASSET_ORIGIN_BASE: ${COURSE_MODE_ASSET_ORIGIN_BASE:?export the robot-reachable local asset origin ending in /}
       FLATTENED_CINEMATIC_PUBLIC_BASE_URL: ${COURSE_MODE_ASSET_ORIGIN_BASE:?export the robot-reachable local asset origin ending in /}
@@ -33,10 +37,22 @@ services:
       - ${TBOT_BACKEND_WORKTREE:?export the task-owned backend worktree}/src/lessons/fixtures/course-mode:/course-mode-fixtures:ro
     networks: [lesson-studio-e2e]
 
+  seed-postgres:
+    profiles: [disabled-course-mode-physical-tft]
+
+  seed-mysql:
+    profiles: [disabled-course-mode-physical-tft]
+
   web:
-    depends_on:
+    depends_on: !override
+      backend:
+        condition: service_healthy
       course-mode-materialize:
         condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - ${TBOT_BACKEND_WORKTREE:?export the task-owned backend worktree}/src/lessons/fixtures/course-mode/pilot/v1/assets:/usr/share/nginx/html/course-mode/pilot/v1/assets:ro
       - ${TBOT_BACKEND_WORKTREE:?export the task-owned backend worktree}/src/lessons/fixtures/course-mode/pilot/v1/derivatives:/usr/share/nginx/html/lessons/derivatives:ro

@@ -4,6 +4,23 @@ Date: 2026-08-21 (Asia/Ho_Chi_Minh)
 
 Verdict: **PHYSICAL BLOCKED**
 
+## Task-owned dependency and isolation repair - 2026-08-22
+
+The Course Mode backend task worktree had the only broken dependency link: its
+`node_modules` symlink still targeted a removed external sibling worktree. With
+explicit ownership authorization, only that symlink was repointed to
+`../../node_modules`, matching the repository's stable worktree convention. It
+now resolves to the canonical local backend dependency tree at
+`/Users/manhhodinh/Documents/TBOT/tbot-backend/node_modules`; no external,
+Farm v9, T54, or T65 worktree was inspected or changed.
+
+The physical-TFT launcher also now forces the dedicated Compose project/resource
+prefix `tbot-course-mode-physical-tft` and pins both backend ESP fan-out settings
+to `http://host.docker.internal:8003`. Inherited shell values therefore cannot
+rename this stack or redirect its backend traffic to a production ESP endpoint.
+This is software-only readiness evidence and does not authorize stack start,
+device access, assignment, flags, deployment, or OTA.
+
 ## Authorized candidate installation and safe-idle rerun - 2026-08-22
 
 The adult operator, independent adult safety observer David, sole physical

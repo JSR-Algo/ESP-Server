@@ -19,9 +19,10 @@
 set -euo pipefail
 
 REPRO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TEST_REL="tests/test_lesson_voice_output_discipline.py"
+TEST_REL="tests/__t23_voice_output_discipline_repro.py"
 
 cd main/tbot-server
+trap 'rm -f "$TEST_REL"' EXIT
 cp "$REPRO_DIR/t23_voice_output_discipline_test.py" "$TEST_REL"
 
 python3 -m pytest -q -p no:randomly "$TEST_REL"

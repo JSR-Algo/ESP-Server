@@ -547,7 +547,7 @@ class ConnectionHandler:
 
     async def _route_message(self, message):
         """Message routing"""
-        listen_state = self._listen_control_state(message)
+        listen_state = self._listen_control_state(message) if isinstance(message, str) else None
         if listen_state in {"stop", "detect"}:
             self.client_audio_input_authorized = False
         if (

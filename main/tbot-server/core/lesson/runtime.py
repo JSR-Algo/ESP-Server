@@ -2211,7 +2211,10 @@ class LessonRuntime:
         if name == "course_apply_response_plan" and self.course_mode.response_plan_requires_commit(arguments):
             decision = self.course_mode._decisions.get(arguments.get("decisionId"))
             if decision is not None:
-                await self._dispatch_course_embodied_decision(decision)
+                await self._dispatch_course_embodied_decision(
+                    decision,
+                    retry_transport_interrupted=True,
+                )
         return result
 
     @staticmethod
@@ -2232,13 +2235,21 @@ class LessonRuntime:
             raise ValueError("lesson embodied action frame is too large")
         await self._send(payload)
 
-    async def _dispatch_course_embodied_decision(self, decision: CourseDecision) -> None:
+    async def _dispatch_course_embodied_decision(
+        self,
+        decision: CourseDecision,
+        *,
+        retry_transport_interrupted: bool = False,
+    ) -> None:
         dispatcher = self.course_embodied_dispatcher
         if dispatcher is None:
             return
         self._course_assessment_generation += 1
         self._close_course_assessment_window()
-        result = await dispatcher.dispatch(decision)
+        result = await dispatcher.dispatch(
+            decision,
+            retry_transport_interrupted=retry_transport_interrupted,
+        )
         if result.status is not EmbodiedDispatchStatus.PENDING:
             self.last_embodied_result = result
 

@@ -41,8 +41,11 @@ ACTUAL_SHA="$(git -C "${BACKEND_ROOT}" rev-parse HEAD)"
   fail "backend Course Mode local materializer source is missing"
 
 BACKEND_IMAGE="local/tbot-backend:course-mode-physical-tft-${ACTUAL_SHA}"
+COMPOSE_PROJECT="tbot-course-mode-physical-tft"
 export TBOT_BACKEND_WORKTREE="${BACKEND_ROOT}"
 export TBOT_LESSON_STUDIO_BACKEND_IMAGE="${BACKEND_IMAGE}"
+unset COMPOSE_PROJECT_NAME COMPOSE_PROFILES LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME
+export LESSON_STUDIO_E2E_RESOURCE_PREFIX="${COMPOSE_PROJECT}"
 
 echo "[course-mode-physical-tft] compiling backend ${ACTUAL_SHA} from ${BACKEND_ROOT}"
 (cd -- "${BACKEND_ROOT}" && pnpm build)
@@ -57,7 +60,7 @@ echo "[course-mode-physical-tft] verifying compiled materializer in ${BACKEND_IM
 docker run --rm --entrypoint /nodejs/bin/node "${BACKEND_IMAGE}" \
   -e "require('node:fs').accessSync('/app/dist/lessons/course-mode/course-mode-local-materializer.js')"
 
-COMPOSE=(docker compose -f "${BASE_COMPOSE}" -f "${OVERLAY_COMPOSE}")
+COMPOSE=(docker compose --project-name "${COMPOSE_PROJECT}" -f "${BASE_COMPOSE}" -f "${OVERLAY_COMPOSE}")
 echo "[course-mode-physical-tft] validating Compose with ${BACKEND_IMAGE}"
 "${COMPOSE[@]}" config --quiet
 

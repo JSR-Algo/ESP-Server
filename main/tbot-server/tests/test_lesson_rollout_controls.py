@@ -170,6 +170,7 @@ def test_compose_variants_forward_documented_lesson_rollout_environment():
         "LESSON_ASSET_PACK_MOUNT_ROOT",
         "LESSON_MOTION_PRESETS_ENABLED",
         "LESSON_PLAYFUL_INTERACTIONS_ENABLED",
+        "LESSON_COURSE_MODE_V2_ENABLED",
         "LESSON_RENDERER_V4_ENABLED",
         "LESSON_RENDERER_V5_ENABLED",
         "LESSON_ROLLOUT_DEVICE_ALLOWLIST",
@@ -194,6 +195,7 @@ def test_compose_variants_forward_documented_lesson_rollout_environment():
     assert production_environment["LESSON_RUNTIME_ENABLED"].endswith(":-false}")
     assert production_environment["LESSON_MOTION_PRESETS_ENABLED"].endswith(":-false}")
     assert production_environment["LESSON_PLAYFUL_INTERACTIONS_ENABLED"].endswith(":-false}")
+    assert production_environment["LESSON_COURSE_MODE_V2_ENABLED"].endswith(":-false}")
 
     healthcheck = production_compose["services"]["tbot-esp32-server"]["healthcheck"]
     assert healthcheck["test"][0] == "CMD"

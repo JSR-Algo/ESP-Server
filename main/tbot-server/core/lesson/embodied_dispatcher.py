@@ -151,7 +151,12 @@ class CourseEmbodiedDispatcher:
             )
             self._results[result.action_id] = result
 
-    async def dispatch(self, decision: CourseDecision) -> EmbodiedDispatchResult:
+    async def dispatch(
+        self,
+        decision: CourseDecision,
+        *,
+        retry_transport_interrupted: bool = False,
+    ) -> EmbodiedDispatchResult:
         if not isinstance(decision, CourseDecision):
             raise TypeError("dispatcher requires an authoritative CourseDecision")
         if not isinstance(decision.embodied_intent, EmbodiedIntent):
@@ -159,7 +164,13 @@ class CourseEmbodiedDispatcher:
         action_id = f"{self.session_id}:{decision.decision_id}"
         prior = self._results.get(action_id)
         if prior is not None:
-            return prior
+            if not (
+                retry_transport_interrupted
+                and prior.status is EmbodiedDispatchStatus.CANCELLED
+                and prior.reason == "transportInterrupted"
+            ):
+                return prior
+            del self._results[action_id]
         if self._in_flight is not None:
             self._complete(
                 self._in_flight.action_id,

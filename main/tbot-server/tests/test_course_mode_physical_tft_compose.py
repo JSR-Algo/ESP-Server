@@ -16,9 +16,15 @@ class ComposeLoader(yaml.SafeLoader):
     pass
 
 
+def _construct_override(loader, node):
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node)
+    return loader.construct_sequence(node)
+
+
 ComposeLoader.add_constructor(
     "!override",
-    lambda loader, node: loader.construct_sequence(node),
+    _construct_override,
 )
 
 
@@ -28,13 +34,25 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
 
     assert set(overlay) == {"name", "services"}
     assert overlay["name"] == "tbot-course-mode-physical-tft"
-    assert set(overlay["services"]) == {"backend", "course-mode-materialize", "web"}
+    assert set(overlay["services"]) == {
+        "backend",
+        "course-mode-materialize",
+        "seed-postgres",
+        "seed-mysql",
+        "web",
+    }
     assert "volumes" not in overlay
     assert "volumes" not in overlay["services"]["backend"]
     assert overlay["services"]["backend"]["environment"][
         "TBOT_DEVICE_MINT_SECRET"
     ] == "${TBOT_DEVICE_MINT_SECRET:?export the shared local device mint secret}"
     materialize = overlay["services"]["course-mode-materialize"]
+    assert overlay["services"]["seed-postgres"]["profiles"] == [
+        "disabled-course-mode-physical-tft"
+    ]
+    assert overlay["services"]["seed-mysql"]["profiles"] == [
+        "disabled-course-mode-physical-tft"
+    ]
     assert materialize["environment"]["COURSE_MODE_LOCAL_COMPOSE_ENABLED"] == "true"
     assert "COURSE_MODE_V2_PUBLISH_ENABLED" not in materialize["environment"]
     assert materialize["environment"]["COURSE_MODE_DEVICE_MAC"] == "14:c1:9f:d1:ac:20"
@@ -42,6 +60,15 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
         "${TBOT_LESSON_STUDIO_BACKEND_IMAGE:?run docs/docker/course-mode-physical-tft/up.sh}"
     )
     assert materialize["image"] == overlay["services"]["backend"]["image"]
+    assert overlay["services"]["backend"]["environment"]["ROBOT_ESP_BASE_URL"] == (
+        "http://host.docker.internal:8003"
+    )
+    assert overlay["services"]["backend"]["environment"]["TBOT_ESP_SERVER_URL"] == (
+        "http://host.docker.internal:8003"
+    )
+    assert overlay["services"]["backend"]["extra_hosts"] == [
+        "host.docker.internal:host-gateway"
+    ]
     assert all("seed" not in str(value).lower() for value in materialize.values())
     assert all(".sql" not in str(value).lower() for value in materialize.values())
 
@@ -86,6 +113,7 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
     compose = json.loads(result.stdout)
     backend = compose["services"]["backend"]
     materialize = compose["services"]["course-mode-materialize"]
+    web = compose["services"]["web"]
 
     assert compose["name"] == "tbot-course-mode-physical-tft"
     assert backend["container_name"] == "tbot-course-mode-physical-tft-backend"
@@ -109,6 +137,7 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
             "protocol": "tcp",
         }
     ]
+    assert backend["extra_hosts"] == ["host.docker.internal=host-gateway"]
     required_environment = (
         "COURSE_MODE_V2_PUBLISH_ENABLED",
         "LESSON_STUDIO_NEW_ASSIGNMENTS_ENABLED",
@@ -145,6 +174,10 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
             "bind": {},
         }
     ]
+    assert set(web["depends_on"]) == {"backend", "course-mode-materialize", "mysql", "redis"}
+    assert "seed-postgres" not in compose["services"]
+    assert "seed-mysql" not in compose["services"]
+    assert "seed-postgres" not in web["depends_on"]
 
     lowered = raw.lower()
     assert "production" not in lowered
@@ -187,6 +220,7 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
     (fake_bin / "docker").write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
+        "[[ -z \"${COMPOSE_PROFILES:-}\" ]] || exit 97\n"
         f"printf 'docker %s\\n' \"$*\" >> {log}\n",
         encoding="utf-8",
     )
@@ -204,6 +238,12 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
             "LESSON_ASSET_ORIGIN_BASE": "http://127.0.0.1:8102/tvideo-demo",
             "ROBOT_ESP_BASE_URL": "http://host.docker.internal:8080",
             "COURSE_MODE_ASSET_ORIGIN_BASE": "http://192.168.100.183:8102/",
+            "COMPOSE_PROJECT_NAME": "unrelated-stack",
+            "COMPOSE_PROFILES": "disabled-course-mode-physical-tft",
+            "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME": "another-stack",
+            "LESSON_STUDIO_E2E_RESOURCE_PREFIX": "external-resources",
+            "ROBOT_ESP_BASE_URL": "https://production-esp.example",
+            "TBOT_ESP_SERVER_URL": "https://production-esp.example",
         }
     )
     subprocess.run(
@@ -225,8 +265,11 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
         f"{expected_image} -e require('node:fs').accessSync('/app/dist/lessons/"
         "course-mode/course-mode-local-materializer.js')"
     )
-    assert " compose " in f" {calls[3]} "
+    assert " compose --project-name tbot-course-mode-physical-tft " in f" {calls[3]} "
     assert calls[3].endswith("config --quiet")
+    assert "unrelated-stack" not in calls[3]
+    assert "another-stack" not in calls[3]
+    assert "external-resources" not in calls[3]
     assert all(" up " not in f" {call} " for call in calls)
 
     log.unlink()
