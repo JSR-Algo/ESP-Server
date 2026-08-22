@@ -18,6 +18,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from core.lesson.course_mode_compatibility import (
+    course_mode_compatibility_assets_match,
+    validate_course_mode_compatibility,
+)
 from core.lesson.flattened_cinematic_contract import (
     TRGB_MEDIA_TYPE,
     FlattenedCinematicContractError,
@@ -515,7 +519,7 @@ def _ready_rich_asset_pack(pack_dir: Path, cache_key: str) -> dict[str, Any] | N
     checksum = manifest.get("manifestChecksum")
     if not isinstance(checksum, str) or _LOWER_SHA256_RE.fullmatch(checksum) is None:
         return None
-    return {
+    result = {
         "assignmentVersion": _safe_int(manifest.get("assignmentVersion"), 0),
         "lessonId": str(manifest.get("lessonId") or _lesson_id_from_cache_key(cache_key)),
         "lessonVersion": _safe_int(
@@ -528,6 +532,20 @@ def _ready_rich_asset_pack(pack_dir: Path, cache_key: str) -> dict[str, Any] | N
         "ready": True,
         "assets": sorted(assets, key=lambda asset: asset["key"]),
     }
+    marker = manifest.get("courseModeCompatibility")
+    if marker is not None:
+        if (
+            not validate_course_mode_compatibility(marker)
+            or not course_mode_compatibility_assets_match(raw_assets)
+        ):
+            return None
+        result["courseModeCompatibility"] = marker
+    elif any(
+        isinstance(asset, dict) and "courseModeCompatibility" in asset
+        for asset in raw_assets
+    ):
+        return None
+    return result
 
 def _expected_sd_path(cache_key: str, key: str) -> str | None:
     """The canonical SD path, or None when the key cannot form one (T5.1)."""

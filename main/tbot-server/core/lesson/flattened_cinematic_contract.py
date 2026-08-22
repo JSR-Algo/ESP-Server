@@ -6,6 +6,12 @@ import re
 from typing import Any, NoReturn, cast
 from urllib.parse import urlsplit
 
+from core.lesson.course_mode_compatibility import (
+    course_mode_compatibility_phase_matches,
+    course_mode_compatibility_for_manifest,
+    validate_course_mode_compatibility,
+)
+
 RENDERER_V4 = "teebot-lesson-renderer.v4"
 TEMPLATE_ID = "flattenedMjpegCinematic"
 TEMPLATE_VERSION_V1 = 1
@@ -92,7 +98,9 @@ def cinematic_identity_key(command: Any) -> str:
     return cast(str, identity)
 
 
-def _entry_identity(entry: dict[str, Any]) -> tuple[int, str]:
+def _entry_identity(
+    entry: dict[str, Any], *, course_mode_compatibility: dict[str, Any] | None = None
+) -> tuple[int, str]:
     version = entry.get("templateVersion")
     if entry.get("templateId") != TEMPLATE_ID or type(version) is not int:
         _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic identity is invalid")
@@ -124,15 +132,23 @@ def _entry_identity(entry: dict[str, Any]) -> tuple[int, str]:
             or not isinstance(effect, str)
             or effect not in _V2_EFFECTS
             or not isinstance(playback_mode, str)
-            or playback_mode != _V2_PLAYBACK_MODE[effect]
+            or playback_mode != (
+                "once"
+                if course_mode_compatibility is not None
+                else _V2_PLAYBACK_MODE[effect]
+            )
         ):
             _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic cue identity is invalid")
         return TEMPLATE_VERSION_V2, entry["cueId"]
     _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic identity is invalid")
 
 
-def _manifest_asset(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], int, str]:
-    version, entry_id = _entry_identity(entry)
+def _manifest_asset(
+    entry: dict[str, Any], *, course_mode_compatibility: dict[str, Any] | None = None
+) -> tuple[dict[str, Any], dict[str, Any], int, str]:
+    version, entry_id = _entry_identity(
+        entry, course_mode_compatibility=course_mode_compatibility
+    )
     timing = _exact_dict(
         entry.get("timing"), {"durationMs"}, "flattened cinematic timing fields are invalid"
     )
@@ -142,7 +158,11 @@ def _manifest_asset(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
     duration_ms = cast(int, raw_duration_ms)
     if duration_ms % 100 != 0:
         _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic duration is invalid")
-    if version == TEMPLATE_VERSION_V2 and duration_ms != _V2_DURATION_MS[entry["effect"]]:
+    if (
+        version == TEMPLATE_VERSION_V2
+        and course_mode_compatibility is None
+        and duration_ms != _V2_DURATION_MS[entry["effect"]]
+    ):
         _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic cue duration is stale")
     asset = _exact_dict(
         entry.get("asset"),
@@ -151,7 +171,11 @@ def _manifest_asset(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
     )
     derivative_id = asset.get("derivativeId")
     sha256 = asset.get("sha256")
-    extension = "mp4" if version == TEMPLATE_VERSION_V1 else "trgb"
+    extension = (
+        "mp4"
+        if version == TEMPLATE_VERSION_V1 or course_mode_compatibility is not None
+        else "trgb"
+    )
     expected_path = f"lessons/derivatives/{derivative_id}/{entry_id}.{extension}"
     asset_url = asset.get("url")
     try:
@@ -176,7 +200,11 @@ def _manifest_asset(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
         or _SHA256_RE.fullmatch(sha256) is None
         or not _positive_int(asset.get("bytes"))
         or asset.get("mediaType")
-        != ("video/mp4" if version == TEMPLATE_VERSION_V1 else TRGB_MEDIA_TYPE)
+        != (
+            "video/mp4"
+            if version == TEMPLATE_VERSION_V1 or course_mode_compatibility is not None
+            else TRGB_MEDIA_TYPE
+        )
         or type(asset.get("width")) is not int
         or asset.get("width") != 480
         or type(asset.get("height")) is not int
@@ -185,7 +213,8 @@ def _manifest_asset(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
         _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic asset identity is invalid")
     metadata_fields = (
         {"codec", "fps", "durationMs", "frameCount", "hasAudio"}
-        if version == TEMPLATE_VERSION_V1 else _V2_METADATA_FIELDS
+        if version == TEMPLATE_VERSION_V1 or course_mode_compatibility is not None
+        else _V2_METADATA_FIELDS
     )
     metadata = _exact_dict(
         asset.get("metadata"), metadata_fields, "flattened cinematic metadata fields are invalid"
@@ -199,8 +228,10 @@ def _manifest_asset(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
         or metadata.get("frameCount") != duration_ms // 100
         or metadata.get("hasAudio") is not False
     )
-    v1_metadata_invalid = version == TEMPLATE_VERSION_V1 and metadata.get("codec") != "mjpeg"
-    v2_metadata_invalid = version == TEMPLATE_VERSION_V2 and (
+    v1_metadata_invalid = (
+        version == TEMPLATE_VERSION_V1 or course_mode_compatibility is not None
+    ) and metadata.get("codec") != "mjpeg"
+    v2_metadata_invalid = version == TEMPLATE_VERSION_V2 and course_mode_compatibility is None and (
         metadata.get("codec") != "rgb565le"
         or metadata.get("containerVersion") != 1
         or metadata.get("width") != 480
@@ -248,7 +279,9 @@ def _local_sd_path(asset: dict[str, Any], local_root: str, expected_key: str) ->
     return cast(str, path)
 
 
-def validate_flattened_cinematic_manifest(manifest: Any) -> None:
+def validate_flattened_cinematic_manifest(
+    manifest: Any, *, manifest_checksum: str = ""
+) -> None:
     """Require the exact renderer-v4 protocol and flattened feature identity."""
     if not isinstance(manifest, dict):
         _fail("CINEMATIC_IDENTITY_UNSUPPORTED", "flattened cinematic manifest is invalid")
@@ -270,10 +303,15 @@ def validate_flattened_cinematic_manifest(manifest: Any) -> None:
         _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic manifest has no phases")
     seen: set[str] = set()
     version: int | None = None
+    course_mode_compatibility = course_mode_compatibility_for_manifest(
+        manifest, manifest_checksum=manifest_checksum
+    )
     for phase in phases:
         if not isinstance(phase, dict):
             _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic entry is invalid")
-        _, _, entry_version, entry_id = _manifest_asset(phase)
+        _, _, entry_version, entry_id = _manifest_asset(
+            phase, course_mode_compatibility=course_mode_compatibility
+        )
         if version is None:
             version = entry_version
         elif version != entry_version:
@@ -368,7 +406,12 @@ def validate_pathless_flattened_cinematic_cache_asset(asset: Any) -> dict[str, A
     }
 
 
-def project_flattened_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
+def project_flattened_cinematic_phase(
+    phase: Any,
+    pack: Any,
+    *,
+    course_mode_compatibility: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Project one exact v4 phase to one verified local SD file identity."""
     if not isinstance(pack, dict) or pack.get("ready") is not True:
         _fail("CINEMATIC_PACK_NOT_READY", "verified flattened cinematic pack is not ready")
@@ -378,7 +421,17 @@ def project_flattened_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
         _fail("CINEMATIC_PACK_NOT_READY", "flattened cinematic pack attestation is incomplete")
     if not isinstance(phase, dict):
         _fail("CINEMATIC_METADATA_MISMATCH", "flattened cinematic entry is invalid")
-    source, metadata, version, entry_id = _manifest_asset(phase)
+    if course_mode_compatibility is not None and not validate_course_mode_compatibility(
+        course_mode_compatibility
+    ):
+        _fail("CINEMATIC_IDENTITY_UNSUPPORTED", "Course Mode compatibility identity is invalid")
+    if course_mode_compatibility is not None and not course_mode_compatibility_phase_matches(
+        phase
+    ):
+        _fail("CINEMATIC_IDENTITY_UNSUPPORTED", "Course Mode cinematic identity is invalid")
+    source, metadata, version, entry_id = _manifest_asset(
+        phase, course_mode_compatibility=course_mode_compatibility
+    )
     expected_key = f"flattenedCinematic.{entry_id}"
     matches = [item for item in assets if isinstance(item, dict) and item.get("key") == expected_key]
     if len(matches) != 1:
@@ -387,6 +440,11 @@ def project_flattened_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
             _fail("CINEMATIC_IDENTITY_UNSUPPORTED", "flattened cinematic pack key is unsupported")
         _fail("CINEMATIC_SD_PATH_MISSING", "flattened cinematic asset is missing from the SD pack")
     packed = matches[0]
+    if course_mode_compatibility is not None and (
+        pack.get("courseModeCompatibility") != course_mode_compatibility
+        or packed.get("courseModeCompatibility") != course_mode_compatibility
+    ):
+        _fail("CINEMATIC_IDENTITY_UNSUPPORTED", "Course Mode compatibility marker is missing")
     expected_identity = (
         {"phaseId": entry_id}
         if version == TEMPLATE_VERSION_V1
@@ -417,7 +475,7 @@ def project_flattened_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
             "frameCount": metadata["frameCount"],
             "hasAudio": metadata["hasAudio"],
         }
-        if version == TEMPLATE_VERSION_V1
+        if version == TEMPLATE_VERSION_V1 or course_mode_compatibility is not None
         else dict(metadata)
     )
     if (
@@ -458,7 +516,7 @@ def project_flattened_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
                 "height": source["height"],
             },
         }
-    return {
+    projected = {
         "templateId": TEMPLATE_ID,
         "templateVersion": TEMPLATE_VERSION_V2,
         "cueId": entry_id,
@@ -499,3 +557,7 @@ def project_flattened_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
             }
         ),
     }
+    if course_mode_compatibility is not None:
+        projected["courseModeCompatibility"] = dict(course_mode_compatibility)
+        projected["asset"]["courseModeCompatibility"] = dict(course_mode_compatibility)
+    return projected

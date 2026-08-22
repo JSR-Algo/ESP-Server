@@ -13,6 +13,11 @@ from core.lesson.flattened_cinematic_contract import (
     validate_flattened_cinematic_cache_asset,
     validate_pathless_flattened_cinematic_cache_asset,
 )
+from core.lesson.course_mode_compatibility import (
+    course_mode_compatibility_asset_matches,
+    course_mode_compatibility_assets_match,
+    validate_course_mode_compatibility,
+)
 from core.lesson.layered_cinematic_contract import (
     LayeredCinematicContractError,
     is_layered_cinematic_generation_asset,
@@ -80,7 +85,7 @@ _FIRMWARE_RENDERER_V4_IDENTITY_FIELDS = frozenset({
 _FIRMWARE_ASSET_FIELDS = (
     _FIRMWARE_BASE_ASSET_FIELDS
     | _FIRMWARE_RENDERER_V4_IDENTITY_FIELDS
-    | {"compatibilityMetadata"}
+    | {"compatibilityMetadata", "courseModeCompatibility"}
 )
 _FIRMWARE_ASSET_FIELDS_BY_KIND = {
     "base": _FIRMWARE_BASE_ASSET_FIELDS,
@@ -261,7 +266,13 @@ def validate_renderer_v4_flattened_mp4(asset: Any) -> dict[str, Any]:
             or not isinstance(effect, str)
             or effect not in _FLATTENED_CUE_EFFECTS
             or not isinstance(playback_mode, str)
-            or playback_mode != _FLATTENED_CUE_PLAYBACK_MODE.get(effect)
+            or playback_mode != (
+                "once"
+                if validate_course_mode_compatibility(
+                    asset.get("courseModeCompatibility")
+                )
+                else _FLATTENED_CUE_PLAYBACK_MODE.get(effect)
+            )
             or asset.get("key") != f"flattenedCinematic.{cue_id}"
         ):
             _refuse()
@@ -290,13 +301,31 @@ def validate_renderer_v4_flattened_mp4(asset: Any) -> dict[str, Any]:
         or duration_ms != frame_count * 100
     ):
         _refuse()
-    if not has_phase and duration_ms != _FLATTENED_CUE_DURATION_MS[effect]:
+    course_mode_compatibility = asset.get("courseModeCompatibility")
+    if course_mode_compatibility is not None and not validate_course_mode_compatibility(
+        course_mode_compatibility
+    ):
+        _refuse()
+    if course_mode_compatibility is not None and not course_mode_compatibility_asset_matches(
+        asset
+    ):
+        _refuse()
+    if (
+        not has_phase
+        and course_mode_compatibility is None
+        and duration_ms != _FLATTENED_CUE_DURATION_MS[effect]
+    ):
         _refuse()
     _validate_online_url(_matching_alias(asset, "onlineUrl", "url"))
     return {
         "derivativeId": derivative_id,
         **identity,
         "compatibilityMetadata": copy.deepcopy(metadata),
+        **(
+            {"courseModeCompatibility": copy.deepcopy(course_mode_compatibility)}
+            if course_mode_compatibility is not None
+            else {}
+        ),
     }
 
 def _validate_asset_metadata(
@@ -373,6 +402,24 @@ def build_firmware_sync_pack(pack: Any) -> dict[str, Any]:
         _refuse()
     assets = pack.get("assets")
     if not isinstance(assets, list) or not 1 <= len(assets) <= MAX_SYNC_ASSETS:
+        _refuse()
+    course_mode_compatibility = pack.get("courseModeCompatibility")
+    if course_mode_compatibility is not None:
+        if (
+            not validate_course_mode_compatibility(course_mode_compatibility)
+            or not course_mode_compatibility_assets_match(assets)
+            or any(
+                isinstance(asset, dict)
+                and "courseModeCompatibility" in asset
+                and asset.get("courseModeCompatibility") != course_mode_compatibility
+                for asset in assets
+            )
+        ):
+            _refuse()
+    elif any(
+        isinstance(asset, dict) and "courseModeCompatibility" in asset
+        for asset in assets
+    ):
         _refuse()
     destinations = set()
     basenames = []

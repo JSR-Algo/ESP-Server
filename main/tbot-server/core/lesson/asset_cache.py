@@ -118,6 +118,7 @@ class AssetState:
         "key", "path", "sha256", "size", "critical", "layer", "role", "media_type", "url",
         "shared_asset_key", "shared_asset_version", "compatibility_metadata", "visual_refs",
         "derivative_id", "phase_id", "cue_id", "effect", "step_key", "playback_mode",
+        "course_mode_compatibility",
         "renderer_v3_mp4", "renderer_v4_mp4", "renderer_v5_media",
         "state", "checksum_ok", "reason",
     )
@@ -158,6 +159,7 @@ class AssetState:
         self.effect: str | None = asset.get("effect")
         self.step_key: str | None = asset.get("stepKey")
         self.playback_mode: str | None = asset.get("playbackMode")
+        self.course_mode_compatibility: Any = asset.get("courseModeCompatibility")
         try:
             validate_renderer_v3_shared_mp4(asset)
             self.renderer_v3_mp4 = True
@@ -419,7 +421,7 @@ class AssetCache:
         lesson_version: int,
         manifest_checksum: str,
     ) -> Dict[str, Any]:
-        return {
+        result = {
             "assignmentVersion": assignment_version,
             "lessonId": lesson_id,
             "lessonVersion": lesson_version,
@@ -439,6 +441,17 @@ class AssetCache:
                 and self._asset_pack_materialized(asset)
             ],
         }
+        markers = {
+            json.dumps(asset.course_mode_compatibility, sort_keys=True)
+            for asset in self.assets
+            if asset.course_mode_compatibility is not None
+        }
+        marked_assets = [
+            asset for asset in self.assets if asset.course_mode_compatibility is not None
+        ]
+        if len(markers) == 1 and len(marked_assets) == 8:
+            result["courseModeCompatibility"] = json.loads(next(iter(markers)))
+        return result
 
     def _asset_pack_record(self, asset: AssetState) -> Dict[str, Any]:
         pack_path = self._asset_pack_path(asset)
@@ -487,6 +500,7 @@ class AssetCache:
             "effect": asset.effect,
             "stepKey": asset.step_key,
             "playbackMode": asset.playback_mode,
+            "courseModeCompatibility": asset.course_mode_compatibility,
         }
         return {k: v for k, v in record.items() if v is not None}
 

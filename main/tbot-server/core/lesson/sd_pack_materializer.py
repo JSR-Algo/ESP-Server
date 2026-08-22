@@ -33,6 +33,10 @@ from core.lesson.cache_key_contract import (
     encode_asset_basename,
     validate_cache_key,
 )
+from core.lesson.course_mode_compatibility import (
+    course_mode_compatibility_assets_match,
+    validate_course_mode_compatibility,
+)
 from core.lesson.flattened_cinematic_contract import (
     TRGB_MEDIA_TYPE,
     FlattenedCinematicContractError,
@@ -75,8 +79,12 @@ _LOCAL_STORAGE_ERRNOS = frozenset(
     if code is not None
 )
 _TOP_LEVEL_FIELDS = frozenset(
-    {"lessonId", "lessonVersion", "profile", "manifestChecksum", "cacheKey", "assets"}
+    {
+        "lessonId", "lessonVersion", "profile", "manifestChecksum", "cacheKey",
+        "assets", "courseModeCompatibility",
+    }
 )
+_REQUIRED_TOP_LEVEL_FIELDS = _TOP_LEVEL_FIELDS - {"courseModeCompatibility"}
 _ASSET_FIELDS = frozenset(
     {
         "key",
@@ -98,6 +106,7 @@ _ASSET_FIELDS = frozenset(
         "effect",
         "stepKey",
         "playbackMode",
+        "courseModeCompatibility",
     }
 )
 _METRICS = {
@@ -469,7 +478,10 @@ async def _download_asset(
 def _validate_manifest(manifest: Mapping[str, Any], config: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(manifest, Mapping):
         raise _bad("INVALID_MANIFEST", "Manifest must be an object")
-    _reject_field_delta(set(manifest.keys()), _TOP_LEVEL_FIELDS, require_all=True)
+    actual_fields = set(manifest.keys())
+    _reject_field_delta(actual_fields, _TOP_LEVEL_FIELDS)
+    if _REQUIRED_TOP_LEVEL_FIELDS - actual_fields:
+        raise _bad("MISSING_FIELD", "Manifest is missing required fields")
     lesson_id = _safe_lesson_id(manifest.get("lessonId"))
     version = _safe_version(manifest.get("lessonVersion"))
     profile = manifest.get("profile")
@@ -515,7 +527,25 @@ def _validate_manifest(manifest: Mapping[str, Any], config: Mapping[str, Any]) -
                 "Lesson asset pack exceeds configured byte limit",
             )
         assets.append(asset)
-    return {
+    marker = manifest.get("courseModeCompatibility")
+    if marker is not None:
+        if (
+            not validate_course_mode_compatibility(marker)
+            or not course_mode_compatibility_assets_match(assets_raw)
+        ):
+            raise _bad(
+                "INVALID_COURSE_MODE_COMPATIBILITY",
+                "Invalid Course Mode compatibility marker",
+            )
+    elif any(
+        isinstance(asset, Mapping) and "courseModeCompatibility" in asset
+        for asset in assets_raw
+    ):
+        raise _bad(
+            "INVALID_COURSE_MODE_COMPATIBILITY",
+            "Missing Course Mode pack marker",
+        )
+    result = {
         "lessonId": lesson_id,
         "lessonVersion": version,
         "profile": "espTft",
@@ -525,6 +555,9 @@ def _validate_manifest(manifest: Mapping[str, Any], config: Mapping[str, Any]) -
         "maxFileBytes": max_file,
         "maxPackBytes": max_pack,
     }
+    if marker is not None:
+        result["courseModeCompatibility"] = marker
+    return result
 
 
 def _validate_asset(
@@ -595,6 +628,7 @@ def _validate_asset(
     elif any(field in item for field in (
         "sharedAssetKey", "sharedAssetVersion", "compatibilityMetadata", "visualRefs",
         "derivativeId", "phaseId", "cueId", "effect", "stepKey", "playbackMode",
+        "courseModeCompatibility",
     )):
         if "compatibilityMetadata" in item or "visualRefs" in item:
             raise _bad("INVALID_RENDERER_V3_MP4", "Renderer-v3 metadata is only valid for shared MP4")
@@ -915,7 +949,7 @@ def _result(cache_key: str, asset_count: int, downloaded: int, skipped: int) -> 
 
 
 def _public_pack_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+    result = {
         "cacheKey": manifest["cacheKey"],
         "lessonId": manifest["lessonId"],
         "lessonVersion": manifest["lessonVersion"],
@@ -923,6 +957,9 @@ def _public_pack_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "manifestChecksum": manifest["manifestChecksum"],
         "assets": [dict(asset) for asset in manifest["assets"]],
     }
+    if "courseModeCompatibility" in manifest:
+        result["courseModeCompatibility"] = manifest["courseModeCompatibility"]
+    return result
 
 
 def _replay_status(store: SharedAssetStore, manifest: Mapping[str, Any]) -> str:
@@ -960,6 +997,7 @@ def _replay_manifest_projection(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "lessonVersion": manifest.get("lessonVersion"),
         "profile": manifest.get("profile"),
         "manifestChecksum": manifest.get("manifestChecksum"),
+        "courseModeCompatibility": manifest.get("courseModeCompatibility"),
         "assets": sorted(
             (
                 _replay_asset_projection(asset)
@@ -983,6 +1021,7 @@ def _replay_asset_projection(asset: Mapping[str, Any]) -> dict[str, Any]:
     if asset.get("mediaType") in {"video/mp4", TRGB_MEDIA_TYPE}:
         projection["onlineUrl"] = asset.get("onlineUrl")
         projection["compatibilityMetadata"] = asset.get("compatibilityMetadata")
+        projection["courseModeCompatibility"] = asset.get("courseModeCompatibility")
         if asset.get("mediaType") == TRGB_MEDIA_TYPE:
             projection["path"] = asset.get("path")
         if asset.get("cueId") is not None:

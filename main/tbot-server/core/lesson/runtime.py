@@ -75,6 +75,7 @@ from core.lesson.conversation_runtime import (
     inactive_conversation_decision,
 )
 from core.lesson.course_mode_contract import CourseModeContract
+from core.lesson.course_mode_compatibility import course_mode_compatibility_for_manifest
 from core.lesson.course_orchestrator import (
     CONTEXT_BRIDGE_INTENTS,
     CONTEXT_CHILD_DETAIL_CODES,
@@ -1793,7 +1794,9 @@ def _requested_renderer_capabilities(
     return requested or [PROTOCOL_VERSION]
 
 
-def _manifest_asset_cache_inputs(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _manifest_asset_cache_inputs(
+    manifest: Dict[str, Any], *, manifest_checksum: str = ""
+) -> List[Dict[str, Any]]:
     assets = [
         {
             "key": asset.get("id") or asset.get("assetId"),
@@ -1862,6 +1865,9 @@ def _manifest_asset_cache_inputs(manifest: Dict[str, Any]) -> List[Dict[str, Any
         return list(layered_by_key.values())
     if manifest_version != RENDERER_V4:
         return assets
+    course_mode_compatibility = course_mode_compatibility_for_manifest(
+        manifest, manifest_checksum=manifest_checksum
+    )
     for phase in manifest.get("cinematicPhases", []):
         if not isinstance(phase, dict) or not isinstance(phase.get("asset"), dict):
             continue
@@ -1894,21 +1900,26 @@ def _manifest_asset_cache_inputs(manifest: Dict[str, Any]) -> List[Dict[str, Any
                 "frameCount": metadata.get("frameCount"),
                 "hasAudio": metadata.get("hasAudio"),
             }
-            if version == 1
+            if version == 1 or course_mode_compatibility is not None
             else copy.deepcopy(metadata)
         )
         compatibility = {"compatibilityMetadata": compatibility_metadata}
         if version == 1:
             assets.append({**common, "phaseId": entry_id, **compatibility})
             continue
-        assets.append({
+        projected = {
             **common,
             "cueId": entry_id,
             "effect": phase.get("effect"),
             "stepKey": phase.get("stepKey"),
             "playbackMode": phase.get("playbackMode"),
             **compatibility,
-        })
+        }
+        if course_mode_compatibility is not None:
+            projected["courseModeCompatibility"] = copy.deepcopy(
+                course_mode_compatibility
+            )
+        assets.append(projected)
     return assets
 
 
@@ -1981,6 +1992,9 @@ class LessonRuntime:
         )
         self.manifest = manifest
         self.manifest_checksum = manifest_checksum
+        self._course_mode_compatibility = course_mode_compatibility_for_manifest(
+            manifest, manifest_checksum=manifest_checksum
+        )
         # L3 P3 — the device's advertised renderer-capability SET (forward-modelled
         # string|list from hello.features.renderer; defaults to the v1-only set for
         # every current firmware). A served manifestVersion MUST be in this set or
@@ -2571,7 +2585,9 @@ class LessonRuntime:
 
         if manifest_version == RENDERER_V4:
             try:
-                validate_flattened_cinematic_manifest(self.manifest)
+                validate_flattened_cinematic_manifest(
+                    self.manifest, manifest_checksum=self.manifest_checksum
+                )
             except FlattenedCinematicContractError as exc:
                 self.last_error = LessonError(exc.code, exc.message, retryable=False)
                 raise self.last_error from exc
@@ -2595,7 +2611,9 @@ class LessonRuntime:
         if manifest_version in {RENDERER_V3, RENDERER_V4, RENDERER_V5}:
             try:
                 if manifest_version == RENDERER_V4:
-                    validate_flattened_cinematic_manifest(self.manifest)
+                    validate_flattened_cinematic_manifest(
+                        self.manifest, manifest_checksum=self.manifest_checksum
+                    )
                 phases = self.manifest.get("cinematicPhases")
                 if not isinstance(phases, list) or not phases:
                     raise CinematicContractError(
@@ -2645,7 +2663,12 @@ class LessonRuntime:
                     )
                 else:
                     projected = [
-                        project_flattened_cinematic_phase(phase, pack) for phase in phases
+                        project_flattened_cinematic_phase(
+                            phase,
+                            pack,
+                            course_mode_compatibility=self._course_mode_compatibility,
+                        )
+                        for phase in phases
                     ]
                     self._cinematic_cues_by_key = {
                         (cue["stepKey"], cue["effect"]): cue
@@ -7109,9 +7132,13 @@ class LessonRuntime:
             "cacheKey",
             "localRoot",
             "ready",
+            "courseModeCompatibility",
         )
         payload = {key: pack[key] for key in top_level_keys if key in pack}
-        asset_keys = ("key", "state", "checksumOk", "size", "mediaType")
+        asset_keys = (
+            "key", "state", "checksumOk", "size", "mediaType",
+            "courseModeCompatibility",
+        )
         local_root = str(pack.get("localRoot") or "").rstrip("/")
         payload_assets = []
         for asset in pack.get("assets", []):
@@ -8597,7 +8624,9 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
             _log("info", f"lesson SD GC deleted cacheKey={result['deleted']}")
 
     asset_cache = AssetCache(
-        assets=_manifest_asset_cache_inputs(manifest),
+        assets=_manifest_asset_cache_inputs(
+            manifest, manifest_checksum=new_manifest_checksum
+        ),
         profile=profile,
         asset_origin_base=lesson_cfg.get("asset_origin_base"),
         public_base_url=lesson_asset_public_base_url(config),
