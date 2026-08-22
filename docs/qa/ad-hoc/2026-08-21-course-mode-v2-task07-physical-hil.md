@@ -24,7 +24,7 @@ the Task 07 verdict remains **PHYSICAL BLOCKED**, and Task 08 remains locked.
 The tooling now records two non-interchangeable firmware identities: the
 immutable reviewed production-candidate target and the active temporary
 local-lab app. The temporary source is pinned to firmware main
-`aef1034f859b35efc93215106eb3be89f10f6c66`; its application and bundle-root
+`5b6121b7933cda25908cc5bd07f1b494f00728ca`; its application and bundle-root
 SHA-256 values must be supplied only after qualification and are not hard-coded
 as preliminary values. This identity split does not authorize installation,
 device access, or a production-candidate substitution.

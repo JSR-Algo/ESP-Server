@@ -4,7 +4,7 @@
 
 **Goal:** Strictly roll the physical-TFT preflight active-lab firmware identity to reviewed SHA `5b6121b7933cda25908cc5bd07f1b494f00728ca`.
 
-**Architecture:** Change the single authoritative preflight firmware pin and its direct fixture. Preserve independent caller-supplied lowercase application and bundle-root SHA-256 validation and every unrelated preflight gate.
+**Architecture:** Change the single authoritative firmware pin in both the preflight and attended-ledger validators and their direct fixtures. Preserve independent caller-supplied lowercase application and bundle-root SHA-256 validation and every unrelated gate.
 
 **Tech Stack:** Python 3, pytest, Markdown Task 07 contracts.
 
@@ -39,6 +39,7 @@ Expected: failures because the validator still requires the superseded SHA.
 
 **Files:**
 - Modify: `main/tbot-server/scripts/course_mode_physical_tft_preflight.py`
+- Modify: `main/tbot-server/scripts/course_mode_physical_tft_ledger_validate.py`
 - Modify: `docs/course-mode/task-07-physical-tft-tooling-design.md`
 - Modify: `docs/course-mode/task-07-physical-tft-tooling-implementation-plan.md`
 - Modify: `docs/qa/ad-hoc/2026-08-21-course-mode-v2-task07-physical-hil.md`
@@ -46,9 +47,8 @@ Expected: failures because the validator still requires the superseded SHA.
 
 - [ ] **Step 1: Replace the single source pin**
 
-```python
-ACTIVE_LAB_FIRMWARE_SHA = "5b6121b7933cda25908cc5bd07f1b494f00728ca"
-```
+Set `ACTIVE_LAB_FIRMWARE_SHA` to
+`5b6121b7933cda25908cc5bd07f1b494f00728ca` in both validators.
 
 Do not change application/bundle validation, production identity, NVS,
 protected-test, Compose, endpoint, or output gates.
@@ -86,7 +86,9 @@ protected test hash remain unchanged; inspect the diff for unrelated gate drift.
 
 ```bash
 git add main/tbot-server/scripts/course_mode_physical_tft_preflight.py \
+  main/tbot-server/scripts/course_mode_physical_tft_ledger_validate.py \
   main/tbot-server/tests/test_course_mode_physical_tft_preflight.py \
+  main/tbot-server/tests/test_course_mode_physical_tft_ledger_validate.py \
   docs/course-mode/task-07-physical-tft-tooling-design.md \
   docs/course-mode/task-07-physical-tft-tooling-implementation-plan.md \
   docs/qa/ad-hoc/2026-08-21-course-mode-v2-task07-physical-hil.md \

@@ -36,7 +36,7 @@ HISTORICAL_INSTALLATION_PROVENANCE = {
 }
 SESSION_NVS_BASELINE = {"beforeInstallSha256": "0" * 64}
 ACTIVE_LAB_APP = {
-    "firmwareSha": "aef1034f859b35efc93215106eb3be89f10f6c66",
+    "firmwareSha": "5b6121b7933cda25908cc5bd07f1b494f00728ca",
     "applicationSha256": "c" * 64,
     "bundleRootSha256": "d" * 64,
 }
@@ -251,6 +251,7 @@ def test_input_contract_rejects_missing_extra_override_and_identity_drift(tmp_pa
         (lambda d: d["sessionNvsBaseline"].update(beforeInstallSha256="short"), "input.sessionNvsBaseline.beforeInstallSha256"),
         (lambda d: d["sessionNvsBaseline"].update(beforeInstallSha256="A" * 64), "input.sessionNvsBaseline.beforeInstallSha256"),
         (lambda d: d["sessionNvsBaseline"].update(afterInstallSha256="0" * 64), "input.sessionNvsBaseline"),
+        (lambda d: d["activeLabApp"].update(firmwareSha="aef1034f859b35efc93215106eb3be89f10f6c66"), "input.activeLabApp.firmwareSha"),
         (lambda d: d["activeLabApp"].update(firmwareSha="f" * 40), "input.activeLabApp.firmwareSha"),
         (lambda d: d["activeLabApp"].update(applicationSha256="short"), "input.activeLabApp.applicationSha256"),
         (lambda d: d["activeLabApp"].update(bundleRootSha256="A" * 64), "input.activeLabApp.bundleRootSha256"),

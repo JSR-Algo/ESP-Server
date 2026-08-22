@@ -35,7 +35,7 @@ HISTORICAL_INSTALLATION_PROVENANCE = {
 }
 SESSION_NVS_SHA256 = "0" * 64
 ACTIVE_LAB_APP = {
-    "firmwareSha": "aef1034f859b35efc93215106eb3be89f10f6c66",
+    "firmwareSha": "5b6121b7933cda25908cc5bd07f1b494f00728ca",
     "applicationSha256": "c" * 64,
     "bundleRootSha256": "d" * 64,
 }
@@ -266,6 +266,15 @@ def test_ledger_rejects_conflated_or_mismatched_firmware_identities(tmp_path):
     active_mismatch["activeLabApp"]["applicationSha256"] = "e" * 64
     result = validate_ledger(active_mismatch, repository_root=tmp_path / "active")
     assert "bindings.preflight.semantic" in result["reasons"]
+
+    superseded_source = complete_ledger(tmp_path / "superseded-source")
+    superseded_source["activeLabApp"]["firmwareSha"] = (
+        "aef1034f859b35efc93215106eb3be89f10f6c66"
+    )
+    result = validate_ledger(
+        superseded_source, repository_root=tmp_path / "superseded-source"
+    )
+    assert "activeLabApp.firmwareSha" in result["reasons"]
 
     target_mismatch = complete_ledger(tmp_path / "target")
     target_mismatch["productionCandidateTarget"]["firmwareSha"] = ACTIVE_LAB_APP["firmwareSha"]
