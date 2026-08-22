@@ -4,7 +4,7 @@
 
 **Goal:** Build a disposable local assignment-backed runtime for the exact `course-mode-pilot-cat-ball@v1` fixture and collect authoritative renderer-v4 evidence from the approved AC:20 physical TFT without mutating production.
 
-**Architecture:** Extend the existing lesson-studio E2E Compose stack with a physical-lab override bound to host port 3000, deterministic fixture seeding, and a fail-closed preflight/readback script. Keep the installed firmware and protected NVS unchanged; use the existing local ESP WebSocket service and capture tooling only after exact backend, assignment, device, renderer, and checksum identities are proven.
+**Architecture:** Extend the existing lesson-studio E2E Compose stack with a physical-lab override bound to host port 3000, a one-shot invocation of the official backend compiled local materializer, and fail-closed receipt/preflight validation. Keep the installed firmware and protected NVS unchanged; use the existing local ESP WebSocket service and capture tooling only after exact backend, assignment, device, renderer, and checksum identities are proven.
 
 **Tech Stack:** Docker Compose, PostgreSQL 16, NestJS/TypeScript, Python 3.11/pytest, aiohttp, ESP lesson runtime, renderer v4, esptool/serial read-only capture.
 
@@ -13,8 +13,8 @@
 ## File map
 
 - `docs/docker/docker-compose.course-mode-physical-tft.yml`: physical-lab-only Compose override and port/network isolation.
-- `docs/docker/course-mode-physical-tft/seed-course-mode-pilot.mjs`: import canonical pilot data and create deterministic local synthetic records.
-- `docs/docker/course-mode-physical-tft/verify-course-mode-pilot.mjs`: read back and validate exact local database/runtime identities.
+- `main/tbot-server/tests/test_course_mode_physical_tft_compose.py`: enforce the compiled backend materializer command, local/AC:20 gates, read-only canonical fixture mounts, and production isolation.
+- `docs/docker/course-mode-physical-tft/verify-course-mode-pilot.mjs`: validate the materializer's redacted receipt and exact local runtime identities without database access.
 - `main/tbot-server/scripts/course_mode_physical_tft_preflight.py`: fail-closed environment, endpoint, device, privacy, and protected-file checks.
 - `main/tbot-server/tests/test_course_mode_physical_tft_preflight.py`: unit tests for preflight admission and rejection.
 - `docs/qa/ad-hoc/2026-08-22-course-mode-task07-tft-e2e.md`: attended run ledger and final TFT result.
@@ -81,60 +81,82 @@ git add docs/docker/docker-compose.course-mode-physical-tft.yml main/tbot-server
 git commit -m "test(task07): isolate local physical TFT backend"
 ```
 
-### Task 2: Materialize the exact canonical pilot and synthetic assignment
+### Task 2: Invoke the official backend compiled local materializer
 
-The rejected ESP-owned seed commits are superseded. The physical overlay invokes
-the reviewed backend-owned compiled materializer, which parses the canonical
-persistence fixture, computes the normal manifest checksum, and writes Course Mode
-contract/cue rows through backend repositories. The ESP repository contains no
-Course Mode seed SQL, checksum implementation, or schema reconstruction.
+The ESP repository owns only the local Compose invocation and its contract test.
+All fixture parsing, identity derivation, persistence, transaction control, and
+authoritative manifest readback remain inside the reviewed backend compiled
+materializer. Operators and ESP agents must not add a parallel data writer, inspect
+database tables to reproduce its behavior, or independently derive manifest
+checksums.
 
 **Files:**
-- Create: `docs/docker/course-mode-physical-tft/seed-course-mode-pilot.mjs`
-- Create: `docs/docker/course-mode-physical-tft/seed-course-mode-pilot.test.mjs`
-- Reference: `/Users/manhhodinh/Documents/TBOT/tbot-backend/src/lessons/fixtures/course-mode/course-mode-pilot-cat-ball.json`
-- Reference: `/Users/manhhodinh/Documents/TBOT/tbot-backend/src/lessons/fixtures/course-mode/pilot/v1/pilot.json`
+- Modify: `docs/docker/docker-compose.course-mode-physical-tft.yml`
+- Modify: `main/tbot-server/tests/test_course_mode_physical_tft_compose.py`
+- Reference only: `$TBOT_BACKEND_WORKTREE/dist/lessons/course-mode/course-mode-local-materializer.js`
+- Mount read-only: `$TBOT_BACKEND_WORKTREE/src/lessons/fixtures/course-mode/`
 
-- [ ] **Step 1: Write failing deterministic-seed tests**
+- [ ] **Step 1: Extend the failing Compose contract test**
 
-```javascript
-import assert from 'node:assert/strict';
-import { buildSeedPlan } from './seed-course-mode-pilot.mjs';
-
-const plan = buildSeedPlan({ deviceId: '14:c1:9f:d1:ac:20' });
-assert.equal(plan.lessonKey, 'course-mode-pilot-cat-ball');
-assert.equal(plan.lessonVersion, 1);
-assert.equal(plan.rendererVersion, 'teebot-lesson-renderer.v4');
-assert.equal(plan.contractChecksum, 'cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264');
-assert.equal(plan.deviceId, '14:c1:9f:d1:ac:20');
-assert.equal(plan.childData, undefined);
+```python
+materialize = overlay["services"]["course-mode-materialize"]
+assert materialize["command"] == [
+    "dist/lessons/course-mode/course-mode-local-materializer.js",
+    "materialize",
+]
+assert materialize["environment"]["COURSE_MODE_LOCAL_COMPOSE_ENABLED"] == "true"
+assert materialize["environment"]["COURSE_MODE_DEVICE_MAC"] == "14:c1:9f:d1:ac:20"
+assert materialize["environment"]["COURSE_MODE_FIXTURE_ROOT"] == "/course-mode-fixtures"
+assert materialize["volumes"] == [
+    "${TBOT_BACKEND_WORKTREE:?export the task-owned backend worktree}"
+    "/src/lessons/fixtures/course-mode:/course-mode-fixtures:ro"
+]
+assert overlay["services"]["web"]["depends_on"]["course-mode-materialize"][
+    "condition"
+] == "service_completed_successfully"
+assert overlay["services"]["web"]["volumes"] == [
+    "${TBOT_BACKEND_WORKTREE:?export the task-owned backend worktree}"
+    "/src/lessons/fixtures/course-mode/pilot/v1/assets:"
+    "/usr/share/nginx/html/course-mode/pilot/v1/assets:ro",
+    "${TBOT_BACKEND_WORKTREE:?export the task-owned backend worktree}"
+    "/src/lessons/fixtures/course-mode/pilot/v1/derivatives:"
+    "/usr/share/nginx/html/lessons/derivatives:ro",
+]
 ```
 
-- [ ] **Step 2: Run and verify import failure**
+- [ ] **Step 2: Run and verify the materializer service contract is missing**
 
-Run: `node docs/docker/course-mode-physical-tft/seed-course-mode-pilot.test.mjs`
+Run: `/Users/manhhodinh/Documents/TBOT/robot/esp32-server/main/tbot-server/.venv311/bin/python -m pytest -q tests/test_course_mode_physical_tft_compose.py`
 
-Expected: FAIL because the seed module does not exist.
+Expected: FAIL because the overlay does not yet define the exact one-shot compiled materializer contract.
 
-- [ ] **Step 3: Implement canonical fixture loading and transactional seed**
+- [ ] **Step 3: Add only the one-shot compiled materializer invocation**
 
-Export `buildSeedPlan()` and a CLI. Resolve both fixture paths from `TBOT_BACKEND_WORKTREE`, parse with strict exact identities, and execute one PostgreSQL transaction that creates deterministic local UUIDs for course, lesson, adult synthetic owner, device, and assignment. Insert the Course Mode contract through the repository table used by `CourseModeRepository`; insert authored steps/assets from the canonical pilot package; set only the disposable local lesson row to `published` and assignment to `active`.
+Add `course-mode-materialize` using the same reviewed backend image as the local backend. Its command must be exactly the backend compiled materializer in `materialize` mode. Gate it with `COURSE_MODE_LOCAL_COMPOSE_ENABLED=true`, the exact AC:20 MAC, the task-local Compose PostgreSQL URL, and a read-only mount of the backend-authoritative `src/lessons/fixtures/course-mode/` root. That root supplies the canonical contract, pilot, persistence-v1 cue package, asset provenance, generated assets, and reviewed derivatives. Mount the canonical `assets/` and `derivatives/` directories read-only into the local web service at the materializer-authored URL paths; do not copy, transform, or recreate them in ESP.
 
-Reject if any of these differ: fixture ID, lesson/version, package version, renderer, semantic checksum, layout checksum, profile `espTft`, device ID, or ordered activity identities. Reject fields matching `child`, `transcript`, `utterance`, `audio`, `pronunciation`, `servo`, or free-form story data.
+The backend process must own one transaction and its normal repository/manifest-resolver readback. It exits successfully only after the exact synthetic adult-only AC:20 assignment, pilot v1, renderer v4, canonical cue/assets, and immutable checksum identities read back correctly; any write or readback failure must roll back and block `web` startup. No production URL, credential, database, volume, or mutation is permitted.
 
-- [ ] **Step 4: Run unit and backend fixture tests**
+- [ ] **Step 4: Build and verify the backend-owned compiled entry point**
 
-Run: `node docs/docker/course-mode-physical-tft/seed-course-mode-pilot.test.mjs`
+Run: `cd "${TBOT_BACKEND_WORKTREE:?export the reviewed task-owned backend worktree}" && pnpm build`
 
-Run: `cd /Users/manhhodinh/Documents/TBOT/tbot-backend && pnpm vitest run src/lessons/course-mode/pilot/course-mode-pilot.spec.ts src/lessons/lesson-manifest.course-mode.spec.ts`
+Run: `cd "${TBOT_BACKEND_WORKTREE:?export the reviewed task-owned backend worktree}" && pnpm vitest run src/lessons/course-mode/course-mode-local-materializer.spec.ts src/lessons/course-mode/pilot/course-mode-pilot.spec.ts src/lessons/lesson-manifest.course-mode.spec.ts`
 
-Expected: PASS.
+Expected: PASS, and `dist/lessons/course-mode/course-mode-local-materializer.js` exists in the reviewed backend build. Do not run an alternate ESP-side writer or database command.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Validate merged Compose and the invariant test**
+
+Run: `docker compose -f docs/docker/docker-compose.lesson-studio-e2e.yml -f docs/docker/docker-compose.course-mode-physical-tft.yml config --quiet`
+
+Run: `/Users/manhhodinh/Documents/TBOT/robot/esp32-server/main/tbot-server/.venv311/bin/python -m pytest -q tests/test_course_mode_physical_tft_compose.py`
+
+Expected: both PASS; the rendered service still invokes only the compiled backend materializer, mounts canonical fixture/assets read-only, and remains scoped to local PostgreSQL plus AC:20.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add docs/docker/course-mode-physical-tft/seed-course-mode-pilot.mjs docs/docker/course-mode-physical-tft/seed-course-mode-pilot.test.mjs
-git commit -m "feat(task07): seed exact local Course Mode pilot"
+git add docs/docker/docker-compose.course-mode-physical-tft.yml main/tbot-server/tests/test_course_mode_physical_tft_compose.py
+git commit -m "feat(task07): invoke official local materializer"
 ```
 
 ### Task 3: Add exact readback verification
@@ -145,7 +167,7 @@ git commit -m "feat(task07): seed exact local Course Mode pilot"
 
 - [ ] **Step 1: Write failing verifier tests**
 
-Test one accepted snapshot and separate failures for renderer drift, checksum drift, non-AC:20 assignment, more than one active assignment, production URL presence, and privacy-key presence. Each rejection must return a stable code such as `RENDERER_IDENTITY`, `CONTRACT_CHECKSUM`, `DEVICE_SCOPE`, `ASSIGNMENT_CARDINALITY`, `PRODUCTION_REFERENCE`, or `PRIVACY_FIELD`.
+Test one accepted redacted materializer receipt and separate failures for renderer drift, checksum drift, non-AC:20 assignment, more than one active assignment, production URL presence, and privacy-key presence. Each rejection must return a stable code such as `RENDERER_IDENTITY`, `CONTRACT_CHECKSUM`, `DEVICE_SCOPE`, `ASSIGNMENT_CARDINALITY`, `PRODUCTION_REFERENCE`, or `PRIVACY_FIELD`.
 
 - [ ] **Step 2: Run and verify failure**
 
@@ -155,7 +177,7 @@ Expected: FAIL because the verifier does not exist.
 
 - [ ] **Step 3: Implement verifier and JSON receipt**
 
-The CLI must query the local database and backend manifest endpoint, compare exact identities, and write a canonical JSON receipt containing only IDs, versions, checksums, states, timestamps, and boolean gates. It must never include JWTs, secrets, raw speech, or personal data.
+The CLI must consume the backend materializer's redacted JSON receipt and compare it with the local backend manifest endpoint. It must not connect to PostgreSQL, encode table/column knowledge, derive a checksum, or write any runtime state. Write a canonical validation receipt containing only IDs, versions, checksums, states, timestamps, and boolean gates; never include JWTs, secrets, raw speech, or personal data.
 
 - [ ] **Step 4: Run tests**
 
@@ -229,9 +251,9 @@ Record ESP, backend, firmware SHAs; candidate bundle root; application SHA; NVS 
 
 Run Compose with a new project name and fresh named volumes, local-only mint secret, backend host port 3000, and existing backend image. Do not stop or recreate unrelated containers.
 
-- [ ] **Step 3: Seed and verify**
+- [ ] **Step 3: Materialize and verify**
 
-Run the seed CLI once, rerun it to prove idempotency, then run the verifier. Expected: exactly one active AC:20 assignment and exact pilot identities.
+Let Compose run `course-mode-materialize` once and capture its redacted success receipt. Rerun only that same one-shot service with `docker compose -f docs/docker/docker-compose.lesson-studio-e2e.yml -f docs/docker/docker-compose.course-mode-physical-tft.yml run --rm --no-deps course-mode-materialize` to prove idempotency, then run the receipt verifier. Expected: both official invocations pass their transaction/readback gate, exactly one active AC:20 assignment exists, and exact pilot/renderer/cue/asset identities are reported. Stop immediately on any non-local database/asset origin or production reference.
 
 - [ ] **Step 4: Run preflight**
 
@@ -305,7 +327,7 @@ Run `git diff --check`, protected SHA verification, branch containment checks, a
 
 - [ ] **Step 5: Request independent review**
 
-Review design compliance, local/production isolation, seed correctness, privacy, visual evidence completeness, cleanup, and residual Task 07 blockers.
+Review design compliance, local/production isolation, compiled materializer invocation and receipt correctness, privacy, visual evidence completeness, cleanup, and residual Task 07 blockers.
 
 - [ ] **Step 6: Merge only after all gates pass**
 
