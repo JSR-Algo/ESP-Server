@@ -34,11 +34,6 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
         "TBOT_DEVICE_MINT_SECRET"
     ] == "${TBOT_DEVICE_MINT_SECRET:?export the shared local device mint secret}"
     materialize = overlay["services"]["course-mode-materialize"]
-    assert materialize["command"] == [
-        "node",
-        "dist/lessons/course-mode/course-mode-local-materializer.js",
-        "materialize",
-    ]
     assert materialize["environment"]["COURSE_MODE_LOCAL_COMPOSE_ENABLED"] == "true"
     assert materialize["environment"]["COURSE_MODE_V2_PUBLISH_ENABLED"] == "true"
     assert materialize["environment"]["COURSE_MODE_DEVICE_MAC"] == "14:c1:9f:d1:ac:20"
@@ -125,6 +120,10 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
         "FLATTENED_CINEMATIC_PUBLIC_BASE_URL": "http://192.168.100.183:8102/",
     }
     assert materialize["depends_on"]["backend"]["condition"] == "service_healthy"
+    assert materialize["command"] == [
+        "dist/lessons/course-mode/course-mode-local-materializer.js",
+        "materialize",
+    ]
     assert materialize["environment"]["DATABASE_URL"] == "postgresql://tbot:tbot@postgres:5432/tbot"
     assert materialize["environment"]["COURSE_MODE_FIXTURE_ROOT"] == "/course-mode-fixtures"
     assert materialize["volumes"] == [

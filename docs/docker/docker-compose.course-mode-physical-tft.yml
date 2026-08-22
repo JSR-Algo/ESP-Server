@@ -27,7 +27,6 @@ services:
       COURSE_MODE_LOCAL_PHYSICAL_TFT_ENABLED: "true"
       FLATTENED_CINEMATIC_PUBLIC_BASE_URL: ${COURSE_MODE_ASSET_ORIGIN_BASE:?export the robot-reachable local asset origin ending in /}
     command:
-      - node
       - dist/lessons/course-mode/course-mode-local-materializer.js
       - materialize
     volumes:
