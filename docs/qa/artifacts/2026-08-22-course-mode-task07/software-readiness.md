@@ -81,7 +81,7 @@ bundle, and V1/default-off assertions are recorded in
 restoration/readback procedure is committed below. The binary and source bundles
 are retained outside Git at the manifest's durable local path; large generated
 binaries were not committed. The reviewed bundle root is its `SHA256SUMS` file,
-SHA-256 `173e92f9b5a79328fc2bd9c613b76bb166107e51359dd6e07cab907625fd215c`.
+SHA-256 `ac9e6cd079fbade699d726a1bcdedea042e55801b2e1b1ba6d3ce688d1b44031`.
 
 This does not establish physical known-good status. T7.1 explicitly records no
 firmware flash, while T7.4 lists `03b3a392...` only as firmware source main.
@@ -104,8 +104,10 @@ flash-encryption requirements that do not match the reviewed bundle. Never erase
 the chip and never use `merged-binary.bin` for this preserving restore.
 
 ```bash
+set -euo pipefail
+
 test "$(shasum -a 256 SHA256SUMS | awk '{print $1}')" = \
-  "173e92f9b5a79328fc2bd9c613b76bb166107e51359dd6e07cab907625fd215c"
+  "ac9e6cd079fbade699d726a1bcdedea042e55801b2e1b1ba6d3ce688d1b44031"
 shasum -a 256 -c SHA256SUMS
 "$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" \
   --after no_reset get_security_info
