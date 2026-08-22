@@ -48,7 +48,7 @@ unset COMPOSE_PROJECT_NAME COMPOSE_PROFILES LESSON_STUDIO_E2E_COMPOSE_PROJECT_NA
 export LESSON_STUDIO_E2E_RESOURCE_PREFIX="${COMPOSE_PROJECT}"
 
 echo "[course-mode-physical-tft] compiling backend ${ACTUAL_SHA} from ${BACKEND_ROOT}"
-(cd -- "${BACKEND_ROOT}" && pnpm build)
+(cd -- "${BACKEND_ROOT}" && npm run build)
 [[ -z "$(git -C "${BACKEND_ROOT}" status --porcelain --untracked-files=all)" ]] || \
   fail "backend build changed the reviewed worktree; refusing to build an image with uncommitted source"
 

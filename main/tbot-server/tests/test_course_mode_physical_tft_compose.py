@@ -211,10 +211,10 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
         "exit 2\n",
         encoding="utf-8",
     )
-    (fake_bin / "pnpm").write_text(
+    (fake_bin / "npm").write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
-        f"printf 'pnpm cwd=%s args=%s\\n' \"$PWD\" \"$*\" >> {log}\n",
+        f"printf 'npm cwd=%s args=%s\\n' \"$PWD\" \"$*\" >> {log}\n",
         encoding="utf-8",
     )
     (fake_bin / "docker").write_text(
@@ -224,7 +224,7 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
         f"printf 'docker %s\\n' \"$*\" >> {log}\n",
         encoding="utf-8",
     )
-    for command in ("git", "pnpm", "docker"):
+    for command in ("git", "npm", "docker"):
         (fake_bin / command).chmod(0o755)
 
     env = os.environ.copy()
@@ -256,7 +256,7 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
 
     calls = log.read_text(encoding="utf-8").splitlines()
     expected_image = f"local/tbot-backend:course-mode-physical-tft-{sha}"
-    assert calls[0] == f"pnpm cwd={backend} args=build"
+    assert calls[0] == f"npm cwd={backend} args=run build"
     assert calls[1] == (
         f"docker build --pull=false -f {backend}/Dockerfile -t {expected_image} {backend}"
     )
