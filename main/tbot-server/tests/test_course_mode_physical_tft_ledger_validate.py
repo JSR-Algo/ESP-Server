@@ -29,8 +29,11 @@ PRODUCTION_CANDIDATE_TARGET = {
     "firmwareSha": "3d4a1e2a32359278124c61e56fd459fac618506e",
     "applicationSha256": "84c999ece0c90eb6e69a410e335c7791f330e9c0fd39c30dfd4162bb7c4cfc6e",
     "bundleRootSha256": "9ef3729d0faec7b02d867cedb3ab30d110b845b1c0133738c588bba0e0c16be6",
+}
+HISTORICAL_INSTALLATION_PROVENANCE = {
     "preservedNvsSha256": "a7a87f72416be20388298cb70cfff306ec78e77f0e8b09231d16113f3d82404e",
 }
+SESSION_NVS_SHA256 = "0" * 64
 ACTIVE_LAB_APP = {
     "firmwareSha": "aef1034f859b35efc93215106eb3be89f10f6c66",
     "applicationSha256": "c" * 64,
@@ -102,6 +105,8 @@ def complete_ledger(repository_root: Path):
         "imageId": BACKEND_IMAGE_ID,
         "composeProject": "tbot-course-mode-physical-tft",
         "productionCandidateTarget": deepcopy(PRODUCTION_CANDIDATE_TARGET),
+        "historicalInstallationProvenance": deepcopy(HISTORICAL_INSTALLATION_PROVENANCE),
+        "sessionNvsBaseline": {"beforeInstallSha256": SESSION_NVS_SHA256},
         "activeLabApp": deepcopy(ACTIVE_LAB_APP),
         "deviceSuffix": "AC:20",
         "syntheticIds": deepcopy(IDS),
@@ -144,6 +149,13 @@ def complete_ledger(repository_root: Path):
         "declaredTftVerdict": "TFT_PASS",
         "task07Verdict": "PHYSICAL_BLOCKED",
         "productionCandidateTarget": deepcopy(PRODUCTION_CANDIDATE_TARGET),
+        "historicalInstallationProvenance": deepcopy(HISTORICAL_INSTALLATION_PROVENANCE),
+        "sessionNvsPreservation": {
+            "phase": "POST_RESTORE",
+            "beforeInstallSha256": SESSION_NVS_SHA256,
+            "afterInstallSha256": SESSION_NVS_SHA256,
+            "afterRestoreSha256": SESSION_NVS_SHA256,
+        },
         "activeLabApp": deepcopy(ACTIVE_LAB_APP),
         "backend": {
             "sha": BACKEND_SHA,
@@ -259,6 +271,147 @@ def test_ledger_rejects_conflated_or_mismatched_firmware_identities(tmp_path):
     target_mismatch["productionCandidateTarget"]["firmwareSha"] = ACTIVE_LAB_APP["firmwareSha"]
     result = validate_ledger(target_mismatch, repository_root=tmp_path / "target")
     assert "productionCandidateTarget" in result["reasons"]
+
+    provenance_mismatch = complete_ledger(tmp_path / "provenance")
+    provenance_mismatch["historicalInstallationProvenance"]["preservedNvsSha256"] = "f" * 64
+    result = validate_ledger(provenance_mismatch, repository_root=tmp_path / "provenance")
+    assert "historicalInstallationProvenance" in result["reasons"]
+
+
+def test_session_nvs_preservation_requires_monotonic_exact_equal_evidence(tmp_path):
+    from course_mode_physical_tft_ledger_validate import validate_ledger
+
+    cases = [
+        (
+            "not-an-object",
+            "sessionNvsPreservation",
+        ),
+        (
+            {"beforeInstallSha256": SESSION_NVS_SHA256,
+             "afterInstallSha256": None, "afterRestoreSha256": None},
+            "sessionNvsPreservation",
+        ),
+        (
+            {"phase": "UNKNOWN", "beforeInstallSha256": SESSION_NVS_SHA256,
+             "afterInstallSha256": None, "afterRestoreSha256": None},
+            "sessionNvsPreservation.phase",
+        ),
+        (
+            {"phase": "PRE_INSTALL_BASELINE", "beforeInstallSha256": SESSION_NVS_SHA256,
+             "afterInstallSha256": SESSION_NVS_SHA256, "afterRestoreSha256": None},
+            "sessionNvsPreservation.phase",
+        ),
+        (
+            {"phase": "POST_INSTALL", "beforeInstallSha256": SESSION_NVS_SHA256,
+             "afterInstallSha256": "1" * 64, "afterRestoreSha256": None},
+            "sessionNvsPreservation.equality",
+        ),
+        (
+            {"phase": "POST_RESTORE", "beforeInstallSha256": SESSION_NVS_SHA256,
+             "afterInstallSha256": SESSION_NVS_SHA256, "afterRestoreSha256": None},
+            "sessionNvsPreservation.afterRestoreSha256",
+        ),
+        (
+            {"phase": "POST_RESTORE", "beforeInstallSha256": SESSION_NVS_SHA256,
+             "afterInstallSha256": SESSION_NVS_SHA256, "afterRestoreSha256": "A" * 64},
+            "sessionNvsPreservation.afterRestoreSha256",
+        ),
+    ]
+    for index, (preservation, reason) in enumerate(cases):
+        root = tmp_path / str(index)
+        document = complete_ledger(root)
+        document["sessionNvsPreservation"] = preservation
+        result = validate_ledger(document, repository_root=root)
+        assert result["valid"] is False
+        assert reason in result["reasons"]
+
+
+def test_session_nvs_before_install_must_match_bound_preflight(tmp_path):
+    from course_mode_physical_tft_ledger_validate import validate_ledger
+
+    document = complete_ledger(tmp_path)
+    document["sessionNvsPreservation"] = {
+        "phase": "POST_RESTORE",
+        "beforeInstallSha256": "1" * 64,
+        "afterInstallSha256": "1" * 64,
+        "afterRestoreSha256": "1" * 64,
+    }
+
+    result = validate_ledger(document, repository_root=tmp_path)
+
+    assert result["valid"] is False
+    assert "bindings.preflight.semantic" in result["reasons"]
+
+
+def test_tft_pass_requires_post_restore_nvs_evidence(tmp_path):
+    from course_mode_physical_tft_ledger_validate import validate_ledger
+
+    document = complete_ledger(tmp_path)
+    document["sessionNvsPreservation"] = {
+        "phase": "POST_INSTALL",
+        "beforeInstallSha256": SESSION_NVS_SHA256,
+        "afterInstallSha256": SESSION_NVS_SHA256,
+        "afterRestoreSha256": None,
+    }
+
+    result = validate_ledger(document, repository_root=tmp_path)
+
+    assert result["valid"] is False
+    assert "sessionNvsPreservation.pass_phase" in result["reasons"]
+
+
+def test_nvs_evidence_phases_accept_only_the_observations_already_made(tmp_path):
+    from course_mode_physical_tft_ledger_validate import validate_ledger
+
+    phases = [
+        {
+            "phase": "PRE_INSTALL_BASELINE",
+            "beforeInstallSha256": SESSION_NVS_SHA256,
+            "afterInstallSha256": None,
+            "afterRestoreSha256": None,
+        },
+        {
+            "phase": "POST_INSTALL",
+            "beforeInstallSha256": SESSION_NVS_SHA256,
+            "afterInstallSha256": SESSION_NVS_SHA256,
+            "afterRestoreSha256": None,
+        },
+        {
+            "phase": "POST_RESTORE",
+            "beforeInstallSha256": SESSION_NVS_SHA256,
+            "afterInstallSha256": SESSION_NVS_SHA256,
+            "afterRestoreSha256": SESSION_NVS_SHA256,
+        },
+    ]
+    for index, preservation in enumerate(phases):
+        root = tmp_path / str(index)
+        document = complete_ledger(root)
+        document["declaredTftVerdict"] = "TFT_FAIL"
+        document["stopConditions"] = ["operator-stop"]
+        document["stopPhase"] = "DURING_ATTENDED_CAPTURE"
+        document["stopOutcome"] = {
+            "safeState": "RESTORED",
+            "powerIsolation": "ISOLATED",
+        }
+        document["sessionNvsPreservation"] = preservation
+
+        assert validate_ledger(document, repository_root=root)["valid"] is True
+
+    root = tmp_path / "not-observed"
+    document = complete_ledger(root)
+    document["declaredTftVerdict"] = "TFT_FAIL"
+    document["stopConditions"] = ["operator-stop"]
+    document["stopPhase"] = "DURING_ATTENDED_CAPTURE"
+    document["stopOutcome"] = {"safeState": "RESTORED", "powerIsolation": "ISOLATED"}
+    document["sessionNvsPreservation"] = {
+        "phase": "NOT_OBSERVED",
+        "beforeInstallSha256": None,
+        "afterInstallSha256": None,
+        "afterRestoreSha256": None,
+    }
+
+    result = validate_ledger(document, repository_root=root)
+    assert "sessionNvsPreservation.preflight_phase" in result["reasons"]
 
 
 def test_ledger_accepts_new_supplied_active_lab_hashes_when_preflight_matches(tmp_path):
@@ -496,6 +649,12 @@ def test_pre_preflight_stop_is_valid_without_preflight_or_receipt_artifacts(tmp_
         "stackStart": "NOT_PERFORMED",
         "captureTrigger": "NOT_PERFORMED",
         "cleanup": "NOT_PERFORMED",
+    }
+    document["sessionNvsPreservation"] = {
+        "phase": "NOT_OBSERVED",
+        "beforeInstallSha256": None,
+        "afterInstallSha256": None,
+        "afterRestoreSha256": None,
     }
 
     result = validate_ledger(document, repository_root=tmp_path)

@@ -106,8 +106,12 @@ The operator supplies only non-secret expected values:
 - approved robot-reachable asset origin ending `/`;
 - expected OTA/WS URLs, both explicitly classified as local-lab endpoints;
 - synthetic UUIDs for course, lesson, device, assignment, and adult operator;
-- immutable production-candidate target firmware SHA, application SHA-256,
-  bundle-root SHA-256, and preserved NVS SHA-256;
+- immutable production-candidate target firmware SHA, application SHA-256, and
+  bundle-root SHA-256;
+- historical installation provenance containing the previously established
+  preserved-NVS SHA-256, explicitly not a current-session prerequisite;
+- current-session pre-install NVS SHA-256 supplied from authorized observation,
+  without reading or inferring it in this tool;
 - active temporary local-lab app source SHA, application SHA-256, and bundle-root
   SHA-256, separately from the production target, plus device suffix `AC:20`;
 - protected test path and SHA-256
@@ -150,6 +154,8 @@ For a complete attended lane, the manifest binds:
   assertion, and UTC start/end times;
 - both exact firmware identities, protected hash, local endpoint identities,
   synthetic assignment UUIDs, renderer identity, and manifest checksum;
+- historical installation provenance separately from the current session's
+  monotonic before-install, after-install, and after-restore NVS evidence;
 - capture artifact relative paths, byte counts, SHA-256s, and redaction status;
 - ordered runtime markers for authenticated AC:20 WebSocket, app-ready,
   `lesson_prepare`, `lesson_start`, eight cue transitions/ACKs, completion, stop,
@@ -199,6 +205,19 @@ bundle-root SHA-256 values are supplied as exact immutable preflight inputs and
 validated for lowercase SHA-256 shape, rather than hard-coded while qualification
 is still in progress. BLOCKED/pre-preflight evidence may leave only those two
 not-yet-qualified hashes null. PASS and every phase after preflight require them.
+
+Mutable NVS state is not firmware identity. The historical preserved-NVS digest
+`a7a87f72416be20388298cb70cfff306ec78e77f0e8b09231d16113f3d82404e`
+lives only in `historicalInstallationProvenance` and describes the retained
+2026-08-22 installation evidence. `sessionNvsBaseline.beforeInstallSha256` is a
+caller-supplied exact lowercase digest for the current authorized session; it
+may legitimately differ from the historical digest. The ledger binds that value
+as `sessionNvsPreservation.beforeInstallSha256` and uses the monotonic phase enum
+`NOT_OBSERVED`, `PRE_INSTALL_BASELINE`, `POST_INSTALL`, or `POST_RESTORE`.
+Each phase requires all earlier observations, forbids later observations, and
+requires every after-install or after-restore digest to equal the before-install
+digest. `TFT_PASS` requires `POST_RESTORE`. The BLOCKED template uses
+`NOT_OBSERVED` with three null hashes and remains `PHYSICAL_BLOCKED`.
 
 Hash bindings are necessary but not sufficient. Every phase-available preflight
 and receipt artifact is parsed as JSON. Preflight must report `valid=true`,

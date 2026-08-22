@@ -62,6 +62,11 @@ offline comparison of the retained readbacks found exact byte equality for the
 bootloader, partition table, OTA data, application, and generated assets. The
 NVS before/after files are byte-identical with SHA-256
 `a7a87f72416be20388298cb70cfff306ec78e77f0e8b09231d16113f3d82404e`.
+This digest is historical installation provenance only. NVS is mutable state,
+so a later session must record its own exact pre-install baseline and prove
+before-install, after-install, and after-restore byte equality. A different
+current baseline does not change or weaken the reviewed firmware, application,
+or bundle identity and must not be replaced with this historical value.
 
 After candidate boot, an authorized 25-second raw serial observation kept
 DTR/RTS false. It recorded `uplink_queued=0`, `websocket_audio_send=0`, and

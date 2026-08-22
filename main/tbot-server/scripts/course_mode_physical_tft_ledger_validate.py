@@ -18,6 +18,8 @@ EXPECTED_PRODUCTION_CANDIDATE_TARGET = {
     "firmwareSha": "3d4a1e2a32359278124c61e56fd459fac618506e",
     "applicationSha256": "84c999ece0c90eb6e69a410e335c7791f330e9c0fd39c30dfd4162bb7c4cfc6e",
     "bundleRootSha256": "9ef3729d0faec7b02d867cedb3ab30d110b845b1c0133738c588bba0e0c16be6",
+}
+EXPECTED_HISTORICAL_INSTALLATION_PROVENANCE = {
     "preservedNvsSha256": "a7a87f72416be20388298cb70cfff306ec78e77f0e8b09231d16113f3d82404e",
 }
 ACTIVE_LAB_FIRMWARE_SHA = "aef1034f859b35efc93215106eb3be89f10f6c66"
@@ -78,7 +80,8 @@ FORBIDDEN_ARTIFACT = re.compile(
 )
 EXPECTED_FIELDS = {
     "schemaVersion", "gate", "declaredTftVerdict", "task07Verdict",
-    "productionCandidateTarget", "activeLabApp", "backend", "protectedTest",
+    "productionCandidateTarget", "historicalInstallationProvenance",
+    "sessionNvsPreservation", "activeLabApp", "backend", "protectedTest",
     "identity", "endpoints", "bindings",
     "operators", "artifacts", "runtimeMarkers", "cues", "finalRest",
     "stopConditions", "stopPhase", "unavailableEvidence", "stopOutcome",
@@ -116,6 +119,8 @@ def _base_reasons(document: dict[str, object]) -> list[str]:
         reasons.append("task07Verdict")
     if document.get("productionCandidateTarget") != EXPECTED_PRODUCTION_CANDIDATE_TARGET:
         reasons.append("productionCandidateTarget")
+    if document.get("historicalInstallationProvenance") != EXPECTED_HISTORICAL_INSTALLATION_PROVENANCE:
+        reasons.append("historicalInstallationProvenance")
     active_lab_app = document.get("activeLabApp")
     if not isinstance(active_lab_app, dict) or set(active_lab_app) != {
         "firmwareSha", "applicationSha256", "bundleRootSha256"
@@ -192,6 +197,54 @@ def _base_reasons(document: dict[str, object]) -> list[str]:
                 reasons.append("numericLimits.status")
             elif not isinstance(row.get("authorityReference"), str) or not row["authorityReference"]:
                 reasons.append("numericLimits.authority")
+    return reasons
+
+
+def _validate_session_nvs_preservation(
+    document: dict[str, object], *, preflight_available: bool, complete: bool
+) -> list[str]:
+    preservation = document.get("sessionNvsPreservation")
+    fields = {
+        "phase", "beforeInstallSha256", "afterInstallSha256", "afterRestoreSha256"
+    }
+    if not isinstance(preservation, dict) or set(preservation) != fields:
+        return ["sessionNvsPreservation"]
+
+    phase = preservation.get("phase")
+    required_by_phase = {
+        "NOT_OBSERVED": (),
+        "PRE_INSTALL_BASELINE": ("beforeInstallSha256",),
+        "POST_INSTALL": ("beforeInstallSha256", "afterInstallSha256"),
+        "POST_RESTORE": (
+            "beforeInstallSha256", "afterInstallSha256", "afterRestoreSha256"
+        ),
+    }
+    if phase not in required_by_phase:
+        return ["sessionNvsPreservation.phase"]
+
+    reasons: list[str] = []
+    required = set(required_by_phase[phase])
+    hash_fields = ("beforeInstallSha256", "afterInstallSha256", "afterRestoreSha256")
+    for field in hash_fields:
+        value = preservation.get(field)
+        if field in required:
+            if not isinstance(value, str) or not LOWER_SHA256.fullmatch(value):
+                reasons.append(f"sessionNvsPreservation.{field}")
+        elif value is not None:
+            reasons.append("sessionNvsPreservation.phase")
+
+    before = preservation.get("beforeInstallSha256")
+    for field in ("afterInstallSha256", "afterRestoreSha256"):
+        value = preservation.get(field)
+        if isinstance(before, str) and isinstance(value, str) and value != before:
+            reasons.append("sessionNvsPreservation.equality")
+
+    if preflight_available and phase == "NOT_OBSERVED":
+        reasons.append("sessionNvsPreservation.preflight_phase")
+    if not preflight_available and phase != "NOT_OBSERVED":
+        reasons.append("sessionNvsPreservation.preflight_phase")
+    if complete and phase != "POST_RESTORE":
+        reasons.append("sessionNvsPreservation.pass_phase")
     return reasons
 
 
@@ -300,9 +353,14 @@ def _validate_bound_documents(
     if "preflight" in parsed:
         preflight = parsed["preflight"]
         backend = document.get("backend")
+        session_nvs = document.get("sessionNvsPreservation")
+        expected_session_baseline = {
+            "beforeInstallSha256": session_nvs.get("beforeInstallSha256")
+        } if isinstance(session_nvs, dict) else None
         expected_fields = {
             "valid", "result", "backendSha", "backendImage", "imageId",
-            "composeProject", "productionCandidateTarget", "activeLabApp",
+            "composeProject", "productionCandidateTarget",
+            "historicalInstallationProvenance", "sessionNvsBaseline", "activeLabApp",
             "deviceSuffix", "syntheticIds",
             "endpoints", "endpointAuthority", "sessionStartedAt", "secrets",
         }
@@ -317,6 +375,9 @@ def _validate_bound_documents(
             and preflight.get("imageId") == backend.get("imageId")
             and preflight.get("composeProject") == "tbot-course-mode-physical-tft"
             and preflight.get("productionCandidateTarget") == document.get("productionCandidateTarget")
+            and preflight.get("historicalInstallationProvenance")
+            == document.get("historicalInstallationProvenance")
+            and preflight.get("sessionNvsBaseline") == expected_session_baseline
             and preflight.get("activeLabApp") == document.get("activeLabApp")
             and preflight.get("deviceSuffix") == document.get("identity", {}).get("deviceSuffix")
             and preflight.get("syntheticIds") == document.get("identity", {}).get("syntheticIds")
@@ -494,6 +555,9 @@ def validate_ledger(document: object, *, repository_root: Path) -> dict[str, obj
         reasons.append("declaredTftVerdict")
         declared = "TFT_BLOCKED"
     if declared == "TFT_BLOCKED":
+        reasons.extend(_validate_session_nvs_preservation(
+            document, preflight_available=False, complete=False
+        ))
         if document.get("artifacts") != [] or document.get("cues") != [] or document.get("runtimeMarkers") != []:
             reasons.append("blocked.evidence_must_be_empty")
         if document.get("physicalActions") != {
@@ -528,6 +592,10 @@ def validate_ledger(document: object, *, repository_root: Path) -> dict[str, obj
                 reasons.append("stopPhase")
         reasons.extend(_validate_bindings(document, artifacts, available))
         reasons.extend(_validate_bound_documents(document, contents, available))
+        reasons.extend(_validate_session_nvs_preservation(
+            document, preflight_available="preflight" in available,
+            complete=declared == "TFT_PASS",
+        ))
         reasons.extend(_validate_unavailable_evidence(document, available))
         reasons.extend(_validate_attended(document, artifacts, complete=declared == "TFT_PASS"))
         reasons.extend(_validate_physical_actions(document, declared))

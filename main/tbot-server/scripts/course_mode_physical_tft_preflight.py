@@ -35,6 +35,8 @@ EXPECTED_PRODUCTION_CANDIDATE_TARGET = {
     "firmwareSha": "3d4a1e2a32359278124c61e56fd459fac618506e",
     "applicationSha256": "84c999ece0c90eb6e69a410e335c7791f330e9c0fd39c30dfd4162bb7c4cfc6e",
     "bundleRootSha256": "9ef3729d0faec7b02d867cedb3ab30d110b845b1c0133738c588bba0e0c16be6",
+}
+EXPECTED_HISTORICAL_INSTALLATION_PROVENANCE = {
     "preservedNvsSha256": "a7a87f72416be20388298cb70cfff306ec78e77f0e8b09231d16113f3d82404e",
 }
 ACTIVE_LAB_FIRMWARE_SHA = "aef1034f859b35efc93215106eb3be89f10f6c66"
@@ -56,6 +58,8 @@ REQUIRED_INPUT_FIELDS = {
     "endpointAuthority": str,
     "syntheticIds": dict,
     "productionCandidateTarget": dict,
+    "historicalInstallationProvenance": dict,
+    "sessionNvsBaseline": dict,
     "activeLabApp": dict,
     "protectedTest": dict,
     "outputDirectory": str,
@@ -166,6 +170,15 @@ def validate_input(document: object, *, repository_root: Path) -> list[str]:
         reasons.append("input.syntheticIds")
     if document["productionCandidateTarget"] != EXPECTED_PRODUCTION_CANDIDATE_TARGET:
         reasons.append("input.productionCandidateTarget")
+    if document["historicalInstallationProvenance"] != EXPECTED_HISTORICAL_INSTALLATION_PROVENANCE:
+        reasons.append("input.historicalInstallationProvenance")
+    session_nvs = document["sessionNvsBaseline"]
+    if not isinstance(session_nvs, dict) or set(session_nvs) != {"beforeInstallSha256"}:
+        reasons.append("input.sessionNvsBaseline")
+    else:
+        value = session_nvs.get("beforeInstallSha256")
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+            reasons.append("input.sessionNvsBaseline.beforeInstallSha256")
     active_lab_app = document["activeLabApp"]
     if not isinstance(active_lab_app, dict) or set(active_lab_app) != {
         "firmwareSha", "applicationSha256", "bundleRootSha256"
@@ -410,6 +423,8 @@ def main(argv: list[str] | None = None) -> int:
         "backendImage": expected["backendImage"],
         "backendSha": expected["backendSha"],
         "productionCandidateTarget": expected["productionCandidateTarget"],
+        "historicalInstallationProvenance": expected["historicalInstallationProvenance"],
+        "sessionNvsBaseline": expected["sessionNvsBaseline"],
         "activeLabApp": expected["activeLabApp"],
         "composeProject": COMPOSE_PROJECT,
         "deviceSuffix": "AC:20",

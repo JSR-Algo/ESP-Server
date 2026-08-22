@@ -179,6 +179,8 @@ REQUIRED_INPUT_FIELDS = {
     "endpointAuthority": str,          # approved-local-task07-lab-route
     "syntheticIds": dict,              # exactly EXPECTED_IDS
     "productionCandidateTarget": dict, # immutable reviewed production target
+    "historicalInstallationProvenance": dict, # historical NVS evidence only
+    "sessionNvsBaseline": dict,         # exact supplied pre-install NVS digest
     "activeLabApp": dict,              # exact supplied temporary lab identity
     "protectedTest": dict,             # exact path/hash from the design
     "outputDirectory": str,            # concrete timestamped task-artifact path
@@ -187,8 +189,13 @@ REQUIRED_INPUT_FIELDS = {
 ```
 
 Require the caller to provide the concrete approved lab IP/URLs; never infer
-them from current networking. `productionCandidateTarget` must equal the four
-reviewed target values in the design. `activeLabApp` must bind exact firmware
+them from current networking. `productionCandidateTarget` must equal the three
+reviewed firmware/application/bundle values in the design.
+`historicalInstallationProvenance` must retain the prior installation's exact
+preserved-NVS digest but must not constrain the current session.
+`sessionNvsBaseline` must contain only a caller-supplied lowercase
+`beforeInstallSha256`; the preflight must not read a device or infer the value.
+`activeLabApp` must bind exact firmware
 main `aef1034f859b35efc93215106eb3be89f10f6c66` and caller-supplied lowercase
 application/bundle SHA-256 values; preliminary artifact hashes must not be
 hard-coded. `protectedTest` must equal the protected path/hash in the design.
@@ -196,6 +203,14 @@ The implementation validates the fixed argv, hashes the protected file
 directly, captures Compose JSON only in memory, sets fixed sentinel values for
 required secret-shaped Compose variables rather than reading them from the
 environment, redacts secret-bearing keys, and atomically writes one JSON result.
+
+The attended ledger separately requires `sessionNvsPreservation` with exact
+fields `phase`, `beforeInstallSha256`, `afterInstallSha256`, and
+`afterRestoreSha256`. Enforce the monotonic phase matrix: `NOT_OBSERVED` has
+three null hashes; `PRE_INSTALL_BASELINE` has only before-install;
+`POST_INSTALL` has equal before/after-install; and `POST_RESTORE` has all three
+equal. Bind before-install to the preflight result and require `POST_RESTORE`
+for `TFT_PASS`. Never change `task07Verdict` from `PHYSICAL_BLOCKED`.
 
 - [ ] **Step 5: Run focused tests and static denial scans**
 

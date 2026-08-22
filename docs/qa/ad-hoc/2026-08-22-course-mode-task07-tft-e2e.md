@@ -66,7 +66,9 @@ Create `preflight-input.json` with the exact schema in
 Use the reviewed clean backend root/SHA and its exact SHA-tagged image, the
 fixed Compose project and loopback endpoints, the approved concrete local-lab
 asset/OTA/WebSocket routes, the five specified synthetic UUIDs, the pinned
-immutable `productionCandidateTarget`, the separate `activeLabApp`, the
+immutable three-field `productionCandidateTarget`, the separate
+`historicalInstallationProvenance`, a `sessionNvsBaseline` containing the exact
+full current pre-install digest, the separate `activeLabApp`, the
 canonical protected path/hash above, the concrete session directory, and a UTC
 session start. The active lab source must be
 `aef1034f859b35efc93215106eb3be89f10f6c66`; supply the exact qualified
@@ -74,6 +76,10 @@ application and bundle-root SHA-256 values at point of use. Do not copy
 preliminary hashes into tooling or substitute the production target identity.
 Do not infer a lab IP from current network state and do not add command,
 environment, or credential fields.
+
+Do not substitute the historical preserved-NVS digest for the session baseline.
+The historical value describes only its retained installation. The preflight
+accepts the exact caller-supplied current baseline and performs no device read.
 
 From `main/tbot-server`:
 
@@ -86,6 +92,13 @@ python3 scripts/course_mode_physical_tft_preflight.py \
 The preflight invokes only the five internally fixed read-only Git/image-inspect/
 Compose-config commands. It refuses a missing session directory and never
 creates one implicitly.
+
+In the attended ledger, update `sessionNvsPreservation.phase` monotonically:
+`PRE_INSTALL_BASELINE` after the current baseline is retained, `POST_INSTALL`
+only after an exact equal readback, and `POST_RESTORE` only after a second exact
+equal readback following restore. Do not populate hashes for observations that
+have not occurred. `TFT_PASS` requires `POST_RESTORE`; every verdict remains
+bounded by `task07Verdict=PHYSICAL_BLOCKED`.
 
 ## Phase 3: Separately Authorized Stack Start
 
