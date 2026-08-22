@@ -80,7 +80,8 @@ bundle, and V1/default-off assertions are recorded in
 `v1-rollback-candidate-identity.json`. The exact non-executed preserving
 restoration/readback procedure is committed below. The binary and source bundles
 are retained outside Git at the manifest's durable local path; large generated
-binaries were not committed.
+binaries were not committed. The reviewed bundle root is its `SHA256SUMS` file,
+SHA-256 `173e92f9b5a79328fc2bd9c613b76bb166107e51359dd6e07cab907625fd215c`.
 
 This does not establish physical known-good status. T7.1 explicitly records no
 firmware flash, while T7.4 lists `03b3a392...` only as firmware source main.
@@ -103,15 +104,19 @@ flash-encryption requirements that do not match the reviewed bundle. Never erase
 the chip and never use `merged-binary.bin` for this preserving restore.
 
 ```bash
+test "$(shasum -a 256 SHA256SUMS | awk '{print $1}')" = \
+  "173e92f9b5a79328fc2bd9c613b76bb166107e51359dd6e07cab907625fd215c"
 shasum -a 256 -c SHA256SUMS
-"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" get_security_info
+"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" \
+  --after no_reset get_security_info
 
 "$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" \
+  --before no_reset --after no_reset \
   read_flash 0x9000 0x4000 readback-nvs-before.bin
 shasum -a 256 readback-nvs-before.bin > readback-nvs-before.sha256
 
 "$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" -b 460800 \
-  --before default_reset --after hard_reset write_flash \
+  --before no_reset --after no_reset write_flash \
   --flash_mode dio --flash_size 16MB --flash_freq 80m \
   0x0 bootloader/bootloader.bin \
   0x8000 partition_table/partition-table.bin \
@@ -120,12 +125,12 @@ shasum -a 256 readback-nvs-before.bin > readback-nvs-before.sha256
   0x800000 generated_assets.bin
 
 mkdir -p readback
-"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" read_flash 0x0 16256 readback/bootloader.bin
-"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" read_flash 0x8000 3072 readback/partition-table.bin
-"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" read_flash 0xd000 8192 readback/ota_data_initial.bin
-"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" read_flash 0x20000 3597792 readback/xiaozhi.bin
-"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" read_flash 0x800000 5693495 readback/generated_assets.bin
-"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" read_flash 0x9000 0x4000 readback-nvs-after.bin
+"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" --before no_reset --after no_reset read_flash 0x0 16256 readback/bootloader.bin
+"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" --before no_reset --after no_reset read_flash 0x8000 3072 readback/partition-table.bin
+"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" --before no_reset --after no_reset read_flash 0xd000 8192 readback/ota_data_initial.bin
+"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" --before no_reset --after no_reset read_flash 0x20000 3597792 readback/xiaozhi.bin
+"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" --before no_reset --after no_reset read_flash 0x800000 5693495 readback/generated_assets.bin
+"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" --before no_reset --after no_reset read_flash 0x9000 0x4000 readback-nvs-after.bin
 
 cmp bootloader/bootloader.bin readback/bootloader.bin
 cmp partition_table/partition-table.bin readback/partition-table.bin
@@ -133,6 +138,10 @@ cmp ota_data_initial.bin readback/ota_data_initial.bin
 cmp xiaozhi.bin readback/xiaozhi.bin
 cmp generated_assets.bin readback/generated_assets.bin
 cmp readback-nvs-before.bin readback-nvs-after.bin
+
+# Only after every byte comparison succeeds, leave the bootloader and run.
+"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" \
+  --before no_reset run
 ```
 
 The external SD card is not a target of these commands and must remain installed
