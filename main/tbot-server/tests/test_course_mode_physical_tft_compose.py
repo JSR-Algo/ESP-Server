@@ -29,6 +29,9 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
     assert set(overlay["services"]) == {"backend"}
     assert "volumes" not in overlay
     assert "volumes" not in overlay["services"]["backend"]
+    assert overlay["services"]["backend"]["environment"][
+        "TBOT_DEVICE_MINT_SECRET"
+    ] == "${TBOT_DEVICE_MINT_SECRET:?export the shared local device mint secret}"
 
     env = os.environ.copy()
     env.update(
