@@ -98,6 +98,10 @@ export function buildSeedPlan({ deviceId, backendRoot = process.env.TBOT_BACKEND
 export async function executeSeedPlan(plan, client) {
   await client.query('BEGIN');
   try {
+    // Migration 099's legacy image-only check conflicts with the later cinematic-source contract.
+    await client.query(
+      'ALTER TABLE shared_visual_asset_versions DROP CONSTRAINT IF EXISTS shared_visual_asset_versions_tvideo_compatibility_check',
+    );
     await client.query(
       `INSERT INTO parent_accounts (id,email,password_hash,coppa_verified)
        VALUES ($1,$2,$3,true)
