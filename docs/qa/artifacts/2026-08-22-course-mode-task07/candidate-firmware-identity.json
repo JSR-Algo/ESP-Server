@@ -4,6 +4,7 @@
   "generatedDate": "2026-08-22",
   "disposition": "IDENTITY_ASSEMBLED_NOT_FLASHED",
   "authorizesFlash": false,
+  "artifactRetention": "IDENTITY_ONLY_BINARY_FILES_NOT_COMMITTED",
   "source": {
     "repository": "TBOT-Firmware",
     "sha": "df70b5a12c68f5a6ab07f981cb7c10113e7dbc01",
@@ -82,6 +83,7 @@
     "cleanOfflineBuild": "PASS",
     "incrementalRebuildHashStable": true,
     "imageStructure": "PASS",
+    "laterRebuildPolicy": "ALL_HASHES_MUST_MATCH_OR_REQUIRE_NEW_REVIEWED_IDENTITY",
     "hardwareInstalled": false,
     "physicalValidation": "NOT_RUN"
   }

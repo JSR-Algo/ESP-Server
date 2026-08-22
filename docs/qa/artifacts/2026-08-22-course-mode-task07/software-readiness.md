@@ -19,6 +19,15 @@ installed ESP-IDF 5.5.4 tree at commit
 assertion passed. A subsequent incremental `idf.py build` preserved the exact
 application SHA-256.
 
+Exact isolated build invocation, with no flash target or serial port:
+
+```bash
+export IDF_PATH=/path/to/pinned/esp-idf
+export IDF_PYTHON_ENV_PATH=/path/to/pinned/idf5.5-python-env
+source "$IDF_PATH/export.sh"
+./build-lcdwiki.sh --no-flash
+```
+
 The checksum-pinned machine-readable identity is
 `candidate-firmware-identity.json`. Its flash map, copied from the generated
 `flasher_args.json`, is:
@@ -30,6 +39,12 @@ The checksum-pinned machine-readable identity is
 | `0xd000` | `ota_data_initial.bin` | 8,192 | `7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f` |
 | `0x20000` | `xiaozhi.bin` | 3,611,920 | `8182dcbb3d23eac255614bf8eafac455053d4f9d5965670257d9071f6ff5e059` |
 | `0x800000` | `generated_assets.bin` | 5,693,495 | `d03b074c39d78601b2a2f6c3438620adc1cf779d634825385e63cafc4528a52b` |
+
+Only the redacted identity is committed; the generated binary files are not.
+Before an authorized HIL session, a staged candidate bundle must be verified
+against every recorded byte size, SHA-256 value, metadata hash, and flash
+offset. Any mismatch requires a new reviewed candidate identity; operators must
+not silently substitute a rebuild.
 
 This identity assembles the candidate bundle but does not authorize installing
 it. Candidate flash, reset, serial capture, readback, and any motion remain
