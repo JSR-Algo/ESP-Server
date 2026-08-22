@@ -7,6 +7,7 @@ from typing import Any, NoReturn, cast
 from urllib.parse import urlsplit
 
 from core.lesson.course_mode_compatibility import (
+    course_mode_local_asset_origin_matches,
     course_mode_compatibility_phase_matches,
     course_mode_compatibility_for_manifest,
     validate_course_mode_compatibility,
@@ -184,12 +185,22 @@ def _manifest_asset(
         parsed_url = None
     url_path = parsed_url.path.lstrip("/") if parsed_url is not None else ""
     url_path_matches = url_path == expected_path or url_path.endswith("/" + expected_path)
+    approved_url_scheme = (
+        parsed_url is not None
+        and (
+            parsed_url.scheme == "https"
+            or (
+                course_mode_compatibility is not None
+                and course_mode_local_asset_origin_matches(parsed_url)
+            )
+        )
+    )
     if (
         not isinstance(derivative_id, str)
         or _SHA256_RE.fullmatch(derivative_id) is None
         or asset.get("path") != expected_path
         or parsed_url is None
-        or parsed_url.scheme != "https"
+        or not approved_url_scheme
         or not parsed_url.netloc
         or parsed_url.username
         or parsed_url.password

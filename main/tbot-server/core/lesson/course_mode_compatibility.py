@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import os
 from typing import Any
+from urllib.parse import ParseResult
 
 from core.lesson.course_mode_contract import CourseModeContract, CourseModeContractError
 
@@ -22,6 +24,8 @@ COURSE_MODE_COMPATIBILITY = {
     "lessonVersion": LESSON_VERSION,
     "manifestChecksum": MANIFEST_CHECKSUM,
 }
+LOCAL_LAB_ASSET_HOST = "192.168.0.120"
+LOCAL_LAB_ASSET_PORT = 8102
 
 _CUES = (
     ("cat-discover", "teach", "6c5d8ee1c2695a12dfa8202df5d0820b360aeca5a15662583efb97e812c99f66", "ebeaf4e8159b17da82d615f359272e26e7e81a1f005183335feba5b702f98d72", 134626),
@@ -37,6 +41,27 @@ _CUES = (
 
 def validate_course_mode_compatibility(value: Any) -> bool:
     return isinstance(value, dict) and value == COURSE_MODE_COMPATIBILITY
+
+
+def course_mode_local_asset_origin_matches(parsed_url: ParseResult | None) -> bool:
+    """Allow HTTP only for the exact Task 07 local asset origin."""
+    if (
+        parsed_url is None
+        or os.getenv("LESSON_COURSE_MODE_LOCAL_HTTP_ASSET_ENABLED", "").strip().lower()
+        != "true"
+    ):
+        return False
+    try:
+        port = parsed_url.port
+    except ValueError:
+        return False
+    return (
+        parsed_url.scheme == "http"
+        and parsed_url.hostname == LOCAL_LAB_ASSET_HOST
+        and port == LOCAL_LAB_ASSET_PORT
+        and not parsed_url.username
+        and not parsed_url.password
+    )
 
 
 def _cue_identity(cue_id: Any) -> tuple[str, str, str, str, int] | None:

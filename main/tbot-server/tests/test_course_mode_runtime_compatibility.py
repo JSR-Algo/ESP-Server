@@ -181,6 +181,43 @@ def test_exact_frozen_course_mode_mp4_cues_project_with_fail_closed_marker() -> 
     assert prepare["asset"]["courseModeCompatibility"] == MARKER
 
 
+def test_exact_frozen_course_mode_accepts_only_the_approved_local_http_asset_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _pilot_manifest()
+    for phase in manifest["cinematicPhases"]:
+        phase["asset"]["url"] = phase["asset"]["url"].replace(
+            "https://cdn.example/", "http://192.168.0.120:8102/"
+        )
+
+    with pytest.raises(FlattenedCinematicContractError):
+        validate_flattened_cinematic_manifest(
+            manifest, manifest_checksum=MANIFEST_CHECKSUM
+        )
+
+    monkeypatch.setenv("LESSON_COURSE_MODE_LOCAL_HTTP_ASSET_ENABLED", "true")
+    validate_flattened_cinematic_manifest(
+        manifest, manifest_checksum=MANIFEST_CHECKSUM
+    )
+
+    generic_manifest = deepcopy(manifest)
+    generic_manifest.pop("courseModeContract")
+    with pytest.raises(FlattenedCinematicContractError):
+        validate_flattened_cinematic_manifest(
+            generic_manifest, manifest_checksum=MANIFEST_CHECKSUM
+        )
+
+    manifest["cinematicPhases"][0]["asset"]["url"] = manifest[
+        "cinematicPhases"
+    ][0]["asset"]["url"].replace("192.168.0.120", "192.168.0.121")
+    with pytest.raises(FlattenedCinematicContractError) as exc_info:
+        validate_flattened_cinematic_manifest(
+            manifest, manifest_checksum=MANIFEST_CHECKSUM
+        )
+
+    assert exc_info.value.code == "CINEMATIC_METADATA_MISMATCH"
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
