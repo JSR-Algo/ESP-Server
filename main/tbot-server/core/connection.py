@@ -570,7 +570,7 @@ class ConnectionHandler:
                 if not allowed:
                     self._discard_refused_voice_input(message)
                     return
-                if listen_state in {"start", "detect"}:
+                if listen_state == "start":
                     self.client_audio_input_authorized = True
                 await self._wait_for_voice_provider_ready()
                 if self.voice_provider is not None:

@@ -275,8 +275,8 @@ waived or replaced by native, simulated, mock-instrument, or subjective evidence
 
 The Task 06 firmware identity remains authoritative historical evidence for the
 runtime-approved preflight candidate, but it predates the fail-closed microphone
-uplink remediation committed on firmware `main` as
-`039ded40387edbb8907b551dd957bde45b1b1fb6`. It must not be installed or accepted
+uplink remediation committed and reviewed on firmware `main` as
+`3d4a1e2a32359278124c61e56fd459fac618506e`. It must not be installed or accepted
 as the Task 07 HIL candidate after the privacy stop condition. The offline
 evidence validator therefore keeps `PHYSICAL_PASS` locked until a replacement
 privacy-remediated artifact identity is checksum-pinned and independently

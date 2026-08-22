@@ -801,18 +801,18 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.voice_provider.audio_calls, [b"authorized-audio"])
         self.assertFalse(handler.client_audio_input_authorized)
 
-    async def test_google_live_wake_detect_authorizes_its_following_audio_window(self):
+    async def test_google_live_non_wake_detect_closes_its_audio_window(self):
         handler = self._build_handler()
         handler.config["voice_mode"] = {"type": "google_live"}
         handler.voice_provider = _RecordingVoiceProvider()
 
         await handler._route_message(
-            '{"type":"listen","state":"detect","text":"Hi ESP"}'
+            '{"type":"listen","state":"detect","text":"xin chao"}'
         )
-        await handler._route_message(b"wake-window-audio")
+        await handler._route_message(b"late-audio")
 
-        self.assertTrue(handler.client_audio_input_authorized)
-        self.assertEqual(handler.voice_provider.audio_calls, [b"wake-window-audio"])
+        self.assertFalse(handler.client_audio_input_authorized)
+        self.assertEqual(handler.voice_provider.audio_calls, [])
 
     async def test_classic_audio_is_authorized_only_after_admitted_listen_start(self):
         handler = self._build_handler()

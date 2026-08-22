@@ -43,8 +43,8 @@ APPROVED_CANDIDATE = {
 }
 APPROVED_ROLLBACK_MANIFEST_SHA256 = "3de432f3c0fb7ae29d40d1d50a720e2cd36aeb175d8413a66d1875967e4dc7db"
 # The Task 06 artifact predates the Task 07 microphone-uplink remediation.
-# Set this only when the replacement identity has completed independent review.
-APPROVED_PRIVACY_REMEDIATED_CANDIDATE_SHA256: str | None = None
+# Populate the complete replacement bundle only after independent review.
+APPROVED_PRIVACY_REMEDIATED_CANDIDATE: dict[str, Any] | None = None
 APPROVED_FLASH_MAP = (
     ("0x0", "bootloader/bootloader.bin"),
     ("0x8000", "partition_table/partition-table.bin"),
@@ -66,6 +66,22 @@ APPROVED_ROLLBACK_READBACKS = (
     ("0x20000", "3597792", "rollback-readback/xiaozhi.bin"),
     ("0x800000", "5693495", "rollback-readback/generated_assets.bin"),
 )
+APPROVED_CANDIDATE_READBACK_HASHES = {
+    "readback/bootloader.bin": (16256, "aaa1bfe9535e78e567bc472ee5cbbfca312e50631fa407c87e36329c52d9dac6"),
+    "readback/partition-table.bin": (3072, "4811619cacae08ef2e0e71b7220c6033a346ca5da7ca179082408c963ef530b5"),
+    "readback/ota_data_initial.bin": (8192, "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"),
+    "readback/xiaozhi.bin": (3611920, "8182dcbb3d23eac255614bf8eafac455053d4f9d5965670257d9071f6ff5e059"),
+    "readback/generated_assets.bin": (5693495, "d03b074c39d78601b2a2f6c3438620adc1cf779d634825385e63cafc4528a52b"),
+}
+APPROVED_ROLLBACK_READBACK_HASHES = {
+    "rollback-readback/bootloader.bin": (16256, "03eab6ea72837189f6f95e6119b40e099b1282bd3029693f8882953d3c63cc1e"),
+    "rollback-readback/partition-table.bin": (3072, "4811619cacae08ef2e0e71b7220c6033a346ca5da7ca179082408c963ef530b5"),
+    "rollback-readback/ota_data_initial.bin": (8192, "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"),
+    "rollback-readback/xiaozhi.bin": (3597792, "723ee925eeea12391104ba9631920cdcd57e3b8d9788302835021a1ccc5f238a"),
+    "rollback-readback/generated_assets.bin": (5693495, "d03b074c39d78601b2a2f6c3438620adc1cf779d634825385e63cafc4528a52b"),
+}
+# Numeric limits remain intentionally empty until an authority approves them.
+APPROVED_HARDWARE_LIMITS: dict[str, dict[str, Any]] = {}
 REQUIRED_LANE_MEASUREMENTS = {
     "baseline-hardware-health": ("supply-voltage", "V"),
     "visual-inspection": ("visual-defect-count", "count"),
@@ -140,18 +156,14 @@ def _verified_esptool_action(
     operation_index = arguments.index(operation)
     operands = arguments[operation_index + 1:]
     if operation == "read_flash":
-        expected_regions = (
-            APPROVED_ROLLBACK_READBACKS
-            if artifact_manifest_sha256 == APPROVED_ROLLBACK_MANIFEST_SHA256
-            else APPROVED_CANDIDATE_READBACKS
-        )
+        expected_regions = _approved_readbacks(artifact_manifest_sha256)
         return tuple(operands) in expected_regions
     flash_map = tuple(
         (operands[index], operands[index + 1])
         for index in range(len(operands) - 1)
         if OFFSET_RE.fullmatch(operands[index]) and not operands[index + 1].startswith("-")
     )
-    return flash_map == APPROVED_FLASH_MAP
+    return flash_map == _approved_flash_map(artifact_manifest_sha256)
 
 
 def _readback_region(
@@ -162,16 +174,41 @@ def _readback_region(
         return None
     operands = arguments[arguments.index("read_flash") + 1:]
     region = tuple(operands)
-    expected_regions = (
-        APPROVED_ROLLBACK_READBACKS
-        if artifact_manifest_sha256 == APPROVED_ROLLBACK_MANIFEST_SHA256
-        else APPROVED_CANDIDATE_READBACKS
-    )
+    expected_regions = _approved_readbacks(artifact_manifest_sha256)
     return region if region in expected_regions else None
 
 
 def _numeric(value: Any) -> bool:
     return type(value) in {int, float} and math.isfinite(value)
+
+
+def _approved_candidate_bundle() -> dict[str, Any]:
+    if APPROVED_PRIVACY_REMEDIATED_CANDIDATE is not None:
+        return APPROVED_PRIVACY_REMEDIATED_CANDIDATE
+    return {
+        "identity": APPROVED_CANDIDATE,
+        "flashMap": APPROVED_FLASH_MAP,
+        "readbacks": APPROVED_CANDIDATE_READBACKS,
+        "readbackHashes": APPROVED_CANDIDATE_READBACK_HASHES,
+    }
+
+
+def _approved_readbacks(manifest_sha256: Any) -> tuple[tuple[str, str, str], ...]:
+    if manifest_sha256 == APPROVED_ROLLBACK_MANIFEST_SHA256:
+        return APPROVED_ROLLBACK_READBACKS
+    bundle = _approved_candidate_bundle()
+    if manifest_sha256 == bundle["identity"].get("firmwareIdentitySha256"):
+        return tuple(bundle["readbacks"])
+    return ()
+
+
+def _approved_flash_map(manifest_sha256: Any) -> tuple[tuple[str, str], ...]:
+    if manifest_sha256 == APPROVED_ROLLBACK_MANIFEST_SHA256:
+        return APPROVED_FLASH_MAP
+    bundle = _approved_candidate_bundle()
+    if manifest_sha256 == bundle["identity"].get("firmwareIdentitySha256"):
+        return tuple(bundle["flashMap"])
+    return ()
 
 
 def validate_document(document: Any, *, evidence_root: Path | None = None) -> dict[str, Any]:
@@ -444,13 +481,15 @@ def validate_document(document: Any, *, evidence_root: Path | None = None) -> di
     if verdict == "PHYSICAL_BLOCKED" and not deferred:
         errors.append("PHYSICAL_BLOCKED requires explicit deferred blockers")
     if verdict == "PHYSICAL_PASS":
-        if APPROVED_PRIVACY_REMEDIATED_CANDIDATE_SHA256 is None:
+        approved_bundle = _approved_candidate_bundle()
+        approved_candidate = approved_bundle["identity"]
+        if APPROVED_PRIVACY_REMEDIATED_CANDIDATE is None:
             errors.append(
                 "PHYSICAL_PASS is locked until a privacy-remediated candidate identity is approved"
             )
         elif (
             candidate.get("firmwareIdentitySha256")
-            != APPROVED_PRIVACY_REMEDIATED_CANDIDATE_SHA256
+            != approved_candidate.get("firmwareIdentitySha256")
         ):
             errors.append(
                 "PHYSICAL_PASS candidate does not match the approved privacy-remediated identity"
@@ -461,11 +500,42 @@ def validate_document(document: Any, *, evidence_root: Path | None = None) -> di
             errors.append("PHYSICAL_PASS requires every required lane to PASS")
         if candidate.get("installed") is not True:
             errors.append("PHYSICAL_PASS requires the exact candidate to be installed")
-        for field, approved_value in APPROVED_CANDIDATE.items():
+        candidate_label = (
+            "approved Task 06 candidate"
+            if APPROVED_PRIVACY_REMEDIATED_CANDIDATE is None
+            else "approved privacy-remediated candidate"
+        )
+        for field, approved_value in approved_candidate.items():
             if candidate.get(field) != approved_value:
                 errors.append(
-                    f"PHYSICAL_PASS candidate.{field} does not match the approved Task 06 candidate"
+                    f"PHYSICAL_PASS candidate.{field} does not match the {candidate_label}"
                 )
+        if APPROVED_PRIVACY_REMEDIATED_CANDIDATE is not None:
+            for lane_id, (measurement_name, unit) in REQUIRED_LANE_MEASUREMENTS.items():
+                approved_limit = APPROVED_HARDWARE_LIMITS.get(lane_id)
+                if approved_limit is None:
+                    errors.append(
+                        f"PHYSICAL_PASS has no approved hardware limit for {lane_id}/{measurement_name}"
+                    )
+                    continue
+                measurement = next(
+                    (
+                        item
+                        for item in lane_by_id.get(lane_id, {}).get("measurements", [])
+                        if _is_dict(item) and item.get("name") == measurement_name
+                    ),
+                    {},
+                )
+                for field, expected in {
+                    "unit": unit,
+                    "minimum": approved_limit.get("minimum"),
+                    "maximum": approved_limit.get("maximum"),
+                    "authority": approved_limit.get("authority"),
+                }.items():
+                    if measurement.get(field) != expected:
+                        errors.append(
+                            f"PHYSICAL_PASS measurement {lane_id}/{measurement_name} {field} does not match the approved hardware limit"
+                        )
         if rollback.get("physicallyRehearsedKnownGoodV1") is not True:
             errors.append("PHYSICAL_PASS requires a physically rehearsed known-good V1 rollback")
         if rollback.get("manifestSha256") != APPROVED_ROLLBACK_MANIFEST_SHA256:
@@ -499,9 +569,9 @@ def validate_document(document: Any, *, evidence_root: Path | None = None) -> di
         if deferred:
             errors.append("PHYSICAL_PASS cannot retain deferred blockers")
         expected_manifests_by_action = {
-            "candidate-install": {APPROVED_CANDIDATE["firmwareIdentitySha256"]},
+            "candidate-install": {approved_candidate["firmwareIdentitySha256"]},
             "readback": {
-                APPROVED_CANDIDATE["firmwareIdentitySha256"],
+                approved_candidate["firmwareIdentitySha256"],
                 APPROVED_ROLLBACK_MANIFEST_SHA256,
             },
             "rollback": {APPROVED_ROLLBACK_MANIFEST_SHA256},
@@ -529,18 +599,37 @@ def validate_document(document: Any, *, evidence_root: Path | None = None) -> di
                 errors.append(
                     f"PHYSICAL_PASS requires successful verified {action_class} esptool operation"
                 )
-        for offset, size, _output in APPROVED_CANDIDATE_READBACKS:
-            expected = (APPROVED_CANDIDATE["firmwareIdentitySha256"], offset, size)
+        approved_candidate_readbacks = tuple(approved_bundle["readbacks"])
+        for offset, size, output in approved_candidate_readbacks:
+            expected = (approved_candidate["firmwareIdentitySha256"], offset, size)
             if not any(region[:3] == expected for region in successful_readback_regions):
                 errors.append(
                     f"PHYSICAL_PASS requires successful readback for candidate region {offset} size {size}"
                 )
-        for offset, size, _output in APPROVED_ROLLBACK_READBACKS:
+            if APPROVED_PRIVACY_REMEDIATED_CANDIDATE is not None:
+                expected_capture = approved_bundle.get("readbackHashes", {}).get(output)
+                capture = next((item for item in captures if _is_dict(item) and item.get("path") == output), None)
+                if (
+                    expected_capture is None
+                    or capture is None
+                    or (capture.get("bytes"), capture.get("sha256")) != expected_capture
+                ):
+                    errors.append(
+                        f"PHYSICAL_PASS requires checksum-pinned candidate readback capture {output}"
+                    )
+        for offset, size, output in APPROVED_ROLLBACK_READBACKS:
             expected = (APPROVED_ROLLBACK_MANIFEST_SHA256, offset, size)
             if not any(region[:3] == expected for region in successful_readback_regions):
                 errors.append(
                     f"PHYSICAL_PASS requires successful readback for rollback region {offset} size {size}"
                 )
+            if APPROVED_PRIVACY_REMEDIATED_CANDIDATE is not None:
+                expected_capture = APPROVED_ROLLBACK_READBACK_HASHES.get(output)
+                capture = next((item for item in captures if _is_dict(item) and item.get("path") == output), None)
+                if capture is None or (capture.get("bytes"), capture.get("sha256")) != expected_capture:
+                    errors.append(
+                        f"PHYSICAL_PASS requires checksum-pinned rollback readback capture {output}"
+                    )
 
     return {"valid": not errors, "verdict": verdict, "errors": errors, "deferredBlockers": deferred}
 

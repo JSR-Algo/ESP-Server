@@ -61,9 +61,9 @@ BLOCKED**, and Task 08 remains locked.
 
 The checksum-pinned Task 06 firmware artifact was built before this remediation
 and is now retained as historical evidence only; it is not eligible for Task 07
-installation. Firmware `main` contains the software fix at
-`039ded40387edbb8907b551dd957bde45b1b1fb6`, but no independently reviewed,
-checksum-pinned replacement candidate identity has yet superseded the Task 06
+installation. Firmware `main` contains the reviewed software fix at
+`3d4a1e2a32359278124c61e56fd459fac618506e`, but no checksum-pinned replacement
+candidate identity has yet superseded the Task 06
 artifact. This is an additional software release blocker. No local build output
 is promoted by this report, and no flash is authorized.
 

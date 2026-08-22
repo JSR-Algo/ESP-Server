@@ -1726,6 +1726,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_wake_word_detect_opens_listening_without_greeting(self):
         conn = _Conn()
+        conn.client_audio_input_authorized = False
         # Unit test: disable spoken wake greeting (production enables it).
         conn.config.setdefault("google_live", {})["wake_greeting_enabled"] = False
         provider = self.make_provider(conn)
@@ -1737,6 +1738,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(handled)
+        self.assertTrue(conn.client_audio_input_authorized)
         remaining = provider._user_audio_allowed_until - time.monotonic()
         self.assertGreater(remaining, 10.0)
         sent = [json.loads(payload) for payload in conn.websocket.sent]

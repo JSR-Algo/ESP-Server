@@ -446,6 +446,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 await self._handle_local_stop_word(text)
                 return True
             if listen_state == "detect" and self._is_wake_word_only(text):
+                self.conn.client_audio_input_authorized = True
                 await self._reset_conversation_live_context("wake_word")
                 # Clear stale turn timer so first_audio latency is measured from this wake.
                 self.conn.google_live_turn_started_at = None

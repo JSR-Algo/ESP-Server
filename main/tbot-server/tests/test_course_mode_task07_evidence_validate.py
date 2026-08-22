@@ -493,12 +493,101 @@ def test_physical_pass_requires_exact_approved_candidate_identity(field):
 
 def test_unlocked_pass_requires_the_submitted_remediated_candidate_digest():
     validator = load_validator()
-    validator.APPROVED_PRIVACY_REMEDIATED_CANDIDATE_SHA256 = "f" * 64
+    validator.APPROVED_PRIVACY_REMEDIATED_CANDIDATE = {
+        "identity": {
+            **validator.APPROVED_CANDIDATE,
+            "firmwareIdentitySha256": "f" * 64,
+        },
+        "flashMap": validator.APPROVED_FLASH_MAP,
+        "readbacks": validator.APPROVED_CANDIDATE_READBACKS,
+    }
 
     result = validator.validate_document(passing_evidence())
 
     assert result["valid"] is False
     assert "PHYSICAL_PASS candidate does not match the approved privacy-remediated identity" in result["errors"]
+
+
+def test_unlocked_pass_uses_the_complete_replacement_candidate_mapping():
+    validator = load_validator()
+    evidence = passing_evidence()
+    replacement = {
+        **validator.APPROVED_CANDIDATE,
+        "espSha": "1" * 40,
+        "firmwareSha": "2" * 40,
+        "firmwareIdentitySha256": "f" * 64,
+    }
+    replacement_flash_map = tuple(
+        (offset, "xiaozhi-remediated.bin" if offset == "0x20000" else path)
+        for offset, path in validator.APPROVED_FLASH_MAP
+    )
+    replacement_readbacks = tuple(
+        (offset, "3612000", "readback/xiaozhi-remediated.bin")
+        if offset == "0x20000"
+        else (offset, size, output)
+        for offset, size, output in validator.APPROVED_CANDIDATE_READBACKS
+    )
+    evidence["candidate"].update(replacement)
+    for command in evidence["commands"]:
+        if command["actionClass"] in {"candidate-install", "readback"} and command[
+            "artifactManifestSha256"
+        ] == validator.APPROVED_CANDIDATE["firmwareIdentitySha256"]:
+            command["artifactManifestSha256"] = replacement["firmwareIdentitySha256"]
+            if command["actionClass"] == "candidate-install":
+                command["argv"] = [
+                    "esptool",
+                    "write_flash",
+                    *[item for pair in replacement_flash_map for item in pair],
+                ]
+            elif command["argv"][2] == "0x20000":
+                command["argv"] = [
+                    "esptool",
+                    "read_flash",
+                    "0x20000",
+                    "3612000",
+                    "readback/xiaozhi-remediated.bin",
+                ]
+    validator.APPROVED_PRIVACY_REMEDIATED_CANDIDATE = {
+        "identity": replacement,
+        "flashMap": replacement_flash_map,
+        "readbacks": replacement_readbacks,
+        "readbackHashes": {},
+    }
+
+    result = validator.validate_document(evidence)
+
+    assert not any("approved Task 06 candidate" in error for error in result["errors"])
+    assert "PHYSICAL_PASS candidate does not match the approved privacy-remediated identity" not in result["errors"]
+    assert "PHYSICAL_PASS requires verified candidate-install esptool operation" not in result["errors"]
+    assert "PHYSICAL_PASS requires successful readback for candidate region 0x20000 size 3612000" not in result["errors"]
+
+
+def test_physical_pass_rejects_measurement_bounds_without_pinned_limit_authority():
+    validator = load_validator()
+    validator.APPROVED_PRIVACY_REMEDIATED_CANDIDATE = {
+        "identity": validator.APPROVED_CANDIDATE,
+        "flashMap": validator.APPROVED_FLASH_MAP,
+        "readbacks": validator.APPROVED_CANDIDATE_READBACKS,
+        "readbackHashes": validator.APPROVED_CANDIDATE_READBACK_HASHES,
+    }
+
+    result = validator.validate_document(passing_evidence())
+
+    assert "PHYSICAL_PASS has no approved hardware limit for baseline-hardware-health/supply-voltage" in result["errors"]
+
+
+def test_physical_pass_requires_checksum_pinned_readback_capture():
+    validator = load_validator()
+    validator.APPROVED_PRIVACY_REMEDIATED_CANDIDATE = {
+        "identity": validator.APPROVED_CANDIDATE,
+        "flashMap": validator.APPROVED_FLASH_MAP,
+        "readbacks": validator.APPROVED_CANDIDATE_READBACKS,
+        "readbackHashes": validator.APPROVED_CANDIDATE_READBACK_HASHES,
+    }
+
+    result = validator.validate_document(passing_evidence())
+
+    assert "PHYSICAL_PASS requires checksum-pinned candidate readback capture readback/bootloader.bin" in result["errors"]
 
 
 @pytest.mark.parametrize("option", ["--help", "-h", "--version"])
