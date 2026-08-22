@@ -258,7 +258,12 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
     expected_image = f"local/tbot-backend:course-mode-physical-tft-{sha}"
     assert calls[0] == f"npm cwd={backend} args=run build"
     assert calls[1] == (
-        f"docker build --pull=false -f {backend}/Dockerfile -t {expected_image} {backend}"
+        "docker build --pull=false --label "
+        "com.tbot.course-mode.materializer-path=/app/dist/lessons/course-mode/"
+        "course-mode-local-materializer.js --label "
+        f"org.opencontainers.image.revision={sha} --label "
+        "com.tbot.course-mode.build-source=reviewed-clean-git-worktree "
+        f"-f {backend}/Dockerfile -t {expected_image} {backend}"
     )
     assert calls[2] == (
         "docker run --rm --entrypoint /nodejs/bin/node "

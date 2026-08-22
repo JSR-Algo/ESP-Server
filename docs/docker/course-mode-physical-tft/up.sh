@@ -53,7 +53,11 @@ echo "[course-mode-physical-tft] compiling backend ${ACTUAL_SHA} from ${BACKEND_
   fail "backend build changed the reviewed worktree; refusing to build an image with uncommitted source"
 
 echo "[course-mode-physical-tft] building ${BACKEND_IMAGE} from the reviewed backend worktree"
-docker build --pull=false -f "${BACKEND_ROOT}/Dockerfile" \
+docker build --pull=false \
+  --label "com.tbot.course-mode.materializer-path=/app/dist/lessons/course-mode/course-mode-local-materializer.js" \
+  --label "org.opencontainers.image.revision=${ACTUAL_SHA}" \
+  --label "com.tbot.course-mode.build-source=reviewed-clean-git-worktree" \
+  -f "${BACKEND_ROOT}/Dockerfile" \
   -t "${BACKEND_IMAGE}" "${BACKEND_ROOT}"
 
 echo "[course-mode-physical-tft] verifying compiled materializer in ${BACKEND_IMAGE}"

@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "gate": "course-mode-v2-task07-physical-tft",
+  "declaredTftVerdict": "TFT_BLOCKED",
+  "task07Verdict": "PHYSICAL_BLOCKED",
+  "candidate": {
+    "firmwareSha": "3d4a1e2a32359278124c61e56fd459fac618506e",
+    "applicationSha256": "84c999ece0c90eb6e69a410e335c7791f330e9c0fd39c30dfd4162bb7c4cfc6e",
+    "bundleRootSha256": "9ef3729d0faec7b02d867cedb3ab30d110b845b1c0133738c588bba0e0c16be6",
+    "preservedNvsSha256": "a7a87f72416be20388298cb70cfff306ec78e77f0e8b09231d16113f3d82404e"
+  },
+  "backend": {
+    "sha": null,
+    "image": null,
+    "imageId": null
+  },
+  "protectedTest": {
+    "path": "/Users/manhhodinh/Documents/TBOT/robot/esp32-server/main/tbot-server/tests/test_lesson_voice_output_discipline.py",
+    "sha256": "08f77b5452301224b17b4b333d2d032fff40c06aa2eaea97fa90932dae7d97e3"
+  },
+  "identity": {
+    "deviceSuffix": "AC:20",
+    "lessonKey": "course-mode-pilot-cat-ball",
+    "lessonVersion": 1,
+    "rendererId": "teebot-lesson-renderer.v4",
+    "contractChecksum": "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264",
+    "layoutChecksum": "e61b56d1f8219a86c7f3986e7d5c70b91f512286604b5b206ef11e2c989d275c",
+    "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "syntheticIds": {
+      "courseId": "70000000-0000-4000-8000-000000000003",
+      "lessonId": "70000000-0000-4000-8000-000000000004",
+      "deviceId": "70000000-0000-4000-8000-000000000005",
+      "assignmentId": "70000000-0000-4000-8000-000000000006",
+      "adultOperatorId": "70000000-0000-4000-8000-000000000007"
+    }
+  },
+  "endpoints": {
+    "backendBaseUrl": "http://127.0.0.1:3000",
+    "espHttpUrl": "http://host.docker.internal:8003",
+    "assetOrigin": "http://192.168.100.183:8102/",
+    "otaUrl": "http://192.168.100.183:8003/ota",
+    "websocketUrl": "ws://192.168.100.183:8003/ws",
+    "authority": "approved-local-task07-lab-route"
+  },
+  "bindings": {},
+  "operators": {
+    "operatorName": null,
+    "observerName": null,
+    "adultOnly": false,
+    "soleLease": false,
+    "clearMotionEnvelope": false,
+    "immediatePowerIsolation": false,
+    "startedAt": null,
+    "endedAt": null
+  },
+  "artifacts": [],
+  "runtimeMarkers": [],
+  "cues": [],
+  "finalRest": {},
+  "stopConditions": [],
+  "stopPhase": "NOT_PERFORMED",
+  "unavailableEvidence": [
+    {
+      "evidence": "preflight",
+      "reason": "blocked-template-not-performed"
+    },
+    {
+      "evidence": "firstReceipt",
+      "reason": "blocked-template-not-performed"
+    },
+    {
+      "evidence": "rerunReceipt",
+      "reason": "blocked-template-not-performed"
+    }
+  ],
+  "stopOutcome": {
+    "safeState": "NOT_PERFORMED",
+    "powerIsolation": "NOT_PERFORMED"
+  },
+  "privacyOutcome": {
+    "privateDataObserved": null,
+    "unauthorizedUplinkObserved": null
+  },
+  "physicalActions": {
+    "stackStart": "NOT_PERFORMED",
+    "captureTrigger": "NOT_PERFORMED",
+    "cleanup": "NOT_PERFORMED"
+  },
+  "numericLimits": [
+    {
+      "lane": "physical-tft-sub-lane",
+      "status": "NOT_MEASURED",
+      "authorityReference": "Task 07 master prompt; no numeric limit defined by this tooling"
+    }
+  ],
+  "outstandingBlockers": [
+    "attended-capture",
+    "direct-visual-evidence",
+    "calibrated-instruments",
+    "approved-limits",
+    "estop-and-tp-en",
+    "rollback",
+    "recovery",
+    "remaining-task07-physical-lanes"
+  ]
+}
