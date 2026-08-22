@@ -21,6 +21,7 @@ services:
     environment:
       DATABASE_URL: postgresql://tbot:tbot@postgres:5432/tbot
       COURSE_MODE_LOCAL_COMPOSE_ENABLED: "true"
+      COURSE_MODE_V2_PUBLISH_ENABLED: "true"
       COURSE_MODE_DEVICE_MAC: "14:c1:9f:d1:ac:20"
       COURSE_MODE_FIXTURE_ROOT: /course-mode-fixtures
       COURSE_MODE_LOCAL_PHYSICAL_TFT_ENABLED: "true"

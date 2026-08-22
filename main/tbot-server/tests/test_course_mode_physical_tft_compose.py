@@ -40,6 +40,7 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
         "materialize",
     ]
     assert materialize["environment"]["COURSE_MODE_LOCAL_COMPOSE_ENABLED"] == "true"
+    assert materialize["environment"]["COURSE_MODE_V2_PUBLISH_ENABLED"] == "true"
     assert materialize["environment"]["COURSE_MODE_DEVICE_MAC"] == "14:c1:9f:d1:ac:20"
     assert all("seed" not in str(value).lower() for value in materialize.values())
     assert all(".sql" not in str(value).lower() for value in materialize.values())
