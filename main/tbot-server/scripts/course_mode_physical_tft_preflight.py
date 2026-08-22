@@ -31,12 +31,13 @@ EXPECTED_IDS = {
     "assignmentId": "70000000-0000-4000-8000-000000000006",
     "adultOperatorId": "70000000-0000-4000-8000-000000000007",
 }
-EXPECTED_CANDIDATE = {
+EXPECTED_PRODUCTION_CANDIDATE_TARGET = {
     "firmwareSha": "3d4a1e2a32359278124c61e56fd459fac618506e",
     "applicationSha256": "84c999ece0c90eb6e69a410e335c7791f330e9c0fd39c30dfd4162bb7c4cfc6e",
     "bundleRootSha256": "9ef3729d0faec7b02d867cedb3ab30d110b845b1c0133738c588bba0e0c16be6",
     "preservedNvsSha256": "a7a87f72416be20388298cb70cfff306ec78e77f0e8b09231d16113f3d82404e",
 }
+ACTIVE_LAB_FIRMWARE_SHA = "aef1034f859b35efc93215106eb3be89f10f6c66"
 EXPECTED_PROTECTED = {
     "path": "/Users/manhhodinh/Documents/TBOT/robot/esp32-server/main/tbot-server/tests/test_lesson_voice_output_discipline.py",
     "sha256": "08f77b5452301224b17b4b333d2d032fff40c06aa2eaea97fa90932dae7d97e3",
@@ -54,7 +55,8 @@ REQUIRED_INPUT_FIELDS = {
     "websocketUrl": str,
     "endpointAuthority": str,
     "syntheticIds": dict,
-    "candidate": dict,
+    "productionCandidateTarget": dict,
+    "activeLabApp": dict,
     "protectedTest": dict,
     "outputDirectory": str,
     "sessionStartedAt": str,
@@ -162,8 +164,20 @@ def validate_input(document: object, *, repository_root: Path) -> list[str]:
         reasons.append("input.endpointAuthority")
     if document["syntheticIds"] != EXPECTED_IDS:
         reasons.append("input.syntheticIds")
-    if document["candidate"] != EXPECTED_CANDIDATE:
-        reasons.append("input.candidate")
+    if document["productionCandidateTarget"] != EXPECTED_PRODUCTION_CANDIDATE_TARGET:
+        reasons.append("input.productionCandidateTarget")
+    active_lab_app = document["activeLabApp"]
+    if not isinstance(active_lab_app, dict) or set(active_lab_app) != {
+        "firmwareSha", "applicationSha256", "bundleRootSha256"
+    }:
+        reasons.append("input.activeLabApp")
+    else:
+        if active_lab_app.get("firmwareSha") != ACTIVE_LAB_FIRMWARE_SHA:
+            reasons.append("input.activeLabApp.firmwareSha")
+        for field in ("applicationSha256", "bundleRootSha256"):
+            value = active_lab_app.get(field)
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+                reasons.append(f"input.activeLabApp.{field}")
     if document["protectedTest"] != EXPECTED_PROTECTED:
         reasons.append("input.protectedTest")
     protected_path = Path(EXPECTED_PROTECTED["path"])
@@ -395,7 +409,8 @@ def main(argv: list[str] | None = None) -> int:
     payload = {
         "backendImage": expected["backendImage"],
         "backendSha": expected["backendSha"],
-        "candidate": expected["candidate"],
+        "productionCandidateTarget": expected["productionCandidateTarget"],
+        "activeLabApp": expected["activeLabApp"],
         "composeProject": COMPOSE_PROJECT,
         "deviceSuffix": "AC:20",
         "endpointAuthority": expected["endpointAuthority"],

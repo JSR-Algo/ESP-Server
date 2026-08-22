@@ -14,12 +14,13 @@ from course_mode_physical_tft_preflight import validate_local_lab_endpoints
 from course_mode_physical_tft_receipt_verify import validate_receipt, validate_receipt_pair
 
 
-EXPECTED_CANDIDATE = {
+EXPECTED_PRODUCTION_CANDIDATE_TARGET = {
     "firmwareSha": "3d4a1e2a32359278124c61e56fd459fac618506e",
     "applicationSha256": "84c999ece0c90eb6e69a410e335c7791f330e9c0fd39c30dfd4162bb7c4cfc6e",
     "bundleRootSha256": "9ef3729d0faec7b02d867cedb3ab30d110b845b1c0133738c588bba0e0c16be6",
     "preservedNvsSha256": "a7a87f72416be20388298cb70cfff306ec78e77f0e8b09231d16113f3d82404e",
 }
+ACTIVE_LAB_FIRMWARE_SHA = "aef1034f859b35efc93215106eb3be89f10f6c66"
 EXPECTED_PROTECTED = {
     "path": "/Users/manhhodinh/Documents/TBOT/robot/esp32-server/main/tbot-server/tests/test_lesson_voice_output_discipline.py",
     "sha256": "08f77b5452301224b17b4b333d2d032fff40c06aa2eaea97fa90932dae7d97e3",
@@ -77,7 +78,8 @@ FORBIDDEN_ARTIFACT = re.compile(
 )
 EXPECTED_FIELDS = {
     "schemaVersion", "gate", "declaredTftVerdict", "task07Verdict",
-    "candidate", "backend", "protectedTest", "identity", "endpoints", "bindings",
+    "productionCandidateTarget", "activeLabApp", "backend", "protectedTest",
+    "identity", "endpoints", "bindings",
     "operators", "artifacts", "runtimeMarkers", "cues", "finalRest",
     "stopConditions", "stopPhase", "unavailableEvidence", "stopOutcome",
     "privacyOutcome", "physicalActions",
@@ -112,8 +114,27 @@ def _base_reasons(document: dict[str, object]) -> list[str]:
         reasons.append("schema.identity")
     if document.get("task07Verdict") != "PHYSICAL_BLOCKED":
         reasons.append("task07Verdict")
-    if document.get("candidate") != EXPECTED_CANDIDATE:
-        reasons.append("candidate")
+    if document.get("productionCandidateTarget") != EXPECTED_PRODUCTION_CANDIDATE_TARGET:
+        reasons.append("productionCandidateTarget")
+    active_lab_app = document.get("activeLabApp")
+    if not isinstance(active_lab_app, dict) or set(active_lab_app) != {
+        "firmwareSha", "applicationSha256", "bundleRootSha256"
+    }:
+        reasons.append("activeLabApp")
+    else:
+        if active_lab_app.get("firmwareSha") != ACTIVE_LAB_FIRMWARE_SHA:
+            reasons.append("activeLabApp.firmwareSha")
+        allow_unqualified = (
+            document.get("declaredTftVerdict") == "TFT_BLOCKED"
+            or document.get("stopPhase") == "PRE_PREFLIGHT"
+        )
+        hashes = [active_lab_app.get(field) for field in ("applicationSha256", "bundleRootSha256")]
+        if allow_unqualified and hashes == [None, None]:
+            pass
+        else:
+            for field, value in zip(("applicationSha256", "bundleRootSha256"), hashes):
+                if not isinstance(value, str) or not LOWER_SHA256.fullmatch(value):
+                    reasons.append(f"activeLabApp.{field}")
     backend = document.get("backend")
     if not isinstance(backend, dict) or set(backend) != {"sha", "image", "imageId"}:
         reasons.append("backend")
@@ -281,7 +302,8 @@ def _validate_bound_documents(
         backend = document.get("backend")
         expected_fields = {
             "valid", "result", "backendSha", "backendImage", "imageId",
-            "composeProject", "candidate", "deviceSuffix", "syntheticIds",
+            "composeProject", "productionCandidateTarget", "activeLabApp",
+            "deviceSuffix", "syntheticIds",
             "endpoints", "endpointAuthority", "sessionStartedAt", "secrets",
         }
         expected_preflight = (
@@ -294,7 +316,8 @@ def _validate_bound_documents(
             and preflight.get("backendImage") == backend.get("image")
             and preflight.get("imageId") == backend.get("imageId")
             and preflight.get("composeProject") == "tbot-course-mode-physical-tft"
-            and preflight.get("candidate") == document.get("candidate")
+            and preflight.get("productionCandidateTarget") == document.get("productionCandidateTarget")
+            and preflight.get("activeLabApp") == document.get("activeLabApp")
             and preflight.get("deviceSuffix") == document.get("identity", {}).get("deviceSuffix")
             and preflight.get("syntheticIds") == document.get("identity", {}).get("syntheticIds")
             and preflight.get("endpoints") == document.get("endpoints")

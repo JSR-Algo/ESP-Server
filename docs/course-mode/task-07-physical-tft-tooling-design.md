@@ -106,8 +106,10 @@ The operator supplies only non-secret expected values:
 - approved robot-reachable asset origin ending `/`;
 - expected OTA/WS URLs, both explicitly classified as local-lab endpoints;
 - synthetic UUIDs for course, lesson, device, assignment, and adult operator;
-- candidate firmware SHA, application SHA-256, candidate bundle-root SHA-256,
-  preserved NVS SHA-256, and device suffix `AC:20`;
+- immutable production-candidate target firmware SHA, application SHA-256,
+  bundle-root SHA-256, and preserved NVS SHA-256;
+- active temporary local-lab app source SHA, application SHA-256, and bundle-root
+  SHA-256, separately from the production target, plus device suffix `AC:20`;
 - protected test path and SHA-256
   `08f77b5452301224b17b4b333d2d032fff40c06aa2eaea97fa90932dae7d97e3`;
 - output directory and UTC session identifier.
@@ -146,8 +148,8 @@ For a complete attended lane, the manifest binds:
 - operator and independent observer names, adult-only assertion, sole-lease
   assertion, clear-motion-envelope assertion, immediate-power-isolation
   assertion, and UTC start/end times;
-- the exact candidate, protected hash, local endpoint identities, synthetic
-  assignment UUIDs, renderer identity, and manifest checksum;
+- both exact firmware identities, protected hash, local endpoint identities,
+  synthetic assignment UUIDs, renderer identity, and manifest checksum;
 - capture artifact relative paths, byte counts, SHA-256s, and redaction status;
 - ordered runtime markers for authenticated AC:20 WebSocket, app-ready,
   `lesson_prepare`, `lesson_start`, eight cue transitions/ACKs, completion, stop,
@@ -189,11 +191,20 @@ a nonempty stop condition, and explicit `safeState` and `powerIsolation`
 outcomes. It does not misrepresent unobserved cues or require final-rest PASS
 assertions after a stop.
 
+The two firmware identities cannot be conflated. `productionCandidateTarget`
+remains the immutable reviewed production target. `activeLabApp` records the
+temporary app actually active for the local lab run. Its source must be exact
+firmware main `aef1034f859b35efc93215106eb3be89f10f6c66`; its application and
+bundle-root SHA-256 values are supplied as exact immutable preflight inputs and
+validated for lowercase SHA-256 shape, rather than hard-coded while qualification
+is still in progress. BLOCKED/pre-preflight evidence may leave only those two
+not-yet-qualified hashes null. PASS and every phase after preflight require them.
+
 Hash bindings are necessary but not sufficient. Every phase-available preflight
 and receipt artifact is parsed as JSON. Preflight must report `valid=true`,
-`result=PASS`, and the exact backend SHA/image/image ID, candidate, synthetic
-identity, endpoint set, Compose project, and redacted secret-presence markers
-recorded by the ledger. Receipt documents are validated through the shared
+`result=PASS`, and the exact backend SHA/image/image ID, both firmware
+identities, synthetic identity, endpoint set, Compose project, and redacted
+secret-presence markers recorded by the ledger. Receipt documents use the shared
 materializer receipt verifier and the first/rerun receipts must be semantically
 equal after parsing. Arbitrary bytes with self-consistent hashes fail closed.
 

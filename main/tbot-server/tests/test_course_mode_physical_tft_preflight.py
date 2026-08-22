@@ -26,11 +26,16 @@ EXPECTED_IDS = {
     "assignmentId": "70000000-0000-4000-8000-000000000006",
     "adultOperatorId": "70000000-0000-4000-8000-000000000007",
 }
-CANDIDATE = {
+PRODUCTION_CANDIDATE_TARGET = {
     "firmwareSha": "3d4a1e2a32359278124c61e56fd459fac618506e",
     "applicationSha256": "84c999ece0c90eb6e69a410e335c7791f330e9c0fd39c30dfd4162bb7c4cfc6e",
     "bundleRootSha256": "9ef3729d0faec7b02d867cedb3ab30d110b845b1c0133738c588bba0e0c16be6",
     "preservedNvsSha256": "a7a87f72416be20388298cb70cfff306ec78e77f0e8b09231d16113f3d82404e",
+}
+ACTIVE_LAB_APP = {
+    "firmwareSha": "aef1034f859b35efc93215106eb3be89f10f6c66",
+    "applicationSha256": "c" * 64,
+    "bundleRootSha256": "d" * 64,
 }
 
 
@@ -48,7 +53,8 @@ def valid_input(backend: Path, output_directory: Path):
         "websocketUrl": "ws://192.168.100.183:8003/ws",
         "endpointAuthority": "approved-local-task07-lab-route",
         "syntheticIds": deepcopy(EXPECTED_IDS),
-        "candidate": deepcopy(CANDIDATE),
+        "productionCandidateTarget": deepcopy(PRODUCTION_CANDIDATE_TARGET),
+        "activeLabApp": deepcopy(ACTIVE_LAB_APP),
         "protectedTest": {
             "path": str(
                 Path("/Users/manhhodinh/Documents/TBOT/robot/esp32-server")
@@ -197,6 +203,8 @@ def test_valid_preflight_runs_only_five_read_only_commands_and_redacts(tmp_path,
         "TBOT_DEVICE_MINT_SECRET": "present-redacted",
     }
     assert "private-secret-value" not in json.dumps(payload)
+    assert payload["productionCandidateTarget"] == PRODUCTION_CANDIDATE_TARGET
+    assert payload["activeLabApp"] == ACTIVE_LAB_APP
     calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
     assert calls == [
         ["-C", str(backend), "rev-parse", "--show-toplevel"],
@@ -230,7 +238,10 @@ def test_input_contract_rejects_missing_extra_override_and_identity_drift(tmp_pa
         (lambda d: d.update(otaUrl="http://127.0.0.1:8003/ota"), "input.otaUrl"),
         (lambda d: d.update(websocketUrl="ws://192.168.100.184:8003/ws"), "input.localLabRoute"),
         (lambda d: d["syntheticIds"].update(courseId="not-approved"), "input.syntheticIds"),
-        (lambda d: d["candidate"].update(applicationSha256="b" * 64), "input.candidate"),
+        (lambda d: d["productionCandidateTarget"].update(applicationSha256="b" * 64), "input.productionCandidateTarget"),
+        (lambda d: d["activeLabApp"].update(firmwareSha="f" * 40), "input.activeLabApp.firmwareSha"),
+        (lambda d: d["activeLabApp"].update(applicationSha256="short"), "input.activeLabApp.applicationSha256"),
+        (lambda d: d["activeLabApp"].update(bundleRootSha256="A" * 64), "input.activeLabApp.bundleRootSha256"),
         (lambda d: d["protectedTest"].update(sha256="b" * 64), "input.protectedTest"),
         (lambda d: d.update(outputDirectory=str(tmp_path)), "input.outputDirectory"),
     ]
@@ -325,3 +336,16 @@ def test_malformed_input_never_executes_commands(tmp_path, artifact_directory):
     assert result.returncode == 1
     assert json.loads(result.stdout)["reasons"] == ["input.invalid_json"]
     assert "private-secret" not in result.stdout
+
+
+def test_active_lab_artifact_hashes_are_supplied_immutable_values_not_hard_coded(tmp_path, artifact_directory):
+    sys.path.insert(0, str(SERVER / "scripts"))
+    from course_mode_physical_tft_preflight import validate_input
+
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    document = valid_input(backend, artifact_directory)
+    document["activeLabApp"]["applicationSha256"] = "e" * 64
+    document["activeLabApp"]["bundleRootSha256"] = "f" * 64
+
+    assert validate_input(document, repository_root=ROOT) == []

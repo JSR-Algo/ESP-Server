@@ -66,9 +66,14 @@ Create `preflight-input.json` with the exact schema in
 Use the reviewed clean backend root/SHA and its exact SHA-tagged image, the
 fixed Compose project and loopback endpoints, the approved concrete local-lab
 asset/OTA/WebSocket routes, the five specified synthetic UUIDs, the pinned
-candidate hashes, the canonical protected path/hash above, the concrete session
-directory, and a UTC session start. Do not infer a lab IP from current network
-state and do not add command, environment, or credential fields.
+immutable `productionCandidateTarget`, the separate `activeLabApp`, the
+canonical protected path/hash above, the concrete session directory, and a UTC
+session start. The active lab source must be
+`aef1034f859b35efc93215106eb3be89f10f6c66`; supply the exact qualified
+application and bundle-root SHA-256 values at point of use. Do not copy
+preliminary hashes into tooling or substitute the production target identity.
+Do not infer a lab IP from current network state and do not add command,
+environment, or credential fields.
 
 From `main/tbot-server`:
 

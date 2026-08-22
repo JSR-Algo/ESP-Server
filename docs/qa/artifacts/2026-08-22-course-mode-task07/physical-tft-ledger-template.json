@@ -3,11 +3,16 @@
   "gate": "course-mode-v2-task07-physical-tft",
   "declaredTftVerdict": "TFT_BLOCKED",
   "task07Verdict": "PHYSICAL_BLOCKED",
-  "candidate": {
+  "productionCandidateTarget": {
     "firmwareSha": "3d4a1e2a32359278124c61e56fd459fac618506e",
     "applicationSha256": "84c999ece0c90eb6e69a410e335c7791f330e9c0fd39c30dfd4162bb7c4cfc6e",
     "bundleRootSha256": "9ef3729d0faec7b02d867cedb3ab30d110b845b1c0133738c588bba0e0c16be6",
     "preservedNvsSha256": "a7a87f72416be20388298cb70cfff306ec78e77f0e8b09231d16113f3d82404e"
+  },
+  "activeLabApp": {
+    "firmwareSha": "aef1034f859b35efc93215106eb3be89f10f6c66",
+    "applicationSha256": null,
+    "bundleRootSha256": null
   },
   "backend": {
     "sha": null,

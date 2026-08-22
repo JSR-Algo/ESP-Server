@@ -25,11 +25,16 @@ CHECKS = [
     "listeningIndicator", "crop", "overlap", "zOrder", "focusAnchor",
     "flicker", "corruption", "reducedMotion",
 ]
-CANDIDATE = {
+PRODUCTION_CANDIDATE_TARGET = {
     "firmwareSha": "3d4a1e2a32359278124c61e56fd459fac618506e",
     "applicationSha256": "84c999ece0c90eb6e69a410e335c7791f330e9c0fd39c30dfd4162bb7c4cfc6e",
     "bundleRootSha256": "9ef3729d0faec7b02d867cedb3ab30d110b845b1c0133738c588bba0e0c16be6",
     "preservedNvsSha256": "a7a87f72416be20388298cb70cfff306ec78e77f0e8b09231d16113f3d82404e",
+}
+ACTIVE_LAB_APP = {
+    "firmwareSha": "aef1034f859b35efc93215106eb3be89f10f6c66",
+    "applicationSha256": "c" * 64,
+    "bundleRootSha256": "d" * 64,
 }
 IDS = {
     "courseId": "70000000-0000-4000-8000-000000000003",
@@ -96,7 +101,8 @@ def complete_ledger(repository_root: Path):
         "backendImage": BACKEND_IMAGE,
         "imageId": BACKEND_IMAGE_ID,
         "composeProject": "tbot-course-mode-physical-tft",
-        "candidate": deepcopy(CANDIDATE),
+        "productionCandidateTarget": deepcopy(PRODUCTION_CANDIDATE_TARGET),
+        "activeLabApp": deepcopy(ACTIVE_LAB_APP),
         "deviceSuffix": "AC:20",
         "syntheticIds": deepcopy(IDS),
         "endpoints": deepcopy(endpoints),
@@ -137,7 +143,8 @@ def complete_ledger(repository_root: Path):
         "gate": "course-mode-v2-task07-physical-tft",
         "declaredTftVerdict": "TFT_PASS",
         "task07Verdict": "PHYSICAL_BLOCKED",
-        "candidate": deepcopy(CANDIDATE),
+        "productionCandidateTarget": deepcopy(PRODUCTION_CANDIDATE_TARGET),
+        "activeLabApp": deepcopy(ACTIVE_LAB_APP),
         "backend": {
             "sha": BACKEND_SHA,
             "image": BACKEND_IMAGE,
@@ -238,6 +245,41 @@ def test_complete_attended_fixture_is_tft_pass_but_task07_stays_blocked(tmp_path
     assert result["tftVerdict"] == "TFT_PASS"
     assert result["task07Verdict"] == "PHYSICAL_BLOCKED"
     assert result["reasons"] == []
+
+
+def test_ledger_rejects_conflated_or_mismatched_firmware_identities(tmp_path):
+    from course_mode_physical_tft_ledger_validate import validate_ledger
+
+    active_mismatch = complete_ledger(tmp_path / "active")
+    active_mismatch["activeLabApp"]["applicationSha256"] = "e" * 64
+    result = validate_ledger(active_mismatch, repository_root=tmp_path / "active")
+    assert "bindings.preflight.semantic" in result["reasons"]
+
+    target_mismatch = complete_ledger(tmp_path / "target")
+    target_mismatch["productionCandidateTarget"]["firmwareSha"] = ACTIVE_LAB_APP["firmwareSha"]
+    result = validate_ledger(target_mismatch, repository_root=tmp_path / "target")
+    assert "productionCandidateTarget" in result["reasons"]
+
+
+def test_ledger_accepts_new_supplied_active_lab_hashes_when_preflight_matches(tmp_path):
+    from course_mode_physical_tft_ledger_validate import validate_ledger
+
+    document = complete_ledger(tmp_path)
+    active = deepcopy(ACTIVE_LAB_APP)
+    active["applicationSha256"] = "e" * 64
+    active["bundleRootSha256"] = "f" * 64
+    document["activeLabApp"] = active
+    artifact = document["artifacts"][0]
+    path = tmp_path / artifact["path"]
+    preflight = json.loads(path.read_text(encoding="utf-8"))
+    preflight["activeLabApp"] = active
+    content = (json.dumps(preflight, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    path.write_bytes(content)
+    artifact["bytes"] = len(content)
+    artifact["sha256"] = hashlib.sha256(content).hexdigest()
+    document["bindings"]["preflightSha256"] = artifact["sha256"]
+
+    assert validate_ledger(document, repository_root=tmp_path)["valid"] is True
 
 
 def test_pass_rejects_hash_valid_but_semantically_arbitrary_preflight_and_receipts(tmp_path):

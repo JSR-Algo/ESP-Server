@@ -178,7 +178,8 @@ REQUIRED_INPUT_FIELDS = {
     "websocketUrl": str,               # approved local-lab ws:// URL
     "endpointAuthority": str,          # approved-local-task07-lab-route
     "syntheticIds": dict,              # exactly EXPECTED_IDS
-    "candidate": dict,                 # exact hashes from the design
+    "productionCandidateTarget": dict, # immutable reviewed production target
+    "activeLabApp": dict,              # exact supplied temporary lab identity
     "protectedTest": dict,             # exact path/hash from the design
     "outputDirectory": str,            # concrete timestamped task-artifact path
     "sessionStartedAt": str,           # ISO-8601 UTC
@@ -186,9 +187,12 @@ REQUIRED_INPUT_FIELDS = {
 ```
 
 Require the caller to provide the concrete approved lab IP/URLs; never infer
-them from current networking. `candidate` must equal the four candidate values
-in the design, and `protectedTest` must equal the protected path/hash in the
-design. The implementation validates the fixed argv, hashes the protected file
+them from current networking. `productionCandidateTarget` must equal the four
+reviewed target values in the design. `activeLabApp` must bind exact firmware
+main `aef1034f859b35efc93215106eb3be89f10f6c66` and caller-supplied lowercase
+application/bundle SHA-256 values; preliminary artifact hashes must not be
+hard-coded. `protectedTest` must equal the protected path/hash in the design.
+The implementation validates the fixed argv, hashes the protected file
 directly, captures Compose JSON only in memory, sets fixed sentinel values for
 required secret-shaped Compose variables rather than reading them from the
 environment, redacts secret-bearing keys, and atomically writes one JSON result.
@@ -250,7 +254,9 @@ Expected: FAIL because the ledger validator and template do not exist.
 - [ ] **Step 3: Add the redacted ledger template**
 
 The committed template must use `TFT_BLOCKED`, empty artifact/cue evidence,
-candidate and synthetic identities from the design, all physical-action fields
+the production-target identity, the active lab source with null unqualified
+application/bundle hashes, and synthetic identities from the design, all
+physical-action fields
 `NOT_PERFORMED`, and outstanding blockers for attended capture, direct visual
 evidence, calibrated instruments, approved limits, E-stop/TP_EN, rollback,
 recovery, and the remaining Task 07 lanes. It must contain no full MAC, secrets,
