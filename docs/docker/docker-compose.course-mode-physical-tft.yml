@@ -2,6 +2,7 @@ name: tbot-course-mode-physical-tft
 
 services:
   backend:
+    image: ${TBOT_LESSON_STUDIO_BACKEND_IMAGE:?run docs/docker/course-mode-physical-tft/up.sh}
     ports: !override
       - "127.0.0.1:3000:3000"
     environment:
@@ -14,14 +15,13 @@ services:
       FLATTENED_CINEMATIC_PUBLIC_BASE_URL: ${COURSE_MODE_ASSET_ORIGIN_BASE:?export the robot-reachable local asset origin ending in /}
 
   course-mode-materialize:
-    image: ${TBOT_LESSON_STUDIO_BACKEND_IMAGE:-local/tbot-backend:lesson-studio-e2e}
+    image: ${TBOT_LESSON_STUDIO_BACKEND_IMAGE:?run docs/docker/course-mode-physical-tft/up.sh}
     depends_on:
       backend:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql://tbot:tbot@postgres:5432/tbot
       COURSE_MODE_LOCAL_COMPOSE_ENABLED: "true"
-      COURSE_MODE_V2_PUBLISH_ENABLED: "true"
       COURSE_MODE_DEVICE_MAC: "14:c1:9f:d1:ac:20"
       COURSE_MODE_FIXTURE_ROOT: /course-mode-fixtures
       COURSE_MODE_LOCAL_PHYSICAL_TFT_ENABLED: "true"

@@ -29,6 +29,17 @@ ESP container already uses `http://host.docker.internal:3000` as its backend.
 The backend must use a local-only mint secret shared with the ESP container and
 must never reuse production credentials.
 
+The physical-TFT stack must be entered through
+`docs/docker/course-mode-physical-tft/up.sh`. The operator supplies the exact
+backend worktree root and its reviewed full Git SHA. The script verifies that
+binding and a clean tree, runs the backend compile, unconditionally builds a
+SHA-tagged Docker image from that worktree, and checks the compiled Course Mode materializer
+inside the resulting runtime image before Compose is rendered or started. The
+overlay has no fallback backend image tag, so a stale pre-existing default image
+cannot be selected silently. Mutable backend source is not mounted into either
+runtime service; only canonical Course Mode fixture and web asset directories
+remain read-only mounts.
+
 Seed one synthetic adult operator identity, one synthetic course, the exact
 pilot lesson version, and one assignment for AC:20. The seed must import the
 canonical checked-in fixture and pilot asset metadata rather than reconstructing
@@ -45,18 +56,20 @@ traffic interception, and NVS binary patching are forbidden.
 
 ## Data flow
 
-1. Start the isolated backend and verify `/v1/health` on host port 3000.
-2. Seed and read back the synthetic identity, exact pilot, version, manifest
+1. Run the exact-worktree image preflight and verify the SHA-tagged runtime
+   contains the compiled local materializer.
+2. Start the isolated backend and verify `/v1/health` on host port 3000.
+3. Seed and read back the synthetic identity, exact pilot, version, manifest
    checksum, renderer version, and AC:20 assignment.
-3. Verify local ESP OTA advertises
+4. Verify local ESP OTA advertises
    `ws://192.168.100.183:8000/tbot/v1/` and the backend advertises no production
    URL or credential.
-4. Establish authenticated AC:20 WebSocket and app-ready evidence.
-5. Start the lesson through the normal assignment-backed runtime path using an
+5. Establish authenticated AC:20 WebSocket and app-ready evidence.
+6. Start the lesson through the normal assignment-backed runtime path using an
    adult operator trigger or the scoped internal lesson nudge.
-6. Capture every pilot cue, renderer ACK, step transition, completion, stop,
+7. Capture every pilot cue, renderer ACK, step transition, completion, stop,
    and quiescent-rest state with timestamps and redacted logs.
-7. Stop the isolated backend after evidence capture. Retain its volumes until
+8. Stop the isolated backend after evidence capture. Retain its volumes until
    the report validates, then remove only the task-owned containers and volumes.
 
 ## TFT acceptance evidence

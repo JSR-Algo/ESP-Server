@@ -247,23 +247,46 @@ git commit -m "feat(task07): gate physical TFT capture preflight"
 
 Record ESP, backend, firmware SHAs; candidate bundle root; application SHA; NVS SHA; protected SHA; device suffix; operator; observer; local IP; UTC start time.
 
-- [ ] **Step 2: Start only the task-owned local backend**
+- [ ] **Step 2: Build and verify the exact backend runtime image**
 
-Run Compose with a new project name and fresh named volumes, local-only mint secret, backend host port 3000, and existing backend image. Do not stop or recreate unrelated containers.
+Export the reviewed task-owned backend worktree and its full Git SHA, then run
+the task-owned entrypoint. It compiles that exact tree, unconditionally builds a
+SHA-tagged runtime image, verifies
+`/app/dist/lessons/course-mode/course-mode-local-materializer.js` inside the
+image, and validates Compose before starting anything:
 
-- [ ] **Step 3: Materialize and verify**
+```bash
+export TBOT_BACKEND_WORKTREE=/absolute/path/to/reviewed/backend-worktree
+export TBOT_BACKEND_GIT_SHA="$(git -C "$TBOT_BACKEND_WORKTREE" rev-parse HEAD)"
+docs/docker/course-mode-physical-tft/up.sh --config-only
+```
+
+Expected: PASS with the reviewed SHA in the image tag. Any dirty tree,
+worktree/SHA mismatch, compile failure, image-build failure, missing in-image
+materializer, or Compose error stops the flow. The overlay must not accept a
+fallback backend image and must not mount mutable backend source into a runtime
+container.
+
+- [ ] **Step 3: Start only the task-owned local backend**
+
+After the config-only evidence is reviewed, run the same script without an
+argument. It repeats the exact-tree build and verification before Compose starts
+the task-owned project with fresh named volumes, local-only mint secret, and
+backend host port 3000. Do not stop or recreate unrelated containers.
+
+- [ ] **Step 4: Materialize and verify**
 
 Let Compose run `course-mode-materialize` once and capture its redacted success receipt. Rerun only that same one-shot service with `docker compose -f docs/docker/docker-compose.lesson-studio-e2e.yml -f docs/docker/docker-compose.course-mode-physical-tft.yml run --rm --no-deps course-mode-materialize` to prove idempotency, then run the receipt verifier. Expected: both official invocations pass their transaction/readback gate, exactly one active AC:20 assignment exists, and exact pilot/renderer/cue/asset identities are reported. Stop immediately on any non-local database/asset origin or production reference.
 
-- [ ] **Step 4: Run preflight**
+- [ ] **Step 5: Run preflight**
 
 Run the Python preflight with David/operator/safety assertions and timestamped output directory. Expected: PASS before any lesson trigger.
 
-- [ ] **Step 5: Establish robot local connectivity**
+- [ ] **Step 6: Establish robot local connectivity**
 
 Use only a reviewed provisioning route. If the candidate cannot be directed to the local OTA/WS endpoint without NVS patching, stop and record `LOCAL_ENDPOINT_UNAVAILABLE`; do not claim TFT evidence.
 
-- [ ] **Step 6: Verify runtime metrics**
+- [ ] **Step 7: Verify runtime metrics**
 
 Require AC:20 authenticated connection, renderer-v4 capability, app-ready, zero privacy markers, and no unexpected motion before triggering.
 

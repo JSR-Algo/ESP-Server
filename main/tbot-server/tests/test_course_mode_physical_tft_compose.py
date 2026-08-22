@@ -9,6 +9,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[3]
 BASE_COMPOSE = ROOT / "docs/docker/docker-compose.lesson-studio-e2e.yml"
 OVERLAY_COMPOSE = ROOT / "docs/docker/docker-compose.course-mode-physical-tft.yml"
+PHYSICAL_TFT_UP = ROOT / "docs/docker/course-mode-physical-tft/up.sh"
 
 
 class ComposeLoader(yaml.SafeLoader):
@@ -35,8 +36,12 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
     ] == "${TBOT_DEVICE_MINT_SECRET:?export the shared local device mint secret}"
     materialize = overlay["services"]["course-mode-materialize"]
     assert materialize["environment"]["COURSE_MODE_LOCAL_COMPOSE_ENABLED"] == "true"
-    assert materialize["environment"]["COURSE_MODE_V2_PUBLISH_ENABLED"] == "true"
+    assert "COURSE_MODE_V2_PUBLISH_ENABLED" not in materialize["environment"]
     assert materialize["environment"]["COURSE_MODE_DEVICE_MAC"] == "14:c1:9f:d1:ac:20"
+    assert overlay["services"]["backend"]["image"] == (
+        "${TBOT_LESSON_STUDIO_BACKEND_IMAGE:?run docs/docker/course-mode-physical-tft/up.sh}"
+    )
+    assert materialize["image"] == overlay["services"]["backend"]["image"]
     assert all("seed" not in str(value).lower() for value in materialize.values())
     assert all(".sql" not in str(value).lower() for value in materialize.values())
 
@@ -55,6 +60,9 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
             "ROBOT_ESP_BASE_URL": "http://host.docker.internal:8080",
             "COURSE_MODE_ASSET_ORIGIN_BASE": "http://192.168.100.183:8102/",
             "TBOT_BACKEND_WORKTREE": "/tmp/task-owned-backend",
+            "TBOT_LESSON_STUDIO_BACKEND_IMAGE": (
+                "local/tbot-backend:course-mode-physical-tft-0123456789abcdef"
+            ),
         }
     )
     result = subprocess.run(
@@ -120,6 +128,8 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
         "FLATTENED_CINEMATIC_PUBLIC_BASE_URL": "http://192.168.100.183:8102/",
     }
     assert materialize["depends_on"]["backend"]["condition"] == "service_healthy"
+    assert backend["image"] == "local/tbot-backend:course-mode-physical-tft-0123456789abcdef"
+    assert materialize["image"] == backend["image"]
     assert materialize["command"] == [
         "dist/lessons/course-mode/course-mode-local-materializer.js",
         "materialize",
@@ -144,3 +154,187 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
     assert "https://" not in lowered
     assert "seed-course-mode" not in lowered
     assert ".sql" not in lowered
+
+
+def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path):
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    (backend / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    materializer = backend / "src/lessons/course-mode/course-mode-local-materializer.ts"
+    materializer.parent.mkdir(parents=True)
+    materializer.write_text("export {};\n", encoding="utf-8")
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "commands.log"
+    sha = "0123456789abcdef0123456789abcdef01234567"
+
+    (fake_bin / "git").write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"if [[ \"$*\" == *\"rev-parse --show-toplevel\"* ]]; then echo {backend}; exit 0; fi\n"
+        f"if [[ \"$*\" == *\"rev-parse HEAD\"* ]]; then echo {sha}; exit 0; fi\n"
+        "if [[ \"$*\" == *\"status --porcelain\"* ]]; then exit 0; fi\n"
+        "exit 2\n",
+        encoding="utf-8",
+    )
+    (fake_bin / "pnpm").write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"printf 'pnpm cwd=%s args=%s\\n' \"$PWD\" \"$*\" >> {log}\n",
+        encoding="utf-8",
+    )
+    (fake_bin / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"printf 'docker %s\\n' \"$*\" >> {log}\n",
+        encoding="utf-8",
+    )
+    for command in ("git", "pnpm", "docker"):
+        (fake_bin / command).chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "TBOT_BACKEND_WORKTREE": str(backend),
+            "TBOT_BACKEND_GIT_SHA": sha,
+            "JWT_PUBLIC_KEY": "dummy-local-public-key",
+            "TBOT_DEVICE_MINT_SECRET": "dummy-local-mint-secret",
+            "LESSON_ASSET_ORIGIN_BASE": "http://127.0.0.1:8102/tvideo-demo",
+            "ROBOT_ESP_BASE_URL": "http://host.docker.internal:8080",
+            "COURSE_MODE_ASSET_ORIGIN_BASE": "http://192.168.100.183:8102/",
+        }
+    )
+    subprocess.run(
+        [str(PHYSICAL_TFT_UP), "--config-only"],
+        check=True,
+        cwd=ROOT,
+        env=env,
+        text=True,
+    )
+
+    calls = log.read_text(encoding="utf-8").splitlines()
+    expected_image = f"local/tbot-backend:course-mode-physical-tft-{sha}"
+    assert calls[0] == f"pnpm cwd={backend} args=build"
+    assert calls[1] == (
+        f"docker build --pull=false -f {backend}/Dockerfile -t {expected_image} {backend}"
+    )
+    assert calls[2] == (
+        "docker run --rm --entrypoint /nodejs/bin/node "
+        f"{expected_image} -e require('node:fs').accessSync('/app/dist/lessons/"
+        "course-mode/course-mode-local-materializer.js')"
+    )
+    assert " compose " in f" {calls[3]} "
+    assert calls[3].endswith("config --quiet")
+    assert all(" up " not in f" {call} " for call in calls)
+
+    log.unlink()
+    subprocess.run(
+        [str(PHYSICAL_TFT_UP)],
+        check=True,
+        cwd=ROOT,
+        env=env,
+        text=True,
+    )
+    start_calls = log.read_text(encoding="utf-8").splitlines()
+    assert start_calls[-2].endswith("config --quiet")
+    assert start_calls[-1].endswith("up -d")
+
+
+def test_physical_tft_up_rejects_backend_sha_mismatch_before_build(tmp_path):
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "commands.log"
+    actual_sha = "0123456789abcdef0123456789abcdef01234567"
+
+    (fake_bin / "git").write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"if [[ \"$*\" == *\"rev-parse --show-toplevel\"* ]]; then echo {backend}; exit 0; fi\n"
+        f"if [[ \"$*\" == *\"rev-parse HEAD\"* ]]; then echo {actual_sha}; exit 0; fi\n"
+        "if [[ \"$*\" == *\"status --porcelain\"* ]]; then exit 0; fi\n"
+        "exit 2\n",
+        encoding="utf-8",
+    )
+    for command in ("pnpm", "docker"):
+        (fake_bin / command).write_text(
+            "#!/usr/bin/env bash\n"
+            f"printf '%s\\n' {command} >> {log}\n",
+            encoding="utf-8",
+        )
+    for command in ("git", "pnpm", "docker"):
+        (fake_bin / command).chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "TBOT_BACKEND_WORKTREE": str(backend),
+            "TBOT_BACKEND_GIT_SHA": "ffffffffffffffffffffffffffffffffffffffff",
+        }
+    )
+    result = subprocess.run(
+        [str(PHYSICAL_TFT_UP), "--config-only"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "does not match TBOT_BACKEND_GIT_SHA" in result.stderr
+    assert not log.exists()
+
+
+def test_physical_tft_up_rejects_dirty_backend_before_build(tmp_path):
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    (backend / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    materializer = backend / "src/lessons/course-mode/course-mode-local-materializer.ts"
+    materializer.parent.mkdir(parents=True)
+    materializer.write_text("export {};\n", encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "commands.log"
+    sha = "0123456789abcdef0123456789abcdef01234567"
+
+    (fake_bin / "git").write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"if [[ \"$*\" == *\"rev-parse --show-toplevel\"* ]]; then echo {backend}; exit 0; fi\n"
+        f"if [[ \"$*\" == *\"rev-parse HEAD\"* ]]; then echo {sha}; exit 0; fi\n"
+        "if [[ \"$*\" == *\"status --porcelain\"* ]]; then echo ' M src/lessons/course-mode/course-mode-local-materializer.ts'; exit 0; fi\n"
+        "exit 2\n",
+        encoding="utf-8",
+    )
+    for command in ("pnpm", "docker"):
+        (fake_bin / command).write_text(
+            "#!/usr/bin/env bash\n"
+            f"printf '%s\\n' {command} >> {log}\n",
+            encoding="utf-8",
+        )
+    for command in ("git", "pnpm", "docker"):
+        (fake_bin / command).chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "TBOT_BACKEND_WORKTREE": str(backend),
+            "TBOT_BACKEND_GIT_SHA": sha,
+        }
+    )
+    result = subprocess.run(
+        [str(PHYSICAL_TFT_UP), "--config-only"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "backend worktree must be clean" in result.stderr
+    assert not log.exists()

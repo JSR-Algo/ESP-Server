@@ -37,6 +37,23 @@ The retained checksum list is `READBACK-SHA256.txt` (SHA-256
 
 ### Safely executable next lanes
 
+The local Course Mode backend must not be started with a pre-existing default
+image tag. Before any future attended TFT lane, record the reviewed backend
+worktree and full SHA and run the software-only preflight:
+
+```bash
+export TBOT_BACKEND_WORKTREE=/absolute/path/to/reviewed/backend-worktree
+export TBOT_BACKEND_GIT_SHA="$(git -C "$TBOT_BACKEND_WORKTREE" rev-parse HEAD)"
+docs/docker/course-mode-physical-tft/up.sh --config-only
+```
+
+This command requires a clean exact worktree, compiles it, always builds a
+SHA-tagged backend runtime image from it, verifies the compiled Course Mode
+materializer exists in the image, and renders Compose without starting the
+stack. A SHA mismatch, missing materializer, stale/default image selection, or
+Compose error is a stop condition. Running the script without `--config-only`
+is a separate stack-start action and remains outside this software-only report.
+
 No second serial reader may start while another process owns the USB port.
 After the current reader exits, the existing capture tooling may first run its
 non-mutating exclusivity preflight:
