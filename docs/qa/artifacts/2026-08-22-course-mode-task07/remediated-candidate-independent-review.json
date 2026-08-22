@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "gate": "course-mode-v2-task-07-remediated-candidate-independent-review",
+  "reviewedAt": "2026-08-22T12:19:39+07:00",
+  "reviewScope": "ARTIFACT_IDENTITY_REPRODUCIBILITY_FLASH_MAP_AND_RUNBOOK_ONLY",
+  "bundleRootSha256": "9ef3729d0faec7b02d867cedb3ab30d110b845b1c0133738c588bba0e0c16be6",
+  "bundleManifestSha256": "7f802d9482bd1ace45875663fb2711cc61a34232f9a56a8ec7b87fb287a6f574",
+  "bundleReadmeSha256": "00afe14a668030bf474ec8516b33b4571dd35ceb67d5a336a85665f1b0d28389",
+  "firmwareSourceSha": "3d4a1e2a32359278124c61e56fd459fac618506e",
+  "applicationSha256": "84c999ece0c90eb6e69a410e335c7791f330e9c0fd39c30dfd4162bb7c4cfc6e",
+  "reviewBaseEspSha": "08f98bf0bffb6eccc7edca83e40fda9773998da1",
+  "reviewCommand": "codex review --uncommitted",
+  "reviewResult": "NO_ACTIONABLE_FINDINGS",
+  "resolvedFindings": [
+    {
+      "priority": "P1",
+      "finding": "Review evidence embedded inside the checksum root was circular",
+      "resolution": "Review receipt moved outside the bundle and pinned to the final unchanged root"
+    }
+  ],
+  "authorizesDeviceMutation": false,
+  "pointOfUseUserAuthorizationRequired": true,
+  "physicalVerdict": "PHYSICAL_BLOCKED",
+  "task08Locked": true
+}

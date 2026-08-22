@@ -1,12 +1,18 @@
 {
   "schemaVersion": 1,
   "gate": "course-mode-v2-task-07-remediated-candidate-readiness",
-  "generatedAt": "2026-08-22T11:53:49+07:00",
+  "generatedAt": "2026-08-22T12:14:16+07:00",
   "classification": "SOFTWARE_QUALIFIED_PRIVACY_REMEDIATED_CANDIDATE",
-  "approvalStatus": "PENDING_INDEPENDENT_REVIEW",
+  "approvalStatus": "INDEPENDENT_SOFTWARE_REVIEW_PASSED",
   "authorizesFlash": false,
+  "eligibleForInstallAuthorizationRequest": true,
+  "mutationAuthorization": "REQUIRES_CURRENT_POINT_OF_USE_USER_AUTHORIZATION",
   "hardwareInstalled": false,
   "physicalValidation": "NOT_RUN",
+  "independentReview": {
+    "scope": "ARTIFACT_IDENTITY_REPRODUCIBILITY_FLASH_MAP_AND_RUNBOOK_ONLY",
+    "evidenceFile": "docs/qa/artifacts/2026-08-22-course-mode-task07/remediated-candidate-independent-review.json"
+  },
   "source": {
     "repository": "TBOT-Firmware",
     "sha": "3d4a1e2a32359278124c61e56fd459fac618506e",

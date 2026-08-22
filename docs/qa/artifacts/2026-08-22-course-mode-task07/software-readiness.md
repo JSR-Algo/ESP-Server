@@ -299,8 +299,15 @@ The exact identity, offsets, readback sizes, and hashes are recorded in
 The durable local bundle is retained at
 `/Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-task07/remediated-candidate-3d4a1e2a32359278124c61e56fd459fac618506e`.
 Its `SHA256SUMS` root is
-`31cfc23794235bdcb1d4149b2a73d5e3a0d3b4222b24934489b4490d3e767840`.
-This bundle remains **PENDING INDEPENDENT REVIEW** and `authorizesFlash=false`.
-The offline evidence validator therefore continues to keep `PHYSICAL_PASS`
-locked. No local build or bundle creation authorizes a flash or replaces any
-physical Task 07 gate.
+`9ef3729d0faec7b02d867cedb3ab30d110b845b1c0133738c588bba0e0c16be6`.
+Independent software review passed for the exact bundle. Its metadata now
+records `approvalStatus=INDEPENDENT_SOFTWARE_REVIEW_PASSED`,
+`eligibleForInstallAuthorizationRequest=true`, and `authorizesFlash=false`.
+This means the bundle may be presented in a future bounded request for current
+point-of-use installation authority; it does not itself authorize flash, OTA,
+readback, reset, motion, audio, or production mutation. Exact cross-repository
+HIL binding and every physical Task 07 gate remain outstanding, so
+`PHYSICAL_BLOCKED` and the Task 08 lock remain unchanged.
+The independent review receipt is stored outside the checksum root in
+`remediated-candidate-independent-review.json`; this avoids making the reviewed
+root depend on its own attestation.

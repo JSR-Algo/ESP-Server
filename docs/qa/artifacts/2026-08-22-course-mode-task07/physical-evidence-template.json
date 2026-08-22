@@ -62,7 +62,7 @@
     "attended E-stop and TP_EN safety-path verification",
     "calibrated acoustic, power, and thermal instruments with calibration evidence",
     "approved numeric hardware limits",
-    "independently reviewed privacy-remediated candidate identity replacing the pre-fix Task 06 firmware artifact",
+    "current explicit point-of-use candidate installation authorization and exact cross-repo HIL candidate binding",
     "candidate installation and all seven physical lanes",
     "physically rehearsed known-good V1 rollback",
     "physical verification of zero microphone uplink at idle after reconnect/startup"

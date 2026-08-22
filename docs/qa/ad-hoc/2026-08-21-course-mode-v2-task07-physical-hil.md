@@ -63,9 +63,12 @@ The checksum-pinned Task 06 firmware artifact was built before this remediation
 and is now retained as historical evidence only; it is not eligible for Task 07
 installation. Firmware `main` contains the reviewed software fix at
 `3d4a1e2a32359278124c61e56fd459fac618506e`. The software-only reconciliation
-below creates a checksum-pinned reproducible replacement candidate, but it
-remains pending independent review and is not approved for installation. No
-flash is authorized.
+below creates a checksum-pinned reproducible replacement candidate. Independent
+software review passed for its artifact identity, reproducibility, flash map,
+and runbook. The bundle is eligible to be presented for a bounded installation
+authorization request, but it does not authorize installation or any other
+device mutation. Current explicit point-of-use user authorization remains
+required. No flash is authorized.
 
 ## Remediated candidate identity reconciliation - 2026-08-22
 
@@ -97,16 +100,21 @@ The complete redacted identity is
 Large binaries are retained outside Git at
 `task-artifacts/course-mode-task07/remediated-candidate-3d4a1e2a32359278124c61e56fd459fac618506e`.
 Its `SHA256SUMS` root is
-`31cfc23794235bdcb1d4149b2a73d5e3a0d3b4222b24934489b4490d3e767840`.
+`9ef3729d0faec7b02d867cedb3ab30d110b845b1c0133738c588bba0e0c16be6`.
 The generated five-region flash map and merged-image slice verification passed.
 The source bundle verifies as complete at exact firmware SHA `3d4a1e2a...`.
+The independent review receipt is retained outside the bundle root at
+`docs/qa/artifacts/2026-08-22-course-mode-task07/remediated-candidate-independent-review.json`
+so it can bind this final root without circular self-attestation.
 
 This closes the missing durable/reproducible build-output sub-blocker only. The
 bundle is classified **SOFTWARE-QUALIFIED PRIVACY-REMEDIATED CANDIDATE;
-PENDING INDEPENDENT REVIEW**. The ESP evidence validator remains deliberately
-locked because no independently reviewed replacement approval has been pinned.
-No device, serial port, flash, readback, reset, motion, audio, assignment,
-feature flag, or production system was accessed.
+INDEPENDENT SOFTWARE REVIEW PASSED; DEVICE MUTATION REQUIRES SEPARATE CURRENT
+USER AUTHORIZATION**. This closes the artifact-review blocker only. Exact
+cross-repository HIL binding, current point-of-use authorization, and every
+physical gate remain outstanding, so the offline evidence remains
+`PHYSICAL_BLOCKED`. No device, serial port, flash, readback, reset, motion,
+audio, assignment, feature flag, or production system was accessed.
 
 ## Authorized serial identity/security preflight - 2026-08-22
 
