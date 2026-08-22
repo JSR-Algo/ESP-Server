@@ -1,3 +1,5 @@
+name: tbot-course-mode-physical-tft
+
 services:
   backend:
     ports: !override
