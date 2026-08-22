@@ -200,7 +200,7 @@ assertions after a stop.
 The two firmware identities cannot be conflated. `productionCandidateTarget`
 remains the immutable reviewed production target. `activeLabApp` records the
 temporary app actually active for the local lab run. Its source must be exact
-firmware main `812f5d3e71d326b350e5b0d1df878d47ac60400e`; its application and
+firmware main `3df15a712a9e7ed656a1a9f240bd2ac2bf8ba989`; its application and
 bundle-root SHA-256 values are supplied as exact immutable preflight inputs and
 validated for lowercase SHA-256 shape, rather than hard-coded while qualification
 is still in progress. BLOCKED/pre-preflight evidence may leave only those two

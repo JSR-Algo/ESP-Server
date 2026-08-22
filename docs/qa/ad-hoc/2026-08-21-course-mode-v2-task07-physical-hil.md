@@ -4,6 +4,49 @@ Date: 2026-08-21 (Asia/Ho_Chi_Minh)
 
 Verdict: **PHYSICAL BLOCKED**
 
+## SD-sync authority boundary correction - 2026-08-23
+
+The attended local-lab startup reached the firmware SD-sync boundary and failed
+closed with `lesson asset sync request invalid`; no lesson prepare, motion, or
+audio action followed. Cross-repository diagnosis proved that ESP correctly
+preserved the exact frozen `courseModeCompatibility` authority marker in the
+MCP pack, while firmware rejected that otherwise valid marker as an unknown
+pack/asset field before worker creation, mutation lease, filesystem access, or
+network access. Stripping the marker in ESP was rejected because it would
+reverse the reviewed authority-preservation contract.
+
+Firmware main `3df15a712a9e7ed656a1a9f240bd2ac2bf8ba989` now accepts only the
+exact frozen Course Mode marker and keeps generic packs and every existing
+URL/hash/path/size/metadata gate fail-closed. Focused RED/GREEN, native
+attestation, full firmware regression, post-merge regression, and independent
+code review passed before target qualification.
+
+The corrected local-lab application is SHA-256
+`26319fd9c17cda6339636368945c6207adcd5ba30f6eac6acdd9123830fcad0b`,
+with ESP image validation hash
+`b9b2cf437bab779c6095980d87abb6cb7b74ad06b283c26755a7022f4fae76e5`.
+Two separate output directories produced byte-identical app, ELF, bootloader,
+partition table, OTA data, generated assets, sdkconfig, flash maps, and exact
+dependency lock. Independent bundle review approved the pre-review bytes with
+zero findings. The review-status-only delta preserves `authorizesFlash=false`,
+and the final immutable bundle has 23 checksum entries with root
+`6d6a6ca01426a511ce4fa28375c813ab80e99588a5806436f719d35a8fb808e0`.
+The final review-status-only delta was independently approved with all 23
+checksums verified. Device install/readback must not proceed until the updated
+ESP preflight identity merges and its point-of-use gates pass cleanly.
+
+Qualification also found that the earlier `812f5d3` bundle copied the wrong
+dependency lock into its metadata: its accepted build logs and retained source
+worktree use `6a555f13...`, while its packaged lock used `70dbd826...`. The new
+candidate explicitly uses the actual prior accepted dependency graph so this
+SD-sync-only correction does not silently change display/component behavior.
+The mismatched `70dbd826...` build was rejected and is not flash eligible.
+
+This software correction and bundle qualification do not change the Task 07
+verdict. Task 08 remains locked pending resumed physical evidence, exact NVS
+preservation after install and restore, rollback rehearsal, and all required
+calibrated quantitative gates.
+
 ## Physical-TFT software tooling - 2026-08-22
 
 The reviewed software-only tooling design and implementation plan are recorded
@@ -24,7 +67,7 @@ the Task 07 verdict remains **PHYSICAL BLOCKED**, and Task 08 remains locked.
 The tooling now records two non-interchangeable firmware identities: the
 immutable reviewed production-candidate target and the active temporary
 local-lab app. The temporary source is pinned to firmware main
-`812f5d3e71d326b350e5b0d1df878d47ac60400e`; its application and bundle-root
+`3df15a712a9e7ed656a1a9f240bd2ac2bf8ba989`; its application and bundle-root
 SHA-256 values must be supplied only after qualification and are not hard-coded
 as preliminary values. This identity split does not authorize installation,
 device access, or a production-candidate substitution.

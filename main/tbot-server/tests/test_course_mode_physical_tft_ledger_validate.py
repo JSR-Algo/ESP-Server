@@ -35,7 +35,7 @@ HISTORICAL_INSTALLATION_PROVENANCE = {
 }
 SESSION_NVS_SHA256 = "0" * 64
 ACTIVE_LAB_APP = {
-    "firmwareSha": "812f5d3e71d326b350e5b0d1df878d47ac60400e",
+    "firmwareSha": "3df15a712a9e7ed656a1a9f240bd2ac2bf8ba989",
     "applicationSha256": "c" * 64,
     "bundleRootSha256": "d" * 64,
 }
