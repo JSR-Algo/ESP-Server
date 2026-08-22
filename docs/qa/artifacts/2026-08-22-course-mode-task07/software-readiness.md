@@ -277,8 +277,30 @@ The Task 06 firmware identity remains authoritative historical evidence for the
 runtime-approved preflight candidate, but it predates the fail-closed microphone
 uplink remediation committed and reviewed on firmware `main` as
 `3d4a1e2a32359278124c61e56fd459fac618506e`. It must not be installed or accepted
-as the Task 07 HIL candidate after the privacy stop condition. The offline
-evidence validator therefore keeps `PHYSICAL_PASS` locked until a replacement
-privacy-remediated artifact identity is checksum-pinned and independently
-reviewed. A local no-flash build alone does not establish that replacement
-release identity or authorize a flash.
+as the Task 07 HIL candidate after the privacy stop condition.
+
+A follow-up artifact reconciliation found that the mutable default
+`build/xiaozhi.bin` (`da61d09b...`) was generated before both
+privacy-remediation commits and has no immutable source binding. Its timestamp
+does not prove whether uncommitted remediation was already present. The
+previously reported explicit `build-task07-final/xiaozhi.bin`
+(`a4d0ab45...`) was built from final main but retained timestamp-dependent app
+and bootloader descriptors. Neither mutable path is promoted.
+
+Two clean no-flash builds from exact source `3d4a1e2a...` used the same pinned
+IDF/toolchain, board, production profile, component lock, and partition inputs,
+plus ESP-IDF's supported `CONFIG_APP_REPRODUCIBLE_BUILD=y`. Every flashable
+artifact and the ELF were byte-identical across the separate build directories.
+The new application SHA-256 is
+`84c999ece0c90eb6e69a410e335c7791f330e9c0fd39c30dfd4162bb7c4cfc6e`.
+The exact identity, offsets, readback sizes, and hashes are recorded in
+`remediated-candidate-identity.json`.
+
+The durable local bundle is retained at
+`/Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-task07/remediated-candidate-3d4a1e2a32359278124c61e56fd459fac618506e`.
+Its `SHA256SUMS` root is
+`31cfc23794235bdcb1d4149b2a73d5e3a0d3b4222b24934489b4490d3e767840`.
+This bundle remains **PENDING INDEPENDENT REVIEW** and `authorizesFlash=false`.
+The offline evidence validator therefore continues to keep `PHYSICAL_PASS`
+locked. No local build or bundle creation authorizes a flash or replaces any
+physical Task 07 gate.

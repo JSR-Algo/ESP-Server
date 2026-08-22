@@ -62,10 +62,51 @@ BLOCKED**, and Task 08 remains locked.
 The checksum-pinned Task 06 firmware artifact was built before this remediation
 and is now retained as historical evidence only; it is not eligible for Task 07
 installation. Firmware `main` contains the reviewed software fix at
-`3d4a1e2a32359278124c61e56fd459fac618506e`, but no checksum-pinned replacement
-candidate identity has yet superseded the Task 06
-artifact. This is an additional software release blocker. No local build output
-is promoted by this report, and no flash is authorized.
+`3d4a1e2a32359278124c61e56fd459fac618506e`. The software-only reconciliation
+below creates a checksum-pinned reproducible replacement candidate, but it
+remains pending independent review and is not approved for installation. No
+flash is authorized.
+
+## Remediated candidate identity reconciliation - 2026-08-22
+
+Independent closeout correctly found that the mutable default build artifact
+`TBOT-Firmware/build/xiaozhi.bin` had SHA-256 `da61d09b...`, while the earlier
+closeout reported `a4d0ab45...`. These are different build outputs:
+
+- `da61d09b...` was produced at 10:48, before the privacy-remediation commits
+  `039ded40...` and `3d4a1e2a...`. Because the working tree may already have
+  contained uncommitted remediation, timing alone does not prove its behavioral
+  content. It has no immutable source binding and is not a Task 07 candidate.
+- `a4d0ab45...` was produced at 11:32 in the explicit
+  `build-task07-final/` directory from final firmware main `3d4a1e2a...` with
+  the pinned LCDWiki config and toolchain. It is a valid preliminary output,
+  but the enabled app/bootloader compile-time descriptors make an ordinary
+  clean rebuild timestamp-dependent, so it is superseded rather than promoted.
+
+Two fresh no-flash builds were then run in separate ignored build directories
+with ESP-IDF's supported `CONFIG_APP_REPRODUCIBLE_BUILD=y` mode. This removes
+only the app and bootloader wall-clock descriptors. Source, production profile,
+LCDWiki ES3C35P board selection, component lock, partition table, flash mode,
+and flash offsets remained pinned. Both builds produced byte-identical
+bootloader, partition table, OTA data, application, generated assets, and ELF.
+The reproducible application is 3,612,672 bytes with SHA-256
+`84c999ece0c90eb6e69a410e335c7791f330e9c0fd39c30dfd4162bb7c4cfc6e`.
+
+The complete redacted identity is
+`docs/qa/artifacts/2026-08-22-course-mode-task07/remediated-candidate-identity.json`.
+Large binaries are retained outside Git at
+`task-artifacts/course-mode-task07/remediated-candidate-3d4a1e2a32359278124c61e56fd459fac618506e`.
+Its `SHA256SUMS` root is
+`31cfc23794235bdcb1d4149b2a73d5e3a0d3b4222b24934489b4490d3e767840`.
+The generated five-region flash map and merged-image slice verification passed.
+The source bundle verifies as complete at exact firmware SHA `3d4a1e2a...`.
+
+This closes the missing durable/reproducible build-output sub-blocker only. The
+bundle is classified **SOFTWARE-QUALIFIED PRIVACY-REMEDIATED CANDIDATE;
+PENDING INDEPENDENT REVIEW**. The ESP evidence validator remains deliberately
+locked because no independently reviewed replacement approval has been pinned.
+No device, serial port, flash, readback, reset, motion, audio, assignment,
+feature flag, or production system was accessed.
 
 ## Authorized serial identity/security preflight - 2026-08-22
 

@@ -1,0 +1,150 @@
+{
+  "schemaVersion": 1,
+  "gate": "course-mode-v2-task-07-remediated-candidate-readiness",
+  "generatedAt": "2026-08-22T11:53:49+07:00",
+  "classification": "SOFTWARE_QUALIFIED_PRIVACY_REMEDIATED_CANDIDATE",
+  "approvalStatus": "PENDING_INDEPENDENT_REVIEW",
+  "authorizesFlash": false,
+  "hardwareInstalled": false,
+  "physicalValidation": "NOT_RUN",
+  "source": {
+    "repository": "TBOT-Firmware",
+    "sha": "3d4a1e2a32359278124c61e56fd459fac618506e",
+    "projectName": "xiaozhi",
+    "projectVersion": "2.2.89",
+    "target": "esp32s3",
+    "board": "lcdwiki-es3c35p",
+    "sourceBundleBytes": 48065849,
+    "sourceBundleSha256": "84a4203d8fc57ed405d17760f81e87071fcf3dba4cd96380dc73aa8d01f476c5"
+  },
+  "toolchain": {
+    "espIdfVersion": "5.5.4",
+    "espIdfSha": "8e48797f0c7e5849050e88e42100164f5898f9db",
+    "compiler": "xtensa-esp-elf-g++ 14.2.0 (esp-14.2.0_20260121)",
+    "python": "3.9.6",
+    "cmake": "4.3.1",
+    "ninja": "1.13.2",
+    "imageInspector": "esptool 5.3.1"
+  },
+  "configuration": {
+    "sdkconfigBytes": 126187,
+    "sdkconfigSha256": "677ee114840ad2c99d149026203239e59653be8d861eabef653726141725630a",
+    "sdkconfigDefaultsSha256": "85d07725a6650acd127e39fe2bca86794f13bd248cec67aca16db2643ab8d385",
+    "sdkconfigDefaultsEsp32s3Sha256": "9e2d9d7c5bb6245676b7cc16c29162d2871db3633e14f0d611b409ee8123f04d",
+    "sdkconfigDefaultsLocalSha256": "774c575b633cb3039a96d0e5969cb7e8a0f221fbfb01a809746d1a652df302ee",
+    "dependenciesLockSha256": "70dbd82619b4813e9e1eab422be9a0fee5ea96e867e9e79d42a587b46fbbb3f5",
+    "partitionCsvSha256": "58a8787d486fe89bac4055acc310b7a0d6edd33e90c61d2ca6a705d251460333",
+    "lcdwikiBoardAssertion": "PASS",
+    "productionProfile": true,
+    "hilStorageFaults": "DEFAULT_OFF",
+    "appReproducibleBuild": true,
+    "appCompileTimeDateEmbedded": false,
+    "bootloaderCompileTimeDateEmbedded": false
+  },
+  "flashSettings": {
+    "mode": "dio",
+    "size": "16MB",
+    "frequency": "80m",
+    "before": "default_reset",
+    "after": "hard_reset"
+  },
+  "artifacts": [
+    {
+      "role": "bootloader",
+      "offset": "0x0",
+      "file": "bootloader/bootloader.bin",
+      "bytes": 16256,
+      "sha256": "0674a1eb42206a0f1713f7ac8fa41d7fbd09f91c6f691dc2b4a73a4c70b495fa"
+    },
+    {
+      "role": "partition-table",
+      "offset": "0x8000",
+      "file": "partition_table/partition-table.bin",
+      "bytes": 3072,
+      "sha256": "4811619cacae08ef2e0e71b7220c6033a346ca5da7ca179082408c963ef530b5"
+    },
+    {
+      "role": "ota-data",
+      "offset": "0xd000",
+      "file": "ota_data_initial.bin",
+      "bytes": 8192,
+      "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"
+    },
+    {
+      "role": "application",
+      "offset": "0x20000",
+      "file": "xiaozhi.bin",
+      "bytes": 3612672,
+      "sha256": "84c999ece0c90eb6e69a410e335c7791f330e9c0fd39c30dfd4162bb7c4cfc6e",
+      "espImageValidationHash": "df428f0dbde049a757f2ed4a75867846cc58b89eeec7d1a23758d52c8b13a5b6"
+    },
+    {
+      "role": "generated-assets",
+      "offset": "0x800000",
+      "file": "generated_assets.bin",
+      "bytes": 5693495,
+      "sha256": "d03b074c39d78601b2a2f6c3438620adc1cf779d634825385e63cafc4528a52b"
+    }
+  ],
+  "metadata": {
+    "elfBytes": 50275992,
+    "elfSha256": "aa51cfe31a8db7ddf66a5069bb6c1050f891d3bea7d0cb527a3c970aa64a6ccb",
+    "mergedReferenceBytes": 14082103,
+    "mergedReferenceSha256": "d8129fda8e69da7e67fba1802fbab9d547085fa65c7707419174897f9cc566d9",
+    "flasherArgsJsonSha256": "63028ddbc257333116502a529c4798b249384208a66f5fa952dea25ba33e2ac9",
+    "flashArgsSha256": "36e8f9f8cb9ba93f3afe161f85eecf55b4d814e794cc33b48613bc76e9c86f22",
+    "projectDescriptionPolicy": "EXCLUDED_FROM_IMMUTABLE_ROOT_ABSOLUTE_BUILD_PATH_ONLY"
+  },
+  "reproducibility": {
+    "cleanBuildCount": 2,
+    "separateBuildDirectories": true,
+    "flashableArtifactsByteIdentical": true,
+    "elfByteIdentical": true,
+    "sdkconfigByteIdentical": true,
+    "flasherArgsByteIdentical": true,
+    "projectDescriptionByteIdentical": false,
+    "projectDescriptionDifference": "generated metadata embeds the absolute build directory and is not flashed",
+    "originalTimestampedBuildSha256": "a4d0ab45b1030eae18634e5bf3c442077230bb47e68c08bef57caaeb9d950b49",
+    "originalTimestampedBuildDisposition": "SUPERSEDED_NON_REPRODUCIBLE_PRELIMINARY_OUTPUT",
+    "mutableDefaultBuildSha256": "da61d09bb26600879393272c1c43a4d59c90db3362438f36a88f2381865d4b0a",
+    "mutableDefaultBuildDisposition": "UNQUALIFIED_MUTABLE_OUTPUT_BUILT_BEFORE_FINAL_COMMITS_NOT_CANDIDATE"
+  },
+  "readbackPlan": [
+    {
+      "offset": "0x0",
+      "bytes": 16256,
+      "output": "readback/bootloader.bin",
+      "sha256": "0674a1eb42206a0f1713f7ac8fa41d7fbd09f91c6f691dc2b4a73a4c70b495fa"
+    },
+    {
+      "offset": "0x8000",
+      "bytes": 3072,
+      "output": "readback/partition-table.bin",
+      "sha256": "4811619cacae08ef2e0e71b7220c6033a346ca5da7ca179082408c963ef530b5"
+    },
+    {
+      "offset": "0xd000",
+      "bytes": 8192,
+      "output": "readback/ota-data.bin",
+      "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"
+    },
+    {
+      "offset": "0x20000",
+      "bytes": 3612672,
+      "output": "readback/xiaozhi.bin",
+      "sha256": "84c999ece0c90eb6e69a410e335c7791f330e9c0fd39c30dfd4162bb7c4cfc6e"
+    },
+    {
+      "offset": "0x800000",
+      "bytes": 5693495,
+      "output": "readback/generated-assets.bin",
+      "sha256": "d03b074c39d78601b2a2f6c3438620adc1cf779d634825385e63cafc4528a52b"
+    }
+  ],
+  "retention": {
+    "committedBinaryFiles": false,
+    "durableLocalBundle": "/Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-task07/remediated-candidate-3d4a1e2a32359278124c61e56fd459fac618506e",
+    "requiredVerificationFile": "SHA256SUMS",
+    "mergedReferenceUse": "REFERENCE_ONLY_DO_NOT_FLASH_WHEN_PRESERVING_NVS"
+  }
+}
