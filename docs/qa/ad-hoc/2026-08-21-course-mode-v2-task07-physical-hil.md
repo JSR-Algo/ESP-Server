@@ -6,6 +6,30 @@ Verdict: **PHYSICAL BLOCKED**
 
 ## Software-only blocker reduction - 2026-08-22
 
+The tagged pre-Course Mode firmware source
+`lesson-prod-campaign-2026-08-21` / `03b3a392091afdd6b65d6e0812f1e4eed67087a6`
+now has a fresh pinned no-flash build, complete split/merged artifact identity,
+source bundle, 90 focused Python passes, 1,243 full Python passes with one
+skip, and all 40 native test scripts passing. It is retained as a
+**SOFTWARE-QUALIFIED ROLLBACK CANDIDATE**, not a physically rehearsed known-good
+V1 image. T7.1 records that no firmware flash occurred, and T7.4 does not bind
+the running robot image to this source with an app hash, ELF hash, build ID,
+flash transcript, or readback. Exact identity evidence is in
+`docs/qa/artifacts/2026-08-22-course-mode-task07/v1-rollback-candidate-identity.json`,
+and the non-executed preserving restore/readback procedure is in
+`docs/qa/artifacts/2026-08-22-course-mode-task07/software-readiness.md`.
+
+The final retained binary is the second clean build, which passed with registry
+traffic forced to an unreachable local endpoint and cached components only.
+That rebuild was not byte-identical to the first build for bootloader, app,
+ELF, and merged output, so the durable bundle hashes are authoritative and a
+later rebuild may not be silently substituted.
+
+This reduces the missing-binary blocker but does not close the rollback gate:
+an attended physical rollback rehearsal must still prove known-good V1
+operation. No flash, readback, reset, serial access, motion, or production
+mutation occurred.
+
 The exact final firmware source
 `df70b5a12c68f5a6ab07f981cb7c10113e7dbc01` now has a successful isolated
 no-flash LCDWiki build. The checksum-pinned five-artifact flash identity,
@@ -18,10 +42,11 @@ behavior and does not authorize flashing.
 The companion software-readiness record at
 `docs/qa/artifacts/2026-08-22-course-mode-task07/software-readiness.md` contains
 the two-adult operator checklist and the complete numeric-limit authority table.
-It also records that a valid known-good V1 rollback bundle still cannot be
-produced: the historical known-good application lacks a verified source SHA and
-V1 designation, while the older 2.2.74 backup is missing all referenced binary
-files.
+It now records a checksum-pinned, durably retained software-qualified rollback
+candidate. It does not call that bundle physically known-good; the historical
+known-good application remains source-ambiguous, the older 2.2.74 backup still
+lacks its binaries, and the new candidate still requires an attended physical
+rollback rehearsal.
 
 No serial port was opened. No candidate install, OTA, flash, reset, motion,
 assignment, publication, flag change, production mutation, readback, or

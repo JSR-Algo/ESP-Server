@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "gate": "course-mode-v2-task-07-v1-rollback-readiness",
+  "generatedDate": "2026-08-22",
+  "classification": "SOFTWARE_QUALIFIED_ROLLBACK_CANDIDATE",
+  "physicallyRehearsedKnownGoodV1": false,
+  "authorizesFlash": false,
+  "source": {
+    "repository": "TBOT-Firmware",
+    "tag": "lesson-prod-campaign-2026-08-21",
+    "annotatedTagObject": "d9366b373a822a94016f3b87ffc9fcafacbe306d",
+    "sha": "03b3a392091afdd6b65d6e0812f1e4eed67087a6",
+    "projectName": "xiaozhi",
+    "projectVersion": "2.2.89",
+    "target": "esp32s3",
+    "board": "lcdwiki-es3c35p",
+    "sourceBundleBytes": 48022223,
+    "sourceBundleSha256": "ae3894d270dc15e3e21ff854b0f9e52e468ee96d8e0c2485a954be0aab735393"
+  },
+  "releaseEvidence": {
+    "t65SoftwareAndBuildReview": "PASS",
+    "t71FlashPerformed": false,
+    "t74ListsSourceSha": true,
+    "t74SourceToRunningBinaryAttestation": false,
+    "missingBindingEvidence": [
+      "runtime application SHA-256",
+      "runtime ELF SHA-256",
+      "runtime build ID or full source SHA",
+      "flash transcript for this source",
+      "device readback matched to this bundle"
+    ]
+  },
+  "toolchain": {
+    "espIdfVersion": "5.5.4",
+    "espIdfSha": "8e48797f0c7e5849050e88e42100164f5898f9db",
+    "compiler": "xtensa-esp-elf-g++ 14.2.0 (esp-14.2.0_20260121)",
+    "python": "3.9.6",
+    "cmake": "4.3.1",
+    "ninja": "1.13.2"
+  },
+  "configuration": {
+    "sdkconfigBytes": 126267,
+    "sdkconfigSha256": "2d9949bef4d0000a1e8d2abd49812020118bc85ebe140c60484bf0602368c008",
+    "sdkconfigDefaultsSha256": "85d07725a6650acd127e39fe2bca86794f13bd248cec67aca16db2643ab8d385",
+    "sdkconfigDefaultsEsp32s3Sha256": "9e2d9d7c5bb6245676b7cc16c29162d2871db3633e14f0d611b409ee8123f04d",
+    "sdkconfigDefaultsLocalSha256": "774c575b633cb3039a96d0e5969cb7e8a0f221fbfb01a809746d1a652df302ee",
+    "generatedDependenciesLockSha256": "7082f34070fd69371855a74872e32cc881d2094d14efb89f5e696a78ff84ebd7",
+    "partitionCsvSha256": "58a8787d486fe89bac4055acc310b7a0d6edd33e90c61d2ca6a705d251460333",
+    "lcdwikiBoardAssertion": "PASS",
+    "hilStorageFaults": "DEFAULT_OFF"
+  },
+  "flashSettings": {
+    "mode": "dio",
+    "size": "16MB",
+    "frequency": "80m",
+    "before": "default_reset",
+    "after": "hard_reset"
+  },
+  "artifacts": [
+    {"role": "bootloader", "offset": "0x0", "file": "bootloader/bootloader.bin", "bytes": 16256, "sha256": "03eab6ea72837189f6f95e6119b40e099b1282bd3029693f8882953d3c63cc1e"},
+    {"role": "partition-table", "offset": "0x8000", "file": "partition_table/partition-table.bin", "bytes": 3072, "sha256": "4811619cacae08ef2e0e71b7220c6033a346ca5da7ca179082408c963ef530b5"},
+    {"role": "ota-data", "offset": "0xd000", "file": "ota_data_initial.bin", "bytes": 8192, "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"},
+    {"role": "application", "offset": "0x20000", "file": "xiaozhi.bin", "bytes": 3597792, "sha256": "723ee925eeea12391104ba9631920cdcd57e3b8d9788302835021a1ccc5f238a", "espImageValidationHash": "24d603315d3fe99ce5a03f61985314fddbd9651459816c0ff0e6882e18c6b6b3"},
+    {"role": "generated-assets", "offset": "0x800000", "file": "generated_assets.bin", "bytes": 5693495, "sha256": "d03b074c39d78601b2a2f6c3438620adc1cf779d634825385e63cafc4528a52b"},
+    {"role": "merged-reference-do-not-use-when-preserving-nvs", "offset": "0x0", "file": "merged-binary.bin", "bytes": 14082103, "sha256": "ffc29f5b65e2043a911996f9709af1b6511ef4c692d33af30b139cfe0b47ee9f"}
+  ],
+  "metadata": {
+    "elfBytes": 50556836,
+    "elfSha256": "3704d12e8f0d265a9c9ab4dca5a2086bafdb53f97e2f14f2f13506741d326a18",
+    "flasherArgsJsonSha256": "63028ddbc257333116502a529c4798b249384208a66f5fa952dea25ba33e2ac9",
+    "flashArgsSha256": "36e8f9f8cb9ba93f3afe161f85eecf55b4d814e794cc33b48613bc76e9c86f22",
+    "projectDescriptionSha256": "1dadb1ff0164f59e28a4d32ec9ebcfa0bf3e831c36f1349eff0e5accb60729a3"
+  },
+  "v1Assertions": {
+    "isImmediateParentOfCourseModeCampaign": true,
+    "courseModeFixtureAbsent": true,
+    "embodiedActionSourceAbsent": true,
+    "courseModeV2FirmwareCapabilityAbsent": true,
+    "productionFlagsOrAssignmentsChanged": false
+  },
+  "verification": {
+    "noFlashBuild": "PASS",
+    "networkBlockedRebuild": "PASS_WITH_CACHED_MANAGED_COMPONENTS",
+    "freshRebuildByteIdentical": false,
+    "freshRebuildNote": "Bootloader, application, ELF, and merged hashes changed on a second clean build; the retained bundle and this manifest pin the second network-blocked build exactly. Partition table, OTA data, generated assets, config, and dependency lock remained identical.",
+    "focusedPython": "90 passed",
+    "fullRepositoryPython": "1243 passed, 1 skipped",
+    "nativeScripts": "40 of 40 passed",
+    "hardwareInstalled": false,
+    "readbackExecuted": false,
+    "physicalRollbackRehearsal": "NOT_RUN"
+  },
+  "retention": {
+    "committedBinaryFiles": false,
+    "durableLocalBundle": "/Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-task07/v1-rollback-03b3a392091afdd6b65d6e0812f1e4eed67087a6",
+    "requiredVerificationFile": "SHA256SUMS"
+  }
+}

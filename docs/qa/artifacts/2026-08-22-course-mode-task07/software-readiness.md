@@ -54,7 +54,93 @@ below.
 
 ## Rollback bundle audit
 
-Result: **CANNOT PRODUCE a checksum-pinned known-good V1 rollback bundle**.
+Result: **SOFTWARE-QUALIFIED ROLLBACK CANDIDATE; NOT PHYSICALLY REHEARSED
+KNOWN-GOOD V1**.
+
+The annotated firmware tag `lesson-prod-campaign-2026-08-21` resolves through
+tag object `d9366b373a822a94016f3b87ffc9fcafacbe306d` to exact source
+`03b3a392091afdd6b65d6e0812f1e4eed67087a6`, immediately before the Course
+Mode campaign commits. T6.5 reviewed this source lineage and recorded 1,243
+passed / 1 skipped plus a successful LCDWiki no-flash build. A fresh detached
+build with the same pinned IDF/toolchain also passed, along with 90 focused
+Python tests, 1,243 passed / 1 skipped for `python3 -m pytest -q tests`, and all
+40 source-appropriate `run_host_native_*_test.sh` scripts.
+
+A second clean build was run with all registry/proxy traffic forced to a
+closed local endpoint. The component manager reported that registry access was
+unavailable and completed from the already-cached 67 managed components. The
+second build passed, but its bootloader, application, ELF, and merged hashes
+differed from the first clean build, so source plus toolchain alone is not a
+byte-reproducible rollback identity. The manifest and durable bundle therefore
+pin the exact second, network-blocked output; any rebuild is a new candidate
+until its hashes are independently reviewed.
+
+The complete checksum identity, split flash map, merged reference image, source
+bundle, and V1/default-off assertions are recorded in
+`v1-rollback-candidate-identity.json`. The exact non-executed preserving
+restoration/readback procedure is committed below. The binary and source bundles
+are retained outside Git at the manifest's durable local path; large generated
+binaries were not committed.
+
+This does not establish physical known-good status. T7.1 explicitly records no
+firmware flash, while T7.4 lists `03b3a392...` only as firmware source main.
+The T7.4 evidence has no runtime app/ELF hash, build ID, flash transcript, or
+readback tying the actual robot image to this exact bundle. Therefore Task 07
+must not relabel it as deployed, physically rehearsed, or known-good V1.
+
+The preserving restore procedure uses split artifacts and does not write NVS
+at `0x9000..0xcfff`; it also does not address the external SD device. The merged
+reference binary must not be used for a preserve-NVS restore because its gap
+fill spans NVS. All flash and readback commands remain **NOT EXECUTED**.
+
+### Future authorized preserving rollback procedure - NOT EXECUTED
+
+Run only from the checksum-pinned durable bundle after every physical Task 07
+prerequisite is closed. `ESP_PYTHON`, `ESPTOOL_PY`, and `PORT` must be bound by
+the authorized adult operator to the reviewed IDF environment, esptool, and sole
+leased robot. Stop without writing if `get_security_info` reports secure-boot or
+flash-encryption requirements that do not match the reviewed bundle. Never erase
+the chip and never use `merged-binary.bin` for this preserving restore.
+
+```bash
+shasum -a 256 -c SHA256SUMS
+"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" get_security_info
+
+"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" \
+  read_flash 0x9000 0x4000 readback-nvs-before.bin
+shasum -a 256 readback-nvs-before.bin > readback-nvs-before.sha256
+
+"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" -b 460800 \
+  --before default_reset --after hard_reset write_flash \
+  --flash_mode dio --flash_size 16MB --flash_freq 80m \
+  0x0 bootloader/bootloader.bin \
+  0x8000 partition_table/partition-table.bin \
+  0xd000 ota_data_initial.bin \
+  0x20000 xiaozhi.bin \
+  0x800000 generated_assets.bin
+
+mkdir -p readback
+"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" read_flash 0x0 16256 readback/bootloader.bin
+"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" read_flash 0x8000 3072 readback/partition-table.bin
+"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" read_flash 0xd000 8192 readback/ota_data_initial.bin
+"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" read_flash 0x20000 3597792 readback/xiaozhi.bin
+"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" read_flash 0x800000 5693495 readback/generated_assets.bin
+"$ESP_PYTHON" "$ESPTOOL_PY" --chip esp32s3 --port "$PORT" read_flash 0x9000 0x4000 readback-nvs-after.bin
+
+cmp bootloader/bootloader.bin readback/bootloader.bin
+cmp partition_table/partition-table.bin readback/partition-table.bin
+cmp ota_data_initial.bin readback/ota_data_initial.bin
+cmp xiaozhi.bin readback/xiaozhi.bin
+cmp generated_assets.bin readback/generated_assets.bin
+cmp readback-nvs-before.bin readback-nvs-after.bin
+```
+
+The external SD card is not a target of these commands and must remain installed
+and unmodified. Byte verification still does not establish known-good V1:
+the two adults must separately record boot, display, audio, microphone, safe
+rest, SD mount/cache, network, stop, and rollback behavior.
+
+Historical alternatives remain non-qualifying:
 
 Repository evidence proves that `build-blufi-fix/xiaozhi.bin`, SHA-256
 `f6c5fab3b0886e6deb90e242d0172d540d80c1206a0eece419e8efee7c335469`,
@@ -70,8 +156,8 @@ recoverable: Git contains only its README, flash script, and expected
 application checksum. The referenced bootloader, partition table, OTA data,
 application, and generated-assets binaries are absent.
 
-Therefore no evidence-backed restoration command or readback verifier can be
-issued for a known-good V1 bundle. Before HIL, an owner must provide all of:
+Before HIL can call any rollback image known-good V1, an owner must still
+provide all of:
 
 - a verified known-good V1 source SHA and corresponding adult-observed
   operational evidence;
@@ -80,7 +166,9 @@ issued for a known-good V1 bundle. Before HIL, an owner must provide all of:
 - an attended restore command reviewed against that exact manifest;
 - a distinct readback file produced with `read_flash 0x20000 <exact-app-size>`
   and verified byte-for-byte against the rollback application;
-- post-restore boot/runtime evidence proving return to known-good V1 operation.
+- post-restore boot/runtime evidence proving return to known-good V1 operation
+  using the staged `03b3a392...` candidate or another independently reviewed
+  bundle.
 
 The existing offline verifier in
 `TBOT-Firmware/scripts/lesson_cinematic_release_evidence_verify.py` demonstrates
