@@ -5,10 +5,9 @@ from __future__ import annotations
 import copy
 import os
 from typing import Any
-from urllib.parse import ParseResult
+from urllib.parse import SplitResult
 
 from core.lesson.course_mode_contract import CourseModeContract, CourseModeContractError
-
 
 CONTRACT_CHECKSUM = "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264"
 LAYOUT_CONTRACT = "renderer-v4.course-mode-layout.v1"
@@ -43,7 +42,7 @@ def validate_course_mode_compatibility(value: Any) -> bool:
     return isinstance(value, dict) and value == COURSE_MODE_COMPATIBILITY
 
 
-def course_mode_local_asset_origin_matches(parsed_url: ParseResult | None) -> bool:
+def course_mode_local_asset_origin_matches(parsed_url: SplitResult | None) -> bool:
     """Allow HTTP only for the exact Task 07 local asset origin."""
     if (
         parsed_url is None

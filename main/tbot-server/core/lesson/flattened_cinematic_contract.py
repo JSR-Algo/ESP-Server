@@ -7,9 +7,9 @@ from typing import Any, NoReturn, cast
 from urllib.parse import urlsplit
 
 from core.lesson.course_mode_compatibility import (
-    course_mode_local_asset_origin_matches,
-    course_mode_compatibility_phase_matches,
     course_mode_compatibility_for_manifest,
+    course_mode_compatibility_phase_matches,
+    course_mode_local_asset_origin_matches,
     validate_course_mode_compatibility,
 )
 

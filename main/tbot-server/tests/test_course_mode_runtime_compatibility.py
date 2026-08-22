@@ -18,7 +18,6 @@ from core.lesson.sd_pack_mcp_payload import (
     build_firmware_sync_pack,
 )
 
-
 FIXTURES = Path(__file__).parent / "fixtures" / "course-mode"
 CONTRACT_CHECKSUM = "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264"
 MANIFEST_CHECKSUM = "205784b3f97cb081ce9c226d8fd83fdd400401e706c000e1b09ba4e7ebdf36ce"
