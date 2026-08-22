@@ -21,19 +21,24 @@ The tooling separates three concepts:
    caller-supplied lowercase SHA-256 observed for the current authorized session.
    The preflight does not read a device or infer this value.
 
-The attended ledger records `sessionNvsPreservation` with
-`beforeInstallSha256`, `afterInstallSha256`, and `afterRestoreSha256`. A complete
-or post-preflight ledger requires all three exact lowercase SHA-256 values and
-requires them to be identical. The ledger also requires its before-install value
-to equal the value in the bound preflight result.
+The attended ledger records `sessionNvsPreservation` with an explicit `phase`
+enum plus `beforeInstallSha256`, `afterInstallSha256`, and
+`afterRestoreSha256`. The phases are `NOT_OBSERVED`, `PRE_INSTALL_BASELINE`,
+`POST_INSTALL`, and `POST_RESTORE`. Values accumulate monotonically: each phase
+requires all evidence from prior phases, forbids evidence from later phases, and
+requires every present after-value to equal the before-install value. The ledger
+also requires its before-install value to equal the value in the bound preflight
+result. `TFT_PASS` requires `POST_RESTORE`.
 
 ## Blocked And Early-Stop Evidence
 
-The committed `TFT_BLOCKED` template leaves all session NVS values `null`
+The committed `TFT_BLOCKED` template uses `NOT_OBSERVED` and leaves all session NVS values `null`
 because no current-session readback is committed. Historical provenance remains
 present and explicitly historical. A `PRE_PREFLIGHT` stop may also leave all
-session values null. Every phase after preflight requires the pre-install value;
-complete attended evidence requires all three values and their equality.
+session values null. Once preflight evidence is claimed, the NVS phase must be at
+least `PRE_INSTALL_BASELINE`. Any ledger that claims `POST_INSTALL` or
+`POST_RESTORE` must carry the corresponding exact equal readback. Complete
+attended evidence requires `POST_RESTORE` and all three equal values.
 
 No schema state may change `task07Verdict` from `PHYSICAL_BLOCKED`. The tooling
 does not authorize installation, restore, device access, serial access, network
