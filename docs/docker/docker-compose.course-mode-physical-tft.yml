@@ -1,0 +1,9 @@
+services:
+  backend:
+    ports: !override
+      - "127.0.0.1:3000:3000"
+    environment:
+      COURSE_MODE_V2_PUBLISH_ENABLED: "true"
+      LESSON_STUDIO_NEW_ASSIGNMENTS_ENABLED: "true"
+      LESSON_ROLLOUT_DEVICE_ALLOWLIST: "14:c1:9f:d1:ac:20"
+      TBOT_DEVICE_MINT_SECRET: ${TBOT_DEVICE_MINT_SECRET:?export the shared local device mint secret}
