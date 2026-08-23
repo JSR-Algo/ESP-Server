@@ -165,6 +165,8 @@ assert.strictEqual(calls[1].onSuccess, onSuccess);
 assert.strictEqual(calls[1].onError, onError);
 
 const editorSource = read('src/views/LessonEditor.vue');
+const lessonApiSourceForAuthoring = read('src/apis/module/lesson.js');
+assertSourceIncludes(lessonApiSourceForAuthoring, 'courseModeContract', 'lesson API must carry persisted Course Mode authority state');
 assertSourceIncludes(
   editorSource,
   "import { canonicalLessonVisualPair, buildLessonVisualRequest } from '@/components/lesson/lesson-visual-selection';",
@@ -176,6 +178,8 @@ assertSourceIncludes(editorSource, 'data-testid="lesson-robot-selector"', 'robot
 assertSourceIncludes(editorSource, 'lessonVisualPair()', 'LessonEditor must derive one canonical pair for the lesson');
 assertSourceIncludes(editorSource, 'canonicalLessonVisualPair(this.steps)', 'the canonical pair must come from authoritative steps');
 assertSourceIncludes(editorSource, 'isCourseModeV5()', 'Course Mode v5 must be the scoped boundary for robot triple authoring');
+assertSourceIncludes(editorSource, 'hasLoadedCourseModeAuthority()', 'Course Mode v5 authoring must require persisted Course Mode authority');
+assertSourceIncludes(editorSource, 'filterRobotVideoAssets', 'robot picker must fail closed to real MJPEG MP4 robot videos');
 assertSourceIncludes(editorSource, 'applyLessonVisualSelection(patch)', 'both selectors must share one lesson-level save path');
 assertSourceIncludes(editorSource, 'buildLessonVisualRequest(this.lessonVisualPair, patch)', 'every save must merge and validate both visual ids');
 assertSourceIncludes(editorSource, 'Api.lesson.applyLessonVisuals(', 'visual selection must use the lesson-level API');
@@ -196,6 +200,62 @@ assert.match(selectedVisualVersionIdSource, /slot === 'robotOverlay'[\s\S]*this\
 const selectCinematicLayerSource = extractObjectMethod(editorSource, 'selectCinematicLayer');
 assert.match(selectCinematicLayerSource, /selection\.slot === 'robotOverlay'[\s\S]*this\.isCourseModeV5[\s\S]*applyLessonVisualSelection\(\{[\s\S]*robotAssetVersionId:\s*selection\.assetVersionId[\s\S]*robotAssetKey:\s*asset\.assetKey/m, 'Course Mode v5 robot selector must use the atomic lesson visual triple save');
 assert.match(selectCinematicLayerSource, /if \(!this\.isCourseModeV5\)[\s\S]*Api\.lesson\.setVisualRef\(/m, 'legacy non-v5 robot authoring must keep the old per-step visual ref path');
+
+const isCourseModeV5Source = extractObjectMethod(editorSource, 'isCourseModeV5');
+const isCourseModeV5 = vm.runInNewContext(`(${isCourseModeV5Source.replace(/^isCourseModeV5/, 'function isCourseModeV5')})`);
+const hasLoadedCourseModeAuthoritySource = extractObjectMethod(editorSource, 'hasLoadedCourseModeAuthority');
+const hasLoadedCourseModeAuthority = vm.runInNewContext(`(${hasLoadedCourseModeAuthoritySource.replace(/^hasLoadedCourseModeAuthority/, 'function hasLoadedCourseModeAuthority')})`);
+assert.equal(hasLoadedCourseModeAuthority.call({
+  lesson: { courseModeContract: { version: 2 } },
+  previewManifest: null,
+}), true, 'lesson-level Course Mode contract marks loaded persisted authority');
+assert.equal(hasLoadedCourseModeAuthority.call({
+  lesson: {},
+  previewManifest: { manifest: { courseModeContract: { version: 2 } } },
+}), true, 'preview Course Mode contract marks loaded persisted authority');
+assert.equal(hasLoadedCourseModeAuthority.call({
+  lesson: {},
+  previewManifest: { manifest: {} },
+}), false, 'missing Course Mode contract must fail closed');
+assert.equal(isCourseModeV5.call({
+  lessonId: 'course-v5',
+  lesson: { lessonId: 'course-v5', manifestVersion: 'teebot-lesson-renderer.v5', courseModeContract: { version: 2 } },
+  previewManifest: null,
+  hasLoadedCourseModeAuthority: true,
+}), true, 'renderer v5 with loaded persisted Course Mode authority is Course Mode v5');
+assert.equal(isCourseModeV5.call({
+  lessonId: 'non-course-v5',
+  lesson: { lessonId: 'non-course-v5', manifestVersion: 'teebot-lesson-renderer.v5' },
+  previewManifest: null,
+  hasLoadedCourseModeAuthority: false,
+}), false, 'renderer v5 alone must not enable Course Mode visual triples');
+assert.equal(isCourseModeV5.call({
+  lessonId: 'preview-course-v5',
+  lesson: { lessonId: 'preview-course-v5', manifestVersion: 'teebot-lesson-renderer.v5' },
+  previewManifest: { manifest: { courseModeContract: { version: 2 } } },
+  hasLoadedCourseModeAuthority: true,
+}), true, 'loaded preview Course Mode authority may enable Course Mode v5 triples');
+
+const nonCourseRobotCalls = [];
+const selectCinematicLayer = vm.runInNewContext(`(${selectCinematicLayerSource.replace(/^selectCinematicLayer/, 'function selectCinematicLayer')})`, {
+  Api: { lesson: { setVisualRef: (...args) => nonCourseRobotCalls.push(args) } },
+});
+const nonCourseRobotContext = {
+  isCourseModeV5: false,
+  selectedStep: { stepKey: 's1' },
+  isDraft: true,
+  cinematicRefSaving: false,
+  lessonId: 'non-course-v5',
+  invalidateFlattenedDerivativeStatus() {},
+  fetchSteps() {},
+  $message: { warning() {}, error() {}, success() {} },
+};
+selectCinematicLayer.call(nonCourseRobotContext, {
+  slot: 'robotOverlay',
+  assetVersionId: 'robot-v1',
+  asset: { assetKey: 'robot.valid', title: 'Robot valid' },
+});
+assert.equal(nonCourseRobotCalls.length, 1, 'non-Course renderer v5 robot selection must keep per-step setVisualRef');
 
 const saveSelectedStepSource = extractObjectMethod(editorSource, 'saveSelectedStep');
 const rebindClonedVisualSource = extractObjectMethod(editorSource, 'rebindClonedVisual');
@@ -405,6 +465,9 @@ assertSourceIncludes(editorSource, 'this.addingStep = false;', 'lesson navigatio
 assertSourceIncludes(editorSource, 'this.reordering = false;', 'lesson navigation must reset reorder in-flight state');
 assertSourceIncludes(read('src/i18n/en.js'), "'lesson.visualPairReloadFailed':", 'English reload reconciliation warning is required');
 assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualPairReloadFailed':", 'Vietnamese reload reconciliation warning is required');
+assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualTripleTitle':", 'Vietnamese Course Mode v5 visual triple title is required');
+assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualTripleWholeLesson':", 'Vietnamese Course Mode v5 visual triple description is required');
+assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualTripleRequired':", 'Vietnamese Course Mode v5 visual triple validation warning is required');
 
 function verifyDirectCinematicLibraryContract() {
   const loadCinematicLibrariesSource = extractObjectMethod(editorSource, 'loadCinematicLibraries');
@@ -423,6 +486,8 @@ function verifyDirectCinematicLibraryContract() {
     cinematicLibraries: { backgroundScene: [], teachingObject: [], robotOverlay: [] },
     cinematicLibraryLoading: { backgroundScene: false, teachingObject: false, robotOverlay: false },
     cinematicLibraryErrors: { backgroundScene: '', teachingObject: '', robotOverlay: '' },
+    isCourseModeV5: true,
+    filterRobotVideoAssets: vm.runInNewContext(`(${extractObjectMethod(editorSource, 'filterRobotVideoAssets').replace(/^filterRobotVideoAssets/, 'function filterRobotVideoAssets')})`, { Number, String, Array }),
     $set(target, key, value) { target[key] = value; },
   };
   loadCinematicLibraries.call(context);
@@ -433,13 +498,38 @@ function verifyDirectCinematicLibraryContract() {
   ], 'direct cinematic libraries must query every backend MP4 category');
   const sceneRows = [{ assetKey: 'scene.farm', versionId: 'scene-v4', url: '/scene-v4.mp4', mimeType: 'video/mp4' }];
   const objectRows = [{ assetKey: 'object.apple', versionId: 'apple-v3', url: '/apple-v3.mp4', mimeType: 'video/mp4' }];
+  const validRobot = {
+    assetKey: 'robot.teacher',
+    versionId: 'robot-valid',
+    category: 'robotPose',
+    profile: 'espTft',
+    publicationState: 'published',
+    url: '/robot-valid.mp4',
+    mimeType: 'video/mp4',
+    codec: 'mjpeg',
+    fps: 10,
+    compatibilityMetadata: {
+      codec: 'mjpeg',
+      fps: 10,
+      hasAudio: false,
+      chromaKey: { color: { r: 0, g: 255, b: 0 }, similarity: 0.18, smoothness: 0.05 },
+    },
+  };
+  const invalidRobots = [
+    { ...validRobot, assetKey: 'robot.draft', versionId: 'robot-draft', publicationState: 'draft' },
+    { ...validRobot, assetKey: 'robot.png', versionId: 'robot-png', mimeType: 'image/png' },
+    { ...validRobot, assetKey: 'robot.h264', versionId: 'robot-h264', codec: 'h264', compatibilityMetadata: { ...validRobot.compatibilityMetadata, codec: 'h264' } },
+    { ...validRobot, assetKey: 'robot.audio', versionId: 'robot-audio', compatibilityMetadata: { ...validRobot.compatibilityMetadata, hasAudio: true } },
+    { ...validRobot, assetKey: 'robot.bad-fps', versionId: 'robot-fps', fps: 12, compatibilityMetadata: { ...validRobot.compatibilityMetadata, fps: 12 } },
+    { ...validRobot, assetKey: 'robot.no-chroma', versionId: 'robot-chroma', compatibilityMetadata: { codec: 'mjpeg', fps: 10, hasAudio: false } },
+  ];
   requests[0][1](sceneRows);
   requests[1][1](objectRows);
-  requests[2][2]('robot unavailable');
+  requests[2][1]([validRobot, ...invalidRobots]);
   assert.strictEqual(context.cinematicLibraries.backgroundScene, sceneRows);
   assert.strictEqual(context.cinematicLibraries.teachingObject, objectRows);
-  assert.deepEqual(JSON.parse(JSON.stringify(context.cinematicLibraries.robotOverlay)), []);
-  assert.equal(context.cinematicLibraryErrors.robotOverlay, 'robot unavailable');
+  assert.deepEqual(JSON.parse(JSON.stringify(context.cinematicLibraries.robotOverlay.map((row) => row.versionId))), ['robot-valid']);
+  assert.equal(context.cinematicLibraryErrors.robotOverlay, '');
   assert.equal(Object.values(context.cinematicLibraryLoading).some(Boolean), false);
 }
 

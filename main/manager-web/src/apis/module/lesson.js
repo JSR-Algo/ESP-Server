@@ -31,6 +31,7 @@ export function normalizeAuthoringLesson(raw) {
   return {
     ...normalized,
     manifestVersion: value.manifest_version ?? value.manifestVersion ?? '',
+    courseModeContract: value.course_mode_contract ?? value.courseModeContract ?? null,
   };
 }
 
@@ -509,13 +510,11 @@ export default {
   // the source is not published or a draft of the next version already exists.
   createNextVersion(lessonId, dataOrSuccess, onSuccessOrError, onError) {
     const hasRequestBody = dataOrSuccess && typeof dataOrSuccess === 'object' && !Array.isArray(dataOrSuccess);
-    const data = hasRequestBody ? dataOrSuccess : { rendererVersion: 'teebot-lesson-renderer.v5' };
     const onSuccess = hasRequestBody ? onSuccessOrError : dataOrSuccess;
     const errorHandler = hasRequestBody ? onError : onSuccessOrError;
-    nestRequest({
+    const request = {
       url: `${getNestUrl()}/lessons/${lessonId}/new-version`,
       method: 'POST',
-      data,
       onSuccess: (payload) => {
         const raw = payload && !Array.isArray(payload) && typeof payload === 'object' ? payload : {};
         const rawLessonId = raw.id ?? raw.lesson_id ?? raw.lessonId;
@@ -530,10 +529,12 @@ export default {
           });
           return;
         }
-        if (onSuccess) onSuccess(normalizeLesson(raw));
+        if (onSuccess) onSuccess(normalizeAuthoringLesson(raw));
       },
       onError: errorHandler,
-    });
+    };
+    if (hasRequestBody) request.data = dataOrSuccess;
+    nestRequest(request);
   },
 
   // GET /v1/admin/lessons/:lessonId/steps -> Step[]

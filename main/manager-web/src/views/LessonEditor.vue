@@ -842,6 +842,14 @@ export default {
         this.lesson
         && this.lesson.lessonId === this.lessonId
         && this.lesson.manifestVersion === 'teebot-lesson-renderer.v5'
+        && this.hasLoadedCourseModeAuthority
+      );
+    },
+    hasLoadedCourseModeAuthority() {
+      const manifest = this.previewManifest && this.previewManifest.manifest;
+      return Boolean(
+        (this.lesson && this.lesson.courseModeContract)
+        || (manifest && manifest.courseModeContract)
       );
     },
     hasAuthoritativeTVideoJourney() {
@@ -2360,7 +2368,10 @@ export default {
         Api.lesson.listVisualAssets(
           { category, profile: 'espTft' },
           (rows) => {
-            this.$set(this.cinematicLibraries, slot, Array.isArray(rows) ? rows : []);
+            const assets = Array.isArray(rows) ? rows : [];
+            this.$set(this.cinematicLibraries, slot, slot === 'robotOverlay' && this.isCourseModeV5
+              ? this.filterRobotVideoAssets(assets)
+              : assets);
             this.$set(this.cinematicLibraryLoading, slot, false);
           },
           (msg) => {
@@ -2369,6 +2380,27 @@ export default {
             this.$set(this.cinematicLibraryErrors, slot, msg || `Could not load ${category} assets.`);
           },
         );
+      });
+    },
+    filterRobotVideoAssets(assets) {
+      return (Array.isArray(assets) ? assets : []).filter((asset) => {
+        const metadata = asset && asset.compatibilityMetadata && typeof asset.compatibilityMetadata === 'object'
+          ? asset.compatibilityMetadata
+          : {};
+        const chromaKey = asset.chromaKey || metadata.chromaKey || metadata.chroma_key;
+        const color = chromaKey && (chromaKey.color || chromaKey.keyColor || chromaKey.key_color);
+        const codec = String(asset.codec || metadata.codec || '').toLowerCase();
+        const fps = Number(asset.fps || metadata.fps || 0);
+        return asset
+          && asset.category === 'robotPose'
+          && asset.profile === 'espTft'
+          && asset.publicationState === 'published'
+          && asset.mimeType === 'video/mp4'
+          && (codec === 'mjpeg' || codec === 'motion-jpeg' || codec === 'motion_jpeg')
+          && metadata.hasAudio === false
+          && (fps === 10 || fps === 15)
+          && chromaKey && typeof chromaKey === 'object'
+          && color && ['r', 'g', 'b'].every((channel) => Number.isFinite(Number(color[channel])));
       });
     },
     selectedVisualVersionId(slot) {

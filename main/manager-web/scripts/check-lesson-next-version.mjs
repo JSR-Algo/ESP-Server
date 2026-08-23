@@ -118,14 +118,29 @@ const apiCreateNextVersion = vm.runInNewContext(`(${extractObjectMethod('createN
       lessonVersion: Number(raw.lesson_version ?? raw.lessonVersion ?? 0),
     };
   },
+  normalizeAuthoringLesson(raw) {
+    return {
+      lessonId: raw.id ?? raw.lesson_id ?? raw.lessonId ?? '',
+      status: raw.status ?? 'draft',
+      lessonVersion: Number(raw.lesson_version ?? raw.lessonVersion ?? 0),
+      manifestVersion: raw.manifest_version ?? raw.manifestVersion ?? '',
+      courseModeContract: raw.course_mode_contract ?? raw.courseModeContract ?? null,
+    };
+  },
 });
 let apiSuccesses = 0;
 let apiFailure;
 apiCreateNextVersion.call({}, 'published-1', () => { apiSuccesses += 1; }, (message, error) => {
   apiFailure = { message, error };
 });
+if ('data' in nextVersionRequest) {
+  throw new Error(`legacy createNextVersion signature must not invent a renderer body, got ${JSON.stringify(nextVersionRequest.data)}`);
+}
+apiCreateNextVersion.call({}, 'published-1', { rendererVersion: 'teebot-lesson-renderer.v5' }, () => { apiSuccesses += 1; }, (message, error) => {
+  apiFailure = { message, error };
+});
 if (JSON.stringify(nextVersionRequest.data) !== JSON.stringify({ rendererVersion: 'teebot-lesson-renderer.v5' })) {
-  throw new Error(`createNextVersion must POST the renderer v5 request body, got ${JSON.stringify(nextVersionRequest.data)}`);
+  throw new Error(`explicit createNextVersion body must be preserved, got ${JSON.stringify(nextVersionRequest.data)}`);
 }
 for (const malformed of [
   { id: 'different-id', lesson_version: 2 },
