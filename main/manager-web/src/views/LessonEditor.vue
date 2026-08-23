@@ -104,8 +104,8 @@
           <section class="lesson-visual-pair" v-loading="savingLessonVisuals" :aria-busy="savingLessonVisuals ? 'true' : 'false'">
             <div class="lesson-visual-pair__heading">
               <div>
-                <h4>{{ $t('lesson.visualPairTitle') }}</h4>
-                <p>{{ $t('lesson.visualPairWholeLesson') }}</p>
+                <h4>{{ $t(isCourseModeV5 ? 'lesson.visualTripleTitle' : 'lesson.visualPairTitle') }}</h4>
+                <p>{{ $t(isCourseModeV5 ? 'lesson.visualTripleWholeLesson' : 'lesson.visualPairWholeLesson') }}</p>
               </div>
               <span v-if="savingLessonVisuals" role="status" aria-live="polite">{{ $t('common.loading') }}</span>
             </div>
@@ -119,7 +119,7 @@
               {{ $t('lesson.visualPairReloadFailed') }}
             </p>
             <p
-              v-else-if="pendingLessonVisualPair && (!lessonVisualPair.backgroundAssetVersionId || !lessonVisualPair.objectAssetVersionId)"
+              v-else-if="pendingLessonVisualPair && (!lessonVisualPair.backgroundAssetVersionId || !lessonVisualPair.objectAssetVersionId || (isCourseModeV5 && !lessonVisualPair.robotAssetVersionId))"
               class="lesson-visual-pair__notice"
               role="status"
               aria-live="polite"
@@ -154,16 +154,18 @@
                   @select="selectCinematicLayer"
                 />
               </div>
-              <CinematicLayerPicker
-                layer-slot="robotOverlay"
-                title="Robot overlay"
-                :assets="cinematicLibraries.robotOverlay"
-                :selected-version-id="selectedVisualVersionId('robotOverlay')"
-                :loading="cinematicLibraryLoading.robotOverlay"
-                :error="cinematicLibraryErrors.robotOverlay"
-                :disabled="!isDraft || cinematicRefSaving || lessonVisualSelectionDisabled"
-                @select="selectCinematicLayer"
-              />
+              <div data-testid="lesson-robot-selector">
+                <CinematicLayerPicker
+                  layer-slot="robotOverlay"
+                  title="Robot overlay"
+                  :assets="cinematicLibraries.robotOverlay"
+                  :selected-version-id="selectedVisualVersionId('robotOverlay')"
+                  :loading="cinematicLibraryLoading.robotOverlay"
+                  :error="cinematicLibraryErrors.robotOverlay"
+                  :disabled="!isDraft || cinematicRefSaving || lessonVisualSelectionDisabled"
+                  @select="selectCinematicLayer"
+                />
+              </div>
             </div>
           </section>
           <div v-if="selectedStep" class="lesson-studio__workbench">
@@ -835,6 +837,13 @@ export default {
         && this.lesson.manifestVersion === 'teebot-lesson-renderer.v4'
       );
     },
+    isCourseModeV5() {
+      return Boolean(
+        this.lesson
+        && this.lesson.lessonId === this.lessonId
+        && this.lesson.manifestVersion === 'teebot-lesson-renderer.v5'
+      );
+    },
     hasAuthoritativeTVideoJourney() {
       const response = this.tvideoJourneyResponse;
       const journey = response && response.journey;
@@ -893,7 +902,16 @@ export default {
       return this.steps[this.selectedStepIndex] || null;
     },
     lessonVisualPair() {
-      return this.pendingLessonVisualPair || canonicalLessonVisualPair(this.steps);
+      const pair = this.pendingLessonVisualPair || canonicalLessonVisualPair(this.steps);
+      if (!this.isCourseModeV5 || this.pendingLessonVisualPair) return pair;
+      const firstStep = this.steps[0] || {};
+      const references = Array.isArray(firstStep.visualRefs) ? firstStep.visualRefs : [];
+      const robot = references.find((reference) => reference && reference.slot === 'robotOverlay') || {};
+      return {
+        ...pair,
+        robotAssetVersionId: robot.assetVersionId || robot.asset_version_id || robot.versionId || robot.version_id || '',
+        robotAssetKey: robot.assetKey || robot.asset_key || '',
+      };
     },
     selectedTemplateBackground() {
       return this.sharedBackgrounds.find((asset) => asset.assetVersionId === this.lessonVisualPair.backgroundAssetVersionId) || null;
@@ -1180,6 +1198,7 @@ export default {
       this.creatingNextVersion = true;
       Api.lesson.createNextVersion(
         publishedLessonId,
+        { rendererVersion: 'teebot-lesson-renderer.v5' },
         (draft) => {
           this.creatingNextVersion = false;
           if (!draft || !draft.lessonId || draft.lessonId === publishedLessonId || draft.status !== 'draft'
@@ -2355,6 +2374,7 @@ export default {
     selectedVisualVersionId(slot) {
       if (slot === 'backgroundScene') return this.lessonVisualPair.backgroundAssetVersionId || '';
       if (slot === 'teachingObject') return this.lessonVisualPair.objectAssetVersionId || '';
+      if (slot === 'robotOverlay' && this.isCourseModeV5) return this.lessonVisualPair.robotAssetVersionId || '';
       const refs = this.selectedStep && Array.isArray(this.selectedStep.visualRefs) ? this.selectedStep.visualRefs : [];
       const ref = refs.find((row) => row && row.slot === slot);
       return ref ? (ref.assetVersionId || ref.asset_version_id || ref.versionId || ref.version_id || '') : '';
@@ -2364,7 +2384,7 @@ export default {
       return (this.cinematicLibraries[slot] || []).find((asset) => asset.versionId === versionId) || null;
     },
     selectCinematicLayer(selection) {
-      if (!selection || !this.selectedStep || !selection.assetVersionId) return;
+      if (!selection || !selection.assetVersionId) return;
       const asset = selection.asset || {};
       if (selection.slot === 'backgroundScene') {
         return this.selectBackground({ assetKey: asset.assetKey, versionId: selection.assetVersionId });
@@ -2372,37 +2392,47 @@ export default {
       if (selection.slot === 'teachingObject') {
         return this.selectTeachObject({ assetKey: asset.assetKey, versionId: selection.assetVersionId });
       }
-      if (!this.isDraft) {
-        this.$message.warning('Robot overlay changes require a draft lesson.');
-        return;
+      if (selection.slot === 'robotOverlay' && this.isCourseModeV5) {
+        return this.applyLessonVisualSelection({
+          robotAssetVersionId: selection.assetVersionId,
+          robotAssetKey: asset.assetKey,
+        });
       }
-      if (this.cinematicRefSaving) return;
-      this.cinematicRefSaving = true;
-      Api.lesson.setVisualRef(
-        this.lessonId,
-        this.selectedStep.stepKey,
-        selection.slot,
-        selection.assetVersionId,
-        () => {
-          this.cinematicRefSaving = false;
-          this.invalidateFlattenedDerivativeStatus();
-          this.previewManifest = null;
-          this.validationResult = null;
-          this.fetchSteps({
-            preservePrompt: true,
-            onSuccess: () => {
-              this.loadFlattenedDerivativeStatus();
-              this.pushCinematicStep();
-              this.$message.success(`${selection.asset.title || selection.asset.assetKey} pinned to ${selection.slot}.`);
-            },
-          });
-        },
-        (msg) => {
-          this.cinematicRefSaving = false;
-          this.$message.error(msg);
-        },
-      );
-      return true;
+      if (!this.isCourseModeV5) {
+        if (!this.selectedStep) return false;
+        if (!this.isDraft) {
+          this.$message.warning('Robot overlay changes require a draft lesson.');
+          return;
+        }
+        if (this.cinematicRefSaving) return;
+        this.cinematicRefSaving = true;
+        Api.lesson.setVisualRef(
+          this.lessonId,
+          this.selectedStep.stepKey,
+          selection.slot,
+          selection.assetVersionId,
+          () => {
+            this.cinematicRefSaving = false;
+            this.invalidateFlattenedDerivativeStatus();
+            this.previewManifest = null;
+            this.validationResult = null;
+            this.fetchSteps({
+              preservePrompt: true,
+              onSuccess: () => {
+                this.loadFlattenedDerivativeStatus();
+                this.pushCinematicStep();
+                this.$message.success(`${selection.asset.title || selection.asset.assetKey} pinned to ${selection.slot}.`);
+              },
+            });
+          },
+          (msg) => {
+            this.cinematicRefSaving = false;
+            this.$message.error(msg);
+          },
+        );
+        return true;
+      }
+      return false;
     },
     selectTeachObject(obj) {
       if (!obj) return false;
@@ -2435,6 +2465,13 @@ export default {
       }
 
       const request = buildLessonVisualRequest(this.lessonVisualPair, patch);
+      if (this.isCourseModeV5) {
+        if (!nextPair.robotAssetVersionId) {
+          this.$message.warning(this.$t('lesson.visualTripleRequired'));
+          return false;
+        }
+        request.robotAssetVersionId = nextPair.robotAssetVersionId;
+      }
       const lessonId = this.lessonId;
       const lessonLoadRequestId = this.lessonLoadRequestId;
       const saveRequestId = this.lessonVisualSaveRequestId + 1;

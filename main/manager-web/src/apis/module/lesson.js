@@ -507,10 +507,15 @@ export default {
   // a fresh draft (same lesson_key + course_id, next lesson_version) with the steps
   // + assets deep-copied. Publishing it supersedes the live version. Server 400s if
   // the source is not published or a draft of the next version already exists.
-  createNextVersion(lessonId, onSuccess, onError) {
+  createNextVersion(lessonId, dataOrSuccess, onSuccessOrError, onError) {
+    const hasRequestBody = dataOrSuccess && typeof dataOrSuccess === 'object' && !Array.isArray(dataOrSuccess);
+    const data = hasRequestBody ? dataOrSuccess : { rendererVersion: 'teebot-lesson-renderer.v5' };
+    const onSuccess = hasRequestBody ? onSuccessOrError : dataOrSuccess;
+    const errorHandler = hasRequestBody ? onError : onSuccessOrError;
     nestRequest({
       url: `${getNestUrl()}/lessons/${lessonId}/new-version`,
       method: 'POST',
+      data,
       onSuccess: (payload) => {
         const raw = payload && !Array.isArray(payload) && typeof payload === 'object' ? payload : {};
         const rawLessonId = raw.id ?? raw.lesson_id ?? raw.lessonId;
@@ -518,7 +523,7 @@ export default {
         if (typeof rawLessonId !== 'string' || !rawLessonId.trim()
           || raw.status !== 'draft'
           || !Number.isSafeInteger(rawLessonVersion) || rawLessonVersion < 1) {
-          if (onError) onError('Next-version response violated the backend contract.', {
+          if (errorHandler) errorHandler('Next-version response violated the backend contract.', {
             status: 200,
             contract: true,
             code: 'INVALID_NEXT_VERSION_RESPONSE',
@@ -527,7 +532,7 @@ export default {
         }
         if (onSuccess) onSuccess(normalizeLesson(raw));
       },
-      onError,
+      onError: errorHandler,
     });
   },
 

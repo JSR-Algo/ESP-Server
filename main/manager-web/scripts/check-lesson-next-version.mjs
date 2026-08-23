@@ -37,8 +37,8 @@ expectMatch(/creatingNextVersion:\s*false/, 'next-version submission state must 
 const calls = [];
 const Api = {
   lesson: {
-    createNextVersion(lessonId, onSuccess, onError) {
-      calls.push({ lessonId, onSuccess, onError });
+    createNextVersion(lessonId, data, onSuccess, onError) {
+      calls.push({ lessonId, data, onSuccess, onError });
     },
   },
 };
@@ -64,6 +64,9 @@ createNextVersion.call(context);
 createNextVersion.call(context);
 if (calls.length !== 1 || calls[0].lessonId !== 'published-1' || !context.creatingNextVersion) {
   throw new Error('rapid clicks must submit exactly one next-version request for the published lesson');
+}
+if (JSON.stringify(calls[0].data) !== JSON.stringify({ rendererVersion: 'teebot-lesson-renderer.v5' })) {
+  throw new Error('Course Mode next-version creation must request renderer v5 explicitly');
 }
 
 calls[0].onSuccess({ lessonId: 'published-1', lessonVersion: 6, status: 'draft' });
@@ -121,6 +124,9 @@ let apiFailure;
 apiCreateNextVersion.call({}, 'published-1', () => { apiSuccesses += 1; }, (message, error) => {
   apiFailure = { message, error };
 });
+if (JSON.stringify(nextVersionRequest.data) !== JSON.stringify({ rendererVersion: 'teebot-lesson-renderer.v5' })) {
+  throw new Error(`createNextVersion must POST the renderer v5 request body, got ${JSON.stringify(nextVersionRequest.data)}`);
+}
 for (const malformed of [
   { id: 'different-id', lesson_version: 2 },
   { id: 'different-id', status: 'draft' },

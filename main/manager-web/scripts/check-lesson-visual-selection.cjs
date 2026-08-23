@@ -146,6 +146,7 @@ const { lessonApi, calls } = loadLessonApi();
 const data = {
   backgroundAssetVersionId: 'background-version-1',
   objectAssetVersionId: 'object-version-1',
+  robotAssetVersionId: 'robot-version-1',
 };
 const onSuccess = () => {};
 const onError = () => {};
@@ -171,8 +172,10 @@ assertSourceIncludes(
 );
 assertSourceIncludes(editorSource, 'data-testid="lesson-background-selector"', 'background selector needs a stable lesson-level test id');
 assertSourceIncludes(editorSource, 'data-testid="lesson-object-selector"', 'object selector needs a stable lesson-level test id');
+assertSourceIncludes(editorSource, 'data-testid="lesson-robot-selector"', 'robot selector needs a stable lesson-level test id');
 assertSourceIncludes(editorSource, 'lessonVisualPair()', 'LessonEditor must derive one canonical pair for the lesson');
 assertSourceIncludes(editorSource, 'canonicalLessonVisualPair(this.steps)', 'the canonical pair must come from authoritative steps');
+assertSourceIncludes(editorSource, 'isCourseModeV5()', 'Course Mode v5 must be the scoped boundary for robot triple authoring');
 assertSourceIncludes(editorSource, 'applyLessonVisualSelection(patch)', 'both selectors must share one lesson-level save path');
 assertSourceIncludes(editorSource, 'buildLessonVisualRequest(this.lessonVisualPair, patch)', 'every save must merge and validate both visual ids');
 assertSourceIncludes(editorSource, 'Api.lesson.applyLessonVisuals(', 'visual selection must use the lesson-level API');
@@ -188,6 +191,11 @@ assert.ok(!selectBackgroundSource.includes('setVisualRef'), 'background selector
 const selectTeachObjectSource = extractObjectMethod(editorSource, 'selectTeachObject');
 assert.match(selectTeachObjectSource, /applyLessonVisualSelection\(\{[\s\S]*objectAssetVersionId:\s*obj\.versionId[\s\S]*objectAssetKey:\s*obj\.assetKey/m);
 assert.ok(!selectTeachObjectSource.includes('setVisualRef'), 'object selector must not save a per-step visual ref');
+const selectedVisualVersionIdSource = extractObjectMethod(editorSource, 'selectedVisualVersionId');
+assert.match(selectedVisualVersionIdSource, /slot === 'robotOverlay'[\s\S]*this\.isCourseModeV5[\s\S]*this\.lessonVisualPair\.robotAssetVersionId/m, 'Course Mode v5 robot selector must read the lesson-wide robot pin');
+const selectCinematicLayerSource = extractObjectMethod(editorSource, 'selectCinematicLayer');
+assert.match(selectCinematicLayerSource, /selection\.slot === 'robotOverlay'[\s\S]*this\.isCourseModeV5[\s\S]*applyLessonVisualSelection\(\{[\s\S]*robotAssetVersionId:\s*selection\.assetVersionId[\s\S]*robotAssetKey:\s*asset\.assetKey/m, 'Course Mode v5 robot selector must use the atomic lesson visual triple save');
+assert.match(selectCinematicLayerSource, /if \(!this\.isCourseModeV5\)[\s\S]*Api\.lesson\.setVisualRef\(/m, 'legacy non-v5 robot authoring must keep the old per-step visual ref path');
 
 const saveSelectedStepSource = extractObjectMethod(editorSource, 'saveSelectedStep');
 const rebindClonedVisualSource = extractObjectMethod(editorSource, 'rebindClonedVisual');
@@ -500,6 +508,7 @@ function verifyVisualSaveNavigationEpochContract() {
     lessonLoadRequestId: 10,
     lessonVisualSaveRequestId: 0,
     editorDestroying: false,
+    isCourseModeV5: true,
     savingLessonVisuals: false,
     savingStep: false,
     rebindingSharedVisual: false,
@@ -515,6 +524,8 @@ function verifyVisualSaveNavigationEpochContract() {
       backgroundAssetKey: 'background.one',
       objectAssetVersionId: 'object-v1',
       objectAssetKey: 'object.one',
+      robotAssetVersionId: 'robot-v1',
+      robotAssetKey: 'robot.one',
     },
     pendingLessonVisualPair: null,
     lessonVisualReconciliationRequired: false,
@@ -537,6 +548,11 @@ function verifyVisualSaveNavigationEpochContract() {
     objectAssetKey: 'object.two',
   });
   assert.equal(calls.length, 1, 'visual save must dispatch once');
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0][1])), {
+    backgroundAssetVersionId: 'background-v1',
+    objectAssetVersionId: 'object-v2',
+    robotAssetVersionId: 'robot-v1',
+  }, 'Course Mode v5 visual saves must send background/object/robot UUIDs atomically');
 
   context.lessonLoadRequestId = 12;
   context.lessonVisualSaveRequestId += 1;
@@ -576,6 +592,11 @@ function verifyVisualSaveNavigationEpochContract() {
     objectAssetVersionId: 'object-v3',
     objectAssetKey: 'object.three',
   });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[1][1])), {
+    backgroundAssetVersionId: 'background-v1',
+    objectAssetVersionId: 'object-v3',
+    robotAssetVersionId: 'robot-v1',
+  }, 'subsequent visual saves must retain the current robot UUID');
   calls[1][2]({});
   assert.equal(invalidations, 1, 'a current visual PUT success must invalidate preview before authoritative reload');
   assert.equal(flattenedInvalidations, 1, 'a current visual PUT success must invalidate flattened derivative status');

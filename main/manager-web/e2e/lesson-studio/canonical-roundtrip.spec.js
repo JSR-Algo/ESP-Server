@@ -148,7 +148,7 @@ async function importCanonicalDraft(page, source, assetManifest, runId) {
       stepBody: { ...sourceStep.stepBody, branches },
     });
   }
-  return { course, lesson: await api(page, 'GET', `/lessons/${lesson.id}`) };
+  return { course, lesson: await api(page, 'GET', `/lessons/${lesson.id}`), versions };
 }
 
 function interactionItem(page, label) {
@@ -455,7 +455,11 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
     && response.request().method() === 'POST' && response.status() === 201);
   await newVersionButton.click();
   await page.getByRole('button', { name: /ok|confirm/i }).last().click();
-  const nextDraft = (await (await nextDraftResponse).json()).data;
+  const nextDraftHttpResponse = await nextDraftResponse;
+  expect(nextDraftHttpResponse.request().postDataJSON()).toEqual({
+    rendererVersion: 'teebot-lesson-renderer.v5',
+  });
+  const nextDraft = (await nextDraftHttpResponse.json()).data;
   await expect(page).toHaveURL(new RegExp(`lessonId=${nextDraft.id}`));
   await expect(page.getByRole('button', { name: 'Publish', exact: true })).toBeVisible();
   // Must differ from what v1 published (the parent draft already pinned corn
@@ -469,7 +473,12 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   const childVisualTile = page.getByTestId('lesson-object-selector').locator('.asset-tile')
     .filter({ hasText: childVisualKey });
   await childVisualTile.locator('.asset-tile__select').click();
-  await childVisualSave;
+  const childVisualSaveResponse = await childVisualSave;
+  expect(childVisualSaveResponse.request().postDataJSON()).toMatchObject({
+    backgroundAssetVersionId: fixture.versions.get(source.visuals.backgroundScene),
+    objectAssetVersionId: fixture.versions.get(source.teachingObjects.hen),
+    robotAssetVersionId: fixture.versions.get(source.visuals.robotOverlay),
+  });
   const childProjection = await api(page, 'GET', `/lessons/${nextDraft.id}/manifest-preview?profile=espTft`);
   const childPinnedVisuals = pinnedVisualIdentity(childProjection.manifest);
   expect(childPinnedVisuals).not.toEqual(publishedPinnedVisuals);
