@@ -307,6 +307,7 @@ export default {
   'lesson.rename': 'Rename',
   'lesson.renamed': 'Lesson renamed',
   'lesson.createNextVersion': 'Create editable version',
+  'lesson.createCourseModeV5Version': 'Create Course Mode v5 version',
   'lesson.nextVersionCreated': 'Editable draft created.',
   'lesson.nextVersionFailed': 'Failed to create an editable draft.',
   'lesson.nextVersionInvalid': 'The server returned an invalid lesson draft.',

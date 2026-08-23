@@ -21,6 +21,9 @@
         <el-button v-if="lesson.status === 'published'" data-testid="create-next-version" type="primary" size="small" @click="createNextVersion" :loading="creatingNextVersion" :disabled="creatingNextVersion">
           {{ $t('lesson.createNextVersion') }}
         </el-button>
+        <el-button v-if="canCreateCourseModeV5Version" data-testid="create-course-mode-v5-version" type="primary" size="small" plain @click="createCourseModeV5Version" :loading="creatingNextVersion" :disabled="creatingNextVersion">
+          {{ $t('lesson.createCourseModeV5Version') }}
+        </el-button>
         <el-button size="small" @click="doValidate" :loading="validating" :disabled="proofActionsDisabled">{{ $t('lesson.validate') }}</el-button>
         <el-button v-if="lessonCapabilities.exactEspTftPreview" size="small" @click="doPreview" :loading="previewing" :disabled="proofActionsDisabled">{{ $t('lesson.previewManifest') }}</el-button>
         <el-button v-if="isDraft" type="primary" size="small" @click="doPublish" :loading="publishing || publishPreparing" :disabled="!canPublishCurrentProof()">
@@ -845,6 +848,15 @@ export default {
         && this.hasLoadedCourseModeAuthority
       );
     },
+    canCreateCourseModeV5Version() {
+      return Boolean(
+        this.lesson
+        && this.lesson.lessonId === this.lessonId
+        && this.lesson.status === 'published'
+        && this.lesson.manifestVersion === 'teebot-lesson-renderer.v4'
+        && this.hasLoadedCourseModeAuthority
+      );
+    },
     hasLoadedCourseModeAuthority() {
       const manifest = this.previewManifest && this.previewManifest.manifest;
       return Boolean(
@@ -1210,32 +1222,37 @@ export default {
       return 'warning';
     },
     createNextVersion() {
+      return this.submitNextVersion();
+    },
+    createCourseModeV5Version() {
+      if (!this.canCreateCourseModeV5Version) return false;
+      return this.submitNextVersion({ rendererVersion: 'teebot-lesson-renderer.v5' });
+    },
+    submitNextVersion(data) {
       if (this.creatingNextVersion || !this.lesson || this.lesson.status !== 'published') return false;
       const publishedLessonId = this.lesson.lessonId;
       const publishedLessonVersion = Number(this.lesson.lessonVersion);
       this.creatingNextVersion = true;
-      Api.lesson.createNextVersion(
-        publishedLessonId,
-        { rendererVersion: 'teebot-lesson-renderer.v5' },
-        (draft) => {
-          this.creatingNextVersion = false;
-          if (!draft || !draft.lessonId || draft.lessonId === publishedLessonId || draft.status !== 'draft'
-            || !Number.isSafeInteger(publishedLessonVersion) || publishedLessonVersion < 1
-            || !Number.isSafeInteger(draft.lessonVersion) || draft.lessonVersion <= publishedLessonVersion) {
-            this.$message.error(this.$t('lesson.nextVersionInvalid'));
-            return;
-          }
-          this.$message.success(this.$t('lesson.nextVersionCreated'));
-          this.$router.replace({
-            path: this.$route.path,
-            query: { ...this.$route.query, lessonId: draft.lessonId },
-          });
-        },
-        (message) => {
-          this.creatingNextVersion = false;
-          this.$message.error(message || this.$t('lesson.nextVersionFailed'));
-        },
-      );
+      const onSuccess = (draft) => {
+        this.creatingNextVersion = false;
+        if (!draft || !draft.lessonId || draft.lessonId === publishedLessonId || draft.status !== 'draft'
+          || !Number.isSafeInteger(publishedLessonVersion) || publishedLessonVersion < 1
+          || !Number.isSafeInteger(draft.lessonVersion) || draft.lessonVersion <= publishedLessonVersion) {
+          this.$message.error(this.$t('lesson.nextVersionInvalid'));
+          return;
+        }
+        this.$message.success(this.$t('lesson.nextVersionCreated'));
+        this.$router.replace({
+          path: this.$route.path,
+          query: { ...this.$route.query, lessonId: draft.lessonId },
+        });
+      };
+      const onError = (message) => {
+        this.creatingNextVersion = false;
+        this.$message.error(message || this.$t('lesson.nextVersionFailed'));
+      };
+      if (data === undefined) Api.lesson.createNextVersion(publishedLessonId, onSuccess, onError);
+      else Api.lesson.createNextVersion(publishedLessonId, data, onSuccess, onError);
       return true;
     },
     formatTVideoJourneyError(message, response) {

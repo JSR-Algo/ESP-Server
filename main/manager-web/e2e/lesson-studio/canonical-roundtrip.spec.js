@@ -451,14 +451,13 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   await expect(page.getByRole('heading', { name: new RegExp(customizedTitle) })).toBeVisible();
   const newVersionButton = page.getByTestId('create-next-version');
   await expect(newVersionButton).toHaveCount(1);
+  await expect(page.getByTestId('create-course-mode-v5-version')).toHaveCount(0);
   const nextDraftResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}/new-version`)
     && response.request().method() === 'POST' && response.status() === 201);
   await newVersionButton.click();
   await page.getByRole('button', { name: /ok|confirm/i }).last().click();
   const nextDraftHttpResponse = await nextDraftResponse;
-  expect(nextDraftHttpResponse.request().postDataJSON()).toEqual({
-    rendererVersion: 'teebot-lesson-renderer.v5',
-  });
+  expect(nextDraftHttpResponse.request().postData()).toBeNull();
   const nextDraft = (await nextDraftHttpResponse.json()).data;
   await expect(page).toHaveURL(new RegExp(`lessonId=${nextDraft.id}`));
   await expect(page.getByRole('button', { name: 'Publish', exact: true })).toBeVisible();

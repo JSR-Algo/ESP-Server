@@ -307,6 +307,7 @@ export default {
   'lesson.rename': 'Đổi tên',
   'lesson.renamed': 'Đã đổi tên bài học',
   'lesson.createNextVersion': 'Tạo phiên bản chỉnh sửa',
+  'lesson.createCourseModeV5Version': 'Tạo phiên bản Course Mode v5',
   'lesson.nextVersionCreated': 'Đã tạo bản nháp có thể chỉnh sửa.',
   'lesson.nextVersionFailed': 'Không thể tạo bản nháp có thể chỉnh sửa.',
   'lesson.nextVersionInvalid': 'Máy chủ trả về bản nháp bài học không hợp lệ.',
