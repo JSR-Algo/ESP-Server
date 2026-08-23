@@ -456,8 +456,9 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
     && response.request().method() === 'POST' && response.status() === 201);
   await newVersionButton.click();
   const nextDraftHttpResponse = await nextDraftResponse;
-  expect(nextDraftHttpResponse.request().postData()).toBeNull();
+  expect(nextDraftHttpResponse.request().postDataJSON()).toEqual({});
   const nextDraft = (await nextDraftHttpResponse.json()).data;
+  expect(nextDraft.manifest_version || nextDraft.manifestVersion).toBe('teebot-lesson-renderer.v1');
   await expect(page).toHaveURL(new RegExp(`lessonId=${nextDraft.id}`));
   await expect(page.getByRole('button', { name: 'Publish', exact: true })).toBeVisible();
   // Must differ from what v1 published (the parent draft already pinned corn
