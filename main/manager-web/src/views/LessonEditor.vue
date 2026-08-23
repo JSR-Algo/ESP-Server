@@ -138,7 +138,7 @@
                   :selected-version-id="selectedVisualVersionId('backgroundScene')"
                   :loading="cinematicLibraryLoading.backgroundScene"
                   :error="cinematicLibraryErrors.backgroundScene"
-                  :disabled="lessonVisualSelectionDisabled"
+                  :disabled="!isDraft || lessonVisualSelectionDisabled"
                   @select="selectCinematicLayer"
                 />
               </div>
@@ -150,7 +150,7 @@
                   :selected-version-id="selectedVisualVersionId('teachingObject')"
                   :loading="cinematicLibraryLoading.teachingObject"
                   :error="cinematicLibraryErrors.teachingObject"
-                  :disabled="lessonVisualSelectionDisabled"
+                  :disabled="!isDraft || lessonVisualSelectionDisabled"
                   @select="selectCinematicLayer"
                 />
               </div>
@@ -694,7 +694,7 @@ export default {
       // Lifted bundle assets from LessonAssetManager (keyed by layer downstream).
       bundleAssets: [],
       sharedBackgrounds: [],
-      cinematicLibraries: { backgroundScene: [], teachingObject: [], robotOverlay: [] },
+      rawCinematicLibraries: { backgroundScene: [], teachingObject: [], robotOverlay: [] },
       cinematicLibraryLoading: { backgroundScene: false, teachingObject: false, robotOverlay: false },
       cinematicLibraryErrors: { backgroundScene: '', teachingObject: '', robotOverlay: '' },
       cinematicRefSaving: false,
@@ -905,6 +905,16 @@ export default {
     },
     templateAssets() {
       return [...this.bundleAssets, ...this.sharedBackgrounds];
+    },
+    cinematicLibraries() {
+      const libraries = this.rawCinematicLibraries || {};
+      return {
+        backgroundScene: Array.isArray(libraries.backgroundScene) ? libraries.backgroundScene : [],
+        teachingObject: Array.isArray(libraries.teachingObject) ? libraries.teachingObject : [],
+        robotOverlay: this.isCourseModeV5
+          ? this.filterRobotVideoAssets(libraries.robotOverlay)
+          : (Array.isArray(libraries.robotOverlay) ? libraries.robotOverlay : []),
+      };
     },
     selectedStep() {
       return this.steps[this.selectedStepIndex] || null;
@@ -2369,13 +2379,11 @@ export default {
           { category, profile: 'espTft' },
           (rows) => {
             const assets = Array.isArray(rows) ? rows : [];
-            this.$set(this.cinematicLibraries, slot, slot === 'robotOverlay' && this.isCourseModeV5
-              ? this.filterRobotVideoAssets(assets)
-              : assets);
+            this.$set(this.rawCinematicLibraries, slot, assets);
             this.$set(this.cinematicLibraryLoading, slot, false);
           },
           (msg) => {
-            this.$set(this.cinematicLibraries, slot, []);
+            this.$set(this.rawCinematicLibraries, slot, []);
             this.$set(this.cinematicLibraryLoading, slot, false);
             this.$set(this.cinematicLibraryErrors, slot, msg || `Could not load ${category} assets.`);
           },
@@ -2383,12 +2391,29 @@ export default {
       });
     },
     filterRobotVideoAssets(assets) {
+      const inRangeInt = (value, min, max) => Number.isInteger(value)
+        && value >= min
+        && value <= max;
+      const hasValidLayeredChroma = (chromaKey) => chromaKey
+        && typeof chromaKey === 'object'
+        && typeof chromaKey.keyColor === 'string'
+        && /^#[0-9a-fA-F]{6}$/.test(chromaKey.keyColor)
+        && inRangeInt(chromaKey.tolerance, 0, 255)
+        && inRangeInt(chromaKey.featherPx, 0, 4);
+      const hasValidLegacyChroma = (chromaKey) => {
+        if (!chromaKey || typeof chromaKey !== 'object') return false;
+        const color = chromaKey.color;
+        return color
+          && typeof color === 'object'
+          && ['r', 'g', 'b'].every((channel) => inRangeInt(color[channel], 0, 255))
+          && inRangeInt(chromaKey.tolerance, 0, 255)
+          && inRangeInt(chromaKey.feather, 0, 4);
+      };
       return (Array.isArray(assets) ? assets : []).filter((asset) => {
         const metadata = asset && asset.compatibilityMetadata && typeof asset.compatibilityMetadata === 'object'
           ? asset.compatibilityMetadata
           : {};
         const chromaKey = asset.chromaKey || metadata.chromaKey || metadata.chroma_key;
-        const color = chromaKey && (chromaKey.color || chromaKey.keyColor || chromaKey.key_color);
         const codec = String(asset.codec || metadata.codec || '').toLowerCase();
         const fps = Number(asset.fps || metadata.fps || 0);
         return asset
@@ -2400,7 +2425,7 @@ export default {
           && metadata.hasAudio === false
           && (fps === 10 || fps === 15)
           && chromaKey && typeof chromaKey === 'object'
-          && color && ['r', 'g', 'b'].every((channel) => Number.isFinite(Number(color[channel])));
+          && (hasValidLayeredChroma(chromaKey) || hasValidLegacyChroma(chromaKey));
       });
     },
     selectedVisualVersionId(slot) {
@@ -2481,7 +2506,8 @@ export default {
       });
     },
     applyLessonVisualSelection(patch) {
-      if (this.savingLessonVisuals || this.savingStep || this.rebindingSharedVisual
+      if (!this.isDraft
+        || this.savingLessonVisuals || this.savingStep || this.rebindingSharedVisual
         || this.assetMutating || this.sharedImpactReconciling
         || Object.keys(this.savingStepKeys).some((key) => this.savingStepKeys[key])
         || this.addingStep || this.reordering || this.deletingStepKey

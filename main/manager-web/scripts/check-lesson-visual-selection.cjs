@@ -185,9 +185,15 @@ assertSourceIncludes(editorSource, 'buildLessonVisualRequest(this.lessonVisualPa
 assertSourceIncludes(editorSource, 'Api.lesson.applyLessonVisuals(', 'visual selection must use the lesson-level API');
 assertSourceIncludes(editorSource, 'savingLessonVisuals: false', 'visual selection needs an explicit saving state');
 assertSourceIncludes(editorSource, 'pendingLessonVisualPair: null', 'incomplete local pairs need explicit pending state');
+assertSourceIncludes(editorSource, 'rawCinematicLibraries:', 'cinematic assets must be stored raw so Course Mode authority can filter on read');
 assert.ok(!editorSource.includes('selectedBackgroundKey: \'\''), 'selectedBackgroundKey must not be mutable component data');
 assert.ok(!editorSource.includes('pickedObjectKey: \'\''), 'pickedObjectKey must not be mutable component data');
 assert.ok(!editorSource.includes('<SharedAssetPicker'), 'the editor must not expose a conflicting per-step teaching-object picker');
+assertSourceIncludes(
+  editorSource,
+  ':disabled="!isDraft || lessonVisualSelectionDisabled"',
+  'published lessons must disable the background and teaching-object selectors',
+);
 
 const selectBackgroundSource = extractObjectMethod(editorSource, 'selectBackground');
 assert.match(selectBackgroundSource, /applyLessonVisualSelection\(\{[\s\S]*backgroundAssetVersionId:\s*bg\.versionId[\s\S]*backgroundAssetKey:\s*bg\.assetKey/m);
@@ -278,6 +284,7 @@ assert.equal(JSON.stringify(staleStepPayload), staleStepPayloadSnapshot, 'stripp
 
 const applyLessonVisualSelectionSource = extractObjectMethod(editorSource, 'applyLessonVisualSelection');
 const visualSaveGuard = applyLessonVisualSelectionSource.slice(0, applyLessonVisualSelectionSource.indexOf('const nextPair'));
+assertSourceIncludes(visualSaveGuard, '!this.isDraft', 'published lessons must not dispatch lesson visual PUTs');
 assertSourceIncludes(visualSaveGuard, 'this.savingStep', 'lesson visual saves must wait for step saves');
 assertSourceIncludes(visualSaveGuard, 'this.rebindingSharedVisual', 'lesson visual saves must wait for shared visual rebinds');
 assertSourceIncludes(visualSaveGuard, 'this.assetMutating', 'lesson visual saves must wait for active visual asset mutations');
@@ -404,6 +411,57 @@ assert.match(
 );
 assert.ok(!applyLessonVisualSelectionSource.includes('this.doPreview('), 'authoritative fetch must remain the only automatic preview trigger');
 
+const publishedVisualSaveCalls = [];
+const applyLessonVisualSelection = vm.runInNewContext(`(${applyLessonVisualSelectionSource.replace(
+  /^applyLessonVisualSelection/,
+  'function applyLessonVisualSelection',
+)})`, {
+  Api: { lesson: { applyLessonVisuals: (...args) => publishedVisualSaveCalls.push(args) } },
+  Object,
+  buildLessonVisualRequest,
+});
+const publishedVisualSaveContext = {
+  lessonId: 'published-lesson',
+  lessonLoadRequestId: 1,
+  lessonVisualSaveRequestId: 0,
+  editorDestroying: false,
+  isDraft: false,
+  isCourseModeV5: true,
+  savingLessonVisuals: false,
+  savingStep: false,
+  rebindingSharedVisual: false,
+  assetMutating: false,
+  sharedImpactReconciling: false,
+  savingStepKeys: {},
+  addingStep: false,
+  reordering: false,
+  deletingStepKey: '',
+  steps: [{ stepKey: 'step-a' }],
+  lessonVisualPair: {
+    backgroundAssetVersionId: 'background-v1',
+    backgroundAssetKey: 'background.one',
+    objectAssetVersionId: 'object-v1',
+    objectAssetKey: 'object.one',
+    robotAssetVersionId: 'robot-v1',
+    robotAssetKey: 'robot.one',
+  },
+  pendingLessonVisualPair: null,
+  lessonVisualReconciliationRequired: false,
+  $nextTick(callback) { callback(); },
+  pushCinematicStep() {},
+  $t(key) { return key; },
+  $message: { warning() {}, error() {}, success() {} },
+};
+assert.equal(
+  applyLessonVisualSelection.call(publishedVisualSaveContext, {
+    backgroundAssetVersionId: 'background-v2',
+    backgroundAssetKey: 'background.two',
+  }),
+  false,
+  'published lesson visual selection must return false',
+);
+assert.equal(publishedVisualSaveCalls.length, 0, 'published lesson visual selection must not send a visual PUT');
+
 const authoritativeReloadFailure = applyLessonVisualSelectionSource.match(
   /this\.fetchSteps\(\{[\s\S]*?onError:\s*\(\)\s*=>\s*\{([\s\S]*?)\n\s{12}\},\n\s{10}\}\);/m,
 );
@@ -471,6 +529,7 @@ assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualTripleRequired':", '
 
 function verifyDirectCinematicLibraryContract() {
   const loadCinematicLibrariesSource = extractObjectMethod(editorSource, 'loadCinematicLibraries');
+  const cinematicLibrariesSource = extractObjectMethod(editorSource, 'cinematicLibraries');
   const requests = [];
   const loadCinematicLibraries = vm.runInNewContext(`(${loadCinematicLibrariesSource.replace(
     /^loadCinematicLibraries/,
@@ -482,12 +541,22 @@ function verifyDirectCinematicLibraryContract() {
     },
     Object,
   });
+  const cinematicLibraries = vm.runInNewContext(`(${cinematicLibrariesSource.replace(
+    /^cinematicLibraries/,
+    'function cinematicLibraries',
+  )})`, {
+    JSON,
+  });
+  const filterRobotVideoAssets = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'filterRobotVideoAssets').replace(
+    /^filterRobotVideoAssets/,
+    'function filterRobotVideoAssets',
+  )})`, { Number, String, Array });
   const context = {
-    cinematicLibraries: { backgroundScene: [], teachingObject: [], robotOverlay: [] },
+    rawCinematicLibraries: { backgroundScene: [], teachingObject: [], robotOverlay: [] },
     cinematicLibraryLoading: { backgroundScene: false, teachingObject: false, robotOverlay: false },
     cinematicLibraryErrors: { backgroundScene: '', teachingObject: '', robotOverlay: '' },
     isCourseModeV5: true,
-    filterRobotVideoAssets: vm.runInNewContext(`(${extractObjectMethod(editorSource, 'filterRobotVideoAssets').replace(/^filterRobotVideoAssets/, 'function filterRobotVideoAssets')})`, { Number, String, Array }),
+    filterRobotVideoAssets,
     $set(target, key, value) { target[key] = value; },
   };
   loadCinematicLibraries.call(context);
@@ -512,7 +581,22 @@ function verifyDirectCinematicLibraryContract() {
       codec: 'mjpeg',
       fps: 10,
       hasAudio: false,
-      chromaKey: { color: { r: 0, g: 255, b: 0 }, similarity: 0.18, smoothness: 0.05 },
+      chromaKey: { color: { r: 0, g: 255, b: 0 }, tolerance: 32, feather: 2 },
+    },
+  };
+  const layeredRobot = {
+    assetKey: 'robot.layered',
+    versionId: 'robot-layered',
+    category: 'robotPose',
+    profile: 'espTft',
+    publicationState: 'published',
+    url: '/robot-layered.mp4',
+    mimeType: 'video/mp4',
+    codec: 'motion-jpeg',
+    fps: 15,
+    compatibilityMetadata: {
+      hasAudio: false,
+      chromaKey: { keyColor: '#00ff00', tolerance: 32, featherPx: 2 },
     },
   };
   const invalidRobots = [
@@ -522,15 +606,54 @@ function verifyDirectCinematicLibraryContract() {
     { ...validRobot, assetKey: 'robot.audio', versionId: 'robot-audio', compatibilityMetadata: { ...validRobot.compatibilityMetadata, hasAudio: true } },
     { ...validRobot, assetKey: 'robot.bad-fps', versionId: 'robot-fps', fps: 12, compatibilityMetadata: { ...validRobot.compatibilityMetadata, fps: 12 } },
     { ...validRobot, assetKey: 'robot.no-chroma', versionId: 'robot-chroma', compatibilityMetadata: { codec: 'mjpeg', fps: 10, hasAudio: false } },
+    { ...layeredRobot, assetKey: 'robot.bad-key-color', versionId: 'robot-key-color', compatibilityMetadata: { ...layeredRobot.compatibilityMetadata, chromaKey: { keyColor: '00ff00', tolerance: 32, featherPx: 2 } } },
+    { ...layeredRobot, assetKey: 'robot.bad-layered-tolerance', versionId: 'robot-layered-tolerance', compatibilityMetadata: { ...layeredRobot.compatibilityMetadata, chromaKey: { keyColor: '#00ff00', tolerance: 256, featherPx: 2 } } },
+    { ...layeredRobot, assetKey: 'robot.bad-layered-feather', versionId: 'robot-layered-feather', compatibilityMetadata: { ...layeredRobot.compatibilityMetadata, chromaKey: { keyColor: '#00ff00', tolerance: 32, featherPx: 5 } } },
+    { ...validRobot, assetKey: 'robot.bad-legacy-tolerance', versionId: 'robot-legacy-tolerance', compatibilityMetadata: { ...validRobot.compatibilityMetadata, chromaKey: { color: { r: 0, g: 255, b: 0 }, tolerance: -1, feather: 2 } } },
+    { ...validRobot, assetKey: 'robot.bad-legacy-feather', versionId: 'robot-legacy-feather', compatibilityMetadata: { ...validRobot.compatibilityMetadata, chromaKey: { color: { r: 0, g: 255, b: 0 }, tolerance: 32, feather: 5 } } },
+    { ...validRobot, assetKey: 'robot.bad-legacy-color', versionId: 'robot-legacy-color', compatibilityMetadata: { ...validRobot.compatibilityMetadata, chromaKey: { color: { r: 0, g: 300, b: 0 }, tolerance: 32, feather: 2 } } },
   ];
   requests[0][1](sceneRows);
   requests[1][1](objectRows);
-  requests[2][1]([validRobot, ...invalidRobots]);
-  assert.strictEqual(context.cinematicLibraries.backgroundScene, sceneRows);
-  assert.strictEqual(context.cinematicLibraries.teachingObject, objectRows);
-  assert.deepEqual(JSON.parse(JSON.stringify(context.cinematicLibraries.robotOverlay.map((row) => row.versionId))), ['robot-valid']);
+  requests[2][1]([validRobot, layeredRobot, ...invalidRobots]);
+  assert.strictEqual(context.rawCinematicLibraries.backgroundScene, sceneRows);
+  assert.strictEqual(context.rawCinematicLibraries.teachingObject, objectRows);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.rawCinematicLibraries.robotOverlay.map((row) => row.versionId))), [
+    'robot-valid',
+    'robot-layered',
+    'robot-draft',
+    'robot-png',
+    'robot-h264',
+    'robot-audio',
+    'robot-fps',
+    'robot-chroma',
+    'robot-key-color',
+    'robot-layered-tolerance',
+    'robot-layered-feather',
+    'robot-legacy-tolerance',
+    'robot-legacy-feather',
+    'robot-legacy-color',
+  ], 'robot library load must keep raw backend rows until Course Mode authority is known');
+  assert.deepEqual(JSON.parse(JSON.stringify(cinematicLibraries.call(context).robotOverlay.map((row) => row.versionId))), ['robot-valid', 'robot-layered']);
   assert.equal(context.cinematicLibraryErrors.robotOverlay, '');
   assert.equal(Object.values(context.cinematicLibraryLoading).some(Boolean), false);
+
+  const delayedAuthorityContext = {
+    rawCinematicLibraries: { backgroundScene: [], teachingObject: [], robotOverlay: [validRobot, ...invalidRobots] },
+    isCourseModeV5: false,
+    filterRobotVideoAssets,
+  };
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(cinematicLibraries.call(delayedAuthorityContext).robotOverlay.map((row) => row.versionId))),
+    delayedAuthorityContext.rawCinematicLibraries.robotOverlay.map((row) => row.versionId),
+    'before Course Mode authority arrives, the robot library remains raw for legacy renderer-v5 authoring',
+  );
+  delayedAuthorityContext.isCourseModeV5 = true;
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(cinematicLibraries.call(delayedAuthorityContext).robotOverlay.map((row) => row.versionId))),
+    ['robot-valid'],
+    'when Course Mode authority arrives after assets, the robot picker must fail closed by filtering on read',
+  );
 }
 
 function verifyOrderedStepRefreshContract() {
@@ -598,6 +721,7 @@ function verifyVisualSaveNavigationEpochContract() {
     lessonLoadRequestId: 10,
     lessonVisualSaveRequestId: 0,
     editorDestroying: false,
+    isDraft: true,
     isCourseModeV5: true,
     savingLessonVisuals: false,
     savingStep: false,
