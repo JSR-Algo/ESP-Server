@@ -442,6 +442,8 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   expect(JSON.stringify(publishedProjection.manifest)).not.toMatch(/video\/mp4|\.mp4/i);
   await assertManifestVisualAssetsServed(page, publishedProjection.manifest);
   const publishedPinnedVisuals = pinnedVisualIdentity(publishedProjection.manifest);
+  const publishedRobotAsset = publishedProjection.manifest.steps[0].scene.robotOverlay.asset;
+  expect(publishedRobotAsset.assetKey).toBe(`canonical.${runId}.${source.visuals.robotOverlay}`);
 
   await page.goto(`/login#/course-lessons?courseId=${fixture.course.id}&title=${encodeURIComponent(fixture.course.title)}`);
   await expect(page.getByRole('row').filter({ hasText: customizedTitle }).first()).toContainText('published');
@@ -473,15 +475,17 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
     .filter({ hasText: childVisualKey });
   await childVisualTile.locator('.asset-tile__select').click();
   const childVisualSaveResponse = await childVisualSave;
-  expect(childVisualSaveResponse.request().postDataJSON()).toMatchObject({
+  const childVisualPayload = childVisualSaveResponse.request().postDataJSON();
+  expect(childVisualPayload).toEqual({
     backgroundAssetVersionId: fixture.versions.get(source.visuals.backgroundScene),
     objectAssetVersionId: fixture.versions.get(source.teachingObjects.hen),
-    robotAssetVersionId: fixture.versions.get(source.visuals.robotOverlay),
   });
+  expect(childVisualPayload).not.toHaveProperty('robotAssetVersionId');
   const childProjection = await api(page, 'GET', `/lessons/${nextDraft.id}/manifest-preview?profile=espTft`);
   const childPinnedVisuals = pinnedVisualIdentity(childProjection.manifest);
   expect(childPinnedVisuals).not.toEqual(publishedPinnedVisuals);
   expect(childProjection.manifest.steps[0].scene.teachingObject.asset.assetKey).toBe(childVisualKey);
+  expect(childProjection.manifest.steps[0].scene.robotOverlay.asset).toEqual(publishedRobotAsset);
   const originalAfterDraftEdit = await api(page, 'GET', `/lessons/${fixture.lesson.id}`);
   expect(originalAfterDraftEdit.manifest_checksum || originalAfterDraftEdit.manifestChecksum).toBe(published.checksum);
   const originalProjectionAfterDraftEdit = await api(page, 'GET', `/lessons/${fixture.lesson.id}/manifest-preview?profile=espTft`);
