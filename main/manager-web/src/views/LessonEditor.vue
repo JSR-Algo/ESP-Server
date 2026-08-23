@@ -2396,8 +2396,7 @@ export default {
         && value <= max;
       const hasValidLayeredChroma = (chromaKey) => chromaKey
         && typeof chromaKey === 'object'
-        && typeof chromaKey.keyColor === 'string'
-        && /^#[0-9a-fA-F]{6}$/.test(chromaKey.keyColor)
+        && chromaKey.keyColor === '#00ff00'
         && inRangeInt(chromaKey.tolerance, 0, 255)
         && inRangeInt(chromaKey.featherPx, 0, 4);
       const hasValidLegacyChroma = (chromaKey) => {
