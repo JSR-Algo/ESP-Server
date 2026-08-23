@@ -39,8 +39,13 @@ ACTUAL_SHA="$(git -C "${BACKEND_ROOT}" rev-parse HEAD)"
 [[ -f "${BACKEND_ROOT}/Dockerfile" ]] || fail "backend Dockerfile is missing"
 [[ -f "${BACKEND_ROOT}/keys/dev-public.pem" ]] || fail "backend local public key is missing"
 [[ -f "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem" ]] || fail "backend local private key is missing"
-openssl pkey -in "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem" -pubout 2>/dev/null | \
-  cmp -s - "${BACKEND_ROOT}/keys/dev-public.pem" || \
+KEY_CHECK_DIR="$(mktemp -d)"
+trap 'rm -rf -- "${KEY_CHECK_DIR}"' EXIT
+openssl pkey -in "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem" -pubout -outform DER \
+  -out "${KEY_CHECK_DIR}/private-public.der" 2>/dev/null && \
+openssl pkey -pubin -in "${BACKEND_ROOT}/keys/dev-public.pem" -outform DER \
+  -out "${KEY_CHECK_DIR}/public.der" 2>/dev/null && \
+  cmp -s "${KEY_CHECK_DIR}/private-public.der" "${KEY_CHECK_DIR}/public.der" || \
   fail "backend local JWT public/private key pair is invalid or mismatched"
 [[ -f "${BACKEND_ROOT}/src/lessons/course-mode/course-mode-local-materializer.ts" ]] || \
   fail "backend Course Mode local materializer source is missing"

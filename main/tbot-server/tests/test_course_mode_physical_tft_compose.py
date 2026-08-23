@@ -212,14 +212,15 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
 
 def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path):
     script = PHYSICAL_TFT_UP.read_text(encoding="utf-8")
-    assert 'openssl pkey -in "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem" -pubout' in script
+    assert 'openssl pkey -in "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem" -pubout -outform DER' in script
+    assert 'openssl pkey -pubin -in "${BACKEND_ROOT}/keys/dev-public.pem" -outform DER' in script
     assert 'export JWT_PRIVATE_KEY="$(cat "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem")"' in script
 
     backend = tmp_path / "backend"
     backend.mkdir()
     (backend / "keys").mkdir()
     public_pem, private_pem = _test_key_pair()
-    (backend / "keys" / "dev-public.pem").write_text(public_pem, encoding="utf-8")
+    (backend / "keys" / "dev-public.pem").write_bytes(public_pem.replace("\n", "\r\n").encode())
     (backend / "keys" / "dev-private-pkcs8.pem").write_text(private_pem, encoding="utf-8")
     (backend / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
     materializer = backend / "src/lessons/course-mode/course-mode-local-materializer.ts"
