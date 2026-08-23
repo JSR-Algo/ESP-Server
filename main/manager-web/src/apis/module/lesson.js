@@ -468,7 +468,7 @@ export default {
       url: `${getNestUrl()}/lessons/${lessonId}`,
       method: 'PATCH',
       data,
-      onSuccess: (p) => onSuccess(normalizeLesson(p)),
+      onSuccess: (p) => onSuccess(normalizeAuthoringLesson(p)),
       onError,
     });
   },

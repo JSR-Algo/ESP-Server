@@ -2854,10 +2854,17 @@ export default {
         this.lessonId,
         { title: this.titleDraft },
         (l) => {
+          const currentLesson = this.lesson || {};
+          const updatedLesson = {
+            ...currentLesson,
+            ...l,
+            manifestVersion: l.manifestVersion || currentLesson.manifestVersion || '',
+            courseModeContract: l.courseModeContract ?? currentLesson.courseModeContract ?? null,
+          };
           this.invalidatePreview();
           this.renaming = false;
           this.renameVisible = false;
-          this.lesson = l;
+          this.lesson = updatedLesson;
           this.$message.success(this.$t('lesson.renamed'));
         },
         (msg, error) => {
