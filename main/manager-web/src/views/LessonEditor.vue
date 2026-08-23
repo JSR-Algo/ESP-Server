@@ -124,11 +124,11 @@
               role="status"
               aria-live="polite"
             >
-              {{ $t('lesson.visualPairRequired') }}
+              {{ $t(isCourseModeV5 ? 'lesson.visualTripleRequired' : 'lesson.visualPairRequired') }}
             </p>
             <div v-if="lessonCapabilities.sharedVisualAuthoring || lessonCapabilities.exactEspTftPreview" class="cinematic-pickers">
               <div v-if="!isDraft" class="immutable-version-message" data-testid="immutable-version-message">
-                Background and teaching object update this lesson immediately. Robot overlay remains read-only for published lessons.
+                {{ $t('lesson.visualSelectionReadOnly') }}
               </div>
               <div data-testid="lesson-background-selector">
                 <CinematicLayerPicker
@@ -1763,6 +1763,7 @@ export default {
       const lessonId = this.lessonId;
       this.lessonLoadRequestId = requestId;
       this.resetLessonAssetGenerationStatus();
+      this.clearPreviewProofState();
       this.loading = true;
       Api.lesson.getLesson(
         lessonId,
@@ -1797,6 +1798,13 @@ export default {
         },
         () => { this.sharedBackgrounds = []; },
       );
+    },
+    clearPreviewProofState() {
+      this.preview = null;
+      this.previewManifest = null;
+      this.previewProofVersion = -1;
+      this.simulationEvidence = null;
+      this.simulationProofVersion = -1;
     },
     fetchSteps(options = {}) {
       const requestId = this.lessonStepsRequestId + 1;

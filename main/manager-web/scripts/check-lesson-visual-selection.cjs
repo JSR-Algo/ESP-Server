@@ -194,6 +194,20 @@ assertSourceIncludes(
   ':disabled="!isDraft || lessonVisualSelectionDisabled"',
   'published lessons must disable the background and teaching-object selectors',
 );
+assertSourceIncludes(
+  editorSource,
+  "$t(isCourseModeV5 ? 'lesson.visualTripleRequired' : 'lesson.visualPairRequired')",
+  'the inline missing-visual notice must use the Course Mode v5 triple copy when a robot video is also required',
+);
+assertSourceIncludes(
+  editorSource,
+  "$t('lesson.visualSelectionReadOnly')",
+  'published lesson visual notice must use read-only/create-editable-version copy',
+);
+assert.ok(
+  !editorSource.includes('Background and teaching object update this lesson immediately.'),
+  'published lesson visual notice must not claim selectors update published lessons immediately',
+);
 
 const selectBackgroundSource = extractObjectMethod(editorSource, 'selectBackground');
 assert.match(selectBackgroundSource, /applyLessonVisualSelection\(\{[\s\S]*backgroundAssetVersionId:\s*bg\.versionId[\s\S]*backgroundAssetKey:\s*bg\.assetKey/m);
@@ -522,7 +536,10 @@ assertSourceIncludes(
 assertSourceIncludes(editorSource, 'this.addingStep = false;', 'lesson navigation must reset add-step in-flight state');
 assertSourceIncludes(editorSource, 'this.reordering = false;', 'lesson navigation must reset reorder in-flight state');
 assertSourceIncludes(read('src/i18n/en.js'), "'lesson.visualPairReloadFailed':", 'English reload reconciliation warning is required');
+assertSourceIncludes(read('src/i18n/en.js'), "'lesson.visualSelectionReadOnly':", 'English published visual read-only notice is required');
+assertSourceIncludes(read('src/i18n/en.js'), 'create an editable version', 'published visual read-only notice must direct authors to create an editable version');
 assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualPairReloadFailed':", 'Vietnamese reload reconciliation warning is required');
+assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualSelectionReadOnly':", 'Vietnamese published visual read-only notice is required');
 assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualTripleTitle':", 'Vietnamese Course Mode v5 visual triple title is required');
 assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualTripleWholeLesson':", 'Vietnamese Course Mode v5 visual triple description is required');
 assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualTripleRequired':", 'Vietnamese Course Mode v5 visual triple validation warning is required');
@@ -842,5 +859,60 @@ function verifyVisualSaveNavigationEpochContract() {
 verifyVisualSaveNavigationEpochContract();
 verifyOrderedStepRefreshContract();
 
+function verifyPreviewAuthorityClearsOnLessonFetchContract() {
+  const fetchAllSource = extractObjectMethod(editorSource, 'fetchAll');
+  const clearPreviewProofStateSource = extractObjectMethod(editorSource, 'clearPreviewProofState');
+  const isCourseModeV5Source = extractObjectMethod(editorSource, 'isCourseModeV5');
+  const hasLoadedCourseModeAuthoritySource = extractObjectMethod(editorSource, 'hasLoadedCourseModeAuthority');
+  const calls = [];
+  const fetchAll = vm.runInNewContext(`(${fetchAllSource.replace(/^fetchAll/, 'function fetchAll')})`, {
+    Api: {
+      lesson: {
+        getLesson: (...args) => calls.push(['getLesson', args]),
+        listStepTypes: (...args) => calls.push(['listStepTypes', args]),
+        listSharedBackgrounds: (...args) => calls.push(['listSharedBackgrounds', args]),
+      },
+    },
+  });
+  const isCourseModeV5 = vm.runInNewContext(`(${isCourseModeV5Source.replace(/^isCourseModeV5/, 'function isCourseModeV5')})`);
+  const hasLoadedCourseModeAuthority = vm.runInNewContext(`(${hasLoadedCourseModeAuthoritySource.replace(/^hasLoadedCourseModeAuthority/, 'function hasLoadedCourseModeAuthority')})`);
+  const clearPreviewProofState = vm.runInNewContext(`(${clearPreviewProofStateSource.replace(/^clearPreviewProofState/, 'function clearPreviewProofState')})`);
+  const context = {
+    lessonId: 'non-course-v5',
+    lessonLoadRequestId: 4,
+    editorDestroying: false,
+    loading: false,
+    lesson: { lessonId: 'course-v5', manifestVersion: 'teebot-lesson-renderer.v5', courseModeContract: { version: 2 } },
+    previewManifest: { lessonId: 'course-v5', manifest: { manifestVersion: 'teebot-lesson-renderer.v5', courseModeContract: { version: 2 }, steps: [] }, checksum: 'old', etag: 'old' },
+    preview: { checksum: 'old', etag: 'old' },
+    previewProofVersion: 9,
+    simulationEvidence: { checksum: 'old', etag: 'old' },
+    simulationProofVersion: 9,
+    stepTypes: [],
+    stepForm: { stepType: '' },
+    sharedBackgrounds: [],
+    clearPreviewProofState,
+    resetLessonAssetGenerationStatus() {},
+    resetTVideoJourneyState() {},
+    loadLessonAssetGenerationStatus() {},
+    fetchSteps() {},
+    loadTVideoJourney() {},
+    loadFlattenedDerivativeStatus() {},
+    $message: { error() {} },
+  };
+  fetchAll.call(context);
+  assert.equal(context.previewManifest, null, 'starting a new lesson fetch must clear stale preview Course Mode authority');
+  assert.equal(context.preview, null, 'starting a new lesson fetch must clear stale preview checksum state');
+  assert.equal(context.previewProofVersion, -1, 'starting a new lesson fetch must reset preview proof version');
+  assert.equal(context.simulationEvidence, null, 'starting a new lesson fetch must clear stale simulation evidence');
+  assert.equal(context.simulationProofVersion, -1, 'starting a new lesson fetch must reset simulation proof version');
+  assert.equal(calls[0][0], 'getLesson', 'fetchAll must request the new lesson');
+  calls[0][1][1]({ lessonId: 'non-course-v5', manifestVersion: 'teebot-lesson-renderer.v5', status: 'draft' });
+  context.hasLoadedCourseModeAuthority = hasLoadedCourseModeAuthority.call(context);
+  assert.equal(context.hasLoadedCourseModeAuthority, false, 'non-Course renderer v5 must not inherit stale preview Course Mode authority');
+  assert.equal(isCourseModeV5.call(context), false, 'non-Course renderer v5 must remain on the legacy visual UI path after route/load');
+}
+
 verifyDirectCinematicLibraryContract();
+verifyPreviewAuthorityClearsOnLessonFetchContract();
 console.log('lesson visual selection contract: OK');

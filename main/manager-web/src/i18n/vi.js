@@ -287,6 +287,7 @@ export default {
   'lesson.visualTripleWholeLesson': 'Áp dụng background, object dạy học và video robot thật đã chọn cho bản nháp Course Mode v5 này.',
   'lesson.visualPairRequired': 'Cần chọn đủ background và object trước khi lưu.',
   'lesson.visualTripleRequired': 'Cần chọn đủ background, object và video robot trước khi lưu.',
+  'lesson.visualSelectionReadOnly': 'Không thể đổi hình ảnh trên bài học đã publish. Hãy tạo phiên bản có thể chỉnh sửa để đổi background, object dạy học hoặc video robot.',
   'lesson.visualPairSaved': 'Đã lưu hình ảnh bài học và bắt đầu đồng bộ xuống SD.',
   'lesson.visualPairReloadFailed': 'Đã lưu hình ảnh bài học nhưng chưa tải lại được các step mới nhất. Hãy thử lại để đồng bộ trạng thái.',
   'lesson.visualPairNoSteps': 'Hãy tạo step đầu tiên trước khi chọn hình ảnh bài học.',

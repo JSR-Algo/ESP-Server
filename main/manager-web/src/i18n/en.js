@@ -287,6 +287,7 @@ export default {
   'lesson.visualTripleWholeLesson': 'Applies the selected background, teaching object, and real robot video to this Course Mode v5 draft.',
   'lesson.visualPairRequired': 'Choose both a background and an object before saving.',
   'lesson.visualTripleRequired': 'Choose a background, object, and robot video before saving.',
+  'lesson.visualSelectionReadOnly': 'Visual selections are read-only for published lessons; create an editable version to change the background, teaching object, or robot video.',
   'lesson.visualPairSaved': 'Lesson visuals saved. SD synchronization has started.',
   'lesson.visualPairReloadFailed': 'Lesson visuals were saved, but the latest steps could not be reloaded. Retry to reconcile.',
   'lesson.visualPairNoSteps': 'Add the first step before choosing lesson visuals.',
