@@ -1765,6 +1765,7 @@ export default {
       this.resetLessonAssetGenerationStatus();
       this.clearPreviewProofState();
       this.clearValidationProofState();
+      this.clearPromptSaveState();
       this.loading = true;
       Api.lesson.getLesson(
         lessonId,
@@ -1814,6 +1815,10 @@ export default {
       this.validating = false;
       this.validationResult = null;
       this.validationProofVersion = -1;
+    },
+    clearPromptSaveState() {
+      this.promptSaveRequestId += 1;
+      this.savingStep = false;
     },
     fetchSteps(options = {}) {
       const requestId = this.lessonStepsRequestId + 1;
@@ -2315,6 +2320,8 @@ export default {
     saveSelectedStep(promptSnapshot = null) {
       const step = this.selectedStep;
       if (!step || !this.isDraft || this.savingStep || this.lessonVisualStepMutationBlocked || this.rebindingSharedVisual) return;
+      const lessonId = this.lessonId;
+      const lessonLoadRequestId = this.lessonLoadRequestId;
       const promptValue = promptSnapshot && promptSnapshot.stepKey === step.stepKey
         ? promptSnapshot.prompt
         : this.promptDraft;
@@ -2336,10 +2343,16 @@ export default {
       }
       const saveGuard = {
         requestId: this.promptSaveRequestId + 1,
+        lessonId,
+        lessonLoadRequestId,
         stepKey: step.stepKey,
         promptRevision: this.promptEditRevision,
         stepRevision: this.stepEditRevisions[step.stepKey] || 0,
       };
+      const saveIsCurrent = () => !this.editorDestroying
+        && lessonId === this.lessonId
+        && lessonLoadRequestId === this.lessonLoadRequestId
+        && saveGuard.requestId === this.promptSaveRequestId;
       this.promptSaveRequestId = saveGuard.requestId;
       this.invalidatePreview();
       this.savingStep = true;
@@ -2351,28 +2364,29 @@ export default {
       });
       const derivativeSourceChanged = this.flattenedStepMutationChangesSource(stepPayload);
       Api.lesson.updateStep(
-        this.lessonId,
+        lessonId,
         step.stepKey,
         stepPayload,
         () => {
-          if (saveGuard.requestId !== this.promptSaveRequestId) return;
+          if (!saveIsCurrent()) return;
           if (derivativeSourceChanged) this.invalidateFlattenedDerivativeStatus();
           this.fetchSteps({
             promptGuard: saveGuard,
             onSuccess: () => {
-              if (saveGuard.requestId !== this.promptSaveRequestId) return;
+              if (!saveIsCurrent()) return;
               this.savingStep = false;
               this.clearSavedStepDraft(saveGuard);
               if (derivativeSourceChanged) this.loadFlattenedDerivativeStatus();
               this.$message.success(this.$t('lesson.stepSaved'));
             },
             onError: () => {
-              if (saveGuard.requestId === this.promptSaveRequestId) this.savingStep = false;
+              if (saveIsCurrent()) this.savingStep = false;
             },
           });
         },
         (msg) => {
-          if (saveGuard.requestId === this.promptSaveRequestId) this.savingStep = false;
+          if (!saveIsCurrent()) return;
+          this.savingStep = false;
           this.$message.error(msg);
         },
       );

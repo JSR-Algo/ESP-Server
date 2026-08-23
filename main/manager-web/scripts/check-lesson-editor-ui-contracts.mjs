@@ -119,8 +119,8 @@ expectRegex(
 );
 expectRegex(
   'src/views/LessonEditor.vue',
-  /Api\.lesson\.updateStep\([\s\S]*?prompt:\s*this\.promptDraft[\s\S]*?fetchSteps/m,
-  'dirty state must clear through a server-confirmed refetch',
+  /Api\.lesson\.updateStep\([\s\S]*?prompt:\s*promptValue[\s\S]*?fetchSteps/m,
+  'dirty state must clear through a server-confirmed refetch using the prompt snapshot selected for this save',
 );
 
 expectNotContains('src/components/lesson/LessonStepPromptEditor.vue', 'this.$emit', 'Vue 2 template handlers must not reference this');
@@ -1148,6 +1148,145 @@ const guardedRebind = vm.runInNewContext(`(${rebindClonedVisualSource})`, {
 });
 guardedRebind.call({ savingStep: true, rebindingSharedVisual: false });
 if (updateCalls.length !== 0) throw new Error('overlapping save/rebind guards must prevent updateStep dispatch');
+
+function promptSaveContext(overrides = {}) {
+  const context = {
+    selectedStep: { stepKey: 's1', prompt: 'server old', stepBody: { durationSec: 5 } },
+    isDraft: true,
+    savingStep: false,
+    lessonVisualStepMutationBlocked: false,
+    rebindingSharedVisual: false,
+    lessonId: 'lesson-a',
+    lessonLoadRequestId: 4,
+    promptDraft: 'typed prompt',
+    promptStepKey: 's1',
+    promptDirty: true,
+    promptEditRevision: 2,
+    promptSaveRequestId: 10,
+    stepEditRevisions: { s1: 3 },
+    selectedAuthoring: { teachingWord: { text: 'WORD' } },
+    selectedContent: { helperText: 'help' },
+    selectedAssetDrafts: {},
+    selectedStepDrafts: { s1: { draft: true } },
+    selectedContentDrafts: { s1: { content: true } },
+    dirtyStepKeys: { s1: true },
+    savingStepKeys: {},
+    proofVersion: 0,
+    previewRequestId: 0,
+    validationRequestId: 0,
+    publishReviewRequestId: 0,
+    previewing: false,
+    validating: false,
+    preview: { stale: true },
+    previewManifest: { stale: true },
+    simulationEvidence: { stale: true },
+    publishReviewVisible: true,
+    publishReviewSnapshot: { stale: true },
+    publishResult: { stale: true },
+    publishPreparing: true,
+    flattenedInvalidations: 0,
+    flattenedReloads: 0,
+    fetchCount: 0,
+    messages: [],
+    flattenedStepMutationChangesSource: () => false,
+    stepPayloadWithoutVisualRefs,
+    fetchSteps(options = {}) {
+      this.fetchCount += 1;
+      const rows = [{ stepKey: 's1', prompt: 'snapshot prompt', stepBody: {} }];
+      if (options.promptGuard) this.syncPromptDraftAfterFetch(rows[0], options.promptGuard);
+      if (options.onSuccess) options.onSuccess(rows);
+    },
+    clearSavedStepDraft,
+    resetPromptDraft(step, { force = false } = {}) {
+      if (force) {
+        this.promptStepKey = step ? step.stepKey : '';
+        this.promptDraft = step && typeof step.prompt === 'string' ? step.prompt : '';
+        this.promptDirty = false;
+        this.promptEditRevision += 1;
+        return true;
+      }
+      return false;
+    },
+    shouldApplySavedStepState,
+    syncPromptDraftAfterFetch(step, guard) {
+      if (this.shouldApplySavedStepState(guard)) {
+        this.resetPromptDraft(step, { force: true });
+        return true;
+      }
+      if (step && step.stepKey === this.promptStepKey) {
+        this.promptDirty = this.promptDraft !== (step.prompt || '');
+      }
+      return false;
+    },
+    invalidatePreview,
+    invalidateFlattenedDerivativeStatus() { this.flattenedInvalidations += 1; },
+    loadFlattenedDerivativeStatus() { this.flattenedReloads += 1; },
+    $delete(target, key) { delete target[key]; },
+    $message: {
+      success(message) { context.messages.push(['success', message]); },
+      error(message) { context.messages.push(['error', message]); },
+    },
+    $t: (key) => key,
+    ...overrides,
+  };
+  return context;
+}
+
+const promptSaveCalls = [];
+const promptSaveApi = { lesson: { updateStep: (...args) => promptSaveCalls.push(args) } };
+const promptSave = vm.runInNewContext(`(${saveSelectedStepSource})`, {
+  Api: promptSaveApi,
+  mergeStepBodyForSave: (body, authored) => ({ ...body, authored }),
+});
+
+const sameLessonPromptSave = promptSaveContext();
+promptSave.call(sameLessonPromptSave, { stepKey: 's1', prompt: 'snapshot prompt' });
+if (promptSaveCalls.length !== 1) throw new Error('same-lesson prompt save must dispatch exactly once');
+if (promptSaveCalls[0][0] !== 'lesson-a') throw new Error('prompt save must dispatch with the captured current lesson id');
+if (promptSaveCalls[0][2].prompt !== 'snapshot prompt') throw new Error('prompt save must persist the captured prompt snapshot');
+promptSaveCalls[0][3]({});
+if (sameLessonPromptSave.fetchCount !== 1 || sameLessonPromptSave.promptDirty
+  || sameLessonPromptSave.dirtyStepKeys.s1 || sameLessonPromptSave.savingStep) {
+  throw new Error('same-lesson prompt save success must refetch server truth, clear dirty state, and release saving state');
+}
+if (!sameLessonPromptSave.messages.some(([kind, message]) => kind === 'success' && message === 'lesson.stepSaved')) {
+  throw new Error('same-lesson prompt save success must show a save confirmation');
+}
+
+const stalePromptSave = promptSaveContext();
+promptSave.call(stalePromptSave, { stepKey: 's1', prompt: 'stale prompt' });
+const staleSaveCallbacks = promptSaveCalls.pop();
+stalePromptSave.lessonId = 'lesson-b';
+stalePromptSave.lessonLoadRequestId = 5;
+stalePromptSave.promptSaveRequestId += 1;
+stalePromptSave.savingStep = false;
+stalePromptSave.promptDirty = false;
+stalePromptSave.selectedStepDrafts = { b: { draft: true } };
+stalePromptSave.selectedContentDrafts = { b: { content: true } };
+stalePromptSave.selectedAssetDrafts = { b: { assetKey: 'asset-b' } };
+stalePromptSave.dirtyStepKeys = { b: true };
+const stalePromptSnapshot = JSON.stringify({
+  savingStep: stalePromptSave.savingStep,
+  promptDirty: stalePromptSave.promptDirty,
+  selectedStepDrafts: stalePromptSave.selectedStepDrafts,
+  selectedContentDrafts: stalePromptSave.selectedContentDrafts,
+  selectedAssetDrafts: stalePromptSave.selectedAssetDrafts,
+  dirtyStepKeys: stalePromptSave.dirtyStepKeys,
+});
+staleSaveCallbacks[3]({});
+staleSaveCallbacks[4]('stale save failed');
+if (stalePromptSave.fetchCount !== 0) throw new Error('stale prompt save callbacks after navigation must not refetch the new lesson');
+if (JSON.stringify({
+  savingStep: stalePromptSave.savingStep,
+  promptDirty: stalePromptSave.promptDirty,
+  selectedStepDrafts: stalePromptSave.selectedStepDrafts,
+  selectedContentDrafts: stalePromptSave.selectedContentDrafts,
+  selectedAssetDrafts: stalePromptSave.selectedAssetDrafts,
+  dirtyStepKeys: stalePromptSave.dirtyStepKeys,
+}) !== stalePromptSnapshot) {
+  throw new Error('stale prompt save callbacks after navigation must not mutate the new lesson draft/status state');
+}
+if (stalePromptSave.messages.length !== 0) throw new Error('stale prompt save callbacks after navigation must not show messages');
 
 let rebindAttempts = 0;
 let successfulClose = 0;

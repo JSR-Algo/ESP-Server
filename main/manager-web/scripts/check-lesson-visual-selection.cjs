@@ -1012,6 +1012,7 @@ function verifyPreviewAuthorityClearsOnLessonFetchContract() {
   const fetchAllSource = extractObjectMethod(editorSource, 'fetchAll');
   const clearPreviewProofStateSource = extractObjectMethod(editorSource, 'clearPreviewProofState');
   const clearValidationProofStateSource = extractObjectMethod(editorSource, 'clearValidationProofState');
+  const clearPromptSaveStateSource = extractObjectMethod(editorSource, 'clearPromptSaveState');
   const isCourseModeV5Source = extractObjectMethod(editorSource, 'isCourseModeV5');
   const hasLoadedCourseModeAuthoritySource = extractObjectMethod(editorSource, 'hasLoadedCourseModeAuthority');
   const calls = [];
@@ -1028,6 +1029,7 @@ function verifyPreviewAuthorityClearsOnLessonFetchContract() {
   const hasLoadedCourseModeAuthority = vm.runInNewContext(`(${hasLoadedCourseModeAuthoritySource.replace(/^hasLoadedCourseModeAuthority/, 'function hasLoadedCourseModeAuthority')})`);
   const clearPreviewProofState = vm.runInNewContext(`(${clearPreviewProofStateSource.replace(/^clearPreviewProofState/, 'function clearPreviewProofState')})`);
   const clearValidationProofState = vm.runInNewContext(`(${clearValidationProofStateSource.replace(/^clearValidationProofState/, 'function clearValidationProofState')})`);
+  const clearPromptSaveState = vm.runInNewContext(`(${clearPromptSaveStateSource.replace(/^clearPromptSaveState/, 'function clearPromptSaveState')})`);
   const context = {
     lessonId: 'non-course-v5',
     lessonLoadRequestId: 4,
@@ -1044,6 +1046,7 @@ function verifyPreviewAuthorityClearsOnLessonFetchContract() {
     sharedBackgrounds: [],
     clearPreviewProofState,
     clearValidationProofState,
+    clearPromptSaveState,
     resetLessonAssetGenerationStatus() {},
     resetTVideoJourneyState() {},
     loadLessonAssetGenerationStatus() {},
@@ -1183,6 +1186,10 @@ function buildProofChainContext(overrides = {}) {
       this.validating = false;
       this.validationResult = null;
       this.validationProofVersion = -1;
+    },
+    clearPromptSaveState() {
+      this.promptSaveRequestId = (this.promptSaveRequestId || 0) + 1;
+      this.savingStep = false;
     },
     resetTVideoJourneyState() {},
     loadLessonAssetGenerationStatus() {},
