@@ -1764,6 +1764,7 @@ export default {
       this.lessonLoadRequestId = requestId;
       this.resetLessonAssetGenerationStatus();
       this.clearPreviewProofState();
+      this.clearValidationProofState();
       this.loading = true;
       Api.lesson.getLesson(
         lessonId,
@@ -1807,6 +1808,12 @@ export default {
       this.previewProofVersion = -1;
       this.simulationEvidence = null;
       this.simulationProofVersion = -1;
+    },
+    clearValidationProofState() {
+      this.validationRequestId += 1;
+      this.validating = false;
+      this.validationResult = null;
+      this.validationProofVersion = -1;
     },
     fetchSteps(options = {}) {
       const requestId = this.lessonStepsRequestId + 1;
@@ -2862,6 +2869,8 @@ export default {
     },
     doValidate(onSuccess, onError, options = {}) {
       if (this.editorDestroying || (!options.allowUnsafe && this.hasUnsafeProofState())) return false;
+      const lessonId = this.lessonId;
+      const lessonLoadRequestId = this.lessonLoadRequestId;
       const requestId = this.validationRequestId + 1;
       const proofVersion = this.proofVersion;
       let settled = false;
@@ -2884,10 +2893,11 @@ export default {
       this.validationProofVersion = -1;
       this.validating = true;
       Api.lesson.validate(
-        this.lessonId,
+        lessonId,
         (res) => {
           if (this.editorDestroying) return;
-          if (requestId !== this.validationRequestId || proofVersion !== this.proofVersion) return;
+          if (requestId !== this.validationRequestId || proofVersion !== this.proofVersion
+            || lessonId !== this.lessonId || lessonLoadRequestId !== this.lessonLoadRequestId) return;
           this.validating = false;
           const parsed = this.parseValidationResult(res, 'espTft');
           this.validationResult = parsed || { valid: false, profiles: [], errors: [this.$t('lesson.validationResponseMalformed')], warnings: [], findings: [] };
@@ -2900,7 +2910,8 @@ export default {
         },
         (msg) => {
           if (this.editorDestroying) return;
-          if (requestId !== this.validationRequestId || proofVersion !== this.proofVersion) return;
+          if (requestId !== this.validationRequestId || proofVersion !== this.proofVersion
+            || lessonId !== this.lessonId || lessonLoadRequestId !== this.lessonLoadRequestId) return;
           this.validating = false;
           this.validationResult = { valid: false, profiles: [], errors: [msg], warnings: [], findings: [] };
           this.validationProofVersion = proofVersion;

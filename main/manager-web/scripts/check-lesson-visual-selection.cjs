@@ -862,6 +862,7 @@ verifyOrderedStepRefreshContract();
 function verifyPreviewAuthorityClearsOnLessonFetchContract() {
   const fetchAllSource = extractObjectMethod(editorSource, 'fetchAll');
   const clearPreviewProofStateSource = extractObjectMethod(editorSource, 'clearPreviewProofState');
+  const clearValidationProofStateSource = extractObjectMethod(editorSource, 'clearValidationProofState');
   const isCourseModeV5Source = extractObjectMethod(editorSource, 'isCourseModeV5');
   const hasLoadedCourseModeAuthoritySource = extractObjectMethod(editorSource, 'hasLoadedCourseModeAuthority');
   const calls = [];
@@ -877,6 +878,7 @@ function verifyPreviewAuthorityClearsOnLessonFetchContract() {
   const isCourseModeV5 = vm.runInNewContext(`(${isCourseModeV5Source.replace(/^isCourseModeV5/, 'function isCourseModeV5')})`);
   const hasLoadedCourseModeAuthority = vm.runInNewContext(`(${hasLoadedCourseModeAuthoritySource.replace(/^hasLoadedCourseModeAuthority/, 'function hasLoadedCourseModeAuthority')})`);
   const clearPreviewProofState = vm.runInNewContext(`(${clearPreviewProofStateSource.replace(/^clearPreviewProofState/, 'function clearPreviewProofState')})`);
+  const clearValidationProofState = vm.runInNewContext(`(${clearValidationProofStateSource.replace(/^clearValidationProofState/, 'function clearValidationProofState')})`);
   const context = {
     lessonId: 'non-course-v5',
     lessonLoadRequestId: 4,
@@ -892,6 +894,7 @@ function verifyPreviewAuthorityClearsOnLessonFetchContract() {
     stepForm: { stepType: '' },
     sharedBackgrounds: [],
     clearPreviewProofState,
+    clearValidationProofState,
     resetLessonAssetGenerationStatus() {},
     resetTVideoJourneyState() {},
     loadLessonAssetGenerationStatus() {},
@@ -973,7 +976,135 @@ function verifyLatePreviewCannotRestoreStaleCourseAuthorityContract() {
   assert.equal(isCourseModeV5.call(context), false, 'late Course Mode preview must leave the non-Course renderer v5 on the legacy UI path');
 }
 
+function buildProofChainContext(overrides = {}) {
+  return {
+    lessonId: 'course-v5',
+    lessonLoadRequestId: 10,
+    proofVersion: 5,
+    validationRequestId: 0,
+    validationProofVersion: -1,
+    validationResult: null,
+    previewRequestId: 0,
+    previewProofVersion: -1,
+    previewManifest: null,
+    preview: null,
+    simulationEvidence: null,
+    simulationProofVersion: -1,
+    publishReviewRequestId: 0,
+    publishReviewVisible: true,
+    publishReviewSnapshot: { stale: true },
+    publishResult: { stale: true },
+    publishing: false,
+    publishPreparing: false,
+    publishUncertainState: null,
+    publishReconciling: false,
+    readinessReady: true,
+    tvideoJourneyPublishReady: true,
+    hasAuthoritativeTVideoJourney: false,
+    flattenedDerivativeManifestVersion: 'teebot-lesson-renderer.v5',
+    flattenedDerivativeStatus: { phases: [] },
+    flattenedDerivativeRequiredPhaseIds: [],
+    editorDestroying: false,
+    validating: false,
+    previewing: false,
+    isDraft: true,
+    lessonCapabilities: { exactEspTftPreview: true },
+    lesson: { lessonId: 'course-v5', manifestVersion: 'teebot-lesson-renderer.v5', status: 'draft', courseModeContract: { version: 2 } },
+    stepTypes: [],
+    stepForm: { stepType: '' },
+    sharedBackgrounds: [],
+    hasUnsafeProofState: () => false,
+    validManifestPreviewResponse: (result) => Boolean(result && result.checksum && result.etag && result.manifest && Array.isArray(result.manifest.steps)),
+    parseValidationResult: (res) => res,
+    validSimulationEvidence: () => true,
+    $t: (key, params) => (params ? `${key}:${JSON.stringify(params)}` : key),
+    $message: { success() {}, warning() {}, error() {} },
+    resetLessonAssetGenerationStatus() {},
+    clearPreviewProofState() {
+      this.previewRequestId += 1;
+      this.previewing = false;
+      this.preview = null;
+      this.previewManifest = null;
+      this.previewProofVersion = -1;
+      this.simulationEvidence = null;
+      this.simulationProofVersion = -1;
+    },
+    clearValidationProofState() {
+      this.validationRequestId += 1;
+      this.validating = false;
+      this.validationResult = null;
+      this.validationProofVersion = -1;
+    },
+    resetTVideoJourneyState() {},
+    loadLessonAssetGenerationStatus() {},
+    fetchSteps() {},
+    loadTVideoJourney() {},
+    loadFlattenedDerivativeStatus() {},
+    ...overrides,
+  };
+}
+
+function verifyValidationProofRetiresAcrossLessonFetchContract() {
+  const doValidateSource = extractObjectMethod(editorSource, 'doValidate');
+  const doPreviewSource = extractObjectMethod(editorSource, 'doPreview');
+  const fetchAllSource = extractObjectMethod(editorSource, 'fetchAll');
+  const canPublishCurrentProofSource = extractObjectMethod(editorSource, 'canPublishCurrentProof');
+  const requests = { validate: [], preview: [], lessons: [] };
+  const apiSandbox = {
+    Api: {
+      lesson: {
+        validate: (...args) => requests.validate.push(args),
+        manifestPreview: (...args) => requests.preview.push(args),
+        getLesson: (...args) => requests.lessons.push(args),
+        listStepTypes: () => {},
+        listSharedBackgrounds: () => {},
+      },
+    },
+  };
+  const doValidate = vm.runInNewContext(`(${doValidateSource.replace(/^doValidate/, 'function doValidate')})`, apiSandbox);
+  const doPreview = vm.runInNewContext(`(${doPreviewSource.replace(/^doPreview/, 'function doPreview')})`, apiSandbox);
+  const fetchAll = vm.runInNewContext(`(${fetchAllSource.replace(/^fetchAll/, 'function fetchAll')})`, apiSandbox);
+  const canPublishCurrentProof = vm.runInNewContext(`(${canPublishCurrentProofSource.replace(/^canPublishCurrentProof/, 'function canPublishCurrentProof')})`);
+  const validValidation = { valid: true, profiles: ['espTft'], errors: [], warnings: [], findings: [] };
+  const validPreview = {
+    checksum: 'preview-b',
+    etag: 'etag-b',
+    preview: { profile: 'espTft', width: 480, height: 320 },
+    manifest: { manifestVersion: 'teebot-lesson-renderer.v5', profile: 'espTft', steps: [] },
+  };
+
+  const sameLesson = buildProofChainContext();
+  assert.equal(doValidate.call(sameLesson, null, null, { allowUnsafe: true }), true, 'same-lesson validation must dispatch');
+  requests.validate.pop()[1](validValidation);
+  assert.equal(sameLesson.validationProofVersion, 5, 'same-lesson validation stores against the current proof');
+  assert.equal(doPreview.call(sameLesson, null, null, { allowUnsafe: true }), true, 'same-lesson preview must dispatch');
+  requests.preview.pop()[2](validPreview);
+  assert.equal(sameLesson.proofVersion, 6, 'same-lesson preview advances proof version');
+  assert.equal(sameLesson.validationProofVersion, 6, 'same-lesson preview must promote current validation proof');
+  sameLesson.simulationEvidence = { checksum: 'preview-b', etag: 'etag-b' };
+  sameLesson.simulationProofVersion = sameLesson.proofVersion;
+  assert.equal(canPublishCurrentProof.call(sameLesson), true, 'same-lesson validate then preview proof chain remains publishable');
+
+  const crossLesson = buildProofChainContext();
+  assert.equal(doValidate.call(crossLesson, null, null, { allowUnsafe: true }), true, 'Course lesson validation must dispatch before navigation');
+  assert.equal(requests.validate.length, 1, 'pending Course validation must be captured');
+  crossLesson.lessonId = 'non-course-v5';
+  fetchAll.call(crossLesson);
+  requests.lessons.pop()[1]({ lessonId: 'non-course-v5', manifestVersion: 'teebot-lesson-renderer.v5', status: 'draft' });
+  const pendingCourseValidation = requests.validate.pop();
+  pendingCourseValidation[1](validValidation);
+  assert.equal(crossLesson.validationResult, null, 'late Course validation must not store after non-Course lesson fetch');
+  assert.equal(crossLesson.validationProofVersion, -1, 'late Course validation must not restore validation proof after lesson fetch');
+  assert.equal(doPreview.call(crossLesson, null, null, { allowUnsafe: true }), true, 'non-Course lesson preview must dispatch after navigation');
+  requests.preview.pop()[2](validPreview);
+  assert.equal(crossLesson.validationProofVersion, -1, 'non-Course preview must not promote stale Course validation');
+  crossLesson.simulationEvidence = { checksum: 'preview-b', etag: 'etag-b' };
+  crossLesson.simulationProofVersion = crossLesson.proofVersion;
+  assert.equal(canPublishCurrentProof.call(crossLesson), false, 'non-Course lesson cannot publish until it validates after navigation');
+}
+
 verifyDirectCinematicLibraryContract();
 verifyPreviewAuthorityClearsOnLessonFetchContract();
 verifyLatePreviewCannotRestoreStaleCourseAuthorityContract();
+verifyValidationProofRetiresAcrossLessonFetchContract();
 console.log('lesson visual selection contract: OK');
