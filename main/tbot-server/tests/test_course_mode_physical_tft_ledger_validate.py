@@ -114,7 +114,7 @@ def complete_ledger(repository_root: Path):
         "endpointAuthority": "approved-local-task07-lab-route",
         "sessionStartedAt": "2026-08-22T00:00:00Z",
         "secrets": {
-            "JWT_PUBLIC_KEY": "present-redacted",
+            "JWT_KEY_PAIR": "present-redacted",
             "TBOT_DEVICE_MINT_SECRET": "present-redacted",
         },
     }

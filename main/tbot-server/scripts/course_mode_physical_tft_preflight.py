@@ -14,7 +14,6 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
-
 COMPOSE_PROJECT = "tbot-course-mode-physical-tft"
 IMAGE_PREFIX = "local/tbot-backend:course-mode-physical-tft-"
 MATERIALIZER_LABEL = "com.tbot.course-mode.materializer-path"
@@ -72,6 +71,8 @@ FORBIDDEN_OUTPUT = re.compile(
     r"transcript|utterance|raw.?speech|audio.?data|pronunciation.?score|"
     r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2})"
 )
+VALIDATION_PUBLIC_PEM = "-----BEGIN PUBLIC KEY-----\ntask07-validation-public\n-----END PUBLIC KEY-----"
+VALIDATION_PRIVATE_PEM = "-----BEGIN PRIVATE KEY-----\ntask07-validation-private\n-----END PRIVATE KEY-----"
 
 
 def _within(path: Path, root: Path) -> bool:
@@ -279,12 +280,12 @@ def validate_compose(compose: object, expected: dict[str, object]) -> list[str]:
         reasons.append("compose.backend.asset_origin")
     if not isinstance(backend_env, dict) or backend_env.get("LESSON_ROLLOUT_DEVICE_ALLOWLIST") != "14:c1:9f:d1:ac:20":
         reasons.append("compose.assignment_scope")
-    for key, sentinel in (
-        ("JWT_PUBLIC_KEY", "task07-sentinel-public"),
-        ("TBOT_DEVICE_MINT_SECRET", "task07-sentinel-mint"),
-    ):
-        if not isinstance(backend_env, dict) or backend_env.get(key) != sentinel:
-            reasons.append(f"compose.secret_sentinel.{key}")
+    if not isinstance(backend_env, dict) or backend_env.get("JWT_PUBLIC_KEY") != VALIDATION_PUBLIC_PEM:
+        reasons.append("compose.jwt_public_key")
+    if not isinstance(backend_env, dict) or backend_env.get("JWT_PRIVATE_KEY") != VALIDATION_PRIVATE_PEM:
+        reasons.append("compose.jwt_private_key")
+    if not isinstance(backend_env, dict) or backend_env.get("TBOT_DEVICE_MINT_SECRET") != "task07-sentinel-mint":
+        reasons.append("compose.secret_sentinel.TBOT_DEVICE_MINT_SECRET")
     if materializer.get("command") != MATERIALIZER_COMMAND:
         reasons.append("compose.materializer.command")
     materializer_env = materializer.get("environment", {})
@@ -323,7 +324,8 @@ def validate_compose(compose: object, expected: dict[str, object]) -> list[str]:
 def _command_env(expected: dict[str, object]) -> dict[str, str]:
     return {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "JWT_PUBLIC_KEY": "task07-sentinel-public",
+        "JWT_PUBLIC_KEY": VALIDATION_PUBLIC_PEM,
+        "JWT_PRIVATE_KEY": VALIDATION_PRIVATE_PEM,
         "TBOT_DEVICE_MINT_SECRET": "task07-sentinel-mint",
         "LESSON_ASSET_ORIGIN_BASE": "http://127.0.0.1:8102/tvideo-demo",
         "COURSE_MODE_ASSET_ORIGIN_BASE": str(expected["assetOrigin"]),
@@ -440,7 +442,7 @@ def main(argv: list[str] | None = None) -> int:
         "imageId": image_document[0]["Id"],
         "result": "PASS",
         "secrets": {
-            "JWT_PUBLIC_KEY": "present-redacted",
+            "JWT_KEY_PAIR": "present-redacted",
             "TBOT_DEVICE_MINT_SECRET": "present-redacted",
         },
         "sessionStartedAt": expected["sessionStartedAt"],

@@ -385,7 +385,7 @@ def _validate_bound_documents(
             and preflight.get("endpointAuthority") == document.get("endpoints", {}).get("authority")
             and preflight.get("sessionStartedAt") == document.get("operators", {}).get("startedAt")
             and preflight.get("secrets") == {
-                "JWT_PUBLIC_KEY": "present-redacted",
+                "JWT_KEY_PAIR": "present-redacted",
                 "TBOT_DEVICE_MINT_SECRET": "present-redacted",
             }
         )

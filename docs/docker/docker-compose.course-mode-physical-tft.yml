@@ -15,6 +15,7 @@ services:
       ROBOT_ESP_BASE_URL: http://host.docker.internal:8003
       TBOT_ESP_SERVER_URL: http://host.docker.internal:8003
       TBOT_DEVICE_MINT_SECRET: ${TBOT_DEVICE_MINT_SECRET:?export the shared local device mint secret}
+      JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY:?course-mode physical TFT requires a matching local private PEM}
       LESSON_ASSET_ORIGIN_BASE: ${COURSE_MODE_ASSET_ORIGIN_BASE:?export the robot-reachable local asset origin ending in /}
       FLATTENED_CINEMATIC_PUBLIC_BASE_URL: ${COURSE_MODE_ASSET_ORIGIN_BASE:?export the robot-reachable local asset origin ending in /}
 

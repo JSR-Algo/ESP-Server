@@ -123,10 +123,12 @@ requires the exact project/resource prefix, backend image on both runtime and
 materializer services, loopback-only backend port 3000, local PostgreSQL,
 AC:20-only assignment scope, one-shot compiled materializer command, read-only
 fixture/assets, disabled generic seed services, pinned ESP fan-out, and no
-production-like host. The preflight supplies fixed non-secret sentinel values
-for Compose variables that require secret-shaped input; it never reads the
-operator's real secret environment. Secret-bearing rendered keys are checked
-for the expected sentinel and represented only as `present-redacted` in output.
+production-like host. The preflight supplies a fixed non-secret PEM-shaped
+validation fixture solely to render and validate the Compose shape; it never reads
+the operator's runtime private key or real secret environment. `up.sh`
+separately refuses to start unless the local runtime public and private PEMs
+are a cryptographically matching pair. Secret-bearing rendered keys are
+represented only as `present-redacted` in retained output.
 
 `up.sh` adds fixed image labels naming the compiled materializer path, exact Git
 revision, and reviewed-clean-worktree build provenance during the exact-SHA

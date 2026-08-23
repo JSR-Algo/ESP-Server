@@ -37,6 +37,11 @@ ACTUAL_SHA="$(git -C "${BACKEND_ROOT}" rev-parse HEAD)"
 [[ -z "$(git -C "${BACKEND_ROOT}" status --porcelain --untracked-files=all)" ]] || \
   fail "backend worktree must be clean so the SHA-tagged image has exact source provenance"
 [[ -f "${BACKEND_ROOT}/Dockerfile" ]] || fail "backend Dockerfile is missing"
+[[ -f "${BACKEND_ROOT}/keys/dev-public.pem" ]] || fail "backend local public key is missing"
+[[ -f "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem" ]] || fail "backend local private key is missing"
+openssl pkey -in "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem" -pubout 2>/dev/null | \
+  cmp -s - "${BACKEND_ROOT}/keys/dev-public.pem" || \
+  fail "backend local JWT public/private key pair is invalid or mismatched"
 [[ -f "${BACKEND_ROOT}/src/lessons/course-mode/course-mode-local-materializer.ts" ]] || \
   fail "backend Course Mode local materializer source is missing"
 
@@ -44,6 +49,8 @@ BACKEND_IMAGE="local/tbot-backend:course-mode-physical-tft-${ACTUAL_SHA}"
 COMPOSE_PROJECT="tbot-course-mode-physical-tft"
 export TBOT_BACKEND_WORKTREE="${BACKEND_ROOT}"
 export TBOT_LESSON_STUDIO_BACKEND_IMAGE="${BACKEND_IMAGE}"
+export JWT_PUBLIC_KEY="$(cat "${BACKEND_ROOT}/keys/dev-public.pem")"
+export JWT_PRIVATE_KEY="$(cat "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem")"
 unset COMPOSE_PROJECT_NAME COMPOSE_PROFILES LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME
 export LESSON_STUDIO_E2E_RESOURCE_PREFIX="${COMPOSE_PROJECT}"
 

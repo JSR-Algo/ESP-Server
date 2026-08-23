@@ -4,12 +4,29 @@ import subprocess
 from pathlib import Path
 
 import yaml
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 
 ROOT = Path(__file__).resolve().parents[3]
 BASE_COMPOSE = ROOT / "docs/docker/docker-compose.lesson-studio-e2e.yml"
 OVERLAY_COMPOSE = ROOT / "docs/docker/docker-compose.course-mode-physical-tft.yml"
 PHYSICAL_TFT_UP = ROOT / "docs/docker/course-mode-physical-tft/up.sh"
+
+
+def _test_key_pair():
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return (
+        private_key.public_key().public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        ).decode(),
+        private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ).decode(),
+    )
 
 
 class ComposeLoader(yaml.SafeLoader):
@@ -46,6 +63,9 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
     assert overlay["services"]["backend"]["environment"][
         "TBOT_DEVICE_MINT_SECRET"
     ] == "${TBOT_DEVICE_MINT_SECRET:?export the shared local device mint secret}"
+    assert overlay["services"]["backend"]["environment"]["JWT_PRIVATE_KEY"] == (
+        "${JWT_PRIVATE_KEY:?course-mode physical TFT requires a matching local private PEM}"
+    )
     materialize = overlay["services"]["course-mode-materialize"]
     assert overlay["services"]["seed-postgres"]["profiles"] == [
         "disabled-course-mode-physical-tft"
@@ -81,7 +101,8 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
         env.pop(variable, None)
     env.update(
         {
-            "JWT_PUBLIC_KEY": "dummy-local-public-key",
+            "JWT_PUBLIC_KEY": "-----BEGIN PUBLIC KEY-----\nlab-public\n-----END PUBLIC KEY-----",
+            "JWT_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----\nlab-private\n-----END PRIVATE KEY-----",
             "TBOT_DEVICE_MINT_SECRET": "dummy-local-mint-secret",
             "LESSON_ASSET_ORIGIN_BASE": "http://127.0.0.1:8102/tvideo-demo",
             "ROBOT_ESP_BASE_URL": "http://host.docker.internal:8080",
@@ -190,8 +211,16 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
 
 
 def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path):
+    script = PHYSICAL_TFT_UP.read_text(encoding="utf-8")
+    assert 'openssl pkey -in "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem" -pubout' in script
+    assert 'export JWT_PRIVATE_KEY="$(cat "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem")"' in script
+
     backend = tmp_path / "backend"
     backend.mkdir()
+    (backend / "keys").mkdir()
+    public_pem, private_pem = _test_key_pair()
+    (backend / "keys" / "dev-public.pem").write_text(public_pem, encoding="utf-8")
+    (backend / "keys" / "dev-private-pkcs8.pem").write_text(private_pem, encoding="utf-8")
     (backend / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
     materializer = backend / "src/lessons/course-mode/course-mode-local-materializer.ts"
     materializer.parent.mkdir(parents=True)
@@ -233,7 +262,8 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
             "PATH": f"{fake_bin}:{env['PATH']}",
             "TBOT_BACKEND_WORKTREE": str(backend),
             "TBOT_BACKEND_GIT_SHA": sha,
-            "JWT_PUBLIC_KEY": "dummy-local-public-key",
+            "JWT_PUBLIC_KEY": "-----BEGIN PUBLIC KEY-----\nlab-public\n-----END PUBLIC KEY-----",
+            "JWT_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----\nlab-private\n-----END PRIVATE KEY-----",
             "TBOT_DEVICE_MINT_SECRET": "dummy-local-mint-secret",
             "LESSON_ASSET_ORIGIN_BASE": "http://127.0.0.1:8102/tvideo-demo",
             "ROBOT_ESP_BASE_URL": "http://host.docker.internal:8080",

@@ -41,6 +41,9 @@ ACTIVE_LAB_APP = {
     "bundleRootSha256": "d" * 64,
 }
 
+TEST_PUBLIC_PEM = "-----BEGIN PUBLIC KEY-----\ntask07-validation-public\n-----END PUBLIC KEY-----"
+TEST_PRIVATE_PEM = "-----BEGIN PRIVATE KEY-----\ntask07-validation-private\n-----END PRIVATE KEY-----"
+
 
 def valid_input(backend: Path, output_directory: Path):
     return {
@@ -93,7 +96,8 @@ def valid_compose(backend: Path):
                 "COURSE_MODE_V2_PUBLISH_ENABLED": "true",
                 "LESSON_STUDIO_NEW_ASSIGNMENTS_ENABLED": "true",
                 "TBOT_DEVICE_MINT_SECRET": "task07-sentinel-mint",
-                "JWT_PUBLIC_KEY": "task07-sentinel-public",
+                "JWT_PUBLIC_KEY": TEST_PUBLIC_PEM,
+                "JWT_PRIVATE_KEY": TEST_PRIVATE_PEM,
             },
         },
         "course-mode-materialize": {
@@ -204,7 +208,7 @@ def test_valid_preflight_runs_only_five_read_only_commands_and_redacts(tmp_path,
     assert payload["valid"] is True
     assert payload["imageId"] == "sha256:" + "a" * 64
     assert payload["secrets"] == {
-        "JWT_PUBLIC_KEY": "present-redacted",
+        "JWT_KEY_PAIR": "present-redacted",
         "TBOT_DEVICE_MINT_SECRET": "present-redacted",
     }
     assert "private-secret-value" not in json.dumps(payload)
@@ -302,6 +306,9 @@ def test_compose_and_image_validation_fail_closed(tmp_path, artifact_directory):
         (lambda c: c["services"]["course-mode-materialize"]["volumes"][0].update(read_only=False), "compose.materializer.fixture_mount"),
         (lambda c: c["services"].update({"seed-postgres": {}}), "compose.services"),
         (lambda c: c["services"]["backend"]["environment"].update(LESSON_ROLLOUT_DEVICE_ALLOWLIST="wrong"), "compose.assignment_scope"),
+        (lambda c: c["services"]["backend"]["environment"].update(JWT_PUBLIC_KEY="task07-sentinel-public"), "compose.jwt_public_key"),
+        (lambda c: c["services"]["backend"]["environment"].pop("JWT_PRIVATE_KEY"), "compose.jwt_private_key"),
+        (lambda c: c["services"]["backend"]["environment"].update(JWT_PRIVATE_KEY="wrong"), "compose.jwt_private_key"),
         (lambda c: c["volumes"]["lesson-studio-pg-data"].update(name="shared-pg"), "compose.resources"),
     ]
     for mutate, expected_reason in mutations:
