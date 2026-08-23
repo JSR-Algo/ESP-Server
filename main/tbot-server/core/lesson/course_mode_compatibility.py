@@ -57,6 +57,32 @@ _V5_CUES = (
     ("ball-meaning", "ball-discover-center-01", "listen"),
     ("cat-delayed", "cat-delayed-recall-01", "listen"),
 )
+_V5_STEPS = (
+    {"entrance": "flyIn", "expression": "teaching", "id": "cat-discover", "phase": "talk",
+     "pose": "teach", "prompt": "Look at the cat. Listen: cat.", "robotState": "modeling",
+     "subject": "cat", "type": "model"},
+    {"entrance": "none", "expression": "listening", "id": "cat-meaning", "phase": "listen",
+     "pose": "listening", "prompt": "Find the cat.", "robotState": "listening",
+     "subject": "cat", "type": "listen"},
+    {"entrance": "none", "expression": "listening", "id": "cat-joint-speech", "phase": "listen",
+     "pose": "listening", "prompt": "Say cat with TeeBot.", "robotState": "listening",
+     "subject": "cat", "type": "repeat"},
+    {"entrance": "none", "expression": "thinking", "id": "cat-recall", "phase": "idle",
+     "pose": "thinking", "prompt": "What is this called?", "robotState": "thinking",
+     "subject": "cat", "type": "fillBlank"},
+    {"entrance": "none", "expression": "thinking", "id": "cat-transfer", "phase": "idle",
+     "pose": "thinking", "prompt": "What do you see in this farm scene?", "robotState": "thinking",
+     "subject": "cat", "type": "fillBlank"},
+    {"entrance": "none", "expression": "teaching", "id": "ball-discover", "phase": "talk",
+     "pose": "teach", "prompt": "Look at the ball. Listen: ball.", "robotState": "modeling",
+     "subject": "ball", "type": "model"},
+    {"entrance": "none", "expression": "listening", "id": "ball-meaning", "phase": "listen",
+     "pose": "listening", "prompt": "Find the ball.", "robotState": "listening",
+     "subject": "ball", "type": "listen"},
+    {"entrance": "none", "expression": "thinking", "id": "cat-delayed", "phase": "idle",
+     "pose": "thinking", "prompt": "Do you remember this word?", "robotState": "thinking",
+     "subject": "cat", "type": "fillBlank"},
+)
 _V5_LAYERS = (
     {
         "layer": "background",
@@ -342,15 +368,15 @@ def _v5_projection_matches(manifest: Any) -> bool:
         or manifest.get("cinematicPhases") != _v5_phases()
     ):
         return False
-    steps = manifest.get("steps")
-    if (
-        not isinstance(steps, list)
-        or not all(isinstance(step, dict) for step in steps)
-        or [step.get("id") for step in steps] != [cue[0] for cue in _V5_CUES]
-    ):
+    if manifest.get("steps") != list(_V5_STEPS):
         return False
     refs = manifest.get("visualRefs")
-    return isinstance(refs, list) and all(isinstance(ref, dict) for ref in refs) and sorted(
+    return isinstance(refs, list) and all(
+        isinstance(ref, dict)
+        and isinstance(ref.get("stepKey"), str)
+        and isinstance(ref.get("slot"), str)
+        for ref in refs
+    ) and sorted(
         refs, key=lambda value: (value.get("stepKey"), value.get("slot"))
     ) == _v5_visual_refs()
 

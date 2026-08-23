@@ -198,6 +198,19 @@ def test_reviewed_renderer_v5_identity_returns_exact_marker_without_changing_v1(
         lambda manifest: manifest["manifestIdentityProjection"]["assets"][1].update(
             sha256="0" * 64
         ),
+        lambda manifest: manifest["manifestIdentityProjection"]["steps"][0].update(
+            prompt="Altered prompt"
+        ),
+        lambda manifest: manifest["manifestIdentityProjection"]["steps"][0].pop(
+            "robotState"
+        ),
+        lambda manifest: manifest["manifestIdentityProjection"]["steps"].reverse(),
+        lambda manifest: manifest["manifestIdentityProjection"]["visualRefs"][0].update(
+            stepKey=None
+        ),
+        lambda manifest: manifest["manifestIdentityProjection"]["visualRefs"][0].update(
+            slot=1
+        ),
     ],
 )
 def test_renderer_v5_identity_rejects_unreviewed_or_mixed_identity(
