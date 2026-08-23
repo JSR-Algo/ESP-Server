@@ -455,7 +455,6 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   const nextDraftResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}/new-version`)
     && response.request().method() === 'POST' && response.status() === 201);
   await newVersionButton.click();
-  await page.getByRole('button', { name: /ok|confirm/i }).last().click();
   const nextDraftHttpResponse = await nextDraftResponse;
   expect(nextDraftHttpResponse.request().postData()).toBeNull();
   const nextDraft = (await nextDraftHttpResponse.json()).data;
