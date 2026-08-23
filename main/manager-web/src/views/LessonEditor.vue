@@ -1800,6 +1800,8 @@ export default {
       );
     },
     clearPreviewProofState() {
+      this.previewRequestId += 1;
+      this.previewing = false;
       this.preview = null;
       this.previewManifest = null;
       this.previewProofVersion = -1;
@@ -2925,6 +2927,8 @@ export default {
     doPreview(onSuccess, onError, options = {}) {
       if (this.editorDestroying || !this.lessonCapabilities.exactEspTftPreview) return false;
       if (!options.allowUnsafe && this.hasUnsafeProofState()) return false;
+      const lessonId = this.lessonId;
+      const lessonLoadRequestId = this.lessonLoadRequestId;
       const requestId = this.previewRequestId + 1;
       const previousProofVersion = this.proofVersion;
       if (!options.reuseProofVersion) this.proofVersion += 1;
@@ -2939,11 +2943,12 @@ export default {
       this.simulationProofVersion = -1;
       this.previewing = true;
       Api.lesson.manifestPreview(
-        this.lessonId,
+        lessonId,
         'espTft',
         (res) => {
           if (this.editorDestroying) return;
-          if (requestId !== this.previewRequestId || proofVersion !== this.proofVersion) return;
+          if (requestId !== this.previewRequestId || proofVersion !== this.proofVersion
+            || lessonId !== this.lessonId || lessonLoadRequestId !== this.lessonLoadRequestId) return;
           this.previewing = false;
           const normalized = res && !res.preview && res.manifest && res.manifest.profile === 'espTft'
             ? { ...res, preview: { profile: 'espTft', width: 480, height: 320 } }
@@ -2963,7 +2968,8 @@ export default {
         },
         (msg) => {
           if (this.editorDestroying) return;
-          if (requestId !== this.previewRequestId || proofVersion !== this.proofVersion) return;
+          if (requestId !== this.previewRequestId || proofVersion !== this.proofVersion
+            || lessonId !== this.lessonId || lessonLoadRequestId !== this.lessonLoadRequestId) return;
           this.previewing = false;
           this.$message.error(msg);
           if (typeof onError === 'function') onError(msg);

@@ -913,6 +913,67 @@ function verifyPreviewAuthorityClearsOnLessonFetchContract() {
   assert.equal(isCourseModeV5.call(context), false, 'non-Course renderer v5 must remain on the legacy visual UI path after route/load');
 }
 
+function verifyLatePreviewCannotRestoreStaleCourseAuthorityContract() {
+  const doPreviewSource = extractObjectMethod(editorSource, 'doPreview');
+  const isCourseModeV5Source = extractObjectMethod(editorSource, 'isCourseModeV5');
+  const hasLoadedCourseModeAuthoritySource = extractObjectMethod(editorSource, 'hasLoadedCourseModeAuthority');
+  const requests = [];
+  const doPreview = vm.runInNewContext(`(${doPreviewSource.replace(/^doPreview/, 'function doPreview')})`, {
+    Api: { lesson: { manifestPreview: (...args) => requests.push(args) } },
+  });
+  const isCourseModeV5 = vm.runInNewContext(`(${isCourseModeV5Source.replace(/^isCourseModeV5/, 'function isCourseModeV5')})`);
+  const hasLoadedCourseModeAuthority = vm.runInNewContext(`(${hasLoadedCourseModeAuthoritySource.replace(/^hasLoadedCourseModeAuthority/, 'function hasLoadedCourseModeAuthority')})`);
+  const context = {
+    lessonId: 'course-v5',
+    lessonLoadRequestId: 10,
+    previewRequestId: 0,
+    proofVersion: 5,
+    validationProofVersion: -1,
+    publishReviewRequestId: 0,
+    publishReviewVisible: true,
+    publishReviewSnapshot: { stale: true },
+    publishResult: { stale: true },
+    previewing: false,
+    preview: null,
+    previewManifest: null,
+    previewProofVersion: -1,
+    simulationEvidence: null,
+    simulationProofVersion: -1,
+    editorDestroying: false,
+    lessonCapabilities: { exactEspTftPreview: true },
+    hasUnsafeProofState: false,
+    validManifestPreviewResponse: (result) => Boolean(result && result.checksum && result.etag && result.manifest && Array.isArray(result.manifest.steps)),
+    $message: { error() {} },
+  };
+  assert.equal(doPreview.call(context, null, null, { allowUnsafe: true }), true, 'Course Mode preview request must dispatch');
+  assert.equal(requests.length, 1, 'preview request must be captured for async race simulation');
+  context.lessonId = 'non-course-v5';
+  context.lessonLoadRequestId += 1;
+  context.lesson = { lessonId: 'non-course-v5', manifestVersion: 'teebot-lesson-renderer.v5', status: 'draft' };
+  context.preview = null;
+  context.previewManifest = null;
+  context.previewProofVersion = -1;
+  context.simulationEvidence = null;
+  context.simulationProofVersion = -1;
+  requests[0][2]({
+    checksum: 'course-preview-checksum',
+    etag: 'course-preview-etag',
+    preview: { profile: 'espTft', width: 480, height: 320 },
+    manifest: {
+      manifestVersion: 'teebot-lesson-renderer.v5',
+      profile: 'espTft',
+      courseModeContract: { version: 2 },
+      steps: [],
+    },
+  });
+  assert.equal(context.previewManifest, null, 'late Course Mode preview success must not store on the navigated lesson');
+  assert.equal(context.preview, null, 'late Course Mode preview success must not restore stale preview checksum state');
+  context.hasLoadedCourseModeAuthority = hasLoadedCourseModeAuthority.call(context);
+  assert.equal(context.hasLoadedCourseModeAuthority, false, 'late Course Mode preview must not restore Course authority on non-Course renderer v5');
+  assert.equal(isCourseModeV5.call(context), false, 'late Course Mode preview must leave the non-Course renderer v5 on the legacy UI path');
+}
+
 verifyDirectCinematicLibraryContract();
 verifyPreviewAuthorityClearsOnLessonFetchContract();
+verifyLatePreviewCannotRestoreStaleCourseAuthorityContract();
 console.log('lesson visual selection contract: OK');
