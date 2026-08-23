@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
+from core.lesson.course_mode_compatibility import (
+    course_mode_compatibility_for_manifest,
+)
 from core.lesson.asset_cache import AssetCache, AssetState
 from core.lesson.layered_cinematic_contract import (
     LayeredCinematicContractError,
@@ -16,6 +21,8 @@ SHA_BACKGROUND = "a" * 64
 SHA_OBJECT = "b" * 64
 SHA_ROBOT = "c" * 64
 LOCAL_ROOT = "/sdcard/tbot/lesson-assets/w02-feelings/v5-checksum"
+FIXTURES = Path(__file__).parent / "fixtures" / "course-mode"
+COURSE_MODE_V5_CHECKSUM = "e8ee7ff1fb67e8dbd0f8c6908b09c4a4f8e0d1cf3ce41bb38142da0fc03519dc"
 
 
 def _phase() -> dict:
@@ -106,6 +113,82 @@ def _pack() -> dict:
             "compatibilityMetadata": deepcopy(layer["metadata"]),
         })
     return {"ready": True, "localRoot": LOCAL_ROOT, "assets": assets}
+
+
+def _course_mode_v5_identity() -> dict:
+    return json.loads(
+        (FIXTURES / "course-mode-pilot-cat-ball-v2.json").read_text(encoding="utf-8")
+    )
+
+
+def test_course_mode_v5_fixture_preserves_reviewed_layered_identity() -> None:
+    manifest = _course_mode_v5_identity()
+
+    assert course_mode_compatibility_for_manifest(
+        manifest, manifest_checksum=COURSE_MODE_V5_CHECKSUM
+    ) == {
+        "schemaVersion": 1,
+        "contractChecksum": "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264",
+        "layoutContract": "layeredCinematic",
+        "lessonId": "course-mode-v5-farm-candidate",
+        "lessonVersion": 2,
+        "manifestChecksum": COURSE_MODE_V5_CHECKSUM,
+    }
+    assert manifest["cuePhases"] == [
+        {"activityId": "cat-discover-center-01", "cueId": "cat-discover", "phaseId": "teach"},
+        {"activityId": "cat-meaning-left-right-01", "cueId": "cat-meaning", "phaseId": "listen"},
+        {"activityId": "cat-discover-center-01", "cueId": "cat-joint-speech", "phaseId": "teach"},
+        {"activityId": "cat-recall-visual-02", "cueId": "cat-recall", "phaseId": "listen"},
+        {"activityId": "cat-transfer-scene-01", "cueId": "cat-transfer", "phaseId": "listen"},
+        {"activityId": "ball-discover-center-01", "cueId": "ball-discover", "phaseId": "teach"},
+        {"activityId": "ball-discover-center-01", "cueId": "ball-meaning", "phaseId": "listen"},
+        {"activityId": "cat-delayed-recall-01", "cueId": "cat-delayed", "phaseId": "listen"},
+    ]
+    assert [
+        {
+            key: asset[key]
+            for key in ("versionId", "assetId", "assetKey", "slot", "sha256", "bytes", "mediaType", "width", "height")
+        }
+        for asset in manifest["sharedAssets"]
+    ] == [
+        {
+            "versionId": "75000000-0000-4000-8000-000000000011",
+            "assetId": "75000000-0000-4000-8000-000000000010",
+            "assetKey": "course-mode.v5.scene.farm",
+            "slot": "backgroundScene",
+            "sha256": "d4abb6087dc3122e0a00feb5e6a86b03dc7db550eb59d25e92f54d0fd09e4fc0",
+            "bytes": 43599,
+            "mediaType": "image/jpeg",
+            "width": 480,
+            "height": 320,
+        },
+        {
+            "versionId": "75000000-0000-4000-8000-000000000022",
+            "assetId": "75000000-0000-4000-8000-000000000020",
+            "assetKey": "course-mode.v5.object.barn",
+            "slot": "teachingObject",
+            "sha256": "c466239ff8ba202998e3827b6871906d7fbac6232aeaea3a59b7c69bec7d8777",
+            "bytes": 15086,
+            "mediaType": "image/png",
+            "width": 95,
+            "height": 95,
+        },
+        {
+            "versionId": "75000000-0000-4000-8000-000000000031",
+            "assetId": "75000000-0000-4000-8000-000000000030",
+            "assetKey": "course-mode.v5.robot.teach",
+            "slot": "robotOverlay",
+            "sha256": "f2d496b5e750e895f7e086aec827d7b99d0bb322d73ea660a2e84ff484b602c4",
+            "bytes": 223033,
+            "mediaType": "video/mp4",
+            "width": 240,
+            "height": 240,
+        },
+    ]
+    assert manifest["phaseIdentity"] == [
+        phase
+        for phase in manifest["manifestIdentityProjection"]["cinematicPhases"]
+    ]
 
 
 def test_projects_exact_mixed_media_phase_from_attested_pack() -> None:
