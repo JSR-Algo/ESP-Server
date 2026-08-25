@@ -74,6 +74,7 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
         "disabled-course-mode-physical-tft"
     ]
     assert materialize["environment"]["COURSE_MODE_LOCAL_COMPOSE_ENABLED"] == "true"
+    assert materialize["environment"]["COURSE_MODE_LOCAL_FIXTURE"] == "admin-w1"
     assert "COURSE_MODE_V2_PUBLISH_ENABLED" not in materialize["environment"]
     assert materialize["environment"]["COURSE_MODE_DEVICE_MAC"] == "14:c1:9f:d1:ac:20"
     assert overlay["services"]["backend"]["image"] == (
@@ -195,6 +196,22 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
             "bind": {},
         }
     ]
+    assert web["volumes"] == [
+        {
+            "type": "bind",
+            "source": "/tmp/task-owned-backend/src/lessons/fixtures/course-mode/admin-w1/assets",
+            "target": "/usr/share/nginx/html/lesson-assets",
+            "read_only": True,
+            "bind": {},
+        }
+    ]
+    robot_facing_origins = {
+        backend["environment"]["LESSON_ASSET_ORIGIN_BASE"],
+        backend["environment"]["FLATTENED_CINEMATIC_PUBLIC_BASE_URL"],
+        materialize["environment"]["FLATTENED_CINEMATIC_PUBLIC_BASE_URL"],
+    }
+    assert robot_facing_origins == {"http://192.168.100.183:8102/"}
+    assert "192.168.0.120" not in result.stdout
     assert set(web["depends_on"]) == {"backend", "course-mode-materialize", "mysql", "redis"}
     assert "seed-postgres" not in compose["services"]
     assert "seed-mysql" not in compose["services"]

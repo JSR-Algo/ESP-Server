@@ -27,6 +27,7 @@ services:
     environment:
       DATABASE_URL: postgresql://tbot:tbot@postgres:5432/tbot
       COURSE_MODE_LOCAL_COMPOSE_ENABLED: "true"
+      COURSE_MODE_LOCAL_FIXTURE: admin-w1
       COURSE_MODE_DEVICE_MAC: "14:c1:9f:d1:ac:20"
       COURSE_MODE_FIXTURE_ROOT: /course-mode-fixtures
       COURSE_MODE_LOCAL_PHYSICAL_TFT_ENABLED: "true"
@@ -54,6 +55,5 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    volumes:
-      - ${TBOT_BACKEND_WORKTREE:?export the task-owned backend worktree}/src/lessons/fixtures/course-mode/pilot/v1/assets:/usr/share/nginx/html/course-mode/pilot/v1/assets:ro
-      - ${TBOT_BACKEND_WORKTREE:?export the task-owned backend worktree}/src/lessons/fixtures/course-mode/pilot/v1/derivatives:/usr/share/nginx/html/lessons/derivatives:ro
+    volumes: !override
+      - ${TBOT_BACKEND_WORKTREE:?export the task-owned backend worktree}/src/lessons/fixtures/course-mode/admin-w1/assets:/usr/share/nginx/html/lesson-assets:ro
