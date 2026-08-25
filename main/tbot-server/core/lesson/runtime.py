@@ -1801,13 +1801,25 @@ def _manifest_asset_cache_inputs(
         {
             "key": asset.get("id") or asset.get("assetId"),
             "path": asset.get("path"),
-            "url": asset.get("url"),
+            "url": asset.get("url") or asset.get("onlineUrl"),
             "sha256": asset.get("sha256"),
             "size": asset.get("bytes"),
             "critical": asset.get("critical"),
             "layer": asset.get("layer"),
             "role": asset.get("role"),
             "mediaType": asset.get("mediaType") or asset.get("media_type"),
+            **(
+                {
+                    "sharedAssetKey": asset.get("sharedAssetKey"),
+                    "sharedAssetVersion": asset.get("sharedAssetVersion"),
+                    "compatibilityMetadata": copy.deepcopy(
+                        asset.get("compatibilityMetadata")
+                    ),
+                    "visualRefs": copy.deepcopy(asset.get("visualRefs")),
+                }
+                if manifest.get("manifestVersion") == RENDERER_V3
+                else {}
+            ),
         }
         for asset in manifest.get("assets", [])
         if isinstance(asset, dict)
