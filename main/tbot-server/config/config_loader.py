@@ -525,6 +525,7 @@ def _validate_lesson_rollout_file_config(lesson_cfg):
         "motion_presets_enabled",
         "playful_interactions_enabled",
         "renderer_v2_enabled",
+        "renderer_v3_enabled",
         "renderer_v4_enabled",
         "renderer_v5_enabled",
         "course_mode_v2_enabled",
@@ -578,6 +579,7 @@ def _apply_lesson_env_overrides(config):
     motion_presets_flag = _parse_strict_bool_env("LESSON_MOTION_PRESETS_ENABLED")
     playful_interactions_flag = _parse_strict_bool_env("LESSON_PLAYFUL_INTERACTIONS_ENABLED")
     renderer_v2_flag = _parse_strict_bool_env("LESSON_RENDERER_V2_ENABLED")
+    renderer_v3_flag = _parse_strict_bool_env("LESSON_RENDERER_V3_ENABLED")
     renderer_v4_flag = _parse_strict_bool_env("LESSON_RENDERER_V4_ENABLED")
     renderer_v5_flag = _parse_strict_bool_env("LESSON_RENDERER_V5_ENABLED")
     course_mode_v2_flag = _parse_strict_bool_env("LESSON_COURSE_MODE_V2_ENABLED")
@@ -652,6 +654,7 @@ def _apply_lesson_env_overrides(config):
         and motion_presets_flag is None
         and playful_interactions_flag is None
         and renderer_v2_flag is None
+        and renderer_v3_flag is None
         and renderer_v4_flag is None
         and renderer_v5_flag is None
         and course_mode_v2_flag is None
@@ -665,6 +668,7 @@ def _apply_lesson_env_overrides(config):
         lesson_cfg.setdefault("motion_presets_enabled", False)
         lesson_cfg.setdefault("playful_interactions_enabled", False)
         lesson_cfg.setdefault("renderer_v2_enabled", False)
+        lesson_cfg.setdefault("renderer_v3_enabled", False)
         lesson_cfg.setdefault("renderer_v4_enabled", False)
         lesson_cfg.setdefault("renderer_v5_enabled", False)
         lesson_cfg.setdefault("course_mode_v2_enabled", False)
@@ -682,6 +686,7 @@ def _apply_lesson_env_overrides(config):
             lesson_cfg.get("motion_presets_enabled") is True
             or lesson_cfg.get("playful_interactions_enabled") is True
             or lesson_cfg.get("renderer_v2_enabled") is True
+            or lesson_cfg.get("renderer_v3_enabled") is True
             or lesson_cfg.get("renderer_v4_enabled") is True
             or lesson_cfg.get("renderer_v5_enabled") is True
             or lesson_cfg.get("course_mode_v2_enabled") is True
@@ -698,6 +703,7 @@ def _apply_lesson_env_overrides(config):
     lesson_cfg.setdefault("motion_presets_enabled", False)
     lesson_cfg.setdefault("playful_interactions_enabled", False)
     lesson_cfg.setdefault("renderer_v2_enabled", False)
+    lesson_cfg.setdefault("renderer_v3_enabled", False)
     lesson_cfg.setdefault("renderer_v4_enabled", False)
     lesson_cfg.setdefault("renderer_v5_enabled", False)
     lesson_cfg.setdefault("course_mode_v2_enabled", False)
@@ -718,6 +724,11 @@ def _apply_lesson_env_overrides(config):
         renderer_v2_flag
         if renderer_v2_flag is not None
         else lesson_cfg["renderer_v2_enabled"]
+    )
+    lesson_cfg["renderer_v3_enabled"] = (
+        renderer_v3_flag
+        if renderer_v3_flag is not None
+        else lesson_cfg["renderer_v3_enabled"]
     )
     lesson_cfg["renderer_v4_enabled"] = (
         renderer_v4_flag
@@ -804,6 +815,7 @@ def _apply_lesson_env_overrides(config):
         lesson_cfg.get("motion_presets_enabled") is True
         or lesson_cfg.get("playful_interactions_enabled") is True
         or lesson_cfg.get("renderer_v2_enabled") is True
+        or lesson_cfg.get("renderer_v3_enabled") is True
         or lesson_cfg.get("renderer_v4_enabled") is True
         or lesson_cfg.get("renderer_v5_enabled") is True
         or lesson_cfg.get("course_mode_v2_enabled") is True
@@ -1033,6 +1045,7 @@ _LOCAL_LESSON_ASSET_PACK_KEYS = (
     "motion_presets_enabled",
     "playful_interactions_enabled",
     "renderer_v2_enabled",
+    "renderer_v3_enabled",
     "renderer_v4_enabled",
     "renderer_v5_enabled",
     "rollout_device_allowlist",

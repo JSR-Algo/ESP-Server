@@ -149,12 +149,15 @@ def test_prod_deploy_wires_renderer_flags_defaulting_disabled():
 
     assert environment["LESSON_RENDERER_V2_ENABLED"] == "${LESSON_RENDERER_V2_ENABLED:-false}"
     assert environment["LESSON_RENDERER_V4_ENABLED"] == "${LESSON_RENDERER_V4_ENABLED:-false}"
+    assert environment["LESSON_RENDERER_V3_ENABLED"] == "${LESSON_RENDERER_V3_ENABLED:-false}"
     assert environment["LESSON_RENDERER_V5_ENABLED"] == "${LESSON_RENDERER_V5_ENABLED:-false}"
     assert "LESSON_RENDERER_V2_ENABLED=false" in env_example
     assert "LESSON_RENDERER_V4_ENABLED=false" in env_example
+    assert "LESSON_RENDERER_V3_ENABLED=false" in env_example
     assert "LESSON_RENDERER_V5_ENABLED=false" in env_example
     assert "LESSON_RENDERER_V2_ENABLED" in script
     assert "LESSON_RENDERER_V4_ENABLED" in script
+    assert "LESSON_RENDERER_V3_ENABLED" in script
     assert "LESSON_RENDERER_V5_ENABLED" in script
 
 

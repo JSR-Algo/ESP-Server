@@ -240,6 +240,7 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
 
 def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path):
     script = PHYSICAL_TFT_UP.read_text(encoding="utf-8")
+    assert 'export LESSON_RENDERER_V3_ENABLED="true"' in script
     assert 'openssl pkey -in "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem" -pubout -outform DER' in script
     assert 'openssl pkey -pubin -in "${BACKEND_ROOT}/keys/dev-public.pem" -outform DER' in script
     assert 'export JWT_PRIVATE_KEY="$(cat "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem")"' in script

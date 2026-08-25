@@ -16,6 +16,7 @@ def test_rollout_flags_default_false_and_parse_allowlist(monkeypatch):
         "LESSON_MOTION_PRESETS_ENABLED",
         "LESSON_PLAYFUL_INTERACTIONS_ENABLED",
         "LESSON_RENDERER_V2_ENABLED",
+        "LESSON_RENDERER_V3_ENABLED",
         "LESSON_RENDERER_V5_ENABLED",
         "LESSON_ROLLOUT_DEVICE_ALLOWLIST",
     ):
@@ -25,6 +26,7 @@ def test_rollout_flags_default_false_and_parse_allowlist(monkeypatch):
     assert config["lesson"]["motion_presets_enabled"] is False
     assert config["lesson"]["playful_interactions_enabled"] is False
     assert config["lesson"]["renderer_v2_enabled"] is False
+    assert config["lesson"]["renderer_v3_enabled"] is False
     assert config["lesson"]["renderer_v5_enabled"] is False
     assert config["lesson"]["rollout_device_allowlist"] == []
 
@@ -171,6 +173,7 @@ def test_compose_variants_forward_documented_lesson_rollout_environment():
         "LESSON_MOTION_PRESETS_ENABLED",
         "LESSON_PLAYFUL_INTERACTIONS_ENABLED",
         "LESSON_COURSE_MODE_V2_ENABLED",
+        "LESSON_RENDERER_V3_ENABLED",
         "LESSON_RENDERER_V4_ENABLED",
         "LESSON_RENDERER_V5_ENABLED",
         "LESSON_ROLLOUT_DEVICE_ALLOWLIST",
