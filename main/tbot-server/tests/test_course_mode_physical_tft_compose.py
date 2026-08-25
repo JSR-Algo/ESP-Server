@@ -29,6 +29,17 @@ def _test_key_pair():
     )
 
 
+def _write_admin_w1_fixture(backend):
+    fixture = backend / "src/lessons/fixtures/course-mode/admin-w1"
+    assets = fixture / "assets"
+    assets.mkdir(parents=True)
+    (fixture / "lesson.json").write_text('{"lessonKey":"w01-greetings-politeness"}\n')
+    (fixture / "published-pack.json").write_text(
+        '{"assets":[{"sha256":"abc123","mediaType":"image/png"}]}\n'
+    )
+    (assets / "abc123.png").write_bytes(b"fixture")
+
+
 class ComposeLoader(yaml.SafeLoader):
     pass
 
@@ -243,6 +254,7 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
     materializer = backend / "src/lessons/course-mode/course-mode-local-materializer.ts"
     materializer.parent.mkdir(parents=True)
     materializer.write_text("export {};\n", encoding="utf-8")
+    _write_admin_w1_fixture(backend)
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -268,7 +280,9 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         "[[ -z \"${COMPOSE_PROFILES:-}\" ]] || exit 97\n"
-        f"printf 'docker %s\\n' \"$*\" >> {log}\n",
+        f"printf 'docker %s\\n' \"$*\" >> {log}\n"
+        f"printf 'asset=%s robot=%s esp=%s\\n' \"${{LESSON_ASSET_ORIGIN_BASE:-}}\" \"${{ROBOT_ESP_BASE_URL:-}}\" \"${{TBOT_ESP_SERVER_URL:-}}\" >> {log}.env\n"
+        "if [[ \"$*\" == *\"exec -T postgres psql\"* ]]; then echo missing; fi\n",
         encoding="utf-8",
     )
     for command in ("git", "npm", "docker"):
@@ -283,15 +297,11 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
             "JWT_PUBLIC_KEY": "-----BEGIN PUBLIC KEY-----\nlab-public\n-----END PUBLIC KEY-----",
             "JWT_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----\nlab-private\n-----END PRIVATE KEY-----",
             "TBOT_DEVICE_MINT_SECRET": "dummy-local-mint-secret",
-            "LESSON_ASSET_ORIGIN_BASE": "http://127.0.0.1:8102/tvideo-demo",
-            "ROBOT_ESP_BASE_URL": "http://host.docker.internal:8080",
             "COURSE_MODE_ASSET_ORIGIN_BASE": "http://192.168.100.183:8102/",
             "COMPOSE_PROJECT_NAME": "unrelated-stack",
             "COMPOSE_PROFILES": "disabled-course-mode-physical-tft",
             "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME": "another-stack",
             "LESSON_STUDIO_E2E_RESOURCE_PREFIX": "external-resources",
-            "ROBOT_ESP_BASE_URL": "https://production-esp.example",
-            "TBOT_ESP_SERVER_URL": "https://production-esp.example",
         }
     )
     subprocess.run(
@@ -324,8 +334,12 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
     assert "another-stack" not in calls[3]
     assert "external-resources" not in calls[3]
     assert all(" up " not in f" {call} " for call in calls)
+    assert set(Path(f"{log}.env").read_text().splitlines()) == {
+        "asset=http://192.168.100.183:8102/ robot=http://192.168.100.183:8003 esp=http://192.168.100.183:8003"
+    }
 
     log.unlink()
+    Path(f"{log}.env").unlink()
     subprocess.run(
         [str(PHYSICAL_TFT_UP)],
         check=True,
@@ -334,8 +348,60 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
         text=True,
     )
     start_calls = log.read_text(encoding="utf-8").splitlines()
-    assert start_calls[-2].endswith("config --quiet")
+    assert any(call.endswith("up -d --wait postgres redis mysql backend") for call in start_calls)
+    assert any("exec -T postgres psql" in call for call in start_calls)
+    assert any(
+        call.endswith("run --rm -e COURSE_MODE_LOCAL_FIXTURE=cat-ball course-mode-materialize")
+        for call in start_calls
+    )
     assert start_calls[-1].endswith("up -d")
+
+
+def test_physical_tft_up_rejects_incomplete_admin_w1_fixture_before_build(tmp_path):
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    (backend / "keys").mkdir()
+    public_pem, private_pem = _test_key_pair()
+    (backend / "keys" / "dev-public.pem").write_text(public_pem)
+    (backend / "keys" / "dev-private-pkcs8.pem").write_text(private_pem)
+    (backend / "Dockerfile").write_text("FROM scratch\n")
+    materializer = backend / "src/lessons/course-mode/course-mode-local-materializer.ts"
+    materializer.parent.mkdir(parents=True)
+    materializer.write_text("export {};\n")
+    fixture = backend / "src/lessons/fixtures/course-mode/admin-w1"
+    fixture.mkdir(parents=True)
+    (fixture / "assets").mkdir()
+    (fixture / "lesson.json").write_text("{}\n")
+    (fixture / "published-pack.json").write_text(
+        '{"assets":[{"sha256":"missing","mediaType":"image/png"}]}\n'
+    )
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    (fake_bin / "git").write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        f"if [[ \"$*\" == *\"rev-parse --show-toplevel\"* ]]; then echo {backend}; exit 0; fi\n"
+        f"if [[ \"$*\" == *\"rev-parse HEAD\"* ]]; then echo {sha}; exit 0; fi\n"
+        "if [[ \"$*\" == *\"status --porcelain\"* ]]; then exit 0; fi\nexit 2\n"
+    )
+    (fake_bin / "npm").write_text("#!/usr/bin/env bash\nexit 99\n")
+    for command in ("git", "npm"):
+        (fake_bin / command).chmod(0o755)
+    env = os.environ.copy()
+    env.update({
+        "PATH": f"{fake_bin}:{env['PATH']}",
+        "TBOT_BACKEND_WORKTREE": str(backend),
+        "TBOT_BACKEND_GIT_SHA": sha,
+        "TBOT_DEVICE_MINT_SECRET": "dummy-local-mint-secret",
+        "COURSE_MODE_ASSET_ORIGIN_BASE": "http://192.168.100.183:8102/",
+    })
+    result = subprocess.run(
+        [str(PHYSICAL_TFT_UP), "--config-only"], cwd=ROOT, env=env,
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "Admin W1 fixture asset is missing" in result.stderr
 
 
 def test_physical_tft_up_rejects_backend_sha_mismatch_before_build(tmp_path):

@@ -36,6 +36,8 @@ ACTUAL_SHA="$(git -C "${BACKEND_ROOT}" rev-parse HEAD)"
   fail "backend HEAD ${ACTUAL_SHA} does not match TBOT_BACKEND_GIT_SHA ${TBOT_BACKEND_GIT_SHA}"
 [[ -z "$(git -C "${BACKEND_ROOT}" status --porcelain --untracked-files=all)" ]] || \
   fail "backend worktree must be clean so the SHA-tagged image has exact source provenance"
+: "${COURSE_MODE_ASSET_ORIGIN_BASE:?export the robot-reachable local asset origin ending in /}"
+: "${TBOT_DEVICE_MINT_SECRET:?export the shared local device mint secret}"
 [[ -f "${BACKEND_ROOT}/Dockerfile" ]] || fail "backend Dockerfile is missing"
 [[ -f "${BACKEND_ROOT}/keys/dev-public.pem" ]] || fail "backend local public key is missing"
 [[ -f "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem" ]] || fail "backend local private key is missing"
@@ -49,6 +51,25 @@ openssl pkey -pubin -in "${BACKEND_ROOT}/keys/dev-public.pem" -outform DER \
   fail "backend local JWT public/private key pair is invalid or mismatched"
 [[ -f "${BACKEND_ROOT}/src/lessons/course-mode/course-mode-local-materializer.ts" ]] || \
   fail "backend Course Mode local materializer source is missing"
+ADMIN_W1_ROOT="${BACKEND_ROOT}/src/lessons/fixtures/course-mode/admin-w1"
+[[ -f "${ADMIN_W1_ROOT}/lesson.json" ]] || fail "Admin W1 fixture lesson.json is missing"
+[[ -f "${ADMIN_W1_ROOT}/published-pack.json" ]] || fail "Admin W1 fixture published-pack.json is missing"
+[[ -d "${ADMIN_W1_ROOT}/assets" ]] || fail "Admin W1 fixture asset directory is missing"
+node - "${ADMIN_W1_ROOT}" <<'NODE' || fail "Admin W1 fixture asset is missing or malformed"
+const fs = require('node:fs');
+const path = require('node:path');
+const root = process.argv[2];
+JSON.parse(fs.readFileSync(path.join(root, 'lesson.json'), 'utf8'));
+const pack = JSON.parse(fs.readFileSync(path.join(root, 'published-pack.json'), 'utf8'));
+if (!Array.isArray(pack.assets) || pack.assets.length === 0) process.exit(1);
+const extensions = { 'image/png': '.png', 'image/jpeg': '.jpg', 'video/mp4': '.mp4' };
+for (const asset of pack.assets) {
+  const extension = extensions[asset.mediaType];
+  if (!extension || !asset.sha256 || !fs.statSync(path.join(root, 'assets', `${asset.sha256}${extension}`)).isFile()) {
+    process.exit(1);
+  }
+}
+NODE
 
 BACKEND_IMAGE="local/tbot-backend:course-mode-physical-tft-${ACTUAL_SHA}"
 COMPOSE_PROJECT="tbot-course-mode-physical-tft"
@@ -56,6 +77,9 @@ export TBOT_BACKEND_WORKTREE="${BACKEND_ROOT}"
 export TBOT_LESSON_STUDIO_BACKEND_IMAGE="${BACKEND_IMAGE}"
 export JWT_PUBLIC_KEY="$(cat "${BACKEND_ROOT}/keys/dev-public.pem")"
 export JWT_PRIVATE_KEY="$(cat "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem")"
+export LESSON_ASSET_ORIGIN_BASE="${COURSE_MODE_ASSET_ORIGIN_BASE}"
+export ROBOT_ESP_BASE_URL="http://192.168.100.183:8003"
+export TBOT_ESP_SERVER_URL="${ROBOT_ESP_BASE_URL}"
 unset COMPOSE_PROJECT_NAME COMPOSE_PROFILES LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME
 export LESSON_STUDIO_E2E_RESOURCE_PREFIX="${COMPOSE_PROJECT}"
 
@@ -86,4 +110,13 @@ if [[ "${1:-}" == "--config-only" ]]; then
 fi
 
 echo "[course-mode-physical-tft] starting the local physical-TFT Compose project"
+"${COMPOSE[@]}" up -d --wait postgres redis mysql backend
+IDENTITY_STATE="$("${COMPOSE[@]}" exec -T postgres psql -U tbot -d tbot -Atqc \
+  "SELECT CASE WHEN COUNT(*)=0 THEN 'missing' WHEN BOOL_AND(d.current_household_id IS NOT NULL AND d.assigned_child_profile_id IS NOT NULL AND h.owner_id IS NOT NULL) THEN 'ready' ELSE 'partial' END FROM devices d LEFT JOIN households h ON h.id=d.current_household_id WHERE lower(d.mac_address)=lower('14:c1:9f:d1:ac:20')")"
+if [[ "${IDENTITY_STATE}" == "missing" ]]; then
+  echo "[course-mode-physical-tft] bootstrapping the task-owned AC:20 identity"
+  "${COMPOSE[@]}" run --rm -e COURSE_MODE_LOCAL_FIXTURE=cat-ball course-mode-materialize
+elif [[ "${IDENTITY_STATE}" != "ready" ]]; then
+  fail "task-owned AC:20 identity is partial; refusing automatic repair"
+fi
 "${COMPOSE[@]}" up -d
