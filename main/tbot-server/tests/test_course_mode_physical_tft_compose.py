@@ -282,6 +282,8 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
         "[[ -z \"${COMPOSE_PROFILES:-}\" ]] || exit 97\n"
         f"printf 'docker %s\\n' \"$*\" >> {log}\n"
         f"printf 'asset=%s robot=%s esp=%s\\n' \"${{LESSON_ASSET_ORIGIN_BASE:-}}\" \"${{ROBOT_ESP_BASE_URL:-}}\" \"${{TBOT_ESP_SERVER_URL:-}}\" >> {log}.env\n"
+        f"printf 'asset_public=%s device=%s\\n' \"${{LESSON_ASSET_PUBLIC_BASE_URL:-}}\" \"${{TASK07_DEVICE_MAC:-}}\" >> {log}.env\n"
+        f"if [[ \"$*\" == *\"inspect --format\"* ]]; then echo {BASE_COMPOSE},{OVERLAY_COMPOSE}; fi\n"
         "if [[ \"$*\" == *\"exec -T postgres psql\"* ]]; then echo missing; fi\n",
         encoding="utf-8",
     )
@@ -335,7 +337,8 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
     assert "external-resources" not in calls[3]
     assert all(" up " not in f" {call} " for call in calls)
     assert set(Path(f"{log}.env").read_text().splitlines()) == {
-        "asset=http://192.168.100.183:8102/ robot=http://192.168.100.183:8003 esp=http://192.168.100.183:8003"
+        "asset=http://192.168.100.183:8102/ robot=http://192.168.100.183:8003 esp=http://192.168.100.183:8003",
+        "asset_public=http://192.168.100.183:8003/ device=14:c1:9f:d1:ac:20",
     }
 
     log.unlink()
@@ -348,6 +351,10 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
         text=True,
     )
     start_calls = log.read_text(encoding="utf-8").splitlines()
+    assert any(
+        call.endswith("up -d --force-recreate tbot-esp32-server")
+        for call in start_calls
+    )
     assert any(call.endswith("up -d --wait postgres redis mysql backend") for call in start_calls)
     assert any("exec -T postgres psql" in call for call in start_calls)
     assert any(

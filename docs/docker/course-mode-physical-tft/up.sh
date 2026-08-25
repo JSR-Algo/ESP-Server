@@ -78,8 +78,10 @@ export TBOT_LESSON_STUDIO_BACKEND_IMAGE="${BACKEND_IMAGE}"
 export JWT_PUBLIC_KEY="$(cat "${BACKEND_ROOT}/keys/dev-public.pem")"
 export JWT_PRIVATE_KEY="$(cat "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem")"
 export LESSON_ASSET_ORIGIN_BASE="${COURSE_MODE_ASSET_ORIGIN_BASE}"
+export LESSON_ASSET_PUBLIC_BASE_URL="http://192.168.100.183:8003/"
 export ROBOT_ESP_BASE_URL="http://192.168.100.183:8003"
 export TBOT_ESP_SERVER_URL="${ROBOT_ESP_BASE_URL}"
+export TASK07_DEVICE_MAC="14:c1:9f:d1:ac:20"
 unset COMPOSE_PROJECT_NAME COMPOSE_PROFILES LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME
 export LESSON_STUDIO_E2E_RESOURCE_PREFIX="${COMPOSE_PROJECT}"
 
@@ -110,6 +112,17 @@ if [[ "${1:-}" == "--config-only" ]]; then
 fi
 
 echo "[course-mode-physical-tft] starting the local physical-TFT Compose project"
+ESP_COMPOSE_FILES="$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.config_files" }}' tbot-esp32-server 2>/dev/null)" || \
+  fail "tbot-esp32-server must be running so its local Compose project can be recreated"
+[[ -n "${ESP_COMPOSE_FILES}" ]] || fail "tbot-esp32-server Compose provenance is unavailable"
+ESP_COMPOSE=(docker compose --project-name tbot-server)
+IFS=',' read -r -a ESP_COMPOSE_PATHS <<< "${ESP_COMPOSE_FILES}"
+for compose_path in "${ESP_COMPOSE_PATHS[@]}"; do
+  [[ -f "${compose_path}" ]] || fail "tbot-esp32-server Compose file is missing: ${compose_path}"
+  ESP_COMPOSE+=(-f "${compose_path}")
+done
+echo "[course-mode-physical-tft] recreating the ESP bridge with the shared local mint secret"
+"${ESP_COMPOSE[@]}" up -d --force-recreate tbot-esp32-server
 "${COMPOSE[@]}" up -d --wait postgres redis mysql backend
 IDENTITY_STATE="$("${COMPOSE[@]}" exec -T postgres psql -U tbot -d tbot -Atqc \
   "SELECT CASE WHEN COUNT(*)=0 THEN 'missing' WHEN BOOL_AND(d.current_household_id IS NOT NULL AND d.assigned_child_profile_id IS NOT NULL AND h.owner_id IS NOT NULL) THEN 'ready' ELSE 'partial' END FROM devices d LEFT JOIN households h ON h.id=d.current_household_id WHERE lower(d.mac_address)=lower('14:c1:9f:d1:ac:20')")"
