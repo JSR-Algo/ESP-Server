@@ -56,4 +56,5 @@ services:
       redis:
         condition: service_healthy
     volumes: !override
+      - ./nginx.conf:/etc/nginx/nginx.conf.template:ro
       - ${TBOT_BACKEND_WORKTREE:?export the task-owned backend worktree}/src/lessons/fixtures/course-mode/admin-w1/assets:/usr/share/nginx/html/lesson-assets:ro
