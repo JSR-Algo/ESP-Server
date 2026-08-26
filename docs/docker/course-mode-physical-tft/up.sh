@@ -113,6 +113,14 @@ if [[ "${1:-}" == "--config-only" ]]; then
 fi
 
 echo "[course-mode-physical-tft] starting the local physical-TFT Compose project"
+: "${TBOT_AUTHORIZED_FIRMWARE_READBACK:?export the authorized AC:20 app partition readback path}"
+[[ -f "${TBOT_AUTHORIZED_FIRMWARE_READBACK}" ]] || \
+  fail "authorized firmware readback is missing: ${TBOT_AUTHORIZED_FIRMWARE_READBACK}"
+python3 "${HERE}/verify_firmware_endpoints.py" \
+  "${TBOT_AUTHORIZED_FIRMWARE_READBACK}" \
+  "http://192.168.100.183:8003/tbot/ota/" \
+  "ws://192.168.100.183:8000/tbot/v1/" || \
+  fail "authorized firmware endpoints do not target the isolated local stack; do not reboot or capture"
 ESP_COMPOSE_FILES="$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.config_files" }}' tbot-esp32-server 2>/dev/null)" || \
   fail "tbot-esp32-server must be running so its local Compose project can be recreated"
 [[ -n "${ESP_COMPOSE_FILES}" ]] || fail "tbot-esp32-server Compose provenance is unavailable"

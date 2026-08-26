@@ -12,6 +12,9 @@ ROOT = Path(__file__).resolve().parents[3]
 BASE_COMPOSE = ROOT / "docs/docker/docker-compose.lesson-studio-e2e.yml"
 OVERLAY_COMPOSE = ROOT / "docs/docker/docker-compose.course-mode-physical-tft.yml"
 PHYSICAL_TFT_UP = ROOT / "docs/docker/course-mode-physical-tft/up.sh"
+FIRMWARE_ENDPOINT_PREFLIGHT = (
+    ROOT / "docs/docker/course-mode-physical-tft/verify_firmware_endpoints.py"
+)
 
 
 def _test_key_pair():
@@ -38,6 +41,51 @@ def _write_admin_w1_fixture(backend):
         '{"assets":[{"sha256":"abc123","mediaType":"image/png"}]}\n'
     )
     (assets / "abc123.png").write_bytes(b"fixture")
+
+
+def test_firmware_endpoint_preflight_rejects_production_only_image(tmp_path):
+    image = tmp_path / "app.bin"
+    image.write_bytes(
+        b"prefix\0https://esp.tjbot.vn/tbot/ota/\0"
+        b"wss://esp.tjbot.vn/tbot/v1/\0suffix"
+    )
+
+    result = subprocess.run(
+        [
+            "python3",
+            str(FIRMWARE_ENDPOINT_PREFLIGHT),
+            str(image),
+            "http://192.168.100.183:8003/tbot/ota/",
+            "ws://192.168.100.183:8000/tbot/v1/",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "authorized firmware does not contain the local OTA endpoint" in result.stderr
+
+
+def test_firmware_endpoint_preflight_accepts_exact_local_endpoints(tmp_path):
+    image = tmp_path / "app.bin"
+    image.write_bytes(
+        b"prefix\0http://192.168.100.183:8003/tbot/ota/\0"
+        b"ws://192.168.100.183:8000/tbot/v1/\0suffix"
+    )
+
+    result = subprocess.run(
+        [
+            "python3",
+            str(FIRMWARE_ENDPOINT_PREFLIGHT),
+            str(image),
+            "http://192.168.100.183:8003/tbot/ota/",
+            "ws://192.168.100.183:8000/tbot/v1/",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
 
 
 class ComposeLoader(yaml.SafeLoader):
@@ -260,6 +308,11 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     log = tmp_path / "commands.log"
+    firmware = tmp_path / "app.bin"
+    firmware.write_bytes(
+        b"http://192.168.100.183:8003/tbot/ota/\0"
+        b"ws://192.168.100.183:8000/tbot/v1/\0"
+    )
     sha = "0123456789abcdef0123456789abcdef01234567"
 
     (fake_bin / "git").write_text(
@@ -305,6 +358,7 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
             "COMPOSE_PROFILES": "disabled-course-mode-physical-tft",
             "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME": "another-stack",
             "LESSON_STUDIO_E2E_RESOURCE_PREFIX": "external-resources",
+            "TBOT_AUTHORIZED_FIRMWARE_READBACK": str(firmware),
         }
     )
     subprocess.run(
