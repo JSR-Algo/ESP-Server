@@ -135,7 +135,7 @@ function loadLessonApi() {
     getNestUrl: () => '/nestjs/v1/admin',
     nestRequest: (request) => calls.push(request),
     nestUpload: () => {},
-    normalizeLesson: (value) => value,
+    normalizeLesson: (value) => ({ ...(value || {}), lessonId: value && (value.lessonId ?? value.lesson_id) }),
     normalizeStep: (value) => value,
     normalizeStepType: (value) => value,
   });
@@ -146,6 +146,7 @@ const { lessonApi, calls } = loadLessonApi();
 const data = {
   backgroundAssetVersionId: 'background-version-1',
   objectAssetVersionId: 'object-version-1',
+  robotAssetVersionId: 'robot-version-1',
 };
 const onSuccess = () => {};
 const onError = () => {};
@@ -156,14 +157,39 @@ assert.strictEqual(calls[0].data, data);
 assert.strictEqual(calls[0].onSuccess, onSuccess);
 assert.strictEqual(calls[0].onError, onError);
 
+let updatedLesson = null;
+lessonApi.updateLesson('lesson-course-v5', { title: 'Renamed Course' }, (lesson) => { updatedLesson = lesson; }, onError);
+assert.equal(calls[1].method, 'PATCH');
+assert.equal(calls[1].url, '/nestjs/v1/admin/lessons/lesson-course-v5');
+calls[1].onSuccess({
+  lesson_id: 'lesson-course-v5',
+  title: 'Renamed Course',
+  status: 'draft',
+  manifest_version: 'teebot-lesson-renderer.v5',
+  course_mode_contract: { version: 2, palette: 'espTft' },
+});
+assert.deepEqual(JSON.parse(JSON.stringify({
+  lessonId: updatedLesson.lessonId,
+  title: updatedLesson.title,
+  manifestVersion: updatedLesson.manifestVersion,
+  courseModeContract: updatedLesson.courseModeContract,
+})), {
+  lessonId: 'lesson-course-v5',
+  title: 'Renamed Course',
+  manifestVersion: 'teebot-lesson-renderer.v5',
+  courseModeContract: { version: 2, palette: 'espTft' },
+}, 'PATCH lesson responses must normalize authoring manifest and Course Mode authority fields');
+
 lessonApi.retryLessonAssetGeneration(onSuccess, onError);
-assert.equal(calls[1].method, 'POST');
-assert.equal(calls[1].url, '/nestjs/v1/admin/lesson-assets/retry');
-assert.deepEqual(JSON.parse(JSON.stringify(calls[1].data)), {});
-assert.strictEqual(calls[1].onSuccess, onSuccess);
-assert.strictEqual(calls[1].onError, onError);
+assert.equal(calls[2].method, 'POST');
+assert.equal(calls[2].url, '/nestjs/v1/admin/lesson-assets/retry');
+assert.deepEqual(JSON.parse(JSON.stringify(calls[2].data)), {});
+assert.strictEqual(calls[2].onSuccess, onSuccess);
+assert.strictEqual(calls[2].onError, onError);
 
 const editorSource = read('src/views/LessonEditor.vue');
+const lessonApiSourceForAuthoring = read('src/apis/module/lesson.js');
+assertSourceIncludes(lessonApiSourceForAuthoring, 'courseModeContract', 'lesson API must carry persisted Course Mode authority state');
 assertSourceIncludes(
   editorSource,
   "import { canonicalLessonVisualPair, buildLessonVisualRequest } from '@/components/lesson/lesson-visual-selection';",
@@ -171,16 +197,40 @@ assertSourceIncludes(
 );
 assertSourceIncludes(editorSource, 'data-testid="lesson-background-selector"', 'background selector needs a stable lesson-level test id');
 assertSourceIncludes(editorSource, 'data-testid="lesson-object-selector"', 'object selector needs a stable lesson-level test id');
+assertSourceIncludes(editorSource, 'data-testid="lesson-robot-selector"', 'robot selector needs a stable lesson-level test id');
 assertSourceIncludes(editorSource, 'lessonVisualPair()', 'LessonEditor must derive one canonical pair for the lesson');
 assertSourceIncludes(editorSource, 'canonicalLessonVisualPair(this.steps)', 'the canonical pair must come from authoritative steps');
+assertSourceIncludes(editorSource, 'isCourseModeV5()', 'Course Mode v5 must be the scoped boundary for robot triple authoring');
+assertSourceIncludes(editorSource, 'hasLoadedCourseModeAuthority()', 'Course Mode v5 authoring must require persisted Course Mode authority');
+assertSourceIncludes(editorSource, 'filterRobotVideoAssets', 'robot picker must fail closed to real MJPEG MP4 robot videos');
 assertSourceIncludes(editorSource, 'applyLessonVisualSelection(patch)', 'both selectors must share one lesson-level save path');
 assertSourceIncludes(editorSource, 'buildLessonVisualRequest(this.lessonVisualPair, patch)', 'every save must merge and validate both visual ids');
 assertSourceIncludes(editorSource, 'Api.lesson.applyLessonVisuals(', 'visual selection must use the lesson-level API');
 assertSourceIncludes(editorSource, 'savingLessonVisuals: false', 'visual selection needs an explicit saving state');
 assertSourceIncludes(editorSource, 'pendingLessonVisualPair: null', 'incomplete local pairs need explicit pending state');
+assertSourceIncludes(editorSource, 'rawCinematicLibraries:', 'cinematic assets must be stored raw so Course Mode authority can filter on read');
 assert.ok(!editorSource.includes('selectedBackgroundKey: \'\''), 'selectedBackgroundKey must not be mutable component data');
 assert.ok(!editorSource.includes('pickedObjectKey: \'\''), 'pickedObjectKey must not be mutable component data');
 assert.ok(!editorSource.includes('<SharedAssetPicker'), 'the editor must not expose a conflicting per-step teaching-object picker');
+assertSourceIncludes(
+  editorSource,
+  ':disabled="!isDraft || lessonVisualSelectionDisabled"',
+  'published lessons must disable the background and teaching-object selectors',
+);
+assertSourceIncludes(
+  editorSource,
+  "$t(isCourseModeV5 ? 'lesson.visualTripleRequired' : 'lesson.visualPairRequired')",
+  'the inline missing-visual notice must use the Course Mode v5 triple copy when a robot video is also required',
+);
+assertSourceIncludes(
+  editorSource,
+  "$t('lesson.visualSelectionReadOnly')",
+  'published lesson visual notice must use read-only/create-editable-version copy',
+);
+assert.ok(
+  !editorSource.includes('Background and teaching object update this lesson immediately.'),
+  'published lesson visual notice must not claim selectors update published lessons immediately',
+);
 
 const selectBackgroundSource = extractObjectMethod(editorSource, 'selectBackground');
 assert.match(selectBackgroundSource, /applyLessonVisualSelection\(\{[\s\S]*backgroundAssetVersionId:\s*bg\.versionId[\s\S]*backgroundAssetKey:\s*bg\.assetKey/m);
@@ -188,6 +238,67 @@ assert.ok(!selectBackgroundSource.includes('setVisualRef'), 'background selector
 const selectTeachObjectSource = extractObjectMethod(editorSource, 'selectTeachObject');
 assert.match(selectTeachObjectSource, /applyLessonVisualSelection\(\{[\s\S]*objectAssetVersionId:\s*obj\.versionId[\s\S]*objectAssetKey:\s*obj\.assetKey/m);
 assert.ok(!selectTeachObjectSource.includes('setVisualRef'), 'object selector must not save a per-step visual ref');
+const selectedVisualVersionIdSource = extractObjectMethod(editorSource, 'selectedVisualVersionId');
+assert.match(selectedVisualVersionIdSource, /slot === 'robotOverlay'[\s\S]*this\.isCourseModeV5[\s\S]*this\.lessonVisualPair\.robotAssetVersionId/m, 'Course Mode v5 robot selector must read the lesson-wide robot pin');
+const selectCinematicLayerSource = extractObjectMethod(editorSource, 'selectCinematicLayer');
+assert.match(selectCinematicLayerSource, /selection\.slot === 'robotOverlay'[\s\S]*this\.isCourseModeV5[\s\S]*applyLessonVisualSelection\(\{[\s\S]*robotAssetVersionId:\s*selection\.assetVersionId[\s\S]*robotAssetKey:\s*asset\.assetKey/m, 'Course Mode v5 robot selector must use the atomic lesson visual triple save');
+assert.match(selectCinematicLayerSource, /if \(!this\.isCourseModeV5\)[\s\S]*Api\.lesson\.setVisualRef\(/m, 'legacy non-v5 robot authoring must keep the old per-step visual ref path');
+
+const isCourseModeV5Source = extractObjectMethod(editorSource, 'isCourseModeV5');
+const isCourseModeV5 = vm.runInNewContext(`(${isCourseModeV5Source.replace(/^isCourseModeV5/, 'function isCourseModeV5')})`);
+const hasLoadedCourseModeAuthoritySource = extractObjectMethod(editorSource, 'hasLoadedCourseModeAuthority');
+const hasLoadedCourseModeAuthority = vm.runInNewContext(`(${hasLoadedCourseModeAuthoritySource.replace(/^hasLoadedCourseModeAuthority/, 'function hasLoadedCourseModeAuthority')})`);
+assert.equal(hasLoadedCourseModeAuthority.call({
+  lesson: { courseModeContract: { version: 2 } },
+  previewManifest: null,
+}), true, 'lesson-level Course Mode contract marks loaded persisted authority');
+assert.equal(hasLoadedCourseModeAuthority.call({
+  lesson: {},
+  previewManifest: { manifest: { courseModeContract: { version: 2 } } },
+}), true, 'preview Course Mode contract marks loaded persisted authority');
+assert.equal(hasLoadedCourseModeAuthority.call({
+  lesson: {},
+  previewManifest: { manifest: {} },
+}), false, 'missing Course Mode contract must fail closed');
+assert.equal(isCourseModeV5.call({
+  lessonId: 'course-v5',
+  lesson: { lessonId: 'course-v5', manifestVersion: 'teebot-lesson-renderer.v5', courseModeContract: { version: 2 } },
+  previewManifest: null,
+  hasLoadedCourseModeAuthority: true,
+}), true, 'renderer v5 with loaded persisted Course Mode authority is Course Mode v5');
+assert.equal(isCourseModeV5.call({
+  lessonId: 'non-course-v5',
+  lesson: { lessonId: 'non-course-v5', manifestVersion: 'teebot-lesson-renderer.v5' },
+  previewManifest: null,
+  hasLoadedCourseModeAuthority: false,
+}), false, 'renderer v5 alone must not enable Course Mode visual triples');
+assert.equal(isCourseModeV5.call({
+  lessonId: 'preview-course-v5',
+  lesson: { lessonId: 'preview-course-v5', manifestVersion: 'teebot-lesson-renderer.v5' },
+  previewManifest: { manifest: { courseModeContract: { version: 2 } } },
+  hasLoadedCourseModeAuthority: true,
+}), true, 'loaded preview Course Mode authority may enable Course Mode v5 triples');
+
+const nonCourseRobotCalls = [];
+const selectCinematicLayer = vm.runInNewContext(`(${selectCinematicLayerSource.replace(/^selectCinematicLayer/, 'function selectCinematicLayer')})`, {
+  Api: { lesson: { setVisualRef: (...args) => nonCourseRobotCalls.push(args) } },
+});
+const nonCourseRobotContext = {
+  isCourseModeV5: false,
+  selectedStep: { stepKey: 's1' },
+  isDraft: true,
+  cinematicRefSaving: false,
+  lessonId: 'non-course-v5',
+  invalidateFlattenedDerivativeStatus() {},
+  fetchSteps() {},
+  $message: { warning() {}, error() {}, success() {} },
+};
+selectCinematicLayer.call(nonCourseRobotContext, {
+  slot: 'robotOverlay',
+  assetVersionId: 'robot-v1',
+  asset: { assetKey: 'robot.valid', title: 'Robot valid' },
+});
+assert.equal(nonCourseRobotCalls.length, 1, 'non-Course renderer v5 robot selection must keep per-step setVisualRef');
 
 const saveSelectedStepSource = extractObjectMethod(editorSource, 'saveSelectedStep');
 const rebindClonedVisualSource = extractObjectMethod(editorSource, 'rebindClonedVisual');
@@ -210,6 +321,7 @@ assert.equal(JSON.stringify(staleStepPayload), staleStepPayloadSnapshot, 'stripp
 
 const applyLessonVisualSelectionSource = extractObjectMethod(editorSource, 'applyLessonVisualSelection');
 const visualSaveGuard = applyLessonVisualSelectionSource.slice(0, applyLessonVisualSelectionSource.indexOf('const nextPair'));
+assertSourceIncludes(visualSaveGuard, '!this.isDraft', 'published lessons must not dispatch lesson visual PUTs');
 assertSourceIncludes(visualSaveGuard, 'this.savingStep', 'lesson visual saves must wait for step saves');
 assertSourceIncludes(visualSaveGuard, 'this.rebindingSharedVisual', 'lesson visual saves must wait for shared visual rebinds');
 assertSourceIncludes(visualSaveGuard, 'this.assetMutating', 'lesson visual saves must wait for active visual asset mutations');
@@ -336,6 +448,57 @@ assert.match(
 );
 assert.ok(!applyLessonVisualSelectionSource.includes('this.doPreview('), 'authoritative fetch must remain the only automatic preview trigger');
 
+const publishedVisualSaveCalls = [];
+const applyLessonVisualSelection = vm.runInNewContext(`(${applyLessonVisualSelectionSource.replace(
+  /^applyLessonVisualSelection/,
+  'function applyLessonVisualSelection',
+)})`, {
+  Api: { lesson: { applyLessonVisuals: (...args) => publishedVisualSaveCalls.push(args) } },
+  Object,
+  buildLessonVisualRequest,
+});
+const publishedVisualSaveContext = {
+  lessonId: 'published-lesson',
+  lessonLoadRequestId: 1,
+  lessonVisualSaveRequestId: 0,
+  editorDestroying: false,
+  isDraft: false,
+  isCourseModeV5: true,
+  savingLessonVisuals: false,
+  savingStep: false,
+  rebindingSharedVisual: false,
+  assetMutating: false,
+  sharedImpactReconciling: false,
+  savingStepKeys: {},
+  addingStep: false,
+  reordering: false,
+  deletingStepKey: '',
+  steps: [{ stepKey: 'step-a' }],
+  lessonVisualPair: {
+    backgroundAssetVersionId: 'background-v1',
+    backgroundAssetKey: 'background.one',
+    objectAssetVersionId: 'object-v1',
+    objectAssetKey: 'object.one',
+    robotAssetVersionId: 'robot-v1',
+    robotAssetKey: 'robot.one',
+  },
+  pendingLessonVisualPair: null,
+  lessonVisualReconciliationRequired: false,
+  $nextTick(callback) { callback(); },
+  pushCinematicStep() {},
+  $t(key) { return key; },
+  $message: { warning() {}, error() {}, success() {} },
+};
+assert.equal(
+  applyLessonVisualSelection.call(publishedVisualSaveContext, {
+    backgroundAssetVersionId: 'background-v2',
+    backgroundAssetKey: 'background.two',
+  }),
+  false,
+  'published lesson visual selection must return false',
+);
+assert.equal(publishedVisualSaveCalls.length, 0, 'published lesson visual selection must not send a visual PUT');
+
 const authoritativeReloadFailure = applyLessonVisualSelectionSource.match(
   /this\.fetchSteps\(\{[\s\S]*?onError:\s*\(\)\s*=>\s*\{([\s\S]*?)\n\s{12}\},\n\s{10}\}\);/m,
 );
@@ -396,10 +559,17 @@ assertSourceIncludes(
 assertSourceIncludes(editorSource, 'this.addingStep = false;', 'lesson navigation must reset add-step in-flight state');
 assertSourceIncludes(editorSource, 'this.reordering = false;', 'lesson navigation must reset reorder in-flight state');
 assertSourceIncludes(read('src/i18n/en.js'), "'lesson.visualPairReloadFailed':", 'English reload reconciliation warning is required');
+assertSourceIncludes(read('src/i18n/en.js'), "'lesson.visualSelectionReadOnly':", 'English published visual read-only notice is required');
+assertSourceIncludes(read('src/i18n/en.js'), 'create an editable version', 'published visual read-only notice must direct authors to create an editable version');
 assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualPairReloadFailed':", 'Vietnamese reload reconciliation warning is required');
+assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualSelectionReadOnly':", 'Vietnamese published visual read-only notice is required');
+assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualTripleTitle':", 'Vietnamese Course Mode v5 visual triple title is required');
+assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualTripleWholeLesson':", 'Vietnamese Course Mode v5 visual triple description is required');
+assertSourceIncludes(read('src/i18n/vi.js'), "'lesson.visualTripleRequired':", 'Vietnamese Course Mode v5 visual triple validation warning is required');
 
 function verifyDirectCinematicLibraryContract() {
   const loadCinematicLibrariesSource = extractObjectMethod(editorSource, 'loadCinematicLibraries');
+  const cinematicLibrariesSource = extractObjectMethod(editorSource, 'cinematicLibraries');
   const requests = [];
   const loadCinematicLibraries = vm.runInNewContext(`(${loadCinematicLibrariesSource.replace(
     /^loadCinematicLibraries/,
@@ -411,10 +581,22 @@ function verifyDirectCinematicLibraryContract() {
     },
     Object,
   });
+  const cinematicLibraries = vm.runInNewContext(`(${cinematicLibrariesSource.replace(
+    /^cinematicLibraries/,
+    'function cinematicLibraries',
+  )})`, {
+    JSON,
+  });
+  const filterRobotVideoAssets = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'filterRobotVideoAssets').replace(
+    /^filterRobotVideoAssets/,
+    'function filterRobotVideoAssets',
+  )})`, { Number, String, Array });
   const context = {
-    cinematicLibraries: { backgroundScene: [], teachingObject: [], robotOverlay: [] },
+    rawCinematicLibraries: { backgroundScene: [], teachingObject: [], robotOverlay: [] },
     cinematicLibraryLoading: { backgroundScene: false, teachingObject: false, robotOverlay: false },
     cinematicLibraryErrors: { backgroundScene: '', teachingObject: '', robotOverlay: '' },
+    isCourseModeV5: true,
+    filterRobotVideoAssets,
     $set(target, key, value) { target[key] = value; },
   };
   loadCinematicLibraries.call(context);
@@ -425,14 +607,95 @@ function verifyDirectCinematicLibraryContract() {
   ], 'direct cinematic libraries must query every backend MP4 category');
   const sceneRows = [{ assetKey: 'scene.farm', versionId: 'scene-v4', url: '/scene-v4.mp4', mimeType: 'video/mp4' }];
   const objectRows = [{ assetKey: 'object.apple', versionId: 'apple-v3', url: '/apple-v3.mp4', mimeType: 'video/mp4' }];
+  const validRobot = {
+    assetKey: 'robot.teacher',
+    versionId: 'robot-valid',
+    category: 'robotPose',
+    profile: 'espTft',
+    publicationState: 'published',
+    url: '/robot-valid.mp4',
+    mimeType: 'video/mp4',
+    codec: 'mjpeg',
+    fps: 10,
+    compatibilityMetadata: {
+      codec: 'mjpeg',
+      fps: 10,
+      hasAudio: false,
+      chromaKey: { color: { r: 0, g: 255, b: 0 }, tolerance: 32, feather: 2 },
+    },
+  };
+  const layeredRobot = {
+    assetKey: 'robot.layered',
+    versionId: 'robot-layered',
+    category: 'robotPose',
+    profile: 'espTft',
+    publicationState: 'published',
+    url: '/robot-layered.mp4',
+    mimeType: 'video/mp4',
+    codec: 'motion-jpeg',
+    fps: 15,
+    compatibilityMetadata: {
+      hasAudio: false,
+      chromaKey: { keyColor: '#00ff00', tolerance: 32, featherPx: 2 },
+    },
+  };
+  const invalidRobots = [
+    { ...validRobot, assetKey: 'robot.draft', versionId: 'robot-draft', publicationState: 'draft' },
+    { ...validRobot, assetKey: 'robot.png', versionId: 'robot-png', mimeType: 'image/png' },
+    { ...validRobot, assetKey: 'robot.h264', versionId: 'robot-h264', codec: 'h264', compatibilityMetadata: { ...validRobot.compatibilityMetadata, codec: 'h264' } },
+    { ...validRobot, assetKey: 'robot.audio', versionId: 'robot-audio', compatibilityMetadata: { ...validRobot.compatibilityMetadata, hasAudio: true } },
+    { ...validRobot, assetKey: 'robot.bad-fps', versionId: 'robot-fps', fps: 12, compatibilityMetadata: { ...validRobot.compatibilityMetadata, fps: 12 } },
+    { ...validRobot, assetKey: 'robot.no-chroma', versionId: 'robot-chroma', compatibilityMetadata: { codec: 'mjpeg', fps: 10, hasAudio: false } },
+    { ...layeredRobot, assetKey: 'robot.magenta-key', versionId: 'robot-magenta-key', compatibilityMetadata: { ...layeredRobot.compatibilityMetadata, chromaKey: { keyColor: '#ff00ff', tolerance: 32, featherPx: 2 } } },
+    { ...layeredRobot, assetKey: 'robot.bad-key-color', versionId: 'robot-key-color', compatibilityMetadata: { ...layeredRobot.compatibilityMetadata, chromaKey: { keyColor: '00ff00', tolerance: 32, featherPx: 2 } } },
+    { ...layeredRobot, assetKey: 'robot.bad-layered-tolerance', versionId: 'robot-layered-tolerance', compatibilityMetadata: { ...layeredRobot.compatibilityMetadata, chromaKey: { keyColor: '#00ff00', tolerance: 256, featherPx: 2 } } },
+    { ...layeredRobot, assetKey: 'robot.bad-layered-feather', versionId: 'robot-layered-feather', compatibilityMetadata: { ...layeredRobot.compatibilityMetadata, chromaKey: { keyColor: '#00ff00', tolerance: 32, featherPx: 5 } } },
+    { ...validRobot, assetKey: 'robot.bad-legacy-tolerance', versionId: 'robot-legacy-tolerance', compatibilityMetadata: { ...validRobot.compatibilityMetadata, chromaKey: { color: { r: 0, g: 255, b: 0 }, tolerance: -1, feather: 2 } } },
+    { ...validRobot, assetKey: 'robot.bad-legacy-feather', versionId: 'robot-legacy-feather', compatibilityMetadata: { ...validRobot.compatibilityMetadata, chromaKey: { color: { r: 0, g: 255, b: 0 }, tolerance: 32, feather: 5 } } },
+    { ...validRobot, assetKey: 'robot.bad-legacy-color', versionId: 'robot-legacy-color', compatibilityMetadata: { ...validRobot.compatibilityMetadata, chromaKey: { color: { r: 0, g: 300, b: 0 }, tolerance: 32, feather: 2 } } },
+  ];
   requests[0][1](sceneRows);
   requests[1][1](objectRows);
-  requests[2][2]('robot unavailable');
-  assert.strictEqual(context.cinematicLibraries.backgroundScene, sceneRows);
-  assert.strictEqual(context.cinematicLibraries.teachingObject, objectRows);
-  assert.deepEqual(JSON.parse(JSON.stringify(context.cinematicLibraries.robotOverlay)), []);
-  assert.equal(context.cinematicLibraryErrors.robotOverlay, 'robot unavailable');
+  requests[2][1]([validRobot, layeredRobot, ...invalidRobots]);
+  assert.strictEqual(context.rawCinematicLibraries.backgroundScene, sceneRows);
+  assert.strictEqual(context.rawCinematicLibraries.teachingObject, objectRows);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.rawCinematicLibraries.robotOverlay.map((row) => row.versionId))), [
+    'robot-valid',
+    'robot-layered',
+    'robot-draft',
+    'robot-png',
+    'robot-h264',
+    'robot-audio',
+    'robot-fps',
+    'robot-chroma',
+    'robot-magenta-key',
+    'robot-key-color',
+    'robot-layered-tolerance',
+    'robot-layered-feather',
+    'robot-legacy-tolerance',
+    'robot-legacy-feather',
+    'robot-legacy-color',
+  ], 'robot library load must keep raw backend rows until Course Mode authority is known');
+  assert.deepEqual(JSON.parse(JSON.stringify(cinematicLibraries.call(context).robotOverlay.map((row) => row.versionId))), ['robot-valid', 'robot-layered']);
+  assert.equal(context.cinematicLibraryErrors.robotOverlay, '');
   assert.equal(Object.values(context.cinematicLibraryLoading).some(Boolean), false);
+
+  const delayedAuthorityContext = {
+    rawCinematicLibraries: { backgroundScene: [], teachingObject: [], robotOverlay: [validRobot, ...invalidRobots] },
+    isCourseModeV5: false,
+    filterRobotVideoAssets,
+  };
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(cinematicLibraries.call(delayedAuthorityContext).robotOverlay.map((row) => row.versionId))),
+    delayedAuthorityContext.rawCinematicLibraries.robotOverlay.map((row) => row.versionId),
+    'before Course Mode authority arrives, the robot library remains raw for legacy renderer-v5 authoring',
+  );
+  delayedAuthorityContext.isCourseModeV5 = true;
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(cinematicLibraries.call(delayedAuthorityContext).robotOverlay.map((row) => row.versionId))),
+    ['robot-valid'],
+    'when Course Mode authority arrives after assets, the robot picker must fail closed by filtering on read',
+  );
 }
 
 function verifyOrderedStepRefreshContract() {
@@ -500,6 +763,8 @@ function verifyVisualSaveNavigationEpochContract() {
     lessonLoadRequestId: 10,
     lessonVisualSaveRequestId: 0,
     editorDestroying: false,
+    isDraft: true,
+    isCourseModeV5: true,
     savingLessonVisuals: false,
     savingStep: false,
     rebindingSharedVisual: false,
@@ -515,6 +780,8 @@ function verifyVisualSaveNavigationEpochContract() {
       backgroundAssetKey: 'background.one',
       objectAssetVersionId: 'object-v1',
       objectAssetKey: 'object.one',
+      robotAssetVersionId: 'robot-v1',
+      robotAssetKey: 'robot.one',
     },
     pendingLessonVisualPair: null,
     lessonVisualReconciliationRequired: false,
@@ -537,6 +804,11 @@ function verifyVisualSaveNavigationEpochContract() {
     objectAssetKey: 'object.two',
   });
   assert.equal(calls.length, 1, 'visual save must dispatch once');
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0][1])), {
+    backgroundAssetVersionId: 'background-v1',
+    objectAssetVersionId: 'object-v2',
+    robotAssetVersionId: 'robot-v1',
+  }, 'Course Mode v5 visual saves must send background/object/robot UUIDs atomically');
 
   context.lessonLoadRequestId = 12;
   context.lessonVisualSaveRequestId += 1;
@@ -576,6 +848,11 @@ function verifyVisualSaveNavigationEpochContract() {
     objectAssetVersionId: 'object-v3',
     objectAssetKey: 'object.three',
   });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[1][1])), {
+    backgroundAssetVersionId: 'background-v1',
+    objectAssetVersionId: 'object-v3',
+    robotAssetVersionId: 'robot-v1',
+  }, 'subsequent visual saves must retain the current robot UUID');
   calls[1][2]({});
   assert.equal(invalidations, 1, 'a current visual PUT success must invalidate preview before authoritative reload');
   assert.equal(flattenedInvalidations, 1, 'a current visual PUT success must invalidate flattened derivative status');
@@ -602,8 +879,388 @@ function verifyVisualSaveNavigationEpochContract() {
   assert.deepEqual(messages, [], 'stale authoritative reload callbacks must not show messages');
 }
 
+function verifyRenamePreservesCourseModeVisualTripleContract() {
+  const doRenameSource = extractObjectMethod(editorSource, 'doRename');
+  const selectCinematicLayerSource = extractObjectMethod(editorSource, 'selectCinematicLayer');
+  const selectBackgroundSource = extractObjectMethod(editorSource, 'selectBackground');
+  const selectTeachObjectSource = extractObjectMethod(editorSource, 'selectTeachObject');
+  const applyLessonVisualSelectionSource = extractObjectMethod(editorSource, 'applyLessonVisualSelection');
+  const isCourseModeV5Source = extractObjectMethod(editorSource, 'isCourseModeV5');
+  const hasLoadedCourseModeAuthoritySource = extractObjectMethod(editorSource, 'hasLoadedCourseModeAuthority');
+  const apiCalls = { rename: [], visuals: [], refs: [] };
+  const sandbox = {
+    Api: {
+      lesson: {
+        updateLesson: (...args) => apiCalls.rename.push(args),
+        applyLessonVisuals: (...args) => {
+          apiCalls.visuals.push(args);
+          const onSuccess = args[2];
+          if (typeof onSuccess === 'function') onSuccess({});
+        },
+        setVisualRef: (...args) => apiCalls.refs.push(args),
+      },
+    },
+    Object,
+    buildLessonVisualRequest,
+  };
+  const doRename = vm.runInNewContext(`(${doRenameSource.replace(/^doRename/, 'function doRename')})`, sandbox);
+  const selectCinematicLayer = vm.runInNewContext(`(${selectCinematicLayerSource.replace(/^selectCinematicLayer/, 'function selectCinematicLayer')})`, sandbox);
+  const selectBackground = vm.runInNewContext(`(${selectBackgroundSource.replace(/^selectBackground/, 'function selectBackground')})`, sandbox);
+  const selectTeachObject = vm.runInNewContext(`(${selectTeachObjectSource.replace(/^selectTeachObject/, 'function selectTeachObject')})`, sandbox);
+  const applyLessonVisualSelection = vm.runInNewContext(`(${applyLessonVisualSelectionSource.replace(/^applyLessonVisualSelection/, 'function applyLessonVisualSelection')})`, sandbox);
+  const isCourseModeV5 = vm.runInNewContext(`(${isCourseModeV5Source.replace(/^isCourseModeV5/, 'function isCourseModeV5')})`);
+  const hasLoadedCourseModeAuthority = vm.runInNewContext(`(${hasLoadedCourseModeAuthoritySource.replace(/^hasLoadedCourseModeAuthority/, 'function hasLoadedCourseModeAuthority')})`);
+  let pair = {
+    backgroundAssetVersionId: 'background-v1',
+    backgroundAssetKey: 'background.one',
+    objectAssetVersionId: 'object-v1',
+    objectAssetKey: 'object.one',
+    robotAssetVersionId: 'robot-v1',
+    robotAssetKey: 'robot.one',
+  };
+  const context = {
+    lessonId: 'course-v5',
+    lessonLoadRequestId: 3,
+    lesson: {
+      lessonId: 'course-v5',
+      title: 'Original title',
+      status: 'draft',
+      manifestVersion: 'teebot-lesson-renderer.v5',
+      courseModeContract: { version: 2 },
+    },
+    previewManifest: null,
+    titleDraft: 'Renamed title',
+    renaming: false,
+    isDraft: true,
+    savingLessonVisuals: false,
+    savingStep: false,
+    rebindingSharedVisual: false,
+    assetMutating: false,
+    sharedImpactReconciling: false,
+    savingStepKeys: {},
+    addingStep: false,
+    reordering: false,
+    deletingStepKey: '',
+    steps: [{ stepKey: 'step-a' }],
+    selectedStep: { stepKey: 'step-a' },
+    lessonVisualReconciliationRequired: false,
+    pendingLessonVisualPair: null,
+    lessonVisualSaveRequestId: 0,
+    editorDestroying: false,
+    cinematicRefSaving: false,
+    renameVisible: true,
+    doRename,
+    selectCinematicLayer,
+    selectBackground,
+    selectTeachObject,
+    applyLessonVisualSelection,
+    invalidatePreview() {},
+    invalidateFlattenedDerivativeStatus() {},
+    loadLessonAssetGenerationStatus() {},
+    loadFlattenedDerivativeStatus() {},
+    pushCinematicStep() {},
+    syncCinematicSoon() {},
+    fetchSteps(options) {
+      pair = this.pendingLessonVisualPair || pair;
+      if (options && typeof options.onSuccess === 'function') options.onSuccess([]);
+    },
+    handleUncertainMutationError() { return false; },
+    $nextTick(callback) { callback(); },
+    $t(key) { return key; },
+    $message: { success() {}, warning() {}, error() {} },
+  };
+  Object.defineProperty(context, 'hasLoadedCourseModeAuthority', {
+    get() { return hasLoadedCourseModeAuthority.call(context); },
+  });
+  Object.defineProperty(context, 'isCourseModeV5', {
+    get() { return isCourseModeV5.call(context); },
+  });
+  Object.defineProperty(context, 'lessonVisualPair', {
+    get() { return context.pendingLessonVisualPair || pair; },
+  });
+
+  doRename.call(context);
+  assert.equal(apiCalls.rename.length, 1, 'rename must dispatch once');
+  apiCalls.rename[0][2]({
+    lessonId: 'course-v5',
+    title: 'Renamed title',
+    status: 'draft',
+  });
+  assert.equal(context.isCourseModeV5, true, 'rename response without manifest fields must preserve Course Mode v5 authority');
+
+  selectCinematicLayer.call(context, {
+    slot: 'robotOverlay',
+    assetVersionId: 'robot-v2',
+    asset: { assetKey: 'robot.two', title: 'Robot two' },
+  });
+  selectBackground.call(context, { versionId: 'background-v2', assetKey: 'background.two' });
+  selectTeachObject.call(context, { versionId: 'object-v2', assetKey: 'object.two' });
+
+  assert.equal(apiCalls.refs.length, 0, 'Course Mode v5 visual selections after rename must never use per-step setVisualRef');
+  assert.deepEqual(JSON.parse(JSON.stringify(apiCalls.visuals.map(([lessonId, payload]) => ({ lessonId, payload })))), [
+    { lessonId: 'course-v5', payload: { backgroundAssetVersionId: 'background-v1', objectAssetVersionId: 'object-v1', robotAssetVersionId: 'robot-v2' } },
+    { lessonId: 'course-v5', payload: { backgroundAssetVersionId: 'background-v2', objectAssetVersionId: 'object-v1', robotAssetVersionId: 'robot-v2' } },
+    { lessonId: 'course-v5', payload: { backgroundAssetVersionId: 'background-v2', objectAssetVersionId: 'object-v2', robotAssetVersionId: 'robot-v2' } },
+  ], 'Course Mode v5 selections after rename must use lesson-level atomic visual triples with all UUIDs');
+}
+
 verifyVisualSaveNavigationEpochContract();
+verifyRenamePreservesCourseModeVisualTripleContract();
 verifyOrderedStepRefreshContract();
 
+function verifyPreviewAuthorityClearsOnLessonFetchContract() {
+  const fetchAllSource = extractObjectMethod(editorSource, 'fetchAll');
+  const clearPreviewProofStateSource = extractObjectMethod(editorSource, 'clearPreviewProofState');
+  const clearValidationProofStateSource = extractObjectMethod(editorSource, 'clearValidationProofState');
+  const clearPromptSaveStateSource = extractObjectMethod(editorSource, 'clearPromptSaveState');
+  const isCourseModeV5Source = extractObjectMethod(editorSource, 'isCourseModeV5');
+  const hasLoadedCourseModeAuthoritySource = extractObjectMethod(editorSource, 'hasLoadedCourseModeAuthority');
+  const calls = [];
+  const fetchAll = vm.runInNewContext(`(${fetchAllSource.replace(/^fetchAll/, 'function fetchAll')})`, {
+    Api: {
+      lesson: {
+        getLesson: (...args) => calls.push(['getLesson', args]),
+        listStepTypes: (...args) => calls.push(['listStepTypes', args]),
+        listSharedBackgrounds: (...args) => calls.push(['listSharedBackgrounds', args]),
+      },
+    },
+  });
+  const isCourseModeV5 = vm.runInNewContext(`(${isCourseModeV5Source.replace(/^isCourseModeV5/, 'function isCourseModeV5')})`);
+  const hasLoadedCourseModeAuthority = vm.runInNewContext(`(${hasLoadedCourseModeAuthoritySource.replace(/^hasLoadedCourseModeAuthority/, 'function hasLoadedCourseModeAuthority')})`);
+  const clearPreviewProofState = vm.runInNewContext(`(${clearPreviewProofStateSource.replace(/^clearPreviewProofState/, 'function clearPreviewProofState')})`);
+  const clearValidationProofState = vm.runInNewContext(`(${clearValidationProofStateSource.replace(/^clearValidationProofState/, 'function clearValidationProofState')})`);
+  const clearPromptSaveState = vm.runInNewContext(`(${clearPromptSaveStateSource.replace(/^clearPromptSaveState/, 'function clearPromptSaveState')})`);
+  const context = {
+    lessonId: 'non-course-v5',
+    lessonLoadRequestId: 4,
+    editorDestroying: false,
+    loading: false,
+    lesson: { lessonId: 'course-v5', manifestVersion: 'teebot-lesson-renderer.v5', courseModeContract: { version: 2 } },
+    previewManifest: { lessonId: 'course-v5', manifest: { manifestVersion: 'teebot-lesson-renderer.v5', courseModeContract: { version: 2 }, steps: [] }, checksum: 'old', etag: 'old' },
+    preview: { checksum: 'old', etag: 'old' },
+    previewProofVersion: 9,
+    simulationEvidence: { checksum: 'old', etag: 'old' },
+    simulationProofVersion: 9,
+    stepTypes: [],
+    stepForm: { stepType: '' },
+    sharedBackgrounds: [],
+    clearPreviewProofState,
+    clearValidationProofState,
+    clearPromptSaveState,
+    resetLessonAssetGenerationStatus() {},
+    resetTVideoJourneyState() {},
+    loadLessonAssetGenerationStatus() {},
+    fetchSteps() {},
+    loadTVideoJourney() {},
+    loadFlattenedDerivativeStatus() {},
+    $message: { error() {} },
+  };
+  fetchAll.call(context);
+  assert.equal(context.previewManifest, null, 'starting a new lesson fetch must clear stale preview Course Mode authority');
+  assert.equal(context.preview, null, 'starting a new lesson fetch must clear stale preview checksum state');
+  assert.equal(context.previewProofVersion, -1, 'starting a new lesson fetch must reset preview proof version');
+  assert.equal(context.simulationEvidence, null, 'starting a new lesson fetch must clear stale simulation evidence');
+  assert.equal(context.simulationProofVersion, -1, 'starting a new lesson fetch must reset simulation proof version');
+  assert.equal(calls[0][0], 'getLesson', 'fetchAll must request the new lesson');
+  calls[0][1][1]({ lessonId: 'non-course-v5', manifestVersion: 'teebot-lesson-renderer.v5', status: 'draft' });
+  context.hasLoadedCourseModeAuthority = hasLoadedCourseModeAuthority.call(context);
+  assert.equal(context.hasLoadedCourseModeAuthority, false, 'non-Course renderer v5 must not inherit stale preview Course Mode authority');
+  assert.equal(isCourseModeV5.call(context), false, 'non-Course renderer v5 must remain on the legacy visual UI path after route/load');
+}
+
+function verifyLatePreviewCannotRestoreStaleCourseAuthorityContract() {
+  const doPreviewSource = extractObjectMethod(editorSource, 'doPreview');
+  const isCourseModeV5Source = extractObjectMethod(editorSource, 'isCourseModeV5');
+  const hasLoadedCourseModeAuthoritySource = extractObjectMethod(editorSource, 'hasLoadedCourseModeAuthority');
+  const requests = [];
+  const doPreview = vm.runInNewContext(`(${doPreviewSource.replace(/^doPreview/, 'function doPreview')})`, {
+    Api: { lesson: { manifestPreview: (...args) => requests.push(args) } },
+  });
+  const isCourseModeV5 = vm.runInNewContext(`(${isCourseModeV5Source.replace(/^isCourseModeV5/, 'function isCourseModeV5')})`);
+  const hasLoadedCourseModeAuthority = vm.runInNewContext(`(${hasLoadedCourseModeAuthoritySource.replace(/^hasLoadedCourseModeAuthority/, 'function hasLoadedCourseModeAuthority')})`);
+  const context = {
+    lessonId: 'course-v5',
+    lessonLoadRequestId: 10,
+    previewRequestId: 0,
+    proofVersion: 5,
+    validationProofVersion: -1,
+    publishReviewRequestId: 0,
+    publishReviewVisible: true,
+    publishReviewSnapshot: { stale: true },
+    publishResult: { stale: true },
+    previewing: false,
+    preview: null,
+    previewManifest: null,
+    previewProofVersion: -1,
+    simulationEvidence: null,
+    simulationProofVersion: -1,
+    editorDestroying: false,
+    lessonCapabilities: { exactEspTftPreview: true },
+    hasUnsafeProofState: false,
+    validManifestPreviewResponse: (result) => Boolean(result && result.checksum && result.etag && result.manifest && Array.isArray(result.manifest.steps)),
+    $message: { error() {} },
+  };
+  assert.equal(doPreview.call(context, null, null, { allowUnsafe: true }), true, 'Course Mode preview request must dispatch');
+  assert.equal(requests.length, 1, 'preview request must be captured for async race simulation');
+  context.lessonId = 'non-course-v5';
+  context.lessonLoadRequestId += 1;
+  context.lesson = { lessonId: 'non-course-v5', manifestVersion: 'teebot-lesson-renderer.v5', status: 'draft' };
+  context.preview = null;
+  context.previewManifest = null;
+  context.previewProofVersion = -1;
+  context.simulationEvidence = null;
+  context.simulationProofVersion = -1;
+  requests[0][2]({
+    checksum: 'course-preview-checksum',
+    etag: 'course-preview-etag',
+    preview: { profile: 'espTft', width: 480, height: 320 },
+    manifest: {
+      manifestVersion: 'teebot-lesson-renderer.v5',
+      profile: 'espTft',
+      courseModeContract: { version: 2 },
+      steps: [],
+    },
+  });
+  assert.equal(context.previewManifest, null, 'late Course Mode preview success must not store on the navigated lesson');
+  assert.equal(context.preview, null, 'late Course Mode preview success must not restore stale preview checksum state');
+  context.hasLoadedCourseModeAuthority = hasLoadedCourseModeAuthority.call(context);
+  assert.equal(context.hasLoadedCourseModeAuthority, false, 'late Course Mode preview must not restore Course authority on non-Course renderer v5');
+  assert.equal(isCourseModeV5.call(context), false, 'late Course Mode preview must leave the non-Course renderer v5 on the legacy UI path');
+}
+
+function buildProofChainContext(overrides = {}) {
+  return {
+    lessonId: 'course-v5',
+    lessonLoadRequestId: 10,
+    proofVersion: 5,
+    validationRequestId: 0,
+    validationProofVersion: -1,
+    validationResult: null,
+    previewRequestId: 0,
+    previewProofVersion: -1,
+    previewManifest: null,
+    preview: null,
+    simulationEvidence: null,
+    simulationProofVersion: -1,
+    publishReviewRequestId: 0,
+    publishReviewVisible: true,
+    publishReviewSnapshot: { stale: true },
+    publishResult: { stale: true },
+    publishing: false,
+    publishPreparing: false,
+    publishUncertainState: null,
+    publishReconciling: false,
+    readinessReady: true,
+    tvideoJourneyPublishReady: true,
+    hasAuthoritativeTVideoJourney: false,
+    flattenedDerivativeManifestVersion: 'teebot-lesson-renderer.v5',
+    flattenedDerivativeStatus: { phases: [] },
+    flattenedDerivativeRequiredPhaseIds: [],
+    editorDestroying: false,
+    validating: false,
+    previewing: false,
+    isDraft: true,
+    lessonCapabilities: { exactEspTftPreview: true },
+    lesson: { lessonId: 'course-v5', manifestVersion: 'teebot-lesson-renderer.v5', status: 'draft', courseModeContract: { version: 2 } },
+    stepTypes: [],
+    stepForm: { stepType: '' },
+    sharedBackgrounds: [],
+    hasUnsafeProofState: () => false,
+    validManifestPreviewResponse: (result) => Boolean(result && result.checksum && result.etag && result.manifest && Array.isArray(result.manifest.steps)),
+    parseValidationResult: (res) => res,
+    validSimulationEvidence: () => true,
+    $t: (key, params) => (params ? `${key}:${JSON.stringify(params)}` : key),
+    $message: { success() {}, warning() {}, error() {} },
+    resetLessonAssetGenerationStatus() {},
+    clearPreviewProofState() {
+      this.previewRequestId += 1;
+      this.previewing = false;
+      this.preview = null;
+      this.previewManifest = null;
+      this.previewProofVersion = -1;
+      this.simulationEvidence = null;
+      this.simulationProofVersion = -1;
+    },
+    clearValidationProofState() {
+      this.validationRequestId += 1;
+      this.validating = false;
+      this.validationResult = null;
+      this.validationProofVersion = -1;
+    },
+    clearPromptSaveState() {
+      this.promptSaveRequestId = (this.promptSaveRequestId || 0) + 1;
+      this.savingStep = false;
+    },
+    resetTVideoJourneyState() {},
+    loadLessonAssetGenerationStatus() {},
+    fetchSteps() {},
+    loadTVideoJourney() {},
+    loadFlattenedDerivativeStatus() {},
+    ...overrides,
+  };
+}
+
+function verifyValidationProofRetiresAcrossLessonFetchContract() {
+  const doValidateSource = extractObjectMethod(editorSource, 'doValidate');
+  const doPreviewSource = extractObjectMethod(editorSource, 'doPreview');
+  const fetchAllSource = extractObjectMethod(editorSource, 'fetchAll');
+  const canPublishCurrentProofSource = extractObjectMethod(editorSource, 'canPublishCurrentProof');
+  const requests = { validate: [], preview: [], lessons: [] };
+  const apiSandbox = {
+    Api: {
+      lesson: {
+        validate: (...args) => requests.validate.push(args),
+        manifestPreview: (...args) => requests.preview.push(args),
+        getLesson: (...args) => requests.lessons.push(args),
+        listStepTypes: () => {},
+        listSharedBackgrounds: () => {},
+      },
+    },
+  };
+  const doValidate = vm.runInNewContext(`(${doValidateSource.replace(/^doValidate/, 'function doValidate')})`, apiSandbox);
+  const doPreview = vm.runInNewContext(`(${doPreviewSource.replace(/^doPreview/, 'function doPreview')})`, apiSandbox);
+  const fetchAll = vm.runInNewContext(`(${fetchAllSource.replace(/^fetchAll/, 'function fetchAll')})`, apiSandbox);
+  const canPublishCurrentProof = vm.runInNewContext(`(${canPublishCurrentProofSource.replace(/^canPublishCurrentProof/, 'function canPublishCurrentProof')})`);
+  const validValidation = { valid: true, profiles: ['espTft'], errors: [], warnings: [], findings: [] };
+  const validPreview = {
+    checksum: 'preview-b',
+    etag: 'etag-b',
+    preview: { profile: 'espTft', width: 480, height: 320 },
+    manifest: { manifestVersion: 'teebot-lesson-renderer.v5', profile: 'espTft', steps: [] },
+  };
+
+  const sameLesson = buildProofChainContext();
+  assert.equal(doValidate.call(sameLesson, null, null, { allowUnsafe: true }), true, 'same-lesson validation must dispatch');
+  requests.validate.pop()[1](validValidation);
+  assert.equal(sameLesson.validationProofVersion, 5, 'same-lesson validation stores against the current proof');
+  assert.equal(doPreview.call(sameLesson, null, null, { allowUnsafe: true }), true, 'same-lesson preview must dispatch');
+  requests.preview.pop()[2](validPreview);
+  assert.equal(sameLesson.proofVersion, 6, 'same-lesson preview advances proof version');
+  assert.equal(sameLesson.validationProofVersion, 6, 'same-lesson preview must promote current validation proof');
+  sameLesson.simulationEvidence = { checksum: 'preview-b', etag: 'etag-b' };
+  sameLesson.simulationProofVersion = sameLesson.proofVersion;
+  assert.equal(canPublishCurrentProof.call(sameLesson), true, 'same-lesson validate then preview proof chain remains publishable');
+
+  const crossLesson = buildProofChainContext();
+  assert.equal(doValidate.call(crossLesson, null, null, { allowUnsafe: true }), true, 'Course lesson validation must dispatch before navigation');
+  assert.equal(requests.validate.length, 1, 'pending Course validation must be captured');
+  crossLesson.lessonId = 'non-course-v5';
+  fetchAll.call(crossLesson);
+  requests.lessons.pop()[1]({ lessonId: 'non-course-v5', manifestVersion: 'teebot-lesson-renderer.v5', status: 'draft' });
+  const pendingCourseValidation = requests.validate.pop();
+  pendingCourseValidation[1](validValidation);
+  assert.equal(crossLesson.validationResult, null, 'late Course validation must not store after non-Course lesson fetch');
+  assert.equal(crossLesson.validationProofVersion, -1, 'late Course validation must not restore validation proof after lesson fetch');
+  assert.equal(doPreview.call(crossLesson, null, null, { allowUnsafe: true }), true, 'non-Course lesson preview must dispatch after navigation');
+  requests.preview.pop()[2](validPreview);
+  assert.equal(crossLesson.validationProofVersion, -1, 'non-Course preview must not promote stale Course validation');
+  crossLesson.simulationEvidence = { checksum: 'preview-b', etag: 'etag-b' };
+  crossLesson.simulationProofVersion = crossLesson.proofVersion;
+  assert.equal(canPublishCurrentProof.call(crossLesson), false, 'non-Course lesson cannot publish until it validates after navigation');
+}
+
 verifyDirectCinematicLibraryContract();
+verifyPreviewAuthorityClearsOnLessonFetchContract();
+verifyLatePreviewCannotRestoreStaleCourseAuthorityContract();
+verifyValidationProofRetiresAcrossLessonFetchContract();
 console.log('lesson visual selection contract: OK');

@@ -31,6 +31,7 @@ export function normalizeAuthoringLesson(raw) {
   return {
     ...normalized,
     manifestVersion: value.manifest_version ?? value.manifestVersion ?? '',
+    courseModeContract: value.course_mode_contract ?? value.courseModeContract ?? null,
   };
 }
 
@@ -467,7 +468,7 @@ export default {
       url: `${getNestUrl()}/lessons/${lessonId}`,
       method: 'PATCH',
       data,
-      onSuccess: (p) => onSuccess(normalizeLesson(p)),
+      onSuccess: (p) => onSuccess(normalizeAuthoringLesson(p)),
       onError,
     });
   },
@@ -507,8 +508,11 @@ export default {
   // a fresh draft (same lesson_key + course_id, next lesson_version) with the steps
   // + assets deep-copied. Publishing it supersedes the live version. Server 400s if
   // the source is not published or a draft of the next version already exists.
-  createNextVersion(lessonId, onSuccess, onError) {
-    nestRequest({
+  createNextVersion(lessonId, dataOrSuccess, onSuccessOrError, onError) {
+    const hasRequestBody = dataOrSuccess && typeof dataOrSuccess === 'object' && !Array.isArray(dataOrSuccess);
+    const onSuccess = hasRequestBody ? onSuccessOrError : dataOrSuccess;
+    const errorHandler = hasRequestBody ? onError : onSuccessOrError;
+    const request = {
       url: `${getNestUrl()}/lessons/${lessonId}/new-version`,
       method: 'POST',
       onSuccess: (payload) => {
@@ -518,17 +522,19 @@ export default {
         if (typeof rawLessonId !== 'string' || !rawLessonId.trim()
           || raw.status !== 'draft'
           || !Number.isSafeInteger(rawLessonVersion) || rawLessonVersion < 1) {
-          if (onError) onError('Next-version response violated the backend contract.', {
+          if (errorHandler) errorHandler('Next-version response violated the backend contract.', {
             status: 200,
             contract: true,
             code: 'INVALID_NEXT_VERSION_RESPONSE',
           });
           return;
         }
-        if (onSuccess) onSuccess(normalizeLesson(raw));
+        if (onSuccess) onSuccess(normalizeAuthoringLesson(raw));
       },
-      onError,
-    });
+      onError: errorHandler,
+    };
+    if (hasRequestBody) request.data = dataOrSuccess;
+    nestRequest(request);
   },
 
   // GET /v1/admin/lessons/:lessonId/steps -> Step[]

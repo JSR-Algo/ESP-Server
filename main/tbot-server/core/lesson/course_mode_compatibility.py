@@ -1,4 +1,4 @@
-"""Exact renderer-v4 compatibility identity for the frozen Course Mode pilot."""
+"""Exact reviewed compatibility identities for frozen Course Mode lessons."""
 
 from __future__ import annotations
 
@@ -14,6 +14,9 @@ LAYOUT_CONTRACT = "renderer-v4.course-mode-layout.v1"
 LESSON_ID = "course-mode-pilot-cat-ball"
 LESSON_VERSION = 1
 MANIFEST_CHECKSUM = "205784b3f97cb081ce9c226d8fd83fdd400401e706c000e1b09ba4e7ebdf36ce"
+V5_MANIFEST_CHECKSUM = "e8ee7ff1fb67e8dbd0f8c6908b09c4a4f8e0d1cf3ce41bb38142da0fc03519dc"
+V5_LESSON_ID = "course-mode-v5-farm-candidate"
+V5_LAYOUT_CONTRACT = "layeredCinematic"
 
 COURSE_MODE_COMPATIBILITY = {
     "schemaVersion": 1,
@@ -22,6 +25,14 @@ COURSE_MODE_COMPATIBILITY = {
     "lessonId": LESSON_ID,
     "lessonVersion": LESSON_VERSION,
     "manifestChecksum": MANIFEST_CHECKSUM,
+}
+COURSE_MODE_V5_COMPATIBILITY = {
+    "schemaVersion": 1,
+    "contractChecksum": CONTRACT_CHECKSUM,
+    "layoutContract": V5_LAYOUT_CONTRACT,
+    "lessonId": V5_LESSON_ID,
+    "lessonVersion": 2,
+    "manifestChecksum": V5_MANIFEST_CHECKSUM,
 }
 LOCAL_LAB_ASSET_HOST = "192.168.0.120"
 LOCAL_LAB_ASSET_PORT = 8102
@@ -36,10 +47,116 @@ _CUES = (
     ("ball-meaning", "listen", "a2bba81867f1a389e4ef7b80b5d3f08e20168ea78b84502749d61bd830c070df", "3b38014a0855297e2fc47e3aa253aac0c1c5744a7c3c32bbfea1f86d206d9389", 135526),
     ("cat-delayed", "listen", "10de40b2da10be7b591b067afb0603e6adeb626248a907e17ef8235a6dafa746", "6f7e0de371b790c018b3777a41f7914f9d06f1a1cea69d3c41ac9112d416048d", 143106),
 )
+_V5_CUES = (
+    ("cat-discover", "cat-discover-center-01", "teach"),
+    ("cat-meaning", "cat-meaning-left-right-01", "listen"),
+    ("cat-joint-speech", "cat-discover-center-01", "teach"),
+    ("cat-recall", "cat-recall-visual-02", "listen"),
+    ("cat-transfer", "cat-transfer-scene-01", "listen"),
+    ("ball-discover", "ball-discover-center-01", "teach"),
+    ("ball-meaning", "ball-discover-center-01", "listen"),
+    ("cat-delayed", "cat-delayed-recall-01", "listen"),
+)
+_V5_STEPS = (
+    {"entrance": "flyIn", "expression": "teaching", "id": "cat-discover", "phase": "talk",
+     "pose": "teach", "prompt": "Look at the cat. Listen: cat.", "robotState": "modeling",
+     "subject": "cat", "type": "model"},
+    {"entrance": "none", "expression": "listening", "id": "cat-meaning", "phase": "listen",
+     "pose": "listening", "prompt": "Find the cat.", "robotState": "listening",
+     "subject": "cat", "type": "listen"},
+    {"entrance": "none", "expression": "listening", "id": "cat-joint-speech", "phase": "listen",
+     "pose": "listening", "prompt": "Say cat with TeeBot.", "robotState": "listening",
+     "subject": "cat", "type": "repeat"},
+    {"entrance": "none", "expression": "thinking", "id": "cat-recall", "phase": "idle",
+     "pose": "thinking", "prompt": "What is this called?", "robotState": "thinking",
+     "subject": "cat", "type": "fillBlank"},
+    {"entrance": "none", "expression": "thinking", "id": "cat-transfer", "phase": "idle",
+     "pose": "thinking", "prompt": "What do you see in this farm scene?", "robotState": "thinking",
+     "subject": "cat", "type": "fillBlank"},
+    {"entrance": "none", "expression": "teaching", "id": "ball-discover", "phase": "talk",
+     "pose": "teach", "prompt": "Look at the ball. Listen: ball.", "robotState": "modeling",
+     "subject": "ball", "type": "model"},
+    {"entrance": "none", "expression": "listening", "id": "ball-meaning", "phase": "listen",
+     "pose": "listening", "prompt": "Find the ball.", "robotState": "listening",
+     "subject": "ball", "type": "listen"},
+    {"entrance": "none", "expression": "thinking", "id": "cat-delayed", "phase": "idle",
+     "pose": "thinking", "prompt": "Do you remember this word?", "robotState": "thinking",
+     "subject": "cat", "type": "fillBlank"},
+)
+_V5_LAYERS = (
+    {
+        "layer": "background",
+        "slot": "backgroundScene",
+        "assetId": "75000000-0000-4000-8000-000000000010",
+        "assetVersionId": "75000000-0000-4000-8000-000000000011",
+        "assetKey": "course-mode.v5.scene.farm",
+        "sha256": "d4abb6087dc3122e0a00feb5e6a86b03dc7db550eb59d25e92f54d0fd09e4fc0",
+        "bytes": 43599,
+        "mediaType": "image/jpeg",
+        "width": 480,
+        "height": 320,
+        "metadata": {
+            "mediaKind": "image",
+            "mediaType": "image/jpeg",
+            "width": 480,
+            "height": 320,
+            "rect": {"x": 0, "y": 0, "width": 480, "height": 320},
+            "fit": "cover",
+        },
+    },
+    {
+        "layer": "teachingObject",
+        "slot": "teachingObject",
+        "assetId": "75000000-0000-4000-8000-000000000020",
+        "assetVersionId": "75000000-0000-4000-8000-000000000022",
+        "assetKey": "course-mode.v5.object.barn",
+        "sha256": "c466239ff8ba202998e3827b6871906d7fbac6232aeaea3a59b7c69bec7d8777",
+        "bytes": 15086,
+        "mediaType": "image/png",
+        "width": 95,
+        "height": 95,
+        "metadata": {
+            "mediaKind": "image",
+            "mediaType": "image/png",
+            "width": 95,
+            "height": 95,
+            "rect": {"x": 20, "y": 168, "width": 95, "height": 95},
+            "fit": "contain",
+        },
+    },
+    {
+        "layer": "robotOverlay",
+        "slot": "robotOverlay",
+        "assetId": "75000000-0000-4000-8000-000000000030",
+        "assetVersionId": "75000000-0000-4000-8000-000000000031",
+        "assetKey": "course-mode.v5.robot.teach",
+        "sha256": "f2d496b5e750e895f7e086aec827d7b99d0bb322d73ea660a2e84ff484b602c4",
+        "bytes": 223033,
+        "mediaType": "video/mp4",
+        "width": 240,
+        "height": 240,
+        "metadata": {
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "codec": "mjpeg",
+            "hasAudio": False,
+            "width": 240,
+            "height": 240,
+            "fps": 10,
+            "durationMs": 3000,
+            "frameCount": 30,
+            "rect": {"x": 118, "y": 160, "width": 150, "height": 150},
+            "chromaKey": {"keyColor": "#00ff00", "tolerance": 20, "featherPx": 1},
+        },
+    },
+)
 
 
 def validate_course_mode_compatibility(value: Any) -> bool:
-    return isinstance(value, dict) and value == COURSE_MODE_COMPATIBILITY
+    return isinstance(value, dict) and value in (
+        COURSE_MODE_COMPATIBILITY,
+        COURSE_MODE_V5_COMPATIBILITY,
+    )
 
 
 def course_mode_local_asset_origin_matches(parsed_url: SplitResult | None) -> bool:
@@ -146,10 +263,191 @@ def course_mode_compatibility_assets_match(assets: Any) -> bool:
     )
 
 
+def _v5_layer(layer: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "assetKey": layer["assetKey"],
+        "assetVersionId": layer["assetVersionId"],
+        "bytes": layer["bytes"],
+        "layer": layer["layer"],
+        "metadata": layer["metadata"],
+        "sha256": layer["sha256"],
+        "slot": layer["slot"],
+        "version": 1,
+    }
+
+
+def _v5_phases() -> list[dict[str, Any]]:
+    layers = [_v5_layer(layer) for layer in _V5_LAYERS]
+    return [
+        {
+            "layers": copy.deepcopy(layers),
+            "phaseId": phase_id,
+            "playbackMode": "once",
+            "templateId": V5_LAYOUT_CONTRACT,
+            "templateVersion": 1,
+            "timing": {"durationMs": 3000},
+        }
+        for phase_id in ("teach", "listen")
+    ]
+
+
+def _v5_visual_refs() -> list[dict[str, Any]]:
+    paths = {
+        "backgroundScene": "main/manager-web/public/tvideo-demo/assets/t54-layered/background-farm.jpg",
+        "teachingObject": "pilot/v2/assets/objects/barn-95x95.png",
+        "robotOverlay": "main/manager-web/public/tvideo-demo/assets/t54-layered/robot-teach.mp4",
+    }
+    return sorted(
+        [
+            {
+                "assetKey": layer["assetKey"],
+                "bytes": layer["bytes"],
+                "path": paths[layer["slot"]],
+                "sha256": layer["sha256"],
+                "slot": layer["slot"],
+                "stepKey": cue_id,
+                "version": 1,
+            }
+            for cue_id, _, _ in _V5_CUES
+            for layer in _V5_LAYERS
+        ],
+        key=lambda value: (value["stepKey"], value["slot"]),
+    )
+
+
+def _v5_manifest_assets() -> list[dict[str, Any]]:
+    roles = {
+        "backgroundScene": "poster",
+        "teachingObject": "primarySubject",
+        "robotOverlay": "pose",
+    }
+    paths = {
+        "backgroundScene": "main/manager-web/public/tvideo-demo/assets/t54-layered/background-farm.jpg",
+        "teachingObject": "pilot/v2/assets/objects/barn-95x95.png",
+        "robotOverlay": "main/manager-web/public/tvideo-demo/assets/t54-layered/robot-teach.mp4",
+    }
+    return [
+        {
+            "bytes": layer["bytes"],
+            "critical": True,
+            "dimensions": {"height": layer["height"], "width": layer["width"]},
+            "id": f'{layer["assetKey"]}@v1',
+            "layer": layer["slot"],
+            "mediaType": layer["mediaType"],
+            "path": paths[layer["slot"]],
+            "role": roles[layer["slot"]],
+            "sha256": layer["sha256"],
+            "version": 1,
+        }
+        for layer in _V5_LAYERS
+    ]
+
+
+def _v5_projection_matches(manifest: Any) -> bool:
+    if not isinstance(manifest, dict):
+        return False
+    contract = manifest.get("courseModeContract")
+    if not isinstance(contract, dict):
+        return False
+    try:
+        CourseModeContract.from_mapping(contract)
+    except CourseModeContractError:
+        return False
+    if (
+        manifest.get("manifestVersion") != "teebot-lesson-renderer.v5"
+        or manifest.get("protocolVersion") != "teebot-lesson-renderer.v5"
+        or manifest.get("lessonId") != V5_LESSON_ID
+        or manifest.get("lessonVersion") != 2
+        or manifest.get("ageBand") != "18+"
+        or manifest.get("profile") != "espTft"
+        or manifest.get("features")
+        != {"lessonRendererV5": {"assetSource": "publishedVersionedVisualRefs", "layeredCinematic": True}}
+        or contract.get("contractChecksum") != CONTRACT_CHECKSUM
+        or contract.get("fixtureId") != LESSON_ID
+        or manifest.get("assets") != _v5_manifest_assets()
+        or manifest.get("cinematicPhases") != _v5_phases()
+    ):
+        return False
+    if manifest.get("steps") != list(_V5_STEPS):
+        return False
+    refs = manifest.get("visualRefs")
+    return isinstance(refs, list) and all(
+        isinstance(ref, dict)
+        and isinstance(ref.get("stepKey"), str)
+        and isinstance(ref.get("slot"), str)
+        for ref in refs
+    ) and sorted(
+        refs, key=lambda value: (value.get("stepKey"), value.get("slot"))
+    ) == _v5_visual_refs()
+
+
+def _v5_envelope_matches(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    bundle = value.get("bundle")
+    lesson = value.get("lesson")
+    if not isinstance(bundle, dict) or not isinstance(lesson, dict):
+        return False
+    if (
+        value.get("evidenceState") != "reviewed-derivative-candidate"
+        or value.get("renderer") != "teebot-lesson-renderer.v5"
+        or value.get("template") != V5_LAYOUT_CONTRACT
+        or value.get("contractChecksum") != CONTRACT_CHECKSUM
+        or value.get("manifestIdentityChecksum") != V5_MANIFEST_CHECKSUM
+        or bundle.get("checksum") != V5_MANIFEST_CHECKSUM
+        or lesson.get("key") != V5_LESSON_ID
+        or lesson.get("version") != 2
+        or lesson.get("manifestChecksum") != V5_MANIFEST_CHECKSUM
+        or value.get("cuePhases")
+        != [
+            {"activityId": activity_id, "cueId": cue_id, "phaseId": phase_id}
+            for cue_id, activity_id, phase_id in _V5_CUES
+        ]
+        or value.get("phaseIdentity") != _v5_phases()
+        or not _v5_projection_matches(value.get("manifestIdentityProjection"))
+    ):
+        return False
+    shared_assets = value.get("sharedAssets")
+    if not isinstance(shared_assets, list) or len(shared_assets) != len(_V5_LAYERS):
+        return False
+    for asset, expected in zip(shared_assets, _V5_LAYERS):
+        if not isinstance(asset, dict) or {
+            "assetId": asset.get("assetId"),
+            "versionId": asset.get("versionId"),
+            "assetKey": asset.get("assetKey"),
+            "slot": asset.get("slot"),
+            "sha256": asset.get("sha256"),
+            "bytes": asset.get("bytes"),
+            "mediaType": asset.get("mediaType"),
+            "width": asset.get("width"),
+            "height": asset.get("height"),
+            "compatibilityMetadata": asset.get("compatibilityMetadata"),
+        } != {
+            "assetId": expected["assetId"],
+            "versionId": expected["assetVersionId"],
+            "assetKey": expected["assetKey"],
+            "slot": expected["slot"],
+            "sha256": expected["sha256"],
+            "bytes": expected["bytes"],
+            "mediaType": expected["mediaType"],
+            "width": expected["width"],
+            "height": expected["height"],
+            "compatibilityMetadata": expected["metadata"],
+        }:
+            return False
+    return True
+
+
 def course_mode_compatibility_for_manifest(
     manifest: Any, *, manifest_checksum: Any
 ) -> dict[str, Any] | None:
-    if not isinstance(manifest, dict) or manifest_checksum != MANIFEST_CHECKSUM:
+    if not isinstance(manifest, dict):
+        return None
+    if manifest_checksum == V5_MANIFEST_CHECKSUM:
+        if _v5_envelope_matches(manifest) or _v5_projection_matches(manifest):
+            return copy.deepcopy(COURSE_MODE_V5_COMPATIBILITY)
+        return None
+    if manifest_checksum != MANIFEST_CHECKSUM:
         return None
     contract = manifest.get("courseModeContract")
     if not isinstance(contract, dict):

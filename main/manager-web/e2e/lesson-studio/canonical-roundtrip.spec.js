@@ -148,7 +148,7 @@ async function importCanonicalDraft(page, source, assetManifest, runId) {
       stepBody: { ...sourceStep.stepBody, branches },
     });
   }
-  return { course, lesson: await api(page, 'GET', `/lessons/${lesson.id}`) };
+  return { course, lesson: await api(page, 'GET', `/lessons/${lesson.id}`), versions };
 }
 
 function interactionItem(page, label) {
@@ -442,6 +442,8 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   expect(JSON.stringify(publishedProjection.manifest)).not.toMatch(/video\/mp4|\.mp4/i);
   await assertManifestVisualAssetsServed(page, publishedProjection.manifest);
   const publishedPinnedVisuals = pinnedVisualIdentity(publishedProjection.manifest);
+  const publishedRobotAsset = publishedProjection.manifest.steps[0].scene.robotOverlay.asset;
+  expect(publishedRobotAsset.assetKey).toBe(`canonical.${runId}.${source.visuals.robotOverlay}`);
 
   await page.goto(`/login#/course-lessons?courseId=${fixture.course.id}&title=${encodeURIComponent(fixture.course.title)}`);
   await expect(page.getByRole('row').filter({ hasText: customizedTitle }).first()).toContainText('published');
@@ -451,11 +453,14 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   await expect(page.getByRole('heading', { name: new RegExp(customizedTitle) })).toBeVisible();
   const newVersionButton = page.getByTestId('create-next-version');
   await expect(newVersionButton).toHaveCount(1);
+  await expect(page.getByTestId('create-course-mode-v5-version')).toHaveCount(0);
   const nextDraftResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}/new-version`)
     && response.request().method() === 'POST' && response.status() === 201);
   await newVersionButton.click();
-  await page.getByRole('button', { name: /ok|confirm/i }).last().click();
-  const nextDraft = (await (await nextDraftResponse).json()).data;
+  const nextDraftHttpResponse = await nextDraftResponse;
+  expect(nextDraftHttpResponse.request().postDataJSON()).toEqual({});
+  const nextDraft = (await nextDraftHttpResponse.json()).data;
+  expect(nextDraft.manifest_version || nextDraft.manifestVersion).toBe('teebot-lesson-renderer.v1');
   await expect(page).toHaveURL(new RegExp(`lessonId=${nextDraft.id}`));
   await expect(page.getByRole('button', { name: 'Publish', exact: true })).toBeVisible();
   // Must differ from what v1 published (the parent draft already pinned corn
@@ -469,11 +474,18 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   const childVisualTile = page.getByTestId('lesson-object-selector').locator('.asset-tile')
     .filter({ hasText: childVisualKey });
   await childVisualTile.locator('.asset-tile__select').click();
-  await childVisualSave;
+  const childVisualSaveResponse = await childVisualSave;
+  const childVisualPayload = childVisualSaveResponse.request().postDataJSON();
+  expect(childVisualPayload).toEqual({
+    backgroundAssetVersionId: fixture.versions.get(source.visuals.backgroundScene),
+    objectAssetVersionId: fixture.versions.get(source.teachingObjects.hen),
+  });
+  expect(childVisualPayload).not.toHaveProperty('robotAssetVersionId');
   const childProjection = await api(page, 'GET', `/lessons/${nextDraft.id}/manifest-preview?profile=espTft`);
   const childPinnedVisuals = pinnedVisualIdentity(childProjection.manifest);
   expect(childPinnedVisuals).not.toEqual(publishedPinnedVisuals);
   expect(childProjection.manifest.steps[0].scene.teachingObject.asset.assetKey).toBe(childVisualKey);
+  expect(childProjection.manifest.steps[0].scene.robotOverlay.asset).toEqual(publishedRobotAsset);
   const originalAfterDraftEdit = await api(page, 'GET', `/lessons/${fixture.lesson.id}`);
   expect(originalAfterDraftEdit.manifest_checksum || originalAfterDraftEdit.manifestChecksum).toBe(published.checksum);
   const originalProjectionAfterDraftEdit = await api(page, 'GET', `/lessons/${fixture.lesson.id}/manifest-preview?profile=espTft`);

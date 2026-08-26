@@ -32,17 +32,35 @@ expectMatch(
   /<el-button[^>]*v-if="lesson\.status === 'published'"[^>]*data-testid="create-next-version"[^>]*@click="createNextVersion"[^>]*:loading="creatingNextVersion"[^>]*:disabled="creatingNextVersion"/m,
   'published lessons need a clear, single-submit next-version action',
 );
+expectMatch(
+  /<el-button[^>]*v-if="canCreateCourseModeV5Version"[^>]*data-testid="create-course-mode-v5-version"[^>]*@click="createCourseModeV5Version"[^>]*:loading="creatingNextVersion"[^>]*:disabled="creatingNextVersion"/m,
+  'eligible published Course Mode v4 lessons need a distinct renderer-v5 action',
+);
 expectMatch(/creatingNextVersion:\s*false/, 'next-version submission state must start idle');
+const enSource = fs.readFileSync(path.join(root, 'src/i18n/en.js'), 'utf8');
+if (!/'lesson\.createCourseModeV5Version':\s*'Create Course Mode v5 version'/.test(enSource)) {
+  throw new Error('the renderer-v5 action needs a clear English label');
+}
+const viSource = fs.readFileSync(path.join(root, 'src/i18n/vi.js'), 'utf8');
+if (!/'lesson\.createCourseModeV5Version':\s*'Tạo phiên bản Course Mode v5'/.test(viSource)) {
+  throw new Error('the renderer-v5 action needs a complete Vietnamese label');
+}
 
 const calls = [];
 const Api = {
   lesson: {
-    createNextVersion(lessonId, onSuccess, onError) {
-      calls.push({ lessonId, onSuccess, onError });
+    createNextVersion(lessonId, dataOrSuccess, onSuccessOrError, onError) {
+      const data = typeof dataOrSuccess === 'function' ? undefined : dataOrSuccess;
+      const onSuccess = typeof dataOrSuccess === 'function' ? dataOrSuccess : onSuccessOrError;
+      const resolvedOnError = typeof dataOrSuccess === 'function' ? onSuccessOrError : onError;
+      calls.push({ lessonId, data, onSuccess, onError: resolvedOnError });
     },
   },
 };
 const createNextVersion = vm.runInNewContext(`(${extractObjectMethod('createNextVersion')})`, { Api });
+const createCourseModeV5Version = vm.runInNewContext(`(${extractObjectMethod('createCourseModeV5Version')})`, { Api });
+const submitNextVersion = vm.runInNewContext(`(${extractObjectMethod('submitNextVersion')})`, { Api });
+const canCreateCourseModeV5Version = vm.runInNewContext(`(${extractObjectMethod('canCreateCourseModeV5Version')})`);
 const notifications = [];
 const navigations = [];
 const context = {
@@ -58,12 +76,16 @@ const context = {
     success(message) { notifications.push({ type: 'success', message }); },
     error(message) { notifications.push({ type: 'error', message }); },
   },
+  submitNextVersion(data) { return submitNextVersion.call(this, data); },
 };
 
 createNextVersion.call(context);
 createNextVersion.call(context);
 if (calls.length !== 1 || calls[0].lessonId !== 'published-1' || !context.creatingNextVersion) {
   throw new Error('rapid clicks must submit exactly one next-version request for the published lesson');
+}
+if (calls[0].data !== undefined) {
+  throw new Error(`generic editable-version creation must preserve the source renderer with an omitted body, got ${JSON.stringify(calls[0].data)}`);
 }
 
 calls[0].onSuccess({ lessonId: 'published-1', lessonVersion: 6, status: 'draft' });
@@ -103,6 +125,40 @@ if (notifications[3]?.type !== 'error' || notifications[3]?.message !== 'draft a
   throw new Error('API errors must be visible to the admin');
 }
 
+context.lesson = {
+  lessonId: 'course-v4-published',
+  lessonVersion: 8,
+  status: 'published',
+  manifestVersion: 'teebot-lesson-renderer.v4',
+  courseModeContract: { version: 2 },
+};
+context.canCreateCourseModeV5Version = true;
+createCourseModeV5Version.call(context);
+if (JSON.stringify(calls[4].data) !== JSON.stringify({ rendererVersion: 'teebot-lesson-renderer.v5' })) {
+  throw new Error(`the distinct Course Mode v5 action must send the exact renderer request, got ${JSON.stringify(calls[4].data)}`);
+}
+
+const eligibilityCases = [
+  [{ lessonId: 'v4-course', status: 'published', manifestVersion: 'teebot-lesson-renderer.v4' }, 'v4-course', true, true],
+  [{ lessonId: 'v1', status: 'published', manifestVersion: 'teebot-lesson-renderer.v1' }, 'v1', false, false],
+  [{ lessonId: 'v3', status: 'published', manifestVersion: 'teebot-lesson-renderer.v3' }, 'v3', false, false],
+  [{ lessonId: 'v4-plain', status: 'published', manifestVersion: 'teebot-lesson-renderer.v4' }, 'v4-plain', false, false],
+  [{ lessonId: 'v5-course', status: 'published', manifestVersion: 'teebot-lesson-renderer.v5' }, 'v5-course', true, false],
+  [{ lessonId: 'v4-draft', status: 'draft', manifestVersion: 'teebot-lesson-renderer.v4' }, 'v4-draft', true, false],
+  [{ lessonId: 'stale-route', status: 'published', manifestVersion: 'teebot-lesson-renderer.v4' }, 'current-route', true, false],
+];
+for (const [lesson, lessonId, hasLoadedCourseModeAuthority, expected] of eligibilityCases) {
+  const actual = canCreateCourseModeV5Version.call({ lesson, lessonId, hasLoadedCourseModeAuthority });
+  if (actual !== expected) {
+    throw new Error(`Course Mode v5 action eligibility mismatch for ${JSON.stringify({ lesson, lessonId, hasLoadedCourseModeAuthority })}`);
+  }
+}
+
+context.canCreateCourseModeV5Version = false;
+if (createCourseModeV5Version.call(context) !== false || calls.length !== 5) {
+  throw new Error('ineligible lessons must not dispatch the explicit renderer-v5 action');
+}
+
 const lessonApiSource = fs.readFileSync(path.join(root, 'src/apis/module/lesson.js'), 'utf8');
 let nextVersionRequest;
 const apiCreateNextVersion = vm.runInNewContext(`(${extractObjectMethod('createNextVersion', lessonApiSource)})`, {
@@ -115,12 +171,30 @@ const apiCreateNextVersion = vm.runInNewContext(`(${extractObjectMethod('createN
       lessonVersion: Number(raw.lesson_version ?? raw.lessonVersion ?? 0),
     };
   },
+  normalizeAuthoringLesson(raw) {
+    return {
+      lessonId: raw.id ?? raw.lesson_id ?? raw.lessonId ?? '',
+      status: raw.status ?? 'draft',
+      lessonVersion: Number(raw.lesson_version ?? raw.lessonVersion ?? 0),
+      manifestVersion: raw.manifest_version ?? raw.manifestVersion ?? '',
+      courseModeContract: raw.course_mode_contract ?? raw.courseModeContract ?? null,
+    };
+  },
 });
 let apiSuccesses = 0;
 let apiFailure;
 apiCreateNextVersion.call({}, 'published-1', () => { apiSuccesses += 1; }, (message, error) => {
   apiFailure = { message, error };
 });
+if ('data' in nextVersionRequest) {
+  throw new Error(`legacy createNextVersion signature must not invent a renderer body, got ${JSON.stringify(nextVersionRequest.data)}`);
+}
+apiCreateNextVersion.call({}, 'published-1', { rendererVersion: 'teebot-lesson-renderer.v5' }, () => { apiSuccesses += 1; }, (message, error) => {
+  apiFailure = { message, error };
+});
+if (JSON.stringify(nextVersionRequest.data) !== JSON.stringify({ rendererVersion: 'teebot-lesson-renderer.v5' })) {
+  throw new Error(`explicit createNextVersion body must be preserved, got ${JSON.stringify(nextVersionRequest.data)}`);
+}
 for (const malformed of [
   { id: 'different-id', lesson_version: 2 },
   { id: 'different-id', status: 'draft' },

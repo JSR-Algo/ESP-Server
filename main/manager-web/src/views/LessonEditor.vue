@@ -21,6 +21,9 @@
         <el-button v-if="lesson.status === 'published'" data-testid="create-next-version" type="primary" size="small" @click="createNextVersion" :loading="creatingNextVersion" :disabled="creatingNextVersion">
           {{ $t('lesson.createNextVersion') }}
         </el-button>
+        <el-button v-if="canCreateCourseModeV5Version" data-testid="create-course-mode-v5-version" type="primary" size="small" plain @click="createCourseModeV5Version" :loading="creatingNextVersion" :disabled="creatingNextVersion">
+          {{ $t('lesson.createCourseModeV5Version') }}
+        </el-button>
         <el-button size="small" @click="doValidate" :loading="validating" :disabled="proofActionsDisabled">{{ $t('lesson.validate') }}</el-button>
         <el-button v-if="lessonCapabilities.exactEspTftPreview" size="small" @click="doPreview" :loading="previewing" :disabled="proofActionsDisabled">{{ $t('lesson.previewManifest') }}</el-button>
         <el-button v-if="isDraft" type="primary" size="small" @click="doPublish" :loading="publishing || publishPreparing" :disabled="!canPublishCurrentProof()">
@@ -104,8 +107,8 @@
           <section class="lesson-visual-pair" v-loading="savingLessonVisuals" :aria-busy="savingLessonVisuals ? 'true' : 'false'">
             <div class="lesson-visual-pair__heading">
               <div>
-                <h4>{{ $t('lesson.visualPairTitle') }}</h4>
-                <p>{{ $t('lesson.visualPairWholeLesson') }}</p>
+                <h4>{{ $t(isCourseModeV5 ? 'lesson.visualTripleTitle' : 'lesson.visualPairTitle') }}</h4>
+                <p>{{ $t(isCourseModeV5 ? 'lesson.visualTripleWholeLesson' : 'lesson.visualPairWholeLesson') }}</p>
               </div>
               <span v-if="savingLessonVisuals" role="status" aria-live="polite">{{ $t('common.loading') }}</span>
             </div>
@@ -119,16 +122,16 @@
               {{ $t('lesson.visualPairReloadFailed') }}
             </p>
             <p
-              v-else-if="pendingLessonVisualPair && (!lessonVisualPair.backgroundAssetVersionId || !lessonVisualPair.objectAssetVersionId)"
+              v-else-if="pendingLessonVisualPair && (!lessonVisualPair.backgroundAssetVersionId || !lessonVisualPair.objectAssetVersionId || (isCourseModeV5 && !lessonVisualPair.robotAssetVersionId))"
               class="lesson-visual-pair__notice"
               role="status"
               aria-live="polite"
             >
-              {{ $t('lesson.visualPairRequired') }}
+              {{ $t(isCourseModeV5 ? 'lesson.visualTripleRequired' : 'lesson.visualPairRequired') }}
             </p>
             <div v-if="lessonCapabilities.sharedVisualAuthoring || lessonCapabilities.exactEspTftPreview" class="cinematic-pickers">
               <div v-if="!isDraft" class="immutable-version-message" data-testid="immutable-version-message">
-                Background and teaching object update this lesson immediately. Robot overlay remains read-only for published lessons.
+                {{ $t('lesson.visualSelectionReadOnly') }}
               </div>
               <div data-testid="lesson-background-selector">
                 <CinematicLayerPicker
@@ -138,7 +141,7 @@
                   :selected-version-id="selectedVisualVersionId('backgroundScene')"
                   :loading="cinematicLibraryLoading.backgroundScene"
                   :error="cinematicLibraryErrors.backgroundScene"
-                  :disabled="lessonVisualSelectionDisabled"
+                  :disabled="!isDraft || lessonVisualSelectionDisabled"
                   @select="selectCinematicLayer"
                 />
               </div>
@@ -150,20 +153,22 @@
                   :selected-version-id="selectedVisualVersionId('teachingObject')"
                   :loading="cinematicLibraryLoading.teachingObject"
                   :error="cinematicLibraryErrors.teachingObject"
-                  :disabled="lessonVisualSelectionDisabled"
+                  :disabled="!isDraft || lessonVisualSelectionDisabled"
                   @select="selectCinematicLayer"
                 />
               </div>
-              <CinematicLayerPicker
-                layer-slot="robotOverlay"
-                title="Robot overlay"
-                :assets="cinematicLibraries.robotOverlay"
-                :selected-version-id="selectedVisualVersionId('robotOverlay')"
-                :loading="cinematicLibraryLoading.robotOverlay"
-                :error="cinematicLibraryErrors.robotOverlay"
-                :disabled="!isDraft || cinematicRefSaving || lessonVisualSelectionDisabled"
-                @select="selectCinematicLayer"
-              />
+              <div data-testid="lesson-robot-selector">
+                <CinematicLayerPicker
+                  layer-slot="robotOverlay"
+                  title="Robot overlay"
+                  :assets="cinematicLibraries.robotOverlay"
+                  :selected-version-id="selectedVisualVersionId('robotOverlay')"
+                  :loading="cinematicLibraryLoading.robotOverlay"
+                  :error="cinematicLibraryErrors.robotOverlay"
+                  :disabled="!isDraft || cinematicRefSaving || lessonVisualSelectionDisabled"
+                  @select="selectCinematicLayer"
+                />
+              </div>
             </div>
           </section>
           <div v-if="selectedStep" class="lesson-studio__workbench">
@@ -692,7 +697,7 @@ export default {
       // Lifted bundle assets from LessonAssetManager (keyed by layer downstream).
       bundleAssets: [],
       sharedBackgrounds: [],
-      cinematicLibraries: { backgroundScene: [], teachingObject: [], robotOverlay: [] },
+      rawCinematicLibraries: { backgroundScene: [], teachingObject: [], robotOverlay: [] },
       cinematicLibraryLoading: { backgroundScene: false, teachingObject: false, robotOverlay: false },
       cinematicLibraryErrors: { backgroundScene: '', teachingObject: '', robotOverlay: '' },
       cinematicRefSaving: false,
@@ -835,6 +840,30 @@ export default {
         && this.lesson.manifestVersion === 'teebot-lesson-renderer.v4'
       );
     },
+    isCourseModeV5() {
+      return Boolean(
+        this.lesson
+        && this.lesson.lessonId === this.lessonId
+        && this.lesson.manifestVersion === 'teebot-lesson-renderer.v5'
+        && this.hasLoadedCourseModeAuthority
+      );
+    },
+    canCreateCourseModeV5Version() {
+      return Boolean(
+        this.lesson
+        && this.lesson.lessonId === this.lessonId
+        && this.lesson.status === 'published'
+        && this.lesson.manifestVersion === 'teebot-lesson-renderer.v4'
+        && this.hasLoadedCourseModeAuthority
+      );
+    },
+    hasLoadedCourseModeAuthority() {
+      const manifest = this.previewManifest && this.previewManifest.manifest;
+      return Boolean(
+        (this.lesson && this.lesson.courseModeContract)
+        || (manifest && manifest.courseModeContract)
+      );
+    },
     hasAuthoritativeTVideoJourney() {
       const response = this.tvideoJourneyResponse;
       const journey = response && response.journey;
@@ -889,11 +918,30 @@ export default {
     templateAssets() {
       return [...this.bundleAssets, ...this.sharedBackgrounds];
     },
+    cinematicLibraries() {
+      const libraries = this.rawCinematicLibraries || {};
+      return {
+        backgroundScene: Array.isArray(libraries.backgroundScene) ? libraries.backgroundScene : [],
+        teachingObject: Array.isArray(libraries.teachingObject) ? libraries.teachingObject : [],
+        robotOverlay: this.isCourseModeV5
+          ? this.filterRobotVideoAssets(libraries.robotOverlay)
+          : (Array.isArray(libraries.robotOverlay) ? libraries.robotOverlay : []),
+      };
+    },
     selectedStep() {
       return this.steps[this.selectedStepIndex] || null;
     },
     lessonVisualPair() {
-      return this.pendingLessonVisualPair || canonicalLessonVisualPair(this.steps);
+      const pair = this.pendingLessonVisualPair || canonicalLessonVisualPair(this.steps);
+      if (!this.isCourseModeV5 || this.pendingLessonVisualPair) return pair;
+      const firstStep = this.steps[0] || {};
+      const references = Array.isArray(firstStep.visualRefs) ? firstStep.visualRefs : [];
+      const robot = references.find((reference) => reference && reference.slot === 'robotOverlay') || {};
+      return {
+        ...pair,
+        robotAssetVersionId: robot.assetVersionId || robot.asset_version_id || robot.versionId || robot.version_id || '',
+        robotAssetKey: robot.assetKey || robot.asset_key || '',
+      };
     },
     selectedTemplateBackground() {
       return this.sharedBackgrounds.find((asset) => asset.assetVersionId === this.lessonVisualPair.backgroundAssetVersionId) || null;
@@ -1174,31 +1222,37 @@ export default {
       return 'warning';
     },
     createNextVersion() {
+      return this.submitNextVersion();
+    },
+    createCourseModeV5Version() {
+      if (!this.canCreateCourseModeV5Version) return false;
+      return this.submitNextVersion({ rendererVersion: 'teebot-lesson-renderer.v5' });
+    },
+    submitNextVersion(data) {
       if (this.creatingNextVersion || !this.lesson || this.lesson.status !== 'published') return false;
       const publishedLessonId = this.lesson.lessonId;
       const publishedLessonVersion = Number(this.lesson.lessonVersion);
       this.creatingNextVersion = true;
-      Api.lesson.createNextVersion(
-        publishedLessonId,
-        (draft) => {
-          this.creatingNextVersion = false;
-          if (!draft || !draft.lessonId || draft.lessonId === publishedLessonId || draft.status !== 'draft'
-            || !Number.isSafeInteger(publishedLessonVersion) || publishedLessonVersion < 1
-            || !Number.isSafeInteger(draft.lessonVersion) || draft.lessonVersion <= publishedLessonVersion) {
-            this.$message.error(this.$t('lesson.nextVersionInvalid'));
-            return;
-          }
-          this.$message.success(this.$t('lesson.nextVersionCreated'));
-          this.$router.replace({
-            path: this.$route.path,
-            query: { ...this.$route.query, lessonId: draft.lessonId },
-          });
-        },
-        (message) => {
-          this.creatingNextVersion = false;
-          this.$message.error(message || this.$t('lesson.nextVersionFailed'));
-        },
-      );
+      const onSuccess = (draft) => {
+        this.creatingNextVersion = false;
+        if (!draft || !draft.lessonId || draft.lessonId === publishedLessonId || draft.status !== 'draft'
+          || !Number.isSafeInteger(publishedLessonVersion) || publishedLessonVersion < 1
+          || !Number.isSafeInteger(draft.lessonVersion) || draft.lessonVersion <= publishedLessonVersion) {
+          this.$message.error(this.$t('lesson.nextVersionInvalid'));
+          return;
+        }
+        this.$message.success(this.$t('lesson.nextVersionCreated'));
+        this.$router.replace({
+          path: this.$route.path,
+          query: { ...this.$route.query, lessonId: draft.lessonId },
+        });
+      };
+      const onError = (message) => {
+        this.creatingNextVersion = false;
+        this.$message.error(message || this.$t('lesson.nextVersionFailed'));
+      };
+      if (data === undefined) Api.lesson.createNextVersion(publishedLessonId, onSuccess, onError);
+      else Api.lesson.createNextVersion(publishedLessonId, data, onSuccess, onError);
       return true;
     },
     formatTVideoJourneyError(message, response) {
@@ -1726,6 +1780,9 @@ export default {
       const lessonId = this.lessonId;
       this.lessonLoadRequestId = requestId;
       this.resetLessonAssetGenerationStatus();
+      this.clearPreviewProofState();
+      this.clearValidationProofState();
+      this.clearPromptSaveState();
       this.loading = true;
       Api.lesson.getLesson(
         lessonId,
@@ -1760,6 +1817,25 @@ export default {
         },
         () => { this.sharedBackgrounds = []; },
       );
+    },
+    clearPreviewProofState() {
+      this.previewRequestId += 1;
+      this.previewing = false;
+      this.preview = null;
+      this.previewManifest = null;
+      this.previewProofVersion = -1;
+      this.simulationEvidence = null;
+      this.simulationProofVersion = -1;
+    },
+    clearValidationProofState() {
+      this.validationRequestId += 1;
+      this.validating = false;
+      this.validationResult = null;
+      this.validationProofVersion = -1;
+    },
+    clearPromptSaveState() {
+      this.promptSaveRequestId += 1;
+      this.savingStep = false;
     },
     fetchSteps(options = {}) {
       const requestId = this.lessonStepsRequestId + 1;
@@ -2261,6 +2337,8 @@ export default {
     saveSelectedStep(promptSnapshot = null) {
       const step = this.selectedStep;
       if (!step || !this.isDraft || this.savingStep || this.lessonVisualStepMutationBlocked || this.rebindingSharedVisual) return;
+      const lessonId = this.lessonId;
+      const lessonLoadRequestId = this.lessonLoadRequestId;
       const promptValue = promptSnapshot && promptSnapshot.stepKey === step.stepKey
         ? promptSnapshot.prompt
         : this.promptDraft;
@@ -2282,10 +2360,16 @@ export default {
       }
       const saveGuard = {
         requestId: this.promptSaveRequestId + 1,
+        lessonId,
+        lessonLoadRequestId,
         stepKey: step.stepKey,
         promptRevision: this.promptEditRevision,
         stepRevision: this.stepEditRevisions[step.stepKey] || 0,
       };
+      const saveIsCurrent = () => !this.editorDestroying
+        && lessonId === this.lessonId
+        && lessonLoadRequestId === this.lessonLoadRequestId
+        && saveGuard.requestId === this.promptSaveRequestId;
       this.promptSaveRequestId = saveGuard.requestId;
       this.invalidatePreview();
       this.savingStep = true;
@@ -2297,28 +2381,29 @@ export default {
       });
       const derivativeSourceChanged = this.flattenedStepMutationChangesSource(stepPayload);
       Api.lesson.updateStep(
-        this.lessonId,
+        lessonId,
         step.stepKey,
         stepPayload,
         () => {
-          if (saveGuard.requestId !== this.promptSaveRequestId) return;
+          if (!saveIsCurrent()) return;
           if (derivativeSourceChanged) this.invalidateFlattenedDerivativeStatus();
           this.fetchSteps({
             promptGuard: saveGuard,
             onSuccess: () => {
-              if (saveGuard.requestId !== this.promptSaveRequestId) return;
+              if (!saveIsCurrent()) return;
               this.savingStep = false;
               this.clearSavedStepDraft(saveGuard);
               if (derivativeSourceChanged) this.loadFlattenedDerivativeStatus();
               this.$message.success(this.$t('lesson.stepSaved'));
             },
             onError: () => {
-              if (saveGuard.requestId === this.promptSaveRequestId) this.savingStep = false;
+              if (saveIsCurrent()) this.savingStep = false;
             },
           });
         },
         (msg) => {
-          if (saveGuard.requestId === this.promptSaveRequestId) this.savingStep = false;
+          if (!saveIsCurrent()) return;
+          this.savingStep = false;
           this.$message.error(msg);
         },
       );
@@ -2341,20 +2426,59 @@ export default {
         Api.lesson.listVisualAssets(
           { category, profile: 'espTft' },
           (rows) => {
-            this.$set(this.cinematicLibraries, slot, Array.isArray(rows) ? rows : []);
+            const assets = Array.isArray(rows) ? rows : [];
+            this.$set(this.rawCinematicLibraries, slot, assets);
             this.$set(this.cinematicLibraryLoading, slot, false);
           },
           (msg) => {
-            this.$set(this.cinematicLibraries, slot, []);
+            this.$set(this.rawCinematicLibraries, slot, []);
             this.$set(this.cinematicLibraryLoading, slot, false);
             this.$set(this.cinematicLibraryErrors, slot, msg || `Could not load ${category} assets.`);
           },
         );
       });
     },
+    filterRobotVideoAssets(assets) {
+      const inRangeInt = (value, min, max) => Number.isInteger(value)
+        && value >= min
+        && value <= max;
+      const hasValidLayeredChroma = (chromaKey) => chromaKey
+        && typeof chromaKey === 'object'
+        && chromaKey.keyColor === '#00ff00'
+        && inRangeInt(chromaKey.tolerance, 0, 255)
+        && inRangeInt(chromaKey.featherPx, 0, 4);
+      const hasValidLegacyChroma = (chromaKey) => {
+        if (!chromaKey || typeof chromaKey !== 'object') return false;
+        const color = chromaKey.color;
+        return color
+          && typeof color === 'object'
+          && ['r', 'g', 'b'].every((channel) => inRangeInt(color[channel], 0, 255))
+          && inRangeInt(chromaKey.tolerance, 0, 255)
+          && inRangeInt(chromaKey.feather, 0, 4);
+      };
+      return (Array.isArray(assets) ? assets : []).filter((asset) => {
+        const metadata = asset && asset.compatibilityMetadata && typeof asset.compatibilityMetadata === 'object'
+          ? asset.compatibilityMetadata
+          : {};
+        const chromaKey = asset.chromaKey || metadata.chromaKey || metadata.chroma_key;
+        const codec = String(asset.codec || metadata.codec || '').toLowerCase();
+        const fps = Number(asset.fps || metadata.fps || 0);
+        return asset
+          && asset.category === 'robotPose'
+          && asset.profile === 'espTft'
+          && asset.publicationState === 'published'
+          && asset.mimeType === 'video/mp4'
+          && (codec === 'mjpeg' || codec === 'motion-jpeg' || codec === 'motion_jpeg')
+          && metadata.hasAudio === false
+          && (fps === 10 || fps === 15)
+          && chromaKey && typeof chromaKey === 'object'
+          && (hasValidLayeredChroma(chromaKey) || hasValidLegacyChroma(chromaKey));
+      });
+    },
     selectedVisualVersionId(slot) {
       if (slot === 'backgroundScene') return this.lessonVisualPair.backgroundAssetVersionId || '';
       if (slot === 'teachingObject') return this.lessonVisualPair.objectAssetVersionId || '';
+      if (slot === 'robotOverlay' && this.isCourseModeV5) return this.lessonVisualPair.robotAssetVersionId || '';
       const refs = this.selectedStep && Array.isArray(this.selectedStep.visualRefs) ? this.selectedStep.visualRefs : [];
       const ref = refs.find((row) => row && row.slot === slot);
       return ref ? (ref.assetVersionId || ref.asset_version_id || ref.versionId || ref.version_id || '') : '';
@@ -2364,7 +2488,7 @@ export default {
       return (this.cinematicLibraries[slot] || []).find((asset) => asset.versionId === versionId) || null;
     },
     selectCinematicLayer(selection) {
-      if (!selection || !this.selectedStep || !selection.assetVersionId) return;
+      if (!selection || !selection.assetVersionId) return;
       const asset = selection.asset || {};
       if (selection.slot === 'backgroundScene') {
         return this.selectBackground({ assetKey: asset.assetKey, versionId: selection.assetVersionId });
@@ -2372,37 +2496,47 @@ export default {
       if (selection.slot === 'teachingObject') {
         return this.selectTeachObject({ assetKey: asset.assetKey, versionId: selection.assetVersionId });
       }
-      if (!this.isDraft) {
-        this.$message.warning('Robot overlay changes require a draft lesson.');
-        return;
+      if (selection.slot === 'robotOverlay' && this.isCourseModeV5) {
+        return this.applyLessonVisualSelection({
+          robotAssetVersionId: selection.assetVersionId,
+          robotAssetKey: asset.assetKey,
+        });
       }
-      if (this.cinematicRefSaving) return;
-      this.cinematicRefSaving = true;
-      Api.lesson.setVisualRef(
-        this.lessonId,
-        this.selectedStep.stepKey,
-        selection.slot,
-        selection.assetVersionId,
-        () => {
-          this.cinematicRefSaving = false;
-          this.invalidateFlattenedDerivativeStatus();
-          this.previewManifest = null;
-          this.validationResult = null;
-          this.fetchSteps({
-            preservePrompt: true,
-            onSuccess: () => {
-              this.loadFlattenedDerivativeStatus();
-              this.pushCinematicStep();
-              this.$message.success(`${selection.asset.title || selection.asset.assetKey} pinned to ${selection.slot}.`);
-            },
-          });
-        },
-        (msg) => {
-          this.cinematicRefSaving = false;
-          this.$message.error(msg);
-        },
-      );
-      return true;
+      if (!this.isCourseModeV5) {
+        if (!this.selectedStep) return false;
+        if (!this.isDraft) {
+          this.$message.warning('Robot overlay changes require a draft lesson.');
+          return;
+        }
+        if (this.cinematicRefSaving) return;
+        this.cinematicRefSaving = true;
+        Api.lesson.setVisualRef(
+          this.lessonId,
+          this.selectedStep.stepKey,
+          selection.slot,
+          selection.assetVersionId,
+          () => {
+            this.cinematicRefSaving = false;
+            this.invalidateFlattenedDerivativeStatus();
+            this.previewManifest = null;
+            this.validationResult = null;
+            this.fetchSteps({
+              preservePrompt: true,
+              onSuccess: () => {
+                this.loadFlattenedDerivativeStatus();
+                this.pushCinematicStep();
+                this.$message.success(`${selection.asset.title || selection.asset.assetKey} pinned to ${selection.slot}.`);
+              },
+            });
+          },
+          (msg) => {
+            this.cinematicRefSaving = false;
+            this.$message.error(msg);
+          },
+        );
+        return true;
+      }
+      return false;
     },
     selectTeachObject(obj) {
       if (!obj) return false;
@@ -2419,7 +2553,8 @@ export default {
       });
     },
     applyLessonVisualSelection(patch) {
-      if (this.savingLessonVisuals || this.savingStep || this.rebindingSharedVisual
+      if (!this.isDraft
+        || this.savingLessonVisuals || this.savingStep || this.rebindingSharedVisual
         || this.assetMutating || this.sharedImpactReconciling
         || Object.keys(this.savingStepKeys).some((key) => this.savingStepKeys[key])
         || this.addingStep || this.reordering || this.deletingStepKey
@@ -2435,6 +2570,13 @@ export default {
       }
 
       const request = buildLessonVisualRequest(this.lessonVisualPair, patch);
+      if (this.isCourseModeV5) {
+        if (!nextPair.robotAssetVersionId) {
+          this.$message.warning(this.$t('lesson.visualTripleRequired'));
+          return false;
+        }
+        request.robotAssetVersionId = nextPair.robotAssetVersionId;
+      }
       const lessonId = this.lessonId;
       const lessonLoadRequestId = this.lessonLoadRequestId;
       const saveRequestId = this.lessonVisualSaveRequestId + 1;
@@ -2743,10 +2885,17 @@ export default {
         this.lessonId,
         { title: this.titleDraft },
         (l) => {
+          const currentLesson = this.lesson || {};
+          const updatedLesson = {
+            ...currentLesson,
+            ...l,
+            manifestVersion: l.manifestVersion || currentLesson.manifestVersion || '',
+            courseModeContract: l.courseModeContract ?? currentLesson.courseModeContract ?? null,
+          };
           this.invalidatePreview();
           this.renaming = false;
           this.renameVisible = false;
-          this.lesson = l;
+          this.lesson = updatedLesson;
           this.$message.success(this.$t('lesson.renamed'));
         },
         (msg, error) => {
@@ -2758,6 +2907,8 @@ export default {
     },
     doValidate(onSuccess, onError, options = {}) {
       if (this.editorDestroying || (!options.allowUnsafe && this.hasUnsafeProofState())) return false;
+      const lessonId = this.lessonId;
+      const lessonLoadRequestId = this.lessonLoadRequestId;
       const requestId = this.validationRequestId + 1;
       const proofVersion = this.proofVersion;
       let settled = false;
@@ -2780,10 +2931,11 @@ export default {
       this.validationProofVersion = -1;
       this.validating = true;
       Api.lesson.validate(
-        this.lessonId,
+        lessonId,
         (res) => {
           if (this.editorDestroying) return;
-          if (requestId !== this.validationRequestId || proofVersion !== this.proofVersion) return;
+          if (requestId !== this.validationRequestId || proofVersion !== this.proofVersion
+            || lessonId !== this.lessonId || lessonLoadRequestId !== this.lessonLoadRequestId) return;
           this.validating = false;
           const parsed = this.parseValidationResult(res, 'espTft');
           this.validationResult = parsed || { valid: false, profiles: [], errors: [this.$t('lesson.validationResponseMalformed')], warnings: [], findings: [] };
@@ -2796,7 +2948,8 @@ export default {
         },
         (msg) => {
           if (this.editorDestroying) return;
-          if (requestId !== this.validationRequestId || proofVersion !== this.proofVersion) return;
+          if (requestId !== this.validationRequestId || proofVersion !== this.proofVersion
+            || lessonId !== this.lessonId || lessonLoadRequestId !== this.lessonLoadRequestId) return;
           this.validating = false;
           this.validationResult = { valid: false, profiles: [], errors: [msg], warnings: [], findings: [] };
           this.validationProofVersion = proofVersion;
@@ -2823,6 +2976,8 @@ export default {
     doPreview(onSuccess, onError, options = {}) {
       if (this.editorDestroying || !this.lessonCapabilities.exactEspTftPreview) return false;
       if (!options.allowUnsafe && this.hasUnsafeProofState()) return false;
+      const lessonId = this.lessonId;
+      const lessonLoadRequestId = this.lessonLoadRequestId;
       const requestId = this.previewRequestId + 1;
       const previousProofVersion = this.proofVersion;
       if (!options.reuseProofVersion) this.proofVersion += 1;
@@ -2837,11 +2992,12 @@ export default {
       this.simulationProofVersion = -1;
       this.previewing = true;
       Api.lesson.manifestPreview(
-        this.lessonId,
+        lessonId,
         'espTft',
         (res) => {
           if (this.editorDestroying) return;
-          if (requestId !== this.previewRequestId || proofVersion !== this.proofVersion) return;
+          if (requestId !== this.previewRequestId || proofVersion !== this.proofVersion
+            || lessonId !== this.lessonId || lessonLoadRequestId !== this.lessonLoadRequestId) return;
           this.previewing = false;
           const normalized = res && !res.preview && res.manifest && res.manifest.profile === 'espTft'
             ? { ...res, preview: { profile: 'espTft', width: 480, height: 320 } }
@@ -2861,7 +3017,8 @@ export default {
         },
         (msg) => {
           if (this.editorDestroying) return;
-          if (requestId !== this.previewRequestId || proofVersion !== this.proofVersion) return;
+          if (requestId !== this.previewRequestId || proofVersion !== this.proofVersion
+            || lessonId !== this.lessonId || lessonLoadRequestId !== this.lessonLoadRequestId) return;
           this.previewing = false;
           this.$message.error(msg);
           if (typeof onError === 'function') onError(msg);

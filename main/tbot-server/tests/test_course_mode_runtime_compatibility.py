@@ -12,6 +12,10 @@ from core.lesson.flattened_cinematic_contract import (
     project_flattened_cinematic_phase,
     validate_flattened_cinematic_manifest,
 )
+from core.lesson.course_mode_compatibility import (
+    course_mode_compatibility_for_manifest,
+    validate_course_mode_compatibility,
+)
 from core.lesson.runtime import LessonRuntime, _manifest_asset_cache_inputs
 from core.lesson.sd_pack_mcp_payload import (
     FirmwareSyncPackError,
@@ -21,6 +25,7 @@ from core.lesson.sd_pack_mcp_payload import (
 FIXTURES = Path(__file__).parent / "fixtures" / "course-mode"
 CONTRACT_CHECKSUM = "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264"
 MANIFEST_CHECKSUM = "205784b3f97cb081ce9c226d8fd83fdd400401e706c000e1b09ba4e7ebdf36ce"
+V5_MANIFEST_CHECKSUM = "e8ee7ff1fb67e8dbd0f8c6908b09c4a4f8e0d1cf3ce41bb38142da0fc03519dc"
 LAYOUT_CONTRACT = "renderer-v4.course-mode-layout.v1"
 MARKER = {
     "schemaVersion": 1,
@@ -29,6 +34,14 @@ MARKER = {
     "lessonId": "course-mode-pilot-cat-ball",
     "lessonVersion": 1,
     "manifestChecksum": MANIFEST_CHECKSUM,
+}
+V5_MARKER = {
+    "schemaVersion": 1,
+    "contractChecksum": CONTRACT_CHECKSUM,
+    "layoutContract": "layeredCinematic",
+    "lessonId": "course-mode-v5-farm-candidate",
+    "lessonVersion": 2,
+    "manifestChecksum": V5_MANIFEST_CHECKSUM,
 }
 
 
@@ -138,6 +151,97 @@ def _pilot_pack(manifest: dict) -> dict:
         "courseModeCompatibility": deepcopy(MARKER),
         "assets": assets,
     }
+
+
+def _pilot_v5_identity() -> dict:
+    return json.loads(
+        (FIXTURES / "course-mode-pilot-cat-ball-v2.json").read_text(encoding="utf-8")
+    )
+
+
+def test_reviewed_renderer_v5_identity_returns_exact_marker_without_changing_v1() -> None:
+    assert validate_course_mode_compatibility(MARKER) is True
+    assert course_mode_compatibility_for_manifest(
+        _pilot_manifest(), manifest_checksum=MANIFEST_CHECKSUM
+    ) == MARKER
+
+    marker = course_mode_compatibility_for_manifest(
+        _pilot_v5_identity(), manifest_checksum=V5_MANIFEST_CHECKSUM
+    )
+
+    assert marker == V5_MARKER
+    assert validate_course_mode_compatibility(marker) is True
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda manifest: manifest.pop("evidenceState"),
+        lambda manifest: manifest.update(evidenceState="unreviewed"),
+        lambda manifest: manifest["lesson"].update(manifestChecksum=MANIFEST_CHECKSUM),
+        lambda manifest: manifest["bundle"].update(checksum=MANIFEST_CHECKSUM),
+        lambda manifest: manifest["sharedAssets"][1].update(
+            versionId="75000000-0000-4000-8000-000000000021"
+        ),
+        lambda manifest: manifest["sharedAssets"][0].update(sha256="0" * 64),
+        lambda manifest: manifest["sharedAssets"][1].update(bytes=200618),
+        lambda manifest: manifest["phaseIdentity"][0]["layers"][1]["metadata"][
+            "rect"
+        ].update(width=96),
+        lambda manifest: manifest["phaseIdentity"][0]["layers"][2]["metadata"][
+            "chromaKey"
+        ].update(tolerance=21),
+        lambda manifest: manifest["cuePhases"][0].update(phaseId="listen"),
+        lambda manifest: manifest["manifestIdentityProjection"]["visualRefs"][0].update(
+            bytes=43600
+        ),
+        lambda manifest: manifest["manifestIdentityProjection"]["assets"][1].update(
+            sha256="0" * 64
+        ),
+        lambda manifest: manifest["manifestIdentityProjection"]["steps"][0].update(
+            prompt="Altered prompt"
+        ),
+        lambda manifest: manifest["manifestIdentityProjection"]["steps"][0].pop(
+            "robotState"
+        ),
+        lambda manifest: manifest["manifestIdentityProjection"]["steps"].reverse(),
+        lambda manifest: manifest["manifestIdentityProjection"]["visualRefs"][0].update(
+            stepKey=None
+        ),
+        lambda manifest: manifest["manifestIdentityProjection"]["visualRefs"][0].update(
+            slot=1
+        ),
+    ],
+)
+def test_renderer_v5_identity_rejects_unreviewed_or_mixed_identity(
+    mutate,
+) -> None:
+    manifest = _pilot_v5_identity()
+    mutate(manifest)
+
+    assert (
+        course_mode_compatibility_for_manifest(
+            manifest, manifest_checksum=V5_MANIFEST_CHECKSUM
+        )
+        is None
+    )
+
+
+def test_generic_or_unreviewed_renderer_v5_manifest_has_no_course_mode_marker() -> None:
+    identity = _pilot_v5_identity()
+    manifest = deepcopy(identity["manifestIdentityProjection"])
+
+    assert course_mode_compatibility_for_manifest(
+        manifest, manifest_checksum=V5_MANIFEST_CHECKSUM
+    ) == V5_MARKER
+
+    manifest.pop("courseModeContract")
+    assert (
+        course_mode_compatibility_for_manifest(
+            manifest, manifest_checksum=V5_MANIFEST_CHECKSUM
+        )
+        is None
+    )
 
 
 def test_exact_frozen_course_mode_mp4_cues_project_with_fail_closed_marker() -> None:
