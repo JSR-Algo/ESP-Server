@@ -258,7 +258,7 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
     assert web["volumes"] == [
         {
             "type": "bind",
-            "source": str(REPO_ROOT / "docs/docker/nginx.conf"),
+            "source": str(ROOT / "docs/docker/nginx.conf"),
             "target": "/etc/nginx/nginx.conf.template",
             "read_only": True,
             "bind": {},
