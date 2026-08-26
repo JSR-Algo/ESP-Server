@@ -1714,18 +1714,51 @@ class CinematicContractTest(unittest.TestCase):
         self.assertEqual([layer["layer"] for layer in projected["layers"]], [
             "background", "teachingObject", "robotOverlay",
         ])
-        for source, layer in zip(phase["layers"], projected["layers"]):
+        for index, (source, layer) in enumerate(zip(phase["layers"], projected["layers"])):
             self.assertTrue(layer["sdPath"].startswith("sd://tbot/lesson-assets/"))
             self.assertEqual(layer["assetVersionId"], source["assetVersionId"])
             self.assertEqual(layer["version"], source["version"])
             self.assertEqual(layer["sha256"], source["sha256"])
             self.assertEqual(layer["bytes"], source["bytes"])
             self.assertEqual(layer["rect"], source["metadata"]["rect"])
-            self.assertEqual(layer["chromaKey"], source["metadata"]["chromaKey"])
+            expected_chroma = (
+                None
+                if index == 0
+                else {"keyColor": "#00ff00", "tolerance": 20, "featherPx": 4}
+            )
+            self.assertEqual(layer["chromaKey"], expected_chroma)
         wire = json.dumps(projected, sort_keys=True)
         self.assertNotIn("http://", wire)
         self.assertNotIn("https://", wire)
         self.assertNotRegex(wire.lower(), r"token|credential|authorization|cookie|signed")
+
+    def test_projects_production_white_chroma_metadata_to_firmware_wire_schema(self):
+        spec = importlib.util.find_spec("core.lesson.cinematic_contract")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        phase = _cinematic_manifest()["cinematicPhases"][0]
+        pack = _CinematicAssetCache().asset_pack_manifest(
+            assignment_version=1,
+            lesson_id="lesson",
+            lesson_version=3,
+            manifest_checksum=T._manifest_checksum(),
+        )
+        production_chroma = {
+            "color": {"r": 255, "g": 255, "b": 255},
+            "tolerance": 20,
+            "feather": 10,
+        }
+        for index in (1, 2):
+            phase["layers"][index]["metadata"]["chromaKey"] = production_chroma
+            pack["assets"][index]["compatibilityMetadata"]["chromaKey"] = production_chroma
+
+        projected = module.project_cinematic_phase(phase, pack)
+
+        for layer in projected["layers"][1:]:
+            self.assertEqual(
+                layer["chromaKey"],
+                {"keyColor": "#ffffff", "tolerance": 20, "featherPx": 10},
+            )
 
     def test_rejects_not_ready_missing_paths_and_mismatched_phase_metadata(self):
         spec = importlib.util.find_spec("core.lesson.cinematic_contract")

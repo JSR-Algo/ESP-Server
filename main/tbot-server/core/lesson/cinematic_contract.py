@@ -81,6 +81,30 @@ def _validate_metadata(metadata: Any, *, duration_ms: int) -> Dict[str, Any]:
     return copy.deepcopy(metadata)
 
 
+def _firmware_chroma_key(chroma: Any) -> Dict[str, Any] | None:
+    if chroma is None:
+        return None
+    color = chroma.get("color") if isinstance(chroma, dict) else None
+    if not isinstance(color, dict):
+        _fail("CINEMATIC_METADATA_MISMATCH", "cinematic chroma metadata is invalid")
+    channels = tuple(color.get(channel) for channel in ("r", "g", "b"))
+    tolerance = chroma.get("tolerance")
+    feather = chroma.get("feather")
+    if (
+        any(type(channel) is not int or not 0 <= channel <= 255 for channel in channels)
+        or type(tolerance) is not int
+        or not 0 <= tolerance <= 255
+        or type(feather) is not int
+        or not 0 <= feather <= 255
+    ):
+        _fail("CINEMATIC_METADATA_MISMATCH", "cinematic chroma metadata is invalid")
+    return {
+        "keyColor": "#{:02x}{:02x}{:02x}".format(*channels),
+        "tolerance": tolerance,
+        "featherPx": feather,
+    }
+
+
 def project_cinematic_phase(phase: Any, pack: Any) -> Dict[str, Any]:
     """Validate and project exactly one phase using only verified local SD paths."""
     if not isinstance(pack, dict) or pack.get("ready") is not True:
@@ -161,7 +185,7 @@ def project_cinematic_phase(phase: Any, pack: Any) -> Dict[str, Any]:
                 "sha256": source["sha256"].lower(),
                 "bytes": source["bytes"],
                 "rect": metadata["rect"],
-                "chromaKey": metadata["chromaKey"],
+                "chromaKey": _firmware_chroma_key(metadata["chromaKey"]),
             }
         )
     return {
