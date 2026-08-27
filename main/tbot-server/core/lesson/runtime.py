@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import re
 import math
@@ -197,6 +198,7 @@ class CourseModeRuntimeAdapter:
         self._course_budget_started = False
         self._completion_stop_dispatched = False
         self._pending_activity_decision_ids: list[str] = []
+        self._activity_delivery_ids: dict[str, str] = {}
 
     def start_course_budget(self) -> None:
         if self._course_budget_started:
@@ -244,7 +246,9 @@ class CourseModeRuntimeAdapter:
             })
         return payload
 
-    def _remember(self, decision: CourseDecision) -> Dict[str, Any]:
+    def _remember(
+        self, decision: CourseDecision, *, operation: str, observation_id: str,
+    ) -> Dict[str, Any]:
         self._decisions[decision.decision_id] = decision
         self._latest_decision_id = decision.decision_id
         if (
@@ -253,10 +257,20 @@ class CourseModeRuntimeAdapter:
             and decision.decision_id not in self._pending_activity_decision_ids
         ):
             self._pending_activity_decision_ids.append(decision.decision_id)
+            identity = ":".join((
+                self.lesson_session_id, operation, observation_id,
+                decision.activity_id, decision.decision_id,
+            ))
+            self._activity_delivery_ids[decision.decision_id] = (
+                "course-delivery-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+            )
         return self._decision_payload(decision)
 
-    def pending_activity_decisions(self) -> list[CourseDecision]:
-        return [self._decisions[decision_id] for decision_id in self._pending_activity_decision_ids]
+    def pending_activity_deliveries(self) -> list[tuple[CourseDecision, str]]:
+        return [
+            (self._decisions[decision_id], self._activity_delivery_ids[decision_id])
+            for decision_id in self._pending_activity_decision_ids
+        ]
 
     def mark_activity_decision_delivered(self, decision_id: str) -> bool:
         if decision_id not in self._pending_activity_decision_ids:
@@ -264,7 +278,11 @@ class CourseModeRuntimeAdapter:
         self._pending_activity_decision_ids.remove(decision_id)
         return True
 
-    def restore_pending_activity_decision(self, decision_id: str) -> None:
+    def restore_pending_activity_decision(
+        self, decision_id: str, delivery_id: str | None = None,
+    ) -> None:
+        if delivery_id is not None:
+            self._activity_delivery_ids[decision_id] = delivery_id
         if decision_id not in self._pending_activity_decision_ids:
             self._pending_activity_decision_ids.insert(0, decision_id)
 
@@ -293,7 +311,9 @@ class CourseModeRuntimeAdapter:
     def _remember_operation(
         self, operation: str, arguments: Dict[str, Any], decision: CourseDecision,
     ) -> Dict[str, Any]:
-        result = self._remember(decision)
+        result = self._remember(
+            decision, operation=operation, observation_id=arguments["observationId"],
+        )
         self._store_operation_result(operation, arguments, result)
         return result
 
@@ -374,10 +394,8 @@ class CourseModeRuntimeAdapter:
         return {"accepted": False, "code": "COURSE_OPERATION_NOT_ALLOWED"}
 
     def tool_context(self) -> Dict[str, Any]:
-        target = next(
-            item for item in (self.contract.primary, self.contract.secondary)
-            if item is not None and item.target_id == self.orchestrator.active_target_id
-        )
+        active_targets = self._active_targets()
+        target = active_targets[0]
         activities = [
             {
                 "activityId": activity.activity_id,
@@ -403,6 +421,7 @@ class CourseModeRuntimeAdapter:
                 "turnSequenceId": self._next_turn_sequence_id,
             },
             "activeTargetId": target.target_id,
+            "activeTargetIds": [item.target_id for item in active_targets],
             "activeActivityId": self.orchestrator.active_activity_id,
             "activities": activities,
             "allowedTools": allowed_tools,
@@ -419,7 +438,7 @@ class CourseModeRuntimeAdapter:
                 "safetyMode": decision.next_state in {
                     SessionState.SAFETY_PAUSED, SessionState.REGULATION_BREAK,
                 },
-                "allowedTargetFactCodes": [target.target_id],
+                "allowedTargetFactCodes": [item.target_id for item in active_targets],
             }
         branch_id = self.orchestrator.snapshot()["activeBranchId"]
         if branch_id is not None:
@@ -429,6 +448,19 @@ class CourseModeRuntimeAdapter:
                 "childDetailCodes": list(CONTEXT_CHILD_DETAIL_CODES),
             }
         return context
+
+    def _active_targets(self) -> tuple[Any, ...]:
+        if not self.contract.is_curriculum:
+            return tuple(
+                target for target in self.contract.targets
+                if target.target_id == self.orchestrator.active_target_id
+            )
+        target_ids = set(
+            self.contract.activity(self.orchestrator.active_activity_id).target_ids,
+        )
+        return tuple(
+            target for target in self.contract.targets if target.target_id in target_ids
+        )
 
     def _evidence_batch(self, decision: CourseDecision) -> Dict[str, Any] | None:
         if decision.evidence_event is None or self.forwarder is None or not self.assignment_id:
@@ -600,25 +632,20 @@ class CourseModeRuntimeAdapter:
             key: value for key, value in arguments.items()
             if key not in {"lessonSessionId", "turnSequenceId", "observationId", "planId", "decisionId"}
         }
-        active_target = next(
-            target for target in (self.contract.primary, self.contract.secondary)
-            if target is not None and target.target_id == self.orchestrator.active_target_id
-        )
-        approved_facts = {active_target.target_id}
-        safety_terms = {active_target.target_word, *active_target.vietnamese_meanings}
+        active_targets = self._active_targets()
+        approved_facts = {target.target_id for target in active_targets}
+        safety_terms = {
+            term
+            for target in active_targets
+            for term in (target.target_word, *target.vietnamese_meanings)
+        }
         safety_terms.update(
             meaning.split()[-1]
-            for meaning in active_target.vietnamese_meanings
+            for target in active_targets
+            for meaning in target.vietnamese_meanings
             if meaning.split()
         )
-        approved_fact_terms = {
-            active_target.target_word, *active_target.vietnamese_meanings,
-        }
-        approved_fact_terms.update(
-            meaning.split()[-1]
-            for meaning in active_target.vietnamese_meanings
-            if meaning.split()
-        )
+        approved_fact_terms = set(safety_terms)
         try:
             plan = CourseResponsePlan.from_mapping(
                 plan_fields,
@@ -630,14 +657,7 @@ class CourseModeRuntimeAdapter:
             return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
         if plan.embodied_intent is not decision.embodied_intent:
             return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
-        protected_target_terms = {
-            active_target.target_word, *active_target.vietnamese_meanings,
-        }
-        protected_target_terms.update(
-            meaning.split()[-1]
-            for meaning in active_target.vietnamese_meanings
-            if meaning.split()
-        )
+        protected_target_terms = set(safety_terms)
         if not decision.may_model_target and any(
             plan.contains_target_word(term) for term in protected_target_terms
         ):
@@ -805,6 +825,13 @@ class CourseModeRuntimeAdapter:
             "courseBudgetStarted": self._course_budget_started,
             "completionStopDispatched": self._completion_stop_dispatched,
             "pendingActivityDecisionIds": list(self._pending_activity_decision_ids),
+            "pendingActivityDeliveries": [
+                {
+                    "decisionId": decision_id,
+                    "deliveryId": self._activity_delivery_ids[decision_id],
+                }
+                for decision_id in self._pending_activity_decision_ids
+            ],
         }
 
     def durable_snapshot(self) -> Dict[str, Any]:
@@ -875,6 +902,25 @@ class CourseModeRuntimeAdapter:
         value._course_budget_started = snapshot["courseBudgetStarted"]
         value._completion_stop_dispatched = snapshot.get("completionStopDispatched") is True
         value._pending_activity_decision_ids = list(snapshot.get("pendingActivityDecisionIds", []))
+        pending_deliveries = snapshot.get("pendingActivityDeliveries", [])
+        value._activity_delivery_ids = {
+            item["decisionId"]: item["deliveryId"]
+            for item in pending_deliveries
+            if isinstance(item, dict)
+            and isinstance(item.get("decisionId"), str)
+            and isinstance(item.get("deliveryId"), str)
+        }
+        for decision_id in value._pending_activity_decision_ids:
+            if decision_id not in value._activity_delivery_ids:
+                decision = value._decisions[decision_id]
+                identity = ":".join((
+                    value.lesson_session_id, "legacy", decision_id,
+                    decision.activity_id or "none",
+                ))
+                value._activity_delivery_ids[decision_id] = (
+                    "course-delivery-"
+                    + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+                )
         value._pending_evidence_batches = copy.deepcopy(snapshot.get("pendingEvidenceBatches", []))
         return value
 
@@ -2353,7 +2399,9 @@ class LessonRuntime:
             raise ValueError("lesson embodied action frame is too large")
         await self._send(payload)
 
-    async def _send_course_activity_decision(self, decision: CourseDecision) -> None:
+    async def _send_course_activity_decision(
+        self, decision: CourseDecision, *, delivery_id: str,
+    ) -> None:
         if decision.activity_id is None:
             return
         frame = {
@@ -2362,6 +2410,7 @@ class LessonRuntime:
             "sequence": self._next_seq(),
             "body": {
                 "contractVersion": "courseCompanion.v2.contract.v1",
+                "deliveryId": delivery_id,
                 "activityId": decision.activity_id, "visualState": decision.visual_state,
                 "embodiedIntent": decision.embodied_intent.value,
                 "retainStaticLayers": True, "replayEntrance": decision.replay_entrance,
@@ -2373,15 +2422,22 @@ class LessonRuntime:
         await self._send(payload)
 
     async def _deliver_pending_course_activity_frames(self) -> None:
+        """Retry durable send attempts; consumers dedupe by (sessionId, deliveryId).
+
+        A successful send has no application ACK here, so a failed clear snapshot can
+        resend the same logical transition with a new wire sequence.
+        """
         if self.course_mode is None:
             return
-        for decision in self.course_mode.pending_activity_decisions():
-            await self._send_course_activity_decision(decision)
+        for decision, delivery_id in self.course_mode.pending_activity_deliveries():
+            await self._send_course_activity_decision(decision, delivery_id=delivery_id)
             self.course_mode.mark_activity_decision_delivered(decision.decision_id)
             try:
                 await self.persist_course_mode_snapshot()
             except Exception:
-                self.course_mode.restore_pending_activity_decision(decision.decision_id)
+                self.course_mode.restore_pending_activity_decision(
+                    decision.decision_id, delivery_id,
+                )
                 raise
 
     async def _dispatch_course_embodied_decision(

@@ -48,12 +48,118 @@ async def test_lesson_runtime_emits_course_activity_frame_after_curriculum_decis
         None, None, EmbodiedIntent.PRESENT_CENTER, False, None,
         activity_id="a2", visual_state="correct", replay_entrance=False,
     )
-    await lesson._send_course_activity_decision(decision)
+    await lesson._send_course_activity_decision(decision, delivery_id="delivery-1")
     assert sent == [{
         "type": "lesson_course_activity", "assignmentId": "assignment-1",
         "sessionId": "w01.session", "stepId": "a1", "sequence": 1,
-        "body": {"contractVersion": "courseCompanion.v2.contract.v1", "activityId": "a2", "visualState": "correct", "embodiedIntent": "PRESENT_CENTER", "retainStaticLayers": True, "replayEntrance": False},
+        "body": {"contractVersion": "courseCompanion.v2.contract.v1", "deliveryId": "delivery-1", "activityId": "a2", "visualState": "correct", "embodiedIntent": "PRESENT_CENTER", "retainStaticLayers": True, "replayEntrance": False},
     }]
+
+
+@pytest.mark.asyncio
+async def test_activity_frame_retry_after_clear_persist_failure_reuses_delivery_id() -> None:
+    class FailingClearStore(MemoryCourseModeSnapshotStore):
+        fail_clear = False
+
+        async def store(self, device_id, assignment_id, snapshot) -> None:
+            if self.fail_clear and snapshot.get("pendingActivityDecisionIds") == []:
+                raise RuntimeError("clear snapshot unavailable")
+            await super().store(device_id, assignment_id, snapshot)
+
+    store = FailingClearStore()
+    adapter = course_mode_runtime_from_manifest(
+        {"courseModeContract": curriculum_contract()}, enabled=True, clock=lambda: 1.0,
+    )
+    assert adapter is not None
+    adapter.orchestrator.session_state = SessionState.WORD_ACTIVE
+    result = await adapter.course_observe_child({
+        "lessonSessionId": adapter.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "stable-delivery", "semanticClass": "target_en",
+        "speechClass": "exact", "language": "en", "intent": "answer",
+        "engagement": "engaged", "safetyClass": "normal", "assessmentEligible": True,
+        "confidenceBand": "high", "activityId": "a1", "contextId": "context.1",
+        "robotAudioContaminated": False, "targetTextVisible": False,
+    })
+    lesson = object.__new__(LessonRuntime)
+    lesson.assignment_id = "assignment-1"; lesson.session_id = adapter.lesson_session_id
+    lesson._step_id = "a1"; lesson._seq = 0; lesson.course_mode = adapter
+    lesson._course_mode_snapshot_store = store
+    lesson._course_mode_snapshot_device_id = "device-1"
+    lesson.course_embodied_dispatcher = None
+    sent = []
+    async def send(payload): sent.append(json.loads(payload))
+    lesson._send = send
+    await lesson.persist_course_mode_snapshot()
+    store.fail_clear = True
+    with pytest.raises(RuntimeError, match="clear snapshot unavailable"):
+        await lesson._deliver_pending_course_activity_frames()
+    durable = await store.load("device-1", "assignment-1")
+    assert durable["pendingActivityDeliveries"][0]["decisionId"] == result["decisionId"]
+
+    restored = adapter.restore(adapter.contract, durable, clock=lambda: 1.0)
+    lesson.course_mode = restored
+    store.fail_clear = False
+    await lesson._deliver_pending_course_activity_frames()
+
+    assert len(sent) == 2
+    assert sent[0]["body"]["deliveryId"] == sent[1]["body"]["deliveryId"]
+    assert sent[0]["body"]["deliveryId"]
+    dedupe_ledger = set()
+    applied_activity_ids = []
+    for frame in sent:
+        application_key = (frame["sessionId"], frame["body"]["deliveryId"])
+        if application_key in dedupe_ledger:
+            continue
+        dedupe_ledger.add(application_key)
+        applied_activity_ids.append(frame["body"]["activityId"])
+    assert applied_activity_ids == ["a2"]
+
+
+@pytest.mark.asyncio
+async def test_curriculum_shared_activity_exposes_and_protects_all_active_targets() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": curriculum_contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    assert runtime is not None
+    decision = await runtime.course_continue({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "shared-target-decision",
+    })
+    context = runtime.tool_context()
+    assert context["activeTargetIds"] == ["w01.hello", "w01.goodbye", "w01.friend"]
+    assert context["pendingDecision"]["allowedTargetFactCodes"] == [
+        "w01.hello", "w01.goodbye", "w01.friend",
+    ]
+
+    accepted = await runtime.course_apply_response_plan({
+        "lessonSessionId": runtime.lesson_session_id, "turnSequenceId": 2,
+        "observationId": "shared-facts-plan", "planId": "shared-facts-plan",
+        "decisionId": decision["decisionId"], "acknowledgment": "I hear you.",
+        "relation": "We can look together.", "guidance": "Look at the picture.",
+        "invitation": "Ready?", "questionCount": 1,
+        "embodiedIntent": decision["embodiedIntent"],
+        "targetFactsUsed": ["w01.hello", "w01.goodbye", "w01.friend"],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    })
+    assert accepted["accepted"] is True
+
+    leaking = course_mode_runtime_from_manifest(
+        {"courseModeContract": curriculum_contract()}, enabled=True, clock=lambda: 0.0,
+    )
+    protected = await leaking.course_continue({
+        "lessonSessionId": leaking.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "shared-protected-decision",
+    })
+    rejected = await leaking.course_apply_response_plan({
+        "lessonSessionId": leaking.lesson_session_id, "turnSequenceId": 2,
+        "observationId": "shared-leak-plan", "planId": "shared-leak-plan",
+        "decisionId": protected["decisionId"], "acknowledgment": "I hear you.",
+        "relation": "Robot is here.", "guidance": "The answer is friend.",
+        "invitation": "Ready?", "questionCount": 1,
+        "embodiedIntent": protected["embodiedIntent"], "targetFactsUsed": [],
+        "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
+    })
+    assert rejected == {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
 
 
 @pytest.mark.asyncio

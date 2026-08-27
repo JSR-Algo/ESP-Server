@@ -327,16 +327,19 @@ class CourseOrchestrator:
             outcome = activity.outcomes.get("regulationBreak")
         if outcome is None:
             if outcome_name == "incorrect":
-                attempt = self._activity_attempts.get(activity.activity_id, 0) + 1
-                self._activity_attempts[activity.activity_id] = attempt
+                attempt, ceiling = self._consume_activity_attempt(activity, evidence=evidence)
+                if ceiling is not None:
+                    return ceiling
                 return self._decision("SUPPORT_WITH_CLUE", teaching="authored_clue", question="invite_retry", embodied=EmbodiedIntent(activity.embodied_intent), activity_id=activity.activity_id, visual_state="incorrect", visual_focus_region=activity.visual_focus_region, attempt=attempt)
             if outcome_name == "silence":
-                attempt = self._activity_attempts.get(activity.activity_id, 0) + 1
-                self._activity_attempts[activity.activity_id] = attempt
+                attempt, ceiling = self._consume_activity_attempt(activity, evidence=evidence)
+                if ceiling is not None:
+                    return ceiling
                 return self._decision("OFFER_NONVERBAL_CHOICE", acknowledgment="honor_silence", question="offer_point_or_pause_choice", embodied=EmbodiedIntent.PAUSE_CHOICE, activity_id=activity.activity_id, visual_state="listen", visual_focus_region=activity.visual_focus_region, attempt=attempt)
             if outcome_name == "help":
-                attempt = self._activity_attempts.get(activity.activity_id, 0) + 1
-                self._activity_attempts[activity.activity_id] = attempt
+                attempt, ceiling = self._consume_activity_attempt(activity, evidence=evidence)
+                if ceiling is not None:
+                    return ceiling
                 return self._decision("MODEL_AND_SUPPORT", acknowledgment="acknowledge_help", teaching="model_target_once", question="invite_supported_speech", embodied=EmbodiedIntent(activity.embodied_intent), may_model=True, activity_id=activity.activity_id, visual_state="retry", visual_focus_region=activity.visual_focus_region, attempt=attempt)
             return self._decision("ACKNOWLEDGE_GUIDE_INVITE", activity_id=activity.activity_id, acknowledgment="acknowledge_child", question="one_next_question")
         action = outcome["action"]
@@ -349,9 +352,13 @@ class CourseOrchestrator:
                 question="one_next_question", evidence=evidence,
             )
         if action in {"retry", "support"}:
-            attempt += 1
-            self._activity_attempts[activity.activity_id] = attempt
+            attempt, ceiling = self._consume_activity_attempt(activity, evidence=evidence)
+            if ceiling is not None:
+                return ceiling
             self.active_activity_id = cast(str, outcome["activityId"])
+            self._activity_attempts[self.active_activity_id] = max(
+                self._activity_attempts.get(self.active_activity_id, 0), attempt,
+            )
             resulting = self.contract.activity(self.active_activity_id)
             help_requested = outcome_name == "help"
             return self._decision(
@@ -382,6 +389,61 @@ class CourseOrchestrator:
         resulting = self.contract.activities[index + 1]
         self.session_state = SessionState.WORD_ACTIVE
         return self._decision("ADVANCE_ACTIVITY", acknowledgment=acknowledgment, embodied=EmbodiedIntent(resulting.embodied_intent), activity_id=self.active_activity_id, visual_state="nearMiss" if outcome_name == "near" else "correct", attempt=attempt, visual_focus_region=resulting.visual_focus_region)
+
+    def _consume_activity_attempt(
+        self, activity: Any, *, evidence: dict[str, object] | None,
+    ) -> tuple[int, CourseDecision | None]:
+        attempt = min(
+            self.contract.max_attempts,
+            self._activity_attempts.get(activity.activity_id, 0) + 1,
+        )
+        self._activity_attempts[activity.activity_id] = attempt
+        if attempt < self.contract.max_attempts:
+            return attempt, None
+        return attempt, self._activity_attempt_ceiling(activity, attempt, evidence=evidence)
+
+    def _activity_attempt_ceiling(
+        self, activity: Any, attempt: int, *, evidence: dict[str, object] | None,
+    ) -> CourseDecision:
+        actions = {outcome["action"] for outcome in activity.outcomes.values()}
+        if "pause" in actions or not actions.intersection({"close", "complete", "advance"}):
+            self.session_state = SessionState.REGULATION_BREAK
+            self._regulation_state = "maxAttempts"
+            return self._decision(
+                "RESPOND_WITHOUT_REDIRECT", acknowledgment="honor_pause_choice",
+                question="offer_pause_choice", embodied=EmbodiedIntent.PAUSE_CHOICE,
+                activity_id=activity.activity_id, attempt=attempt,
+                visual_focus_region=activity.visual_focus_region, evidence=evidence,
+            )
+        if "close" in actions or "complete" in actions:
+            complete = "close" not in actions
+            self.session_state = SessionState.COMPLETE if complete else SessionState.CLOSING
+            return self._decision(
+                "COMPLETE_COURSE" if complete else "CLOSE_BY_OUTCOME",
+                acknowledgment="acknowledge_child", embodied=EmbodiedIntent.GOODBYE_SMALL,
+                activity_id=activity.activity_id, visual_state="completion", attempt=attempt,
+                visual_focus_region=activity.visual_focus_region, evidence=evidence,
+            )
+        index = next(
+            i for i, candidate in enumerate(self.contract.activities)
+            if candidate.activity_id == activity.activity_id
+        )
+        if index + 1 >= len(self.contract.activities):
+            self.session_state = SessionState.CLOSING
+            return self._decision(
+                "CLOSE_BY_OUTCOME", embodied=EmbodiedIntent.GOODBYE_SMALL,
+                activity_id=activity.activity_id, visual_state="completion", attempt=attempt,
+                visual_focus_region=activity.visual_focus_region, evidence=evidence,
+            )
+        self.active_activity_id = self.contract.activities[index + 1].activity_id
+        resulting = self.contract.activities[index + 1]
+        self.session_state = SessionState.WORD_ACTIVE
+        return self._decision(
+            "ADVANCE_ACTIVITY", acknowledgment="acknowledge_child",
+            embodied=EmbodiedIntent(resulting.embodied_intent),
+            activity_id=resulting.activity_id, visual_state="correct", attempt=attempt,
+            visual_focus_region=resulting.visual_focus_region, evidence=evidence,
+        )
 
     def open_context_branch(self, *, observation_id: str, turn_sequence_id: int, branch_type: str) -> CourseDecision:
         if observation_id in self._consumed_observations:

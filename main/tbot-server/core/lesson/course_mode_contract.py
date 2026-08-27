@@ -7,7 +7,7 @@ import json
 import re
 import unicodedata
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, NoReturn, cast
 
@@ -151,8 +151,10 @@ class CourseActivity:
     reduced_motion_fallback: str
     modalities: tuple[str, ...] = ()
     expected_duration_sec: int = 0
-    outcomes: Mapping[str, Mapping[str, Any]] = MappingProxyType({})
-    visual: Mapping[str, Any] = MappingProxyType({})
+    outcomes: Mapping[str, Mapping[str, Any]] = field(
+        default_factory=lambda: MappingProxyType({}),
+    )
+    visual: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     navigation_mode: str = "authoritative_graph"
     evidence_policy: str = "shared_outcome"
 

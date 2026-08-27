@@ -320,7 +320,7 @@ def test_curriculum_snapshot_resume_preserves_activity_attempt_evidence_and_old_
     snapshot = runtime.snapshot()
     restored = CourseOrchestrator.restore(runtime.contract, json.loads(json.dumps(snapshot)))
     assert restored.active_activity_id == "a2"
-    assert restored.snapshot()["activityAttempts"] == {"a1": 1}
+    assert restored.snapshot()["activityAttempts"] == {"a1": 1, "a2": 1}
     assert restored.snapshot()["evidenceState"] == snapshot["evidenceState"]
 
     old = {
@@ -330,3 +330,49 @@ def test_curriculum_snapshot_resume_preserves_activity_attempt_evidence_and_old_
     }
     compatible = CourseOrchestrator.restore(runtime.contract, old)
     assert compatible.active_activity_id == "a1" and compatible.snapshot()["activityAttempts"] == {}
+
+
+def test_max_attempts_caps_authored_support_across_snapshot_restore() -> None:
+    value = curriculum_contract()
+    value["session"]["maxAttempts"] = 2
+    value["contractChecksum"] = _checksum(value)
+    runtime = CourseOrchestrator(
+        CourseModeContract.from_mapping(value), started_at_ms=0, soft_deadline_ms=480_000,
+    )
+    runtime.session_state = SessionState.WORD_ACTIVE
+
+    first = runtime.observe(observation("a1", semantic="other", speech="incorrect"))
+    restored = CourseOrchestrator.restore(
+        runtime.contract, json.loads(json.dumps(runtime.snapshot())),
+    )
+    second = restored.observe(
+        observation("a2", semantic="other", speech="incorrect", now_ms=2_000),
+    )
+
+    assert (first.action, first.attempt, first.activity_id) == ("SUPPORT_WITH_CLUE", 1, "a2")
+    assert second.attempt == 2
+    assert second.attempt <= restored.contract.max_attempts
+    assert second.action == "RESPOND_WITHOUT_REDIRECT"
+    assert second.next_state is SessionState.REGULATION_BREAK
+    assert second.activity_id == "a2"
+
+
+def test_max_attempts_caps_final_fallback_with_safe_authored_pause() -> None:
+    value = curriculum_contract()
+    value["session"]["maxAttempts"] = 1
+    value["activities"][-1]["outcomes"] = {
+        "finished": {"action": "complete"},
+        "regulationBreak": {"action": "pause"},
+    }
+    value["contractChecksum"] = _checksum(value)
+    runtime = CourseOrchestrator(
+        CourseModeContract.from_mapping(value), started_at_ms=0, soft_deadline_ms=480_000,
+    )
+    runtime.session_state = SessionState.WORD_ACTIVE
+    runtime.active_activity_id = "a7"
+
+    decision = runtime.observe(observation("a7", semantic="other", speech="incorrect"))
+
+    assert decision.attempt == 1
+    assert decision.action == "RESPOND_WITHOUT_REDIRECT"
+    assert decision.next_state is SessionState.REGULATION_BREAK
