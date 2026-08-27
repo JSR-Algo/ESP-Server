@@ -69,7 +69,10 @@ _ANSWER = {
 _ASSESSMENT = {"RECALL", "TRANSFER", "DELAYED_RECALL"}
 _ROLES = {"primary", "optional_secondary", "exposure", "review"}
 _ACTIONS = {"advance", "retry", "support", "pause", "close", "complete"}
+_OUTCOME_NAMES = {"success", "correct", "near", "incorrect", "silence", "vietnamese", "help", "uncertain", "fatigue", "refusal", "story", "continue", "finished", "regulationBreak"}
 _MODALITIES = {"speech_en", "speech_vi", "choice", "gesture", "silence", "help"}
+_STAGES = {"OPENING", "DISCOVER", "UNDERSTAND", "GUIDED_ACTION", "SUPPORTED_SPEECH", "RECALL", "TRANSFER", "DELAYED_RECALL", "CLOSING"}
+_VISUAL = {"strategy", "backgroundAssetKey", "objectAssetKey", "fallback"}
 FROZEN_CONTRACT_CHECKSUM = "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264"
 CANONICAL_V5_CONTRACT_CHECKSUM = "332fb68e340abb94c0178dd83b06ed0939d6e2d63c17d48bcb09dab8cc6bb3be"
 
@@ -210,10 +213,24 @@ class CourseModeContract:
                 or session["listenTimeoutSec"] > 6
             ):
                 _fail("INVALID_SESSION", "invalid session policy")
+            renderer = _exact(root["renderer"], {"rendererId", "visualLayoutContract"}, "renderer")
+            if renderer != {
+                "rendererId": "teebot-lesson-renderer.v5",
+                "visualLayoutContract": "renderer-v5.layered-cinematic-layout.v1",
+            }:
+                _fail("UNSUPPORTED_RENDERER", "curriculum requires renderer v5 layered cinematic")
+        else:
+            renderer = _exact(root["renderer"], {"rendererId", "visualLayoutContract"}, "renderer")
+            if (renderer["rendererId"], renderer["visualLayoutContract"]) not in {
+                ("teebot-lesson-renderer.v4", "renderer-v4.course-mode-layout.v1"),
+                ("teebot-lesson-renderer.v5", "renderer-v5.layered-cinematic-layout.v1"),
+            }:
+                _fail("UNSUPPORTED_RENDERER", "pilot renderer identity is invalid")
         raw_targets = root["targets"]
         if not isinstance(raw_targets, list) or not raw_targets or (not curriculum and len(raw_targets) > 2):
             _fail("TARGET_COUNT", "invalid target count")
         targets = []
+        seen_target_ids: set[str] = set()
         for i, item in enumerate(raw_targets):
             t = _exact(item, _TARGET, "target")
             role = t["role"]
@@ -228,9 +245,13 @@ class CourseModeContract:
                 _fail("INVALID_TARGET", "Vietnamese meanings are required")
             if not isinstance(ids, list) or (role == "primary" and not ids):
                 _fail("INVALID_TARGET", "activityIds are required")
+            target_id = _id(t["targetId"], "targetId")
+            if target_id in seen_target_ids or not isinstance(t["targetWord"], str) or not t["targetWord"].strip():
+                _fail("INVALID_TARGET", "target identity or word is invalid")
+            seen_target_ids.add(target_id)
             targets.append(
                 CourseWordTarget(
-                    _id(t["targetId"], "targetId"),
+                    target_id,
                     cast(str, t["targetWord"]),
                     cast(str, role),
                     tuple(meanings),
@@ -242,9 +263,15 @@ class CourseModeContract:
         intents, evidence = root["embodiedIntentNames"], root["evidenceNames"]
         if not isinstance(intents, list) or not isinstance(evidence, list):
             _fail("INVALID_FIELDS", "name registries must be arrays")
+        visual_focus = _exact(root["visualFocus"], {"directionSource", "regions", "presentCenterTarget"}, "visualFocus")
+        regions = visual_focus["regions"]
+        if not isinstance(regions, list) or not regions or not all(isinstance(region, str) for region in regions):
+            _fail("INVALID_VISUAL_FOCUS", "visual focus regions are required")
         raw_activities = root["activities"]
         if not isinstance(raw_activities, list) or not raw_activities:
             _fail("INVALID_FIELDS", "activities must be an array")
+        if curriculum and not 7 <= len(raw_activities) <= 10:
+            _fail("INVALID_ACTIVITY_COUNT", "curriculum requires seven to ten activities")
         activities = []
         seen = set()
         authored = {t.target_id for t in targets}
@@ -269,6 +296,8 @@ class CourseModeContract:
                 _fail("INVALID_ACTIVITY_TARGET", "activity targets are not authored")
             answer = _exact(a["answerPolicy"], _ANSWER, "answerPolicy", "INVALID_ACTIVITY_FIELDS")
             stage = cast(str, a["stage"])
+            if curriculum and stage not in _STAGES:
+                _fail("INVALID_ACTIVITY_STAGE", "activity stage is not supported")
             if stage in _ASSESSMENT and (
                 any(
                     answer[k] is not False
@@ -303,18 +332,34 @@ class CourseModeContract:
                     _fail("INVALID_OUTCOME", "outcomes required")
                 checked = {}
                 for name, out in raw_out.items():
-                    if not isinstance(name, str) or not isinstance(out, Mapping):
+                    if name not in _OUTCOME_NAMES or not isinstance(out, Mapping):
                         _fail("INVALID_OUTCOME", "invalid outcome")
+                    expected_fields = {"action", "activityId"} if "activityId" in out else {"action"}
+                    _exact(out, expected_fields, "outcome", "INVALID_OUTCOME")
                     action, dest = out.get("action"), out.get("activityId")
                     if action not in _ACTIONS or ((action in {"retry", "support"}) != isinstance(dest, str)):
                         _fail("INVALID_OUTCOME", "invalid outcome action")
+                    if isinstance(dest, str):
+                        _id(dest, "outcome activityId")
                     checked[name] = _freeze(out)
                 outcomes = MappingProxyType(checked)
-                if not isinstance(a["visual"], Mapping):
-                    _fail("INVALID_VISUAL", "visual required")
-                visual = _freeze(a["visual"])
+                authored_visual = _exact(a["visual"], _VISUAL, "visual", "INVALID_VISUAL")
+                if not all(
+                    authored_visual[key] is None or isinstance(authored_visual[key], str)
+                    for key in ("backgroundAssetKey", "objectAssetKey")
+                ) or not isinstance(authored_visual["strategy"], str) or not isinstance(authored_visual["fallback"], str):
+                    _fail("INVALID_VISUAL", "visual values are invalid")
+                visual = _freeze(authored_visual)
             if a["embodiedIntent"] not in intents:
                 _fail("UNSUPPORTED_INTENT", "embodied intent is not registered")
+            if a["evidenceName"] not in evidence:
+                _fail("UNSUPPORTED_EVIDENCE", "evidence name is not registered")
+            if a["visualFocusRegion"] not in regions:
+                _fail("INVALID_VISUAL_FOCUS", "activity focus region is not registered")
+            if not isinstance(a["listeningTransition"], list) or not all(
+                isinstance(item, str) and item for item in a["listeningTransition"]
+            ):
+                _fail("INVALID_ACTIVITY_FIELDS", "listening transition is invalid")
             activities.append(
                 CourseActivity(
                     aid,

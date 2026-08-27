@@ -56,6 +56,49 @@ async def test_lesson_runtime_emits_course_activity_frame_after_curriculum_decis
     }]
 
 
+@pytest.mark.asyncio
+async def test_failed_activity_frame_send_restores_and_retries_without_reapplying_transition() -> None:
+    adapter = course_mode_runtime_from_manifest(
+        {"courseModeContract": curriculum_contract()}, enabled=True, clock=lambda: 1.0,
+    )
+    assert adapter is not None
+    adapter.orchestrator.session_state = SessionState.WORD_ACTIVE
+    arguments = {
+        "lessonSessionId": adapter.lesson_session_id, "turnSequenceId": 1,
+        "observationId": "advance-once", "semanticClass": "target_en",
+        "speechClass": "exact", "language": "en", "intent": "answer",
+        "engagement": "engaged", "safetyClass": "normal", "assessmentEligible": True,
+        "confidenceBand": "high", "activityId": "a1", "contextId": "context.1",
+        "robotAudioContaminated": False, "targetTextVisible": False,
+    }
+    result = await adapter.course_observe_child(arguments)
+    assert adapter.orchestrator.active_activity_id == "a2"
+    snapshot = json.loads(json.dumps(adapter.snapshot()))
+
+    lesson = object.__new__(LessonRuntime)
+    lesson.assignment_id = "assignment-1"; lesson.session_id = adapter.lesson_session_id
+    lesson._step_id = "a1"; lesson._seq = 0; lesson.course_mode = adapter
+    async def persist(): return None
+    lesson.persist_course_mode_snapshot = persist
+    async def fail(_payload): raise ConnectionError("disconnected")
+    lesson._send = fail
+    with pytest.raises(ConnectionError, match="disconnected"):
+        await lesson._deliver_pending_course_activity_frames()
+    assert adapter.snapshot()["pendingActivityDecisionIds"] == [result["decisionId"]]
+
+    restored = adapter.restore(adapter.contract, snapshot, clock=lambda: 1.0)
+    replay = await restored.course_observe_child(arguments)
+    assert replay == result and restored.orchestrator.active_activity_id == "a2"
+    sent = []
+    lesson.course_mode = restored
+    async def send(payload): sent.append(json.loads(payload))
+    lesson._send = send
+    await lesson._deliver_pending_course_activity_frames()
+    await lesson._deliver_pending_course_activity_frames()
+    assert len(sent) == 1
+    assert restored.snapshot()["pendingActivityDecisionIds"] == []
+
+
 def test_v2_requires_explicit_flag_and_exact_contract_without_v1_fallback() -> None:
     assert course_mode_runtime_from_manifest({"courseModeContract": contract()}, enabled=False) is None
     runtime = course_mode_runtime_from_manifest({"courseModeContract": contract()}, enabled=True)

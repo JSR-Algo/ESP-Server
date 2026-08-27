@@ -196,6 +196,7 @@ class CourseModeRuntimeAdapter:
         self._response_plan_rollback: dict[str, Any] | None = None
         self._course_budget_started = False
         self._completion_stop_dispatched = False
+        self._pending_activity_decision_ids: list[str] = []
 
     def start_course_budget(self) -> None:
         if self._course_budget_started:
@@ -246,7 +247,26 @@ class CourseModeRuntimeAdapter:
     def _remember(self, decision: CourseDecision) -> Dict[str, Any]:
         self._decisions[decision.decision_id] = decision
         self._latest_decision_id = decision.decision_id
+        if (
+            decision.activity_id is not None
+            and bool(self.contract.activity(decision.activity_id).outcomes)
+            and decision.decision_id not in self._pending_activity_decision_ids
+        ):
+            self._pending_activity_decision_ids.append(decision.decision_id)
         return self._decision_payload(decision)
+
+    def pending_activity_decisions(self) -> list[CourseDecision]:
+        return [self._decisions[decision_id] for decision_id in self._pending_activity_decision_ids]
+
+    def mark_activity_decision_delivered(self, decision_id: str) -> bool:
+        if decision_id not in self._pending_activity_decision_ids:
+            return False
+        self._pending_activity_decision_ids.remove(decision_id)
+        return True
+
+    def restore_pending_activity_decision(self, decision_id: str) -> None:
+        if decision_id not in self._pending_activity_decision_ids:
+            self._pending_activity_decision_ids.insert(0, decision_id)
 
     def _replay_operation(
         self, operation: str, arguments: Dict[str, Any],
@@ -784,6 +804,7 @@ class CourseModeRuntimeAdapter:
             "responsePlanRollback": copy.deepcopy(self._response_plan_rollback),
             "courseBudgetStarted": self._course_budget_started,
             "completionStopDispatched": self._completion_stop_dispatched,
+            "pendingActivityDecisionIds": list(self._pending_activity_decision_ids),
         }
 
     def durable_snapshot(self) -> Dict[str, Any]:
@@ -853,6 +874,7 @@ class CourseModeRuntimeAdapter:
             )
         value._course_budget_started = snapshot["courseBudgetStarted"]
         value._completion_stop_dispatched = snapshot.get("completionStopDispatched") is True
+        value._pending_activity_decision_ids = list(snapshot.get("pendingActivityDecisionIds", []))
         value._pending_evidence_batches = copy.deepcopy(snapshot.get("pendingEvidenceBatches", []))
         return value
 
@@ -2302,11 +2324,8 @@ class LessonRuntime:
                 retry_interrupted_delivery=False,
             )
             return {"accepted": False, "code": "COURSE_SNAPSHOT_PERSIST_FAILED"}
+        await self._deliver_pending_course_activity_frames()
         await self._flush_course_evidence_outbox()
-        if not operation_was_recorded:
-            decision = self.course_mode._decisions.get(result.get("decisionId"))
-            if decision is not None:
-                await self._send_course_activity_decision(decision)
         if name == "course_apply_response_plan" and self.course_mode.response_plan_requires_commit(arguments):
             decision = self.course_mode._decisions.get(arguments.get("decisionId"))
             if decision is not None:
@@ -2352,6 +2371,18 @@ class LessonRuntime:
         if len(payload.encode("utf-8")) > MAX_LESSON_FRAME_BYTES:
             raise ValueError("lesson course activity frame is too large")
         await self._send(payload)
+
+    async def _deliver_pending_course_activity_frames(self) -> None:
+        if self.course_mode is None:
+            return
+        for decision in self.course_mode.pending_activity_decisions():
+            await self._send_course_activity_decision(decision)
+            self.course_mode.mark_activity_decision_delivered(decision.decision_id)
+            try:
+                await self.persist_course_mode_snapshot()
+            except Exception:
+                self.course_mode.restore_pending_activity_decision(decision.decision_id)
+                raise
 
     async def _dispatch_course_embodied_decision(
         self,

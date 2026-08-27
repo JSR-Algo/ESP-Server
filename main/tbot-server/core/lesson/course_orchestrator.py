@@ -191,11 +191,17 @@ class CourseOrchestrator:
         if observation.now_ms - self.started_at_ms >= self.soft_deadline_ms:
             self.session_state = SessionState.CLOSING
             return self._decision(
-                "CLOSE_AT_DEADLINE" if self.contract.is_curriculum else "CLOSE_WITHOUT_SECOND_WORD",
+                "CLOSE_AT_DEADLINE" if self.contract.activity(self.active_activity_id).outcomes else "CLOSE_WITHOUT_SECOND_WORD",
                 embodied=EmbodiedIntent.GOODBYE_SMALL, activity_id=self.active_activity_id,
                 visual_state="completion",
             )
-        if observation.intent in {"emotional_share", "refusal", "fatigue"}:
+        try:
+            activity = self.contract.activity(observation.activity_id)
+        except KeyError:
+            return self._decision("INVALID_ACTIVITY_IGNORED", accepted=False, acknowledgment="retain_authoritative_state")
+        if observation.intent in {"emotional_share", "refusal", "fatigue"} and (
+            not activity.outcomes or observation.intent == "emotional_share"
+        ):
             self.session_state = SessionState.REGULATION_BREAK
             self._regulation_state = observation.intent
             embodied = EmbodiedIntent.COMFORT_CALM if observation.intent == "emotional_share" else EmbodiedIntent.PAUSE_CHOICE
@@ -210,16 +216,18 @@ class CourseOrchestrator:
                 embodied=EmbodiedIntent.ACKNOWLEDGE_STORY, branch_id=self._active_branch_id,
                 activity_id=self.active_activity_id,
             )
-        try:
-            activity = self.contract.activity(observation.activity_id)
-        except KeyError:
+        valid_identity = (
+            activity.context_id == observation.context_id
+            and (
+                observation.activity_id == self.active_activity_id
+                if activity.outcomes
+                else self.active_target_id in activity.target_ids
+            )
+        )
+        if not valid_identity:
             return self._decision("INVALID_ACTIVITY_IGNORED", accepted=False, acknowledgment="retain_authoritative_state")
-        if activity.target_id != self.active_target_id or activity.context_id != observation.context_id:
-            if self.contract.is_curriculum and observation.activity_id == self.active_activity_id and activity.context_id == observation.context_id:
-                return self._observe_curriculum(activity, observation)
-            return self._decision("INVALID_ACTIVITY_IGNORED", accepted=False, acknowledgment="retain_authoritative_state")
-        if self.contract.is_curriculum:
-            return self._observe_curriculum(activity, observation)
+        if activity.outcomes:
+            return self._observe_authored_activity(activity, observation)
         assessment_stage = activity.stage in {"RECALL", "TRANSFER", "DELAYED_RECALL"}
         if (
             observation.confidence_band != "high"
@@ -306,7 +314,7 @@ class CourseOrchestrator:
         self.session_state = SessionState.WORD_ACTIVE
         return self._decision("ACKNOWLEDGE_GUIDE_INVITE", evidence=evidence, question="one_next_question")
 
-    def _observe_curriculum(self, activity: Any, observation: ChildObservation) -> CourseDecision:
+    def _observe_authored_activity(self, activity: Any, observation: ChildObservation) -> CourseDecision:
         if observation.activity_id != self.active_activity_id:
             return self._decision("INVALID_ACTIVITY_IGNORED", accepted=False, acknowledgment="retain_authoritative_state", activity_id=self.active_activity_id)
         if (
@@ -322,6 +330,8 @@ class CourseOrchestrator:
             outcome = activity.outcomes.get("continue") or activity.outcomes.get("finished")
         if outcome is None and outcome_name in {"incorrect", "silence"}:
             outcome = activity.outcomes.get("help")
+        if outcome is None and outcome_name in {"fatigue", "refusal"}:
+            outcome = activity.outcomes.get("regulationBreak")
         if outcome is None:
             return self._decision("ACKNOWLEDGE_GUIDE_INVITE", activity_id=activity.activity_id, acknowledgment="acknowledge_child", question="one_next_question")
         action = outcome["action"]
@@ -331,16 +341,17 @@ class CourseOrchestrator:
             attempt += 1
             self._activity_attempts[activity.activity_id] = attempt
             self.active_activity_id = cast(str, outcome["activityId"])
+            resulting = self.contract.activity(self.active_activity_id)
             help_requested = outcome_name == "help"
             return self._decision(
                 "MODEL_AND_SUPPORT" if help_requested else ("OFFER_CHOICE_OR_RETRY" if outcome_name == "silence" else "SUPPORT_WITH_CLUE"),
                 acknowledgment="acknowledge_help" if help_requested else acknowledgment,
                 teaching="model_target_once" if help_requested else "authored_clue",
                 question="invite_supported_speech" if help_requested else "offer_choice_or_retry",
-                embodied=EmbodiedIntent.MODEL_WORD if help_requested else EmbodiedIntent.TRY_DIFFERENT_WAY,
+                embodied=EmbodiedIntent(resulting.embodied_intent),
                 may_model=help_requested, activity_id=self.active_activity_id,
                 visual_state="retry" if action == "retry" else "incorrect", attempt=attempt,
-                visual_focus_region=activity.visual_focus_region,
+                visual_focus_region=resulting.visual_focus_region,
             )
         if action == "pause":
             self.session_state = SessionState.REGULATION_BREAK
@@ -356,8 +367,9 @@ class CourseOrchestrator:
         for target_id in activity.target_ids:
             self._evidence_state[target_id] = activity.evidence_name
         self.active_activity_id = self.contract.activities[index + 1].activity_id
+        resulting = self.contract.activities[index + 1]
         self.session_state = SessionState.WORD_ACTIVE
-        return self._decision("ADVANCE_ACTIVITY", acknowledgment=acknowledgment, embodied=EmbodiedIntent(activity.embodied_intent), activity_id=self.active_activity_id, visual_state="nearMiss" if outcome_name == "near" else "correct", attempt=attempt, visual_focus_region=activity.visual_focus_region)
+        return self._decision("ADVANCE_ACTIVITY", acknowledgment=acknowledgment, embodied=EmbodiedIntent(resulting.embodied_intent), activity_id=self.active_activity_id, visual_state="nearMiss" if outcome_name == "near" else "correct", attempt=attempt, visual_focus_region=resulting.visual_focus_region)
 
     def open_context_branch(self, *, observation_id: str, turn_sequence_id: int, branch_type: str) -> CourseDecision:
         if observation_id in self._consumed_observations:

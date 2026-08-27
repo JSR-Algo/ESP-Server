@@ -202,6 +202,81 @@ def test_curriculum_outcomes_cover_advance_near_clue_silence_vi_and_help() -> No
     assert help_decision.action == "MODEL_AND_SUPPORT" and help_decision.may_model_target is True
 
 
+def test_transition_frame_identity_comes_entirely_from_resulting_activity() -> None:
+    value = curriculum_contract()
+    value["embodiedIntentNames"].extend(["PRESENT_LEFT", "PRESENT_RIGHT"])
+    value["visualFocus"]["regions"].extend(["focus.left.choice", "focus.right.choice"])
+    value["activities"][0]["embodiedIntent"] = "PRESENT_LEFT"
+    value["activities"][0]["visualFocusRegion"] = "focus.left.choice"
+    value["activities"][1]["embodiedIntent"] = "PRESENT_RIGHT"
+    value["activities"][1]["visualFocusRegion"] = "focus.right.choice"
+    value["contractChecksum"] = _checksum(value)
+    runtime = CourseOrchestrator(CourseModeContract.from_mapping(value), started_at_ms=0, soft_deadline_ms=480_000)
+    runtime.session_state = SessionState.WORD_ACTIVE
+    decision = runtime.observe(observation("a1"))
+    assert (decision.activity_id, decision.embodied_intent.value, decision.visual_focus_region) == (
+        "a2", "PRESENT_RIGHT", "focus.right.choice",
+    )
+    runtime = CourseOrchestrator(CourseModeContract.from_mapping(value), started_at_ms=0, soft_deadline_ms=480_000)
+    runtime.session_state = SessionState.WORD_ACTIVE
+    supported = runtime.observe(observation("a1", semantic="help", speech="not_applicable", intent="help"))
+    assert (supported.activity_id, supported.embodied_intent.value, supported.visual_focus_region) == (
+        "a2", "PRESENT_RIGHT", "focus.right.choice",
+    )
+
+
+def test_real_compiler_outcome_vocabulary_completes_and_regulates_without_generic_ack() -> None:
+    value = curriculum_contract()
+    value["activities"][-1]["outcomes"] = {
+        "finished": {"action": "complete"},
+        "regulationBreak": {"action": "pause"},
+    }
+    value["contractChecksum"] = _checksum(value)
+    contract = CourseModeContract.from_mapping(value)
+    runtime = CourseOrchestrator(contract, started_at_ms=0, soft_deadline_ms=480_000)
+    runtime.session_state = SessionState.WORD_ACTIVE; runtime.active_activity_id = "a7"
+    assert runtime.observe(observation("a7")).action == "COMPLETE_COURSE"
+    runtime = CourseOrchestrator(contract, started_at_ms=0, soft_deadline_ms=480_000)
+    runtime.session_state = SessionState.WORD_ACTIVE; runtime.active_activity_id = "a7"
+    paused = runtime.observe(observation("a7", intent="fatigue"))
+    assert paused.action == "RESPOND_WITHOUT_REDIRECT" and paused.next_state is SessionState.REGULATION_BREAK
+
+
+@pytest.mark.parametrize("semantic,speech,intent,expected", [
+    ("target_en", "exact", "answer", "ADVANCE_ACTIVITY"),
+    ("target_en", "near", "answer", "ADVANCE_ACTIVITY"),
+    ("other", "incorrect", "answer", "SUPPORT_WITH_CLUE"),
+    ("silence", "silence", "silence", "OFFER_CHOICE_OR_RETRY"),
+    ("help", "not_applicable", "help", "MODEL_AND_SUPPORT"),
+    ("other", "not_applicable", "fatigue", "RESPOND_WITHOUT_REDIRECT"),
+])
+def test_real_compiler_continue_help_regulation_vocabulary(semantic, speech, intent, expected) -> None:
+    value = curriculum_contract()
+    value["activities"][0]["outcomes"] = {
+        "continue": {"action": "advance"},
+        "help": {"action": "support", "activityId": "a2"},
+        "regulationBreak": {"action": "pause"},
+    }
+    value["contractChecksum"] = _checksum(value)
+    runtime = CourseOrchestrator(CourseModeContract.from_mapping(value), started_at_ms=0, soft_deadline_ms=480_000)
+    runtime.session_state = SessionState.WORD_ACTIVE
+    result = runtime.observe(observation("a1", semantic=semantic, speech=speech, intent=intent))
+    assert result.action == expected
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda value: value["renderer"].update({"rendererId": "teebot-lesson-renderer.v4"}),
+    lambda value: value["activities"][0].update({"evidenceName": "NOT_REGISTERED"}),
+    lambda value: value["activities"][0].update({"visualFocusRegion": "focus.nowhere"}),
+    lambda value: value["activities"][0].update({"stage": "INVENTED"}),
+    lambda value: value["activities"][0]["outcomes"]["correct"].update({"extra": True}),
+])
+def test_curriculum_parser_rejects_noncanonical_registries_and_renderer(mutate) -> None:
+    value = curriculum_contract(); mutate(value); value["contractChecksum"] = _checksum(value)
+    with pytest.raises(ValueError):
+        CourseModeContract.from_mapping(value)
+
+
 def test_curriculum_uncertainty_regulation_context_deadline_and_completion() -> None:
     runtime = running()
     uncertain = copy.replace(observation("a1"), confidence_band="low") if hasattr(copy, "replace") else None
