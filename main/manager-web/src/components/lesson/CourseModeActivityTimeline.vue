@@ -180,25 +180,33 @@ export default {
       return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`;
     },
     setMeanings(target, value) {
+      if (this.disabled || this.saving) return false;
       this.$set(target, 'vietnameseMeanings', String(value).split(',').map((item) => item.trim()).filter(Boolean));
       this.emitDraft();
+      return true;
     },
     setVisualKey(activity, field, value) {
+      if (this.disabled || this.saving) return false;
       this.$set(activity.visual, field, typeof value === 'string' && value.trim() ? value.trim() : null);
       this.emitDraft();
+      return true;
     },
     onOutcomeAction(outcome) {
+      if (this.disabled || this.saving) return false;
       if (!['retry', 'support'].includes(outcome.action)) this.$delete(outcome, 'activityId');
       else if (!outcome.activityId && this.draft.activities.length) this.$set(outcome, 'activityId', this.draft.activities[0].activityId);
       this.emitDraft();
+      return true;
     },
     emitDraft() {
+      if (this.disabled || this.saving) return false;
       const next = normalizeCourseModeVisualKeys(this.draft);
       next.targets = (next.targets || []).map((target) => ({
         ...target,
         activityIds: (next.activities || []).filter((activity) => (activity.targetIds || []).includes(target.targetId)).map((activity) => activity.activityId),
       }));
       this.$emit('input', next);
+      return true;
     },
   },
 };

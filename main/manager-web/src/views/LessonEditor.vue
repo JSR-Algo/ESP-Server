@@ -73,9 +73,9 @@
       </section>
       <CourseModeActivityTimeline
         v-if="courseModeIsCurriculum"
-        v-model="courseModeDraft"
+        :value="courseModeDraft"
         :assets="courseModeAssets"
-        :disabled="!isDraft || courseModeLoading"
+        :disabled="!isDraft || courseModeLoading || courseModeSaving"
         :saving="courseModeSaving"
         :dirty="courseModeDirty"
         :error="courseModeError"
@@ -83,6 +83,13 @@
         @input="onCourseModeDraftInput"
         @save="saveCourseModeContract"
       />
+      <section v-else-if="isCourseModeAuthority && !courseModeContract" class="course-mode-load-state" aria-live="polite">
+        <p v-if="courseModeLoading" data-testid="course-mode-loading" role="status">Loading Course Mode activities…</p>
+        <el-alert v-else data-testid="course-mode-load-error" :title="courseModeError || 'Course Mode activities could not be loaded.'" type="error" :closable="false" show-icon />
+        <el-button v-if="!courseModeLoading" data-testid="course-mode-load-retry" size="small" :loading="courseModeLoading" @click="loadCourseModeContract">
+          Retry Course Mode load
+        </el-button>
+      </section>
       <el-alert
         v-else-if="courseModeContract"
         title="This frozen pilot contract is available for audit only. Curriculum activity editing is not applicable."
@@ -839,6 +846,7 @@ export default {
       courseModeError: '',
       courseModeSavedMessage: '',
       courseModeRequestId: 0,
+      courseModeRevision: 0,
     };
   },
   computed: {
@@ -1291,10 +1299,14 @@ export default {
     this.lessonUpdateSafety.release();
   },
   methods: {
-    onCourseModeDraftInput() {
+    onCourseModeDraftInput(value) {
+      if (this.courseModeSaving) return false;
+      this.courseModeDraft = value;
+      this.courseModeRevision += 1;
       this.courseModeDirty = true;
       this.courseModeSavedMessage = '';
       this.invalidatePreview();
+      return true;
     },
     resetCourseModeState() {
       this.courseModeRequestId += 1;
@@ -1305,6 +1317,7 @@ export default {
       this.courseModeDirty = false;
       this.courseModeError = '';
       this.courseModeSavedMessage = '';
+      this.courseModeRevision = 0;
     },
     loadCourseModeContract() {
       if (this.editorDestroying) return false;
@@ -1318,12 +1331,12 @@ export default {
         this.courseModeContract = contract;
         this.courseModeDraft = JSON.parse(JSON.stringify(contract));
         this.courseModeDirty = false;
+        this.courseModeRevision = 0;
         this.courseModeLoading = false;
       }, (message, error) => {
         if (this.editorDestroying || requestId !== this.courseModeRequestId || lessonId !== this.lessonId) return;
         this.courseModeLoading = false;
-        const status = Number(error && (error.status || (error.response && error.response.status)));
-        if (status !== 404 && this.isCourseModeAuthority) this.courseModeError = message || 'Course Mode contract could not be loaded.';
+        this.courseModeError = message || 'Course Mode contract could not be loaded.';
       });
       return true;
     },
@@ -1331,6 +1344,7 @@ export default {
       if (!this.isDraft || !this.courseModeDraft || !this.courseModeDirty || this.courseModeSaving) return false;
       const lessonId = this.lessonId;
       const requestId = ++this.courseModeRequestId;
+      const saveRevision = this.courseModeRevision;
       this.courseModeSaving = true;
       this.courseModeError = '';
       this.courseModeSavedMessage = '';
@@ -1340,11 +1354,13 @@ export default {
         Api.lesson.saveCourseModeContract(lessonId, contract, (response) => {
           if (this.editorDestroying || requestId !== this.courseModeRequestId || lessonId !== this.lessonId) return;
           const saved = response && response.contract ? response.contract : contract;
-          this.courseModeContract = saved;
-          this.courseModeDraft = JSON.parse(JSON.stringify(saved));
-          this.courseModeDirty = false;
           this.courseModeSaving = false;
-          this.courseModeSavedMessage = `Saved · ${String(response && response.checksum ? response.checksum : saved.contractChecksum).slice(0, 12)}`;
+          this.courseModeContract = saved;
+          if (this.courseModeRevision === saveRevision) {
+            this.courseModeDraft = JSON.parse(JSON.stringify(saved));
+            this.courseModeDirty = false;
+            this.courseModeSavedMessage = `Saved · ${String(response && response.checksum ? response.checksum : saved.contractChecksum).slice(0, 12)}`;
+          }
           this.invalidatePreview();
           this.fetchSteps();
         }, (message) => {

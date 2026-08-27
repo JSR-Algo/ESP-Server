@@ -199,11 +199,22 @@ try {
   assert.equal(courseModeResult.clearedObjectKey, null);
   assert.equal(courseModeResult.savedObjectKey, null);
   assert.equal(courseModeResult.savedFallback, 'robotActing');
+  assert.equal(courseModeResult.disabledDuringSave, true);
+  assert.equal(courseModeResult.uiEditBlockedDuringSave, true);
+  assert.equal(courseModeResult.newerRevisionPreserved, true);
   assert.equal(courseModeResult.saveCount, 1);
   assert.match(courseModeResult.savedChecksum, /^[a-f0-9]{64}$/);
   const courseModeMobileAudit = await auditLayoutAt(390);
   assertNoPageOverflow(courseModeMobileAudit);
   assertResponsiveOverflowControls(courseModeMobileAudit);
+
+  assert.deepEqual(await evaluate('window.__MOUNT_COURSE_MODE_LOAD_ERROR__()'), {
+    loadingVisible: true,
+    errorVisible: true,
+    retryPresent: true,
+    retryCalled: true,
+    timelineRecovered: true,
+  });
 
   const disabledResult = await evaluate('window.__MOUNT_DISABLED_LESSON_EDITOR__()');
   assert.deepEqual(disabledResult, {

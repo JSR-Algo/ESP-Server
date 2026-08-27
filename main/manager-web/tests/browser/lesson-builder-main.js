@@ -15,8 +15,9 @@ Vue.use(VueRouter);
 Vue.config.productionTip = false;
 localStorage.setItem('token', 'lesson-builder-test-session');
 
-const calls = { update: [], visualFilters: [], visualRefSets: [], lessonVisualSets: [], journeyLoads: [], journeySaves: [], courseModeSaves: [], flattenedDerivativeLoads: [], validate: 0, preview: 0, errors: [], warnings: [], failNextUpdate: false, failNextJourneySave: false, deferNextUpdate: false, deferNextValidate: false, deferNextJourneySave: false, pendingUpdates: [], pendingValidations: [], pendingJourneySaves: [] };
+const calls = { update: [], visualFilters: [], visualRefSets: [], lessonVisualSets: [], journeyLoads: [], journeySaves: [], courseModeLoads: [], courseModeSaves: [], flattenedDerivativeLoads: [], validate: 0, preview: 0, errors: [], warnings: [], failNextUpdate: false, failNextJourneySave: false, deferNextUpdate: false, deferNextValidate: false, deferNextJourneySave: false, deferNextCourseModeLoad: false, deferNextCourseModeSave: false, pendingUpdates: [], pendingValidations: [], pendingJourneySaves: [], pendingCourseModeLoads: [], pendingCourseModeSaves: [] };
 let courseModeEnabled = false;
+let courseModeLoadFails = false;
 let steps = [
   {
     stepKey: 's1', stepType: 'greeting', prompt: 'Meet Pip', subject: 'pet', stepBody: { durationSec: 8 },
@@ -111,8 +112,8 @@ const lessonManifestVersions = {
 Object.assign(Api.lesson, {
   getRolloutCapabilities(ok) { ok({ sharedVisualAuthoring: true, exactEspTftPreview: true }); },
   getLesson(id, ok) { ok({ lessonId: id, lessonKey: 'farm-1', title: 'Farm friends', status: 'draft', lessonVersion: 1, locale: 'vi', manifestVersion: courseModeEnabled ? 'teebot-lesson-renderer.v5' : (lessonManifestVersions[id] || 'teebot-lesson-renderer.v2'), courseModeContract: courseModeEnabled ? courseModeContract : null }); },
-  getCourseModeContract(id, ok, fail) { if (courseModeEnabled) ok({ lessonId: id, checksum: courseModeContract.contractChecksum, contract: courseModeContract }); else fail('not found', { status: 404 }); },
-  saveCourseModeContract(id, contract, ok) { calls.courseModeSaves.push({ id, contract }); ok({ lessonId: id, checksum: contract.contractChecksum, contract }); },
+  getCourseModeContract(id, ok, fail) { calls.courseModeLoads.push(id); if (calls.deferNextCourseModeLoad) { calls.deferNextCourseModeLoad = false; calls.pendingCourseModeLoads.push({ id, ok, fail }); return; } if (courseModeEnabled && !courseModeLoadFails) ok({ lessonId: id, checksum: courseModeContract.contractChecksum, contract: courseModeContract }); else fail(courseModeEnabled ? 'course mode unavailable' : 'not found', { status: courseModeEnabled ? 503 : 404 }); },
+  saveCourseModeContract(id, contract, ok, fail) { calls.courseModeSaves.push({ id, contract }); if (calls.deferNextCourseModeSave) { calls.deferNextCourseModeSave = false; calls.pendingCourseModeSaves.push({ id, contract, ok, fail }); return; } ok({ lessonId: id, checksum: contract.contractChecksum, contract }); },
   getTVideoJourneyPreset(ok) { ok(journeyPreset); },
   getTVideoJourney(id, ok, fail) {
     calls.journeyLoads.push(id);
@@ -139,7 +140,7 @@ Object.assign(Api.lesson, {
   listSteps(id, ok) { ok(steps.map((step) => ({ ...step, visualRefs: [...(step.visualRefs || [])] }))); },
   listStepTypes(ok) { ok([{ stepType: 'greeting', completionClass: 'passive' }, { stepType: 'repeat', completionClass: 'interactive' }]); },
   listSharedBackgrounds(ok) { ok([]); },
-  listVisualAssets(filters, ok) { calls.visualFilters.push(filters); const catalog = courseModeEnabled ? sharedAssets : sharedAssets.slice(0, 6); ok(filters.category ? catalog.filter((asset) => asset.category === filters.category) : catalog); },
+  listVisualAssets(filters, ok) { calls.visualFilters.push(filters); const legacyCatalog = sharedAssets.filter((asset) => !['admin-only-object', 'draft-admin-object'].includes(asset.assetId)); const catalog = courseModeEnabled ? sharedAssets : (filters.category ? legacyCatalog.slice(0, 6) : legacyCatalog); ok(filters.category ? catalog.filter((asset) => asset.category === filters.category) : catalog); },
   setVisualRef(lessonId, stepKey, slot, assetVersionId, ok) {
     calls.visualRefSets.push({ lessonId, stepKey, slot, assetVersionId });
     const asset = sharedAssets.find((row) => row.versionId === assetVersionId);
@@ -181,7 +182,7 @@ Object.assign(Api.lesson, {
 });
 
 LessonEditor.components.HeaderBar = { name: 'HeaderBar', render: (h) => h('header') };
-LessonEditor.components.LessonAssetManager = { name: 'LessonAssetManager', props: ['lessonId'], mounted() { this.$emit('assets-loaded', sharedAssets.slice(0, 6)); }, render: (h) => h('div') };
+LessonEditor.components.LessonAssetManager = { name: 'LessonAssetManager', props: ['lessonId'], mounted() { this.$emit('assets-loaded', sharedAssets.filter((asset) => !['admin-only-object', 'draft-admin-object'].includes(asset.assetId))); }, render: (h) => h('div') };
 
 const router = new VueRouter({ routes: [{ path: '/', component: { render: (h) => h('div') } }] });
 await router.replace({ path: '/', query: { lessonId: 'lesson-1' } });
@@ -249,9 +250,38 @@ window.__MOUNT_COURSE_MODE_EDITOR__ = async () => {
   const clearedObjectKey = timeline.draft.activities[0].visual.objectAssetKey;
   courseEditor.courseModeDraft = JSON.parse(JSON.stringify(courseEditor.courseModeDraft));
   await courseEditor.$nextTick();
-  await courseEditor.saveCourseModeContract();
-  for (let index = 0; index < 40 && courseEditor.courseModeSaving; index += 1) await new Promise((resolve) => setTimeout(resolve, 0));
-  return { ...initial, leakageWarning, adminCatalogObjectSelectable, draftCatalogObjectExcluded, selectedCatalogObjectKey, clearedObjectKey, saveCount: calls.courseModeSaves.length, savedChecksum: calls.courseModeSaves[0]?.contract.contractChecksum || '', savedObjectKey: calls.courseModeSaves[0]?.contract.activities[0].visual.objectAssetKey, savedFallback: calls.courseModeSaves[0]?.contract.activities[0].visual.fallback };
+  calls.deferNextCourseModeSave = true;
+  const savePromise = courseEditor.saveCourseModeContract(); await new Promise((resolve) => setTimeout(resolve, 0));
+  const disabledDuringSave = timeline.disabled === true;
+  const keyBeforeBlockedEdit = timeline.draft.activities[0].visual.objectAssetKey;
+  timeline.setVisualKey(timeline.draft.activities[0], 'objectAssetKey', 'object.admin-only');
+  const uiEditBlockedDuringSave = timeline.draft.activities[0].visual.objectAssetKey === keyBeforeBlockedEdit;
+  const newerDraft = JSON.parse(JSON.stringify(courseEditor.courseModeDraft)); newerDraft.activities[0].contextId = 'newer-context'; courseEditor.courseModeDraft = newerDraft; courseEditor.courseModeRevision += 1; courseEditor.courseModeDirty = true;
+  const pendingSave = calls.pendingCourseModeSaves.shift(); pendingSave.ok({ lessonId: pendingSave.id, checksum: pendingSave.contract.contractChecksum, contract: pendingSave.contract });
+  await savePromise; await courseEditor.$nextTick();
+  const newerRevisionPreserved = courseEditor.courseModeDraft.activities[0].contextId === 'newer-context' && courseEditor.courseModeDirty;
+  return { ...initial, leakageWarning, adminCatalogObjectSelectable, draftCatalogObjectExcluded, selectedCatalogObjectKey, clearedObjectKey, disabledDuringSave, uiEditBlockedDuringSave, newerRevisionPreserved, saveCount: calls.courseModeSaves.length, savedChecksum: calls.courseModeSaves[0]?.contract.contractChecksum || '', savedObjectKey: calls.courseModeSaves[0]?.contract.activities[0].visual.objectAssetKey, savedFallback: calls.courseModeSaves[0]?.contract.activities[0].visual.fallback };
+};
+window.__MOUNT_COURSE_MODE_LOAD_ERROR__ = async () => {
+  vm.$destroy(); vm.$el.remove(); await new Promise((resolve) => setTimeout(resolve, 0));
+  const root = document.createElement('div'); root.id = 'course-mode-error-app'; document.body.appendChild(root);
+  courseModeEnabled = true; courseModeLoadFails = true; calls.deferNextCourseModeLoad = true;
+  await router.replace({ path: '/', query: { lessonId: 'course-mode-error-lesson' } });
+  vm = new Vue({ router, i18n, render: (h) => h(LessonEditor) }).$mount(root);
+  const errorEditor = vm.$children[0];
+  for (let index = 0; index < 40 && !calls.pendingCourseModeLoads.length; index += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+  await errorEditor.$nextTick();
+  const loadingVisible = Boolean(vm.$el.querySelector('[data-testid="course-mode-loading"]'));
+  calls.pendingCourseModeLoads.shift().fail('course mode unavailable', { status: 503 });
+  for (let index = 0; index < 40 && !errorEditor.courseModeError; index += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+  await errorEditor.$nextTick();
+  const errorVisible = Boolean(vm.$el.querySelector('[data-testid="course-mode-load-error"]'));
+  const retryButton = vm.$el.querySelector('[data-testid="course-mode-load-retry"]');
+  const loadCountBeforeRetry = calls.courseModeLoads.length;
+  courseModeLoadFails = false; retryButton.click();
+  for (let index = 0; index < 40 && !errorEditor.courseModeContract; index += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+  await errorEditor.$nextTick();
+  return { loadingVisible, errorVisible, retryPresent: Boolean(retryButton), retryCalled: calls.courseModeLoads.length === loadCountBeforeRetry + 1, timelineRecovered: Boolean(vm.$el.querySelector('[data-testid="course-mode-activity-timeline"]')) };
 };
 window.__TEST_CAPABILITY_ROUTE_LOGOUT_RACE__ = async () => {
   localStorage.setItem('token', 'route-session-a');
