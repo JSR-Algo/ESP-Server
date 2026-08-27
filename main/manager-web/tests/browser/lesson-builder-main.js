@@ -15,7 +15,8 @@ Vue.use(VueRouter);
 Vue.config.productionTip = false;
 localStorage.setItem('token', 'lesson-builder-test-session');
 
-const calls = { update: [], visualFilters: [], visualRefSets: [], lessonVisualSets: [], journeyLoads: [], journeySaves: [], flattenedDerivativeLoads: [], validate: 0, preview: 0, errors: [], warnings: [], failNextUpdate: false, failNextJourneySave: false, deferNextUpdate: false, deferNextValidate: false, deferNextJourneySave: false, pendingUpdates: [], pendingValidations: [], pendingJourneySaves: [] };
+const calls = { update: [], visualFilters: [], visualRefSets: [], lessonVisualSets: [], journeyLoads: [], journeySaves: [], courseModeSaves: [], flattenedDerivativeLoads: [], validate: 0, preview: 0, errors: [], warnings: [], failNextUpdate: false, failNextJourneySave: false, deferNextUpdate: false, deferNextValidate: false, deferNextJourneySave: false, pendingUpdates: [], pendingValidations: [], pendingJourneySaves: [] };
+let courseModeEnabled = false;
 let steps = [
   {
     stepKey: 's1', stepType: 'greeting', prompt: 'Meet Pip', subject: 'pet', stepBody: { durationSec: 8 },
@@ -75,6 +76,26 @@ const manifest = {
     { stepKey: 's2', prompt: 'Say barn', scene: { robotOverlay: { asset: robotAsset } }, teachingWord: { text: 'BARN' }, entrance: 'none', templateProjection, visualStates: Object.fromEntries(visualStates.map((state) => [state, { prompt: state, motionPreset: stateMotions[state], overlayKey: state }])) },
   ]
 };
+const courseModeAnswerPolicy = { targetTextVisible: false, targetAudioBeforeAssessment: false, spokenTargetInPrompt: false, multipleChoiceContainsTarget: false, minElapsedSinceFullModelMs: 20000, minInterveningActivityCount: 1 };
+const courseModeContract = {
+  schemaVersion: 1, contractVersion: 'courseCompanion.v2.contract.v1', contractChecksum: 'a'.repeat(64),
+  session: { softDeadlineSec: 480, maxAttempts: 3, listenTimeoutSec: 6 },
+  targets: [
+    { targetId: 'animals.cat', targetWord: 'cat', role: 'primary', vietnameseMeanings: ['con mèo'], activityIds: [] },
+    { targetId: 'toys.ball', targetWord: 'ball', role: 'primary', vietnameseMeanings: ['quả bóng'], activityIds: [] },
+  ],
+  embodiedIntentNames: ['PRESENT_CENTER', 'MODEL_WORD', 'INVITE_CHILD', 'LISTEN_STILL', 'THINK_CURIOUS', 'CELEBRATE_RECALL'],
+  visualFocus: { regions: ['focus.center.primary', 'focus.left.choice', 'focus.right.choice'] },
+  activities: ['DISCOVER', 'UNDERSTAND', 'GUIDED_ACTION', 'SUPPORTED_SPEECH', 'RECALL', 'TRANSFER', 'DELAYED_RECALL'].map((stage, index) => ({
+    activityId: `activity-${index + 1}`, targetIds: ['animals.cat', 'toys.ball'], stage, activityType: `child_${stage.toLowerCase()}`,
+    evidenceName: 'EXPOSED', contextId: `context-${index + 1}`, embodiedIntent: index < 2 ? 'PRESENT_CENTER' : 'LISTEN_STILL', visualFocusRegion: 'focus.center.primary',
+    answerPolicy: { ...courseModeAnswerPolicy }, listeningTransition: [], reducedMotionFallback: 'face_and_transient_focus_cue',
+    modalities: ['speech_en', 'help'], expectedDurationSec: 60,
+    outcomes: index === 6 ? { done: { action: 'complete' } } : { next: { action: 'advance' } },
+    visual: { strategy: 'sceneObject', backgroundAssetKey: 'scene.farm', objectAssetKey: 'object.barn', fallback: 'robotActing' },
+  })),
+};
+courseModeContract.targets.forEach((target) => { target.activityIds = courseModeContract.activities.map((activity) => activity.activityId); });
 const lessonManifestVersions = {
   'lesson-1': 'teebot-lesson-renderer.v2',
   'journey-v4': 'teebot-lesson-renderer.v4',
@@ -87,7 +108,9 @@ const lessonManifestVersions = {
 
 Object.assign(Api.lesson, {
   getRolloutCapabilities(ok) { ok({ sharedVisualAuthoring: true, exactEspTftPreview: true }); },
-  getLesson(id, ok) { ok({ lessonId: id, lessonKey: 'farm-1', title: 'Farm friends', status: 'draft', lessonVersion: 1, locale: 'vi', manifestVersion: lessonManifestVersions[id] || 'teebot-lesson-renderer.v2' }); },
+  getLesson(id, ok) { ok({ lessonId: id, lessonKey: 'farm-1', title: 'Farm friends', status: 'draft', lessonVersion: 1, locale: 'vi', manifestVersion: courseModeEnabled ? 'teebot-lesson-renderer.v5' : (lessonManifestVersions[id] || 'teebot-lesson-renderer.v2'), courseModeContract: courseModeEnabled ? courseModeContract : null }); },
+  getCourseModeContract(id, ok, fail) { if (courseModeEnabled) ok({ lessonId: id, checksum: courseModeContract.contractChecksum, contract: courseModeContract }); else fail('not found', { status: 404 }); },
+  saveCourseModeContract(id, contract, ok) { calls.courseModeSaves.push({ id, contract }); ok({ lessonId: id, checksum: contract.contractChecksum, contract }); },
   getTVideoJourneyPreset(ok) { ok(journeyPreset); },
   getTVideoJourney(id, ok, fail) {
     calls.journeyLoads.push(id);
@@ -190,6 +213,35 @@ window.__MOUNT_DISABLED_LESSON_EDITOR__ = async () => {
     sharedPickerVisible: Boolean(vm.$el.querySelector('.asset-picker')),
     previewButtonVisible: [...vm.$el.querySelectorAll('button')].some((button) => button.textContent.includes('Preview')),
   };
+};
+window.__MOUNT_COURSE_MODE_EDITOR__ = async () => {
+  vm.$destroy(); vm.$el.remove(); await new Promise((resolve) => setTimeout(resolve, 0));
+  const root = document.createElement('div'); root.id = 'course-mode-app'; document.body.appendChild(root);
+  courseModeEnabled = true;
+  steps = courseModeContract.activities.map((activity) => ({ stepKey: activity.activityId, stepType: activity.stage.toLowerCase(), prompt: activity.contextId, subject: 'course mode', stepBody: { authority: 'courseMode', activityId: activity.activityId, durationSec: activity.expectedDurationSec } }));
+  await router.replace({ path: '/', query: { lessonId: 'course-mode-lesson' } });
+  vm = new Vue({ router, i18n, render: (h) => h(LessonEditor) }).$mount(root);
+  const courseEditor = vm.$children[0];
+  for (let index = 0; index < 40 && !courseEditor.courseModeContract; index += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+  await courseEditor.$nextTick();
+  const initial = {
+    timeline: Boolean(vm.$el.querySelector('[data-testid="course-mode-activity-timeline"]')),
+    duration: vm.$el.querySelector('[data-testid="course-mode-duration-meter"]')?.textContent || '',
+    readOnly: Boolean(vm.$el.querySelector('[data-testid="course-mode-projected-steps-read-only"]')),
+    addStep: Boolean(vm.$el.querySelector('.add-row')),
+    actionButtons: [...vm.$el.querySelectorAll('.advanced-steps-scroll button')].length,
+  };
+  courseEditor.courseModeDraft.activities[4].answerPolicy.targetTextVisible = true;
+  courseEditor.courseModeDraft = JSON.parse(JSON.stringify(courseEditor.courseModeDraft));
+  courseEditor.courseModeDirty = true;
+  await courseEditor.$nextTick();
+  const leakageWarning = Boolean(vm.$el.querySelector('[data-testid="course-mode-answer-leakage-warning"]'));
+  courseEditor.courseModeDraft.activities[4].answerPolicy.targetTextVisible = false;
+  courseEditor.courseModeDraft = JSON.parse(JSON.stringify(courseEditor.courseModeDraft));
+  await courseEditor.$nextTick();
+  await courseEditor.saveCourseModeContract();
+  for (let index = 0; index < 40 && courseEditor.courseModeSaving; index += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+  return { ...initial, leakageWarning, saveCount: calls.courseModeSaves.length, savedChecksum: calls.courseModeSaves[0]?.contract.contractChecksum || '' };
 };
 window.__TEST_CAPABILITY_ROUTE_LOGOUT_RACE__ = async () => {
   localStorage.setItem('token', 'route-session-a');

@@ -548,6 +548,25 @@ export default {
     });
   },
 
+  getCourseModeContract(lessonId, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lessons/${lessonId}/course-mode`,
+      method: 'GET',
+      onSuccess,
+      onError,
+    });
+  },
+
+  saveCourseModeContract(lessonId, contract, onSuccess, onError) {
+    nestRequest({
+      url: `${getNestUrl()}/lessons/${lessonId}/course-mode`,
+      method: 'PUT',
+      data: { contract },
+      onSuccess,
+      onError,
+    });
+  },
+
   // POST /v1/admin/lessons/:lessonId/steps — ONLY author fields (no render triple)
   createStep(lessonId, input, onSuccess, onError) {
     const data = {

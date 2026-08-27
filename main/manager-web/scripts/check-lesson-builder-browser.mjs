@@ -186,6 +186,19 @@ try {
   assertNoPageOverflow(stressedAudit);
   assertResponsiveOverflowControls(stressedAudit, { assetPickerRequired: false });
 
+  const courseModeResult = await evaluate('window.__MOUNT_COURSE_MODE_EDITOR__()');
+  assert.equal(courseModeResult.timeline, true);
+  assert.match(courseModeResult.duration, /7:00 \/ 8:00/);
+  assert.equal(courseModeResult.readOnly, true);
+  assert.equal(courseModeResult.addStep, false);
+  assert.equal(courseModeResult.actionButtons, 0);
+  assert.equal(courseModeResult.leakageWarning, true);
+  assert.equal(courseModeResult.saveCount, 1);
+  assert.match(courseModeResult.savedChecksum, /^[a-f0-9]{64}$/);
+  const courseModeMobileAudit = await auditLayoutAt(390);
+  assertNoPageOverflow(courseModeMobileAudit);
+  assertResponsiveOverflowControls(courseModeMobileAudit);
+
   const disabledResult = await evaluate('window.__MOUNT_DISABLED_LESSON_EDITOR__()');
   assert.deepEqual(disabledResult, {
     visualCalls: 0,

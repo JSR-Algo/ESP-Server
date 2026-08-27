@@ -21,7 +21,48 @@ const {
   replaceStepAssetReference,
   validSimulationEvidence,
   stepReferencesAssetInLayer,
+  courseModeActivityReport,
+  isCourseModeAuthority,
+  isProjectedCourseModeStep,
 } = require('../src/components/lesson/lesson-builder-logic');
+
+const protectedRecallActivity = {
+  activityId: 'recall-1',
+  targetIds: ['animals.cat'],
+  stage: 'RECALL',
+  expectedDurationSec: 60,
+  answerPolicy: {
+    targetTextVisible: true,
+    targetAudioBeforeAssessment: false,
+    spokenTargetInPrompt: false,
+    multipleChoiceContainsTarget: false,
+    minElapsedSinceFullModelMs: 20000,
+    minInterveningActivityCount: 1,
+  },
+};
+const courseModeContract = {
+  contractVersion: 'courseCompanion.v2.contract.v1',
+  activities: [
+    { activityId: 'discover-1', stage: 'DISCOVER', expectedDurationSec: 425, answerPolicy: {} },
+    protectedRecallActivity,
+  ],
+};
+assert.strictEqual(isCourseModeAuthority({ courseModeContract }), true);
+assert.strictEqual(isCourseModeAuthority({}, [{ stepBody: { authority: 'courseMode' } }]), true);
+assert.strictEqual(isCourseModeAuthority({}, [], { steps: [{ authority: 'courseMode' }] }), true);
+assert.strictEqual(isCourseModeAuthority({ manifestVersion: 'teebot-lesson-renderer.v5' }), false);
+assert.strictEqual(isProjectedCourseModeStep({ stepBody: { authority: 'courseMode' } }), true);
+assert.strictEqual(isProjectedCourseModeStep({ authority: 'courseMode' }), true);
+assert.strictEqual(isProjectedCourseModeStep({ stepBody: { authority: 'legacy' } }), false);
+assert.deepStrictEqual(courseModeActivityReport(courseModeContract), {
+  totalSeconds: 485,
+  overDuration: true,
+  leakageActivityIds: ['recall-1'],
+});
+assert.deepStrictEqual(courseModeActivityReport({ activities: [{
+  ...protectedRecallActivity,
+  answerPolicy: { ...protectedRecallActivity.answerPolicy, targetTextVisible: false },
+}] }), { totalSeconds: 60, overDuration: false, leakageActivityIds: [] });
 
 const simulationIdentity = {
   checksum: 'checksum-a',
@@ -419,6 +460,17 @@ const lessonApi = apiSandbox.module.exports;
 const onSuccess = () => {};
 const onError = () => {};
 
+assert.strictEqual(typeof lessonApi.getCourseModeContract, 'function');
+lessonApi.getCourseModeContract('lesson-course-mode', onSuccess, onError);
+assert.strictEqual(apiRequests[0].url, '/v1/admin/lessons/lesson-course-mode/course-mode');
+assert.strictEqual(apiRequests[0].method, 'GET');
+assert.strictEqual(typeof lessonApi.saveCourseModeContract, 'function');
+lessonApi.saveCourseModeContract('lesson-course-mode', courseModeContract, onSuccess, onError);
+assert.strictEqual(apiRequests[1].url, '/v1/admin/lessons/lesson-course-mode/course-mode');
+assert.strictEqual(apiRequests[1].method, 'PUT');
+assert.strictEqual(JSON.stringify(apiRequests[1].data), JSON.stringify({ contract: courseModeContract }));
+apiRequests.length = 0;
+
 assert.strictEqual(typeof lessonApi.reviewSharedVisualImpact, 'function');
 lessonApi.reviewSharedVisualImpact('asset-7', onSuccess, onError);
 assert.strictEqual(apiRequests[0].url, '/v1/admin/assets/asset-7/impact');
@@ -518,6 +570,21 @@ const editorSourceForDeletion = fs.readFileSync(
   path.join(__dirname, '..', 'src/views/LessonEditor.vue'),
   'utf8',
 );
+const courseModeTimelineSource = fs.readFileSync(
+  path.join(__dirname, '..', 'src/components/lesson/CourseModeActivityTimeline.vue'),
+  'utf8',
+);
+assert.match(editorSourceForDeletion, /<CourseModeActivityTimeline/);
+assert.match(editorSourceForDeletion, /Api\.lesson\.getCourseModeContract/);
+assert.match(editorSourceForDeletion, /Api\.lesson\.saveCourseModeContract/);
+assert.match(editorSourceForDeletion, /v-if="[^"]*!isCourseModeAuthority[^"]*"[^>]*class="add-row"/);
+assert.match(editorSourceForDeletion, /v-if="isDraft && !isCourseModeAuthority"[^>]*:label="\$t\('lesson\.colActions'\)"/);
+assert.match(courseModeTimelineSource, /data-testid="course-mode-duration-meter"/);
+assert.match(courseModeTimelineSource, /data-testid="course-mode-answer-leakage-warning"/);
+assert.match(courseModeTimelineSource, /expectedDurationSec/);
+assert.match(courseModeTimelineSource, /backgroundAssetKey/);
+assert.match(courseModeTimelineSource, /objectAssetKey/);
+assert.match(courseModeTimelineSource, /fallback/);
 assert.match(editorSourceForDeletion, /:deletion-guard="assetDeletionGuard"/);
 // studioSteps, not steps: an unsaved draft binding the asset must block too.
 assert.match(

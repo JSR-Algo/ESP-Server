@@ -71,6 +71,33 @@
           @save="saveTVideoJourney"
         />
       </section>
+      <CourseModeActivityTimeline
+        v-if="courseModeIsCurriculum"
+        v-model="courseModeDraft"
+        :assets="courseModeAssets"
+        :disabled="!isDraft || courseModeLoading"
+        :saving="courseModeSaving"
+        :dirty="courseModeDirty"
+        :error="courseModeError"
+        :saved-message="courseModeSavedMessage"
+        @input="onCourseModeDraftInput"
+        @save="saveCourseModeContract"
+      />
+      <el-alert
+        v-else-if="courseModeContract"
+        title="This frozen pilot contract is available for audit only. Curriculum activity editing is not applicable."
+        type="info"
+        :closable="false"
+        show-icon
+      />
+      <el-alert
+        v-if="isCourseModeAuthority"
+        data-testid="course-mode-projected-steps-read-only"
+        title="Projected steps are generated from Course Mode activities and are read-only here."
+        type="info"
+        :closable="false"
+        show-icon
+      />
       <section v-if="canonicalDemo && canonicalDemo.adminPreview" class="canonical-demo" data-testid="canonical-source-demo">
         <div class="canonical-demo__copy">
           <span class="eyebrow">SOURCE / ADMIN DEMO</span>
@@ -93,14 +120,14 @@
       </section>
 
       <section v-if="lesson" class="lesson-studio">
-        <LessonStepNavigator v-model="selectedStepIndex" :steps="steps" :editable="isDraft && !lessonVisualStepMutationBlocked && !addingStep && !reordering && !deletingStepKey" @add="openStepDialog" />
+        <LessonStepNavigator v-model="selectedStepIndex" :steps="steps" :editable="isDraft && !isCourseModeAuthority && !lessonVisualStepMutationBlocked && !addingStep && !reordering && !deletingStepKey" @add="openStepDialog" />
         <main class="lesson-studio__canvas">
           <div class="lesson-studio__toolbar">
             <div>
               <span class="eyebrow">VISUAL LESSON BUILDER</span>
               <h3>{{ selectedStep ? promptDraft : 'Choose or add a lesson step' }}</h3>
             </div>
-            <el-button v-if="isDraft && selectedStep" type="primary" size="small" :loading="savingStep || stepConflictChecking" :disabled="savingStep || stepConflictChecking || lessonVisualStepMutationBlocked || rebindingSharedVisual || !selectedStepDirty" @click="requestSelectedStepSave">
+            <el-button v-if="isDraft && selectedStep && !isCourseModeAuthority" type="primary" size="small" :loading="savingStep || stepConflictChecking" :disabled="savingStep || stepConflictChecking || lessonVisualStepMutationBlocked || rebindingSharedVisual || !selectedStepDirty" @click="requestSelectedStepSave">
               Save step
             </el-button>
           </div>
@@ -299,7 +326,7 @@
             :disabled="proofActionsDisabled"
             @evidence="acceptSimulationEvidence"
           />
-          <LessonEngagementTrack :steps="studioSteps" @select="selectedStepIndex = $event" />
+          <LessonEngagementTrack :steps="studioSteps" :read-only="isCourseModeAuthority" @select="selectedStepIndex = $event" />
           <LessonPublishReadiness
             :steps="studioSteps"
             :assets="bundleAssets"
@@ -346,7 +373,7 @@
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column v-if="isDraft" :label="$t('lesson.colActions')" width="180">
+            <el-table-column v-if="isDraft && !isCourseModeAuthority" :label="$t('lesson.colActions')" width="180">
               <template slot-scope="scope">
                 <el-button type="text" size="small" :disabled="stepMutationBlocked || scope.$index === 0" @click="moveStep(scope.$index, -1)">↑</el-button>
                 <el-button type="text" size="small" :disabled="stepMutationBlocked || scope.$index === steps.length - 1" @click="moveStep(scope.$index, 1)">↓</el-button>
@@ -358,7 +385,7 @@
         </div>
 
         <!-- Add step (draft only) -->
-        <div v-if="isDraft" class="add-row">
+        <div v-if="!isCourseModeAuthority && isDraft" class="add-row">
           <el-button type="primary" size="small" icon="el-icon-plus" :disabled="stepMutationBlocked" @click="openStepDialog">{{ $t('lesson.addStepTitle') }}</el-button>
         </div>
         <p v-else class="muted">{{ $t('lesson.draftOnly') }}</p>
@@ -589,6 +616,7 @@
 import HeaderBar from '@/components/HeaderBar.vue';
 import LessonAssetManager from '@/components/LessonAssetManager.vue';
 import CinematicLayerPicker, { SLOT_CATEGORY as CINEMATIC_SLOT_CATEGORY } from '@/components/lesson/CinematicLayerPicker.vue';
+import CourseModeActivityTimeline from '@/components/lesson/CourseModeActivityTimeline.vue';
 import LessonEngagementTrack from '@/components/lesson/LessonEngagementTrack.vue';
 import LessonInteractionPanel from '@/components/lesson/LessonInteractionPanel.vue';
 import LessonPublishReadiness from '@/components/lesson/LessonPublishReadiness.vue';
@@ -609,6 +637,7 @@ import {
   assetDeletionImpact,
   bindClonedAssetToStep,
   collectAssetReferences,
+  isCourseModeAuthority as detectCourseModeAuthority,
   mergeAuthoringFields,
   replaceStepAssetReference,
   validSimulationEvidence as validateSimulationEvidence,
@@ -641,10 +670,30 @@ import {
   requiredFlattenedDerivativePhaseIds,
 } from '@/components/lesson/flattened-derivative-status';
 
+function canonicalCourseModeValue(value) {
+  if (typeof value === 'string') return value.normalize('NFC');
+  if (Array.isArray(value)) return value.map(canonicalCourseModeValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalCourseModeValue(value[key])]));
+  }
+  return value;
+}
+
+async function withCourseModeChecksum(contract) {
+  const next = JSON.parse(JSON.stringify(contract));
+  delete next.contractChecksum;
+  const bytes = new TextEncoder().encode(JSON.stringify(canonicalCourseModeValue(next)));
+  const digest = await window.crypto.subtle.digest('SHA-256', bytes);
+  const contractChecksum = Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return { ...next, contractChecksum };
+}
+
 export default {
   name: 'LessonEditor',
   components: {
     CinematicLayerPicker,
+    CourseModeActivityTimeline,
     HeaderBar,
     LessonAssetManager,
     LessonEngagementTrack,
@@ -781,6 +830,14 @@ export default {
       tvideoJourneyError: '',
       tvideoJourneySaveMessage: '',
       tvideoJourneyRequestId: 0,
+      courseModeContract: null,
+      courseModeDraft: null,
+      courseModeLoading: false,
+      courseModeSaving: false,
+      courseModeDirty: false,
+      courseModeError: '',
+      courseModeSavedMessage: '',
+      courseModeRequestId: 0,
     };
   },
   computed: {
@@ -863,6 +920,22 @@ export default {
         (this.lesson && this.lesson.courseModeContract)
         || (manifest && manifest.courseModeContract)
       );
+    },
+    isCourseModeAuthority() {
+      const manifest = this.previewManifest && this.previewManifest.manifest;
+      return Boolean(this.courseModeContract)
+        || detectCourseModeAuthority(this.lesson, this.steps, manifest);
+    },
+    courseModeAssets() {
+      const byIdentity = new Map();
+      [...this.bundleAssets, ...this.sharedVisualAssets].forEach((asset) => {
+        const identity = asset && (asset.versionId || asset.assetVersionId || `${asset.assetKey}:${asset.sha256}`);
+        if (identity) byIdentity.set(identity, asset);
+      });
+      return [...byIdentity.values()];
+    },
+    courseModeIsCurriculum() {
+      return Boolean(this.courseModeContract && this.courseModeContract.session);
     },
     hasAuthoritativeTVideoJourney() {
       const response = this.tvideoJourneyResponse;
@@ -953,7 +1026,8 @@ export default {
       return this.lessonVisualPair.objectAssetKey;
     },
     lessonVisualSelectionDisabled() {
-      return this.savingLessonVisuals
+      return this.isCourseModeAuthority
+        || this.savingLessonVisuals
         || this.savingStep
         || this.rebindingSharedVisual
         || this.assetMutating
@@ -965,7 +1039,8 @@ export default {
         || !this.steps.length;
     },
     lessonVisualStepMutationBlocked() {
-      return this.savingLessonVisuals
+      return this.isCourseModeAuthority
+        || this.savingLessonVisuals
         || Boolean(this.pendingLessonVisualPair)
         || this.lessonVisualReconciliationRequired;
     },
@@ -1009,7 +1084,9 @@ export default {
       return Object.keys(this.dirtyStepKeys).some((key) => this.dirtyStepKeys[key]);
     },
     hasPendingAuthoringChanges() {
-      return this.hasUnsavedDrafts
+      return this.courseModeDirty
+        || this.courseModeSaving
+        || this.hasUnsavedDrafts
         || Boolean(this.pendingLessonVisualPair)
         || this.stepDialogVisible
         || this.renameVisible
@@ -1119,6 +1196,7 @@ export default {
       this.addingStep = false;
       this.reordering = false;
       this.resetTVideoJourneyState();
+      this.resetCourseModeState();
       this.resetLessonAssetGenerationStatus();
       this.resetFlattenedDerivativeStatus();
       this.fetchAll();
@@ -1190,6 +1268,7 @@ export default {
     this.lessonVisualSaveRequestId += 1;
     this.lessonAssetGenerationRequestId += 1;
     this.lessonAssetGenerationRetryRequestId += 1;
+    this.courseModeRequestId += 1;
     this.lessonAssetGenerationRetrying = false;
     this.clearLessonAssetGenerationPoll();
     if (this.flattenedDerivativePollTimer) clearTimeout(this.flattenedDerivativePollTimer);
@@ -1201,6 +1280,75 @@ export default {
     this.lessonUpdateSafety.release();
   },
   methods: {
+    onCourseModeDraftInput() {
+      this.courseModeDirty = true;
+      this.courseModeSavedMessage = '';
+      this.invalidatePreview();
+    },
+    resetCourseModeState() {
+      this.courseModeRequestId += 1;
+      this.courseModeContract = null;
+      this.courseModeDraft = null;
+      this.courseModeLoading = false;
+      this.courseModeSaving = false;
+      this.courseModeDirty = false;
+      this.courseModeError = '';
+      this.courseModeSavedMessage = '';
+    },
+    loadCourseModeContract() {
+      if (this.editorDestroying) return false;
+      const lessonId = this.lessonId;
+      const requestId = ++this.courseModeRequestId;
+      this.courseModeLoading = true;
+      this.courseModeError = '';
+      Api.lesson.getCourseModeContract(lessonId, (response) => {
+        if (this.editorDestroying || requestId !== this.courseModeRequestId || lessonId !== this.lessonId) return;
+        const contract = response && response.contract ? response.contract : response;
+        this.courseModeContract = contract;
+        this.courseModeDraft = JSON.parse(JSON.stringify(contract));
+        this.courseModeDirty = false;
+        this.courseModeLoading = false;
+      }, (message, error) => {
+        if (this.editorDestroying || requestId !== this.courseModeRequestId || lessonId !== this.lessonId) return;
+        this.courseModeLoading = false;
+        const status = Number(error && (error.status || (error.response && error.response.status)));
+        if (status !== 404 && this.isCourseModeAuthority) this.courseModeError = message || 'Course Mode contract could not be loaded.';
+      });
+      return true;
+    },
+    async saveCourseModeContract() {
+      if (!this.isDraft || !this.courseModeDraft || !this.courseModeDirty || this.courseModeSaving) return false;
+      const lessonId = this.lessonId;
+      const requestId = ++this.courseModeRequestId;
+      this.courseModeSaving = true;
+      this.courseModeError = '';
+      this.courseModeSavedMessage = '';
+      try {
+        const contract = await withCourseModeChecksum(this.courseModeDraft);
+        if (this.editorDestroying || requestId !== this.courseModeRequestId || lessonId !== this.lessonId) return false;
+        Api.lesson.saveCourseModeContract(lessonId, contract, (response) => {
+          if (this.editorDestroying || requestId !== this.courseModeRequestId || lessonId !== this.lessonId) return;
+          const saved = response && response.contract ? response.contract : contract;
+          this.courseModeContract = saved;
+          this.courseModeDraft = JSON.parse(JSON.stringify(saved));
+          this.courseModeDirty = false;
+          this.courseModeSaving = false;
+          this.courseModeSavedMessage = `Saved · ${String(response && response.checksum ? response.checksum : saved.contractChecksum).slice(0, 12)}`;
+          this.invalidatePreview();
+          this.fetchSteps();
+        }, (message) => {
+          if (this.editorDestroying || requestId !== this.courseModeRequestId || lessonId !== this.lessonId) return;
+          this.courseModeSaving = false;
+          this.courseModeError = message || 'Course Mode contract could not be saved.';
+        });
+      } catch (error) {
+        if (requestId === this.courseModeRequestId) {
+          this.courseModeSaving = false;
+          this.courseModeError = error instanceof Error ? error.message : 'Course Mode checksum failed.';
+        }
+      }
+      return true;
+    },
     async loadCanonicalDemo() {
       const sequence = ++this.canonicalDemoLoadSequence;
       try {
@@ -1638,6 +1786,8 @@ export default {
         || this.sharedImpactReconciling
         || this.savingStep
         || this.savingLessonVisuals
+        || this.courseModeDirty
+        || this.courseModeSaving
         || (this.isTVideoJourney && (this.tvideoJourneyDirty || this.tvideoJourneySaving))
         || Boolean(this.pendingLessonVisualPair)
         || this.validating
@@ -1789,6 +1939,7 @@ export default {
         (l) => {
           if (this.editorDestroying || requestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;
           this.lesson = l;
+          this.loadCourseModeContract();
           if (l.manifestVersion !== 'teebot-lesson-renderer.v4') this.resetTVideoJourneyState();
           this.loading = false;
           this.loadLessonAssetGenerationStatus();

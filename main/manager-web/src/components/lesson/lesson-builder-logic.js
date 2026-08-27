@@ -95,6 +95,48 @@ function buildEngagementTrack(steps) {
   });
 }
 
+const PROTECTED_COURSE_MODE_STAGES = new Set(['RECALL', 'TRANSFER', 'DELAYED_RECALL']);
+
+function isProjectedCourseModeStep(step) {
+  const value = step && typeof step === 'object' ? step : {};
+  const body = value.stepBody || value.step_body || {};
+  return value.authority === 'courseMode' || body.authority === 'courseMode';
+}
+
+function isCourseModeAuthority(lesson, steps = [], manifest = null) {
+  const value = lesson && typeof lesson === 'object' ? lesson : {};
+  const contract = value.courseModeContract || value.course_mode_contract;
+  const manifestSteps = manifest && Array.isArray(manifest.steps) ? manifest.steps : [];
+  return Boolean(
+    contract && contract.contractVersion === 'courseCompanion.v2.contract.v1'
+  ) || (Array.isArray(steps) && steps.some(isProjectedCourseModeStep))
+    || manifestSteps.some(isProjectedCourseModeStep);
+}
+
+function answerPolicyLeaks(activity) {
+  if (!activity || !PROTECTED_COURSE_MODE_STAGES.has(activity.stage)) return false;
+  const policy = activity.answerPolicy || {};
+  return policy.targetTextVisible === true
+    || policy.targetAudioBeforeAssessment === true
+    || policy.spokenTargetInPrompt === true
+    || policy.multipleChoiceContainsTarget === true
+    || !(Number(policy.minElapsedSinceFullModelMs) >= 20000)
+    || !(Number(policy.minInterveningActivityCount) >= 1);
+}
+
+function courseModeActivityReport(contract) {
+  const activities = contract && Array.isArray(contract.activities) ? contract.activities : [];
+  const totalSeconds = activities.reduce(
+    (sum, activity) => sum + Math.max(0, Number(activity && activity.expectedDurationSec) || 0),
+    0,
+  );
+  return {
+    totalSeconds,
+    overDuration: totalSeconds > 480,
+    leakageActivityIds: activities.filter(answerPolicyLeaks).map((activity) => activity.activityId),
+  };
+}
+
 function assetIdentity(asset) {
   return asset.sha256 || asset.versionId || asset.path || asset.src || asset.assetKey;
 }
@@ -466,6 +508,7 @@ module.exports = {
   NAMED_MOTIONS,
   TEACHING_WORD_MAX_VISIBLE_CHARS,
   buildEngagementTrack,
+  courseModeActivityReport,
   teachingWordLengthIssue,
   visibleGraphemeCount,
   calculateReadiness,
@@ -473,6 +516,8 @@ module.exports = {
   createAuthoringFields,
   createInitialAuthoringFields,
   mergeAuthoringFields,
+  isCourseModeAuthority,
+  isProjectedCourseModeStep,
   nextClonedAssetKey,
   replaceStepAssetReference,
   sameSimulationPreviewIdentity,

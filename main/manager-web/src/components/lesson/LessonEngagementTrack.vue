@@ -1,6 +1,6 @@
 <template>
   <section class="engagement">
-    <div class="engagement__header"><strong>Engagement rhythm</strong><span>{{ totalSeconds }} sec authored</span></div>
+    <div class="engagement__header"><strong>Engagement rhythm</strong><span>{{ totalSeconds }} sec · {{ readOnly ? 'projected audit' : 'authored' }}</span></div>
     <div class="engagement__rail">
       <button v-for="(item, index) in track" :key="item.stepKey" type="button" :class="['beat', 'beat--' + item.kind]" @click="$emit('select', index)">
         <span class="beat__icon">{{ icons[item.kind] }}</span><strong>{{ item.kind }}</strong><small>{{ item.durationSec }}s<span v-if="item.hasMotion"> · motion</span></small>
@@ -12,7 +12,10 @@
 import { buildEngagementTrack } from './lesson-builder-logic';
 export default {
   name: 'LessonEngagementTrack',
-  props: { steps: { type: Array, default: () => [] } },
+  props: {
+    steps: { type: Array, default: () => [] },
+    readOnly: { type: Boolean, default: false },
+  },
   data: () => ({ icons: { passive: '◉', voice: '●', motion: '↗', minigame: '★', recall: '↺', ending: '✓' } }),
   computed: {
     track() { return buildEngagementTrack(this.steps); },
