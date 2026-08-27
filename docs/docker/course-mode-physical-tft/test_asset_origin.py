@@ -1,6 +1,5 @@
 import hashlib
 import json
-import mimetypes
 import os
 from pathlib import Path
 from urllib.request import urlopen
@@ -12,30 +11,44 @@ BACKEND_ROOT = Path(os.environ.get(
     "TBOT_BACKEND_WORKTREE",
     Path(__file__).resolve().parents[5] / "tbot-backend",
 ))
-FIXTURE_ROOT = BACKEND_ROOT / "src/lessons/fixtures/course-mode/admin-w1"
+ESP_ROOT = Path(os.environ.get(
+    "TBOT_ESP_REPOSITORY_ROOT",
+    Path(__file__).resolve().parents[3],
+))
+FIXTURE_ROOT = BACKEND_ROOT / "src/lessons/fixtures/course-mode/pilot/v2"
+IDENTITY_FIXTURE = FIXTURE_ROOT / "course-mode-v5-identity-candidate.json"
 ORIGIN = os.environ.get("COURSE_MODE_ASSET_ORIGIN_BASE", "http://127.0.0.1:8102/")
 
 
 def published_assets():
-    return json.loads((FIXTURE_ROOT / "published-pack.json").read_text())["assets"]
+    return json.loads(IDENTITY_FIXTURE.read_text())["sharedAssets"]
 
 
-@pytest.mark.parametrize("asset_key", ["object.robot", "scene.playground-park"])
-def test_extensionless_static_asset_returns_published_bytes_and_mime(asset_key):
-    asset = next(item for item in published_assets() if item["key"] == asset_key)
+@pytest.mark.parametrize(
+    "asset_key",
+    ["course-mode.v5.scene.farm", "course-mode.v5.object.barn"],
+)
+def test_canonical_static_asset_returns_published_bytes_and_mime(asset_key):
+    asset = next(item for item in published_assets() if item["assetKey"] == asset_key)
     assert_asset_response(asset)
 
 
 def test_cinematic_asset_returns_published_bytes_and_mime():
-    asset = next(item for item in published_assets() if item["key"] == "object.cinematic.greetings@v1")
+    asset = next(
+        item for item in published_assets()
+        if item["assetKey"] == "course-mode.v5.robot.teach"
+    )
     assert_asset_response(asset)
 
 
 def assert_asset_response(asset):
-    extension = mimetypes.guess_extension(asset["mediaType"], strict=False)
-    assert extension is not None
-    fixture = FIXTURE_ROOT / "assets" / f'{asset["sha256"]}{extension}'
-    with urlopen(f'{ORIGIN}lesson-assets/{asset["sha256"]}', timeout=5) as response:
+    storage_path = asset["storagePath"]
+    fixture = (
+        FIXTURE_ROOT.parents[1] / storage_path
+        if storage_path.startswith("pilot/v2/")
+        else ESP_ROOT / storage_path
+    )
+    with urlopen(f'{ORIGIN}{storage_path}', timeout=5) as response:
         body = response.read()
         content_type = response.headers.get_content_type()
 

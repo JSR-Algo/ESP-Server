@@ -223,16 +223,25 @@ def validate_layered_cinematic_runtime_asset(asset: Any) -> dict[str, Any]:
     }
 
 
-def project_layered_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
+def project_layered_cinematic_phase(
+    phase: Any,
+    pack: Any,
+    *,
+    course_mode_activity_ids: set[str] | None = None,
+    fallback_activity_ids: set[str] | None = None,
+) -> dict[str, Any]:
     """Validate and project one renderer-v5 phase using verified local media only."""
     if not isinstance(pack, dict) or pack.get("ready") is not True:
         _fail("CINEMATIC_PACK_NOT_READY", "verified layered cinematic SD pack is not ready")
     local_root, assets = pack.get("localRoot"), pack.get("assets")
     if not isinstance(local_root, str) or not isinstance(assets, list):
         _fail("CINEMATIC_PACK_NOT_READY", "layered cinematic SD pack metadata is incomplete")
-    if not isinstance(phase, dict) or set(phase) != {
+    expected_fields = {
         "templateId", "templateVersion", "phaseId", "timing", "playbackMode", "layers"
-    }:
+    }
+    if course_mode_activity_ids is not None:
+        expected_fields.add("activityIds")
+    if not isinstance(phase, dict) or set(phase) != expected_fields:
         _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic phase fields are invalid")
     phase_id = phase.get("phaseId")
     if (
@@ -246,9 +255,30 @@ def project_layered_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
     duration_ms = timing.get("durationMs")
     if not _positive_int(duration_ms):
         _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic duration is invalid")
+    activity_ids: list[str] | None = None
+    if course_mode_activity_ids is not None:
+        raw_activity_ids = phase.get("activityIds")
+        if (
+            not isinstance(raw_activity_ids, list)
+            or not raw_activity_ids
+            or any(not isinstance(item, str) or not item for item in raw_activity_ids)
+            or len(set(raw_activity_ids)) != len(raw_activity_ids)
+            or not set(raw_activity_ids).issubset(course_mode_activity_ids)
+        ):
+            _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic activity mapping is invalid")
+        activity_ids = list(raw_activity_ids)
     layers = phase.get("layers")
-    if not isinstance(layers, list) or len(layers) != 3:
-        _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic phase requires exactly three layers")
+    allow_missing_object = (
+        activity_ids is not None
+        and fallback_activity_ids is not None
+        and set(activity_ids).issubset(fallback_activity_ids)
+    )
+    expected_slots = (
+        (LAYER_SLOTS[0], LAYER_SLOTS[2]) if allow_missing_object and len(layers or []) == 2
+        else LAYER_SLOTS
+    )
+    if not isinstance(layers, list) or len(layers) != len(expected_slots):
+        _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic phase has invalid layer cardinality")
     assets_by_key = {
         item.get("key"): item for item in assets
         if isinstance(item, dict) and isinstance(item.get("key"), str)
@@ -256,7 +286,7 @@ def project_layered_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
     projected: list[dict[str, Any]] = []
     robot_fps: int | None = None
     robot_frames: int | None = None
-    for index, (layer_name, slot) in enumerate(LAYER_SLOTS):
+    for index, (layer_name, slot) in enumerate(expected_slots):
         source = layers[index]
         if not isinstance(source, dict) or set(source) != {
             "layer", "slot", "assetVersionId", "assetKey", "version", "sha256", "bytes", "metadata"
@@ -270,8 +300,9 @@ def project_layered_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
         if not isinstance(sha256, str) or _SHA256_RE.fullmatch(sha256.lower()) is None or not _positive_int(byte_count):
             _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic asset checksum is invalid")
         metadata = (
-            _image_metadata(source.get("metadata"), background=index == 0)
-            if index < 2 else _video_metadata(source.get("metadata"), duration_ms=duration_ms)
+            _video_metadata(source.get("metadata"), duration_ms=duration_ms)
+            if layer_name == "robotOverlay"
+            else _image_metadata(source.get("metadata"), background=layer_name == "background")
         )
         asset = assets_by_key.get(asset_version_id)
         if not isinstance(asset, dict):
@@ -299,7 +330,7 @@ def project_layered_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
             "height": metadata["height"],
             "rect": metadata["rect"],
         }
-        if index < 2:
+        if layer_name != "robotOverlay":
             item["fit"] = metadata["fit"]
         else:
             item.update(codec="mjpeg", hasAudio=False, chromaKey=metadata["chromaKey"])
@@ -314,4 +345,5 @@ def project_layered_cinematic_phase(phase: Any, pack: Any) -> dict[str, Any]:
         "frameCount": robot_frames,
         "playbackMode": phase["playbackMode"],
         "layers": projected,
+        **({"activityIds": activity_ids} if activity_ids is not None else {}),
     }

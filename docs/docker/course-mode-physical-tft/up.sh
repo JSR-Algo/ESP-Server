@@ -49,32 +49,17 @@ openssl pkey -pubin -in "${BACKEND_ROOT}/keys/dev-public.pem" -outform DER \
   -out "${KEY_CHECK_DIR}/public.der" 2>/dev/null && \
   cmp -s "${KEY_CHECK_DIR}/private-public.der" "${KEY_CHECK_DIR}/public.der" || \
   fail "backend local JWT public/private key pair is invalid or mismatched"
-[[ -f "${BACKEND_ROOT}/src/lessons/course-mode/course-mode-local-materializer.ts" ]] || \
-  fail "backend Course Mode local materializer source is missing"
-ADMIN_W1_ROOT="${BACKEND_ROOT}/src/lessons/fixtures/course-mode/admin-w1"
-[[ -f "${ADMIN_W1_ROOT}/lesson.json" ]] || fail "Admin W1 fixture lesson.json is missing"
-[[ -f "${ADMIN_W1_ROOT}/published-pack.json" ]] || fail "Admin W1 fixture published-pack.json is missing"
-[[ -d "${ADMIN_W1_ROOT}/assets" ]] || fail "Admin W1 fixture asset directory is missing"
-node - "${ADMIN_W1_ROOT}" <<'NODE' || fail "Admin W1 fixture asset is missing or malformed"
-const fs = require('node:fs');
-const path = require('node:path');
-const root = process.argv[2];
-JSON.parse(fs.readFileSync(path.join(root, 'lesson.json'), 'utf8'));
-const pack = JSON.parse(fs.readFileSync(path.join(root, 'published-pack.json'), 'utf8'));
-if (!Array.isArray(pack.assets) || pack.assets.length === 0) process.exit(1);
-const extensions = { 'image/png': '.png', 'image/jpeg': '.jpg', 'video/mp4': '.mp4' };
-for (const asset of pack.assets) {
-  const extension = extensions[asset.mediaType];
-  if (!extension || !asset.sha256 || !fs.statSync(path.join(root, 'assets', `${asset.sha256}${extension}`)).isFile()) {
-    process.exit(1);
-  }
-}
-NODE
+[[ -f "${BACKEND_ROOT}/src/lessons/course-mode/course-mode-v5-identity-materializer.ts" ]] || \
+  fail "backend canonical Course Mode v5 materializer source is missing"
+TBOT_ESP_REPOSITORY_ROOT="$(cd -- "${HERE}/../../.." && pwd -P)"
+export TBOT_ESP_REPOSITORY_ROOT
 
 BACKEND_IMAGE="local/tbot-backend:course-mode-physical-tft-${ACTUAL_SHA}"
+MATERIALIZER_IMAGE="local/tbot-course-mode-v5-materializer:${ACTUAL_SHA}"
 COMPOSE_PROJECT="tbot-course-mode-physical-tft"
 export TBOT_BACKEND_WORKTREE="${BACKEND_ROOT}"
 export TBOT_LESSON_STUDIO_BACKEND_IMAGE="${BACKEND_IMAGE}"
+export TBOT_COURSE_MODE_V5_MATERIALIZER_IMAGE="${MATERIALIZER_IMAGE}"
 export JWT_PUBLIC_KEY="$(cat "${BACKEND_ROOT}/keys/dev-public.pem")"
 export JWT_PRIVATE_KEY="$(cat "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem")"
 export LESSON_ASSET_ORIGIN_BASE="${COURSE_MODE_ASSET_ORIGIN_BASE}"
@@ -93,15 +78,22 @@ echo "[course-mode-physical-tft] compiling backend ${ACTUAL_SHA} from ${BACKEND_
 
 echo "[course-mode-physical-tft] building ${BACKEND_IMAGE} from the reviewed backend worktree"
 docker build --pull=false \
-  --label "com.tbot.course-mode.materializer-path=/app/dist/lessons/course-mode/course-mode-local-materializer.js" \
+  --label "com.tbot.course-mode.materializer-path=/app/dist/lessons/course-mode/course-mode-v5-identity-materializer.js" \
   --label "org.opencontainers.image.revision=${ACTUAL_SHA}" \
   --label "com.tbot.course-mode.build-source=reviewed-clean-git-worktree" \
   -f "${BACKEND_ROOT}/Dockerfile" \
   -t "${BACKEND_IMAGE}" "${BACKEND_ROOT}"
 
+echo "[course-mode-physical-tft] building canonical v5 materializer ${MATERIALIZER_IMAGE}"
+docker build --pull=false \
+  --label "com.tbot.course-mode.materializer-path=/app/dist/lessons/course-mode/course-mode-v5-identity-materializer.js" \
+  --label "org.opencontainers.image.revision=${ACTUAL_SHA}" \
+  -f "${BACKEND_ROOT}/Dockerfile.course-mode-v5-identity" \
+  -t "${MATERIALIZER_IMAGE}" "${BACKEND_ROOT}"
+
 echo "[course-mode-physical-tft] verifying compiled materializer in ${BACKEND_IMAGE}"
-docker run --rm --entrypoint /nodejs/bin/node "${BACKEND_IMAGE}" \
-  -e "require('node:fs').accessSync('/app/dist/lessons/course-mode/course-mode-local-materializer.js')"
+docker run --rm --entrypoint node "${MATERIALIZER_IMAGE}" \
+  -e "require('node:fs').accessSync('/app/dist/lessons/course-mode/course-mode-v5-identity-materializer.js')"
 
 COMPOSE=(docker compose --project-name "${COMPOSE_PROJECT}" -f "${BASE_COMPOSE}" -f "${OVERLAY_COMPOSE}")
 echo "[course-mode-physical-tft] validating Compose with ${BACKEND_IMAGE}"
@@ -134,11 +126,10 @@ echo "[course-mode-physical-tft] recreating the ESP bridge with the shared local
 "${ESP_COMPOSE[@]}" up -d --force-recreate tbot-esp32-server
 "${COMPOSE[@]}" up -d --wait postgres redis mysql backend
 IDENTITY_STATE="$("${COMPOSE[@]}" exec -T postgres psql -U tbot -d tbot -Atqc \
-  "SELECT CASE WHEN COUNT(*)=0 THEN 'missing' WHEN BOOL_AND(d.current_household_id IS NOT NULL AND d.assigned_child_profile_id IS NOT NULL AND h.owner_id IS NOT NULL) THEN 'ready' ELSE 'partial' END FROM devices d LEFT JOIN households h ON h.id=d.current_household_id WHERE lower(d.mac_address)=lower('14:c1:9f:d1:ac:20')")"
+  "SELECT CASE WHEN COUNT(*)=0 THEN 'missing' WHEN NOT BOOL_AND(d.current_household_id IS NOT NULL AND d.assigned_child_profile_id IS NOT NULL AND h.owner_id IS NOT NULL) THEN 'partial' WHEN NOT BOOL_OR(EXISTS (SELECT 1 FROM lesson_assignments la JOIN lessons l ON l.id=la.lesson_id AND l.lesson_version=la.lesson_version WHERE la.device_id=d.id AND la.state='ACTIVE' AND l.status='published' AND l.manifest_version='teebot-lesson-renderer.v5')) THEN 'assignment-missing' ELSE 'ready' END FROM devices d LEFT JOIN households h ON h.id=d.current_household_id WHERE lower(d.mac_address)=lower('14:c1:9f:d1:ac:20')")"
 if [[ "${IDENTITY_STATE}" == "missing" ]]; then
-  echo "[course-mode-physical-tft] bootstrapping the task-owned AC:20 identity"
-  "${COMPOSE[@]}" run --rm -e COURSE_MODE_LOCAL_FIXTURE=cat-ball course-mode-materialize
+  fail "task-owned AC:20 identity is missing; refusing automatic bootstrap"
 elif [[ "${IDENTITY_STATE}" != "ready" ]]; then
-  fail "task-owned AC:20 identity is partial; refusing automatic repair"
+  fail "task-owned AC:20 identity or active renderer-v5 assignment is incomplete; refusing automatic repair"
 fi
 "${COMPOSE[@]}" up -d

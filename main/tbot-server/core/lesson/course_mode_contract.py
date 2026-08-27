@@ -24,12 +24,14 @@ _ACTIVITY_FIELDS = {
     "embodiedIntent", "visualFocusRegion", "answerPolicy", "listeningTransition",
     "reducedMotionFallback",
 }
+_NORMALIZED_ACTIVITY_FIELDS = _ACTIVITY_FIELDS | {"targetIds"}
 _ANSWER_FIELDS = {
     "targetTextVisible", "targetAudioBeforeAssessment", "spokenTargetInPrompt",
     "multipleChoiceContainsTarget", "minElapsedSinceFullModelMs", "minInterveningActivityCount",
 }
 _ASSESSMENT_STAGES = {"RECALL", "TRANSFER", "DELAYED_RECALL"}
 FROZEN_CONTRACT_CHECKSUM = "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264"
+CANONICAL_V5_CONTRACT_CHECKSUM = "332fb68e340abb94c0178dd83b06ed0939d6e2d63c17d48bcb09dab8cc6bb3be"
 
 
 class CourseModeContractError(ValueError):
@@ -65,6 +67,14 @@ def _canonical_checksum(value: Mapping[str, Any]) -> str:
         return item
 
     payload = {key: child for key, child in value.items() if key != "contractChecksum"}
+    activities = payload.get("activities")
+    if isinstance(activities, list):
+        payload["activities"] = [
+            {key: child for key, child in activity.items() if key != "targetIds"}
+            if isinstance(activity, Mapping)
+            else activity
+            for activity in activities
+        ]
     encoded = json.dumps(normalize(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 
@@ -147,13 +157,16 @@ class CourseModeContract:
         seen: set[str] = set()
         target_ids = {target.target_id for target in targets}
         for item in raw_activities:
-            activity = _exact(item, _ACTIVITY_FIELDS, "activity", "INVALID_ACTIVITY_FIELDS")
+            fields = _NORMALIZED_ACTIVITY_FIELDS if isinstance(item, Mapping) and "targetIds" in item else _ACTIVITY_FIELDS
+            activity = _exact(item, fields, "activity", "INVALID_ACTIVITY_FIELDS")
             activity_id = _safe_id(activity["activityId"], "activityId")
             if activity_id in seen:
                 _fail("DUPLICATE_ACTIVITY", "activity IDs must be unique")
             seen.add(activity_id)
             if activity["targetId"] not in target_ids:
                 _fail("INVALID_ACTIVITY_TARGET", "activity target is not authored")
+            if "targetIds" in activity and activity["targetIds"] != [activity["targetId"]]:
+                _fail("INVALID_ACTIVITY_TARGET", "normalized activity targets must preserve pilot identity")
             if activity["embodiedIntent"] not in intents:
                 _fail("UNSUPPORTED_INTENT", "embodied intent is not frozen")
             answer = _exact(activity["answerPolicy"], _ANSWER_FIELDS, "answerPolicy", "INVALID_ACTIVITY_FIELDS")
@@ -188,8 +201,11 @@ class CourseModeContract:
                 _fail("ACTIVITY_IDENTITY_MISMATCH", "target activity IDs must match authored order")
         if verify_checksum and root["contractChecksum"] != _canonical_checksum(root):
             _fail("CHECKSUM_MISMATCH", "canonical checksum does not match")
-        if verify_checksum and root["contractChecksum"] != FROZEN_CONTRACT_CHECKSUM:
-            _fail("UNSUPPORTED_CONTRACT_CHECKSUM", "contract checksum is not the frozen Task 00 identity")
+        if verify_checksum and root["contractChecksum"] not in {
+            FROZEN_CONTRACT_CHECKSUM,
+            CANONICAL_V5_CONTRACT_CHECKSUM,
+        }:
+            _fail("UNSUPPORTED_CONTRACT_CHECKSUM", "contract checksum is not an approved Course Mode identity")
         return cls(
             contract_version=cast(str, root["contractVersion"]),
             contract_checksum=cast(str, root["contractChecksum"]), fixture_id=cast(str, root["fixtureId"]),

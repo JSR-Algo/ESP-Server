@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 from typing import Any
 from urllib.parse import SplitResult
 
 from core.lesson.course_mode_contract import CourseModeContract, CourseModeContractError
 
 CONTRACT_CHECKSUM = "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264"
+V5_CONTRACT_CHECKSUM = "332fb68e340abb94c0178dd83b06ed0939d6e2d63c17d48bcb09dab8cc6bb3be"
 LAYOUT_CONTRACT = "renderer-v4.course-mode-layout.v1"
 LESSON_ID = "course-mode-pilot-cat-ball"
 LESSON_VERSION = 1
 MANIFEST_CHECKSUM = "205784b3f97cb081ce9c226d8fd83fdd400401e706c000e1b09ba4e7ebdf36ce"
-V5_MANIFEST_CHECKSUM = "e8ee7ff1fb67e8dbd0f8c6908b09c4a4f8e0d1cf3ce41bb38142da0fc03519dc"
+V5_MANIFEST_CHECKSUM = "22e94ced4b2dae1ced13f3e34de1f72e8a3ce177e1ba3a7c599a4c3d002aea0d"
 V5_LESSON_ID = "course-mode-v5-farm-candidate"
 V5_LAYOUT_CONTRACT = "layeredCinematic"
 
@@ -28,7 +30,7 @@ COURSE_MODE_COMPATIBILITY = {
 }
 COURSE_MODE_V5_COMPATIBILITY = {
     "schemaVersion": 1,
-    "contractChecksum": CONTRACT_CHECKSUM,
+    "contractChecksum": V5_CONTRACT_CHECKSUM,
     "layoutContract": V5_LAYOUT_CONTRACT,
     "lessonId": V5_LESSON_ID,
     "lessonVersion": 2,
@@ -58,28 +60,28 @@ _V5_CUES = (
     ("cat-delayed", "cat-delayed-recall-01", "listen"),
 )
 _V5_STEPS = (
-    {"entrance": "flyIn", "expression": "teaching", "id": "cat-discover", "phase": "talk",
+    {"activityId": "cat-discover-center-01", "entrance": "flyIn", "expression": "teaching", "id": "cat-discover", "phase": "talk",
      "pose": "teach", "prompt": "Look at the cat. Listen: cat.", "robotState": "modeling",
      "subject": "cat", "type": "model"},
-    {"entrance": "none", "expression": "listening", "id": "cat-meaning", "phase": "listen",
+    {"activityId": "cat-meaning-left-right-01", "entrance": "none", "expression": "listening", "id": "cat-meaning", "phase": "listen",
      "pose": "listening", "prompt": "Find the cat.", "robotState": "listening",
      "subject": "cat", "type": "listen"},
-    {"entrance": "none", "expression": "listening", "id": "cat-joint-speech", "phase": "listen",
+    {"activityId": "cat-discover-center-01", "entrance": "none", "expression": "listening", "id": "cat-joint-speech", "phase": "listen",
      "pose": "listening", "prompt": "Say cat with TeeBot.", "robotState": "listening",
      "subject": "cat", "type": "repeat"},
-    {"entrance": "none", "expression": "thinking", "id": "cat-recall", "phase": "idle",
+    {"activityId": "cat-recall-visual-02", "entrance": "none", "expression": "thinking", "id": "cat-recall", "phase": "idle",
      "pose": "thinking", "prompt": "What is this called?", "robotState": "thinking",
      "subject": "cat", "type": "fillBlank"},
-    {"entrance": "none", "expression": "thinking", "id": "cat-transfer", "phase": "idle",
+    {"activityId": "cat-transfer-scene-01", "entrance": "none", "expression": "thinking", "id": "cat-transfer", "phase": "idle",
      "pose": "thinking", "prompt": "What do you see in this farm scene?", "robotState": "thinking",
      "subject": "cat", "type": "fillBlank"},
-    {"entrance": "none", "expression": "teaching", "id": "ball-discover", "phase": "talk",
+    {"activityId": "ball-discover-center-01", "entrance": "none", "expression": "teaching", "id": "ball-discover", "phase": "talk",
      "pose": "teach", "prompt": "Look at the ball. Listen: ball.", "robotState": "modeling",
      "subject": "ball", "type": "model"},
-    {"entrance": "none", "expression": "listening", "id": "ball-meaning", "phase": "listen",
+    {"activityId": "ball-discover-center-01", "entrance": "none", "expression": "listening", "id": "ball-meaning", "phase": "listen",
      "pose": "listening", "prompt": "Find the ball.", "robotState": "listening",
      "subject": "ball", "type": "listen"},
-    {"entrance": "none", "expression": "thinking", "id": "cat-delayed", "phase": "idle",
+    {"activityId": "cat-delayed-recall-01", "entrance": "none", "expression": "thinking", "id": "cat-delayed", "phase": "idle",
      "pose": "thinking", "prompt": "Do you remember this word?", "robotState": "thinking",
      "subject": "cat", "type": "fillBlank"},
 )
@@ -278,8 +280,16 @@ def _v5_layer(layer: dict[str, Any]) -> dict[str, Any]:
 
 def _v5_phases() -> list[dict[str, Any]]:
     layers = [_v5_layer(layer) for layer in _V5_LAYERS]
+    activity_ids = {
+        "teach": ["cat-discover-center-01", "ball-discover-center-01"],
+        "listen": [
+            "cat-meaning-left-right-01", "cat-recall-visual-02",
+            "cat-transfer-scene-01", "cat-delayed-recall-01",
+        ],
+    }
     return [
         {
+            "activityIds": activity_ids[phase_id],
             "layers": copy.deepcopy(layers),
             "phaseId": phase_id,
             "playbackMode": "once",
@@ -362,7 +372,7 @@ def _v5_projection_matches(manifest: Any) -> bool:
         or manifest.get("profile") != "espTft"
         or manifest.get("features")
         != {"lessonRendererV5": {"assetSource": "publishedVersionedVisualRefs", "layeredCinematic": True}}
-        or contract.get("contractChecksum") != CONTRACT_CHECKSUM
+        or contract.get("contractChecksum") != V5_CONTRACT_CHECKSUM
         or contract.get("fixtureId") != LESSON_ID
         or manifest.get("assets") != _v5_manifest_assets()
         or manifest.get("cinematicPhases") != _v5_phases()
@@ -392,7 +402,7 @@ def _v5_envelope_matches(value: Any) -> bool:
         value.get("evidenceState") != "reviewed-derivative-candidate"
         or value.get("renderer") != "teebot-lesson-renderer.v5"
         or value.get("template") != V5_LAYOUT_CONTRACT
-        or value.get("contractChecksum") != CONTRACT_CHECKSUM
+        or value.get("contractChecksum") != V5_CONTRACT_CHECKSUM
         or value.get("manifestIdentityChecksum") != V5_MANIFEST_CHECKSUM
         or bundle.get("checksum") != V5_MANIFEST_CHECKSUM
         or lesson.get("key") != V5_LESSON_ID
@@ -447,9 +457,38 @@ def course_mode_compatibility_for_manifest(
         if _v5_envelope_matches(manifest) or _v5_projection_matches(manifest):
             return copy.deepcopy(COURSE_MODE_V5_COMPATIBILITY)
         return None
+    contract = manifest.get("courseModeContract")
+    renderer = contract.get("renderer") if isinstance(contract, dict) else None
+    contract_checksum = contract.get("contractChecksum") if isinstance(contract, dict) else None
+    lesson_id = manifest.get("lessonId")
+    lesson_version = manifest.get("lessonVersion")
+    if (
+        manifest.get("manifestVersion") == "teebot-lesson-renderer.v5"
+        and manifest.get("protocolVersion") == "teebot-lesson-renderer.v5"
+        and isinstance(renderer, dict)
+        and renderer == {
+            "rendererId": "teebot-lesson-renderer.v5",
+            "visualLayoutContract": "renderer-v5.layered-cinematic-layout.v1",
+        }
+        and isinstance(contract_checksum, str)
+        and re.fullmatch(r"[0-9a-f]{64}", contract_checksum) is not None
+        and isinstance(manifest_checksum, str)
+        and re.fullmatch(r"[0-9a-f]{64}", manifest_checksum) is not None
+        and isinstance(lesson_id, str)
+        and lesson_id
+        and isinstance(lesson_version, int)
+        and lesson_version > 0
+    ):
+        return {
+            "schemaVersion": 1,
+            "contractChecksum": contract_checksum,
+            "layoutContract": V5_LAYOUT_CONTRACT,
+            "lessonId": lesson_id,
+            "lessonVersion": lesson_version,
+            "manifestChecksum": manifest_checksum,
+        }
     if manifest_checksum != MANIFEST_CHECKSUM:
         return None
-    contract = manifest.get("courseModeContract")
     if not isinstance(contract, dict):
         return None
     try:

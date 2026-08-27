@@ -32,15 +32,10 @@ def _test_key_pair():
     )
 
 
-def _write_admin_w1_fixture(backend):
-    fixture = backend / "src/lessons/fixtures/course-mode/admin-w1"
-    assets = fixture / "assets"
-    assets.mkdir(parents=True)
-    (fixture / "lesson.json").write_text('{"lessonKey":"w01-greetings-politeness"}\n')
-    (fixture / "published-pack.json").write_text(
-        '{"assets":[{"sha256":"abc123","mediaType":"image/png"}]}\n'
-    )
-    (assets / "abc123.png").write_bytes(b"fixture")
+def _write_v5_fixture(backend):
+    fixture = backend / "src/lessons/fixtures/course-mode/pilot/v2/assets/objects"
+    fixture.mkdir(parents=True)
+    (fixture / "barn-95x95.png").write_bytes(b"fixture")
 
 
 def test_firmware_endpoint_preflight_rejects_production_only_image(tmp_path):
@@ -132,14 +127,17 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
     assert overlay["services"]["seed-mysql"]["profiles"] == [
         "disabled-course-mode-physical-tft"
     ]
-    assert materialize["environment"]["COURSE_MODE_LOCAL_COMPOSE_ENABLED"] == "true"
-    assert materialize["environment"]["COURSE_MODE_LOCAL_FIXTURE"] == "admin-w1"
-    assert "COURSE_MODE_V2_PUBLISH_ENABLED" not in materialize["environment"]
-    assert materialize["environment"]["COURSE_MODE_DEVICE_MAC"] == "14:c1:9f:d1:ac:20"
+    assert materialize["environment"]["COURSE_MODE_V2_PUBLISH_ENABLED"] == "true"
+    assert materialize["environment"]["COURSE_MODE_V5_SOURCE_ROOT"] == "/course-mode-v5-source"
+    assert materialize["environment"]["COURSE_MODE_V5_FIXTURE_ROOT"] == (
+        "/app/dist/lessons/fixtures/course-mode"
+    )
     assert overlay["services"]["backend"]["image"] == (
         "${TBOT_LESSON_STUDIO_BACKEND_IMAGE:?run docs/docker/course-mode-physical-tft/up.sh}"
     )
-    assert materialize["image"] == overlay["services"]["backend"]["image"]
+    assert materialize["image"] == (
+        "${TBOT_COURSE_MODE_V5_MATERIALIZER_IMAGE:?run docs/docker/course-mode-physical-tft/up.sh}"
+    )
     assert overlay["services"]["backend"]["environment"]["ROBOT_ESP_BASE_URL"] == (
         "http://host.docker.internal:8003"
     )
@@ -171,6 +169,10 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
             "TBOT_LESSON_STUDIO_BACKEND_IMAGE": (
                 "local/tbot-backend:course-mode-physical-tft-0123456789abcdef"
             ),
+            "TBOT_COURSE_MODE_V5_MATERIALIZER_IMAGE": (
+                "local/tbot-course-mode-v5-materializer:0123456789abcdef"
+            ),
+            "TBOT_ESP_REPOSITORY_ROOT": "/tmp/task-owned-esp",
         }
     )
     result = subprocess.run(
@@ -239,18 +241,20 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
     }
     assert materialize["depends_on"]["backend"]["condition"] == "service_healthy"
     assert backend["image"] == "local/tbot-backend:course-mode-physical-tft-0123456789abcdef"
-    assert materialize["image"] == backend["image"]
+    assert materialize["image"] == (
+        "local/tbot-course-mode-v5-materializer:0123456789abcdef"
+    )
     assert materialize["command"] == [
-        "dist/lessons/course-mode/course-mode-local-materializer.js",
+        "dist/lessons/course-mode/course-mode-v5-identity-materializer.js",
         "materialize",
     ]
     assert materialize["environment"]["DATABASE_URL"] == "postgresql://tbot:tbot@postgres:5432/tbot"
-    assert materialize["environment"]["COURSE_MODE_FIXTURE_ROOT"] == "/course-mode-fixtures"
+    assert materialize["environment"]["COURSE_MODE_V5_SOURCE_ROOT"] == "/course-mode-v5-source"
     assert materialize["volumes"] == [
         {
             "type": "bind",
-            "source": "/tmp/task-owned-backend/src/lessons/fixtures/course-mode",
-            "target": "/course-mode-fixtures",
+            "source": "/tmp/task-owned-esp",
+            "target": "/course-mode-v5-source",
             "read_only": True,
             "bind": {},
         }
@@ -265,8 +269,15 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
         },
         {
             "type": "bind",
-            "source": "/tmp/task-owned-backend/src/lessons/fixtures/course-mode/admin-w1/assets",
-            "target": "/usr/share/nginx/html/lesson-assets",
+            "source": "/tmp/task-owned-esp/main/manager-web/public/tvideo-demo/assets/t54-layered",
+            "target": "/usr/share/nginx/html/main/manager-web/public/tvideo-demo/assets/t54-layered",
+            "read_only": True,
+            "bind": {},
+        },
+        {
+            "type": "bind",
+            "source": "/tmp/task-owned-backend/src/lessons/fixtures/course-mode/pilot/v2",
+            "target": "/usr/share/nginx/html/pilot/v2",
             "read_only": True,
             "bind": {},
         }
@@ -299,6 +310,8 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
     assert 'openssl pkey -in "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem" -pubout -outform DER' in script
     assert 'openssl pkey -pubin -in "${BACKEND_ROOT}/keys/dev-public.pem" -outform DER' in script
     assert 'export JWT_PRIVATE_KEY="$(cat "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem")"' in script
+    assert "task-owned AC:20 identity is missing; refusing automatic bootstrap" in script
+    assert "bootstrapping the task-owned AC:20 identity" not in script
 
     backend = tmp_path / "backend"
     backend.mkdir()
@@ -307,10 +320,11 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
     (backend / "keys" / "dev-public.pem").write_bytes(public_pem.replace("\n", "\r\n").encode())
     (backend / "keys" / "dev-private-pkcs8.pem").write_text(private_pem, encoding="utf-8")
     (backend / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
-    materializer = backend / "src/lessons/course-mode/course-mode-local-materializer.ts"
+    (backend / "Dockerfile.course-mode-v5-identity").write_text("FROM scratch\n", encoding="utf-8")
+    materializer = backend / "src/lessons/course-mode/course-mode-v5-identity-materializer.ts"
     materializer.parent.mkdir(parents=True)
     materializer.write_text("export {};\n", encoding="utf-8")
-    _write_admin_w1_fixture(backend)
+    _write_v5_fixture(backend)
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -345,7 +359,7 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
         f"printf 'asset=%s robot=%s esp=%s\\n' \"${{LESSON_ASSET_ORIGIN_BASE:-}}\" \"${{ROBOT_ESP_BASE_URL:-}}\" \"${{TBOT_ESP_SERVER_URL:-}}\" >> {log}.env\n"
         f"printf 'asset_public=%s device=%s\\n' \"${{LESSON_ASSET_PUBLIC_BASE_URL:-}}\" \"${{TASK07_DEVICE_MAC:-}}\" >> {log}.env\n"
         f"if [[ \"$*\" == *\"inspect --format\"* ]]; then echo {BASE_COMPOSE},{OVERLAY_COMPOSE}; fi\n"
-        "if [[ \"$*\" == *\"exec -T postgres psql\"* ]]; then echo missing; fi\n",
+        "if [[ \"$*\" == *\"exec -T postgres psql\"* ]]; then echo ready; fi\n",
         encoding="utf-8",
     )
     for command in ("git", "npm", "docker"):
@@ -382,21 +396,28 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
     assert calls[1] == (
         "docker build --pull=false --label "
         "com.tbot.course-mode.materializer-path=/app/dist/lessons/course-mode/"
-        "course-mode-local-materializer.js --label "
+        "course-mode-v5-identity-materializer.js --label "
         f"org.opencontainers.image.revision={sha} --label "
         "com.tbot.course-mode.build-source=reviewed-clean-git-worktree "
         f"-f {backend}/Dockerfile -t {expected_image} {backend}"
     )
+    materializer_image = f"local/tbot-course-mode-v5-materializer:{sha}"
     assert calls[2] == (
-        "docker run --rm --entrypoint /nodejs/bin/node "
-        f"{expected_image} -e require('node:fs').accessSync('/app/dist/lessons/"
-        "course-mode/course-mode-local-materializer.js')"
+        "docker build --pull=false --label com.tbot.course-mode.materializer-path="
+        "/app/dist/lessons/course-mode/course-mode-v5-identity-materializer.js --label "
+        f"org.opencontainers.image.revision={sha} -f "
+        f"{backend}/Dockerfile.course-mode-v5-identity -t {materializer_image} {backend}"
     )
-    assert " compose --project-name tbot-course-mode-physical-tft " in f" {calls[3]} "
-    assert calls[3].endswith("config --quiet")
-    assert "unrelated-stack" not in calls[3]
-    assert "another-stack" not in calls[3]
-    assert "external-resources" not in calls[3]
+    assert calls[3] == (
+        "docker run --rm --entrypoint node "
+        f"{materializer_image} -e require('node:fs').accessSync('/app/dist/lessons/"
+        "course-mode/course-mode-v5-identity-materializer.js')"
+    )
+    assert " compose --project-name tbot-course-mode-physical-tft " in f" {calls[4]} "
+    assert calls[4].endswith("config --quiet")
+    assert "unrelated-stack" not in calls[4]
+    assert "another-stack" not in calls[4]
+    assert "external-resources" not in calls[4]
     assert all(" up " not in f" {call} " for call in calls)
     assert set(Path(f"{log}.env").read_text().splitlines()) == {
         "asset=http://192.168.100.183:8102/ robot=http://192.168.100.183:8003 esp=http://192.168.100.183:8003",
@@ -419,14 +440,11 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
     )
     assert any(call.endswith("up -d --wait postgres redis mysql backend") for call in start_calls)
     assert any("exec -T postgres psql" in call for call in start_calls)
-    assert any(
-        call.endswith("run --rm -e COURSE_MODE_LOCAL_FIXTURE=cat-ball course-mode-materialize")
-        for call in start_calls
-    )
+    assert not any(call.endswith("run --rm course-mode-materialize") for call in start_calls)
     assert start_calls[-1].endswith("up -d")
 
 
-def test_physical_tft_up_rejects_incomplete_admin_w1_fixture_before_build(tmp_path):
+def test_physical_tft_up_rejects_missing_canonical_v5_materializer_before_build(tmp_path):
     backend = tmp_path / "backend"
     backend.mkdir()
     (backend / "keys").mkdir()
@@ -434,16 +452,6 @@ def test_physical_tft_up_rejects_incomplete_admin_w1_fixture_before_build(tmp_pa
     (backend / "keys" / "dev-public.pem").write_text(public_pem)
     (backend / "keys" / "dev-private-pkcs8.pem").write_text(private_pem)
     (backend / "Dockerfile").write_text("FROM scratch\n")
-    materializer = backend / "src/lessons/course-mode/course-mode-local-materializer.ts"
-    materializer.parent.mkdir(parents=True)
-    materializer.write_text("export {};\n")
-    fixture = backend / "src/lessons/fixtures/course-mode/admin-w1"
-    fixture.mkdir(parents=True)
-    (fixture / "assets").mkdir()
-    (fixture / "lesson.json").write_text("{}\n")
-    (fixture / "published-pack.json").write_text(
-        '{"assets":[{"sha256":"missing","mediaType":"image/png"}]}\n'
-    )
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -470,7 +478,7 @@ def test_physical_tft_up_rejects_incomplete_admin_w1_fixture_before_build(tmp_pa
         capture_output=True, text=True,
     )
     assert result.returncode != 0
-    assert "Admin W1 fixture asset is missing" in result.stderr
+    assert "canonical Course Mode v5 materializer source is missing" in result.stderr
 
 
 def test_physical_tft_up_rejects_backend_sha_mismatch_before_build(tmp_path):

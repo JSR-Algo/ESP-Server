@@ -22,7 +22,7 @@ SHA_OBJECT = "b" * 64
 SHA_ROBOT = "c" * 64
 LOCAL_ROOT = "/sdcard/tbot/lesson-assets/w02-feelings/v5-checksum"
 FIXTURES = Path(__file__).parent / "fixtures" / "course-mode"
-COURSE_MODE_V5_CHECKSUM = "e8ee7ff1fb67e8dbd0f8c6908b09c4a4f8e0d1cf3ce41bb38142da0fc03519dc"
+COURSE_MODE_V5_CHECKSUM = "22e94ced4b2dae1ced13f3e34de1f72e8a3ce177e1ba3a7c599a4c3d002aea0d"
 
 
 def _phase() -> dict:
@@ -128,7 +128,7 @@ def test_course_mode_v5_fixture_preserves_reviewed_layered_identity() -> None:
         manifest, manifest_checksum=COURSE_MODE_V5_CHECKSUM
     ) == {
         "schemaVersion": 1,
-        "contractChecksum": "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264",
+        "contractChecksum": "332fb68e340abb94c0178dd83b06ed0939d6e2d63c17d48bcb09dab8cc6bb3be",
         "layoutContract": "layeredCinematic",
         "lessonId": "course-mode-v5-farm-candidate",
         "lessonVersion": 2,
@@ -244,6 +244,55 @@ def test_projects_exact_mixed_media_phase_from_attested_pack() -> None:
             },
         ],
     }
+
+
+def test_course_mode_v5_projects_activity_aware_fallback_without_teaching_object() -> None:
+    phase = _phase()
+    phase["activityIds"] = ["w19-weather-guided"]
+    phase["layers"].pop(1)
+    pack = _pack()
+    pack["assets"] = [
+        asset for asset in pack["assets"]
+        if asset["sharedAssetKey"] != "object.happy"
+    ]
+
+    projected = project_layered_cinematic_phase(
+        phase,
+        pack,
+        course_mode_activity_ids={"w19-weather-guided"},
+        fallback_activity_ids={"w19-weather-guided"},
+    )
+
+    assert projected["activityIds"] == ["w19-weather-guided"]
+    assert [layer["layer"] for layer in projected["layers"]] == [
+        "background", "robotOverlay"
+    ]
+    assert projected["fps"] == 10
+
+
+def test_course_mode_v5_rejects_incomplete_or_unapproved_activity_mapping() -> None:
+    phase = _phase()
+    phase["activityIds"] = ["unknown-activity"]
+
+    with pytest.raises(LayeredCinematicContractError):
+        project_layered_cinematic_phase(
+            phase,
+            _pack(),
+            course_mode_activity_ids={"known-activity"},
+            fallback_activity_ids=set(),
+        )
+
+
+def test_non_course_renderer_v5_remains_strict_about_activity_ids_and_three_layers() -> None:
+    phase = _phase()
+    phase["activityIds"] = ["activity-1"]
+    with pytest.raises(LayeredCinematicContractError):
+        project_layered_cinematic_phase(phase, _pack())
+
+    phase = _phase()
+    phase["layers"].pop(1)
+    with pytest.raises(LayeredCinematicContractError):
+        project_layered_cinematic_phase(phase, _pack())
 
 
 def test_runtime_manifest_projection_attests_renderer_v5_without_generation_visual_refs() -> None:

@@ -85,6 +85,55 @@ from core.lesson.course_orchestrator import (
     SessionState,
     WordState,
 )
+
+
+def _index_layered_cinematic_phases(
+    phases: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Keep a canonical default while preserving every activity-specific variant."""
+    canonical: dict[str, dict[str, Any]] = {}
+    by_activity: dict[str, dict[str, Any]] = {}
+    for phase in phases:
+        phase_id = phase.get("phaseId")
+        if isinstance(phase_id, str):
+            canonical.setdefault(phase_id, phase)
+        for activity_id in phase.get("activityIds", []) or []:
+            if not isinstance(activity_id, str) or activity_id in by_activity:
+                raise LayeredCinematicContractError(
+                    "CINEMATIC_METADATA_MISMATCH",
+                    "layered cinematic activity mapping is duplicated",
+                )
+            by_activity[activity_id] = phase
+    return canonical, by_activity
+
+
+def _course_mode_v5_activity_authority(
+    manifest: dict[str, Any],
+) -> tuple[set[str] | None, set[str] | None]:
+    contract = manifest.get("courseModeContract")
+    activities = contract.get("activities") if isinstance(contract, dict) else None
+    if not isinstance(activities, list) or not activities:
+        return None, None
+    renderer = contract.get("renderer") if isinstance(contract, dict) else None
+    activity_aware = (
+        isinstance(renderer, dict)
+        and renderer.get("rendererId") == RENDERER_V5
+    )
+    activity_ids: set[str] = set()
+    fallback_ids: set[str] = set()
+    for activity in activities:
+        if not isinstance(activity, dict) or not isinstance(activity.get("activityId"), str):
+            return None, None
+        visual = activity.get("visual")
+        if visual is not None and not isinstance(visual, dict):
+            return None, None
+        activity_id = activity["activityId"]
+        if not activity_id or activity_id in activity_ids:
+            return None, None
+        activity_ids.add(activity_id)
+        if isinstance(visual, dict) and visual.get("objectAssetKey") is None:
+            fallback_ids.add(activity_id)
+    return (activity_ids, fallback_ids) if activity_aware else (None, None)
 from core.lesson.course_response_plan import CourseResponsePlan, CourseResponsePlanError
 from core.lesson.course_snapshot_store import get_course_mode_snapshot_store
 from core.lesson.embodied_intent import EmbodiedIntent
@@ -2145,6 +2194,7 @@ class LessonRuntime:
         self._conversation_cues: dict[str, dict[str, Any]] = {}
         self._cinematic_cues_by_key: dict[tuple[str, str], dict[str, Any]] = {}
         self._layered_cinematic_phases: dict[str, dict[str, Any]] = {}
+        self._layered_cinematic_activity_phases: dict[str, dict[str, Any]] = {}
         self._layered_cinematic_step_phases: dict[str, dict[str, Any]] = {}
         self._authored_cinematic_pending: dict[str, Any] | None = None
         self._conversation_contract_valid = False
@@ -2645,15 +2695,43 @@ class LessonRuntime:
                 if manifest_version == RENDERER_V3:
                     self._cinematic_phase = project_cinematic_phase(phases[0], pack)
                 elif manifest_version == RENDERER_V5:
+                    activity_ids, fallback_activity_ids = _course_mode_v5_activity_authority(
+                        self.manifest
+                    )
                     projected = [
-                        project_layered_cinematic_phase(phase, pack) for phase in phases
+                        project_layered_cinematic_phase(
+                            phase,
+                            pack,
+                            course_mode_activity_ids=activity_ids,
+                            fallback_activity_ids=fallback_activity_ids,
+                        )
+                        for phase in phases
                     ]
-                    self._layered_cinematic_phases = {
-                        phase["phaseId"]: phase for phase in projected
-                    }
+                    if self._course_mode_compatibility is not None:
+                        for phase in projected:
+                            phase["courseModeCompatibility"] = copy.deepcopy(
+                                self._course_mode_compatibility
+                            )
+                    (
+                        self._layered_cinematic_phases,
+                        self._layered_cinematic_activity_phases,
+                    ) = _index_layered_cinematic_phases(projected)
+                    if (
+                        activity_ids is not None
+                        and set(self._layered_cinematic_activity_phases) != activity_ids
+                    ):
+                        raise LayeredCinematicContractError(
+                            "CINEMATIC_METADATA_MISMATCH",
+                            "layered cinematic activity mapping is incomplete",
+                        )
                     projected_by_asset = {
-                        source["layers"][2]["assetVersionId"]: target
+                        next(
+                            layer["assetVersionId"]
+                            for layer in source["layers"]
+                            if layer.get("layer") == "robotOverlay"
+                        ): target
                         for source, target in zip(phases, projected)
+                        if not target.get("activityIds")
                     }
                     self._layered_cinematic_step_phases = {}
                     for asset in self.manifest.get("assets", []) or []:
@@ -4741,7 +4819,15 @@ class LessonRuntime:
         self, step: dict[str, Any]
     ) -> dict[str, Any] | None:
         step_id = step.get("id")
+        activity_id = step.get("activityId")
+        if isinstance(activity_id, str):
+            activity_phase = self._layered_cinematic_activity_phases.get(activity_id)
+            if isinstance(activity_phase, dict):
+                return activity_phase
         if isinstance(step_id, str):
+            activity_phase = self._layered_cinematic_activity_phases.get(step_id)
+            if isinstance(activity_phase, dict):
+                return activity_phase
             authored = self._layered_cinematic_step_phases.get(step_id)
             if isinstance(authored, dict):
                 return authored
@@ -6788,6 +6874,7 @@ class LessonRuntime:
         self._retire_authored_cinematic_pending()
         self._cinematic_phase = None
         self._layered_cinematic_phases.clear()
+        self._layered_cinematic_activity_phases.clear()
         self._layered_cinematic_step_phases.clear()
         for sequence, frame in list(self._outstanding.items()):
             if self._cinematic_frame_command(frame) is not None:

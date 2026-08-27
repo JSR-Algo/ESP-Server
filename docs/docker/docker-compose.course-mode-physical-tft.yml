@@ -20,23 +20,22 @@ services:
       FLATTENED_CINEMATIC_PUBLIC_BASE_URL: ${COURSE_MODE_ASSET_ORIGIN_BASE:?export the robot-reachable local asset origin ending in /}
 
   course-mode-materialize:
-    image: ${TBOT_LESSON_STUDIO_BACKEND_IMAGE:?run docs/docker/course-mode-physical-tft/up.sh}
+    image: ${TBOT_COURSE_MODE_V5_MATERIALIZER_IMAGE:?run docs/docker/course-mode-physical-tft/up.sh}
     depends_on:
       backend:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql://tbot:tbot@postgres:5432/tbot
-      COURSE_MODE_LOCAL_COMPOSE_ENABLED: "true"
-      COURSE_MODE_LOCAL_FIXTURE: admin-w1
-      COURSE_MODE_DEVICE_MAC: "14:c1:9f:d1:ac:20"
-      COURSE_MODE_FIXTURE_ROOT: /course-mode-fixtures
+      COURSE_MODE_V2_PUBLISH_ENABLED: "true"
+      COURSE_MODE_V5_SOURCE_ROOT: /course-mode-v5-source
+      COURSE_MODE_V5_FIXTURE_ROOT: /app/dist/lessons/fixtures/course-mode
       COURSE_MODE_LOCAL_PHYSICAL_TFT_ENABLED: "true"
       FLATTENED_CINEMATIC_PUBLIC_BASE_URL: ${COURSE_MODE_ASSET_ORIGIN_BASE:?export the robot-reachable local asset origin ending in /}
     command:
-      - dist/lessons/course-mode/course-mode-local-materializer.js
+      - dist/lessons/course-mode/course-mode-v5-identity-materializer.js
       - materialize
     volumes:
-      - ${TBOT_BACKEND_WORKTREE:?export the task-owned backend worktree}/src/lessons/fixtures/course-mode:/course-mode-fixtures:ro
+      - ${TBOT_ESP_REPOSITORY_ROOT:?export the ESP repository root}:/course-mode-v5-source:ro
     networks: [lesson-studio-e2e]
 
   seed-postgres:
@@ -57,4 +56,5 @@ services:
         condition: service_healthy
     volumes: !override
       - ./nginx.conf:/etc/nginx/nginx.conf.template:ro
-      - ${TBOT_BACKEND_WORKTREE:?export the task-owned backend worktree}/src/lessons/fixtures/course-mode/admin-w1/assets:/usr/share/nginx/html/lesson-assets:ro
+      - ${TBOT_ESP_REPOSITORY_ROOT:?export the ESP repository root}/main/manager-web/public/tvideo-demo/assets/t54-layered:/usr/share/nginx/html/main/manager-web/public/tvideo-demo/assets/t54-layered:ro
+      - ${TBOT_BACKEND_WORKTREE:?export the task-owned backend worktree}/src/lessons/fixtures/course-mode/pilot/v2:/usr/share/nginx/html/pilot/v2:ro

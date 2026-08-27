@@ -17,6 +17,7 @@ from core.lesson.course_mode_compatibility import (
     validate_course_mode_compatibility,
 )
 from core.lesson.runtime import LessonRuntime, _manifest_asset_cache_inputs
+from core.lesson.runtime import _course_mode_v5_activity_authority, _index_layered_cinematic_phases
 from core.lesson.sd_pack_mcp_payload import (
     FirmwareSyncPackError,
     build_firmware_sync_pack,
@@ -25,7 +26,7 @@ from core.lesson.sd_pack_mcp_payload import (
 FIXTURES = Path(__file__).parent / "fixtures" / "course-mode"
 CONTRACT_CHECKSUM = "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264"
 MANIFEST_CHECKSUM = "205784b3f97cb081ce9c226d8fd83fdd400401e706c000e1b09ba4e7ebdf36ce"
-V5_MANIFEST_CHECKSUM = "e8ee7ff1fb67e8dbd0f8c6908b09c4a4f8e0d1cf3ce41bb38142da0fc03519dc"
+V5_MANIFEST_CHECKSUM = "22e94ced4b2dae1ced13f3e34de1f72e8a3ce177e1ba3a7c599a4c3d002aea0d"
 LAYOUT_CONTRACT = "renderer-v4.course-mode-layout.v1"
 MARKER = {
     "schemaVersion": 1,
@@ -37,7 +38,7 @@ MARKER = {
 }
 V5_MARKER = {
     "schemaVersion": 1,
-    "contractChecksum": CONTRACT_CHECKSUM,
+    "contractChecksum": "332fb68e340abb94c0178dd83b06ed0939d6e2d63c17d48bcb09dab8cc6bb3be",
     "layoutContract": "layeredCinematic",
     "lessonId": "course-mode-v5-farm-candidate",
     "lessonVersion": 2,
@@ -242,6 +243,96 @@ def test_generic_or_unreviewed_renderer_v5_manifest_has_no_course_mode_marker() 
         )
         is None
     )
+
+
+def test_renderer_v5_course_mode_marker_tracks_nonfixture_manifest_identity() -> None:
+    manifest = deepcopy(_pilot_v5_identity()["manifestIdentityProjection"])
+    manifest["lessonId"] = "english-6month-week-19"
+    manifest["lessonVersion"] = 3
+    checksum = "a" * 64
+
+    assert course_mode_compatibility_for_manifest(
+        manifest, manifest_checksum=checksum
+    ) == {
+        "schemaVersion": 1,
+        "contractChecksum": manifest["courseModeContract"]["contractChecksum"],
+        "layoutContract": "layeredCinematic",
+        "lessonId": "english-6month-week-19",
+        "lessonVersion": 3,
+        "manifestChecksum": checksum,
+    }
+
+
+def test_renderer_v5_phase_index_preserves_canonical_variants_and_resolves_by_activity() -> None:
+    teach_cat = {"phaseId": "teach", "activityIds": ["cat-discover"], "layers": []}
+    teach_ball = {"phaseId": "teach", "activityIds": ["ball-discover"], "layers": []}
+    listen = {"phaseId": "listen", "activityIds": ["cat-recall"], "layers": []}
+
+    canonical, by_activity = _index_layered_cinematic_phases(
+        [teach_cat, teach_ball, listen]
+    )
+
+    assert canonical["teach"] is teach_cat
+    assert by_activity == {
+        "cat-discover": teach_cat,
+        "ball-discover": teach_ball,
+        "cat-recall": listen,
+    }
+
+
+def test_renderer_v5_runtime_resolves_full_manifest_activity_identity() -> None:
+    phase = {"phaseId": "listen", "activityIds": ["cat-recall-visual-02"], "layers": []}
+    runtime = object.__new__(LessonRuntime)
+    runtime._layered_cinematic_activity_phases = {"cat-recall-visual-02": phase}
+    runtime._layered_cinematic_step_phases = {}
+    runtime._layered_cinematic_phases = {}
+
+    assert runtime._layered_cinematic_phase_for_step({
+        "id": "cat-recall",
+        "activityId": "cat-recall-visual-02",
+    }) is phase
+
+
+def test_renderer_v5_canonical_manifest_resolves_every_step_by_activity_identity() -> None:
+    manifest = _pilot_v5_identity()["manifestIdentityProjection"]
+    _, by_activity = _index_layered_cinematic_phases(manifest["cinematicPhases"])
+    runtime = object.__new__(LessonRuntime)
+    runtime._layered_cinematic_activity_phases = by_activity
+    runtime._layered_cinematic_step_phases = {}
+    runtime._layered_cinematic_phases = {}
+
+    assert all(
+        runtime._layered_cinematic_phase_for_step(step)
+        is by_activity[step["activityId"]]
+        for step in manifest["steps"]
+    )
+
+
+def test_renderer_v5_pilot_contract_supplies_activity_authority_without_visual_fallbacks() -> None:
+    manifest = deepcopy(_pilot_v5_identity()["manifestIdentityProjection"])
+
+    activity_ids, fallback_ids = _course_mode_v5_activity_authority(manifest)
+
+    assert activity_ids == {
+        activity["activityId"] for activity in manifest["courseModeContract"]["activities"]
+    }
+    assert fallback_ids == set()
+
+
+def test_renderer_v5_phase_index_finds_robot_overlay_by_role_for_two_layer_fallback() -> None:
+    phase = {
+        "phaseId": "listen",
+        "activityIds": ["w19-weather-recall"],
+        "layers": [
+            {"layer": "background", "assetVersionId": "background@v1"},
+            {"layer": "robotOverlay", "assetVersionId": "robot@v1"},
+        ],
+    }
+
+    canonical, by_activity = _index_layered_cinematic_phases([phase])
+
+    assert canonical["listen"] is phase
+    assert by_activity["w19-weather-recall"] is phase
 
 
 def test_exact_frozen_course_mode_mp4_cues_project_with_fail_closed_marker() -> None:
