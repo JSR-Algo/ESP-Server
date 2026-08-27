@@ -2788,12 +2788,14 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "key": "flattenedCinematic.barn-opening",
                 "state": "READY",
                 "checksumOk": True,
+                "sha256": "a" * 64,
                 "size": 2_904_507,
                 "mediaType": "video/mp4",
             }],
         })
 
         self.assertEqual(payload["assets"][0]["mediaType"], "video/mp4")
+        self.assertEqual(payload["assets"][0]["sha256"], "a" * 64)
 
     async def test_sd_asset_pack_prepare_compacts_verbose_live_pack_under_frame_limit(self):
         class _VerboseLiveAssetPackCache(_FirmwareSyncAssetCache):
@@ -2856,7 +2858,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(conn.websocket.sent[0].encode("utf-8")), 16384)
         self.assertEqual(
             set(sent[0]["body"]["assetPack"]["assets"][0]),
-            {"key", "state", "checksumOk", "size", "mediaType"},
+            {"key", "state", "checksumOk", "sha256", "size", "mediaType"},
         )
 
     async def test_sd_asset_pack_prepare_supports_publish_budget_maximum_64_assets(self):

@@ -125,11 +125,16 @@ done
 echo "[course-mode-physical-tft] recreating the ESP bridge with the shared local mint secret"
 "${ESP_COMPOSE[@]}" up -d --force-recreate tbot-esp32-server
 "${COMPOSE[@]}" up -d --wait postgres redis mysql backend
+echo "[course-mode-physical-tft] materializing the canonical Course Mode v5 lesson"
+"${COMPOSE[@]}" run --rm course-mode-materialize
+echo "[course-mode-physical-tft] provisioning the scoped local AC:20 assignment"
+"${COMPOSE[@]}" run --rm --no-deps \
+  -v "${HERE}:/course-mode-physical-tft:ro" \
+  -e DATABASE_URL=postgresql://tbot:tbot@postgres:5432/tbot \
+  --entrypoint node backend \
+  /course-mode-physical-tft/provision-course-mode-v5-assignment.mjs
 IDENTITY_STATE="$("${COMPOSE[@]}" exec -T postgres psql -U tbot -d tbot -Atqc \
-  "SELECT CASE WHEN COUNT(*)=0 THEN 'missing' WHEN NOT BOOL_AND(d.current_household_id IS NOT NULL AND d.assigned_child_profile_id IS NOT NULL AND h.owner_id IS NOT NULL) THEN 'partial' WHEN NOT BOOL_OR(EXISTS (SELECT 1 FROM lesson_assignments la JOIN lessons l ON l.id=la.lesson_id AND l.lesson_version=la.lesson_version WHERE la.device_id=d.id AND la.state IN ('ASSIGNED','PRELOADING','READY','RUNNING','PAUSED') AND l.status='published' AND l.manifest_version='teebot-lesson-renderer.v5')) THEN 'assignment-missing' ELSE 'ready' END FROM devices d LEFT JOIN households h ON h.id=d.current_household_id WHERE lower(d.mac_address)=lower('14:c1:9f:d1:ac:20')")"
-if [[ "${IDENTITY_STATE}" == "missing" ]]; then
-  fail "task-owned AC:20 identity is missing; refusing automatic bootstrap"
-elif [[ "${IDENTITY_STATE}" != "ready" ]]; then
-  fail "task-owned AC:20 identity or active renderer-v5 assignment is incomplete; refusing automatic repair"
-fi
+  "SELECT CASE WHEN COUNT(*)=0 THEN 'missing' WHEN NOT BOOL_AND(d.current_household_id IS NOT NULL AND d.assigned_child_profile_id IS NOT NULL AND h.owner_id IS NOT NULL) THEN 'partial' WHEN NOT BOOL_OR(EXISTS (SELECT 1 FROM lesson_assignments la JOIN lessons l ON l.id=la.lesson_id AND l.lesson_version=la.lesson_version WHERE la.id='76000000-0000-4000-8000-000000000004'::uuid AND la.device_id=d.id AND la.profile='espTft' AND la.state IN ('ASSIGNED','PRELOADING','READY','RUNNING','PAUSED') AND l.id='75000000-0000-4000-8000-000000000003'::uuid AND l.lesson_key='course-mode-v5-farm-candidate' AND l.lesson_version=2 AND l.status='published' AND l.manifest_version='teebot-lesson-renderer.v5')) THEN 'assignment-missing' ELSE 'ready' END FROM devices d LEFT JOIN households h ON h.id=d.current_household_id WHERE lower(d.mac_address)=lower('14:c1:9f:d1:ac:20')")"
+[[ "${IDENTITY_STATE}" == "ready" ]] || \
+  fail "canonical Course Mode v5 assignment provisioning did not reach readiness: ${IDENTITY_STATE}"
 "${COMPOSE[@]}" up -d

@@ -486,6 +486,9 @@ def test_firmware_pack_and_prepare_projection_preserve_exact_marker() -> None:
 
     compact = LessonRuntime._prepare_asset_pack_payload(pack)
     assert compact["courseModeCompatibility"] == MARKER
+    assert [asset["sha256"] for asset in compact["assets"]] == [
+        asset["sha256"] for asset in pack["assets"]
+    ]
     assert all(
         asset["courseModeCompatibility"] == MARKER for asset in compact["assets"]
     )

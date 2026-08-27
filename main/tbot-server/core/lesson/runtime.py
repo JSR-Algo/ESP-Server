@@ -7235,7 +7235,7 @@ class LessonRuntime:
         )
         payload = {key: pack[key] for key in top_level_keys if key in pack}
         asset_keys = (
-            "key", "state", "checksumOk", "size", "mediaType",
+            "key", "state", "checksumOk", "sha256", "size", "mediaType",
             "courseModeCompatibility",
         )
         local_root = str(pack.get("localRoot") or "").rstrip("/")

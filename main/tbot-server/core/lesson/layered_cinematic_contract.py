@@ -18,6 +18,9 @@ LAYER_SLOTS = (
     ("robotOverlay", "robotOverlay"),
 )
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+)
 _RECT_KEYS = {"x", "y", "width", "height"}
 _IMAGE_KEYS = {"mediaKind", "mediaType", "width", "height", "rect", "fit"}
 _VIDEO_KEYS = {
@@ -294,7 +297,14 @@ def project_layered_cinematic_phase(
             _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic layer order or slot is invalid")
         asset_key, version = source.get("assetKey"), source.get("version")
         asset_version_id = source.get("assetVersionId")
-        if not isinstance(asset_key, str) or not asset_key or not _positive_int(version) or asset_version_id != f"{asset_key}@v{version}":
+        valid_version_id = (
+            isinstance(asset_version_id, str)
+            and (
+                asset_version_id == f"{asset_key}@v{version}"
+                or _UUID_RE.fullmatch(asset_version_id) is not None
+            )
+        )
+        if not isinstance(asset_key, str) or not asset_key or not _positive_int(version) or not valid_version_id:
             _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic asset version is invalid")
         sha256, byte_count = source.get("sha256"), source.get("bytes")
         if not isinstance(sha256, str) or _SHA256_RE.fullmatch(sha256.lower()) is None or not _positive_int(byte_count):

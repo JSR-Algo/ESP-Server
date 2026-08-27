@@ -310,10 +310,15 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
     assert 'openssl pkey -in "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem" -pubout -outform DER' in script
     assert 'openssl pkey -pubin -in "${BACKEND_ROOT}/keys/dev-public.pem" -outform DER' in script
     assert 'export JWT_PRIVATE_KEY="$(cat "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem")"' in script
-    assert "task-owned AC:20 identity is missing; refusing automatic bootstrap" in script
-    assert "bootstrapping the task-owned AC:20 identity" not in script
+    assert "provision-course-mode-v5-assignment.mjs" in script
+    assert "canonical Course Mode v5 assignment provisioning did not reach readiness" in script
     assert "la.state IN ('ASSIGNED','PRELOADING','READY','RUNNING','PAUSED')" in script
     assert "la.state='ACTIVE'" not in script
+    assert "la.id='76000000-0000-4000-8000-000000000004'::uuid" in script
+    assert "l.id='75000000-0000-4000-8000-000000000003'::uuid" in script
+    assert "l.lesson_key='course-mode-v5-farm-candidate'" in script
+    assert "l.lesson_version=2" in script
+    assert "la.profile='espTft'" in script
 
     backend = tmp_path / "backend"
     backend.mkdir()
@@ -440,9 +445,19 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
         call.endswith("up -d --force-recreate tbot-esp32-server")
         for call in start_calls
     )
-    assert any(call.endswith("up -d --wait postgres redis mysql backend") for call in start_calls)
-    assert any("exec -T postgres psql" in call for call in start_calls)
-    assert not any(call.endswith("run --rm course-mode-materialize") for call in start_calls)
+    materialize_index = next(
+        index for index, call in enumerate(start_calls)
+        if call.endswith("run --rm course-mode-materialize")
+    )
+    provision_index = next(
+        index for index, call in enumerate(start_calls)
+        if "provision-course-mode-v5-assignment.mjs" in call
+    )
+    readiness_index = next(
+        index for index, call in enumerate(start_calls)
+        if "exec -T postgres psql" in call
+    )
+    assert materialize_index < provision_index < readiness_index
     assert start_calls[-1].endswith("up -d")
 
 

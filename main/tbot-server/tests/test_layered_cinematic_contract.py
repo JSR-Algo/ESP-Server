@@ -191,6 +191,96 @@ def test_course_mode_v5_fixture_preserves_reviewed_layered_identity() -> None:
     ]
 
 
+def _canonical_v5_phase_and_pack() -> tuple[dict, dict]:
+    manifest = _course_mode_v5_identity()
+    phase = deepcopy(manifest["phaseIdentity"][0])
+    shared_by_version = {
+        asset["versionId"]: asset for asset in manifest["sharedAssets"]
+    }
+    assets = []
+    for layer in phase["layers"]:
+        shared = shared_by_version[layer["assetVersionId"]]
+        assets.append({
+            "key": layer["assetVersionId"],
+            "state": "READY",
+            "checksumOk": True,
+            "localPath": f"{LOCAL_ROOT}/{layer['assetVersionId']}",
+            "sdPath": f"{LOCAL_ROOT}/{layer['assetVersionId']}",
+            "sha256": layer["sha256"],
+            "size": layer["bytes"],
+            "mediaType": layer["metadata"]["mediaType"],
+            "sharedAssetKey": layer["assetKey"],
+            "sharedAssetVersion": layer["version"],
+            "compatibilityMetadata": deepcopy(layer["metadata"]),
+            "sourceVersionId": shared["versionId"],
+        })
+    return phase, {"ready": True, "localRoot": LOCAL_ROOT, "assets": assets}
+
+
+def test_projects_checked_in_canonical_v5_phase_with_uuid_asset_version_ids() -> None:
+    phase, pack = _canonical_v5_phase_and_pack()
+
+    projected = project_layered_cinematic_phase(
+        phase,
+        pack,
+        course_mode_activity_ids=set(phase["activityIds"]),
+        fallback_activity_ids=set(),
+    )
+
+    assert projected["activityIds"] == phase["activityIds"]
+    assert [asset["key"] for asset in pack["assets"]] == [
+        "75000000-0000-4000-8000-000000000011",
+        "75000000-0000-4000-8000-000000000022",
+        "75000000-0000-4000-8000-000000000031",
+    ]
+    assert [layer["sdPath"] for layer in projected["layers"]] == [
+        f"{LOCAL_ROOT}/{asset['key']}" for asset in pack["assets"]
+    ]
+
+
+def test_runtime_sd_pack_inputs_keep_canonical_uuid_version_keys() -> None:
+    manifest = _course_mode_v5_identity()["manifestIdentityProjection"]
+
+    assets = _manifest_asset_cache_inputs(manifest)
+
+    assert [asset["key"] for asset in assets] == [
+        "75000000-0000-4000-8000-000000000011",
+        "75000000-0000-4000-8000-000000000022",
+        "75000000-0000-4000-8000-000000000031",
+    ]
+
+
+@pytest.mark.parametrize("asset_version_id", ["not-a-uuid", "75000000-0000-4000-7000-000000000011"])
+def test_rejects_malformed_or_unsupported_uuid_asset_version_identity(asset_version_id: str) -> None:
+    phase, pack = _canonical_v5_phase_and_pack()
+    phase["layers"][0]["assetVersionId"] = asset_version_id
+
+    with pytest.raises(LayeredCinematicContractError) as exc_info:
+        project_layered_cinematic_phase(
+            phase,
+            pack,
+            course_mode_activity_ids=set(phase["activityIds"]),
+            fallback_activity_ids=set(),
+        )
+
+    assert exc_info.value.code == "CINEMATIC_METADATA_MISMATCH"
+
+
+def test_rejects_uuid_asset_version_id_not_present_in_attested_pack() -> None:
+    phase, pack = _canonical_v5_phase_and_pack()
+    phase["layers"][0]["assetVersionId"] = "75000000-0000-4000-8000-000000000099"
+
+    with pytest.raises(LayeredCinematicContractError) as exc_info:
+        project_layered_cinematic_phase(
+            phase,
+            pack,
+            course_mode_activity_ids=set(phase["activityIds"]),
+            fallback_activity_ids=set(),
+        )
+
+    assert exc_info.value.code == "CINEMATIC_SD_PATH_MISSING"
+
+
 def test_projects_exact_mixed_media_phase_from_attested_pack() -> None:
     assert project_layered_cinematic_phase(_phase(), _pack()) == {
         "templateId": "layeredCinematic",
