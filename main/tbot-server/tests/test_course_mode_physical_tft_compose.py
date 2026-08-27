@@ -312,6 +312,8 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
     assert 'export JWT_PRIVATE_KEY="$(cat "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem")"' in script
     assert "task-owned AC:20 identity is missing; refusing automatic bootstrap" in script
     assert "bootstrapping the task-owned AC:20 identity" not in script
+    assert "la.state IN ('ASSIGNED','PRELOADING','READY','RUNNING','PAUSED')" in script
+    assert "la.state='ACTIVE'" not in script
 
     backend = tmp_path / "backend"
     backend.mkdir()
@@ -479,6 +481,13 @@ def test_physical_tft_up_rejects_missing_canonical_v5_materializer_before_build(
     )
     assert result.returncode != 0
     assert "canonical Course Mode v5 materializer source is missing" in result.stderr
+
+
+def test_physical_tft_nginx_never_falls_through_for_canonical_asset_mounts():
+    nginx = (ROOT / "docs/docker/nginx.conf").read_text(encoding="utf-8")
+    assert "location /main/manager-web/public/tvideo-demo/assets/t54-layered/" in nginx
+    assert "location /pilot/v2/" in nginx
+    assert nginx.count("try_files $uri =404;") >= 2
 
 
 def test_physical_tft_up_rejects_backend_sha_mismatch_before_build(tmp_path):

@@ -126,7 +126,7 @@ echo "[course-mode-physical-tft] recreating the ESP bridge with the shared local
 "${ESP_COMPOSE[@]}" up -d --force-recreate tbot-esp32-server
 "${COMPOSE[@]}" up -d --wait postgres redis mysql backend
 IDENTITY_STATE="$("${COMPOSE[@]}" exec -T postgres psql -U tbot -d tbot -Atqc \
-  "SELECT CASE WHEN COUNT(*)=0 THEN 'missing' WHEN NOT BOOL_AND(d.current_household_id IS NOT NULL AND d.assigned_child_profile_id IS NOT NULL AND h.owner_id IS NOT NULL) THEN 'partial' WHEN NOT BOOL_OR(EXISTS (SELECT 1 FROM lesson_assignments la JOIN lessons l ON l.id=la.lesson_id AND l.lesson_version=la.lesson_version WHERE la.device_id=d.id AND la.state='ACTIVE' AND l.status='published' AND l.manifest_version='teebot-lesson-renderer.v5')) THEN 'assignment-missing' ELSE 'ready' END FROM devices d LEFT JOIN households h ON h.id=d.current_household_id WHERE lower(d.mac_address)=lower('14:c1:9f:d1:ac:20')")"
+  "SELECT CASE WHEN COUNT(*)=0 THEN 'missing' WHEN NOT BOOL_AND(d.current_household_id IS NOT NULL AND d.assigned_child_profile_id IS NOT NULL AND h.owner_id IS NOT NULL) THEN 'partial' WHEN NOT BOOL_OR(EXISTS (SELECT 1 FROM lesson_assignments la JOIN lessons l ON l.id=la.lesson_id AND l.lesson_version=la.lesson_version WHERE la.device_id=d.id AND la.state IN ('ASSIGNED','PRELOADING','READY','RUNNING','PAUSED') AND l.status='published' AND l.manifest_version='teebot-lesson-renderer.v5')) THEN 'assignment-missing' ELSE 'ready' END FROM devices d LEFT JOIN households h ON h.id=d.current_household_id WHERE lower(d.mac_address)=lower('14:c1:9f:d1:ac:20')")"
 if [[ "${IDENTITY_STATE}" == "missing" ]]; then
   fail "task-owned AC:20 identity is missing; refusing automatic bootstrap"
 elif [[ "${IDENTITY_STATE}" != "ready" ]]; then
