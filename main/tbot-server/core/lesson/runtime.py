@@ -182,7 +182,8 @@ class CourseModeRuntimeAdapter:
         self.assignment_id = assignment_id
         self.forwarder = forwarder
         self.orchestrator = CourseOrchestrator(
-            contract, started_at_ms=self._started_at_ms, soft_deadline_ms=540_000,
+            contract, started_at_ms=self._started_at_ms,
+            soft_deadline_ms=contract.soft_deadline_sec * 1_000,
             lesson_session_id=self.lesson_session_id,
         )
         self._applied_plan_ids: set[str] = set()
@@ -226,7 +227,7 @@ class CourseModeRuntimeAdapter:
 
     @staticmethod
     def _decision_payload(decision: CourseDecision) -> Dict[str, Any]:
-        return {
+        payload = {
             "accepted": decision.accepted, "decisionId": decision.decision_id,
             "nextState": decision.next_state.value, "action": decision.action,
             "acknowledgmentIntent": decision.acknowledgment_intent,
@@ -234,6 +235,13 @@ class CourseModeRuntimeAdapter:
             "embodiedIntent": decision.embodied_intent.value, "mayModelTarget": decision.may_model_target,
             "evidenceEvent": decision.evidence_event, "branchId": decision.branch_id,
         }
+        if decision.activity_id is not None:
+            payload.update({
+                "activityId": decision.activity_id, "visualState": decision.visual_state,
+                "replayEntrance": decision.replay_entrance, "attempt": decision.attempt,
+                "visualFocusRegion": decision.visual_focus_region,
+            })
+        return payload
 
     def _remember(self, decision: CourseDecision) -> Dict[str, Any]:
         self._decisions[decision.decision_id] = decision
@@ -355,9 +363,11 @@ class CourseModeRuntimeAdapter:
                 "activityId": activity.activity_id,
                 "stage": activity.stage,
                 "contextId": activity.context_id,
+                "targetIds": list(activity.target_ids),
+                "modalities": list(activity.modalities),
             }
             for activity in self.contract.activities
-            if activity.target_id == target.target_id
+            if self.contract.is_curriculum or activity.target_id == target.target_id
         ]
         allowed_tools = [
             operation for operation in (
@@ -373,6 +383,7 @@ class CourseModeRuntimeAdapter:
                 "turnSequenceId": self._next_turn_sequence_id,
             },
             "activeTargetId": target.target_id,
+            "activeActivityId": self.orchestrator.active_activity_id,
             "activities": activities,
             "allowedTools": allowed_tools,
         }
@@ -724,6 +735,11 @@ class CourseModeRuntimeAdapter:
             "mayModelTarget": decision.may_model_target,
             "evidenceEvent": copy.deepcopy(decision.evidence_event),
             "branchId": decision.branch_id,
+            "activityId": decision.activity_id,
+            "visualState": decision.visual_state,
+            "replayEntrance": decision.replay_entrance,
+            "attempt": decision.attempt,
+            "visualFocusRegion": decision.visual_focus_region,
         }
 
     @staticmethod
@@ -736,6 +752,9 @@ class CourseModeRuntimeAdapter:
             embodied_intent=EmbodiedIntent(value["embodiedIntent"]),
             may_model_target=value["mayModelTarget"],
             evidence_event=copy.deepcopy(value["evidenceEvent"]), branch_id=value["branchId"],
+            activity_id=value.get("activityId"), visual_state=value.get("visualState", "listen"),
+            replay_entrance=value.get("replayEntrance", False), attempt=value.get("attempt", 0),
+            visual_focus_region=value.get("visualFocusRegion"),
         )
 
     def snapshot(self) -> Dict[str, Any]:
@@ -2284,6 +2303,10 @@ class LessonRuntime:
             )
             return {"accepted": False, "code": "COURSE_SNAPSHOT_PERSIST_FAILED"}
         await self._flush_course_evidence_outbox()
+        if not operation_was_recorded:
+            decision = self.course_mode._decisions.get(result.get("decisionId"))
+            if decision is not None:
+                await self._send_course_activity_decision(decision)
         if name == "course_apply_response_plan" and self.course_mode.response_plan_requires_commit(arguments):
             decision = self.course_mode._decisions.get(arguments.get("decisionId"))
             if decision is not None:
@@ -2309,6 +2332,25 @@ class LessonRuntime:
         payload = json.dumps(frame, ensure_ascii=False)
         if len(payload.encode("utf-8")) > MAX_LESSON_FRAME_BYTES:
             raise ValueError("lesson embodied action frame is too large")
+        await self._send(payload)
+
+    async def _send_course_activity_decision(self, decision: CourseDecision) -> None:
+        if decision.activity_id is None:
+            return
+        frame = {
+            "type": "lesson_course_activity", "assignmentId": self.assignment_id,
+            "sessionId": self.session_id, "stepId": self._step_id,
+            "sequence": self._next_seq(),
+            "body": {
+                "contractVersion": "courseCompanion.v2.contract.v1",
+                "activityId": decision.activity_id, "visualState": decision.visual_state,
+                "embodiedIntent": decision.embodied_intent.value,
+                "retainStaticLayers": True, "replayEntrance": decision.replay_entrance,
+            },
+        }
+        payload = json.dumps(frame, ensure_ascii=False)
+        if len(payload.encode("utf-8")) > MAX_LESSON_FRAME_BYTES:
+            raise ValueError("lesson course activity frame is too large")
         await self._send(payload)
 
     async def _dispatch_course_embodied_decision(

@@ -5,10 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from core.lesson.course_orchestrator import SessionState, WordState
+from core.lesson.course_orchestrator import CourseDecision, SessionState, WordState
+from core.lesson.embodied_intent import EmbodiedIntent
 from core.lesson.course_snapshot_store import MemoryCourseModeSnapshotStore
 from core.lesson.runtime import LessonRuntime, course_mode_runtime_from_manifest
 from core.lesson.word_mastery import EvidenceLevel
+from tests.test_course_mode_curriculum import curriculum_contract
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "course-mode" / "course-mode-pilot-cat-ball.json"
@@ -16,6 +18,42 @@ FIXTURE = Path(__file__).parent / "fixtures" / "course-mode" / "course-mode-pilo
 
 def contract():
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
+
+
+@pytest.mark.asyncio
+async def test_curriculum_adapter_exposes_active_activity_and_restores_old_snapshot_defaults() -> None:
+    runtime = course_mode_runtime_from_manifest({"courseModeContract": curriculum_contract()}, enabled=True, clock=lambda: 0.0)
+    assert runtime is not None
+    runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
+    context = runtime.tool_context()
+    assert context["activeActivityId"] == "a1"
+    assert context["activities"][0]["targetIds"] == ["w01.hello", "w01.goodbye", "w01.friend"]
+    snapshot = runtime.snapshot()
+    for key in ("activeActivityId", "activityAttempts", "evidenceState", "regulationState"):
+        snapshot["orchestrator"].pop(key)
+    restored = runtime.restore(runtime.contract, snapshot, clock=lambda: 0.0)
+    assert restored.tool_context()["activeActivityId"] == "a1"
+
+
+@pytest.mark.asyncio
+async def test_lesson_runtime_emits_course_activity_frame_after_curriculum_decision() -> None:
+    sent = []
+    lesson = object.__new__(LessonRuntime)
+    lesson.assignment_id = "assignment-1"; lesson.session_id = "w01.session"
+    lesson._step_id = "a1"; lesson._seq = 0
+    async def send(payload): sent.append(json.loads(payload))
+    lesson._send = send
+    decision = CourseDecision(
+        "d1", True, SessionState.WORD_ACTIVE, "ADVANCE_ACTIVITY", "acknowledge_child",
+        None, None, EmbodiedIntent.PRESENT_CENTER, False, None,
+        activity_id="a2", visual_state="correct", replay_entrance=False,
+    )
+    await lesson._send_course_activity_decision(decision)
+    assert sent == [{
+        "type": "lesson_course_activity", "assignmentId": "assignment-1",
+        "sessionId": "w01.session", "stepId": "a1", "sequence": 1,
+        "body": {"contractVersion": "courseCompanion.v2.contract.v1", "activityId": "a2", "visualState": "correct", "embodiedIntent": "PRESENT_CENTER", "retainStaticLayers": True, "replayEntrance": False},
+    }]
 
 
 def test_v2_requires_explicit_flag_and_exact_contract_without_v1_fallback() -> None:

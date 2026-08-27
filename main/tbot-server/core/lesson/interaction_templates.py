@@ -79,3 +79,24 @@ class SafeSpeakingSession:
 def fun_pattern_prompt(pattern: str, target_word: str) -> str:
     template = FUN_PATTERN_PROMPTS.get(str(pattern or ""), FUN_PATTERN_PROMPTS["copyMyMove"])
     return template.format(word=str(target_word or "the word").strip() or "the word")
+
+
+def curriculum_outcome_name(
+    *,
+    semantic_class: str,
+    speech_class: str,
+    language: str,
+    intent: str,
+) -> str:
+    """Map child input to an authored curriculum outcome without inventing content."""
+    if intent in {"fatigue", "refusal", "help", "silence", "story"}:
+        return intent
+    if semantic_class == "meaning_vi" or language == "vi":
+        return "vietnamese"
+    if speech_class == "near":
+        return "near"
+    if semantic_class == "target_en" and speech_class == "exact":
+        return "correct"
+    if semantic_class == "silence" or speech_class == "silence":
+        return "silence"
+    return "incorrect"

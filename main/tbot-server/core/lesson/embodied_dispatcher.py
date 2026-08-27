@@ -214,7 +214,8 @@ class CourseEmbodiedDispatcher:
                 "actionId": action_id,
                 "actionGeneration": self._generation,
                 "intent": decision.embodied_intent.value,
-                "visualFocusRegion": FOCUS_BY_INTENT.get(
+                "visualFocusRegion": decision.visual_focus_region
+                or FOCUS_BY_INTENT.get(
                     decision.embodied_intent,
                     DEFAULT_FOCUS_REGION,
                 ),
