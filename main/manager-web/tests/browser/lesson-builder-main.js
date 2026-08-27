@@ -51,6 +51,8 @@ const sharedAssets = [
     ['greeting-teaching', 'greet-loop', '249a86cea2456b41ee5344445b0b83777a0ee7217ce435e7e9294ed7f39b12e0'],
     ['celebration', 'celebrate', '708d982dc9f2257a170ad1811c1afc230b5249a4139f975133a703ebdf39e105'],
   ].map(([role, file, sha256], index) => ({ assetId: `journey-${role}`, assetKey: `journey.robot.${role}`, category: 'robotPose', layer: 'robotOverlay', role, versionId: `20000000-0000-4000-8000-00000000000${index + 1}`, version: 1, url: `/tvideo-demo/assets/robot-alive/flight/${file}.webm`, mimeType: 'video/webm', sha256, bytes: 1000, width: 200, height: 220, usageCount: 0 })),
+  { assetId: 'admin-only-object', assetKey: 'object.admin-only', category: 'teachingObject', layer: 'teachingObject', versionId: 'admin-only-v1', version: 1, url: '/tvideo-demo/assets/objects/hay.png', mimeType: 'image/png', sha256: 'c'.repeat(64), bytes: 68, width: 192, height: 192, usageCount: 0, publicationState: 'published' },
+  { assetId: 'draft-admin-object', assetKey: 'object.draft-only', category: 'teachingObject', layer: 'teachingObject', versionId: 'draft-only-v1', version: 1, url: '/tvideo-demo/assets/objects/hay.png', mimeType: 'image/png', sha256: 'd'.repeat(64), bytes: 68, width: 192, height: 192, usageCount: 0, publicationState: 'draft' },
 ];
 const journeyPreset = { presetId: 'tvideoJourney', presetVersion: 1, locked: true, width: 480, height: 320, fps: 10, confettiSeed: 0x54424f54, confettiPieces: 64, rendererBuildSha256: 'a'.repeat(64), effects: { opening: {}, greet: {}, teach: {}, listen: {}, thinking: {}, correct: {}, 'retry-level-1': {}, 'retry-level-2': {}, 'retry-level-3': {}, celebrate: {}, 'word-transition': {} } };
 const validation = { valid: true, profiles: ['espTft'], budgets: { espTft: { errors: [], warnings: [], metrics: { assetCount: 9, uniqueAssetCount: 7, sharedAssetCount: 2, packBytes: 222000, estimatedVisualPeakBytes: 640000, offlineReady: true, allPathsTerminate: true } } } };
@@ -137,7 +139,7 @@ Object.assign(Api.lesson, {
   listSteps(id, ok) { ok(steps.map((step) => ({ ...step, visualRefs: [...(step.visualRefs || [])] }))); },
   listStepTypes(ok) { ok([{ stepType: 'greeting', completionClass: 'passive' }, { stepType: 'repeat', completionClass: 'interactive' }]); },
   listSharedBackgrounds(ok) { ok([]); },
-  listVisualAssets(filters, ok) { calls.visualFilters.push(filters); ok(filters.category ? sharedAssets.slice(0, 6).filter((asset) => asset.category === filters.category) : sharedAssets); },
+  listVisualAssets(filters, ok) { calls.visualFilters.push(filters); const catalog = courseModeEnabled ? sharedAssets : sharedAssets.slice(0, 6); ok(filters.category ? catalog.filter((asset) => asset.category === filters.category) : catalog); },
   setVisualRef(lessonId, stepKey, slot, assetVersionId, ok) {
     calls.visualRefSets.push({ lessonId, stepKey, slot, assetVersionId });
     const asset = sharedAssets.find((row) => row.versionId === assetVersionId);
@@ -179,7 +181,7 @@ Object.assign(Api.lesson, {
 });
 
 LessonEditor.components.HeaderBar = { name: 'HeaderBar', render: (h) => h('header') };
-LessonEditor.components.LessonAssetManager = { name: 'LessonAssetManager', props: ['lessonId'], mounted() { this.$emit('assets-loaded', sharedAssets); }, render: (h) => h('div') };
+LessonEditor.components.LessonAssetManager = { name: 'LessonAssetManager', props: ['lessonId'], mounted() { this.$emit('assets-loaded', sharedAssets.slice(0, 6)); }, render: (h) => h('div') };
 
 const router = new VueRouter({ routes: [{ path: '/', component: { render: (h) => h('div') } }] });
 await router.replace({ path: '/', query: { lessonId: 'lesson-1' } });
@@ -231,17 +233,25 @@ window.__MOUNT_COURSE_MODE_EDITOR__ = async () => {
     addStep: Boolean(vm.$el.querySelector('.add-row')),
     actionButtons: [...vm.$el.querySelectorAll('.advanced-steps-scroll button')].length,
   };
+  const timeline = courseEditor.$children.find((child) => child.$options.name === 'CourseModeActivityTimeline');
+  for (let index = 0; index < 40 && !timeline.objectKeys.includes('object.admin-only'); index += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+  const adminCatalogObjectSelectable = timeline.objectKeys.includes('object.admin-only');
+  const draftCatalogObjectExcluded = !timeline.objectKeys.includes('object.draft-only');
   courseEditor.courseModeDraft.activities[4].answerPolicy.targetTextVisible = true;
   courseEditor.courseModeDraft = JSON.parse(JSON.stringify(courseEditor.courseModeDraft));
   courseEditor.courseModeDirty = true;
   await courseEditor.$nextTick();
   const leakageWarning = Boolean(vm.$el.querySelector('[data-testid="course-mode-answer-leakage-warning"]'));
   courseEditor.courseModeDraft.activities[4].answerPolicy.targetTextVisible = false;
+  timeline.setVisualKey(timeline.draft.activities[0], 'objectAssetKey', 'object.admin-only');
+  const selectedCatalogObjectKey = timeline.draft.activities[0].visual.objectAssetKey;
+  timeline.setVisualKey(timeline.draft.activities[0], 'objectAssetKey', '');
+  const clearedObjectKey = timeline.draft.activities[0].visual.objectAssetKey;
   courseEditor.courseModeDraft = JSON.parse(JSON.stringify(courseEditor.courseModeDraft));
   await courseEditor.$nextTick();
   await courseEditor.saveCourseModeContract();
   for (let index = 0; index < 40 && courseEditor.courseModeSaving; index += 1) await new Promise((resolve) => setTimeout(resolve, 0));
-  return { ...initial, leakageWarning, saveCount: calls.courseModeSaves.length, savedChecksum: calls.courseModeSaves[0]?.contract.contractChecksum || '' };
+  return { ...initial, leakageWarning, adminCatalogObjectSelectable, draftCatalogObjectExcluded, selectedCatalogObjectKey, clearedObjectKey, saveCount: calls.courseModeSaves.length, savedChecksum: calls.courseModeSaves[0]?.contract.contractChecksum || '', savedObjectKey: calls.courseModeSaves[0]?.contract.activities[0].visual.objectAssetKey, savedFallback: calls.courseModeSaves[0]?.contract.activities[0].visual.fallback };
 };
 window.__TEST_CAPABILITY_ROUTE_LOGOUT_RACE__ = async () => {
   localStorage.setItem('token', 'route-session-a');

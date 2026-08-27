@@ -88,12 +88,12 @@
               <el-form-item label="Strategy"><el-input v-model="activity.visual.strategy" :disabled="disabled" @input="emitDraft" /></el-form-item>
               <el-form-item label="Fallback"><el-input v-model="activity.visual.fallback" :disabled="disabled" @input="emitDraft" /></el-form-item>
               <el-form-item label="Published background key">
-                <el-select v-model="activity.visual.backgroundAssetKey" clearable filterable :disabled="disabled" @change="emitDraft">
+                <el-select :value="activity.visual.backgroundAssetKey" clearable filterable :disabled="disabled" @change="setVisualKey(activity, 'backgroundAssetKey', $event)">
                   <el-option v-for="key in backgroundKeys" :key="key" :label="key" :value="key" />
                 </el-select>
               </el-form-item>
               <el-form-item label="Published object key">
-                <el-select v-model="activity.visual.objectAssetKey" clearable filterable :disabled="disabled" @change="emitDraft">
+                <el-select :value="activity.visual.objectAssetKey" clearable filterable :disabled="disabled" @change="setVisualKey(activity, 'objectAssetKey', $event)">
                   <el-option v-for="key in objectKeys" :key="key" :label="key" :value="key" />
                 </el-select>
               </el-form-item>
@@ -129,7 +129,7 @@
 </template>
 
 <script>
-import { courseModeActivityReport } from './lesson-builder-logic';
+import { courseModeActivityReport, normalizeCourseModeVisualKeys } from './lesson-builder-logic';
 
 const clone = (value) => JSON.parse(JSON.stringify(value || {}));
 
@@ -183,13 +183,17 @@ export default {
       this.$set(target, 'vietnameseMeanings', String(value).split(',').map((item) => item.trim()).filter(Boolean));
       this.emitDraft();
     },
+    setVisualKey(activity, field, value) {
+      this.$set(activity.visual, field, typeof value === 'string' && value.trim() ? value.trim() : null);
+      this.emitDraft();
+    },
     onOutcomeAction(outcome) {
       if (!['retry', 'support'].includes(outcome.action)) this.$delete(outcome, 'activityId');
       else if (!outcome.activityId && this.draft.activities.length) this.$set(outcome, 'activityId', this.draft.activities[0].activityId);
       this.emitDraft();
     },
     emitDraft() {
-      const next = clone(this.draft);
+      const next = normalizeCourseModeVisualKeys(this.draft);
       next.targets = (next.targets || []).map((target) => ({
         ...target,
         activityIds: (next.activities || []).filter((activity) => (activity.targetIds || []).includes(target.targetId)).map((activity) => activity.activityId),

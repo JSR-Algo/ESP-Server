@@ -193,6 +193,12 @@ try {
   assert.equal(courseModeResult.addStep, false);
   assert.equal(courseModeResult.actionButtons, 0);
   assert.equal(courseModeResult.leakageWarning, true);
+  assert.equal(courseModeResult.adminCatalogObjectSelectable, true);
+  assert.equal(courseModeResult.draftCatalogObjectExcluded, true);
+  assert.equal(courseModeResult.selectedCatalogObjectKey, 'object.admin-only');
+  assert.equal(courseModeResult.clearedObjectKey, null);
+  assert.equal(courseModeResult.savedObjectKey, null);
+  assert.equal(courseModeResult.savedFallback, 'robotActing');
   assert.equal(courseModeResult.saveCount, 1);
   assert.match(courseModeResult.savedChecksum, /^[a-f0-9]{64}$/);
   const courseModeMobileAudit = await auditLayoutAt(390);

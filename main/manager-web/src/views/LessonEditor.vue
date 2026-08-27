@@ -639,6 +639,7 @@ import {
   collectAssetReferences,
   isCourseModeAuthority as detectCourseModeAuthority,
   mergeAuthoringFields,
+  normalizeCourseModeVisualKeys,
   replaceStepAssetReference,
   validSimulationEvidence as validateSimulationEvidence,
 } from '@/components/lesson/lesson-builder-logic';
@@ -928,10 +929,20 @@ export default {
     },
     courseModeAssets() {
       const byIdentity = new Map();
-      [...this.bundleAssets, ...this.sharedVisualAssets].forEach((asset) => {
+      const publishedCatalog = [
+        ...(this.rawCinematicLibraries.backgroundScene || []),
+        ...(this.rawCinematicLibraries.teachingObject || []),
+      ].filter((asset) => asset && asset.publicationState === 'published'
+        && ['scene', 'teachingObject'].includes(asset.category));
+      [...this.bundleAssets, ...this.sharedVisualAssets, ...publishedCatalog]
+        .filter((asset) => asset
+          && (!asset.publicationState || asset.publicationState === 'published')
+          && (['scene', 'teachingObject'].includes(asset.category)
+            || ['backgroundScene', 'teachingObject'].includes(asset.layer)))
+        .forEach((asset) => {
         const identity = asset && (asset.versionId || asset.assetVersionId || `${asset.assetKey}:${asset.sha256}`);
         if (identity) byIdentity.set(identity, asset);
-      });
+        });
       return [...byIdentity.values()];
     },
     courseModeIsCurriculum() {
@@ -1324,7 +1335,7 @@ export default {
       this.courseModeError = '';
       this.courseModeSavedMessage = '';
       try {
-        const contract = await withCourseModeChecksum(this.courseModeDraft);
+        const contract = await withCourseModeChecksum(normalizeCourseModeVisualKeys(this.courseModeDraft));
         if (this.editorDestroying || requestId !== this.courseModeRequestId || lessonId !== this.lessonId) return false;
         Api.lesson.saveCourseModeContract(lessonId, contract, (response) => {
           if (this.editorDestroying || requestId !== this.courseModeRequestId || lessonId !== this.lessonId) return;

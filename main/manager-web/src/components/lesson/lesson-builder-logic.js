@@ -137,6 +137,24 @@ function courseModeActivityReport(contract) {
   };
 }
 
+function nullableAssetKey(value) {
+  const key = typeof value === 'string' ? value.trim() : '';
+  return key || null;
+}
+
+function normalizeCourseModeVisualKeys(contract) {
+  const next = clone(contract || {});
+  next.activities = (Array.isArray(next.activities) ? next.activities : []).map((activity) => ({
+    ...activity,
+    visual: activity && activity.visual ? {
+      ...activity.visual,
+      backgroundAssetKey: nullableAssetKey(activity.visual.backgroundAssetKey),
+      objectAssetKey: nullableAssetKey(activity.visual.objectAssetKey),
+    } : activity.visual,
+  }));
+  return next;
+}
+
 function assetIdentity(asset) {
   return asset.sha256 || asset.versionId || asset.path || asset.src || asset.assetKey;
 }
@@ -518,6 +536,7 @@ module.exports = {
   mergeAuthoringFields,
   isCourseModeAuthority,
   isProjectedCourseModeStep,
+  normalizeCourseModeVisualKeys,
   nextClonedAssetKey,
   replaceStepAssetReference,
   sameSimulationPreviewIdentity,

@@ -24,6 +24,7 @@ const {
   courseModeActivityReport,
   isCourseModeAuthority,
   isProjectedCourseModeStep,
+  normalizeCourseModeVisualKeys,
 } = require('../src/components/lesson/lesson-builder-logic');
 
 const protectedRecallActivity = {
@@ -63,6 +64,12 @@ assert.deepStrictEqual(courseModeActivityReport({ activities: [{
   ...protectedRecallActivity,
   answerPolicy: { ...protectedRecallActivity.answerPolicy, targetTextVisible: false },
 }] }), { totalSeconds: 60, overDuration: false, leakageActivityIds: [] });
+const normalizedClearedVisual = normalizeCourseModeVisualKeys({
+  activities: [{ visual: { backgroundAssetKey: '', objectAssetKey: '   ', fallback: 'robotActing' } }],
+});
+assert.strictEqual(normalizedClearedVisual.activities[0].visual.backgroundAssetKey, null);
+assert.strictEqual(normalizedClearedVisual.activities[0].visual.objectAssetKey, null);
+assert.strictEqual(normalizedClearedVisual.activities[0].visual.fallback, 'robotActing');
 
 const simulationIdentity = {
   checksum: 'checksum-a',
@@ -585,6 +592,10 @@ assert.match(courseModeTimelineSource, /expectedDurationSec/);
 assert.match(courseModeTimelineSource, /backgroundAssetKey/);
 assert.match(courseModeTimelineSource, /objectAssetKey/);
 assert.match(courseModeTimelineSource, /fallback/);
+assert.match(courseModeTimelineSource, /setVisualKey\(activity, 'objectAssetKey', \$event\)/);
+assert.match(editorSourceForDeletion, /rawCinematicLibraries\.backgroundScene/);
+assert.match(editorSourceForDeletion, /rawCinematicLibraries\.teachingObject/);
+assert.match(editorSourceForDeletion, /publicationState === 'published'/);
 assert.match(editorSourceForDeletion, /:deletion-guard="assetDeletionGuard"/);
 // studioSteps, not steps: an unsaved draft binding the asset must block too.
 assert.match(
