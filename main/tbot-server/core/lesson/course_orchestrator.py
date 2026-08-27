@@ -191,7 +191,7 @@ class CourseOrchestrator:
         if observation.now_ms - self.started_at_ms >= self.soft_deadline_ms:
             self.session_state = SessionState.CLOSING
             return self._decision(
-                "CLOSE_AT_DEADLINE" if self.contract.activity(self.active_activity_id).outcomes else "CLOSE_WITHOUT_SECOND_WORD",
+                "CLOSE_AT_DEADLINE" if self.contract.activity(self.active_activity_id).navigation_mode == "authoritative_graph" else "CLOSE_WITHOUT_SECOND_WORD",
                 embodied=EmbodiedIntent.GOODBYE_SMALL, activity_id=self.active_activity_id,
                 visual_state="completion",
             )
@@ -200,7 +200,7 @@ class CourseOrchestrator:
         except KeyError:
             return self._decision("INVALID_ACTIVITY_IGNORED", accepted=False, acknowledgment="retain_authoritative_state")
         if observation.intent in {"emotional_share", "refusal", "fatigue"} and (
-            not activity.outcomes or observation.intent == "emotional_share"
+            activity.navigation_mode != "authoritative_graph" or observation.intent == "emotional_share"
         ):
             self.session_state = SessionState.REGULATION_BREAK
             self._regulation_state = observation.intent
@@ -220,32 +220,32 @@ class CourseOrchestrator:
             activity.context_id == observation.context_id
             and (
                 observation.activity_id == self.active_activity_id
-                if activity.outcomes
+                if activity.navigation_mode == "authoritative_graph"
                 else self.active_target_id in activity.target_ids
             )
         )
         if not valid_identity:
             return self._decision("INVALID_ACTIVITY_IGNORED", accepted=False, acknowledgment="retain_authoritative_state")
-        if activity.outcomes:
-            return self._observe_authored_activity(activity, observation)
-        assessment_stage = activity.stage in {"RECALL", "TRANSFER", "DELAYED_RECALL"}
-        if (
-            observation.confidence_band != "high"
-            or observation.robot_audio_contaminated
-            or (assessment_stage and not observation.assessment_eligible)
-        ):
-            self.session_state = SessionState.TECHNICAL_RECOVERY
-            return self._decision("OWN_ASR_UNCERTAINTY", acknowledgment="robot_ears_unclear", question="invite_retry", embodied=EmbodiedIntent.LISTEN_STILL)
+        return self._observe_activity(activity, observation)
+
+    def _apply_evidence_policy(
+        self, activity: Any, observation: ChildObservation,
+    ) -> tuple[str, dict[str, object] | None, CourseDecision | None]:
         mastery = self.active_mastery
         mastery.set_target_text_visible(observation.target_text_visible)
         mastery.set_robot_audio_contaminated(observation.robot_audio_contaminated)
         evidence = None
         before_level = mastery.level
+        outcome_name = curriculum_outcome_name(
+            semantic_class=observation.semantic_class, speech_class=observation.speech_class,
+            language=observation.language, intent=observation.intent,
+        )
         if activity.stage == "UNDERSTAND" and observation.semantic_class == "meaning_vi":
             result = mastery.record_meaning(
                 evidence_id=observation.observation_id, activity_id=observation.activity_id, context_id=observation.context_id,
             )
             self.word_state = WordState.IMITATE
+            outcome_name = "vietnamese"
         elif activity.stage == "RECALL":
             result = mastery.record_speech(
                 evidence_id=observation.observation_id, activity_id=observation.activity_id,
@@ -254,21 +254,7 @@ class CourseOrchestrator:
                 assessment_eligible=observation.assessment_eligible, confidence_band=observation.confidence_band,
             )
             if result.level is not EvidenceLevel.INDEPENDENT_RECALL:
-                self.session_state = SessionState.WORD_ACTIVE
-                return self._decision(
-                    "MODEL_AND_SUPPORT", teaching="model_target_once",
-                    question="invite_supported_speech", embodied=EmbodiedIntent.MODEL_WORD,
-                    may_model=True,
-                    evidence=(
-                        {
-                            "targetId": self.active_target_id, "evidenceLevel": result.level.value,
-                            "activityId": observation.activity_id, "contextId": observation.context_id,
-                            "assessmentConfidenceBand": observation.confidence_band,
-                            "reviewNeeded": result.review_needed,
-                        }
-                        if result.accepted and result.level is not before_level else None
-                    ),
-                )
+                outcome_name = "help"
         elif (
             activity.stage == "TRANSFER"
             and observation.semantic_class == "target_en"
@@ -280,13 +266,14 @@ class CourseOrchestrator:
                 context_id=observation.context_id,
             )
             self.word_state = WordState.DELAYED_RECALL
+            outcome_name = "near" if observation.speech_class == "near" else "correct"
         elif activity.stage == "DELAYED_RECALL":
             if (
                 self.word_state is not WordState.DELAYED_RECALL
                 or mastery.level is not EvidenceLevel.TRANSFERRED
             ):
                 self.session_state = SessionState.WORD_ACTIVE
-                return self._decision(
+                return outcome_name, None, self._decision(
                     "INVALID_ACTIVITY_IGNORED", accepted=False,
                     acknowledgment="retain_authoritative_state",
                 )
@@ -301,9 +288,9 @@ class CourseOrchestrator:
                 ),
             )
             self.word_state = WordState.DONE_FOR_SESSION
+            outcome_name = "correct" if observation.semantic_class == "target_en" and observation.speech_class in {"exact", "near"} else "incorrect"
         else:
-            self.session_state = SessionState.WORD_ACTIVE
-            return self._decision("ACKNOWLEDGE_GUIDE_INVITE", question="one_next_question")
+            return outcome_name, None, None
         if result.accepted and (result.level is not before_level or result.review_needed):
             evidence = {
                 "targetId": self.active_target_id, "evidenceLevel": result.level.value,
@@ -311,12 +298,12 @@ class CourseOrchestrator:
                 "assessmentConfidenceBand": observation.confidence_band,
                 "reviewNeeded": result.review_needed,
             }
-        self.session_state = SessionState.WORD_ACTIVE
-        return self._decision("ACKNOWLEDGE_GUIDE_INVITE", evidence=evidence, question="one_next_question")
+        return outcome_name, evidence, None
 
-    def _observe_authored_activity(self, activity: Any, observation: ChildObservation) -> CourseDecision:
+    def _observe_activity(self, activity: Any, observation: ChildObservation) -> CourseDecision:
         if observation.activity_id != self.active_activity_id:
-            return self._decision("INVALID_ACTIVITY_IGNORED", accepted=False, acknowledgment="retain_authoritative_state", activity_id=self.active_activity_id)
+            if activity.navigation_mode == "authoritative_graph":
+                return self._decision("INVALID_ACTIVITY_IGNORED", accepted=False, acknowledgment="retain_authoritative_state", activity_id=self.active_activity_id)
         if (
             observation.confidence_band != "high"
             or observation.robot_audio_contaminated
@@ -324,7 +311,13 @@ class CourseOrchestrator:
         ):
             self.session_state = SessionState.TECHNICAL_RECOVERY
             return self._decision("OWN_ASR_UNCERTAINTY", acknowledgment="robot_ears_unclear", question="invite_retry", embodied=EmbodiedIntent.LISTEN_STILL, activity_id=activity.activity_id, visual_state="retry", attempt=self._activity_attempts.get(activity.activity_id, 0), visual_focus_region=activity.visual_focus_region)
-        outcome_name = curriculum_outcome_name(semantic_class=observation.semantic_class, speech_class=observation.speech_class, language=observation.language, intent=observation.intent)
+        evidence = None
+        if activity.evidence_policy == "word_mastery":
+            outcome_name, evidence, terminal = self._apply_evidence_policy(activity, observation)
+            if terminal is not None:
+                return terminal
+        else:
+            outcome_name = curriculum_outcome_name(semantic_class=observation.semantic_class, speech_class=observation.speech_class, language=observation.language, intent=observation.intent)
         outcome = activity.outcomes.get(outcome_name)
         if outcome is None and outcome_name in {"correct", "near", "vietnamese"}:
             outcome = activity.outcomes.get("continue") or activity.outcomes.get("finished")
@@ -333,10 +326,28 @@ class CourseOrchestrator:
         if outcome is None and outcome_name in {"fatigue", "refusal"}:
             outcome = activity.outcomes.get("regulationBreak")
         if outcome is None:
+            if outcome_name == "incorrect":
+                attempt = self._activity_attempts.get(activity.activity_id, 0) + 1
+                self._activity_attempts[activity.activity_id] = attempt
+                return self._decision("SUPPORT_WITH_CLUE", teaching="authored_clue", question="invite_retry", embodied=EmbodiedIntent(activity.embodied_intent), activity_id=activity.activity_id, visual_state="incorrect", visual_focus_region=activity.visual_focus_region, attempt=attempt)
+            if outcome_name == "silence":
+                attempt = self._activity_attempts.get(activity.activity_id, 0) + 1
+                self._activity_attempts[activity.activity_id] = attempt
+                return self._decision("OFFER_NONVERBAL_CHOICE", acknowledgment="honor_silence", question="offer_point_or_pause_choice", embodied=EmbodiedIntent.PAUSE_CHOICE, activity_id=activity.activity_id, visual_state="listen", visual_focus_region=activity.visual_focus_region, attempt=attempt)
+            if outcome_name == "help":
+                attempt = self._activity_attempts.get(activity.activity_id, 0) + 1
+                self._activity_attempts[activity.activity_id] = attempt
+                return self._decision("MODEL_AND_SUPPORT", acknowledgment="acknowledge_help", teaching="model_target_once", question="invite_supported_speech", embodied=EmbodiedIntent(activity.embodied_intent), may_model=True, activity_id=activity.activity_id, visual_state="retry", visual_focus_region=activity.visual_focus_region, attempt=attempt)
             return self._decision("ACKNOWLEDGE_GUIDE_INVITE", activity_id=activity.activity_id, acknowledgment="acknowledge_child", question="one_next_question")
         action = outcome["action"]
         attempt = self._activity_attempts.get(activity.activity_id, 0)
         acknowledgment = "acknowledge_vietnamese_meaning" if outcome_name == "vietnamese" else "acknowledge_child"
+        if activity.navigation_mode == "target_stage" and action == "advance":
+            self.session_state = SessionState.WORD_ACTIVE
+            return self._decision(
+                "ACKNOWLEDGE_GUIDE_INVITE", acknowledgment=acknowledgment,
+                question="one_next_question", evidence=evidence,
+            )
         if action in {"retry", "support"}:
             attempt += 1
             self._activity_attempts[activity.activity_id] = attempt
@@ -352,6 +363,7 @@ class CourseOrchestrator:
                 may_model=help_requested, activity_id=self.active_activity_id,
                 visual_state="retry" if action == "retry" else "incorrect", attempt=attempt,
                 visual_focus_region=resulting.visual_focus_region,
+                evidence=evidence,
             )
         if action == "pause":
             self.session_state = SessionState.REGULATION_BREAK

@@ -249,7 +249,7 @@ class CourseModeRuntimeAdapter:
         self._latest_decision_id = decision.decision_id
         if (
             decision.activity_id is not None
-            and bool(self.contract.activity(decision.activity_id).outcomes)
+            and self.contract.activity(decision.activity_id).navigation_mode == "authoritative_graph"
             and decision.decision_id not in self._pending_activity_decision_ids
         ):
             self._pending_activity_decision_ids.append(decision.decision_id)

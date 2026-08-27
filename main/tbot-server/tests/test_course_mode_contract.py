@@ -26,6 +26,9 @@ def test_parses_frozen_task00_contract_into_immutable_targets_and_activities() -
     assert contract.secondary is not None
     assert contract.secondary.target_id == "toys.ball"
     assert contract.activity("cat-recall-visual-02").stage == "RECALL"
+    assert contract.activities[0].target_ids == ("animals.cat",)
+    assert contract.activities[0].outcomes["help"]["activityId"] == "cat-discover-center-01"
+    assert contract.activities[0].evidence_policy == "word_mastery"
     with pytest.raises(TypeError):
         contract.activities[0].answer_policy["targetTextVisible"] = True
 

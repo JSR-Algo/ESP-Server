@@ -62,7 +62,7 @@ def curriculum_contract() -> dict:
                     "minElapsedSinceFullModelMs": 20_000 if stage in {"RECALL", "TRANSFER", "DELAYED_RECALL"} else 0,
                     "minInterveningActivityCount": 1 if stage in {"RECALL", "TRANSFER", "DELAYED_RECALL"} else 0,
                 },
-                "listeningTransition": ["speech_complete", "assessment_window_open"],
+                "listeningTransition": ["speech_complete", "gesture_settled", "head_centered", "arms_lowered", "motor_stopped", "assessment_window_open"],
                 "reducedMotionFallback": "face_and_transient_focus_cue",
                 "modalities": ["speech_en", "speech_vi", "choice", "silence", "help"],
                 "expectedDurationSec": 60,
@@ -240,6 +240,16 @@ def test_real_compiler_outcome_vocabulary_completes_and_regulates_without_generi
     runtime.session_state = SessionState.WORD_ACTIVE; runtime.active_activity_id = "a7"
     paused = runtime.observe(observation("a7", intent="fatigue"))
     assert paused.action == "RESPOND_WITHOUT_REDIRECT" and paused.next_state is SessionState.REGULATION_BREAK
+    for semantic, speech, intent, expected, may_model in (
+        ("other", "incorrect", "answer", "SUPPORT_WITH_CLUE", False),
+        ("silence", "silence", "silence", "OFFER_NONVERBAL_CHOICE", False),
+        ("help", "not_applicable", "help", "MODEL_AND_SUPPORT", True),
+    ):
+        runtime = CourseOrchestrator(contract, started_at_ms=0, soft_deadline_ms=480_000)
+        runtime.session_state = SessionState.WORD_ACTIVE; runtime.active_activity_id = "a7"
+        decision = runtime.observe(observation("a7", semantic=semantic, speech=speech, intent=intent))
+        assert decision.action == expected and decision.activity_id == "a7"
+        assert decision.may_model_target is may_model
 
 
 @pytest.mark.parametrize("semantic,speech,intent,expected", [
@@ -270,6 +280,12 @@ def test_real_compiler_continue_help_regulation_vocabulary(semantic, speech, int
     lambda value: value["activities"][0].update({"visualFocusRegion": "focus.nowhere"}),
     lambda value: value["activities"][0].update({"stage": "INVENTED"}),
     lambda value: value["activities"][0]["outcomes"]["correct"].update({"extra": True}),
+    lambda value: value["activities"][0].update({"activityType": ""}),
+    lambda value: value["activities"][0].update({"listeningTransition": ["speech_complete"]}),
+    lambda value: value["activities"][0].update({"reducedMotionFallback": "invented"}),
+    lambda value: value["activities"][0]["visual"].update({"strategy": "invented"}),
+    lambda value: value["activities"][0]["visual"].update({"fallback": "invented"}),
+    lambda value: value["activities"][0]["visual"].update({"strategy": "publishedTeachingObject", "objectAssetKey": None}),
 ])
 def test_curriculum_parser_rejects_noncanonical_registries_and_renderer(mutate) -> None:
     value = curriculum_contract(); mutate(value); value["contractChecksum"] = _checksum(value)

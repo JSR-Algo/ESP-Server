@@ -73,6 +73,9 @@ _OUTCOME_NAMES = {"success", "correct", "near", "incorrect", "silence", "vietnam
 _MODALITIES = {"speech_en", "speech_vi", "choice", "gesture", "silence", "help"}
 _STAGES = {"OPENING", "DISCOVER", "UNDERSTAND", "GUIDED_ACTION", "SUPPORTED_SPEECH", "RECALL", "TRANSFER", "DELAYED_RECALL", "CLOSING"}
 _VISUAL = {"strategy", "backgroundAssetKey", "objectAssetKey", "fallback"}
+_VISUAL_STRATEGIES = {"embodiedFallback", "publishedTeachingObject"}
+_VISUAL_FALLBACKS = {"gesture", "robotActing", "sceneOnly", "visualFree"}
+_LISTENING_TRANSITION = ("speech_complete", "gesture_settled", "head_centered", "arms_lowered", "motor_stopped", "assessment_window_open")
 FROZEN_CONTRACT_CHECKSUM = "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264"
 CANONICAL_V5_CONTRACT_CHECKSUM = "332fb68e340abb94c0178dd83b06ed0939d6e2d63c17d48bcb09dab8cc6bb3be"
 
@@ -150,6 +153,8 @@ class CourseActivity:
     expected_duration_sec: int = 0
     outcomes: Mapping[str, Mapping[str, Any]] = MappingProxyType({})
     visual: Mapping[str, Any] = MappingProxyType({})
+    navigation_mode: str = "authoritative_graph"
+    evidence_policy: str = "shared_outcome"
 
     @property
     def target_id(self) -> str:
@@ -298,6 +303,12 @@ class CourseModeContract:
             stage = cast(str, a["stage"])
             if curriculum and stage not in _STAGES:
                 _fail("INVALID_ACTIVITY_STAGE", "activity stage is not supported")
+            if (
+                not isinstance(a["activityType"], str)
+                or not a["activityType"].strip()
+                or len(a["activityType"]) > 128
+            ):
+                _fail("INVALID_ACTIVITY_TYPE", "activity type must be bounded text")
             if stage in _ASSESSMENT and (
                 any(
                     answer[k] is not False
@@ -318,6 +329,8 @@ class CourseModeContract:
             duration = 0
             outcomes = MappingProxyType({})
             visual = MappingProxyType({})
+            navigation_mode = "authoritative_graph" if curriculum else "target_stage"
+            evidence_policy = "shared_outcome" if curriculum else "word_mastery"
             if curriculum:
                 mods = a["modalities"]
                 if not isinstance(mods, list) or not mods or not set(mods) <= _MODALITIES:
@@ -349,17 +362,37 @@ class CourseModeContract:
                     for key in ("backgroundAssetKey", "objectAssetKey")
                 ) or not isinstance(authored_visual["strategy"], str) or not isinstance(authored_visual["fallback"], str):
                     _fail("INVALID_VISUAL", "visual values are invalid")
+                if authored_visual["strategy"] not in _VISUAL_STRATEGIES or authored_visual["fallback"] not in _VISUAL_FALLBACKS:
+                    _fail("INVALID_VISUAL", "visual strategy or fallback is unsupported")
+                if (
+                    authored_visual["strategy"] == "publishedTeachingObject"
+                    and authored_visual["objectAssetKey"] is None
+                ) or (
+                    authored_visual["strategy"] == "embodiedFallback"
+                    and authored_visual["objectAssetKey"] is not None
+                ):
+                    _fail("INVALID_VISUAL", "visual strategy does not match object binding")
                 visual = _freeze(authored_visual)
+            else:
+                outcomes = MappingProxyType({
+                    "correct": MappingProxyType({"action": "advance"}),
+                    "near": MappingProxyType({"action": "advance"}),
+                    "vietnamese": MappingProxyType({"action": "advance"}),
+                    "incorrect": MappingProxyType({"action": "advance"}),
+                    "silence": MappingProxyType({"action": "advance"}),
+                    "help": MappingProxyType({"action": "support", "activityId": aid}),
+                    "regulationBreak": MappingProxyType({"action": "pause"}),
+                })
             if a["embodiedIntent"] not in intents:
                 _fail("UNSUPPORTED_INTENT", "embodied intent is not registered")
             if a["evidenceName"] not in evidence:
                 _fail("UNSUPPORTED_EVIDENCE", "evidence name is not registered")
             if a["visualFocusRegion"] not in regions:
                 _fail("INVALID_VISUAL_FOCUS", "activity focus region is not registered")
-            if not isinstance(a["listeningTransition"], list) or not all(
-                isinstance(item, str) and item for item in a["listeningTransition"]
-            ):
+            if tuple(a["listeningTransition"]) != _LISTENING_TRANSITION:
                 _fail("INVALID_ACTIVITY_FIELDS", "listening transition is invalid")
+            if a["reducedMotionFallback"] != "face_and_transient_focus_cue":
+                _fail("INVALID_ACTIVITY_FIELDS", "reduced motion fallback is invalid")
             activities.append(
                 CourseActivity(
                     aid,
@@ -377,6 +410,8 @@ class CourseModeContract:
                     duration,
                     outcomes,
                     visual,
+                    navigation_mode,
+                    evidence_policy,
                 )
             )
         if curriculum and total > session["softDeadlineSec"]:
