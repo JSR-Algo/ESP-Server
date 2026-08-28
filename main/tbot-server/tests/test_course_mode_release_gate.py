@@ -612,6 +612,35 @@ def test_physical_preflight_rejects_dirty_cross_repository_authority_before_comm
     assert not marker.exists()
 
 
+@pytest.mark.parametrize(
+    "relative",
+    ["main/manager-web/src/dirty.js", "shared/admin-runtime.txt"],
+)
+def test_physical_preflight_rejects_dirty_admin_paths_outside_unselected_tests(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _commit_then_dirty(candidate, "adminEsp", relative)
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    marker = tmp_path / "must-not-run"
+    monkeypatch.setattr(
+        gate, "_command_for_lane",
+        lambda _lane, _candidate: (
+            sys.executable, "-c", f"from pathlib import Path;Path({str(marker)!r}).touch()",
+        ),
+    )
+    monkeypatch.setattr(gate, "lane_candidate_paths", lambda _lane, _candidate: ())
+
+    result = gate.run_gate(
+        candidate_file, "physical-preflight",
+        runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "physical-tft-preflight"
+    assert not marker.exists()
+
+
 def test_physical_preflight_allows_protected_unselected_voice_exception(
     candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

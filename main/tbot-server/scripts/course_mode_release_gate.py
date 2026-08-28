@@ -401,6 +401,8 @@ def lane_dirty_exceptions_authorized(lane: Lane, candidate: dict) -> bool:
     selected = set(lane_candidate_paths(lane, candidate))
     for relative in dirty:
         if not relative.startswith("main/tbot-server/"):
+            if lane.name == "physical-tft-preflight":
+                return False
             continue
         path = Path(relative)
         is_unselected_standalone_test = (
