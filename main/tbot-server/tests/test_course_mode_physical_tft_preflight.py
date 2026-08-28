@@ -240,6 +240,12 @@ def valid_input(session: Path, tmp_path: Path) -> dict:
         "robotMac": "14:c1:9f:d1:ac:20",
         "sessionId": SESSION_ID,
         "materializedPackRoot": str(session / "assets"),
+        "partitionTableSha256": hashlib.sha256(
+            json.dumps(partitions, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "buildToolVersion": "5.3.2",
+        "buildConfigSha256": hashlib.sha256(b"sdkconfig").hexdigest(),
+        "materializerVersion": "course-mode-curriculum.v2",
     }
     expected_ref = _write_json(tmp_path / "expected-physical-identity.json", expected_identity)
     EXPECTED_IDENTITIES[str(session)] = (expected_identity, expected_ref)
@@ -256,7 +262,7 @@ def valid_input(session: Path, tmp_path: Path) -> dict:
     materialization["authorization"] = {
         "algorithm": "sha256",
         "expectedIdentitySha256": expected_ref["sha256"],
-        "receiptDigest": hashlib.sha256(
+        "integrityDigest": hashlib.sha256(
             json.dumps(materialization, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest(),
     }
@@ -277,7 +283,7 @@ def valid_input(session: Path, tmp_path: Path) -> dict:
         },
         "expectedIdentitySha256": expected_ref["sha256"],
     }
-    firmware_receipt["receiptDigest"] = hashlib.sha256(
+    firmware_receipt["integrityDigest"] = hashlib.sha256(
         json.dumps(firmware_receipt, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     firmware_ref = _write_json(session / "firmware-build-receipt.json", firmware_receipt)
@@ -480,7 +486,7 @@ def _rewrite_materialization(document, mutate):
         ).encode()
     ).hexdigest()
     unsigned = {key: value for key, value in body.items() if key != "authorization"}
-    body["authorization"]["receiptDigest"] = hashlib.sha256(
+    body["authorization"]["integrityDigest"] = hashlib.sha256(
         json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     document["materializationReceipt"] = _write_json(
@@ -581,15 +587,15 @@ def test_external_identity_and_receipts_fail_closed(tmp_path, session_dir):
 
     unsigned = deepcopy(base)
     receipt = json.loads(Path(base["materializationReceipt"]["path"]).read_text())
-    receipt["authorization"].pop("receiptDigest")
+    receipt["authorization"].pop("integrityDigest")
     unsigned["materializationReceipt"] = _write_json(session_dir / "unsigned-materialization.json", receipt)
     assert "materialization.authorization" in _validate(unsigned)
 
     firmware_drift = deepcopy(base)
     firmware = json.loads(Path(base["firmwareBuildReceipt"]["path"]).read_text())
     firmware["app"]["sha256"] = hashlib.sha256(b"other-app").hexdigest()
-    unsigned_firmware = {key: value for key, value in firmware.items() if key != "receiptDigest"}
-    firmware["receiptDigest"] = hashlib.sha256(
+    unsigned_firmware = {key: value for key, value in firmware.items() if key != "integrityDigest"}
+    firmware["integrityDigest"] = hashlib.sha256(
         json.dumps(unsigned_firmware, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     firmware_drift["firmwareBuildReceipt"] = _write_json(session_dir / "firmware-drift.json", firmware)
@@ -618,6 +624,53 @@ def test_nvs_visual_identifiers_and_parent_symlinks_fail_closed(tmp_path, sessio
         linked_parent / Path(base["visualPack"]["phases"][0]["layers"][0]["assetPath"]).name
     )
     assert "visual_pack.asset_path" in _validate(linked)
+
+
+def test_partition_table_is_fixed_by_external_identity(tmp_path, session_dir):
+    base = valid_input(session_dir, tmp_path)
+    snapshot = json.loads(Path(base["flashPlan"]["partitionSnapshot"]["path"]).read_text())
+    snapshot["partitions"][2].update(size="0x3fff", end="0xcfff")
+    snapshot["partitions"][3].update(offset="0xcfff", end="0xefff")
+    snapshot["partitions"][4].update(offset="0xefff", end="0xffff")
+    snapshot["partitions"][5].update(offset="0xffff", size="0x10001", end="0x20000")
+    snapshot["snapshotChecksum"] = hashlib.sha256(
+        json.dumps(snapshot["partitions"], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    changed = deepcopy(base)
+    changed["flashPlan"]["partitionSnapshot"] = _write_json(session_dir / "shifted-partitions.json", snapshot)
+    reasons = _validate(changed)
+    assert "flash.partition_snapshot.anchor" in reasons
+    assert "flash.partition_snapshot.table" in reasons
+
+
+def test_same_byte_dirty_exception_symlink_is_rejected(tmp_path, session_dir):
+    base = valid_input(session_dir, tmp_path)
+    esp_root = Path(base["repositories"]["esp"]["path"])
+    protected = esp_root / VOICE_PATH
+    same_bytes = tmp_path / "same-voice.py"
+    same_bytes.write_bytes(protected.read_bytes())
+    protected.unlink()
+    protected.symlink_to(same_bytes)
+    assert "repository.esp.dirty_exception_symlink" in _validate(base)
+
+
+def test_build_and_materializer_versions_are_externally_anchored(tmp_path, session_dir):
+    base = valid_input(session_dir, tmp_path)
+    firmware = json.loads(Path(base["firmwareBuildReceipt"]["path"]).read_text())
+    firmware["buildToolVersion"] = "9.9.9"
+    unsigned = {key: value for key, value in firmware.items() if key != "integrityDigest"}
+    firmware["integrityDigest"] = hashlib.sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    changed = deepcopy(base)
+    changed["firmwareBuildReceipt"] = _write_json(session_dir / "rewritten-build.json", firmware)
+    assert "firmware_receipt.anchor" in _validate(changed)
+
+    materialization = deepcopy(base)
+    _rewrite_materialization(
+        materialization, lambda body: body.update(materializerVersion="course-mode-curriculum.v999")
+    )
+    assert "materialization.anchor" in _validate(materialization)
 
 
 def test_external_identity_duplicate_keys_and_symlink_path_are_rejected(tmp_path, session_dir):

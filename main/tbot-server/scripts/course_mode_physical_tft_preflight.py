@@ -53,6 +53,40 @@ TOP_FIELDS = {
     "nvsPreservation",
 }
 REF_FIELDS = {"path", "algorithm", "sha256"}
+EXPECTED_PARTITIONS = [
+    {"name": "bootloader", "offset": "0x0", "size": "0x8000", "end": "0x8000", "protected": True},
+    {
+        "name": "partition-table",
+        "offset": "0x8000",
+        "size": "0x1000",
+        "end": "0x9000",
+        "protected": True,
+    },
+    {"name": "nvs", "offset": "0x9000", "size": "0x4000", "end": "0xd000", "protected": True},
+    {"name": "ota-data", "offset": "0xd000", "size": "0x2000", "end": "0xf000", "protected": True},
+    {"name": "phy-init", "offset": "0xf000", "size": "0x1000", "end": "0x10000", "protected": True},
+    {
+        "name": "reserved",
+        "offset": "0x10000",
+        "size": "0x10000",
+        "end": "0x20000",
+        "protected": True,
+    },
+    {
+        "name": "application",
+        "offset": "0x20000",
+        "size": "0x7e0000",
+        "end": "0x800000",
+        "protected": False,
+    },
+    {
+        "name": "generated-assets",
+        "offset": "0x800000",
+        "size": "0x800000",
+        "end": "0x1000000",
+        "protected": True,
+    },
+]
 FORBIDDEN_OUTPUT = re.compile(r"(?i)(bearer|password|private.?key|secret.?value|transcript|raw.?speech|audio.?data)")
 
 
@@ -121,13 +155,17 @@ def _within(path: Path, root: Path) -> bool:
         return False
 
 
+def _path_has_symlink(path: Path) -> bool:
+    return any(component.is_symlink() for component in (path, *path.parents))
+
+
 def _safe_file(value: object, session: Path | None) -> tuple[Path | None, str | None]:
     if not isinstance(value, str):
         return None, "type"
     path = Path(value)
     if not path.is_absolute() or session is None:
         return None, "absolute"
-    if any(component.is_symlink() for component in (path, *path.parents)):
+    if _path_has_symlink(path):
         return None, "symlink"
     try:
         resolved = path.resolve(strict=True)
@@ -145,7 +183,7 @@ def _absolute_regular_file(value: object) -> tuple[Path | None, str | None]:
     path = Path(value)
     if not path.is_absolute():
         return None, "absolute"
-    if any(component.is_symlink() for component in (path, *path.parents)):
+    if _path_has_symlink(path):
         return None, "symlink"
     try:
         resolved = path.resolve(strict=True)
@@ -272,12 +310,7 @@ def _validate_repositories(
             continue
         path_value = repo.get("path")
         path = Path(path_value) if isinstance(path_value, str) else None
-        if (
-            path is None
-            or not path.is_absolute()
-            or not path.is_dir()
-            or any(item.is_symlink() for item in (path, *path.parents))
-        ):
+        if path is None or not path.is_absolute() or not path.is_dir() or _path_has_symlink(path):
             reasons.append(f"{prefix}.path")
         if not isinstance(repo.get("sha"), str) or SHA40.fullmatch(repo["sha"]) is None:
             reasons.append(f"{prefix}.sha")
@@ -294,10 +327,12 @@ def _validate_repositories(
                     reasons.append(f"{prefix}.dirty_exceptions")
                     continue
                 candidate = path / item["path"] if isinstance(item.get("path"), str) else None
-                if (
-                    candidate is None
-                    or not candidate.is_file()
-                    or hashlib.sha256(candidate.read_bytes()).hexdigest() != item.get("sha256")
+                if candidate is None:
+                    reasons.append(f"{prefix}.dirty_exceptions")
+                elif _path_has_symlink(candidate):
+                    reasons.append(f"{prefix}.dirty_exception_symlink")
+                elif not candidate.is_file() or hashlib.sha256(candidate.read_bytes()).hexdigest() != item.get(
+                    "sha256"
                 ):
                     reasons.append(f"{prefix}.dirty_exception_hash")
     if task9 != TASK9_SHA:
@@ -339,6 +374,10 @@ def _validate_expected_identity(value: object, reasons: list[str]) -> dict[str, 
         "robotMac",
         "sessionId",
         "materializedPackRoot",
+        "partitionTableSha256",
+        "buildToolVersion",
+        "buildConfigSha256",
+        "materializerVersion",
     }
     if not _record(value) or set(value) != fields:
         reasons.append("expected_identity.schema")
@@ -364,7 +403,14 @@ def _validate_expected_identity(value: object, reasons: list[str]) -> dict[str, 
         != (CONTRACT_VERSION, RENDERER, LAYOUT, CONTRACT_CHECKSUM)
         or any(
             not _real_sha(value.get(field))
-            for field in ("manifestChecksum", "stepsChecksum", "visualPackChecksum", "appSha256")
+            for field in (
+                "manifestChecksum",
+                "stepsChecksum",
+                "visualPackChecksum",
+                "appSha256",
+                "partitionTableSha256",
+                "buildConfigSha256",
+            )
         )
         or any(
             not isinstance(value.get(field), str) or SHA40.fullmatch(value[field]) is None
@@ -372,6 +418,10 @@ def _validate_expected_identity(value: object, reasons: list[str]) -> dict[str, 
         )
         or type(value.get("appSize")) is not int
         or value["appSize"] <= 0
+        or not isinstance(value.get("buildToolVersion"), str)
+        or not value["buildToolVersion"]
+        or not isinstance(value.get("materializerVersion"), str)
+        or not value["materializerVersion"]
         or _normal_mac(value.get("robotMac")) != ROBOT_MAC
         or not _valid_uuid(value.get("sessionId"))
     ):
@@ -379,12 +429,7 @@ def _validate_expected_identity(value: object, reasons: list[str]) -> dict[str, 
     for field in ("backendWorktree", "materializedPackRoot"):
         raw = value.get(field)
         path = Path(raw) if isinstance(raw, str) else None
-        if (
-            path is None
-            or not path.is_absolute()
-            or not path.is_dir()
-            or any(item.is_symlink() for item in (path, *path.parents))
-        ):
+        if path is None or not path.is_absolute() or not path.is_dir() or _path_has_symlink(path):
             reasons.append(f"expected_identity.{field}")
     return value if len(reasons) == initial_reason_count else None
 
@@ -437,7 +482,11 @@ def _validate_materialization(
     ):
         reasons.append("materialization.artifact_checksum")
     authorization = value.get("authorization")
-    if not _record(authorization) or set(authorization) != {"algorithm", "expectedIdentitySha256", "receiptDigest"}:
+    if not _record(authorization) or set(authorization) != {
+        "algorithm",
+        "expectedIdentitySha256",
+        "integrityDigest",
+    }:
         reasons.append("materialization.authorization")
     else:
         unsigned = {key: item for key, item in value.items() if key != "authorization"}
@@ -445,13 +494,14 @@ def _validate_materialization(
         if (
             authorization.get("algorithm") != "sha256"
             or authorization.get("expectedIdentitySha256") != expected_sha
-            or authorization.get("receiptDigest") != digest
+            or authorization.get("integrityDigest") != digest
         ):
             reasons.append("materialization.authorization")
     if expected is not None and (
         value.get("backendGitSha") != expected.get("backendGitSha")
         or value.get("backendWorktree") != expected.get("backendWorktree")
         or value.get("sessionId") != expected.get("sessionId")
+        or value.get("materializerVersion") != expected.get("materializerVersion")
     ):
         reasons.append("materialization.anchor")
     if course != {"courseId": COURSE_ID, "courseKey": COURSE_KEY}:
@@ -646,12 +696,12 @@ def _validate_firmware_receipt(
         "buildConfigSha256",
         "app",
         "expectedIdentitySha256",
-        "receiptDigest",
+        "integrityDigest",
     }
     if not _record(value) or set(value) != fields:
         reasons.append("firmware_receipt.schema")
         return None
-    unsigned = {key: item for key, item in value.items() if key != "receiptDigest"}
+    unsigned = {key: item for key, item in value.items() if key != "integrityDigest"}
     digest = hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     app = value.get("app")
     app_fields = {"path", "offset", "maxPartitionSize", "size", "sha256"}
@@ -663,7 +713,7 @@ def _validate_firmware_receipt(
         or not value["buildToolVersion"]
         or not _real_sha(value.get("buildConfigSha256"))
         or value.get("expectedIdentitySha256") != expected_sha
-        or value.get("receiptDigest") != digest
+        or value.get("integrityDigest") != digest
         or not _record(app)
         or set(app) != app_fields
     ):
@@ -686,6 +736,8 @@ def _validate_firmware_receipt(
         reasons.append("firmware_receipt.app")
     if expected is not None and (
         value.get("firmwareGitSha") != expected.get("firmwareGitSha")
+        or value.get("buildToolVersion") != expected.get("buildToolVersion")
+        or value.get("buildConfigSha256") != expected.get("buildConfigSha256")
         or app.get("sha256") != expected.get("appSha256")
         or app.get("size") != expected.get("appSize")
     ):
@@ -836,7 +888,7 @@ def _validate_visual_pack(
             if (
                 storage is None
                 or not storage.is_absolute()
-                or any(component.is_symlink() for component in (storage, *storage.parents))
+                or _path_has_symlink(storage)
                 or pack_root is None
                 or not _within(storage.resolve(strict=False), pack_root.resolve(strict=False))
                 or asset is None
@@ -918,6 +970,7 @@ def _hex(value: object) -> int | None:
 def _validate_flash(
     value: object,
     firmware_receipt: dict[str, object] | None,
+    expected: dict[str, object] | None,
     session: Path | None,
     reasons: list[str],
 ) -> dict[str, object] | None:
@@ -940,6 +993,10 @@ def _validate_flash(
         checksum = hashlib.sha256(json.dumps(partitions, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         if snapshot.get("snapshotChecksum") != checksum or _hex(snapshot.get("flashSize")) != 0x1000000:
             reasons.append("flash.partition_snapshot.identity")
+        if expected is None or snapshot.get("snapshotChecksum") != expected.get("partitionTableSha256"):
+            reasons.append("flash.partition_snapshot.anchor")
+        if partitions != EXPECTED_PARTITIONS:
+            reasons.append("flash.partition_snapshot.table")
         expected_names = [
             "bootloader",
             "partition-table",
@@ -1158,7 +1215,7 @@ def _validate_input(
     firmware_doc = _parse_ref_json(document.get("firmwareBuildReceipt"), session, "firmware_receipt.file", reasons)
     firmware_receipt = _validate_firmware_receipt(firmware_doc, external, expected_identity_sha256, session, reasons)
     _validate_visual_pack(document.get("visualPack"), materialization, external, session, reasons)
-    nvs_partition = _validate_flash(document.get("flashPlan"), firmware_receipt, session, reasons)
+    nvs_partition = _validate_flash(document.get("flashPlan"), firmware_receipt, external, session, reasons)
     _validate_nvs(document.get("nvsPreservation"), nvs_partition, session, reasons)
     return sorted(set(reasons))
 
@@ -1372,7 +1429,9 @@ def main(argv: list[str] | None = None) -> int:
             reasons.append(f"git.dirty.{name}")
         for item in repo["dirtyExceptions"]:
             path = Path(repo["path"]) / item["path"]
-            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
+            if _path_has_symlink(path):
+                reasons.append(f"git.dirty_symlink.{name}")
+            elif not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
                 reasons.append(f"git.dirty_hash.{name}")
     image_out, image_ok = _run(["docker", "image", "inspect", expected["backendImage"]], root, env)
     compose_out, compose_ok = _run(
