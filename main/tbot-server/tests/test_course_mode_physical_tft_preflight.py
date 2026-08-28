@@ -102,6 +102,33 @@ def _layer(session: Path, slot: str, media_type: str, index: int) -> dict:
     }
 
 
+def _create_trusted_tools(tmp_path: Path) -> tuple[Path, Path]:
+    tool_dir = tmp_path / "trusted-tools"
+    tool_dir.mkdir()
+    config = tool_dir / "config.json"
+    git = tool_dir / "git"
+    docker = tool_dir / "docker"
+    git.write_text(
+        f"#!{sys.executable}\nimport json,sys\n"
+        + f"c=json.load(open({str(config)!r})); open(c['log'],'a').write(json.dumps(sys.argv[1:])+'\\n'); "
+        + "a=sys.argv[1:]; root=a[a.index('-C')+1]; repo=c['repos'][root]\n"
+        + "if a[-2:]==['rev-parse','--show-toplevel']: print(root)\n"
+        + "elif a[-2:]==['rev-parse','HEAD']: print(repo['sha'])\n"
+        + "elif a[-3:]==['status','--porcelain','--untracked-files=all']:\n  [print(' M '+x['path']) for x in repo['dirtyExceptions']]\n"
+        + "elif a[-4:-1]==['merge-base','--is-ancestor',c['required']]: pass\nelse: raise SystemExit(93)\n"
+    )
+    docker.write_text(
+        f"#!{sys.executable}\nimport json,sys\n"
+        + f"c=json.load(open({str(config)!r})); open(c['log'],'a').write(json.dumps(sys.argv[1:])+'\\n'); a=sys.argv[1:]\n"
+        + "if a[:2]==['image','inspect']: print(json.dumps(c['image']))\n"
+        + "elif a[0]=='compose' and a[-3:]==['config','--format','json']: print(json.dumps(c['compose']))\n"
+        + "else: raise SystemExit(94)\n"
+    )
+    git.chmod(0o755)
+    docker.chmod(0o755)
+    return git, docker
+
+
 def valid_input(session: Path, tmp_path: Path) -> dict:
     repos = {}
     for name, sha in (("backend", BACKEND_SHA), ("esp", ESP_SHA), ("firmware", FIRMWARE_SHA)):
@@ -114,6 +141,7 @@ def valid_input(session: Path, tmp_path: Path) -> dict:
             protected.write_bytes((ROOT / VOICE_PATH).read_bytes())
             exceptions = [{"path": VOICE_PATH, "sha256": hashlib.sha256(protected.read_bytes()).hexdigest()}]
         repos[name] = {"path": str(path), "sha": sha, "dirtyExceptions": exceptions}
+    trusted_git, trusted_docker = _create_trusted_tools(tmp_path)
 
     phases = [
         {
@@ -254,6 +282,13 @@ def valid_input(session: Path, tmp_path: Path) -> dict:
         "buildConfigSha256": hashlib.sha256(b"sdkconfig").hexdigest(),
         "materializerVersion": "course-mode-curriculum.v2",
         "backendImageId": "sha256:" + "b" * 64,
+        "tools": {
+            "git": {"path": str(trusted_git), "sha256": hashlib.sha256(trusted_git.read_bytes()).hexdigest()},
+            "docker": {
+                "path": str(trusted_docker),
+                "sha256": hashlib.sha256(trusted_docker.read_bytes()).hexdigest(),
+            },
+        },
     }
     expected_ref = _write_json(tmp_path / "expected-physical-identity.json", expected_identity)
     EXPECTED_IDENTITIES[str(session)] = (expected_identity, expected_ref)
@@ -429,16 +464,6 @@ def _fake_commands(tmp_path, document):
     fake_bin.mkdir()
     log = tmp_path / "commands.jsonl"
     repos = {value["path"]: value for value in document["repositories"].values()}
-    git = fake_bin / "git"
-    git.write_text(
-        "#!/usr/bin/env python3\nimport json,sys\n"
-        + f"log={str(log)!r}; repos={repos!r}; required={FIRMWARE_SHA!r}\n"
-        + "open(log,'a').write(json.dumps(sys.argv[1:])+'\\n'); a=sys.argv[1:]; repo=repos[a[1]]\n"
-        + "if a[-2:]==['rev-parse','--show-toplevel']: print(a[1])\n"
-        + "elif a[-2:]==['rev-parse','HEAD']: print(repo['sha'])\n"
-        + "elif a[-3:]==['status','--porcelain','--untracked-files=all']:\n  [print(' M '+x['path']) for x in repo['dirtyExceptions']]\n"
-        + "elif a[-4:-1]==['merge-base','--is-ancestor',required]: pass\nelse: raise SystemExit(93)\n"
-    )
     image = [
         {
             "Id": "sha256:" + "b" * 64,
@@ -452,15 +477,12 @@ def _fake_commands(tmp_path, document):
             },
         }
     ]
-    docker = fake_bin / "docker"
-    docker.write_text(
-        "#!/usr/bin/env python3\nimport json,sys\n"
-        + f"log={str(log)!r}; image={image!r}; compose={_compose(document)!r}\n"
-        + "open(log,'a').write(json.dumps(sys.argv[1:])+'\\n'); a=sys.argv[1:]\n"
-        + "if a[:2]==['image','inspect']: print(json.dumps(image))\nelif a[0]=='compose' and a[-3:]==['config','--format','json']: print(json.dumps(compose))\nelse: raise SystemExit(94)\n"
+    config = tmp_path / "trusted-tools" / "config.json"
+    config.write_text(
+        json.dumps(
+            {"log": str(log), "repos": repos, "required": FIRMWARE_SHA, "image": image, "compose": _compose(document)}
+        )
     )
-    git.chmod(0o755)
-    docker.chmod(0o755)
     return fake_bin, log
 
 
@@ -518,6 +540,11 @@ def _rewrite_materialization(document, mutate):
 def test_canonical_receipt_derived_preflight_passes_cli(tmp_path, session_dir, monkeypatch, capsys):
     document = valid_input(session_dir, tmp_path)
     fake_bin, log = _fake_commands(tmp_path, document)
+    shadow_marker = tmp_path / "path-shadow-invoked"
+    for name in ("git", "docker"):
+        shadow = fake_bin / name
+        shadow.write_text(f"#!/bin/sh\necho invoked >> {shadow_marker}\nexit 99\n")
+        shadow.chmod(0o755)
     source = session_dir / "input.json"
     output = session_dir / "result.json"
     source.write_text(json.dumps(document))
@@ -547,11 +574,45 @@ def test_canonical_receipt_derived_preflight_passes_cli(tmp_path, session_dir, m
     assert payload["expectedIdentityApproval"] == "ed25519-signature-verified"
     assert payload["expectedIdentitySignerFingerprint"] != "unprovisioned"
     assert payload["backendImageId"] == "sha256:" + "b" * 64
+    identity = EXPECTED_IDENTITIES[str(session_dir)][0]
+    assert payload["gitToolSha256"] == identity["tools"]["git"]["sha256"]
+    assert payload["dockerToolSha256"] == identity["tools"]["docker"]["sha256"]
     assert (
         payload["inputChecksum"]
         == hashlib.sha256(json.dumps(document, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     )
     assert len(log.read_text().splitlines()) == 12
+    assert not shadow_marker.exists()
+
+
+def test_changed_trusted_tool_bytes_fail_before_subprocess(tmp_path, session_dir, monkeypatch, capsys):
+    document = valid_input(session_dir, tmp_path)
+    _, log = _fake_commands(tmp_path, document)
+    identity, expected_ref = EXPECTED_IDENTITIES[str(session_dir)]
+    git_tool = Path(identity["tools"]["git"]["path"])
+    git_tool.write_bytes(git_tool.read_bytes() + b"\n# changed\n")
+    source = session_dir / "changed-tool-input.json"
+    source.write_text(json.dumps(document))
+    sys.path.insert(0, str(SERVER / "scripts"))
+    import course_mode_physical_tft_preflight as preflight
+
+    monkeypatch.setattr(preflight, "PINNED_APPROVAL_PUBLIC_KEY_RAW", EXPECTED_PUBLIC_KEYS[str(session_dir)])
+    monkeypatch.setattr(preflight, "PINNED_APPROVAL_KEY_FINGERPRINT", EXPECTED_FINGERPRINTS[str(session_dir)])
+    result = preflight.main(
+        [
+            "--input",
+            str(source),
+            "--output",
+            str(session_dir / "changed-tool-output.json"),
+            "--expected-identity",
+            expected_ref["path"],
+            "--expected-identity-signature",
+            str(EXPECTED_SIGNATURES[str(session_dir)]),
+        ]
+    )
+    assert result == 1
+    assert "expected_identity.tools.git" in json.loads(capsys.readouterr().out)["reasons"]
+    assert not log.exists()
 
 
 def test_cli_requires_provisioned_signer_and_rejects_coherent_rewrite(tmp_path, session_dir):
@@ -592,8 +653,10 @@ def test_cli_requires_provisioned_signer_and_rejects_coherent_rewrite(tmp_path, 
 def test_retagged_backend_image_id_fails_fixed_external_anchor(tmp_path, session_dir, monkeypatch, capsys):
     document = valid_input(session_dir, tmp_path)
     fake_bin, _ = _fake_commands(tmp_path, document)
-    docker = fake_bin / "docker"
-    docker.write_text(docker.read_text().replace("sha256:" + "b" * 64, "sha256:" + "c" * 64))
+    tool_config = tmp_path / "trusted-tools" / "config.json"
+    config = json.loads(tool_config.read_text())
+    config["image"][0]["Id"] = "sha256:" + "c" * 64
+    tool_config.write_text(json.dumps(config))
     source = session_dir / "retagged-input.json"
     source.write_text(json.dumps(document))
     _, expected_ref = EXPECTED_IDENTITIES[str(session_dir)]
@@ -623,28 +686,45 @@ def test_run_timeout_and_invalid_utf8_are_deterministic(tmp_path):
     sys.path.insert(0, str(SERVER / "scripts"))
     from course_mode_physical_tft_preflight import _run
 
+    python = Path(sys.executable).resolve()
+    python_sha = hashlib.sha256(python.read_bytes()).hexdigest()
+
     _, ok, reason = _run(
         [
-            sys.executable,
+            str(python),
             "-c",
             "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c','import time;time.sleep(10)']); time.sleep(10)",
         ],
         tmp_path,
         os.environ.copy(),
+        allowed_executable=python,
+        expected_executable_sha256=python_sha,
         timeout_seconds=0.05,
     )
     assert (ok, reason) == (False, "timeout")
-    _, ok, reason = _run([sys.executable, "-c", "import os; os.write(1, bytes([255]))"], tmp_path, os.environ.copy())
+    _, ok, reason = _run(
+        [str(python), "-c", "import os; os.write(1, bytes([255]))"],
+        tmp_path,
+        os.environ.copy(),
+        allowed_executable=python,
+        expected_executable_sha256=python_sha,
+    )
     assert (ok, reason) == (False, "decode")
     _, ok, reason = _run(
-        [sys.executable, "-c", "import sys; sys.stdout.write('x' * 3000000)"], tmp_path, os.environ.copy()
+        [str(python), "-c", "import sys; sys.stdout.write('x' * 3000000)"],
+        tmp_path,
+        os.environ.copy(),
+        allowed_executable=python,
+        expected_executable_sha256=python_sha,
     )
     assert (ok, reason) == (False, "output_limit")
     started = time.monotonic()
     _, ok, reason = _run(
-        [sys.executable, "-c", "import os; b=b'x'*65536\nwhile True: os.write(1,b)"],
+        [str(python), "-c", "import os; b=b'x'*65536\nwhile True: os.write(1,b)"],
         tmp_path,
         os.environ.copy(),
+        allowed_executable=python,
+        expected_executable_sha256=python_sha,
         timeout_seconds=2,
     )
     assert (ok, reason) == (False, "output_limit")
@@ -655,10 +735,19 @@ def test_run_cleans_descendants_after_successful_parent_exit(tmp_path):
     sys.path.insert(0, str(SERVER / "scripts"))
     from course_mode_physical_tft_preflight import _run
 
+    python = Path(sys.executable).resolve()
+    python_sha = hashlib.sha256(python.read_bytes()).hexdigest()
+
     marker = tmp_path / "descendant-marker"
     child = f"import time,pathlib;time.sleep(.5);pathlib.Path({str(marker)!r}).write_text('escaped')"
     parent = f"import subprocess,sys;subprocess.Popen([sys.executable,'-c',{child!r}]);print('{{}}')"
-    stdout, ok, reason = _run([sys.executable, "-c", parent], tmp_path, os.environ.copy())
+    stdout, ok, reason = _run(
+        [str(python), "-c", parent],
+        tmp_path,
+        os.environ.copy(),
+        allowed_executable=python,
+        expected_executable_sha256=python_sha,
+    )
     assert (stdout.strip(), ok, reason) == ("{}", True, None)
     time.sleep(0.7)
     assert not marker.exists()

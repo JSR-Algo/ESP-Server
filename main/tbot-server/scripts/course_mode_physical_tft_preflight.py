@@ -509,6 +509,7 @@ def _validate_expected_identity(value: object, reasons: list[str]) -> dict[str, 
         "buildConfigSha256",
         "materializerVersion",
         "backendImageId",
+        "tools",
     }
     if not _record(value) or set(value) != fields:
         reasons.append("expected_identity.schema")
@@ -564,6 +565,24 @@ def _validate_expected_identity(value: object, reasons: list[str]) -> dict[str, 
         path = Path(raw) if isinstance(raw, str) else None
         if path is None or not path.is_absolute() or not path.is_dir() or _path_has_symlink(path):
             reasons.append(f"expected_identity.{field}")
+    tools = value.get("tools")
+    if not _record(tools) or set(tools) != {"git", "docker"}:
+        reasons.append("expected_identity.tools")
+    else:
+        for name in ("git", "docker"):
+            tool = tools.get(name)
+            if not _record(tool) or set(tool) != {"path", "sha256"}:
+                reasons.append(f"expected_identity.tools.{name}")
+                continue
+            path = Path(tool["path"]) if isinstance(tool.get("path"), str) else None
+            if (
+                path is None
+                or not path.is_absolute()
+                or _path_has_symlink(path)
+                or not os.access(path, os.X_OK)
+                or not _secure_hash_matches(path, tool.get("sha256"))
+            ):
+                reasons.append(f"expected_identity.tools.{name}")
     return value if len(reasons) == initial_reason_count else None
 
 
@@ -1487,8 +1506,23 @@ def validate_compose(compose: object, expected: object) -> list[str]:
 
 
 def _run(
-    command: list[str], cwd: Path, env: dict[str, str], *, timeout_seconds: float = COMMAND_TIMEOUT_SECONDS
+    command: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    *,
+    allowed_executable: Path,
+    expected_executable_sha256: str,
+    timeout_seconds: float = COMMAND_TIMEOUT_SECONDS,
 ) -> tuple[str, bool, str | None]:
+    if (
+        not command
+        or not allowed_executable.is_absolute()
+        or command[0] != str(allowed_executable)
+        or _path_has_symlink(allowed_executable)
+        or not _secure_hash_matches(allowed_executable, expected_executable_sha256)
+    ):
+        return "", False, "executable"
+
     def limit_and_isolate() -> None:
         import resource
 
@@ -1505,7 +1539,7 @@ def _run(
         while time.monotonic() < deadline:
             try:
                 os.killpg(pgid, 0)
-            except ProcessLookupError:
+            except (PermissionError, ProcessLookupError):
                 return
             time.sleep(0.01)
         with contextlib.suppress(ProcessLookupError):
@@ -1678,7 +1712,25 @@ def main(argv: list[str] | None = None) -> int:
         _emit({"reasons": ["output.path"], "valid": False})
         return 1
     outputs: dict[str, str] = {}
-    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+    tool_docs = identity["tools"]
+    git_executable = Path(tool_docs["git"]["path"])
+    docker_executable = Path(tool_docs["docker"]["path"])
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+        "HOME": "/nonexistent",
+    }
+    git_prefix = [
+        str(git_executable),
+        "--no-optional-locks",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "credential.helper=",
+    ]
     for name in ("backend", "esp", "firmware"):
         repo = expected["repositories"][name]
         for label, suffix in (
@@ -1686,14 +1738,32 @@ def main(argv: list[str] | None = None) -> int:
             ("sha", ["rev-parse", "HEAD"]),
             ("status", ["status", "--porcelain", "--untracked-files=all"]),
         ):
-            stdout, ok, run_error = _run(["git", "-C", repo["path"], *suffix], root, env)
+            stdout, ok, run_error = _run(
+                [*git_prefix, "-C", repo["path"], *suffix],
+                root,
+                env,
+                allowed_executable=git_executable,
+                expected_executable_sha256=tool_docs["git"]["sha256"],
+            )
             if not ok:
                 reasons.append(f"command.git.{name}.{label}.{run_error or 'exit'}")
             else:
                 outputs[f"{name}.{label}"] = stdout
     firmware = expected["repositories"]["firmware"]
     _, ok, run_error = _run(
-        ["git", "-C", firmware["path"], "merge-base", "--is-ancestor", TASK9_SHA, firmware["sha"]], root, env
+        [
+            *git_prefix,
+            "-C",
+            firmware["path"],
+            "merge-base",
+            "--is-ancestor",
+            TASK9_SHA,
+            firmware["sha"],
+        ],
+        root,
+        env,
+        allowed_executable=git_executable,
+        expected_executable_sha256=tool_docs["git"]["sha256"],
     )
     if not ok:
         reasons.append(f"git.ancestor.firmware.{run_error or 'exit'}")
@@ -1717,10 +1787,16 @@ def main(argv: list[str] | None = None) -> int:
                 digest, _, read_error = _read_file_secure(path)
                 if read_error or not _digest_equal(digest, item["sha256"]):
                     reasons.append(f"git.dirty_hash.{name}")
-    image_out, image_ok, image_error = _run(["docker", "image", "inspect", expected["backendImage"]], root, env)
+    image_out, image_ok, image_error = _run(
+        [str(docker_executable), "image", "inspect", expected["backendImage"]],
+        root,
+        env,
+        allowed_executable=docker_executable,
+        expected_executable_sha256=tool_docs["docker"]["sha256"],
+    )
     compose_out, compose_ok, compose_error = _run(
         [
-            "docker",
+            str(docker_executable),
             "compose",
             "--project-name",
             COMPOSE_PROJECT,
@@ -1734,6 +1810,8 @@ def main(argv: list[str] | None = None) -> int:
         ],
         root,
         env,
+        allowed_executable=docker_executable,
+        expected_executable_sha256=tool_docs["docker"]["sha256"],
     )
     if not image_ok:
         reasons.append(f"command.image.{image_error or 'exit'}")
@@ -1786,6 +1864,8 @@ def main(argv: list[str] | None = None) -> int:
         "espSha": expected["repositories"]["esp"]["sha"],
         "firmwareSha": expected["repositories"]["firmware"]["sha"],
         "backendImageId": inspected_image_id,
+        "gitToolSha256": tool_docs["git"]["sha256"],
+        "dockerToolSha256": tool_docs["docker"]["sha256"],
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
     if FORBIDDEN_OUTPUT.search(encoded):
