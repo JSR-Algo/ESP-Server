@@ -44,10 +44,17 @@ EXPECTED_MATRIX_ACTIONS = {
     "refusal": "RESPOND_WITHOUT_REDIRECT", "authored_branch": "OPEN_CONTEXT_BRANCH",
     "safety": "PAUSE_FOR_SAFETY",
 }
+ATTEMPT_CEILING_SCENARIOS = {"incorrect", "silence", "help"}
+ASR_RECOVERY_REPETITIONS = 2
+ATTEMPT_RECOVERY_ACTIONS = {
+    "incorrect": {"SUPPORT_WITH_CLUE"},
+    "silence": {"OFFER_CHOICE_OR_RETRY", "OFFER_NONVERBAL_CHOICE"},
+    "help": {"MODEL_AND_SUPPORT"},
+}
 REAL_ACTIONS = {
     "GREET_AND_CHECK_IN", "ACKNOWLEDGE_AND_BUILD_CURIOSITY", "CLUE_AND_ELICIT",
     "ADVANCE_ACTIVITY", "COMPLETE_COURSE", "CLOSE_BY_OUTCOME", "SUPPORT_WITH_CLUE",
-    "OFFER_CHOICE_OR_RETRY", "MODEL_AND_SUPPORT", "OWN_ASR_UNCERTAINTY",
+    "OFFER_CHOICE_OR_RETRY", "OFFER_NONVERBAL_CHOICE", "MODEL_AND_SUPPORT", "OWN_ASR_UNCERTAINTY",
     "RESPOND_WITHOUT_REDIRECT", "OPEN_CONTEXT_BRANCH", "RETURN_THROUGH_AUTHORED_BRIDGE",
     "PAUSE_FOR_SAFETY", "DUPLICATE_IGNORED", "CLOSE_BY_CHILD_CHOICE",
     "CLOSE_BY_SAFETY_CHOICE", "PRESENT_INTERVENING_ACTIVITY",
@@ -183,12 +190,51 @@ def _track_deliveries(
         emitted.append({"decisionId": decision_id, "deliveryId": delivery_id})
 
 
+def _attempt_recovery_outcome(contract: CourseModeContract, activity_id: str, scenario: str) -> Any:
+    activity = contract.activity(activity_id)
+    return activity.outcomes.get(scenario) or activity.outcomes.get("help")
+
+
+def _attempt_ceiling_turn_index(contract: CourseModeContract, scenario: str) -> int:
+    for index in range(1, len(contract.activities)):
+        activity_id = contract.activities[index].activity_id
+        for _ in range(contract.max_attempts - 1):
+            outcome = _attempt_recovery_outcome(contract, activity_id, scenario)
+            if not outcome or outcome.get("action") not in {"support", "retry"}:
+                break
+            activity_id = outcome.get("activityId")
+            if not activity_id:
+                break
+        else:
+            return index
+    raise AssertionError(f"contract has no authored {scenario} recovery runway")
+
+
+def _expected_attempt_ceiling_action(contract: CourseModeContract, activity_id: str) -> str:
+    actions = {outcome["action"] for outcome in contract.activity(activity_id).outcomes.values()}
+    if "pause" in actions or not actions.intersection({"close", "complete", "advance"}):
+        return "RESPOND_WITHOUT_REDIRECT"
+    if "close" in actions:
+        return "CLOSE_BY_OUTCOME"
+    if "complete" in actions:
+        return "COMPLETE_COURSE"
+    return "ADVANCE_ACTIVITY"
+
+
 async def simulate_terminal_path(
     contract: CourseModeContract, scenario: str, *, scenario_turn_index: int,
 ) -> dict[str, Any]:
     adapter = CourseModeRuntimeAdapter(contract, clock=lambda: 1.0, wall_clock=lambda: 1.0)
     transitions: list[dict[str, Any]] = []
     scenario_exercised = False
+    scenario_observations = 0
+    scenario_activity_ids: list[str] = []
+    scenario_delivery_ids: list[str] = []
+    scenario_replay_count = 0
+    attempt_levels: list[int] = []
+    attempt_ceiling_reached = False
+    expected_ceiling_action: str | None = None
+    ceiling_action: str | None = None
     seen: set[tuple[Any, ...]] = set()
     delivery_owners: dict[str, str] = {}
     delivery_records: list[dict[str, str]] = []
@@ -216,6 +262,7 @@ async def simulate_terminal_path(
         current_scenario = scenario if not scenario_exercised and step >= scenario_turn_index else "correct"
         identity = (
             activity_id, adapter.orchestrator.session_state.value, current_scenario,
+            scenario_observations,
             tuple(sorted(adapter.orchestrator.snapshot()["activityAttempts"].items())),
             adapter.orchestrator.snapshot()["activeBranchId"],
         )
@@ -229,10 +276,32 @@ async def simulate_terminal_path(
         transitions.append(_record(decision, current_scenario))
         scenario_now = current_scenario == scenario and not scenario_exercised
         if scenario_now:
-            scenario_exercised = True
-            if decision["action"] != EXPECTED_MATRIX_ACTIONS[scenario]:
+            scenario_observations += 1
+            scenario_activity_ids.append(arguments["activityId"])
+            attempt = decision.get("attempt", 0)
+            if attempt > 0:
+                attempt_levels.append(attempt)
+            if scenario in ATTEMPT_CEILING_SCENARIOS:
+                attempt_ceiling_reached = attempt == contract.max_attempts
+                scenario_exercised = attempt_ceiling_reached
+                if attempt_ceiling_reached:
+                    expected_ceiling_action = _expected_attempt_ceiling_action(
+                        contract, arguments["activityId"],
+                    )
+                    ceiling_action = decision["action"]
+                expected_actions = (
+                    {expected_ceiling_action} if attempt_ceiling_reached
+                    else ATTEMPT_RECOVERY_ACTIONS[scenario]
+                )
+            elif scenario == "asr_failure":
+                scenario_exercised = scenario_observations >= ASR_RECOVERY_REPETITIONS
+                expected_actions = {EXPECTED_MATRIX_ACTIONS[scenario]}
+            else:
+                scenario_exercised = True
+                expected_actions = {EXPECTED_MATRIX_ACTIONS[scenario]}
+            if decision["action"] not in expected_actions:
                 raise AssertionError(
-                    f"{scenario} emitted {decision['action']}, expected {EXPECTED_MATRIX_ACTIONS[scenario]}"
+                    f"{scenario} attempt ceiling emitted {decision['action']}, expected {sorted(expected_actions)}"
                 )
             pending_before = adapter.pending_activity_deliveries()
             snapshot = json.loads(json.dumps(adapter.durable_snapshot()))
@@ -247,6 +316,18 @@ async def simulate_terminal_path(
                 (item.decision_id, delivery) for item, delivery in pending_before
             ]:
                 raise AssertionError("scenario replay changed pending outbox")
+            scenario_replay_count += 1
+            if decision.get("activityId") is not None:
+                scenario_delivery = next(
+                    (delivery for item, delivery in pending_after
+                     if item.decision_id == decision["decisionId"]),
+                    None,
+                )
+                if scenario_delivery is None:
+                    raise AssertionError(
+                        f"{scenario} replay has no stable activity delivery for {decision['decisionId']}"
+                    )
+                scenario_delivery_ids.append(scenario_delivery)
             adapter = restored
             replay_delivery_id = pending_after[-1][1] if pending_after else None
         hold_for_scenario = not scenario_exercised and step + 1 == scenario_turn_index
@@ -293,6 +374,25 @@ async def simulate_terminal_path(
             )
     if not scenario_exercised:
         raise AssertionError(f"{scenario} was not exercised")
+    if scenario in ATTEMPT_CEILING_SCENARIOS:
+        expected_attempts = list(range(1, contract.max_attempts + 1))
+        authored_recovery = all(
+            (outcome := _attempt_recovery_outcome(contract, source_id, scenario)) is not None
+            and outcome.get("action") in {"support", "retry"}
+            and outcome.get("activityId") == target_id
+            for source_id, target_id in zip(
+                scenario_activity_ids, scenario_activity_ids[1:],
+            )
+        )
+        if (attempt_levels != expected_attempts or not attempt_ceiling_reached
+            or not authored_recovery or ceiling_action != expected_ceiling_action):
+            raise AssertionError(
+                f"{scenario} attempt ceiling coverage {attempt_levels}/{scenario_activity_ids}"
+            )
+    if scenario == "asr_failure" and scenario_observations < ASR_RECOVERY_REPETITIONS:
+        raise AssertionError("asr_failure recovery was not repeated through the public adapter")
+    if scenario == "asr_failure" and len(set(scenario_activity_ids)) != 1:
+        raise AssertionError("asr_failure recovery changed the eligible activity")
     if adapter.orchestrator.session_state not in {SessionState.COMPLETE, SessionState.CLOSING}:
         raise AssertionError(f"{scenario} path did not terminate within {limit} transitions")
     if any(item["attempt"] > contract.max_attempts for item in transitions):
@@ -303,6 +403,13 @@ async def simulate_terminal_path(
         "actions": [item["action"] for item in transitions], "transitions": transitions,
         "deliveryIds": list(delivery_owners), "deliveryRecords": delivery_records,
         "replayDeliveryId": replay_delivery_id, "deduped": True,
+        "attemptLevels": attempt_levels, "attemptCeilingReached": attempt_ceiling_reached,
+        "scenarioObservations": scenario_observations,
+        "scenarioActivityIds": scenario_activity_ids,
+        "scenarioReplayCount": scenario_replay_count,
+        "scenarioDeliveryIds": scenario_delivery_ids,
+        "expectedCeilingAction": expected_ceiling_action,
+        "ceilingAction": ceiling_action,
     }
 
 
@@ -364,7 +471,10 @@ def simulate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
         matrix = {
             scenario: asyncio.run(simulate_terminal_path(
                 contract, scenario,
-                scenario_turn_index=1 + (week + scenario_index) % (len(contract.activities) - 2),
+                scenario_turn_index=(
+                    _attempt_ceiling_turn_index(contract, scenario) if scenario in ATTEMPT_CEILING_SCENARIOS
+                    else 1 + (week + scenario_index) % (len(contract.activities) - 2)
+                ),
             ))
             for scenario_index, scenario in enumerate(RESPONSE_MATRIX)
         }
