@@ -79,6 +79,67 @@ def test_backend_source_rejects_uncommitted_runtime_authority(tmp_path: Path) ->
     assert result.error == "BACKEND_IDENTITY_MISMATCH"
 
 
+def test_backend_git_ignores_repo_local_fsmonitor(tmp_path: Path) -> None:
+    root = tmp_path / "backend"
+    verifier = root / "scripts/verify-course-mode-curriculum.mjs"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text("", encoding="utf-8")
+    marker = tmp_path / "fsmonitor-executed"
+    monitor = tmp_path / "monitor.sh"
+    monitor.write_text(f"#!/bin/sh\necho invoked > {marker}\nexit 0\n", encoding="utf-8")
+    monitor.chmod(0o755)
+    subprocess.run(["git", "init", "-b", "candidate"], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "candidate@example.invalid"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Candidate Test"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-m", "fixture"], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "core.fsmonitor", str(monitor)], cwd=root, check=True)
+
+    result = resolve_backend_root(root)
+
+    assert result.error is None and not marker.exists()
+
+
+def test_backend_identity_is_rechecked_after_custom_command(tmp_path: Path) -> None:
+    root = tmp_path / "backend"
+    verifier = root / "scripts/verify-course-mode-curriculum.mjs"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text("// first\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-b", "candidate"], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "candidate@example.invalid"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Candidate Test"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-m", "first"], cwd=root, check=True, capture_output=True)
+    expected = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    verifier.write_text("// second\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-m", "second"], cwd=root, check=True, capture_output=True)
+    second = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "checkout", "--detach", expected], cwd=root, check=True, capture_output=True)
+    command = [
+        sys.executable, "-c",
+        "import json,pathlib,subprocess,sys; "
+        f"subprocess.run(['/usr/bin/git','checkout','--detach',{second!r}],check=True,capture_output=True); "
+        "pathlib.Path(sys.argv[-1]).write_text(json.dumps({'status':'pass','lessonCount':26,'contracts':[]}))",
+    ]
+
+    with pytest.raises(CourseModeSimulationError) as caught:
+        load_backend_contracts(root, expected_sha=expected, backend_command=command)
+    assert caught.value.code == "BACKEND_IDENTITY_MISMATCH"
+
+
+def test_backend_command_output_is_bounded() -> None:
+    command = [sys.executable, "-c", "import sys;sys.stdout.write('x'*2000000)"]
+
+    with pytest.raises(CourseModeSimulationError) as caught:
+        load_backend_contracts(BACKEND_ROOT, backend_command=command)
+    assert caught.value.code == "BACKEND_COMMAND_OUTPUT_LIMIT"
+
+
 def _checksum(value: dict) -> str:
     payload = {key: child for key, child in value.items() if key != "contractChecksum"}
     encoded = json.dumps(

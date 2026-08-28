@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
+import scripts.course_mode_candidate_manifest as manifest
 from scripts.course_mode_candidate_manifest import REQUIRED_KEYS, validate_candidate
 
 
@@ -76,8 +80,11 @@ def candidate(repositories: dict[str, Path], tmp_path: Path) -> dict:
     }
 
 
+NOW = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
+
+
 def test_candidate_accepts_exact_committed_repository_identity(candidate: dict) -> None:
-    assert validate_candidate(candidate) == []
+    assert validate_candidate(candidate, now=NOW) == []
 
 
 def test_candidate_requires_exact_top_level_and_repository_keys(candidate: dict) -> None:
@@ -183,3 +190,154 @@ def test_candidate_freeze_report_records_exact_tdd_and_simulator_evidence() -> N
         "Final GREEN",
     ):
         assert required in report
+
+
+@pytest.mark.parametrize("candidate_id", [
+    "", "course mode-2026-08-29.1", "course-mode-2026-08-29", "../course-mode-1",
+])
+def test_candidate_id_has_a_canonical_format(candidate: dict, candidate_id: str) -> None:
+    candidate["candidateId"] = candidate_id
+
+    assert "candidateId" in validate_candidate(candidate, now=NOW)
+
+
+@pytest.mark.parametrize("field, value", [
+    ("createdAt", "2026-08-29T00:00:00+00:00"),
+    ("createdAt", "2026-08-29 00:00:00Z"),
+    ("expiresAt", "2026-09-05T00:00:00z"),
+    ("expiresAt", "not-a-time"),
+])
+def test_candidate_times_require_canonical_rfc3339_utc(
+    candidate: dict, field: str, value: str,
+) -> None:
+    candidate[field] = value
+
+    assert field in validate_candidate(candidate, now=NOW)
+
+
+def test_candidate_times_are_ordered_and_unexpired(candidate: dict) -> None:
+    candidate["createdAt"] = candidate["expiresAt"]
+    assert validate_candidate(candidate, now=NOW) == ["timestamps.order"]
+
+    candidate["createdAt"] = "2026-08-20T00:00:00Z"
+    candidate["expiresAt"] = "2026-08-21T00:00:00Z"
+    assert validate_candidate(candidate, now=NOW) == ["expiresAt.expired"]
+
+
+@pytest.mark.parametrize("field, value", [
+    ("lessonCount", 26.0), ("lessonCount", True),
+    ("activityCount", 256.0), ("activityCount", True),
+    ("pedagogyCount", 6.0), ("pedagogyCount", True),
+    ("responseClassCount", 11.0), ("responseClassCount", True),
+])
+def test_candidate_counts_are_exact_json_integers(
+    candidate: dict, field: str, value: object,
+) -> None:
+    candidate["curriculum"][field] = value
+
+    assert validate_candidate(candidate, now=NOW) == [f"curriculum.{field}"]
+
+
+def test_candidate_git_ignores_repo_local_fsmonitor_and_hooks(
+    candidate: dict, repositories: dict[str, Path], tmp_path: Path, monkeypatch,
+) -> None:
+    marker = tmp_path / "git-config-executed"
+    executable = tmp_path / "hostile.sh"
+    executable.write_text(f"#!/bin/sh\necho invoked > {marker}\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / "post-index-change").symlink_to(executable)
+    _git(repositories["adminEsp"], "config", "core.fsmonitor", str(executable))
+    _git(repositories["adminEsp"], "config", "core.hooksPath", str(hooks))
+    hostile_bin = tmp_path / "bin"
+    hostile_bin.mkdir()
+    (hostile_bin / "git").symlink_to(executable)
+    monkeypatch.setenv("PATH", str(hostile_bin))
+
+    assert validate_candidate(candidate, now=NOW) == []
+    assert not marker.exists()
+
+
+def test_candidate_git_output_is_bounded(candidate: dict, tmp_path: Path, monkeypatch) -> None:
+    fake_git = tmp_path / "fake-git"
+    fake_git.write_text(
+        f"#!{sys.executable}\nimport sys\nsys.stdout.write('x' * 2000000)\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+    monkeypatch.setattr(manifest, "TRUSTED_GIT_EXECUTABLE", fake_git)
+
+    assert validate_candidate(candidate, now=NOW) == [
+        "repositories.adminEsp.git",
+        "repositories.backend.git",
+        "repositories.firmware.git",
+    ]
+
+
+def test_candidate_rejects_oversized_dirty_exception(
+    candidate: dict, repositories: dict[str, Path],
+) -> None:
+    path = repositories["adminEsp"] / "large.bin"
+    path.write_bytes(b"x" * (manifest.MAX_DIRTY_FILE_BYTES + 1))
+    candidate["repositories"]["adminEsp"]["dirtyExceptions"] = [{
+        "path": "large.bin", "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }]
+
+    assert validate_candidate(candidate, now=NOW) == [
+        "repositories.adminEsp.dirtyExceptions.size",
+    ]
+
+
+def test_candidate_rejects_symlink_dirty_exception_escape(
+    candidate: dict, repositories: dict[str, Path], tmp_path: Path,
+) -> None:
+    external = tmp_path / "external-secret"
+    external.write_text("not repository data", encoding="utf-8")
+    link = repositories["adminEsp"] / "external-link"
+    link.symlink_to(external)
+    candidate["repositories"]["adminEsp"]["dirtyExceptions"] = [{
+        "path": "external-link", "sha256": hashlib.sha256(external.read_bytes()).hexdigest(),
+    }]
+
+    assert validate_candidate(candidate, now=NOW) == [
+        "repositories.adminEsp.dirtyExceptions.path",
+    ]
+
+
+def test_secure_dirty_read_detects_path_replacement(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "dirty.txt"
+    target.write_bytes(b"reviewed")
+    replacement = root / "replacement.txt"
+    replacement.write_bytes(b"replacement")
+    original_read = os.read
+    replaced = False
+
+    def replace_after_first_read(fd: int, size: int) -> bytes:
+        nonlocal replaced
+        data = original_read(fd, size)
+        if data and not replaced:
+            replaced = True
+            os.replace(replacement, target)
+        return data
+
+    monkeypatch.setattr(os, "read", replace_after_first_read)
+    digest, error = manifest._secure_hash_relative(root, "dirty.txt")
+
+    assert digest is None and error == "changed"
+
+
+def test_candidate_cli_bounds_input_without_traceback_or_echo(tmp_path: Path) -> None:
+    path = tmp_path / "candidate.json"
+    secret = "secret-do-not-echo"
+    path.write_bytes((secret * 100_000).encode())
+    completed = subprocess.run(
+        [sys.executable, str(Path(manifest.__file__)), str(path)],
+        check=False, capture_output=True, text=True, timeout=5,
+    )
+
+    assert completed.returncode == 1 and completed.stderr == ""
+    assert json.loads(completed.stdout)["reasons"] == ["candidate.input"]
+    assert secret not in completed.stdout

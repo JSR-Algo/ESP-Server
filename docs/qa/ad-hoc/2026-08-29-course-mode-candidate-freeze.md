@@ -85,8 +85,46 @@ python3 scripts/course_mode_26week_simulation.py --backend-root /Users/manhhodin
 Observed simulator/verifier evidence was 26 lessons, 256 activities, 6 pedagogies, and 11 response classes, bound to backend SHA
 `0783ddba5474c418a2830a761eda78c7b57cacdf`.
 
-Final GREEN: focused ESP tests passed, the explicit-root simulator returned
-`status=pass`, and both task worktrees were clean.
+Final GREEN: the original focused ESP gate reported `47 passed`; after count
+binding it reported `54 passed`; the current cumulative security gate reports
+`80 passed`. The explicit-root simulator returned `status=pass`.
+
+### Security review RED/GREEN
+
+The security follow-up first ran the hostile-config, identity-swap, metadata,
+bounded-input, and secure-file cases in isolation. RED was `22 failed, 2 passed`
+of 24 selected tests. The failures reproduced inherited Git `PATH`/repository
+config authority, missing post-verifier SHA validation, permissive timestamps
+and numeric types, and filesystem-link-following dirty-file reads.
+
+GREEN uses an absolute trusted Git executable with optional locks, fsmonitor,
+hooks, credential helpers, external diffs, and pagers disabled under a sanitized
+Git environment. Git and verifier execution have time/output bounds; backend
+SHA and cleanliness are checked before and after the verifier, including custom
+commands. Candidate and verifier inputs are bounded. Dirty exceptions use
+directory-FD traversal, `O_NOFOLLOW`, regular-file/size checks, and stable
+`fstat` identity before and after reads. The final combined command was:
+
+```text
+COURSE_MODE_BACKEND_ROOT=/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/prod-readiness-task1-backend python3 -m pytest -q tests/test_course_mode_candidate_manifest.py tests/test_course_mode_curriculum_e2e.py
+```
+
+It reported `80 passed`.
+
+### Fresh backend dependencies
+
+The backend worktree's ambient `node_modules -> ../../node_modules` symlink was
+removed. Dependencies were then installed from the committed lockfile with
+Node `v22.23.2`, npm `10.9.8`, and:
+
+```text
+npm ci
+```
+
+The clean install added 1,160 packages and reported six moderate dependency
+advisories. No `npm audit fix` or source/lockfile mutation was performed. The
+verification commands below ran against this worktree-local, non-symlinked
+installation.
 
 ## Limitations
 

@@ -8,6 +8,7 @@ import asyncio
 import copy
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -22,6 +23,11 @@ if str(SERVER_ROOT) not in sys.path:
 from core.lesson.course_mode_contract import CourseModeContract, CourseModeContractError
 from core.lesson.course_orchestrator import SessionState
 from core.lesson.runtime import CourseModeRuntimeAdapter
+from scripts.course_mode_candidate_manifest import (
+    MAX_CANDIDATE_BYTES,
+    _git,
+    run_bounded_command,
+)
 
 
 RESPONSE_MATRIX = {
@@ -89,6 +95,7 @@ class CourseModeSimulationError(RuntimeError):
 class BackendRootResolution:
     path: Path | None
     error: str | None
+    sha: str | None = None
 
 
 def resolve_backend_root(
@@ -108,65 +115,98 @@ def resolve_backend_root(
     if not root.is_dir() or not (root / "scripts/verify-course-mode-curriculum.mjs").is_file():
         return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
     try:
-        head = subprocess.run(
-            ["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=root,
-            check=True, capture_output=True, text=True,
-        ).stdout.strip()
-        dirty = subprocess.run(
-            ["git", "status", "--porcelain=v1", "--untracked-files=all"], cwd=root,
-            check=True, capture_output=True, text=True,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError):
+        top_level = Path(_git(root, "rev-parse", "--show-toplevel").strip()).resolve(strict=True)
+        head = _git(root, "rev-parse", "--verify", "HEAD^{commit}").strip()
+        dirty = _git(root, "status", "--porcelain=v1", "--untracked-files=all")
+    except (OSError, RuntimeError):
         return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
-    if dirty or (expected_sha is not None and expected_sha != head):
+    if top_level != root or dirty or (expected_sha is not None and expected_sha != head):
         return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
-    return BackendRootResolution(root, None)
+    return BackendRootResolution(root, None, head)
+
+
+def _read_bounded_regular(path: Path, max_bytes: int) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+            raise OSError("invalid bounded input")
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(fd, min(1024 * 1024, max_bytes + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise OSError("bounded input too large")
+            chunks.append(chunk)
+        after = os.fstat(fd)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+        ) or total != before.st_size:
+            raise OSError("bounded input changed")
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
 
 
 def load_backend_contracts(
     root: Path | None = None, *, backend_command: list[str] | None = None,
-    timeout_sec: float = 30,
+    timeout_sec: float = 30, expected_sha: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    resolution = resolve_backend_root(root)
+    resolution = resolve_backend_root(root, expected_sha=expected_sha)
     if resolution.error or resolution.path is None:
         raise CourseModeSimulationError(
             resolution.error or "BACKEND_IDENTITY_MISMATCH",
             "an explicit committed backend root is required",
         )
     source_root = resolution.path
+    bound_sha = expected_sha or resolution.sha
+    if bound_sha is None:
+        raise CourseModeSimulationError("BACKEND_IDENTITY_MISMATCH", "backend SHA is unavailable")
     verifier = source_root / "scripts/verify-course-mode-curriculum.mjs"
     with tempfile.TemporaryDirectory(prefix="tbot-course-mode-e2e-") as directory:
         output = Path(directory) / "contracts.json"
         command = backend_command or ["node", str(verifier)]
         try:
-            completed = subprocess.run(
-                [*command, "--contracts-output", str(output)],
-                cwd=source_root, check=False, capture_output=True, text=True,
-                timeout=timeout_sec,
+            completed = run_bounded_command(
+                [*command, "--contracts-output", str(output)], cwd=source_root,
+                env=os.environ.copy(), timeout_sec=timeout_sec,
+                max_output_bytes=1024 * 1024,
             )
-        except FileNotFoundError as exc:
-            raise CourseModeSimulationError("BACKEND_COMMAND_NOT_FOUND", str(exc)) from None
-        except subprocess.TimeoutExpired:
+        except OSError:
+            raise CourseModeSimulationError("BACKEND_COMMAND_FAILED", "backend command failed") from None
+        if completed.error == "not_found":
+            raise CourseModeSimulationError("BACKEND_COMMAND_NOT_FOUND", "backend command not found")
+        if completed.error == "timeout":
             raise CourseModeSimulationError(
                 "BACKEND_COMMAND_TIMEOUT", f"backend command exceeded {timeout_sec:g}s",
-            ) from None
-        if completed.returncode != 0:
+            )
+        if completed.error == "output":
+            raise CourseModeSimulationError(
+                "BACKEND_COMMAND_OUTPUT_LIMIT", "backend command output exceeded the limit",
+            )
+        if completed.error or completed.returncode != 0:
             raise CourseModeSimulationError(
                 "BACKEND_COMMAND_FAILED", f"backend command exited {completed.returncode}",
             )
+        post_resolution = resolve_backend_root(source_root, expected_sha=bound_sha)
+        if post_resolution.error:
+            raise CourseModeSimulationError(
+                "BACKEND_IDENTITY_MISMATCH", "backend identity changed during verification",
+            )
         try:
-            fixture = json.loads(output.read_text(encoding="utf-8"))
-        except (FileNotFoundError, IsADirectoryError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            fixture = json.loads(_read_bounded_regular(output, 64 * 1024 * 1024).decode("utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise CourseModeSimulationError("BACKEND_OUTPUT_INVALID_JSON", str(exc)) from None
     if fixture.get("status") != "pass" or fixture.get("lessonCount") != 26:
         raise CourseModeSimulationError(
             "BACKEND_OUTPUT_INVALID_ENVELOPE",
             "backend curriculum export is not a passing 26-lesson fixture",
         )
-    fixture["backendSha"] = subprocess.run(
-        ["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=source_root,
-        check=True, capture_output=True, text=True,
-    ).stdout.strip()
+    fixture["backendSha"] = bound_sha
     return fixture, fixture["contracts"]
 
 
@@ -720,7 +760,7 @@ def main(argv: list[str] | None = None) -> int:
                     "CONTRACTS_INPUT_NOT_FILE", f"contracts input is not a file: {args.contracts}",
                 )
             try:
-                fixture = json.loads(args.contracts.read_text(encoding="utf-8"))
+                fixture = json.loads(_read_bounded_regular(args.contracts, 64 * 1024 * 1024).decode("utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise CourseModeSimulationError("CONTRACTS_INPUT_INVALID_JSON", str(exc)) from None
             contracts = fixture["contracts"]
@@ -728,7 +768,9 @@ def main(argv: list[str] | None = None) -> int:
             expected_sha = None
             if args.candidate is not None:
                 try:
-                    candidate = json.loads(args.candidate.read_text(encoding="utf-8"))
+                    candidate = json.loads(
+                        _read_bounded_regular(args.candidate, MAX_CANDIDATE_BYTES).decode("utf-8")
+                    )
                     expected_sha = candidate["repositories"]["backend"]["sha"]
                 except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError):
                     raise CourseModeSimulationError(
@@ -754,7 +796,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
             fixture, contracts = load_backend_contracts(
                 resolution.path, backend_command=backend_command,
-                timeout_sec=args.backend_timeout_sec,
+                timeout_sec=args.backend_timeout_sec, expected_sha=expected_sha or resolution.sha,
             )
         fixture = copy.deepcopy(fixture)
         fixture["contracts"] = copy.deepcopy(contracts)
