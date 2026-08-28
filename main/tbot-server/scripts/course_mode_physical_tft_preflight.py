@@ -6,12 +6,15 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import hmac
 import ipaddress
 import json
 import os
 import re
+import signal
 import stat
 import subprocess
+import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -89,9 +92,11 @@ EXPECTED_PARTITIONS = [
     },
 ]
 FORBIDDEN_OUTPUT = re.compile(r"(?i)(bearer|password|private.?key|secret.?value|transcript|raw.?speech|audio.?data)")
-EXPECTED_IDENTITY_ENV = "COURSE_MODE_EXPECTED_IDENTITY_SHA256"
 MAX_JSON_BYTES = 1024 * 1024
 COMMAND_TIMEOUT_SECONDS = 10
+MAX_COMMAND_OUTPUT_BYTES = 2 * 1024 * 1024
+PINNED_APPROVAL_PUBLIC_KEY_RAW: bytes | None = None
+PINNED_APPROVAL_KEY_FINGERPRINT = "unprovisioned"
 
 
 class DuplicateKeyError(ValueError):
@@ -124,11 +129,15 @@ def _load_json_bytes(payload: bytes) -> tuple[object | None, str | None]:
 
 
 def _canonical_bytes(value: object) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
 
 
 def _canonical_sha256(value: object) -> str:
     return hashlib.sha256(_canonical_bytes(value)).hexdigest()
+
+
+def _digest_equal(left: object, right: object) -> bool:
+    return isinstance(left, str) and isinstance(right, str) and hmac.compare_digest(left, right)
 
 
 def _record(value: object) -> bool:
@@ -178,6 +187,30 @@ def _path_has_symlink(path: Path) -> bool:
     return any(component.is_symlink() for component in (path, *path.parents))
 
 
+def _open_directory_secure(path: Path) -> int:
+    if not path.is_absolute():
+        raise OSError("absolute path required")
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    current = os.open("/", flags)
+    try:
+        for component in path.parts[1:]:
+            next_fd = os.open(component, flags, dir_fd=current)
+            os.close(current)
+            current = next_fd
+        return current
+    except Exception:
+        os.close(current)
+        raise
+
+
+def _open_file_secure(path: Path) -> int:
+    parent_fd = _open_directory_secure(path.parent)
+    try:
+        return os.open(path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
 def _read_file_secure(
     path: Path,
     *,
@@ -190,7 +223,8 @@ def _read_file_secure(
         return None, None, "symlink"
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, flags)
+        del flags
+        fd = _open_file_secure(path)
     except OSError:
         return None, None, "open"
     try:
@@ -228,6 +262,13 @@ def _read_file_secure(
         return None, None, "read"
     finally:
         os.close(fd)
+
+
+def _secure_hash_matches(
+    path: Path, expected: object, *, exact_size: int | None = None, hash_prefix_size: int | None = None
+) -> bool:
+    digest, _, error = _read_file_secure(path, exact_size=exact_size, hash_prefix_size=hash_prefix_size)
+    return error is None and _digest_equal(digest, expected)
 
 
 def _safe_file(value: object, session: Path | None) -> tuple[Path | None, str | None]:
@@ -276,7 +317,7 @@ def _validate_ref(value: object, session: Path | None) -> tuple[Path | None, lis
         reasons.append("hash")
     if path is not None:
         digest, _, read_error = _read_file_secure(path)
-        if read_error or digest != value.get("sha256"):
+        if read_error or not _digest_equal(digest, value.get("sha256")):
             reasons.append("hash")
     return path, sorted(set(reasons))
 
@@ -293,7 +334,11 @@ def _parse_ref_json(value: object, session: Path | None, prefix: str, reasons: l
     if read_error or payload is None:
         reasons.append(f"{prefix}.size" if read_error == "size" else f"{prefix}.read")
         return None
-    if value.get("algorithm") != "sha256" or not _real_sha(value.get("sha256")) or digest != value.get("sha256"):
+    if (
+        value.get("algorithm") != "sha256"
+        or not _real_sha(value.get("sha256"))
+        or not _digest_equal(digest, value.get("sha256"))
+    ):
         reasons.append(f"{prefix}.hash")
         return None
     parsed, error = _load_json_bytes(payload)
@@ -416,7 +461,7 @@ def _validate_repositories(
                     reasons.append(f"{prefix}.dirty_exception_symlink")
                 else:
                     digest, _, read_error = _read_file_secure(candidate)
-                    if read_error or digest != item.get("sha256"):
+                    if read_error or not _digest_equal(digest, item.get("sha256")):
                         reasons.append(f"{prefix}.dirty_exception_hash")
     if task9 != TASK9_SHA:
         reasons.append("repository.firmware.ancestor")
@@ -561,7 +606,9 @@ def _validate_materialization(
         if all(key in value for key in ("course", "source", "replacement"))
         else None
     )
-    if artifact_projection is None or value.get("artifactChecksum") != _canonical_sha256(artifact_projection):
+    if artifact_projection is None or not _digest_equal(
+        value.get("artifactChecksum"), _canonical_sha256(artifact_projection)
+    ):
         reasons.append("materialization.artifact_checksum")
     authorization = value.get("authorization")
     if not _record(authorization) or set(authorization) != {
@@ -575,8 +622,8 @@ def _validate_materialization(
         digest = _canonical_sha256(unsigned)
         if (
             authorization.get("algorithm") != "sha256"
-            or authorization.get("expectedIdentitySha256") != expected_sha
-            or authorization.get("integrityDigest") != digest
+            or not _digest_equal(authorization.get("expectedIdentitySha256"), expected_sha)
+            or not _digest_equal(authorization.get("integrityDigest"), digest)
         ):
             reasons.append("materialization.authorization")
     if expected is not None and (
@@ -758,7 +805,7 @@ def _validate_assignment(value: object, receipt: dict[str, object] | None, reaso
     ):
         reasons.append("assignment.identity")
     checksum = _canonical_sha256(assignments)
-    if value.get("snapshotChecksum") != checksum:
+    if not _digest_equal(value.get("snapshotChecksum"), checksum):
         reasons.append("assignment.checksum")
 
 
@@ -794,8 +841,8 @@ def _validate_firmware_receipt(
         or not isinstance(value.get("buildToolVersion"), str)
         or not value["buildToolVersion"]
         or not _real_sha(value.get("buildConfigSha256"))
-        or value.get("expectedIdentitySha256") != expected_sha
-        or value.get("integrityDigest") != digest
+        or not _digest_equal(value.get("expectedIdentitySha256"), expected_sha)
+        or not _digest_equal(value.get("integrityDigest"), digest)
         or not _record(app)
         or set(app) != app_fields
     ):
@@ -810,14 +857,14 @@ def _validate_firmware_receipt(
         or type(app.get("size")) is not int
         or app["size"] <= 0
         or not _real_sha(app.get("sha256"))
-        or (path is not None and _read_file_secure(path, exact_size=app["size"])[::2] != (app["sha256"], None))
+        or (path is not None and not _secure_hash_matches(path, app["sha256"], exact_size=app["size"]))
     ):
         reasons.append("firmware_receipt.app")
     if expected is not None and (
         value.get("firmwareGitSha") != expected.get("firmwareGitSha")
         or value.get("buildToolVersion") != expected.get("buildToolVersion")
-        or value.get("buildConfigSha256") != expected.get("buildConfigSha256")
-        or app.get("sha256") != expected.get("appSha256")
+        or not _digest_equal(value.get("buildConfigSha256"), expected.get("buildConfigSha256"))
+        or not _digest_equal(app.get("sha256"), expected.get("appSha256"))
         or app.get("size") != expected.get("appSize")
     ):
         reasons.append("firmware_receipt.anchor")
@@ -856,7 +903,9 @@ def _validate_visual_pack(
         reasons.append("visual_pack.phase")
         return
     checksum = _canonical_sha256({"phases": phases})
-    if value.get("checksum") != checksum or value.get("checksum") != replacement.get("visualPackChecksum"):
+    if not _digest_equal(value.get("checksum"), checksum) or not _digest_equal(
+        value.get("checksum"), replacement.get("visualPackChecksum")
+    ):
         reasons.append("visual_pack.checksum")
     phase_fields = {"phaseId", "activityIds", "templateId", "templateVersion", "playbackMode", "layers"}
     layer_fields = {
@@ -974,7 +1023,7 @@ def _validate_visual_pack(
                 reasons.append("visual_pack.storage_path")
             if asset is not None:
                 asset_digest, _, asset_error = _read_file_secure(asset, exact_size=layer.get("bytes"))
-                if asset_error or asset_digest != layer.get("sha256"):
+                if asset_error or not _digest_equal(asset_digest, layer.get("sha256")):
                     reasons.append("visual_pack.asset_hash")
             metadata = layer.get("compatibilityMetadata")
             if not _record(metadata):
@@ -1067,9 +1116,14 @@ def _validate_flash(
     ):
         partitions = snapshot["partitions"]
         checksum = _canonical_sha256(partitions)
-        if snapshot.get("snapshotChecksum") != checksum or _hex(snapshot.get("flashSize")) != 0x1000000:
+        if (
+            not _digest_equal(snapshot.get("snapshotChecksum"), checksum)
+            or _hex(snapshot.get("flashSize")) != 0x1000000
+        ):
             reasons.append("flash.partition_snapshot.identity")
-        if expected is None or snapshot.get("snapshotChecksum") != expected.get("partitionTableSha256"):
+        if expected is None or not _digest_equal(
+            snapshot.get("snapshotChecksum"), expected.get("partitionTableSha256")
+        ):
             reasons.append("flash.partition_snapshot.anchor")
         if partitions != EXPECTED_PARTITIONS:
             reasons.append("flash.partition_snapshot.table")
@@ -1135,7 +1189,7 @@ def _validate_flash(
             reasons.append("flash.image_range")
         if image_path is not None:
             digest, _, read_error = _read_file_secure(image_path, exact_size=image.get("size"))
-            if read_error or digest != image.get("sha256"):
+            if read_error or not _digest_equal(digest, image.get("sha256")):
                 reasons.append("flash.file_size")
     if not isinstance(operations, list) or len(operations) != 3:
         reasons.append("flash.operations")
@@ -1165,23 +1219,26 @@ def _validate_flash(
                 or offset + size > app_offset + app_size
             ):
                 reasons.append("flash.write_range")
-            if operation.get("path") != image_doc.get("path") or operation.get("sha256") != image_doc.get("sha256"):
+            if operation.get("path") != image_doc.get("path") or not _digest_equal(
+                operation.get("sha256"), image_doc.get("sha256")
+            ):
                 reasons.append("flash.operations")
         else:
             if offset != app_offset or type(size) is not int or size != app_size:
                 reasons.append("flash.readback_range")
         if path is not None:
             digest, _, read_error = _read_file_secure(path, exact_size=size if type(size) is int else None)
-            if read_error or digest != operation.get("sha256"):
+            if read_error or not _digest_equal(digest, operation.get("sha256")):
                 reasons.append("flash.file_size")
     if (
         image_path is not None
         and len(operation_paths) == 3
         and operation_paths[2] is not None
-        and _read_file_secure(
-            operation_paths[2], hash_prefix_size=image_doc.get("size") if type(image_doc.get("size")) is int else 0
-        )[0]
-        != image_doc.get("sha256")
+        and not _secure_hash_matches(
+            operation_paths[2],
+            image_doc.get("sha256"),
+            hash_prefix_size=image_doc.get("size") if type(image_doc.get("size")) is int else 0,
+        )
     ):
         reasons.append("flash.post_readback")
     receipt_app = firmware_receipt.get("app") if _record(firmware_receipt) else None
@@ -1191,7 +1248,7 @@ def _validate_flash(
         or not _record(app_claim)
         or (
             image.get("path") != receipt_app.get("path")
-            or image.get("sha256") != receipt_app.get("sha256")
+            or not _digest_equal(image.get("sha256"), receipt_app.get("sha256"))
             or image.get("size") != receipt_app.get("size")
             or app_claim.get("offset") != receipt_app.get("offset")
             or _hex(app_claim.get("size")) != receipt_app.get("maxPartitionSize")
@@ -1226,7 +1283,7 @@ def _validate_nvs(value: object, partition: dict[str, object] | None, session: P
     if (
         _record(value.get("before"))
         and _record(value.get("after"))
-        and value["before"].get("sha256") != value["after"].get("sha256")
+        and not _digest_equal(value["before"].get("sha256"), value["after"].get("sha256"))
     ):
         reasons.append("nvs.equality")
     size = _hex(partition.get("size")) if partition else None
@@ -1234,8 +1291,8 @@ def _validate_nvs(value: object, partition: dict[str, object] | None, session: P
         size is None
         or before is None
         or after is None
-        or _read_file_secure(before, exact_size=size)[::2] != (value["before"].get("sha256"), None)
-        or _read_file_secure(after, exact_size=size)[::2] != (value["after"].get("sha256"), None)
+        or not _secure_hash_matches(before, value["before"].get("sha256"), exact_size=size)
+        or not _secure_hash_matches(after, value["after"].get("sha256"), exact_size=size)
     ):
         reasons.append("nvs.size")
 
@@ -1430,20 +1487,37 @@ def validate_compose(compose: object, expected: object) -> list[str]:
 def _run(
     command: list[str], cwd: Path, env: dict[str, str], *, timeout_seconds: float = COMMAND_TIMEOUT_SECONDS
 ) -> tuple[str, bool, str | None]:
-    try:
-        result = subprocess.run(
-            command, cwd=cwd, env=env, capture_output=True, text=False, check=False, timeout=timeout_seconds
-        )
-    except subprocess.TimeoutExpired:
-        return "", False, "timeout"
-    except OSError:
-        return "", False, "os_error"
-    try:
-        stdout = result.stdout.decode("utf-8", errors="strict")
-        result.stderr.decode("utf-8", errors="strict")
-    except UnicodeDecodeError:
-        return "", False, "decode"
-    return stdout, result.returncode == 0, None
+    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=cwd,
+                env=env,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                start_new_session=True,
+            )
+        except OSError:
+            return "", False, "os_error"
+        try:
+            return_code = process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            return "", False, "timeout"
+        stdout_size = os.fstat(stdout_file.fileno()).st_size
+        stderr_size = os.fstat(stderr_file.fileno()).st_size
+        if stdout_size > MAX_COMMAND_OUTPUT_BYTES or stderr_size > MAX_COMMAND_OUTPUT_BYTES:
+            return "", False, "output_limit"
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        try:
+            stdout = stdout_file.read().decode("utf-8", errors="strict")
+            stderr_file.read().decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return "", False, "decode"
+        return stdout, return_code == 0, None
 
 
 def _emit(payload: dict[str, object]) -> None:
@@ -1453,11 +1527,13 @@ def _emit(payload: dict[str, object]) -> None:
 def _publish_output(output: Path, payload: bytes, session: Path) -> bool:
     if _path_has_symlink(session) or _path_has_symlink(output.parent) or output.parent.resolve() != session:
         return False
-    temporary = session / f".preflight-{os.getpid()}-{os.urandom(8).hex()}.tmp"
+    temporary_name = f".preflight-{os.getpid()}-{os.urandom(8).hex()}.tmp"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     fd: int | None = None
+    directory_fd: int | None = None
     try:
-        fd = os.open(temporary, flags, 0o600)
+        directory_fd = _open_directory_secure(session)
+        fd = os.open(temporary_name, flags, 0o600, dir_fd=directory_fd)
         view = memoryview(payload)
         while view:
             written = os.write(fd, view)
@@ -1465,28 +1541,48 @@ def _publish_output(output: Path, payload: bytes, session: Path) -> bool:
         os.fsync(fd)
         os.close(fd)
         fd = None
-        os.link(temporary, output, follow_symlinks=False)
-        os.unlink(temporary)
-        directory_fd = os.open(session, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        os.link(
+            temporary_name,
+            output.name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        os.unlink(temporary_name, dir_fd=directory_fd)
+        os.fsync(directory_fd)
         return True
     except OSError:
         return False
     finally:
         if fd is not None:
             os.close(fd)
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(temporary)
+        if directory_fd is not None:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            os.close(directory_fd)
 
 
-def main(argv: list[str] | None = None) -> int:
+def _verify_pinned_identity_signature(canonical_identity: bytes, signature: bytes) -> tuple[bool, str]:
+    if PINNED_APPROVAL_PUBLIC_KEY_RAW is None:
+        return False, PINNED_APPROVAL_KEY_FINGERPRINT
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except ImportError:
+        return False, PINNED_APPROVAL_KEY_FINGERPRINT
+    try:
+        Ed25519PublicKey.from_public_bytes(PINNED_APPROVAL_PUBLIC_KEY_RAW).verify(signature, canonical_identity)
+    except (InvalidSignature, ValueError):
+        return False, PINNED_APPROVAL_KEY_FINGERPRINT
+    return True, PINNED_APPROVAL_KEY_FINGERPRINT
+
+
+def main(argv: list[str] | None = None, *, signature_verifier=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--expected-identity", required=True, type=Path)
+    parser.add_argument("--expected-identity-signature", required=True, type=Path)
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[3]
     _, raw, input_read_error = _read_file_secure(args.input, max_size=MAX_JSON_BYTES, collect=True)
@@ -1501,23 +1597,35 @@ def main(argv: list[str] | None = None) -> int:
     if identity_path_error or identity_path is None:
         _emit({"reasons": [f"expected_identity.path.{identity_path_error}"], "valid": False})
         return 1
-    approved_identity_sha = os.environ.get(EXPECTED_IDENTITY_ENV)
-    if not _real_sha(approved_identity_sha):
-        _emit({"reasons": ["expected_identity.approval_missing"], "valid": False})
-        return 1
     identity_digest, identity_raw, identity_read_error = _read_file_secure(
         identity_path, max_size=MAX_JSON_BYTES, collect=True
     )
     if identity_read_error or identity_raw is None:
         _emit({"reasons": ["expected_identity.read"], "valid": False})
         return 1
-    if identity_digest != approved_identity_sha:
-        _emit({"reasons": ["expected_identity.hash"], "valid": False})
-        return 1
     identity, identity_error = _load_json_bytes(identity_raw)
     if identity_error:
         _emit({"reasons": [f"expected_identity.{identity_error}"], "valid": False})
         return 1
+    signature_path, signature_path_error = _absolute_regular_file(args.expected_identity_signature)
+    if signature_path_error or signature_path is None:
+        _emit({"reasons": [f"expected_identity.signature_path.{signature_path_error}"], "valid": False})
+        return 1
+    _, signature, signature_read_error = _read_file_secure(signature_path, max_size=256, collect=True)
+    if signature_read_error or signature is None or len(signature) != 64:
+        _emit({"reasons": ["expected_identity.signature"], "valid": False})
+        return 1
+    verifier = signature_verifier or _verify_pinned_identity_signature
+    signature_valid, signer_fingerprint = verifier(_canonical_bytes(identity), signature)
+    if not signature_valid:
+        reason = (
+            "expected_identity.signing_prerequisite"
+            if signer_fingerprint == "unprovisioned"
+            else "expected_identity.signature"
+        )
+        _emit({"reasons": [reason], "valid": False})
+        return 1
+    approved_identity_sha = identity_digest
     if _record(expected) and isinstance(expected.get("sessionDirectory"), str):
         session_candidate = Path(expected["sessionDirectory"])
         if _within(identity_path, session_candidate.resolve(strict=False)):
@@ -1574,7 +1682,7 @@ def main(argv: list[str] | None = None) -> int:
                 reasons.append(f"git.dirty_symlink.{name}")
             else:
                 digest, _, read_error = _read_file_secure(path)
-                if read_error or digest != item["sha256"]:
+                if read_error or not _digest_equal(digest, item["sha256"]):
                     reasons.append(f"git.dirty_hash.{name}")
     image_out, image_ok, image_error = _run(["docker", "image", "inspect", expected["backendImage"]], root, env)
     compose_out, compose_ok, compose_error = _run(
@@ -1626,7 +1734,8 @@ def main(argv: list[str] | None = None) -> int:
     payload = {
         "valid": True,
         "result": "PASS",
-        "expectedIdentityApproval": "environment-sha256-match",
+        "expectedIdentityApproval": "ed25519-signature-verified",
+        "expectedIdentitySignerFingerprint": signer_fingerprint,
         "inputChecksum": _canonical_sha256(expected),
         "courseId": COURSE_ID,
         "courseKey": COURSE_KEY,

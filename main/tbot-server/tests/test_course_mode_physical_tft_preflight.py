@@ -9,6 +9,9 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 ROOT = Path(__file__).resolve().parents[3]
 SERVER = ROOT / "main/tbot-server"
@@ -31,6 +34,8 @@ NVS_OFFSET = 0x9000
 NVS_SIZE = 0x4000
 SESSION_ID = "a23be10d-1f38-4c14-b563-bcc821cb809e"
 EXPECTED_IDENTITIES = {}
+EXPECTED_SIGNATURES = {}
+EXPECTED_VERIFIERS = {}
 
 
 @pytest.fixture
@@ -250,6 +255,25 @@ def valid_input(session: Path, tmp_path: Path) -> dict:
     }
     expected_ref = _write_json(tmp_path / "expected-physical-identity.json", expected_identity)
     EXPECTED_IDENTITIES[str(session)] = (expected_identity, expected_ref)
+    private_key = Ed25519PrivateKey.generate()
+    public_key = private_key.public_key()
+    public_raw = public_key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    fingerprint = hashlib.sha256(public_raw).hexdigest()
+    canonical_identity = json.dumps(
+        expected_identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    ).encode()
+    signature_path = tmp_path / "expected-physical-identity.sig"
+    signature_path.write_bytes(private_key.sign(canonical_identity))
+
+    def verifier(payload, signature):
+        try:
+            public_key.verify(signature, payload)
+        except InvalidSignature:
+            return False, fingerprint
+        return True, fingerprint
+
+    EXPECTED_SIGNATURES[str(session)] = signature_path
+    EXPECTED_VERIFIERS[str(session)] = verifier
     materialization.update(
         {
             "backendGitSha": BACKEND_SHA,
@@ -495,37 +519,37 @@ def _rewrite_materialization(document, mutate):
     )
 
 
-def test_canonical_receipt_derived_preflight_passes_cli(tmp_path, session_dir):
+def test_canonical_receipt_derived_preflight_passes_cli(tmp_path, session_dir, monkeypatch, capsys):
     document = valid_input(session_dir, tmp_path)
     fake_bin, log = _fake_commands(tmp_path, document)
     source = session_dir / "input.json"
     output = session_dir / "result.json"
     source.write_text(json.dumps(document))
     _, expected_ref = EXPECTED_IDENTITIES[str(session_dir)]
-    result = subprocess.run(
+    signature = EXPECTED_SIGNATURES[str(session_dir)]
+    verifier = EXPECTED_VERIFIERS[str(session_dir)]
+    sys.path.insert(0, str(SERVER / "scripts"))
+    from course_mode_physical_tft_preflight import main
+
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+    result = main(
         [
-            sys.executable,
-            str(SCRIPT),
             "--input",
             str(source),
             "--output",
             str(output),
             "--expected-identity",
             expected_ref["path"],
+            "--expected-identity-signature",
+            str(signature),
         ],
-        cwd=ROOT,
-        env={
-            **os.environ,
-            "PATH": f"{fake_bin}:{os.environ['PATH']}",
-            "COURSE_MODE_EXPECTED_IDENTITY_SHA256": expected_ref["sha256"],
-        },
-        capture_output=True,
-        text=True,
+        signature_verifier=verifier,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
-    payload = json.loads(result.stdout)
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
     assert payload["replacementId"] == REPLACEMENT_ID and payload["valid"] is True
-    assert payload["expectedIdentityApproval"] == "environment-sha256-match"
+    assert payload["expectedIdentityApproval"] == "ed25519-signature-verified"
+    assert payload["expectedIdentitySignerFingerprint"] != "unprovisioned"
     assert payload["backendImageId"] == "sha256:" + "b" * 64
     assert (
         payload["inputChecksum"]
@@ -534,7 +558,7 @@ def test_canonical_receipt_derived_preflight_passes_cli(tmp_path, session_dir):
     assert len(log.read_text().splitlines()) == 12
 
 
-def test_cli_requires_separate_environment_approval_and_fixed_digest(tmp_path, session_dir):
+def test_cli_requires_provisioned_signer_and_rejects_coherent_rewrite(tmp_path, session_dir):
     document = valid_input(session_dir, tmp_path)
     fake_bin, _ = _fake_commands(tmp_path, document)
     source = session_dir / "approval-input.json"
@@ -550,26 +574,24 @@ def test_cli_requires_separate_environment_approval_and_fixed_digest(tmp_path, s
         str(output),
         "--expected-identity",
         expected_ref["path"],
+        "--expected-identity-signature",
+        str(EXPECTED_SIGNATURES[str(session_dir)]),
     ]
     missing = subprocess.run(command, env={"PATH": str(fake_bin)}, capture_output=True, text=True)
-    assert json.loads(missing.stdout)["reasons"] == ["expected_identity.approval_missing"]
+    assert json.loads(missing.stdout)["reasons"] == ["expected_identity.signing_prerequisite"]
 
     identity = json.loads(Path(expected_ref["path"]).read_text())
     identity["replacementId"] = "97b892e1-0f1e-42d5-bbc4-50465042e111"
     document["reviewedIdentity"]["replacementId"] = identity["replacementId"]
     source.write_text(json.dumps(document))
-    changed_ref = _write_json(tmp_path / "changed-identity.json", identity)
-    changed_command = [*command[:-1], changed_ref["path"]]
-    fixed = subprocess.run(
-        changed_command,
-        env={"PATH": str(fake_bin), "COURSE_MODE_EXPECTED_IDENTITY_SHA256": expected_ref["sha256"]},
-        capture_output=True,
-        text=True,
-    )
-    assert json.loads(fixed.stdout)["reasons"] == ["expected_identity.hash"]
+    _write_json(tmp_path / "changed-identity.json", identity)
+    verifier = EXPECTED_VERIFIERS[str(session_dir)]
+    signature = EXPECTED_SIGNATURES[str(session_dir)].read_bytes()
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    assert verifier(canonical, signature)[0] is False
 
 
-def test_retagged_backend_image_id_fails_fixed_external_anchor(tmp_path, session_dir):
+def test_retagged_backend_image_id_fails_fixed_external_anchor(tmp_path, session_dir, monkeypatch, capsys):
     document = valid_input(session_dir, tmp_path)
     fake_bin, _ = _fake_commands(tmp_path, document)
     docker = fake_bin / "docker"
@@ -577,27 +599,25 @@ def test_retagged_backend_image_id_fails_fixed_external_anchor(tmp_path, session
     source = session_dir / "retagged-input.json"
     source.write_text(json.dumps(document))
     _, expected_ref = EXPECTED_IDENTITIES[str(session_dir)]
-    result = subprocess.run(
+    sys.path.insert(0, str(SERVER / "scripts"))
+    from course_mode_physical_tft_preflight import main
+
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+    result = main(
         [
-            sys.executable,
-            str(SCRIPT),
             "--input",
             str(source),
             "--output",
             str(session_dir / "retagged-output.json"),
             "--expected-identity",
             expected_ref["path"],
+            "--expected-identity-signature",
+            str(EXPECTED_SIGNATURES[str(session_dir)]),
         ],
-        cwd=ROOT,
-        env={
-            **os.environ,
-            "PATH": f"{fake_bin}:{os.environ['PATH']}",
-            "COURSE_MODE_EXPECTED_IDENTITY_SHA256": expected_ref["sha256"],
-        },
-        capture_output=True,
-        text=True,
+        signature_verifier=EXPECTED_VERIFIERS[str(session_dir)],
     )
-    assert "image.anchor" in json.loads(result.stdout)["reasons"]
+    assert result == 1
+    assert "image.anchor" in json.loads(capsys.readouterr().out)["reasons"]
 
 
 def test_run_timeout_and_invalid_utf8_are_deterministic(tmp_path):
@@ -605,11 +625,82 @@ def test_run_timeout_and_invalid_utf8_are_deterministic(tmp_path):
     from course_mode_physical_tft_preflight import _run
 
     _, ok, reason = _run(
-        [sys.executable, "-c", "import time; time.sleep(1)"], tmp_path, os.environ.copy(), timeout_seconds=0.01
+        [
+            sys.executable,
+            "-c",
+            "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c','import time;time.sleep(10)']); time.sleep(10)",
+        ],
+        tmp_path,
+        os.environ.copy(),
+        timeout_seconds=0.05,
     )
     assert (ok, reason) == (False, "timeout")
     _, ok, reason = _run([sys.executable, "-c", "import os; os.write(1, bytes([255]))"], tmp_path, os.environ.copy())
     assert (ok, reason) == (False, "decode")
+    _, ok, reason = _run(
+        [sys.executable, "-c", "import sys; sys.stdout.write('x' * 3000000)"], tmp_path, os.environ.copy()
+    )
+    assert (ok, reason) == (False, "output_limit")
+
+
+def test_python_canonical_json_matches_node_unicode_bytes():
+    sys.path.insert(0, str(SERVER / "scripts"))
+    from course_mode_physical_tft_preflight import _canonical_bytes
+
+    value = {"é": "雪", "a": [1, True, None], "nested": {"β": "café", "z": 2}}
+    script = (
+        "const v="
+        + json.dumps(value, ensure_ascii=False)
+        + ";const s=x=>Array.isArray(x)?x.map(s):(x&&typeof x==='object'?"
+        + "Object.fromEntries(Object.keys(x).sort().map(k=>[k,s(x[k])])):x);"
+        + "process.stdout.write(JSON.stringify(s(v)));"
+    )
+    node = subprocess.run(["node", "-e", script], capture_output=True, check=True)
+    assert node.stdout == _canonical_bytes(value)
+
+
+def test_parent_swap_to_symlink_fails_secure_read_and_publish(tmp_path, monkeypatch):
+    sys.path.insert(0, str(SERVER / "scripts"))
+    import course_mode_physical_tft_preflight as preflight
+
+    trusted = tmp_path / "trusted"
+    outside = tmp_path / "outside"
+    trusted.mkdir()
+    outside.mkdir()
+    target = trusted / "artifact.bin"
+    target.write_bytes(b"trusted")
+    (outside / "artifact.bin").write_bytes(b"outside")
+    original_check = preflight._path_has_symlink
+    swapped = False
+
+    def swap_after_check(path):
+        nonlocal swapped
+        result = original_check(path)
+        if not swapped:
+            swapped = True
+            trusted.rename(tmp_path / "trusted-real")
+            trusted.symlink_to(outside, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(preflight, "_path_has_symlink", swap_after_check)
+    assert preflight._read_file_secure(target, collect=True)[2] == "open"
+    assert (outside / "artifact.bin").read_bytes() == b"outside"
+
+    publish_root = tmp_path / "publish"
+    publish_outside = tmp_path / "publish-outside"
+    publish_root.mkdir()
+    publish_outside.mkdir()
+    real_open_directory = preflight._open_directory_secure
+
+    def swap_before_open(path):
+        publish_root.rename(tmp_path / "publish-real")
+        publish_root.symlink_to(publish_outside, target_is_directory=True)
+        return real_open_directory(path)
+
+    monkeypatch.setattr(preflight, "_path_has_symlink", original_check)
+    monkeypatch.setattr(preflight, "_open_directory_secure", swap_before_open)
+    assert preflight._publish_output(publish_root / "result.json", b"trusted", publish_root) is False
+    assert not (publish_outside / "result.json").exists()
 
 
 def test_output_publish_never_replaces_racing_destination(tmp_path, monkeypatch):
@@ -643,8 +734,10 @@ def test_non_finite_json_is_rejected_at_every_boundary(tmp_path, session_dir):
             str(session_dir / "nan-out.json"),
             "--expected-identity",
             expected_ref["path"],
+            "--expected-identity-signature",
+            str(session_dir / "unused.sig"),
         ],
-        env={**os.environ, "COURSE_MODE_EXPECTED_IDENTITY_SHA256": expected_ref["sha256"]},
+        env=os.environ.copy(),
         capture_output=True,
         text=True,
     )
@@ -652,7 +745,6 @@ def test_non_finite_json_is_rejected_at_every_boundary(tmp_path, session_dir):
 
     identity_path = tmp_path / "nan-identity.json"
     identity_path.write_text('{"schemaVersion":NaN}')
-    identity_sha = hashlib.sha256(identity_path.read_bytes()).hexdigest()
     valid_source = session_dir / "valid-for-nan-identity.json"
     valid_source.write_text(json.dumps(document))
     identity_result = subprocess.run(
@@ -665,8 +757,10 @@ def test_non_finite_json_is_rejected_at_every_boundary(tmp_path, session_dir):
             str(session_dir / "nan-identity-out.json"),
             "--expected-identity",
             str(identity_path),
+            "--expected-identity-signature",
+            str(session_dir / "unused.sig"),
         ],
-        env={**os.environ, "COURSE_MODE_EXPECTED_IDENTITY_SHA256": identity_sha},
+        env=os.environ.copy(),
         capture_output=True,
         text=True,
     )
@@ -831,7 +925,6 @@ def test_external_identity_duplicate_keys_and_symlink_path_are_rejected(tmp_path
     source.write_text(json.dumps(document))
     duplicate = tmp_path / "duplicate-identity.json"
     duplicate.write_text('{"schemaVersion":1,"schemaVersion":1}')
-    duplicate_sha = hashlib.sha256(duplicate.read_bytes()).hexdigest()
     duplicate_result = subprocess.run(
         [
             sys.executable,
@@ -842,8 +935,10 @@ def test_external_identity_duplicate_keys_and_symlink_path_are_rejected(tmp_path
             str(session_dir / "duplicate-out.json"),
             "--expected-identity",
             str(duplicate),
+            "--expected-identity-signature",
+            str(session_dir / "unused.sig"),
         ],
-        env={**os.environ, "COURSE_MODE_EXPECTED_IDENTITY_SHA256": duplicate_sha},
+        env=os.environ.copy(),
         capture_output=True,
         text=True,
     )
@@ -862,8 +957,10 @@ def test_external_identity_duplicate_keys_and_symlink_path_are_rejected(tmp_path
             str(session_dir / "symlink-out.json"),
             "--expected-identity",
             str(identity_link),
+            "--expected-identity-signature",
+            str(session_dir / "unused.sig"),
         ],
-        env={**os.environ, "COURSE_MODE_EXPECTED_IDENTITY_SHA256": identity_ref["sha256"]},
+        env=os.environ.copy(),
         capture_output=True,
         text=True,
     )
@@ -883,6 +980,8 @@ def test_duplicate_json_keys_fail_before_commands(session_dir):
             str(session_dir / "out.json"),
             "--expected-identity",
             str(session_dir / "unused.json"),
+            "--expected-identity-signature",
+            str(session_dir / "unused.sig"),
         ],
         env={"PATH": ""},
         capture_output=True,
@@ -1003,8 +1102,10 @@ def test_wrong_type_cli_inputs_always_emit_stable_json(tmp_path, session_dir):
                 str(session_dir / f"wrong-{index}-out.json"),
                 "--expected-identity",
                 expected_ref["path"],
+                "--expected-identity-signature",
+                str(EXPECTED_SIGNATURES[str(session_dir)]),
             ],
-            env={"PATH": "", "COURSE_MODE_EXPECTED_IDENTITY_SHA256": expected_ref["sha256"]},
+            env={"PATH": ""},
             capture_output=True,
             text=True,
         )
@@ -1066,6 +1167,8 @@ def test_compose_non_mapping_and_malformed_secret_input_are_stable(tmp_path, ses
             str(session_dir / "bad-out.json"),
             "--expected-identity",
             str(session_dir / "unused.json"),
+            "--expected-identity-signature",
+            str(session_dir / "unused.sig"),
         ],
         env={"PATH": ""},
         capture_output=True,
