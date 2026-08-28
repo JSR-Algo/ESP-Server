@@ -585,6 +585,58 @@ def test_unselected_standalone_voice_test_dirty_exception_is_not_lane_authority(
     assert marker.is_file()
 
 
+@pytest.mark.parametrize("repository_name", ["backend", "firmware"])
+def test_physical_preflight_rejects_dirty_cross_repository_authority_before_command(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    repository_name: str,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _commit_then_dirty(candidate, repository_name, "runtime-dependency.txt")
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    marker = tmp_path / "must-not-run"
+    monkeypatch.setattr(
+        gate, "_command_for_lane",
+        lambda _lane, _candidate: (
+            sys.executable, "-c", f"from pathlib import Path;Path({str(marker)!r}).touch()",
+        ),
+    )
+    monkeypatch.setattr(gate, "lane_candidate_paths", lambda _lane, _candidate: ())
+
+    result = gate.run_gate(
+        candidate_file, "physical-preflight",
+        runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "physical-tft-preflight"
+    assert not marker.exists()
+
+
+def test_physical_preflight_allows_protected_unselected_voice_exception(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    voice_test = "main/tbot-server/tests/test_lesson_voice_output_discipline.py"
+    _commit_then_dirty(candidate, "adminEsp", voice_test)
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    marker = tmp_path / "ran"
+    monkeypatch.setattr(
+        gate, "_command_for_lane",
+        lambda _lane, _candidate: (
+            sys.executable, "-c", f"from pathlib import Path;Path({str(marker)!r}).touch()",
+        ),
+    )
+    monkeypatch.setattr(gate, "lane_candidate_paths", lambda _lane, _candidate: ())
+
+    result = gate.run_gate(
+        candidate_file, "physical-preflight",
+        runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+    )
+
+    assert result["verdict"] == "PASS"
+    assert marker.is_file()
+
+
 def test_full_esp_lane_maps_task06_roots_and_rejects_skips(candidate_file: Path) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     lane = next(lane for lane in gate.lanes_for_mode("full") if lane.name == "esp-course-mode-full")

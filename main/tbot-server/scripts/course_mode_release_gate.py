@@ -379,6 +379,11 @@ def lane_candidate_paths(lane: Lane, candidate: dict) -> tuple[str, ...]:
 
 def lane_dirty_exceptions_authorized(lane: Lane, candidate: dict) -> bool:
     try:
+        if lane.name == "physical-tft-preflight" and any(
+            candidate["repositories"][name]["dirtyExceptions"]
+            for name in ("backend", "firmware")
+        ):
+            return False
         dirty = {
             item["path"] for item in candidate["repositories"][lane.repository]["dirtyExceptions"]
         }
