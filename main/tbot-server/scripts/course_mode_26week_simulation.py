@@ -534,6 +534,15 @@ def _simulate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
             f"lesson weeks must be exactly {expected_weeks}, found {actual_weeks}",
         )
     lessons_by_week = {lesson["week"]: lesson for lesson in lesson_rows}
+    canonical_lesson_keys = fixture.get("lessonKeys")
+    canonical_checksums = fixture.get("contractChecksums")
+    course_key = fixture.get("courseKey")
+    if (not isinstance(canonical_lesson_keys, list) or len(canonical_lesson_keys) != 26
+        or not isinstance(canonical_checksums, list) or len(canonical_checksums) != 26
+        or not isinstance(course_key, str)):
+        raise CourseModeSimulationError(
+            "CANONICAL_MAPPING_INVALID", "backend export canonical mapping is incomplete",
+        )
     normalized_contracts = []
     contracts = []
     for week, raw_contract in enumerate(raw_contracts, 1):
@@ -541,6 +550,21 @@ def _simulate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
         if lesson is None or _normalized_json(lesson.get("contract")) != _normalized_json(raw_contract):
             raise CourseModeSimulationError(
                 "CONTRACT_ENVELOPE_MISMATCH", f"envelope contract mismatch at week {week}",
+            )
+        expected_fixture_id = f"curriculum.w{week:02d}"
+        manifest = lesson.get("manifest", {})
+        if (
+            raw_contract.get("fixtureId") != expected_fixture_id
+            or raw_contract.get("lesson", {}).get("lessonId") != expected_fixture_id
+            or raw_contract.get("contractChecksum") != canonical_checksums[week - 1]
+            or lesson.get("lessonKey") != canonical_lesson_keys[week - 1]
+            or manifest.get("lessonKey") != canonical_lesson_keys[week - 1]
+            or manifest.get("courseKey") != course_key
+            or manifest.get("contractChecksum") != canonical_checksums[week - 1]
+        ):
+            raise CourseModeSimulationError(
+                "CANONICAL_WEEK_IDENTITY_MISMATCH",
+                f"week {week} does not match backend canonical identity",
             )
         normalized = _normalized_json(raw_contract)
         normalized_contracts.append(normalized)

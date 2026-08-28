@@ -145,6 +145,23 @@ def test_top_level_contract_must_match_lesson_envelope(backend_contracts) -> Non
         simulate_fixture(mutated)
 
 
+def test_same_pedagogy_week_swap_cannot_be_relabelled(backend_contracts) -> None:
+    fixture, _ = backend_contracts
+    mutated = copy.deepcopy(fixture)
+    mutated["contracts"][0], mutated["contracts"][4] = (
+        mutated["contracts"][4], mutated["contracts"][0],
+    )
+    mutated["lessons"][0], mutated["lessons"][4] = (
+        mutated["lessons"][4], mutated["lessons"][0],
+    )
+    mutated["lessons"][0]["week"] = 1
+    mutated["lessons"][4]["week"] = 5
+
+    with pytest.raises(CourseModeSimulationError) as caught:
+        simulate_fixture(mutated)
+    assert caught.value.code == "CANONICAL_WEEK_IDENTITY_MISMATCH"
+
+
 @pytest.mark.parametrize("mutation, code", [
     (lambda fixture: fixture["lessons"].append(
         {**copy.deepcopy(fixture["lessons"][0]), "week": 27},
@@ -184,8 +201,9 @@ def test_recomputed_object_key_drift_fails_phase_binding(backend_contracts) -> N
         value["activities"][activity_index]["visual"]["objectAssetKey"] = replacement
         value["contractChecksum"] = _checksum(value)
 
-    with pytest.raises(CourseModeSimulationError, match="object phase mismatch"):
+    with pytest.raises(CourseModeSimulationError) as caught:
         simulate_fixture(mutated)
+    assert caught.value.code == "CANONICAL_WEEK_IDENTITY_MISMATCH"
 
 
 def test_full_path_loop_detector_rejects_a_stuck_runtime(backend_contracts, monkeypatch) -> None:
