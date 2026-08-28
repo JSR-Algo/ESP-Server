@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import scripts.course_mode_candidate_manifest as manifest
 from core.lesson.course_mode_contract import CourseModeContract
 from core.lesson.course_orchestrator import CourseOrchestrator
 from core.lesson.runtime import CourseModeRuntimeAdapter
@@ -138,6 +139,48 @@ def test_backend_command_output_is_bounded() -> None:
     with pytest.raises(CourseModeSimulationError) as caught:
         load_backend_contracts(BACKEND_ROOT, backend_command=command)
     assert caught.value.code == "BACKEND_COMMAND_OUTPUT_LIMIT"
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), 0.0, -1.0])
+def test_backend_timeout_must_be_positive_and_finite(timeout: float) -> None:
+    with pytest.raises(CourseModeSimulationError) as caught:
+        load_backend_contracts(BACKEND_ROOT, timeout_sec=timeout)
+    assert caught.value.code == "BACKEND_TIMEOUT_INVALID"
+
+
+@pytest.mark.parametrize("timeout", ["nan", "inf", "0", "-1"])
+def test_cli_rejects_invalid_backend_timeout(timeout: str) -> None:
+    completed = _run_cli(
+        "--backend-root", str(BACKEND_ROOT), "--backend-timeout-sec", timeout,
+    )
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 1 and completed.stderr == ""
+    assert payload["error"]["code"] == "BACKEND_TIMEOUT_INVALID"
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), 0.0, -1.0])
+def test_bounded_runner_fails_closed_for_invalid_timeout(timeout: float) -> None:
+    result = manifest.run_bounded_command(
+        [sys.executable, "-c", "raise SystemExit(0)"], cwd=ROOT,
+        timeout_sec=timeout, max_output_bytes=1024,
+    )
+
+    assert result.error == "invalid_timeout" and result.returncode is None
+
+
+@pytest.mark.parametrize("raw", [
+    b'{"contracts":[],"contracts":[]}', b'{"value":NaN}', b'{"value":Infinity}', b'\xff',
+])
+def test_cli_contract_input_uses_strict_json(raw: bytes, tmp_path: Path) -> None:
+    path = tmp_path / "contracts.json"
+    path.write_bytes(raw)
+
+    completed = _run_cli("--contracts", str(path))
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 1 and completed.stderr == ""
+    assert payload["error"]["code"] == "CONTRACTS_INPUT_INVALID_JSON"
 
 
 def _checksum(value: dict) -> str:

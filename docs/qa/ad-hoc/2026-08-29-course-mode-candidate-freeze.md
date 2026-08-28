@@ -87,7 +87,7 @@ Observed simulator/verifier evidence was 26 lessons, 256 activities, 6 pedagogie
 
 Final GREEN: the original focused ESP gate reported `47 passed`; after count
 binding it reported `54 passed`; the current cumulative security gate reports
-`80 passed`. The explicit-root simulator returned `status=pass`.
+`104 passed`. The explicit-root simulator returned `status=pass`.
 
 ### Security review RED/GREEN
 
@@ -110,6 +110,15 @@ COURSE_MODE_BACKEND_ROOT=/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktree
 ```
 
 It reported `80 passed`.
+
+The quality re-review added four final fail-closed lanes: non-finite/non-positive
+timeouts, direct `O_NOFOLLOW` candidate-manifest reads with replacement checks,
+strict duplicate-key/non-finite JSON rejection, and a final all-repository
+identity recheck after hashing. The focused RED was `22 failed, 2 passed`; the
+focused GREEN was `24 passed`, and the final combined gate was `104 passed`.
+The only full-suite integration correction was canonicalizing the verifier-owned
+macOS temporary output from `/var` to `/private/var` before its secure read;
+caller-supplied candidate and contracts paths remain direct no-follow reads.
 
 ### Fresh backend dependencies
 

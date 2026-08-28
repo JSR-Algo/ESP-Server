@@ -7,6 +7,7 @@ import argparse
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import selectors
@@ -75,6 +76,8 @@ def run_bounded_command(
     command: list[str], *, cwd: Path, timeout_sec: float, max_output_bytes: int,
     env: dict[str, str] | None = None,
 ) -> BoundedCommandResult:
+    if not isinstance(timeout_sec, (int, float)) or not math.isfinite(timeout_sec) or timeout_sec <= 0:
+        return BoundedCommandResult(None, "", "invalid_timeout")
     try:
         process = subprocess.Popen(
             command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
@@ -161,6 +164,25 @@ def _dirty_paths(root: Path) -> list[str]:
     return sorted(set(paths))
 
 
+def strict_json_loads(raw: bytes | str) -> Any:
+    text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    def reject_constant(_value: str) -> None:
+        raise ValueError("non-finite JSON number")
+
+    return json.loads(
+        text, object_pairs_hook=reject_duplicates, parse_constant=reject_constant,
+    )
+
+
 def _open_directory_secure(path: Path) -> int:
     if not path.is_absolute():
         raise OSError("absolute path required")
@@ -175,6 +197,43 @@ def _open_directory_secure(path: Path) -> int:
     except Exception:
         os.close(current)
         raise
+
+
+def read_secure_regular(path: Path, max_bytes: int) -> bytes:
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    parent_fd = _open_directory_secure(absolute.parent)
+    file_fd: int | None = None
+    try:
+        file_fd = os.open(
+            absolute.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd,
+        )
+        before = os.fstat(file_fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+            raise OSError("invalid bounded input")
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(file_fd, min(1024 * 1024, max_bytes + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise OSError("bounded input too large")
+            chunks.append(chunk)
+        after = os.fstat(file_fd)
+        current = os.stat(absolute.name, dir_fd=parent_fd, follow_symlinks=False)
+        identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        if identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+            raise OSError("bounded input changed")
+        if identity != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns):
+            raise OSError("bounded input changed")
+        if total != before.st_size:
+            raise OSError("bounded input changed")
+        return b"".join(chunks)
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        os.close(parent_fd)
 
 
 def _secure_hash_relative(root: Path, relative: str) -> tuple[str | None, str | None]:
@@ -310,6 +369,23 @@ def _validate_repository(name: str, value: Any, reasons: set[str]) -> Path | Non
     return root
 
 
+def _repository_matches_candidate(root: Path, value: dict[str, Any]) -> bool:
+    try:
+        if (
+            _git(root, "rev-parse", "--verify", "HEAD^{commit}").strip() != value["sha"]
+            or _git(root, "branch", "--show-current").strip() != value["branch"]
+            or _git(root, "remote", "get-url", "origin").strip() != value["remoteUrl"]
+            or _dirty_paths(root) != sorted(item["path"] for item in value["dirtyExceptions"])
+        ):
+            return False
+        return all(
+            _secure_hash_relative(root, item["path"]) == (item["sha256"], None)
+            for item in value["dirtyExceptions"]
+        )
+    except (KeyError, RuntimeError, TypeError):
+        return False
+
+
 def _parse_rfc3339_utc(value: Any) -> datetime | None:
     if not isinstance(value, str) or RFC3339_UTC_RE.fullmatch(value) is None:
         return None
@@ -398,6 +474,12 @@ def validate_candidate(candidate: Any, *, now: datetime | None = None) -> list[s
             checksum_invalid = True
     if checksum_invalid:
         reasons.add("curriculum.sourceChecksum")
+    for name, root in repository_roots.items():
+        prefix = f"repositories.{name}."
+        if root is not None and not any(reason.startswith(prefix) for reason in reasons):
+            value = repositories[name]
+            if not _repository_matches_candidate(root, value):
+                reasons.add(f"repositories.{name}.changed")
     return sorted(reasons)
 
 
@@ -406,16 +488,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("candidate", type=Path)
     args = parser.parse_args(argv)
     try:
-        path = args.candidate.resolve(strict=True)
-        if path.is_symlink() or path.stat().st_size > MAX_CANDIDATE_BYTES:
-            raise OSError("invalid candidate input")
-        with path.open("rb") as source:
-            raw = source.read(MAX_CANDIDATE_BYTES + 1)
-        if len(raw) > MAX_CANDIDATE_BYTES:
-            raise OSError("candidate input too large")
-        candidate = json.loads(raw.decode("utf-8"))
+        candidate = strict_json_loads(read_secure_regular(args.candidate, MAX_CANDIDATE_BYTES))
         reasons = validate_candidate(candidate)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
         reasons = ["candidate.input"]
     print(json.dumps(
         {"schemaVersion": 1, "validator": "course-mode-candidate.v1",

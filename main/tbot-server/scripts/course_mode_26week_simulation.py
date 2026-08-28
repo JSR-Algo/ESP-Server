@@ -7,8 +7,8 @@ import argparse
 import asyncio
 import copy
 import json
+import math
 import os
-import stat
 import subprocess
 import sys
 import tempfile
@@ -26,7 +26,9 @@ from core.lesson.runtime import CourseModeRuntimeAdapter
 from scripts.course_mode_candidate_manifest import (
     MAX_CANDIDATE_BYTES,
     _git,
+    read_secure_regular,
     run_bounded_command,
+    strict_json_loads,
 )
 
 
@@ -125,37 +127,14 @@ def resolve_backend_root(
     return BackendRootResolution(root, None, head)
 
 
-def _read_bounded_regular(path: Path, max_bytes: int) -> bytes:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags)
-    try:
-        before = os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
-            raise OSError("invalid bounded input")
-        chunks = []
-        total = 0
-        while True:
-            chunk = os.read(fd, min(1024 * 1024, max_bytes + 1 - total))
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                raise OSError("bounded input too large")
-            chunks.append(chunk)
-        after = os.fstat(fd)
-        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
-            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
-        ) or total != before.st_size:
-            raise OSError("bounded input changed")
-        return b"".join(chunks)
-    finally:
-        os.close(fd)
-
-
 def load_backend_contracts(
     root: Path | None = None, *, backend_command: list[str] | None = None,
     timeout_sec: float = 30, expected_sha: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    if not isinstance(timeout_sec, (int, float)) or not math.isfinite(timeout_sec) or timeout_sec <= 0:
+        raise CourseModeSimulationError(
+            "BACKEND_TIMEOUT_INVALID", "backend timeout must be positive and finite",
+        )
     resolution = resolve_backend_root(root, expected_sha=expected_sha)
     if resolution.error or resolution.path is None:
         raise CourseModeSimulationError(
@@ -198,8 +177,10 @@ def load_backend_contracts(
                 "BACKEND_IDENTITY_MISMATCH", "backend identity changed during verification",
             )
         try:
-            fixture = json.loads(_read_bounded_regular(output, 64 * 1024 * 1024).decode("utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            fixture = strict_json_loads(
+                read_secure_regular(output.resolve(strict=True), 64 * 1024 * 1024)
+            )
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             raise CourseModeSimulationError("BACKEND_OUTPUT_INVALID_JSON", str(exc)) from None
     if fixture.get("status") != "pass" or fixture.get("lessonCount") != 26:
         raise CourseModeSimulationError(
@@ -760,19 +741,19 @@ def main(argv: list[str] | None = None) -> int:
                     "CONTRACTS_INPUT_NOT_FILE", f"contracts input is not a file: {args.contracts}",
                 )
             try:
-                fixture = json.loads(_read_bounded_regular(args.contracts, 64 * 1024 * 1024).decode("utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                fixture = strict_json_loads(read_secure_regular(args.contracts, 64 * 1024 * 1024))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
                 raise CourseModeSimulationError("CONTRACTS_INPUT_INVALID_JSON", str(exc)) from None
             contracts = fixture["contracts"]
         else:
             expected_sha = None
             if args.candidate is not None:
                 try:
-                    candidate = json.loads(
-                        _read_bounded_regular(args.candidate, MAX_CANDIDATE_BYTES).decode("utf-8")
+                    candidate = strict_json_loads(
+                        read_secure_regular(args.candidate, MAX_CANDIDATE_BYTES)
                     )
                     expected_sha = candidate["repositories"]["backend"]["sha"]
-                except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError):
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, KeyError, TypeError):
                     raise CourseModeSimulationError(
                         "BACKEND_IDENTITY_MISMATCH", "candidate backend identity is invalid",
                     ) from None
@@ -785,8 +766,8 @@ def main(argv: list[str] | None = None) -> int:
             backend_command = None
             if args.backend_command_json is not None:
                 try:
-                    backend_command = json.loads(args.backend_command_json)
-                except json.JSONDecodeError as exc:
+                    backend_command = strict_json_loads(args.backend_command_json)
+                except (json.JSONDecodeError, ValueError) as exc:
                     raise CourseModeSimulationError("BACKEND_COMMAND_INVALID", str(exc)) from None
                 if not isinstance(backend_command, list) or not backend_command or not all(
                     isinstance(item, str) for item in backend_command

@@ -341,3 +341,85 @@ def test_candidate_cli_bounds_input_without_traceback_or_echo(tmp_path: Path) ->
     assert completed.returncode == 1 and completed.stderr == ""
     assert json.loads(completed.stdout)["reasons"] == ["candidate.input"]
     assert secret not in completed.stdout
+
+
+def test_candidate_cli_rejects_symlink_input(tmp_path: Path) -> None:
+    target = tmp_path / "candidate.json"
+    target.write_text("{}", encoding="utf-8")
+    link = tmp_path / "candidate-link.json"
+    link.symlink_to(target)
+
+    completed = subprocess.run(
+        [sys.executable, str(Path(manifest.__file__)), str(link)],
+        check=False, capture_output=True, text=True, timeout=5,
+    )
+
+    assert completed.returncode == 1 and completed.stderr == ""
+    assert json.loads(completed.stdout)["reasons"] == ["candidate.input"]
+
+
+def test_candidate_input_detects_path_replacement(tmp_path: Path, monkeypatch) -> None:
+    target = tmp_path / "candidate.json"
+    target.write_bytes(b"{}")
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(b'{"replacement":true}')
+    original_read = os.read
+    replaced = False
+
+    def replace_after_first_read(fd: int, size: int) -> bytes:
+        nonlocal replaced
+        data = original_read(fd, size)
+        if data and not replaced:
+            replaced = True
+            os.replace(replacement, target)
+        return data
+
+    monkeypatch.setattr(os, "read", replace_after_first_read)
+
+    with pytest.raises(OSError):
+        manifest.read_secure_regular(target, manifest.MAX_CANDIDATE_BYTES)
+
+
+@pytest.mark.parametrize("raw", [
+    b'{"candidateId":"one","candidateId":"two"}',
+    b'{"value":NaN}', b'{"value":Infinity}', b'{"value":-Infinity}', b'\xff',
+])
+def test_candidate_cli_uses_strict_json(raw: bytes, tmp_path: Path) -> None:
+    path = tmp_path / "candidate.json"
+    path.write_bytes(raw)
+
+    completed = subprocess.run(
+        [sys.executable, str(Path(manifest.__file__)), str(path)],
+        check=False, capture_output=True, text=True, timeout=5,
+    )
+
+    assert completed.returncode == 1 and completed.stderr == ""
+    assert json.loads(completed.stdout)["reasons"] == ["candidate.input"]
+
+
+def test_candidate_rechecks_repository_identity_after_hashing(
+    candidate: dict, repositories: dict[str, Path], monkeypatch,
+) -> None:
+    backend = repositories["backend"]
+    (backend / "other.txt").write_text("second commit", encoding="utf-8")
+    _git(backend, "add", "other.txt")
+    _git(backend, "commit", "-m", "second")
+    second = _git(backend, "rev-parse", "HEAD")
+    first = candidate["repositories"]["backend"]["sha"]
+    _git(backend, "branch", "candidate-next", second)
+    _git(backend, "checkout", "--detach", first)
+    _git(backend, "branch", "-f", "candidate", first)
+    _git(backend, "checkout", "candidate")
+    original = manifest._secure_hash_relative
+    switched = False
+
+    def switch_after_identity(root: Path, relative: str):
+        nonlocal switched
+        if root == backend and relative.endswith("curriculum-course-mode.ts") and not switched:
+            switched = True
+            _git(backend, "checkout", "candidate-next")
+        return original(root, relative)
+
+    monkeypatch.setattr(manifest, "_secure_hash_relative", switch_after_identity)
+
+    assert validate_candidate(candidate, now=NOW) == ["repositories.backend.changed"]
