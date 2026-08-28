@@ -44,6 +44,22 @@ def _repository(root: Path) -> dict:
     }
 
 
+def _commit_then_dirty(candidate: dict, repository_name: str, relative: str) -> None:
+    repository = candidate["repositories"][repository_name]
+    root = Path(repository["path"])
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("committed\n", encoding="utf-8")
+    _git(root, "add", relative)
+    _git(root, "commit", "-m", f"add {Path(relative).name}")
+    repository.update(_repository(root))
+    path.write_text("dirty runtime bytes\n", encoding="utf-8")
+    repository["dirtyExceptions"] = [{
+        "path": relative,
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }]
+
+
 @pytest.fixture
 def candidate_file(tmp_path: Path) -> Path:
     repositories = {}
@@ -480,6 +496,93 @@ def test_selected_esp_test_drift_blocks_before_execution(candidate_file: Path, t
     assert result["verdict"] == "BLOCKED"
     assert result["failedLane"] == "esp-course-mode-full"
     assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("repository_name", "relative", "lane"),
+    [
+        (
+            "backend", "src/runtime-dependency.ts",
+            gate.Lane("backend-policy", "backend", ".", (sys.executable, "-c", "pass"), 5.0),
+        ),
+        (
+            "adminEsp", "main/manager-web/src/runtime-dependency.js",
+            gate.Lane(
+                "admin-policy", "adminEsp", "main/manager-web",
+                (sys.executable, "-c", "pass"), 5.0,
+            ),
+        ),
+        (
+            "adminEsp", "main/tbot-server/scripts/runtime_dependency.py",
+            gate.Lane(
+                "esp-policy", "adminEsp", "main/tbot-server",
+                (sys.executable, "-c", "pass"), 5.0,
+            ),
+        ),
+        (
+            "adminEsp", "main/tbot-server/tests/conftest.py",
+            gate.Lane(
+                "esp-policy", "adminEsp", "main/tbot-server",
+                (sys.executable, "-c", "pass"), 5.0,
+            ),
+        ),
+        (
+            "adminEsp", "main/tbot-server/scripts/course_mode_physical_tft_helper.py",
+            gate.PHYSICAL_PREFLIGHT_LANE,
+        ),
+        (
+            "firmware", "main/runtime_dependency.cpp",
+            gate.Lane("firmware-policy", "firmware", ".", (sys.executable, "-c", "pass"), 5.0),
+        ),
+    ],
+)
+def test_lane_dirty_runtime_dependencies_have_no_execution_authority(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    repository_name: str, relative: str, lane: gate.Lane,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _commit_then_dirty(candidate, repository_name, relative)
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    marker = tmp_path / "must-not-run"
+    probe = lane
+    if lane is gate.PHYSICAL_PREFLIGHT_LANE:
+        monkeypatch.setattr(
+            gate, "_command_for_lane",
+            lambda _lane, _candidate: (
+                sys.executable, "-c", f"from pathlib import Path;Path({str(marker)!r}).touch()",
+            ),
+        )
+    else:
+        probe = gate.Lane(
+            lane.name, lane.repository, lane.relative_cwd,
+            (sys.executable, "-c", f"from pathlib import Path;Path({str(marker)!r}).touch()"),
+            lane.timeout_sec,
+        )
+
+    assert gate.lane_dirty_exceptions_authorized(probe, candidate) is False
+    result = gate.run_gate(candidate_file, "full", lanes=(probe,))
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == probe.name
+    assert not marker.exists()
+
+
+def test_unselected_standalone_voice_test_dirty_exception_is_not_lane_authority(
+    candidate_file: Path, tmp_path: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    voice_test = "main/tbot-server/tests/test_lesson_voice_output_discipline.py"
+    _commit_then_dirty(candidate, "adminEsp", voice_test)
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    marker = tmp_path / "ran"
+    lane = gate.Lane(
+        "esp-policy", "adminEsp", "main/tbot-server",
+        (sys.executable, "-c", f"from pathlib import Path;Path({str(marker)!r}).touch()"), 5.0,
+    )
+
+    assert gate.lane_dirty_exceptions_authorized(lane, candidate) is True
+    result = gate.run_gate(candidate_file, "full", lanes=(lane,))
+    assert result["verdict"] == "PASS"
+    assert marker.is_file()
 
 
 def test_full_esp_lane_maps_task06_roots_and_rejects_skips(candidate_file: Path) -> None:

@@ -377,6 +377,38 @@ def lane_candidate_paths(lane: Lane, candidate: dict) -> tuple[str, ...]:
     return tuple(sorted(paths))
 
 
+def lane_dirty_exceptions_authorized(lane: Lane, candidate: dict) -> bool:
+    try:
+        dirty = {
+            item["path"] for item in candidate["repositories"][lane.repository]["dirtyExceptions"]
+        }
+    except (KeyError, TypeError):
+        return False
+    if lane.repository in {"backend", "firmware"}:
+        return not dirty
+    if lane.repository != "adminEsp":
+        return False
+    if lane.relative_cwd == "main/manager-web":
+        return not any(path.startswith("main/manager-web/") for path in dirty)
+    if lane.relative_cwd != "main/tbot-server":
+        return not dirty
+
+    selected = set(lane_candidate_paths(lane, candidate))
+    for relative in dirty:
+        if not relative.startswith("main/tbot-server/"):
+            continue
+        path = Path(relative)
+        is_unselected_standalone_test = (
+            path.parent == Path("main/tbot-server/tests")
+            and path.name.startswith("test_")
+            and path.suffix == ".py"
+            and relative not in selected
+        )
+        if not is_unselected_standalone_test:
+            return False
+    return True
+
+
 def _committed_text(admin_root: Path, sha: str, relative: str) -> str | None:
     try:
         return _candidate_git(admin_root, "show", f"{sha}:{relative}")
@@ -626,6 +658,11 @@ def run_gate(
             source = source_environment if source_environment is not None else os.environ
             for lane in selected:
                 if not _candidate_matches(candidate):
+                    report["verdict"] = "BLOCKED"
+                    report["failedLane"] = lane.name
+                    break
+                if not lane_dirty_exceptions_authorized(lane, candidate):
+                    report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
                     break
