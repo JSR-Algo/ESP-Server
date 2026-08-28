@@ -103,6 +103,10 @@ COMMAND_TIMEOUT_SECONDS = 10
 MAX_COMMAND_OUTPUT_BYTES = 2 * 1024 * 1024
 OUTPUT_FILE_LIMIT_MARGIN = 4096
 FD_EXEC_ROOT = Path("/proc/self/fd") if Path("/proc/self/fd").is_dir() else None
+DARWIN_GIT_IMPLEMENTATIONS = {
+    Path("/Library/Developer/CommandLineTools/usr/bin/git"),
+    Path("/Applications/Xcode.app/Contents/Developer/usr/bin/git"),
+}
 PINNED_APPROVAL_PUBLIC_KEY_RAW: bytes | None = None
 PINNED_APPROVAL_KEY_FINGERPRINT = "unprovisioned"
 
@@ -585,7 +589,7 @@ def _validate_expected_identity(value: object, reasons: list[str]) -> dict[str, 
             if (
                 path is None
                 or not path.is_absolute()
-                or (sys.platform == "darwin" and name == "git" and path == Path("/usr/bin/git"))
+                or (sys.platform == "darwin" and name == "git" and path not in DARWIN_GIT_IMPLEMENTATIONS)
                 or _path_has_symlink(path)
                 or not os.access(path, os.X_OK)
                 or not _secure_hash_matches(path, tool.get("sha256"))
@@ -1561,11 +1565,11 @@ def _run(
 
     def seal_verified_fd(fd: int, expected_digest: str) -> tuple[Path | None, str | None]:
         directory = Path(tempfile.mkdtemp(prefix="tbot-preflight-tool-"))
-        directory.chmod(0o700)
         target = directory / "tool"
         target_fd: int | None = None
         sealed = False
         try:
+            directory.chmod(0o700)
             target_fd = os.open(target, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o700)
             os.lseek(fd, 0, os.SEEK_SET)
             source_digest = hashlib.sha256()
@@ -1653,6 +1657,7 @@ def _run(
     except OSError:
         if executable_fd is not None:
             os.close(executable_fd)
+        cleanup_sealed()
         return "", False, "executable"
 
     def limit_and_isolate() -> None:

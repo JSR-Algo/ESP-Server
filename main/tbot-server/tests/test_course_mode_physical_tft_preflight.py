@@ -164,6 +164,11 @@ def valid_input(session: Path, tmp_path: Path) -> dict:
             exceptions = [{"path": VOICE_PATH, "sha256": hashlib.sha256(protected.read_bytes()).hexdigest()}]
         repos[name] = {"path": str(path), "sha": sha, "dirtyExceptions": exceptions}
     trusted_git, trusted_docker, trusted_compose = _create_trusted_tools(tmp_path)
+    if sys.platform == "darwin":
+        sys.path.insert(0, str(SERVER / "scripts"))
+        import course_mode_physical_tft_preflight as preflight
+
+        preflight.DARWIN_GIT_IMPLEMENTATIONS.add(trusted_git)
 
     phases = [
         {
@@ -922,6 +927,49 @@ def test_darwin_sealed_copy_is_cleaned_when_fsync_fails(tmp_path, monkeypatch):
     assert not sealed_directory.exists()
 
 
+@pytest.mark.parametrize("failure", ["chmod", "stat"])
+def test_darwin_sealed_copy_is_cleaned_on_setup_metadata_failures(tmp_path, monkeypatch, failure):
+    sys.path.insert(0, str(SERVER / "scripts"))
+    import course_mode_physical_tft_preflight as preflight
+
+    executable = tmp_path / "trusted-tool"
+    source = tmp_path / "trusted-tool.c"
+    source.write_text("int main(void){return 0;}\n")
+    subprocess.run(["/usr/bin/cc", str(source), "-o", str(executable)], check=True)
+    expected_sha = hashlib.sha256(executable.read_bytes()).hexdigest()
+    sealed_directory = tmp_path / "sealed"
+    real_chmod = Path.chmod
+    real_stat = Path.stat
+
+    def create_sealed_directory(*_args, **_kwargs):
+        sealed_directory.mkdir(mode=0o700)
+        return str(sealed_directory)
+
+    def fail_selected_chmod(path, mode):
+        if failure == "chmod" and path == sealed_directory:
+            raise OSError("chmod")
+        return real_chmod(path, mode)
+
+    def fail_selected_stat(path, *args, **kwargs):
+        if failure == "stat" and path == sealed_directory / "tool":
+            raise OSError("stat")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(preflight, "FD_EXEC_ROOT", None)
+    monkeypatch.setattr(preflight.tempfile, "mkdtemp", create_sealed_directory)
+    monkeypatch.setattr(Path, "chmod", fail_selected_chmod)
+    monkeypatch.setattr(Path, "stat", fail_selected_stat)
+    stdout, ok, reason = preflight._run(
+        [str(executable)],
+        tmp_path,
+        {"PATH": "/usr/bin:/bin"},
+        allowed_executable=executable,
+        expected_executable_sha256=expected_sha,
+    )
+    assert (stdout, ok, reason) == ("", False, "executable")
+    assert not sealed_directory.exists()
+
+
 def test_darwin_child_rejects_replaced_sealed_copy(tmp_path, monkeypatch):
     sys.path.insert(0, str(SERVER / "scripts"))
     import course_mode_physical_tft_preflight as preflight
@@ -957,13 +1005,18 @@ def test_darwin_child_rejects_replaced_sealed_copy(tmp_path, monkeypatch):
     assert sealed_directories and all(not directory.exists() for directory in sealed_directories)
 
 
-def test_darwin_expected_identity_rejects_usr_bin_git_shim(tmp_path, session_dir, monkeypatch):
+@pytest.mark.parametrize("git_path", [Path("/usr/bin/git"), Path("/opt/homebrew/bin/git")])
+def test_darwin_expected_identity_rejects_unapproved_git_path(tmp_path, session_dir, monkeypatch, git_path):
     document = valid_input(session_dir, tmp_path)
     identity, identity_ref = EXPECTED_IDENTITIES[str(session_dir)]
+    if not git_path.is_file():
+        git_path = tmp_path / "unapproved-git"
+        git_path.write_bytes(Path(identity["tools"]["git"]["path"]).read_bytes())
+        git_path.chmod(0o755)
     changed = deepcopy(identity)
     changed["tools"]["git"] = {
-        "path": "/usr/bin/git",
-        "sha256": hashlib.sha256(Path("/usr/bin/git").read_bytes()).hexdigest(),
+        "path": str(git_path),
+        "sha256": hashlib.sha256(git_path.read_bytes()).hexdigest(),
     }
     sys.path.insert(0, str(SERVER / "scripts"))
     import course_mode_physical_tft_preflight as preflight
