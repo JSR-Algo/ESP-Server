@@ -102,14 +102,15 @@ def _layer(session: Path, slot: str, media_type: str, index: int) -> dict:
     }
 
 
-def _create_trusted_tools(tmp_path: Path) -> tuple[Path, Path]:
+def _create_trusted_tools(tmp_path: Path) -> tuple[Path, Path, Path]:
     tool_dir = tmp_path / "trusted-tools"
     tool_dir.mkdir()
     config = tool_dir / "config.json"
-    git = tool_dir / "git"
-    docker = tool_dir / "docker"
-    git.write_text(
-        f"#!{sys.executable}\nimport json,sys\n"
+    git_script = tool_dir / "git.py"
+    docker_script = tool_dir / "docker.py"
+    compose_script = tool_dir / "docker-compose.py"
+    git_script.write_text(
+        "import json,sys\n"
         + f"c=json.load(open({str(config)!r})); open(c['log'],'a').write(json.dumps(sys.argv[1:])+'\\n'); "
         + "a=sys.argv[1:]; root=a[a.index('-C')+1]; repo=c['repos'][root]\n"
         + "if a[-2:]==['rev-parse','--show-toplevel']: print(root)\n"
@@ -117,16 +118,37 @@ def _create_trusted_tools(tmp_path: Path) -> tuple[Path, Path]:
         + "elif a[-3:]==['status','--porcelain','--untracked-files=all']:\n  [print(' M '+x['path']) for x in repo['dirtyExceptions']]\n"
         + "elif a[-4:-1]==['merge-base','--is-ancestor',c['required']]: pass\nelse: raise SystemExit(93)\n"
     )
-    docker.write_text(
-        f"#!{sys.executable}\nimport json,sys\n"
+    docker_script.write_text(
+        "import json,sys\n"
         + f"c=json.load(open({str(config)!r})); open(c['log'],'a').write(json.dumps(sys.argv[1:])+'\\n'); a=sys.argv[1:]\n"
         + "if a[:2]==['image','inspect']: print(json.dumps(c['image']))\n"
         + "elif a[0]=='compose' and a[-3:]==['config','--format','json']: print(json.dumps(c['compose']))\n"
         + "else: raise SystemExit(94)\n"
     )
-    git.chmod(0o755)
-    docker.chmod(0o755)
-    return git, docker
+    compose_script.write_text(
+        "import json,sys\n"
+        + f"c=json.load(open({str(config)!r})); open(c['log'],'a').write(json.dumps(sys.argv[1:])+'\\n'); a=sys.argv[1:]\n"
+        + "if a[-3:]==['config','--format','json']: print(json.dumps(c['compose']))\n"
+        + "else: raise SystemExit(95)\n"
+    )
+
+    def compile_launcher(script: Path, output: Path) -> None:
+        source = tool_dir / f"{output.name}.c"
+        source.write_text(
+            "#include <unistd.h>\n#include <stdlib.h>\n"
+            "int main(int argc,char **argv){char **a=calloc((size_t)argc+2,sizeof(char*));"
+            f'a[0]="{sys.executable}";a[1]="{script}";'
+            "for(int i=1;i<argc;i++)a[i+1]=argv[i];execv(a[0],a);return 126;}\n"
+        )
+        subprocess.run(["/usr/bin/cc", str(source), "-o", str(output)], check=True)
+
+    git = tool_dir / "git"
+    docker = tool_dir / "docker"
+    compose = tool_dir / "docker-compose"
+    compile_launcher(git_script, git)
+    compile_launcher(docker_script, docker)
+    compile_launcher(compose_script, compose)
+    return git, docker, compose
 
 
 def valid_input(session: Path, tmp_path: Path) -> dict:
@@ -141,7 +163,7 @@ def valid_input(session: Path, tmp_path: Path) -> dict:
             protected.write_bytes((ROOT / VOICE_PATH).read_bytes())
             exceptions = [{"path": VOICE_PATH, "sha256": hashlib.sha256(protected.read_bytes()).hexdigest()}]
         repos[name] = {"path": str(path), "sha": sha, "dirtyExceptions": exceptions}
-    trusted_git, trusted_docker = _create_trusted_tools(tmp_path)
+    trusted_git, trusted_docker, trusted_compose = _create_trusted_tools(tmp_path)
 
     phases = [
         {
@@ -287,6 +309,11 @@ def valid_input(session: Path, tmp_path: Path) -> dict:
             "docker": {
                 "path": str(trusted_docker),
                 "sha256": hashlib.sha256(trusted_docker.read_bytes()).hexdigest(),
+            },
+            "dockerCompose": {
+                "path": str(trusted_compose),
+                "sha256": hashlib.sha256(trusted_compose.read_bytes()).hexdigest(),
+                "version": "test-compose-v1",
             },
         },
     }
@@ -541,7 +568,7 @@ def test_canonical_receipt_derived_preflight_passes_cli(tmp_path, session_dir, m
     document = valid_input(session_dir, tmp_path)
     fake_bin, log = _fake_commands(tmp_path, document)
     shadow_marker = tmp_path / "path-shadow-invoked"
-    for name in ("git", "docker"):
+    for name in ("git", "docker", "docker-compose"):
         shadow = fake_bin / name
         shadow.write_text(f"#!/bin/sh\necho invoked >> {shadow_marker}\nexit 99\n")
         shadow.chmod(0o755)
@@ -568,6 +595,13 @@ def test_canonical_receipt_derived_preflight_passes_cli(tmp_path, session_dir, m
             str(signature),
         ]
     )
+    if preflight.FD_EXEC_ROOT is None:
+        assert result == 1
+        reasons = json.loads(capsys.readouterr().out)["reasons"]
+        assert any(reason.endswith(".executable_unsupported") for reason in reasons)
+        assert not log.exists()
+        assert not shadow_marker.exists()
+        return
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["replacementId"] == REPLACEMENT_ID and payload["valid"] is True
@@ -577,6 +611,8 @@ def test_canonical_receipt_derived_preflight_passes_cli(tmp_path, session_dir, m
     identity = EXPECTED_IDENTITIES[str(session_dir)][0]
     assert payload["gitToolSha256"] == identity["tools"]["git"]["sha256"]
     assert payload["dockerToolSha256"] == identity["tools"]["docker"]["sha256"]
+    assert payload["dockerComposeToolSha256"] == identity["tools"]["dockerCompose"]["sha256"]
+    assert payload["dockerComposeToolVersion"] == "test-compose-v1"
     assert (
         payload["inputChecksum"]
         == hashlib.sha256(json.dumps(document, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -585,12 +621,13 @@ def test_canonical_receipt_derived_preflight_passes_cli(tmp_path, session_dir, m
     assert not shadow_marker.exists()
 
 
-def test_changed_trusted_tool_bytes_fail_before_subprocess(tmp_path, session_dir, monkeypatch, capsys):
+@pytest.mark.parametrize("tool_name", ["git", "dockerCompose"])
+def test_changed_trusted_tool_bytes_fail_before_subprocess(tmp_path, session_dir, monkeypatch, capsys, tool_name):
     document = valid_input(session_dir, tmp_path)
     _, log = _fake_commands(tmp_path, document)
     identity, expected_ref = EXPECTED_IDENTITIES[str(session_dir)]
-    git_tool = Path(identity["tools"]["git"]["path"])
-    git_tool.write_bytes(git_tool.read_bytes() + b"\n# changed\n")
+    tool = Path(identity["tools"][tool_name]["path"])
+    tool.write_bytes(tool.read_bytes() + b"\nchanged\n")
     source = session_dir / "changed-tool-input.json"
     source.write_text(json.dumps(document))
     sys.path.insert(0, str(SERVER / "scripts"))
@@ -611,7 +648,7 @@ def test_changed_trusted_tool_bytes_fail_before_subprocess(tmp_path, session_dir
         ]
     )
     assert result == 1
-    assert "expected_identity.tools.git" in json.loads(capsys.readouterr().out)["reasons"]
+    assert f"expected_identity.tools.{tool_name}" in json.loads(capsys.readouterr().out)["reasons"]
     assert not log.exists()
 
 
@@ -663,6 +700,9 @@ def test_retagged_backend_image_id_fails_fixed_external_anchor(tmp_path, session
     sys.path.insert(0, str(SERVER / "scripts"))
     import course_mode_physical_tft_preflight as preflight
 
+    if preflight.FD_EXEC_ROOT is None:
+        pytest.skip("host does not support execute-from-verified-fd")
+
     monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
     monkeypatch.setattr(preflight, "PINNED_APPROVAL_PUBLIC_KEY_RAW", EXPECTED_PUBLIC_KEYS[str(session_dir)])
     monkeypatch.setattr(preflight, "PINNED_APPROVAL_KEY_FINGERPRINT", EXPECTED_FINGERPRINTS[str(session_dir)])
@@ -684,7 +724,11 @@ def test_retagged_backend_image_id_fails_fixed_external_anchor(tmp_path, session
 
 def test_run_timeout_and_invalid_utf8_are_deterministic(tmp_path):
     sys.path.insert(0, str(SERVER / "scripts"))
-    from course_mode_physical_tft_preflight import _run
+    import course_mode_physical_tft_preflight as preflight
+
+    if preflight.FD_EXEC_ROOT is None:
+        pytest.skip("host does not support execute-from-verified-fd")
+    _run = preflight._run
 
     python = Path(sys.executable).resolve()
     python_sha = hashlib.sha256(python.read_bytes()).hexdigest()
@@ -733,7 +777,11 @@ def test_run_timeout_and_invalid_utf8_are_deterministic(tmp_path):
 
 def test_run_cleans_descendants_after_successful_parent_exit(tmp_path):
     sys.path.insert(0, str(SERVER / "scripts"))
-    from course_mode_physical_tft_preflight import _run
+    import course_mode_physical_tft_preflight as preflight
+
+    if preflight.FD_EXEC_ROOT is None:
+        pytest.skip("host does not support execute-from-verified-fd")
+    _run = preflight._run
 
     python = Path(sys.executable).resolve()
     python_sha = hashlib.sha256(python.read_bytes()).hexdigest()
@@ -751,6 +799,142 @@ def test_run_cleans_descendants_after_successful_parent_exit(tmp_path):
     assert (stdout.strip(), ok, reason) == ("{}", True, None)
     time.sleep(0.7)
     assert not marker.exists()
+
+
+def test_git_local_fsmonitor_is_disabled_and_status_is_read_only(tmp_path):
+    git = Path("/usr/bin/git")
+    if not git.is_file():
+        pytest.skip("host git is unavailable")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    marker = tmp_path / "fsmonitor-marker"
+    monitor = tmp_path / "fsmonitor.sh"
+    monitor.write_text(f"#!/bin/sh\necho invoked > {marker}\nexit 0\n")
+    monitor.chmod(0o755)
+    subprocess.run([str(git), "-C", str(repo), "init", "-q"], check=True)
+    subprocess.run([str(git), "-C", str(repo), "config", "core.fsmonitor", str(monitor)], check=True)
+    (repo / "tracked.txt").write_text("one")
+    subprocess.run([str(git), "-C", str(repo), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        [
+            str(git),
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "initial",
+        ],
+        check=True,
+    )
+    (repo / "tracked.txt").write_text("two")
+    marker.unlink(missing_ok=True)
+    sys.path.insert(0, str(SERVER / "scripts"))
+    import course_mode_physical_tft_preflight as preflight
+
+    if preflight.FD_EXEC_ROOT is None:
+        pytest.skip("host does not support execute-from-verified-fd")
+    _run = preflight._run
+
+    git_sha = hashlib.sha256(git.read_bytes()).hexdigest()
+    command = [
+        str(git),
+        "--no-optional-locks",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "credential.helper=",
+        "-c",
+        "diff.external=",
+        "-c",
+        "core.pager=cat",
+        "-C",
+        str(repo),
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+    ]
+    stdout, ok, reason = _run(
+        command,
+        tmp_path,
+        {
+            "PATH": "/usr/bin:/bin",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_OPTIONAL_LOCKS": "0",
+        },
+        allowed_executable=git,
+        expected_executable_sha256=git_sha,
+    )
+    assert (ok, reason) == (True, None)
+    assert " M tracked.txt" in stdout
+    assert not marker.exists()
+
+
+def test_verified_executable_fd_defeats_path_replacement(tmp_path, monkeypatch):
+    sys.path.insert(0, str(SERVER / "scripts"))
+    import course_mode_physical_tft_preflight as preflight
+
+    executable = tmp_path / "trusted-tool"
+    executable.write_bytes(Path("/usr/bin/true").read_bytes())
+    executable.chmod(0o755)
+    expected_sha = hashlib.sha256(executable.read_bytes()).hexdigest()
+    attacker_marker = tmp_path / "attacker-marker"
+    real_popen = preflight.subprocess.Popen
+
+    def replace_then_spawn(*args, **kwargs):
+        replacement = tmp_path / "replacement"
+        replacement.write_text(
+            f"#!{sys.executable}\nfrom pathlib import Path\nPath({str(attacker_marker)!r}).write_text('ran')\n"
+        )
+        replacement.chmod(0o755)
+        replacement.replace(executable)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(preflight.subprocess, "Popen", replace_then_spawn)
+    stdout, ok, reason = preflight._run(
+        [str(executable)],
+        tmp_path,
+        {"PATH": "/usr/bin:/bin"},
+        allowed_executable=executable,
+        expected_executable_sha256=expected_sha,
+    )
+    if preflight.FD_EXEC_ROOT is None:
+        assert (stdout.strip(), ok, reason) == ("", False, "executable_unsupported")
+    else:
+        assert (stdout.strip(), ok, reason) == ("", True, None)
+    assert not attacker_marker.exists()
+
+
+def test_real_host_compose_binary_is_fd_launch_compatible_when_available(tmp_path):
+    candidates = [
+        Path("/usr/local/bin/docker-compose"),
+        Path("/opt/homebrew/bin/docker-compose"),
+        Path("/Applications/Docker.app/Contents/Resources/cli-plugins/docker-compose"),
+    ]
+    compose = next((path for path in candidates if path.is_file() and os.access(path, os.X_OK)), None)
+    if compose is None:
+        pytest.skip("host compose binary is unavailable")
+    sys.path.insert(0, str(SERVER / "scripts"))
+    import course_mode_physical_tft_preflight as preflight
+
+    if preflight.FD_EXEC_ROOT is None:
+        pytest.skip("host does not support execute-from-verified-fd")
+    digest = hashlib.sha256(compose.read_bytes()).hexdigest()
+    stdout, ok, reason = preflight._run(
+        [str(compose), "version", "--short"],
+        tmp_path,
+        {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+        allowed_executable=compose,
+        expected_executable_sha256=digest,
+    )
+    assert ok, reason
+    assert stdout.strip()
 
 
 def test_pinned_signer_fingerprint_is_derived_and_policy_checked(tmp_path, session_dir, monkeypatch):

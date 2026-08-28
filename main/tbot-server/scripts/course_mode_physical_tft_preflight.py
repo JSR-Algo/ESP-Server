@@ -97,6 +97,7 @@ MAX_JSON_BYTES = 1024 * 1024
 COMMAND_TIMEOUT_SECONDS = 10
 MAX_COMMAND_OUTPUT_BYTES = 2 * 1024 * 1024
 OUTPUT_FILE_LIMIT_MARGIN = 4096
+FD_EXEC_ROOT = Path("/proc/self/fd") if Path("/proc/self/fd").is_dir() else None
 PINNED_APPROVAL_PUBLIC_KEY_RAW: bytes | None = None
 PINNED_APPROVAL_KEY_FINGERPRINT = "unprovisioned"
 
@@ -566,12 +567,13 @@ def _validate_expected_identity(value: object, reasons: list[str]) -> dict[str, 
         if path is None or not path.is_absolute() or not path.is_dir() or _path_has_symlink(path):
             reasons.append(f"expected_identity.{field}")
     tools = value.get("tools")
-    if not _record(tools) or set(tools) != {"git", "docker"}:
+    if not _record(tools) or set(tools) != {"git", "docker", "dockerCompose"}:
         reasons.append("expected_identity.tools")
     else:
-        for name in ("git", "docker"):
+        for name in ("git", "docker", "dockerCompose"):
             tool = tools.get(name)
-            if not _record(tool) or set(tool) != {"path", "sha256"}:
+            expected_fields = {"path", "sha256", "version"} if name == "dockerCompose" else {"path", "sha256"}
+            if not _record(tool) or set(tool) != expected_fields:
                 reasons.append(f"expected_identity.tools.{name}")
                 continue
             path = Path(tool["path"]) if isinstance(tool.get("path"), str) else None
@@ -581,6 +583,7 @@ def _validate_expected_identity(value: object, reasons: list[str]) -> dict[str, 
                 or _path_has_symlink(path)
                 or not os.access(path, os.X_OK)
                 or not _secure_hash_matches(path, tool.get("sha256"))
+                or (name == "dockerCompose" and (not isinstance(tool.get("version"), str) or not tool["version"]))
             ):
                 reasons.append(f"expected_identity.tools.{name}")
     return value if len(reasons) == initial_reason_count else None
@@ -1519,8 +1522,32 @@ def _run(
         or not allowed_executable.is_absolute()
         or command[0] != str(allowed_executable)
         or _path_has_symlink(allowed_executable)
-        or not _secure_hash_matches(allowed_executable, expected_executable_sha256)
     ):
+        return "", False, "executable"
+    if FD_EXEC_ROOT is None:
+        return "", False, "executable_unsupported"
+
+    executable_fd: int | None = None
+    try:
+        executable_fd = _open_file_secure(allowed_executable)
+        metadata = os.fstat(executable_fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o111 == 0:
+            os.close(executable_fd)
+            return "", False, "executable"
+        digest = hashlib.sha256()
+        while chunk := os.read(executable_fd, 1024 * 1024):
+            digest.update(chunk)
+        if not hmac.compare_digest(digest.hexdigest(), expected_executable_sha256):
+            os.close(executable_fd)
+            return "", False, "executable"
+        os.lseek(executable_fd, 0, os.SEEK_SET)
+        fd_executable = str(FD_EXEC_ROOT / str(executable_fd))
+        if not Path(fd_executable).exists():
+            os.close(executable_fd)
+            return "", False, "executable_unsupported"
+    except OSError:
+        if executable_fd is not None:
+            os.close(executable_fd)
         return "", False, "executable"
 
     def limit_and_isolate() -> None:
@@ -1554,9 +1581,13 @@ def _run(
                 stdout=stdout_file,
                 stderr=stderr_file,
                 preexec_fn=limit_and_isolate,
+                executable=fd_executable,
+                pass_fds=(executable_fd,),
             )
         except OSError:
+            os.close(executable_fd)
             return "", False, "os_error"
+        os.close(executable_fd)
         pgid = process.pid
         try:
             return_code = process.wait(timeout=timeout_seconds)
@@ -1715,21 +1746,31 @@ def main(argv: list[str] | None = None) -> int:
     tool_docs = identity["tools"]
     git_executable = Path(tool_docs["git"]["path"])
     docker_executable = Path(tool_docs["docker"]["path"])
+    compose_executable = Path(tool_docs["dockerCompose"]["path"])
     env = {
         "PATH": "/usr/bin:/bin",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_TERMINAL_PROMPT": "0",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "PAGER": "cat",
         "HOME": "/nonexistent",
     }
     git_prefix = [
         str(git_executable),
         "--no-optional-locks",
         "-c",
+        "core.fsmonitor=false",
+        "-c",
         "core.hooksPath=/dev/null",
         "-c",
         "credential.helper=",
+        "-c",
+        "diff.external=",
+        "-c",
+        "core.pager=cat",
     ]
     for name in ("backend", "esp", "firmware"):
         repo = expected["repositories"][name]
@@ -1796,8 +1837,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     compose_out, compose_ok, compose_error = _run(
         [
-            str(docker_executable),
-            "compose",
+            str(compose_executable),
             "--project-name",
             COMPOSE_PROJECT,
             "-f",
@@ -1810,8 +1850,8 @@ def main(argv: list[str] | None = None) -> int:
         ],
         root,
         env,
-        allowed_executable=docker_executable,
-        expected_executable_sha256=tool_docs["docker"]["sha256"],
+        allowed_executable=compose_executable,
+        expected_executable_sha256=tool_docs["dockerCompose"]["sha256"],
     )
     if not image_ok:
         reasons.append(f"command.image.{image_error or 'exit'}")
@@ -1866,6 +1906,8 @@ def main(argv: list[str] | None = None) -> int:
         "backendImageId": inspected_image_id,
         "gitToolSha256": tool_docs["git"]["sha256"],
         "dockerToolSha256": tool_docs["docker"]["sha256"],
+        "dockerComposeToolSha256": tool_docs["dockerCompose"]["sha256"],
+        "dockerComposeToolVersion": tool_docs["dockerCompose"]["version"],
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
     if FORBIDDEN_OUTPUT.search(encoded):
