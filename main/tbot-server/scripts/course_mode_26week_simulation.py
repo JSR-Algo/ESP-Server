@@ -19,7 +19,7 @@ if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
 
 from core.lesson.course_mode_contract import CourseModeContract
-from core.lesson.course_orchestrator import ChildObservation, CourseOrchestrator, SessionState
+from core.lesson.course_orchestrator import SessionState
 from core.lesson.runtime import CourseModeRuntimeAdapter
 
 
@@ -44,8 +44,8 @@ EXPECTED_MATRIX_ACTIONS = {
     "refusal": "RESPOND_WITHOUT_REDIRECT", "authored_branch": "OPEN_CONTEXT_BRANCH",
     "safety": "PAUSE_FOR_SAFETY",
 }
-TERMINAL_STATES = {SessionState.COMPLETE, SessionState.CLOSING, SessionState.REGULATION_BREAK}
 REAL_ACTIONS = {
+    "GREET_AND_CHECK_IN", "ACKNOWLEDGE_AND_BUILD_CURIOSITY", "CLUE_AND_ELICIT",
     "ADVANCE_ACTIVITY", "COMPLETE_COURSE", "CLOSE_BY_OUTCOME", "SUPPORT_WITH_CLUE",
     "OFFER_CHOICE_OR_RETRY", "MODEL_AND_SUPPORT", "OWN_ASR_UNCERTAINTY",
     "RESPOND_WITHOUT_REDIRECT", "OPEN_CONTEXT_BRANCH", "RETURN_THROUGH_AUTHORED_BRIDGE",
@@ -96,183 +96,213 @@ def load_backend_contracts(root: Path | None = None) -> tuple[dict[str, Any], li
     return fixture, fixture["contracts"]
 
 
-def observation(
-    contract: CourseModeContract, activity_id: str, scenario: str, sequence: int,
-    *, intent_override: str | None = None,
-) -> ChildObservation:
-    activity = contract.activity(activity_id)
-    semantic, speech, language, intent, confidence, safety = RESPONSE_MATRIX[scenario]
-    return ChildObservation(
-        observation_id=f"sim-{scenario}-{sequence}", turn_sequence_id=sequence,
-        semantic_class=semantic, speech_class=speech, language=language,
-        intent=intent_override or intent,
-        engagement="engaged", safety_class=safety, assessment_eligible=True,
-        confidence_band=confidence, activity_id=activity.activity_id,
-        context_id=activity.context_id, now_ms=sequence * 1_000,
-        robot_audio_contaminated=False, target_text_visible=False,
-    )
-
-
-def _activity_observation(
-    contract: CourseModeContract, activity_id: str, scenario: str, sequence: int,
-    *, intent_override: str | None = None,
-) -> ChildObservation:
-    base = observation(
-        contract, activity_id, scenario, sequence, intent_override=intent_override,
-    )
-    activity = contract.activity(activity_id)
-    return ChildObservation(**{
-        **base.__dict__, "activity_id": activity_id, "context_id": activity.context_id,
-        "observation_id": f"sim-{scenario}-{activity_id}-{sequence}",
-    })
-
-
-def _record(decision: Any, scenario: str) -> dict[str, Any]:
+def _record(decision: dict[str, Any], scenario: str) -> dict[str, Any]:
     return {
-        "scenario": scenario, "outcome": scenario, "action": decision.action,
-        "attempt": decision.attempt,
-        "state": decision.next_state.value, "activityId": decision.activity_id,
+        "scenario": scenario, "outcome": scenario, "action": decision["action"],
+        "attempt": decision.get("attempt", 0),
+        "state": decision["nextState"], "activityId": decision.get("activityId"),
     }
 
 
-def simulate_attempt_ceiling(contract: CourseModeContract) -> dict[str, Any]:
-    runtime = CourseOrchestrator(contract, started_at_ms=0, soft_deadline_ms=480_000)
-    runtime.session_state = SessionState.WORD_ACTIVE
-    attempts = []
-    for sequence in range(1, contract.max_attempts + 1):
-        decision = runtime.observe(_activity_observation(
-            contract, runtime.active_activity_id, "incorrect", sequence,
-        ))
-        attempts.append(decision.attempt)
-        runtime = CourseOrchestrator.restore(
-            contract, json.loads(json.dumps(runtime.snapshot())),
-        )
-        if runtime.session_state in TERMINAL_STATES:
-            break
-    if not attempts or max(attempts) > contract.max_attempts:
-        raise AssertionError("maxAttempts ceiling was exceeded")
-    if runtime.session_state not in TERMINAL_STATES:
-        raise AssertionError("attempt ceiling did not choose an authored safe exit")
-    return {"attempts": attempts, "state": runtime.session_state.value}
-
-
-def _adapter_args(adapter: CourseModeRuntimeAdapter, scenario: str) -> dict[str, Any]:
+def _adapter_args(
+    adapter: CourseModeRuntimeAdapter, scenario: str, operation_id: str,
+    *, intent_override: str | None = None,
+) -> dict[str, Any]:
     activity = adapter.contract.activity(adapter.orchestrator.active_activity_id)
     semantic, speech, language, intent, confidence, safety = RESPONSE_MATRIX[scenario]
+    identity = adapter.tool_context()["identity"]
     return {
-        "lessonSessionId": adapter.lesson_session_id, "turnSequenceId": 1,
-        "observationId": f"delivery-{adapter.contract.fixture_id}",
+        "lessonSessionId": identity["lessonSessionId"],
+        "turnSequenceId": identity["turnSequenceId"], "observationId": operation_id,
         "semanticClass": semantic, "speechClass": speech, "language": language,
-        "intent": intent, "engagement": "engaged", "safetyClass": safety,
+        "intent": intent_override or intent, "engagement": "engaged", "safetyClass": safety,
         "assessmentEligible": True, "confidenceBand": confidence,
         "activityId": activity.activity_id, "contextId": activity.context_id,
         "robotAudioContaminated": False, "targetTextVisible": False,
     }
 
 
-async def simulate_disconnect_resume(contract: CourseModeContract) -> dict[str, Any]:
-    adapter = CourseModeRuntimeAdapter(contract, clock=lambda: 1.0, wall_clock=lambda: 1.0)
-    adapter.orchestrator.session_state = SessionState.WORD_ACTIVE
-    arguments = _adapter_args(adapter, "correct")
-    first = await adapter.course_observe_child(arguments)
-    pending = adapter.pending_activity_deliveries()
-    if len(pending) != 1:
-        raise AssertionError("expected one stable pending activity delivery")
-    snapshot = json.loads(json.dumps(adapter.durable_snapshot()))
-    restored = CourseModeRuntimeAdapter.restore(
-        contract, snapshot, clock=lambda: 2.0, wall_clock=lambda: 2.0,
+def _plan_arguments(adapter: CourseModeRuntimeAdapter, decision: dict[str, Any], operation_id: str) -> dict[str, Any]:
+    identity = adapter.tool_context()["identity"]
+    safety = decision["nextState"] in {"SAFETY_PAUSED", "REGULATION_BREAK"}
+    return {
+        "lessonSessionId": identity["lessonSessionId"],
+        "turnSequenceId": identity["turnSequenceId"], "observationId": operation_id,
+        "planId": f"plan-{operation_id}", "decisionId": decision["decisionId"],
+        "acknowledgment": "Robot is here." if safety else "I hear you.",
+        "relation": "", "guidance": "", "invitation": "", "questionCount": 0,
+        "embodiedIntent": decision["embodiedIntent"], "targetFactsUsed": [],
+        "praiseLevel": "engagement", "safetyMode": safety, "normalMiss": False,
+    }
+
+
+async def _settle_decision(
+    adapter: CourseModeRuntimeAdapter, decision: dict[str, Any], operation_id: str,
+    *, acknowledge_deliveries: bool = True,
+) -> list[tuple[str, str]]:
+    if decision.get("accepted") is True and adapter.tool_context().get("pendingDecision"):
+        plan_arguments = _plan_arguments(adapter, decision, f"{operation_id}-plan")
+        applied = await adapter.course_apply_response_plan(plan_arguments)
+        if applied.get("accepted") is not True:
+            raise AssertionError(f"response plan rejected: {applied}")
+        if not adapter.mark_response_plan_delivery_attempted(plan_arguments):
+            raise AssertionError("response plan delivery was not marked")
+        if not adapter.commit_course_response_plan(plan_arguments):
+            raise AssertionError("response plan did not commit")
+    pending_deliveries = adapter.pending_activity_deliveries()
+    activity_id = decision.get("activityId")
+    authoritative = (
+        activity_id is not None
+        and adapter.contract.activity(activity_id).navigation_mode == "authoritative_graph"
     )
-    replay = await restored.course_observe_child(arguments)
-    restored_pending = restored.pending_activity_deliveries()
-    if replay != first or len(restored_pending) != 1 or restored_pending[0][1] != pending[0][1]:
-        raise AssertionError("disconnect replay changed decision or delivery identity")
-    if not restored.mark_activity_decision_delivered(restored_pending[0][0].decision_id):
-        raise AssertionError("pending delivery could not be acknowledged")
-    if restored.pending_activity_deliveries():
-        raise AssertionError("delivery outbox retained an acknowledged duplicate")
-    return {"deliveryId": pending[0][1], "deduped": True}
+    if decision.get("accepted") is True and authoritative:
+        if not any(item.decision_id == decision["decisionId"] for item, _ in pending_deliveries):
+            raise AssertionError("accepted activity decision has no pending activity delivery")
+    delivery_records = [
+        (pending_decision.decision_id, delivery_id)
+        for pending_decision, delivery_id in pending_deliveries
+    ]
+    if acknowledge_deliveries:
+        for pending_decision, _ in list(adapter.pending_activity_deliveries()):
+            if not adapter.mark_activity_decision_delivered(pending_decision.decision_id):
+                raise AssertionError("activity delivery ACK failed")
+        if adapter.pending_activity_deliveries():
+            raise AssertionError("activity outbox did not empty after ACK")
+    return delivery_records
 
 
-async def simulate_terminal_path(contract: CourseModeContract, scenario: str) -> dict[str, Any]:
+def _track_deliveries(
+    records: list[tuple[str, str]], owners: dict[str, str], emitted: list[dict[str, str]],
+) -> None:
+    for decision_id, delivery_id in records:
+        owner = owners.setdefault(delivery_id, decision_id)
+        if owner != decision_id:
+            raise AssertionError(
+                f"deliveryId collision: {delivery_id} belongs to {owner} and {decision_id}"
+            )
+        emitted.append({"decisionId": decision_id, "deliveryId": delivery_id})
+
+
+async def simulate_terminal_path(
+    contract: CourseModeContract, scenario: str, *, scenario_turn_index: int,
+) -> dict[str, Any]:
     adapter = CourseModeRuntimeAdapter(contract, clock=lambda: 1.0, wall_clock=lambda: 1.0)
-    adapter.orchestrator.session_state = SessionState.WORD_ACTIVE
-    first_arguments = _adapter_args(adapter, "correct")
-    first = await adapter.course_observe_child(first_arguments)
-    pending = adapter.pending_activity_deliveries()
-    if len(pending) != 1:
-        raise AssertionError("mid-path disconnect has no stable pending delivery")
-    restored = CourseModeRuntimeAdapter.restore(
-        contract, json.loads(json.dumps(adapter.durable_snapshot())),
-        clock=lambda: 2.0, wall_clock=lambda: 2.0,
-    )
-    replay = await restored.course_observe_child(first_arguments)
-    restored_pending = restored.pending_activity_deliveries()
-    if replay != first or len(restored_pending) != 1 or restored_pending[0][1] != pending[0][1]:
-        raise AssertionError("mid-path replay changed decision or delivery identity")
-    restored.mark_activity_decision_delivered(restored_pending[0][0].decision_id)
-    if restored.pending_activity_deliveries():
-        raise AssertionError("mid-path delivery dedupe left a pending duplicate")
-
-    runtime = restored.orchestrator
-    transitions = [{
-        "scenario": "disconnect_resume_correct", "action": first["action"],
-        "attempt": first.get("attempt", 0), "state": first["nextState"],
-        "activityId": first.get("activityId"),
-    }]
+    transitions: list[dict[str, Any]] = []
     scenario_exercised = False
     seen: set[tuple[Any, ...]] = set()
-    limit = len(contract.activities) * (contract.max_attempts + 2) + 8
-    for sequence in range(2, limit + 2):
-        if runtime.session_state in {SessionState.COMPLETE, SessionState.CLOSING}:
+    delivery_owners: dict[str, str] = {}
+    delivery_records: list[dict[str, str]] = []
+    replay_delivery_id: str | None = None
+    for startup_step in range(3):
+        if adapter.orchestrator.session_state is SessionState.WORD_ACTIVE:
             break
-        activity_id = runtime.active_activity_id
-        current_scenario = scenario if not scenario_exercised else "correct"
+        context = adapter.tool_context()
+        operation_id = f"{contract.fixture_id}-{scenario}-startup-{startup_step + 1}"
+        started = await adapter.course_continue({
+            **context["identity"], "observationId": operation_id,
+        })
+        transitions.append(_record(started, "startup"))
+        _track_deliveries(
+            await _settle_decision(adapter, started, operation_id),
+            delivery_owners, delivery_records,
+        )
+    if adapter.orchestrator.session_state is not SessionState.WORD_ACTIVE:
+        raise AssertionError("startup path loop before WORD_ACTIVE")
+    limit = len(contract.activities) * (contract.max_attempts + 2) + 8
+    for step in range(limit):
+        if adapter.orchestrator.session_state in {SessionState.COMPLETE, SessionState.CLOSING}:
+            break
+        activity_id = adapter.orchestrator.active_activity_id
+        current_scenario = scenario if not scenario_exercised and step >= scenario_turn_index else "correct"
         identity = (
-            activity_id, runtime.session_state.value, current_scenario,
-            tuple(sorted(runtime.snapshot()["activityAttempts"].items())),
-            runtime.snapshot()["activeBranchId"],
+            activity_id, adapter.orchestrator.session_state.value, current_scenario,
+            tuple(sorted(adapter.orchestrator.snapshot()["activityAttempts"].items())),
+            adapter.orchestrator.snapshot()["activeBranchId"],
         )
         if identity in seen:
             raise AssertionError(f"runtime path loop at {activity_id}/{current_scenario}")
         seen.add(identity)
-        decision = runtime.observe(_activity_observation(
-            contract, activity_id, current_scenario, sequence,
-        ))
+        operation_id = f"{contract.fixture_id}-{scenario}-turn-{step + 1}"
+        arguments = _adapter_args(adapter, current_scenario, operation_id)
+        before_sequence = arguments["turnSequenceId"]
+        decision = await adapter.course_observe_child(arguments)
         transitions.append(_record(decision, current_scenario))
-        if not scenario_exercised:
+        scenario_now = current_scenario == scenario and not scenario_exercised
+        if scenario_now:
             scenario_exercised = True
-            if decision.action != EXPECTED_MATRIX_ACTIONS[scenario]:
+            if decision["action"] != EXPECTED_MATRIX_ACTIONS[scenario]:
                 raise AssertionError(
-                    f"{scenario} emitted {decision.action}, expected {EXPECTED_MATRIX_ACTIONS[scenario]}"
+                    f"{scenario} emitted {decision['action']}, expected {EXPECTED_MATRIX_ACTIONS[scenario]}"
                 )
-            if scenario == "authored_branch":
-                if not decision.branch_id:
-                    raise AssertionError("authored branch did not open")
-                bridged = runtime.close_context_branch(
-                    branch_id=decision.branch_id,
-                    bridge_intent="resume_active_word_visual", child_detail_code="related_pet",
-                )
-                transitions.append(_record(bridged, "authored_bridge"))
-            elif runtime.session_state in {SessionState.REGULATION_BREAK, SessionState.SAFETY_PAUSED}:
-                stopped = runtime.observe(_activity_observation(
-                    contract, runtime.active_activity_id, "correct", sequence + limit,
-                    intent_override="stop",
-                ))
-                transitions.append(_record(stopped, "safe_stop"))
-            elif runtime.session_state is SessionState.TECHNICAL_RECOVERY:
-                recovered = runtime.continue_word(now_ms=sequence * 1_000)
-                transitions.append(_record(recovered, "technical_recovery"))
+            pending_before = adapter.pending_activity_deliveries()
+            snapshot = json.loads(json.dumps(adapter.durable_snapshot()))
+            restored = CourseModeRuntimeAdapter.restore(
+                contract, snapshot, clock=lambda: 2.0, wall_clock=lambda: 2.0,
+            )
+            replay = await restored.course_observe_child(arguments)
+            if replay != decision or restored.tool_context()["identity"]["turnSequenceId"] != before_sequence + 1:
+                raise AssertionError("scenario replay changed result or turn sequence")
+            pending_after = restored.pending_activity_deliveries()
+            if [(item.decision_id, delivery) for item, delivery in pending_after] != [
+                (item.decision_id, delivery) for item, delivery in pending_before
+            ]:
+                raise AssertionError("scenario replay changed pending outbox")
+            adapter = restored
+            replay_delivery_id = pending_after[-1][1] if pending_after else None
+        hold_for_scenario = not scenario_exercised and step + 1 == scenario_turn_index
+        new_delivery_records = await _settle_decision(
+            adapter, decision, operation_id,
+            acknowledge_deliveries=not hold_for_scenario,
+        )
+        _track_deliveries(new_delivery_records, delivery_owners, delivery_records)
+        if scenario_now and new_delivery_records and replay_delivery_id != new_delivery_records[-1][1]:
+            raise AssertionError("scenario deliveryId changed after replay")
+        if scenario_now and scenario == "authored_branch":
+            context = adapter.tool_context()
+            active = context.get("activeContext")
+            if not active:
+                raise AssertionError("authored branch did not expose active context")
+            identity_args = context["identity"]
+            close_args = {
+                **identity_args, "observationId": f"{operation_id}-bridge",
+                "branchId": active["branchId"], "bridgeIntent": "resume_active_word_visual",
+                "childDetailCode": "related_pet",
+            }
+            bridged = await adapter.course_close_context(close_args)
+            transitions.append(_record(bridged, "authored_bridge"))
+            _track_deliveries(
+                await _settle_decision(adapter, bridged, f"{operation_id}-bridge"),
+                delivery_owners, delivery_records,
+            )
+        elif scenario_now and adapter.orchestrator.session_state in {SessionState.REGULATION_BREAK, SessionState.SAFETY_PAUSED}:
+            stop_args = _adapter_args(adapter, "correct", f"{operation_id}-stop", intent_override="stop")
+            stopped = await adapter.course_observe_child(stop_args)
+            transitions.append(_record(stopped, "safe_stop"))
+            _track_deliveries(
+                await _settle_decision(adapter, stopped, f"{operation_id}-stop"),
+                delivery_owners, delivery_records,
+            )
+        elif scenario_now and adapter.orchestrator.session_state is SessionState.TECHNICAL_RECOVERY:
+            context = adapter.tool_context()
+            continue_args = {**context["identity"], "observationId": f"{operation_id}-recover"}
+            recovered = await adapter.course_continue(continue_args)
+            transitions.append(_record(recovered, "technical_recovery"))
+            _track_deliveries(
+                await _settle_decision(adapter, recovered, f"{operation_id}-recover"),
+                delivery_owners, delivery_records,
+            )
     if not scenario_exercised:
         raise AssertionError(f"{scenario} was not exercised")
-    if runtime.session_state not in {SessionState.COMPLETE, SessionState.CLOSING}:
+    if adapter.orchestrator.session_state not in {SessionState.COMPLETE, SessionState.CLOSING}:
         raise AssertionError(f"{scenario} path did not terminate within {limit} transitions")
     if any(item["attempt"] > contract.max_attempts for item in transitions):
         raise AssertionError(f"{scenario} exceeded maxAttempts")
     return {
-        "state": runtime.session_state.value, "steps": len(transitions),
+        "state": adapter.orchestrator.session_state.value, "steps": len(transitions),
         "visitedActivities": [item["activityId"] for item in transitions if item["activityId"]],
         "actions": [item["action"] for item in transitions], "transitions": transitions,
-        "deliveryId": pending[0][1], "deduped": True,
+        "deliveryIds": list(delivery_owners), "deliveryRecords": delivery_records,
+        "replayDeliveryId": replay_delivery_id, "deduped": True,
     }
 
 
@@ -332,10 +362,12 @@ def simulate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
     for week, contract in enumerate(contracts, 1):
         _validate_visual_phases(lessons_by_week[week], inventory)
         matrix = {
-            scenario: asyncio.run(simulate_terminal_path(contract, scenario))
-            for scenario in RESPONSE_MATRIX
+            scenario: asyncio.run(simulate_terminal_path(
+                contract, scenario,
+                scenario_turn_index=1 + (week + scenario_index) % (len(contract.activities) - 2),
+            ))
+            for scenario_index, scenario in enumerate(RESPONSE_MATRIX)
         }
-        attempt_ceiling = simulate_attempt_ceiling(contract)
         actions = {action for result in matrix.values() for action in result["actions"]}
         if not actions <= REAL_ACTIONS:
             raise AssertionError(f"week {week} emitted invented actions: {sorted(actions - REAL_ACTIONS)}")
@@ -363,7 +395,7 @@ def simulate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
         all_actions.update(actions)
         lessons.append({
             "week": week, "fixtureId": contract.fixture_id, "activityCount": len(contract.activities),
-            "attemptCeiling": attempt_ceiling, "matrix": matrix,
+            "matrix": matrix,
         })
     return {
         "schemaVersion": 1, "simulator": "course-mode-26week.v1", "status": "pass",

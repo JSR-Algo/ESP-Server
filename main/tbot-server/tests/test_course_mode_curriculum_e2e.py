@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -11,12 +12,14 @@ import pytest
 
 from core.lesson.course_mode_contract import CourseModeContract
 from core.lesson.course_orchestrator import CourseOrchestrator
+from core.lesson.runtime import CourseModeRuntimeAdapter
 from scripts.course_mode_26week_simulation import (
     PEDAGOGY_WEEKS,
     RESPONSE_MATRIX,
     load_backend_contracts,
     simulate_contracts,
     simulate_fixture,
+    simulate_terminal_path,
 )
 
 
@@ -109,6 +112,69 @@ def test_full_path_loop_detector_rejects_a_stuck_runtime(backend_contracts, monk
     monkeypatch.setattr(CourseOrchestrator, "observe", stuck_after_advance)
     with pytest.raises(AssertionError, match="runtime path loop"):
         simulate_fixture(copy.deepcopy(fixture))
+
+
+def test_simulator_cannot_bypass_public_adapter_entry(backend_contracts, monkeypatch) -> None:
+    fixture, _ = backend_contracts
+
+    async def reject_bypass(self, arguments):
+        raise RuntimeError("adapter-entry-required")
+
+    monkeypatch.setattr(CourseModeRuntimeAdapter, "course_observe_child", reject_bypass)
+    with pytest.raises(RuntimeError, match="adapter-entry-required"):
+        simulate_fixture(copy.deepcopy(fixture))
+
+
+def test_path_startup_uses_public_continue_entry(backend_contracts, monkeypatch) -> None:
+    _, raw = backend_contracts
+    contract = CourseModeContract.from_mapping(raw[0])
+
+    async def reject_bypass(self, arguments):
+        raise RuntimeError("continue-entry-required")
+
+    monkeypatch.setattr(CourseModeRuntimeAdapter, "course_continue", reject_bypass)
+    with pytest.raises(RuntimeError, match="continue-entry-required"):
+        asyncio.run(simulate_terminal_path(contract, "correct", scenario_turn_index=1))
+
+
+def test_path_startup_fails_closed_when_continue_stalls(backend_contracts, monkeypatch) -> None:
+    _, raw = backend_contracts
+    contract = CourseModeContract.from_mapping(raw[0])
+
+    async def stalled(self, arguments):
+        return {
+            "accepted": False, "action": "OPERATION_NOT_ALLOWED",
+            "nextState": self.orchestrator.session_state.value,
+        }
+
+    monkeypatch.setattr(CourseModeRuntimeAdapter, "course_continue", stalled)
+    with pytest.raises(AssertionError, match="startup path loop"):
+        asyncio.run(asyncio.wait_for(
+            simulate_terminal_path(contract, "correct", scenario_turn_index=1),
+            timeout=0.1,
+        ))
+
+
+def test_path_requires_authoritative_activity_delivery(backend_contracts, monkeypatch) -> None:
+    _, raw = backend_contracts
+    contract = CourseModeContract.from_mapping(raw[0])
+
+    monkeypatch.setattr(CourseModeRuntimeAdapter, "pending_activity_deliveries", lambda self: [])
+    with pytest.raises(AssertionError, match="pending activity delivery"):
+        asyncio.run(simulate_terminal_path(contract, "correct", scenario_turn_index=1))
+
+
+def test_path_rejects_delivery_id_collision_between_decisions(backend_contracts, monkeypatch) -> None:
+    _, raw = backend_contracts
+    contract = CourseModeContract.from_mapping(raw[0])
+    original = CourseModeRuntimeAdapter.pending_activity_deliveries
+
+    def collide(self):
+        return [(decision, "course-delivery-collision") for decision, _ in original(self)]
+
+    monkeypatch.setattr(CourseModeRuntimeAdapter, "pending_activity_deliveries", collide)
+    with pytest.raises(AssertionError, match="deliveryId collision"):
+        asyncio.run(simulate_terminal_path(contract, "correct", scenario_turn_index=1))
 
 
 def test_visual_phase_mutation_is_detected(backend_contracts) -> None:
