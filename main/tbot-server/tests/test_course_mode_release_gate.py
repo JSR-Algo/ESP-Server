@@ -5,6 +5,7 @@ import importlib
 import json
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
@@ -46,10 +47,12 @@ def candidate_file(tmp_path: Path) -> Path:
             curriculum.write_text("export const curriculum = 26;\n", encoding="utf-8")
         if name == "adminEsp":
             python_gate = root / "main/tbot-server/scripts/course_mode_release_gate.py"
+            manifest_helper = root / "main/tbot-server/scripts/course_mode_candidate_manifest.py"
             shell_gate = root / "scripts/course_robot_e2e_gates.sh"
             python_gate.parent.mkdir(parents=True)
             shell_gate.parent.mkdir(parents=True)
             python_gate.write_text("# candidate gate\n", encoding="utf-8")
+            manifest_helper.write_text("# candidate helper\n", encoding="utf-8")
             shell_gate.write_text("#!/bin/sh\n", encoding="utf-8")
         _git(root, "add", ".")
         _git(root, "commit", "-m", "fixture")
@@ -247,13 +250,20 @@ def test_runtime_gate_must_be_the_candidate_admin_checkout(candidate_file: Path)
     assert result["lanes"] == []
 
 
-def test_runtime_identity_requires_both_gate_files_at_candidate_sha(candidate_file: Path) -> None:
+def test_runtime_identity_requires_gate_wrapper_and_imported_helper_at_candidate_sha(candidate_file: Path) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     admin_root = Path(candidate["repositories"]["adminEsp"]["path"])
 
     assert gate._runtime_matches_candidate(candidate, admin_root) is True
 
-    (admin_root / "scripts/course_robot_e2e_gates.sh").write_text("#!/bin/sh\nexit 99\n")
+    (admin_root / "main/tbot-server/scripts/course_mode_candidate_manifest.py").write_text("# drift\n")
+    assert gate._runtime_matches_candidate(candidate, admin_root) is False
+
+    helper = "main/tbot-server/scripts/course_mode_candidate_manifest.py"
+    candidate["repositories"]["adminEsp"]["dirtyExceptions"] = [{
+        "path": helper,
+        "sha256": hashlib.sha256((admin_root / helper).read_bytes()).hexdigest(),
+    }]
     assert gate._runtime_matches_candidate(candidate, admin_root) is False
 
 
@@ -353,15 +363,30 @@ def test_full_lane_inventory_is_exhaustive_and_uses_candidate_roots() -> None:
 def test_full_esp_lane_discovers_every_committed_software_course_mode_suite() -> None:
     root = Path(__file__).resolve().parents[3]
     discovered = gate.discover_esp_course_mode_tests(root, _git(root, "rev-parse", "HEAD"))
-    expected = tuple(
-        f"tests/{path.name}"
-        for path in sorted((root / "main/tbot-server/tests").glob("test_course_mode*.py"))
-        if path.name != "test_course_mode_release_gate.py"
+    expected = (
+        "tests/test_course_mode_candidate_manifest.py",
+        "tests/test_course_mode_contract.py",
+        "tests/test_course_mode_curriculum.py",
+        "tests/test_course_mode_curriculum_e2e.py",
+        "tests/test_course_mode_e2e_journeys.py",
+        "tests/test_course_mode_forwarder.py",
+        "tests/test_course_mode_physical_tft_compose.py",
+        "tests/test_course_mode_physical_tft_ledger_validate.py",
+        "tests/test_course_mode_physical_tft_preflight.py",
+        "tests/test_course_mode_physical_tft_receipt_verify.py",
+        "tests/test_course_mode_renderer_v4_persistence.py",
+        "tests/test_course_mode_runtime_compatibility.py",
+        "tests/test_course_mode_runtime_integration.py",
+        "tests/test_course_mode_task00_contract.py",
+        "tests/test_course_mode_task06_validation_script.py",
+        "tests/test_course_mode_task07_evidence_validate.py",
+        "tests/test_google_live_course_mode.py",
     )
 
     assert discovered == expected
     assert "tests/test_course_mode_candidate_manifest.py" in discovered
     assert "tests/test_course_mode_task07_evidence_validate.py" in discovered
+    assert "tests/test_google_live_course_mode.py" in discovered
     assert "tests/test_course_mode_physical_tft_preflight.py" in discovered
     assert gate.classify_esp_course_mode_test("tests/test_course_mode_physical_tft_preflight.py") == "physical-contract"
     assert gate.classify_esp_course_mode_test("tests/test_course_mode_runtime_integration.py") == "software"
@@ -376,6 +401,7 @@ def test_esp_discovery_ignores_untracked_and_non_source_files(tmp_path: Path) ->
     _git(root, "config", "user.name", "Candidate Test")
     (tests / "test_course_mode_committed.py").write_text("def test_ok(): pass\n")
     (tests / "test_course_mode_physical_lab.py").write_text("def test_ok(): pass\n")
+    (tests / "test_google_live_course_mode.py").write_text("def test_ok(): pass\n")
     _git(root, "add", ".")
     _git(root, "commit", "-m", "fixture")
     sha = _git(root, "rev-parse", "HEAD")
@@ -387,10 +413,63 @@ def test_esp_discovery_ignores_untracked_and_non_source_files(tmp_path: Path) ->
     assert gate.discover_esp_course_mode_tests(root, sha) == (
         "tests/test_course_mode_committed.py",
         "tests/test_course_mode_physical_lab.py",
+        "tests/test_google_live_course_mode.py",
     )
     assert gate.select_esp_software_tests(gate.discover_esp_course_mode_tests(root, sha)) == (
         "tests/test_course_mode_committed.py",
+        "tests/test_google_live_course_mode.py",
     )
+
+
+def test_full_esp_lane_maps_task06_roots_and_rejects_skips(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(lane for lane in gate.lanes_for_mode("full") if lane.name == "esp-course-mode-full")
+
+    environment = gate._child_environment(candidate, {}, lane)
+
+    assert environment["TASK06_BACKEND_ROOT"] == candidate["repositories"]["backend"]["path"]
+    assert environment["TASK06_FIRMWARE_ROOT"] == candidate["repositories"]["firmware"]["path"]
+    assert lane.reject_pytest_skips is True
+
+
+@pytest.mark.parametrize("skipped,expected", [(0, False), (1, True), (7, True)])
+def test_pytest_junit_skip_detection_is_deterministic(tmp_path: Path, skipped: int, expected: bool) -> None:
+    report = tmp_path / "pytest.xml"
+    root = ET.Element("testsuites", tests="8", failures="0", errors="0", skipped=str(skipped))
+    ET.ElementTree(root).write(report, encoding="utf-8", xml_declaration=True)
+
+    assert gate.pytest_report_has_skips(report) is expected
+
+
+def test_missing_or_malformed_pytest_report_blocks_skip_admission(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.xml"
+    malformed = tmp_path / "malformed.xml"
+    empty = tmp_path / "empty.xml"
+    malformed.write_text("not xml")
+    empty.write_text('<testsuites tests="0" skipped="0"/>')
+
+    assert gate.pytest_report_has_skips(missing) is None
+    assert gate.pytest_report_has_skips(malformed) is None
+    assert gate.pytest_report_has_skips(empty) is None
+
+
+def test_exit_zero_with_required_pytest_skip_blocks_aggregate(candidate_file: Path) -> None:
+    code = (
+        "import pathlib,sys;"
+        "path=next(value.split('=',1)[1] for value in sys.argv if value.startswith('--junitxml='));"
+        "pathlib.Path(path).write_text('<testsuites tests=\"1\" skipped=\"1\"/>')"
+    )
+    lane = gate.Lane(
+        name="skip-aware", repository="adminEsp", relative_cwd=".",
+        command=(sys.executable, "-c", code), timeout_sec=5.0,
+        reject_pytest_skips=True,
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "skip-aware"
+    assert result["lanes"][0]["exitCode"] == 0
 
 
 def test_playwright_full_has_named_desktop_and_mobile_chromium_and_webkit_lanes() -> None:
@@ -408,29 +487,89 @@ def test_playwright_full_has_named_desktop_and_mobile_chromium_and_webkit_lanes(
 def test_current_playwright_config_fails_closed_until_named_projects_are_committed() -> None:
     admin_root = Path(__file__).resolve().parents[3]
 
-    assert gate.source_contract_ready(admin_root, "course-mode-playwright") is False
+    assert gate.source_contract_ready(
+        admin_root, "course-mode-playwright", _git(admin_root, "rev-parse", "HEAD"),
+    ) is False
 
 
 def test_playwright_contract_requires_named_projects_and_matching_devices(tmp_path: Path) -> None:
     web = tmp_path / "main/manager-web"
-    web.mkdir(parents=True)
-    (web / "package.json").write_text(json.dumps({"scripts": {"test:e2e:course-mode": "playwright test"}}))
+    spec = web / "e2e/lesson-studio/course-mode-authoring.spec.js"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("test('course mode', async () => {});\n")
+    (web / "package.json").write_text(json.dumps({
+        "scripts": {"test:e2e:course-mode": "playwright test --config=playwright.config.js"},
+    }))
     projects = {
         "course-mode-chromium-desktop": "Desktop Chrome",
         "course-mode-webkit-desktop": "Desktop Safari",
         "course-mode-chromium-mobile": "Pixel 7",
         "course-mode-webkit-mobile": "iPhone 13",
     }
-    config = "projects: [\n" + "\n".join(
-        f"{{ name: {name!r}, use: {{ ...devices[{device!r}] }} }},"
+    viewports = {
+        "course-mode-chromium-desktop": (1440, 900),
+        "course-mode-webkit-desktop": (1440, 900),
+        "course-mode-chromium-mobile": (390, 844),
+        "course-mode-webkit-mobile": (390, 844),
+    }
+    config = "testMatch: /course-mode.*\\.spec\\.js/,\nprojects: [\n" + "\n".join(
+        f"{{ name: {name!r}, use: {{ ...devices[{device!r}], viewport: "
+        f"{{ width: {viewports[name][0]}, height: {viewports[name][1]} }} }} }},"
         for name, device in projects.items()
     ) + "\n]"
     (web / "playwright.config.js").write_text(config)
+    _git(tmp_path, "init", "-b", "candidate")
+    _git(tmp_path, "config", "user.email", "candidate@example.invalid")
+    _git(tmp_path, "config", "user.name", "Candidate Test")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "fixture")
+    sha = _git(tmp_path, "rev-parse", "HEAD")
 
-    assert gate.source_contract_ready(tmp_path, "course-mode-playwright") is True
+    assert gate.source_contract_ready(tmp_path, "course-mode-playwright", sha) is True
 
-    (web / "playwright.config.js").write_text("// " + " ".join((*projects, *projects.values())))
-    assert gate.source_contract_ready(tmp_path, "course-mode-playwright") is False
+    (web / "package.json").write_text(json.dumps({"scripts": {"test:e2e:course-mode": "true"}}))
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "fake script")
+    assert gate.source_contract_ready(
+        tmp_path, "course-mode-playwright", _git(tmp_path, "rev-parse", "HEAD"),
+    ) is False
+
+
+def test_playwright_contract_rejects_wrong_testmatch_and_small_viewport(tmp_path: Path) -> None:
+    web = tmp_path / "main/manager-web"
+    spec = web / "e2e/lesson-studio/course-mode-authoring.spec.js"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("test('course mode', async () => {});\n")
+    (web / "package.json").write_text(json.dumps({
+        "scripts": {"test:e2e:course-mode": "playwright test --config=playwright.config.js"},
+    }))
+    projects = "\n".join(
+        f"{{ name: {name!r}, use: {{ ...devices[{device!r}], viewport: {{ width: {width}, height: {height} }} }} }},"
+        for name, device, width, height in (
+            ("course-mode-chromium-desktop", "Desktop Chrome", 1439, 900),
+            ("course-mode-webkit-desktop", "Desktop Safari", 1440, 900),
+            ("course-mode-chromium-mobile", "Pixel 7", 390, 844),
+            ("course-mode-webkit-mobile", "iPhone 13", 390, 844),
+        )
+    )
+    (web / "playwright.config.js").write_text(f"testMatch: /course-mode.*spec/,\nprojects: [{projects}]")
+    _git(tmp_path, "init", "-b", "candidate")
+    _git(tmp_path, "config", "user.email", "candidate@example.invalid")
+    _git(tmp_path, "config", "user.name", "Candidate Test")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "fixture")
+
+    assert gate.source_contract_ready(
+        tmp_path, "course-mode-playwright", _git(tmp_path, "rev-parse", "HEAD"),
+    ) is False
+
+    valid_viewports = projects.replace("width: 1439", "width: 1440")
+    (web / "playwright.config.js").write_text(f"testMatch: /rewards.*spec/,\nprojects: [{valid_viewports}]")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "wrong test match")
+    assert gate.source_contract_ready(
+        tmp_path, "course-mode-playwright", _git(tmp_path, "rev-parse", "HEAD"),
+    ) is False
 
 
 def test_live_db_adds_to_full_and_physical_mode_is_read_only_preflight() -> None:

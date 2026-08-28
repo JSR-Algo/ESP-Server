@@ -4,15 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib
 import json
 import math
 import os
 import re
+import shlex
 import shutil
 import stat
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -73,6 +76,7 @@ class Lane:
     required_environment: tuple[str, ...] | str = ()
     fixed_environment: tuple[tuple[str, str], ...] = ()
     required_source_contract: str | None = None
+    reject_pytest_skips: bool = False
 
 
 def _lane(
@@ -84,10 +88,11 @@ def _lane(
     required_environment: tuple[str, ...] | str = (),
     fixed_environment: tuple[tuple[str, str], ...] = (),
     required_source_contract: str | None = None,
+    reject_pytest_skips: bool = False,
 ) -> Lane:
     return Lane(
         name, repository, relative_cwd, command, timeout_sec, required_environment,
-        fixed_environment, required_source_contract,
+        fixed_environment, required_source_contract, reject_pytest_skips,
     )
 
 
@@ -141,6 +146,7 @@ FULL_LANES = (
         "esp-course-mode-full", "adminEsp", "main/tbot-server",
         (COURSE_MODE_SOFTWARE_TESTS,),
         1800.0,
+        reject_pytest_skips=True,
     ),
     _lane(
         "firmware-renderer", "firmware", ".",
@@ -233,6 +239,7 @@ def _runtime_matches_candidate(candidate: dict, runtime_root: Path | None) -> bo
         dirty = {item["path"] for item in repository["dirtyExceptions"]}
         for relative in (
             "main/tbot-server/scripts/course_mode_release_gate.py",
+            "main/tbot-server/scripts/course_mode_candidate_manifest.py",
             "scripts/course_robot_e2e_gates.sh",
         ):
             if relative in dirty:
@@ -243,7 +250,11 @@ def _runtime_matches_candidate(candidate: dict, runtime_root: Path | None) -> bo
                 return False
         if runtime_root is None:
             expected_script = expected / "main/tbot-server/scripts/course_mode_release_gate.py"
-            return expected_script.resolve(strict=True) == Path(__file__).resolve(strict=True)
+            expected_helper = expected / "main/tbot-server/scripts/course_mode_candidate_manifest.py"
+            return (
+                expected_script.resolve(strict=True) == Path(__file__).resolve(strict=True)
+                and expected_helper.resolve(strict=True) == Path(_manifest.__file__).resolve(strict=True)
+            )
         return True
     except (KeyError, OSError, RuntimeError, TypeError):
         return False
@@ -268,7 +279,10 @@ def discover_esp_course_mode_tests(admin_root: Path, sha: str) -> tuple[str, ...
     discovered = []
     for relative in sorted(path for path in tracked if path):
         name = Path(relative).name
-        if not name.startswith("test_course_mode") or not name.endswith(".py"):
+        if not (
+            (name.startswith("test_course_mode") and name.endswith(".py"))
+            or name == "test_google_live_course_mode.py"
+        ):
             continue
         if name == "test_course_mode_release_gate.py":
             continue
@@ -296,33 +310,93 @@ def select_esp_software_tests(discovered: Sequence[str]) -> tuple[str, ...]:
     )
 
 
-def source_contract_ready(admin_root: Path, contract: str) -> bool:
+def _committed_text(admin_root: Path, sha: str, relative: str) -> str | None:
+    try:
+        return _candidate_git(admin_root, "show", f"{sha}:{relative}")
+    except RuntimeError:
+        return None
+
+
+def source_contract_ready(admin_root: Path, contract: str, sha: str) -> bool:
     if contract != "course-mode-playwright":
         return False
     try:
-        package = strict_json_loads(read_secure_regular(admin_root / "main/manager-web/package.json", 1024 * 1024))
-        config = read_secure_regular(
-            admin_root / "main/manager-web/playwright.config.js", 1024 * 1024,
-        ).decode("utf-8")
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        package_raw = _committed_text(admin_root, sha, "main/manager-web/package.json")
+        config = _committed_text(admin_root, sha, "main/manager-web/playwright.config.js")
+        if package_raw is None or config is None:
+            return False
+        package = strict_json_loads(package_raw)
+        tracked = _candidate_git(
+            admin_root, "ls-tree", "-r", "--name-only", sha, "--",
+            "main/manager-web/e2e/lesson-studio",
+        ).splitlines()
+    except (json.JSONDecodeError, ValueError, RuntimeError):
         return False
     scripts = package.get("scripts") if isinstance(package, dict) else None
-    if not isinstance(scripts, dict) or not isinstance(scripts.get("test:e2e:course-mode"), str):
+    script = scripts.get("test:e2e:course-mode") if isinstance(scripts, dict) else None
+    if not isinstance(script, str):
+        return False
+    try:
+        argv = shlex.split(script)
+    except ValueError:
+        return False
+    if (
+        argv[:2] != ["playwright", "test"]
+        or "--config=playwright.config.js" not in argv
+        or any(any(character in token for character in ";|&$`") for token in argv)
+    ):
+        return False
+    if not any(
+        Path(relative).name.startswith("course-mode") and relative.endswith(".spec.js")
+        for relative in tracked
+    ):
+        return False
+    match = re.search(r"testMatch\s*:\s*([^,\n]+)", config)
+    if match is None or "course-mode" not in match.group(1):
         return False
     projects = {
-        "course-mode-chromium-desktop": "Desktop Chrome",
-        "course-mode-webkit-desktop": "Desktop Safari",
-        "course-mode-chromium-mobile": "Pixel 7",
-        "course-mode-webkit-mobile": "iPhone 13",
+        "course-mode-chromium-desktop": ("Desktop Chrome", 1440, 900),
+        "course-mode-webkit-desktop": ("Desktop Safari", 1440, 900),
+        "course-mode-chromium-mobile": ("Pixel 7", 390, 844),
+        "course-mode-webkit-mobile": ("iPhone 13", 390, 844),
     }
-    return all(
-        re.search(
-            rf"name\s*:\s*(['\"]){re.escape(project)}\1"
-            rf"[\s\S]{{0,600}}devices\[(['\"]){re.escape(device)}\2\]",
-            config,
+    positions = {}
+    for project in projects:
+        found = re.search(rf"name\s*:\s*(['\"]){re.escape(project)}\1", config)
+        if found is None:
+            return False
+        positions[project] = found.start()
+    ordered = sorted(positions, key=positions.get)
+    for index, project in enumerate(ordered):
+        start = positions[project]
+        end = positions[ordered[index + 1]] if index + 1 < len(ordered) else min(len(config), start + 1200)
+        block = config[start:end]
+        device, minimum_width, minimum_height = projects[project]
+        if re.search(rf"devices\[(['\"]){re.escape(device)}\1\]", block) is None:
+            return False
+        viewport = re.search(
+            r"viewport\s*:\s*\{[^}]*width\s*:\s*(\d+)[^}]*height\s*:\s*(\d+)", block,
         )
-        for project, device in projects.items()
-    )
+        if viewport is None:
+            return False
+        if int(viewport.group(1)) < minimum_width or int(viewport.group(2)) < minimum_height:
+            return False
+    return True
+
+
+def pytest_report_has_skips(path: Path) -> bool | None:
+    try:
+        root = ET.fromstring(read_secure_regular(path, MAX_REPORT_BYTES))
+        suites = [root] if root.tag == "testsuite" else root.findall(".//testsuite")
+        if not suites and root.tag == "testsuites":
+            tests = int(root.attrib.get("tests", "0"))
+            skipped = int(root.attrib.get("skipped", "0"))
+            return skipped > 0 if tests > 0 else None
+        tests = sum(int(suite.attrib.get("tests", "0")) for suite in suites)
+        skipped = sum(int(suite.attrib.get("skipped", "0")) for suite in suites)
+        return skipped > 0 if tests > 0 else None
+    except (OSError, ET.ParseError, TypeError, ValueError):
+        return None
 
 
 def physical_preflight_command(candidate: dict) -> tuple[str, ...] | None:
@@ -391,6 +465,8 @@ def _child_environment(candidate: dict, source: Mapping[str, str], lane: Lane) -
         "COURSE_MODE_FIRMWARE_ROOT": candidate["repositories"]["firmware"]["path"],
         "COURSE_MODE_CANDIDATE_ID": candidate["candidateId"],
         "TBOT_BACKEND_WORKTREE": candidate["repositories"]["backend"]["path"],
+        "TASK06_BACKEND_ROOT": candidate["repositories"]["backend"]["path"],
+        "TASK06_FIRMWARE_ROOT": candidate["repositories"]["firmware"]["path"],
         "TBOT_BACKEND_CONTRACTS_DIR": str(
             Path(candidate["repositories"]["backend"]["path"]) / "contracts"
         ),
@@ -495,6 +571,7 @@ def run_gate(
                     break
                 if lane.required_source_contract and not source_contract_ready(
                     Path(repositories["adminEsp"]["path"]), lane.required_source_contract,
+                    repositories["adminEsp"]["sha"],
                 ):
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
@@ -517,11 +594,23 @@ def run_gate(
                     report["failedLane"] = lane.name
                     break
                 started = time.monotonic_ns()
-                result = run_bounded_command(
-                    list(command), cwd=resolved_cwd, timeout_sec=lane.timeout_sec,
-                    max_output_bytes=max_output_bytes,
-                    env=_child_environment(candidate, source, lane),
-                )
+                junit_path: Path | None = None
+                if lane.reject_pytest_skips:
+                    descriptor, name = tempfile.mkstemp(prefix="course-mode-pytest-", suffix=".xml")
+                    os.close(descriptor)
+                    junit_path = Path(name).resolve()
+                    command = (*command, f"--junitxml={junit_path}")
+                try:
+                    result = run_bounded_command(
+                        list(command), cwd=resolved_cwd, timeout_sec=lane.timeout_sec,
+                        max_output_bytes=max_output_bytes,
+                        env=_child_environment(candidate, source, lane),
+                    )
+                    skip_state = pytest_report_has_skips(junit_path) if junit_path else False
+                finally:
+                    if junit_path is not None:
+                        with contextlib.suppress(OSError):
+                            junit_path.unlink()
                 duration_ms = max(0, (time.monotonic_ns() - started) // 1_000_000)
                 exit_code = None if result.error else result.returncode
                 report["lanes"].append({
@@ -529,6 +618,10 @@ def run_gate(
                 })
                 if result.error or result.returncode != 0:
                     report["verdict"] = "FAIL"
+                    report["failedLane"] = lane.name
+                    break
+                if skip_state is not False:
+                    report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
                     break
     if report_path is not None and not _write_report_atomic(report_path, report):
