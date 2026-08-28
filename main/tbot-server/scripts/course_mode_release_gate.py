@@ -8,6 +8,7 @@ import importlib
 import json
 import math
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -27,6 +28,7 @@ read_secure_regular = _manifest.read_secure_regular
 run_bounded_command = _manifest.run_bounded_command
 strict_json_loads = _manifest.strict_json_loads
 validate_candidate = _manifest.validate_candidate
+_candidate_git = _manifest._git
 
 
 SECURE_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -46,6 +48,19 @@ BASE_ENVIRONMENT = {
 MAX_LANE_OUTPUT_BYTES = 4 * 1024 * 1024
 MAX_REPORT_BYTES = 1024 * 1024
 MODES = ("quick", "full", "live-db", "physical-preflight")
+COURSE_MODE_SOFTWARE_TESTS = "@course-mode-software-tests"
+PLAYWRIGHT_PROJECTS = (
+    "course-mode-chromium-desktop",
+    "course-mode-webkit-desktop",
+    "course-mode-chromium-mobile",
+    "course-mode-webkit-mobile",
+)
+SAFE_PHYSICAL_CONTRACT_TESTS = {
+    "test_course_mode_physical_tft_compose.py",
+    "test_course_mode_physical_tft_ledger_validate.py",
+    "test_course_mode_physical_tft_preflight.py",
+    "test_course_mode_physical_tft_receipt_verify.py",
+}
 
 
 @dataclass(frozen=True)
@@ -55,7 +70,9 @@ class Lane:
     relative_cwd: str
     command: tuple[str, ...]
     timeout_sec: float
-    required_environment: str | None = None
+    required_environment: tuple[str, ...] | str = ()
+    fixed_environment: tuple[tuple[str, str], ...] = ()
+    required_source_contract: str | None = None
 
 
 def _lane(
@@ -64,9 +81,14 @@ def _lane(
     relative_cwd: str,
     command: tuple[str, ...],
     timeout_sec: float = 900.0,
-    required_environment: str | None = None,
+    required_environment: tuple[str, ...] | str = (),
+    fixed_environment: tuple[tuple[str, str], ...] = (),
+    required_source_contract: str | None = None,
 ) -> Lane:
-    return Lane(name, repository, relative_cwd, command, timeout_sec, required_environment)
+    return Lane(
+        name, repository, relative_cwd, command, timeout_sec, required_environment,
+        fixed_environment, required_source_contract,
+    )
 
 
 QUICK_LANES = (
@@ -105,19 +127,19 @@ FULL_LANES = (
     _lane("admin-logic", "adminEsp", "main/manager-web", ("npm", "run", "test:course-admin-ui")),
     _lane("admin-browser", "adminEsp", "main/manager-web", ("npm", "run", "test:lesson-studio")),
     _lane("admin-build", "adminEsp", "main/manager-web", ("npm", "run", "build"), 1200.0),
-    _lane(
-        "admin-course-mode-playwright", "adminEsp", "main/manager-web",
-        ("npm", "run", "test:e2e:course-mode", "--", "--project=chromium"),
-        1200.0, "COURSE_MODE_ADMIN_E2E_READY",
+    *(
+        _lane(
+            f"admin-course-mode-playwright-{project.removeprefix('course-mode-')}",
+            "adminEsp", "main/manager-web",
+            ("npm", "run", "test:e2e:course-mode", "--", f"--project={project}"),
+            1200.0, ("COURSE_MODE_ADMIN_E2E_READY",),
+            required_source_contract="course-mode-playwright",
+        )
+        for project in PLAYWRIGHT_PROJECTS
     ),
     _lane(
         "esp-course-mode-full", "adminEsp", "main/tbot-server",
-        (
-            "python3", "-m", "pytest", "-q", "tests/test_course_mode_curriculum_e2e.py",
-            "tests/test_course_mode_runtime_integration.py", "tests/test_course_mode_contract.py",
-            "tests/test_course_mode_e2e_journeys.py", "tests/test_course_mode_forwarder.py",
-            "tests/test_course_mode_runtime_compatibility.py",
-        ),
+        (COURSE_MODE_SOFTWARE_TESTS,),
         1800.0,
     ),
     _lane(
@@ -151,13 +173,15 @@ LIVE_DB_LANE = _lane(
         "tests/integration/course-mode-curriculum.postgres.spec.ts",
         "tests/integration/course-mode-local-materializer.integration.spec.ts",
     ),
-    1800.0, "COURSE_MODE_V2_TEST_DATABASE_URL",
+    1800.0,
+    ("COURSE_MODE_V2_TEST_DATABASE_URL", "COURSE_MODE_TEST_DATABASE_URL", "DATABASE_URL"),
+    (("TBOT_RUN_LIVE_DB_TESTS", "true"),),
 )
 
 
 PHYSICAL_PREFLIGHT_LANE = _lane(
     "physical-tft-preflight", "adminEsp", "main/tbot-server",
-    ("python3", "-m", "pytest", "-q", "tests/test_course_mode_physical_tft_preflight.py"),
+    ("python3", "scripts/course_mode_physical_tft_preflight.py"),
     900.0,
 )
 
@@ -199,6 +223,146 @@ def _candidate_matches(candidate: dict) -> bool:
         return False
 
 
+def _runtime_matches_candidate(candidate: dict, runtime_root: Path | None) -> bool:
+    repository = candidate["repositories"]["adminEsp"]
+    expected = Path(repository["path"])
+    actual = runtime_root if runtime_root is not None else Path(__file__).resolve().parents[3]
+    try:
+        if actual.resolve(strict=True) != expected.resolve(strict=True):
+            return False
+        dirty = {item["path"] for item in repository["dirtyExceptions"]}
+        for relative in (
+            "main/tbot-server/scripts/course_mode_release_gate.py",
+            "scripts/course_robot_e2e_gates.sh",
+        ):
+            if relative in dirty:
+                return False
+            committed_blob = _candidate_git(expected, "rev-parse", f"{repository['sha']}:{relative}").strip()
+            working_blob = _candidate_git(expected, "hash-object", "--", relative).strip()
+            if committed_blob != working_blob:
+                return False
+        if runtime_root is None:
+            expected_script = expected / "main/tbot-server/scripts/course_mode_release_gate.py"
+            return expected_script.resolve(strict=True) == Path(__file__).resolve(strict=True)
+        return True
+    except (KeyError, OSError, RuntimeError, TypeError):
+        return False
+
+
+def _required_environment(lane: Lane) -> tuple[str, ...]:
+    if lane.required_environment is None:
+        return ()
+    if isinstance(lane.required_environment, str):
+        return (lane.required_environment,) if lane.required_environment else ()
+    return lane.required_environment
+
+
+def discover_esp_course_mode_tests(admin_root: Path, sha: str) -> tuple[str, ...]:
+    try:
+        root = admin_root.resolve(strict=True)
+        tracked = _candidate_git(
+            root, "ls-tree", "-r", "--name-only", "-z", sha, "--", "main/tbot-server/tests",
+        ).split("\0")
+    except (OSError, RuntimeError):
+        return ()
+    discovered = []
+    for relative in sorted(path for path in tracked if path):
+        name = Path(relative).name
+        if not name.startswith("test_course_mode") or not name.endswith(".py"):
+            continue
+        if name == "test_course_mode_release_gate.py":
+            continue
+        path = root / relative
+        if path.is_file() and not path.is_symlink():
+            discovered.append(f"tests/{name}")
+    return tuple(discovered)
+
+
+def classify_esp_course_mode_test(relative: str) -> str:
+    name = Path(relative).name
+    if name in SAFE_PHYSICAL_CONTRACT_TESTS:
+        return "physical-contract"
+    if "_physical_" in name:
+        return "physical-runtime"
+    if "postgres" in name or "live_db" in name:
+        return "live-db"
+    return "software"
+
+
+def select_esp_software_tests(discovered: Sequence[str]) -> tuple[str, ...]:
+    return tuple(
+        relative for relative in discovered
+        if classify_esp_course_mode_test(relative) in {"software", "physical-contract"}
+    )
+
+
+def source_contract_ready(admin_root: Path, contract: str) -> bool:
+    if contract != "course-mode-playwright":
+        return False
+    try:
+        package = strict_json_loads(read_secure_regular(admin_root / "main/manager-web/package.json", 1024 * 1024))
+        config = read_secure_regular(
+            admin_root / "main/manager-web/playwright.config.js", 1024 * 1024,
+        ).decode("utf-8")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return False
+    scripts = package.get("scripts") if isinstance(package, dict) else None
+    if not isinstance(scripts, dict) or not isinstance(scripts.get("test:e2e:course-mode"), str):
+        return False
+    projects = {
+        "course-mode-chromium-desktop": "Desktop Chrome",
+        "course-mode-webkit-desktop": "Desktop Safari",
+        "course-mode-chromium-mobile": "Pixel 7",
+        "course-mode-webkit-mobile": "iPhone 13",
+    }
+    return all(
+        re.search(
+            rf"name\s*:\s*(['\"]){re.escape(project)}\1"
+            rf"[\s\S]{{0,600}}devices\[(['\"]){re.escape(device)}\2\]",
+            config,
+        )
+        for project, device in projects.items()
+    )
+
+
+def physical_preflight_command(candidate: dict) -> tuple[str, ...] | None:
+    if any(not isinstance(candidate.get(key), dict) or not candidate[key] for key in ("images", "firmware", "database")):
+        return None
+    tools = candidate.get("tools")
+    metadata = tools.get("physicalPreflight") if isinstance(tools, dict) else None
+    required = {"input", "output", "expectedIdentity", "expectedIdentitySignature"}
+    if not isinstance(metadata, dict) or set(metadata) != required:
+        return None
+    try:
+        evidence_root = Path(candidate["evidenceRoot"]).resolve(strict=True)
+        resolved = {key: Path(value) for key, value in metadata.items() if isinstance(value, str)}
+        if set(resolved) != required or any(not path.is_absolute() for path in resolved.values()):
+            return None
+        for key in ("input", "expectedIdentity", "expectedIdentitySignature"):
+            path = resolved[key].resolve(strict=True)
+            path.relative_to(evidence_root)
+            raw = read_secure_regular(path, 256 if key == "expectedIdentitySignature" else MAX_CANDIDATE_BYTES)
+            if key == "expectedIdentitySignature":
+                if len(raw) != 64:
+                    return None
+            else:
+                document = strict_json_loads(raw)
+                if not isinstance(document, dict):
+                    return None
+        output = resolved["output"]
+        output.parent.resolve(strict=True).relative_to(evidence_root)
+        if output.exists() or output.is_symlink():
+            return None
+    except (KeyError, OSError, ValueError):
+        return None
+    return (
+        "python3", "scripts/course_mode_physical_tft_preflight.py",
+        "--input", str(resolved["input"]), "--output", str(resolved["output"]),
+        "--expected-identity", str(resolved["expectedIdentity"]),
+        "--expected-identity-signature", str(resolved["expectedIdentitySignature"]),
+    )
+
+
 def _valid_lane(lane: Lane, repositories: Mapping[str, object]) -> bool:
     if (
         not lane.name or lane.repository not in repositories or not lane.command
@@ -226,13 +390,28 @@ def _child_environment(candidate: dict, source: Mapping[str, str], lane: Lane) -
         "COURSE_MODE_ADMIN_ESP_ROOT": candidate["repositories"]["adminEsp"]["path"],
         "COURSE_MODE_FIRMWARE_ROOT": candidate["repositories"]["firmware"]["path"],
         "COURSE_MODE_CANDIDATE_ID": candidate["candidateId"],
+        "TBOT_BACKEND_WORKTREE": candidate["repositories"]["backend"]["path"],
         "TBOT_BACKEND_CONTRACTS_DIR": str(
             Path(candidate["repositories"]["backend"]["path"]) / "contracts"
         ),
     })
-    if lane.required_environment and source.get(lane.required_environment):
-        environment[lane.required_environment] = source[lane.required_environment]
+    for name in _required_environment(lane):
+        if source.get(name):
+            environment[name] = source[name]
+    environment.update(dict(lane.fixed_environment))
     return environment
+
+
+def _command_for_lane(lane: Lane, candidate: dict) -> tuple[str, ...] | None:
+    if lane.command == (COURSE_MODE_SOFTWARE_TESTS,):
+        repository = candidate["repositories"]["adminEsp"]
+        tests = select_esp_software_tests(
+            discover_esp_course_mode_tests(Path(repository["path"]), repository["sha"])
+        )
+        return ("python3", "-m", "pytest", "-q", *tests) if tests else None
+    if lane.name == "physical-tft-preflight":
+        return physical_preflight_command(candidate)
+    return lane.command
 
 
 def _write_report_atomic(path: Path, report: dict) -> bool:
@@ -279,6 +458,7 @@ def run_gate(
     source_environment: Mapping[str, str] | None = None,
     max_output_bytes: int = MAX_LANE_OUTPUT_BYTES,
     report_path: Path | None = None,
+    runtime_root: Path | None = None,
 ) -> dict:
     candidate = _load_candidate(candidate_path)
     candidate_id = candidate.get("candidateId") if isinstance(candidate, dict) else None
@@ -286,6 +466,8 @@ def run_gate(
         report = _blocked(candidate_id if isinstance(candidate_id, str) else None, "candidate")
     elif mode not in MODES or type(max_output_bytes) is not int or max_output_bytes <= 0:
         report = _blocked(candidate_id, "configuration")
+    elif lanes is None and not _runtime_matches_candidate(candidate, runtime_root):
+        report = _blocked(candidate_id, "candidate-runtime")
     else:
         selected = tuple(lanes) if lanes is not None else lanes_for_mode(mode)
         repositories = candidate["repositories"]
@@ -305,12 +487,21 @@ def run_gate(
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
                     break
-                if lane.required_environment and not source.get(lane.required_environment):
+                required_environment = _required_environment(lane)
+                if any(not source.get(name) for name in required_environment):
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
                     break
-                command = _resolve_command(lane.command)
+                if lane.required_source_contract and not source_contract_ready(
+                    Path(repositories["adminEsp"]["path"]), lane.required_source_contract,
+                ):
+                    report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
+                    report["verdict"] = "BLOCKED"
+                    report["failedLane"] = lane.name
+                    break
+                lane_command = _command_for_lane(lane, candidate)
+                command = _resolve_command(lane_command) if lane_command else None
                 if command is None:
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"

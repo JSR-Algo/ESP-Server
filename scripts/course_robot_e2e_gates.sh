@@ -28,5 +28,7 @@ exec /usr/bin/env -i \
   PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin \
   HOME=/nonexistent LANG=C LC_ALL=C \
   COURSE_MODE_V2_TEST_DATABASE_URL="${COURSE_MODE_V2_TEST_DATABASE_URL-}" \
+  COURSE_MODE_TEST_DATABASE_URL="${COURSE_MODE_TEST_DATABASE_URL-}" \
+  DATABASE_URL="${DATABASE_URL-}" \
   COURSE_MODE_ADMIN_E2E_READY="${COURSE_MODE_ADMIN_E2E_READY-}" \
   "${PYTHON}" "${REPOSITORY_ROOT}/main/tbot-server/scripts/course_mode_release_gate.py" "$@"

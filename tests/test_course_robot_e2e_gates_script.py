@@ -26,6 +26,12 @@ def test_canonical_gate_does_not_delegate_to_workspace_convenience_script() -> N
 
     assert "exec /usr/bin/env -i" in script
     assert "/usr/bin/dirname" in script
+    for allowed in (
+        "COURSE_MODE_V2_TEST_DATABASE_URL",
+        "COURSE_MODE_TEST_DATABASE_URL",
+        "DATABASE_URL",
+    ):
+        assert allowed in script
     assert "exec env -i" not in script
     assert "/Users/manhhodinh/Documents/TBOT/scripts/course_robot_e2e_gates.sh" not in script
     assert "dist/" not in script
