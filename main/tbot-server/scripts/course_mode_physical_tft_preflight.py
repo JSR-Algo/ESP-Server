@@ -15,6 +15,7 @@ import signal
 import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -95,6 +96,7 @@ FORBIDDEN_OUTPUT = re.compile(r"(?i)(bearer|password|private.?key|secret.?value|
 MAX_JSON_BYTES = 1024 * 1024
 COMMAND_TIMEOUT_SECONDS = 10
 MAX_COMMAND_OUTPUT_BYTES = 2 * 1024 * 1024
+OUTPUT_FILE_LIMIT_MARGIN = 4096
 PINNED_APPROVAL_PUBLIC_KEY_RAW: bytes | None = None
 PINNED_APPROVAL_KEY_FINGERPRINT = "unprovisioned"
 
@@ -1487,6 +1489,28 @@ def validate_compose(compose: object, expected: object) -> list[str]:
 def _run(
     command: list[str], cwd: Path, env: dict[str, str], *, timeout_seconds: float = COMMAND_TIMEOUT_SECONDS
 ) -> tuple[str, bool, str | None]:
+    def limit_and_isolate() -> None:
+        import resource
+
+        os.setsid()
+        limit = MAX_COMMAND_OUTPUT_BYTES + OUTPUT_FILE_LIMIT_MARGIN
+        resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+
+    def cleanup_group(pgid: int) -> None:
+        if pgid <= 1 or pgid == os.getpgrp():
+            return
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(pgid, signal.SIGTERM)
+        deadline = time.monotonic() + 0.1
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.01)
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(pgid, signal.SIGKILL)
+
     with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
         try:
             process = subprocess.Popen(
@@ -1495,20 +1519,27 @@ def _run(
                 env=env,
                 stdout=stdout_file,
                 stderr=stderr_file,
-                start_new_session=True,
+                preexec_fn=limit_and_isolate,
             )
         except OSError:
             return "", False, "os_error"
+        pgid = process.pid
         try:
             return_code = process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
             with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
+                os.killpg(pgid, signal.SIGKILL)
             process.wait()
             return "", False, "timeout"
+        finally:
+            cleanup_group(pgid)
         stdout_size = os.fstat(stdout_file.fileno()).st_size
         stderr_size = os.fstat(stderr_file.fileno()).st_size
-        if stdout_size > MAX_COMMAND_OUTPUT_BYTES or stderr_size > MAX_COMMAND_OUTPUT_BYTES:
+        if (
+            stdout_size > MAX_COMMAND_OUTPUT_BYTES
+            or stderr_size > MAX_COMMAND_OUTPUT_BYTES
+            or return_code == -signal.SIGXFSZ
+        ):
             return "", False, "output_limit"
         stdout_file.seek(0)
         stderr_file.seek(0)
@@ -1565,19 +1596,22 @@ def _publish_output(output: Path, payload: bytes, session: Path) -> bool:
 def _verify_pinned_identity_signature(canonical_identity: bytes, signature: bytes) -> tuple[bool, str]:
     if PINNED_APPROVAL_PUBLIC_KEY_RAW is None:
         return False, PINNED_APPROVAL_KEY_FINGERPRINT
+    derived_fingerprint = hashlib.sha256(PINNED_APPROVAL_PUBLIC_KEY_RAW).hexdigest()
+    if not _digest_equal(derived_fingerprint, PINNED_APPROVAL_KEY_FINGERPRINT):
+        return False, derived_fingerprint
     try:
         from cryptography.exceptions import InvalidSignature
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     except ImportError:
-        return False, PINNED_APPROVAL_KEY_FINGERPRINT
+        return False, derived_fingerprint
     try:
         Ed25519PublicKey.from_public_bytes(PINNED_APPROVAL_PUBLIC_KEY_RAW).verify(signature, canonical_identity)
     except (InvalidSignature, ValueError):
-        return False, PINNED_APPROVAL_KEY_FINGERPRINT
-    return True, PINNED_APPROVAL_KEY_FINGERPRINT
+        return False, derived_fingerprint
+    return True, derived_fingerprint
 
 
-def main(argv: list[str] | None = None, *, signature_verifier=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
@@ -1615,8 +1649,7 @@ def main(argv: list[str] | None = None, *, signature_verifier=None) -> int:
     if signature_read_error or signature is None or len(signature) != 64:
         _emit({"reasons": ["expected_identity.signature"], "valid": False})
         return 1
-    verifier = signature_verifier or _verify_pinned_identity_signature
-    signature_valid, signer_fingerprint = verifier(_canonical_bytes(identity), signature)
+    signature_valid, signer_fingerprint = _verify_pinned_identity_signature(_canonical_bytes(identity), signature)
     if not signature_valid:
         reason = (
             "expected_identity.signing_prerequisite"

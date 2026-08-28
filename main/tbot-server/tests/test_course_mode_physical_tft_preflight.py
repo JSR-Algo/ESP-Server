@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from copy import deepcopy
 from pathlib import Path
 
@@ -35,7 +36,8 @@ NVS_SIZE = 0x4000
 SESSION_ID = "a23be10d-1f38-4c14-b563-bcc821cb809e"
 EXPECTED_IDENTITIES = {}
 EXPECTED_SIGNATURES = {}
-EXPECTED_VERIFIERS = {}
+EXPECTED_PUBLIC_KEYS = {}
+EXPECTED_FINGERPRINTS = {}
 
 
 @pytest.fixture
@@ -265,15 +267,9 @@ def valid_input(session: Path, tmp_path: Path) -> dict:
     signature_path = tmp_path / "expected-physical-identity.sig"
     signature_path.write_bytes(private_key.sign(canonical_identity))
 
-    def verifier(payload, signature):
-        try:
-            public_key.verify(signature, payload)
-        except InvalidSignature:
-            return False, fingerprint
-        return True, fingerprint
-
     EXPECTED_SIGNATURES[str(session)] = signature_path
-    EXPECTED_VERIFIERS[str(session)] = verifier
+    EXPECTED_PUBLIC_KEYS[str(session)] = public_raw
+    EXPECTED_FINGERPRINTS[str(session)] = fingerprint
     materialization.update(
         {
             "backendGitSha": BACKEND_SHA,
@@ -527,12 +523,13 @@ def test_canonical_receipt_derived_preflight_passes_cli(tmp_path, session_dir, m
     source.write_text(json.dumps(document))
     _, expected_ref = EXPECTED_IDENTITIES[str(session_dir)]
     signature = EXPECTED_SIGNATURES[str(session_dir)]
-    verifier = EXPECTED_VERIFIERS[str(session_dir)]
     sys.path.insert(0, str(SERVER / "scripts"))
-    from course_mode_physical_tft_preflight import main
+    import course_mode_physical_tft_preflight as preflight
 
     monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
-    result = main(
+    monkeypatch.setattr(preflight, "PINNED_APPROVAL_PUBLIC_KEY_RAW", EXPECTED_PUBLIC_KEYS[str(session_dir)])
+    monkeypatch.setattr(preflight, "PINNED_APPROVAL_KEY_FINGERPRINT", EXPECTED_FINGERPRINTS[str(session_dir)])
+    result = preflight.main(
         [
             "--input",
             str(source),
@@ -542,8 +539,7 @@ def test_canonical_receipt_derived_preflight_passes_cli(tmp_path, session_dir, m
             expected_ref["path"],
             "--expected-identity-signature",
             str(signature),
-        ],
-        signature_verifier=verifier,
+        ]
     )
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
@@ -585,10 +581,12 @@ def test_cli_requires_provisioned_signer_and_rejects_coherent_rewrite(tmp_path, 
     document["reviewedIdentity"]["replacementId"] = identity["replacementId"]
     source.write_text(json.dumps(document))
     _write_json(tmp_path / "changed-identity.json", identity)
-    verifier = EXPECTED_VERIFIERS[str(session_dir)]
     signature = EXPECTED_SIGNATURES[str(session_dir)].read_bytes()
     canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-    assert verifier(canonical, signature)[0] is False
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    with pytest.raises(InvalidSignature):
+        Ed25519PublicKey.from_public_bytes(EXPECTED_PUBLIC_KEYS[str(session_dir)]).verify(signature, canonical)
 
 
 def test_retagged_backend_image_id_fails_fixed_external_anchor(tmp_path, session_dir, monkeypatch, capsys):
@@ -600,10 +598,12 @@ def test_retagged_backend_image_id_fails_fixed_external_anchor(tmp_path, session
     source.write_text(json.dumps(document))
     _, expected_ref = EXPECTED_IDENTITIES[str(session_dir)]
     sys.path.insert(0, str(SERVER / "scripts"))
-    from course_mode_physical_tft_preflight import main
+    import course_mode_physical_tft_preflight as preflight
 
     monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
-    result = main(
+    monkeypatch.setattr(preflight, "PINNED_APPROVAL_PUBLIC_KEY_RAW", EXPECTED_PUBLIC_KEYS[str(session_dir)])
+    monkeypatch.setattr(preflight, "PINNED_APPROVAL_KEY_FINGERPRINT", EXPECTED_FINGERPRINTS[str(session_dir)])
+    result = preflight.main(
         [
             "--input",
             str(source),
@@ -613,8 +613,7 @@ def test_retagged_backend_image_id_fails_fixed_external_anchor(tmp_path, session
             expected_ref["path"],
             "--expected-identity-signature",
             str(EXPECTED_SIGNATURES[str(session_dir)]),
-        ],
-        signature_verifier=EXPECTED_VERIFIERS[str(session_dir)],
+        ]
     )
     assert result == 1
     assert "image.anchor" in json.loads(capsys.readouterr().out)["reasons"]
@@ -641,6 +640,51 @@ def test_run_timeout_and_invalid_utf8_are_deterministic(tmp_path):
         [sys.executable, "-c", "import sys; sys.stdout.write('x' * 3000000)"], tmp_path, os.environ.copy()
     )
     assert (ok, reason) == (False, "output_limit")
+    started = time.monotonic()
+    _, ok, reason = _run(
+        [sys.executable, "-c", "import os; b=b'x'*65536\nwhile True: os.write(1,b)"],
+        tmp_path,
+        os.environ.copy(),
+        timeout_seconds=2,
+    )
+    assert (ok, reason) == (False, "output_limit")
+    assert time.monotonic() - started < 2
+
+
+def test_run_cleans_descendants_after_successful_parent_exit(tmp_path):
+    sys.path.insert(0, str(SERVER / "scripts"))
+    from course_mode_physical_tft_preflight import _run
+
+    marker = tmp_path / "descendant-marker"
+    child = f"import time,pathlib;time.sleep(.5);pathlib.Path({str(marker)!r}).write_text('escaped')"
+    parent = f"import subprocess,sys;subprocess.Popen([sys.executable,'-c',{child!r}]);print('{{}}')"
+    stdout, ok, reason = _run([sys.executable, "-c", parent], tmp_path, os.environ.copy())
+    assert (stdout.strip(), ok, reason) == ("{}", True, None)
+    time.sleep(0.7)
+    assert not marker.exists()
+
+
+def test_pinned_signer_fingerprint_is_derived_and_policy_checked(tmp_path, session_dir, monkeypatch):
+    valid_input(session_dir, tmp_path)
+    sys.path.insert(0, str(SERVER / "scripts"))
+    import course_mode_physical_tft_preflight as preflight
+
+    raw = EXPECTED_PUBLIC_KEYS[str(session_dir)]
+    signature = EXPECTED_SIGNATURES[str(session_dir)].read_bytes()
+    identity = EXPECTED_IDENTITIES[str(session_dir)][0]
+    monkeypatch.setattr(preflight, "PINNED_APPROVAL_PUBLIC_KEY_RAW", raw)
+    monkeypatch.setattr(preflight, "PINNED_APPROVAL_KEY_FINGERPRINT", "a" * 64)
+    valid, derived = preflight._verify_pinned_identity_signature(preflight._canonical_bytes(identity), signature)
+    assert valid is False
+    assert derived == hashlib.sha256(raw).hexdigest()
+
+
+def test_cryptography_is_pinned_in_clean_install_manifest():
+    requirements = (SERVER / "requirements.txt").read_text()
+    assert "cryptography==49.0.0" in requirements.splitlines()
+    import cryptography
+
+    assert cryptography.__version__ == "49.0.0"
 
 
 def test_python_canonical_json_matches_node_unicode_bytes():
