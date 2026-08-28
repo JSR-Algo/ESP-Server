@@ -1706,8 +1706,8 @@ def _run(
         with contextlib.suppress(ProcessLookupError):
             os.killpg(pgid, signal.SIGKILL)
 
-    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
-        try:
+    try:
+        with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
             process = subprocess.Popen(
                 command,
                 cwd=cwd,
@@ -1718,41 +1718,41 @@ def _run(
                 executable=launch_executable,
                 pass_fds=launch_pass_fds,
             )
-        except OSError:
             os.close(executable_fd)
-            cleanup_sealed()
-            return "", False, "os_error"
-        os.close(executable_fd)
-        pgid = process.pid
-        try:
-            return_code = process.wait(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(pgid, signal.SIGKILL)
-            process.wait()
-            cleanup_sealed()
-            return "", False, "timeout"
-        finally:
-            cleanup_group(pgid)
-        stdout_size = os.fstat(stdout_file.fileno()).st_size
-        stderr_size = os.fstat(stderr_file.fileno()).st_size
-        if (
-            stdout_size > MAX_COMMAND_OUTPUT_BYTES
-            or stderr_size > MAX_COMMAND_OUTPUT_BYTES
-            or return_code == -signal.SIGXFSZ
-        ):
-            cleanup_sealed()
-            return "", False, "output_limit"
-        stdout_file.seek(0)
-        stderr_file.seek(0)
-        try:
-            stdout = stdout_file.read().decode("utf-8", errors="strict")
-            stderr_file.read().decode("utf-8", errors="strict")
-        except UnicodeDecodeError:
-            cleanup_sealed()
-            return "", False, "decode"
+            executable_fd = None
+            pgid = process.pid
+            try:
+                return_code = process.wait(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(pgid, signal.SIGKILL)
+                process.wait()
+                return "", False, "timeout"
+            finally:
+                cleanup_group(pgid)
+            stdout_size = os.fstat(stdout_file.fileno()).st_size
+            stderr_size = os.fstat(stderr_file.fileno()).st_size
+            if (
+                stdout_size > MAX_COMMAND_OUTPUT_BYTES
+                or stderr_size > MAX_COMMAND_OUTPUT_BYTES
+                or return_code == -signal.SIGXFSZ
+            ):
+                return "", False, "output_limit"
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            try:
+                stdout = stdout_file.read().decode("utf-8", errors="strict")
+                stderr_file.read().decode("utf-8", errors="strict")
+            except UnicodeDecodeError:
+                return "", False, "decode"
+            return stdout, return_code == 0, None
+    except (OSError, subprocess.SubprocessError):
+        return "", False, "os_error"
+    finally:
+        if executable_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(executable_fd)
         cleanup_sealed()
-        return stdout, return_code == 0, None
 
 
 def _emit(payload: dict[str, object]) -> None:

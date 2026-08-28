@@ -1005,6 +1005,47 @@ def test_darwin_child_rejects_replaced_sealed_copy(tmp_path, monkeypatch):
     assert sealed_directories and all(not directory.exists() for directory in sealed_directories)
 
 
+@pytest.mark.parametrize("failure", ["preexec", "temporary_file"])
+def test_darwin_sealed_copy_is_cleaned_when_launch_setup_fails(tmp_path, monkeypatch, failure):
+    sys.path.insert(0, str(SERVER / "scripts"))
+    import course_mode_physical_tft_preflight as preflight
+
+    executable = tmp_path / "trusted-tool"
+    source = tmp_path / "trusted-tool.c"
+    source.write_text("int main(void){return 0;}\n")
+    subprocess.run(["/usr/bin/cc", str(source), "-o", str(executable)], check=True)
+    expected_sha = hashlib.sha256(executable.read_bytes()).hexdigest()
+    sealed_directory = tmp_path / "sealed"
+
+    def create_sealed_directory(*_args, **_kwargs):
+        sealed_directory.mkdir(mode=0o700)
+        return str(sealed_directory)
+
+    monkeypatch.setattr(preflight, "FD_EXEC_ROOT", None)
+    monkeypatch.setattr(preflight.tempfile, "mkdtemp", create_sealed_directory)
+    if failure == "preexec":
+        monkeypatch.setattr(
+            preflight.subprocess,
+            "Popen",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(subprocess.SubprocessError("preexec")),
+        )
+    else:
+        monkeypatch.setattr(
+            preflight.tempfile,
+            "TemporaryFile",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("temporary file")),
+        )
+    stdout, ok, reason = preflight._run(
+        [str(executable)],
+        tmp_path,
+        {"PATH": "/usr/bin:/bin"},
+        allowed_executable=executable,
+        expected_executable_sha256=expected_sha,
+    )
+    assert (stdout, ok, reason) == ("", False, "os_error")
+    assert not sealed_directory.exists()
+
+
 @pytest.mark.parametrize("git_path", [Path("/usr/bin/git"), Path("/opt/homebrew/bin/git")])
 def test_darwin_expected_identity_rejects_unapproved_git_path(tmp_path, session_dir, monkeypatch, git_path):
     document = valid_input(session_dir, tmp_path)
