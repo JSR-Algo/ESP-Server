@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Fail-closed, no-device preflight for the attended W1 physical TFT lane."""
+"""Fail-closed, no-device preflight for the attended W1 physical TFT lane.
+
+The executable boundary protects against PATH/config injection and original-path
+swaps. A process already compromised under the same UID is outside this model.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +18,7 @@ import re
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -580,6 +585,7 @@ def _validate_expected_identity(value: object, reasons: list[str]) -> dict[str, 
             if (
                 path is None
                 or not path.is_absolute()
+                or (sys.platform == "darwin" and name == "git" and path == Path("/usr/bin/git"))
                 or _path_has_symlink(path)
                 or not os.access(path, os.X_OK)
                 or not _secure_hash_matches(path, tool.get("sha256"))
@@ -1524,10 +1530,91 @@ def _run(
         or _path_has_symlink(allowed_executable)
     ):
         return "", False, "executable"
-    if FD_EXEC_ROOT is None:
+    if FD_EXEC_ROOT is None and sys.platform != "darwin":
         return "", False, "executable_unsupported"
 
     executable_fd: int | None = None
+    sealed_directory: Path | None = None
+    launch_executable: str | None = None
+    launch_pass_fds: tuple[int, ...] = ()
+    launch_identity: tuple[int, int, int, int, int] | None = None
+
+    def darwin_direct_path_is_trusted(path: Path, opened: os.stat_result) -> bool:
+        for component in (path, *path.parents):
+            try:
+                metadata = component.lstat()
+            except OSError:
+                return False
+            if stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_mode & 0o022:
+                return False
+        try:
+            current = path.stat(follow_symlinks=False)
+        except OSError:
+            return False
+        return (opened.st_dev, opened.st_ino, opened.st_size, opened.st_uid, opened.st_mode) == (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+            current.st_uid,
+            current.st_mode,
+        )
+
+    def seal_verified_fd(fd: int, expected_digest: str) -> tuple[Path | None, str | None]:
+        directory = Path(tempfile.mkdtemp(prefix="tbot-preflight-tool-"))
+        directory.chmod(0o700)
+        target = directory / "tool"
+        target_fd: int | None = None
+        sealed = False
+        try:
+            target_fd = os.open(target, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o700)
+            os.lseek(fd, 0, os.SEEK_SET)
+            source_digest = hashlib.sha256()
+            while chunk := os.read(fd, 1024 * 1024):
+                source_digest.update(chunk)
+                view = memoryview(chunk)
+                while view:
+                    view = view[os.write(target_fd, view) :]
+            os.fsync(target_fd)
+            os.lseek(target_fd, 0, os.SEEK_SET)
+            sealed_digest = hashlib.sha256()
+            while chunk := os.read(target_fd, 1024 * 1024):
+                sealed_digest.update(chunk)
+            metadata = os.fstat(target_fd)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_size != os.fstat(fd).st_size
+                or not hmac.compare_digest(source_digest.hexdigest(), expected_digest)
+                or not hmac.compare_digest(sealed_digest.hexdigest(), expected_digest)
+            ):
+                return None, "executable"
+            os.fchmod(target_fd, 0o500)
+            os.fsync(target_fd)
+            directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            sealed = True
+            return target, None
+        except OSError:
+            return None, "executable"
+        finally:
+            if target_fd is not None:
+                os.close(target_fd)
+            if not sealed:
+                with contextlib.suppress(FileNotFoundError):
+                    target.unlink()
+                with contextlib.suppress(FileNotFoundError):
+                    directory.rmdir()
+
+    def cleanup_sealed() -> None:
+        if sealed_directory is None:
+            return
+        with contextlib.suppress(FileNotFoundError):
+            (sealed_directory / "tool").unlink()
+        with contextlib.suppress(FileNotFoundError):
+            sealed_directory.rmdir()
+
     try:
         executable_fd = _open_file_secure(allowed_executable)
         metadata = os.fstat(executable_fd)
@@ -1541,10 +1628,28 @@ def _run(
             os.close(executable_fd)
             return "", False, "executable"
         os.lseek(executable_fd, 0, os.SEEK_SET)
-        fd_executable = str(FD_EXEC_ROOT / str(executable_fd))
-        if not Path(fd_executable).exists():
-            os.close(executable_fd)
-            return "", False, "executable_unsupported"
+        if FD_EXEC_ROOT is not None:
+            launch_executable = str(FD_EXEC_ROOT / str(executable_fd))
+            launch_pass_fds = (executable_fd,)
+            launch_identity = (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_uid, metadata.st_mode)
+        elif darwin_direct_path_is_trusted(allowed_executable, metadata):
+            launch_executable = str(allowed_executable)
+            launch_identity = (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_uid, metadata.st_mode)
+        else:
+            sealed_path, seal_error = seal_verified_fd(executable_fd, expected_executable_sha256)
+            if seal_error or sealed_path is None:
+                os.close(executable_fd)
+                return "", False, seal_error or "executable"
+            sealed_directory = sealed_path.parent
+            launch_executable = str(sealed_path)
+            sealed_metadata = sealed_path.stat(follow_symlinks=False)
+            launch_identity = (
+                sealed_metadata.st_dev,
+                sealed_metadata.st_ino,
+                sealed_metadata.st_size,
+                sealed_metadata.st_uid,
+                sealed_metadata.st_mode,
+            )
     except OSError:
         if executable_fd is not None:
             os.close(executable_fd)
@@ -1556,6 +1661,30 @@ def _run(
         os.setsid()
         limit = MAX_COMMAND_OUTPUT_BYTES + OUTPUT_FILE_LIMIT_MARGIN
         resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+        if launch_executable is None or launch_identity is None:
+            os._exit(126)
+        try:
+            launch_fd = (
+                executable_fd
+                if launch_pass_fds and executable_fd is not None
+                else os.open(launch_executable, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            )
+            try:
+                os.lseek(launch_fd, 0, os.SEEK_SET)
+                current = os.fstat(launch_fd)
+                identity = (current.st_dev, current.st_ino, current.st_size, current.st_uid, current.st_mode)
+                child_digest = hashlib.sha256()
+                while chunk := os.read(launch_fd, 1024 * 1024):
+                    child_digest.update(chunk)
+                if identity != launch_identity or not hmac.compare_digest(
+                    child_digest.hexdigest(), expected_executable_sha256
+                ):
+                    os._exit(126)
+            finally:
+                if not launch_pass_fds:
+                    os.close(launch_fd)
+        except OSError:
+            os._exit(126)
 
     def cleanup_group(pgid: int) -> None:
         if pgid <= 1 or pgid == os.getpgrp():
@@ -1581,11 +1710,12 @@ def _run(
                 stdout=stdout_file,
                 stderr=stderr_file,
                 preexec_fn=limit_and_isolate,
-                executable=fd_executable,
-                pass_fds=(executable_fd,),
+                executable=launch_executable,
+                pass_fds=launch_pass_fds,
             )
         except OSError:
             os.close(executable_fd)
+            cleanup_sealed()
             return "", False, "os_error"
         os.close(executable_fd)
         pgid = process.pid
@@ -1595,6 +1725,7 @@ def _run(
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(pgid, signal.SIGKILL)
             process.wait()
+            cleanup_sealed()
             return "", False, "timeout"
         finally:
             cleanup_group(pgid)
@@ -1605,6 +1736,7 @@ def _run(
             or stderr_size > MAX_COMMAND_OUTPUT_BYTES
             or return_code == -signal.SIGXFSZ
         ):
+            cleanup_sealed()
             return "", False, "output_limit"
         stdout_file.seek(0)
         stderr_file.seek(0)
@@ -1612,7 +1744,9 @@ def _run(
             stdout = stdout_file.read().decode("utf-8", errors="strict")
             stderr_file.read().decode("utf-8", errors="strict")
         except UnicodeDecodeError:
+            cleanup_sealed()
             return "", False, "decode"
+        cleanup_sealed()
         return stdout, return_code == 0, None
 
 

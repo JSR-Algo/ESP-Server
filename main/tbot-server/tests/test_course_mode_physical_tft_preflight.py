@@ -595,13 +595,6 @@ def test_canonical_receipt_derived_preflight_passes_cli(tmp_path, session_dir, m
             str(signature),
         ]
     )
-    if preflight.FD_EXEC_ROOT is None:
-        assert result == 1
-        reasons = json.loads(capsys.readouterr().out)["reasons"]
-        assert any(reason.endswith(".executable_unsupported") for reason in reasons)
-        assert not log.exists()
-        assert not shadow_marker.exists()
-        return
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["replacementId"] == REPLACEMENT_ID and payload["valid"] is True
@@ -700,9 +693,6 @@ def test_retagged_backend_image_id_fails_fixed_external_anchor(tmp_path, session
     sys.path.insert(0, str(SERVER / "scripts"))
     import course_mode_physical_tft_preflight as preflight
 
-    if preflight.FD_EXEC_ROOT is None:
-        pytest.skip("host does not support execute-from-verified-fd")
-
     monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
     monkeypatch.setattr(preflight, "PINNED_APPROVAL_PUBLIC_KEY_RAW", EXPECTED_PUBLIC_KEYS[str(session_dir)])
     monkeypatch.setattr(preflight, "PINNED_APPROVAL_KEY_FINGERPRINT", EXPECTED_FINGERPRINTS[str(session_dir)])
@@ -726,8 +716,6 @@ def test_run_timeout_and_invalid_utf8_are_deterministic(tmp_path):
     sys.path.insert(0, str(SERVER / "scripts"))
     import course_mode_physical_tft_preflight as preflight
 
-    if preflight.FD_EXEC_ROOT is None:
-        pytest.skip("host does not support execute-from-verified-fd")
     _run = preflight._run
 
     python = Path(sys.executable).resolve()
@@ -779,8 +767,6 @@ def test_run_cleans_descendants_after_successful_parent_exit(tmp_path):
     sys.path.insert(0, str(SERVER / "scripts"))
     import course_mode_physical_tft_preflight as preflight
 
-    if preflight.FD_EXEC_ROOT is None:
-        pytest.skip("host does not support execute-from-verified-fd")
     _run = preflight._run
 
     python = Path(sys.executable).resolve()
@@ -802,7 +788,7 @@ def test_run_cleans_descendants_after_successful_parent_exit(tmp_path):
 
 
 def test_git_local_fsmonitor_is_disabled_and_status_is_read_only(tmp_path):
-    git = Path("/usr/bin/git")
+    git = Path("/Library/Developer/CommandLineTools/usr/bin/git") if sys.platform == "darwin" else Path("/usr/bin/git")
     if not git.is_file():
         pytest.skip("host git is unavailable")
     repo = tmp_path / "repo"
@@ -835,8 +821,6 @@ def test_git_local_fsmonitor_is_disabled_and_status_is_read_only(tmp_path):
     sys.path.insert(0, str(SERVER / "scripts"))
     import course_mode_physical_tft_preflight as preflight
 
-    if preflight.FD_EXEC_ROOT is None:
-        pytest.skip("host does not support execute-from-verified-fd")
     _run = preflight._run
 
     git_sha = hashlib.sha256(git.read_bytes()).hexdigest()
@@ -881,8 +865,9 @@ def test_verified_executable_fd_defeats_path_replacement(tmp_path, monkeypatch):
     import course_mode_physical_tft_preflight as preflight
 
     executable = tmp_path / "trusted-tool"
-    executable.write_bytes(Path("/usr/bin/true").read_bytes())
-    executable.chmod(0o755)
+    source = tmp_path / "trusted-tool.c"
+    source.write_text("int main(void){return 0;}\n")
+    subprocess.run(["/usr/bin/cc", str(source), "-o", str(executable)], check=True)
     expected_sha = hashlib.sha256(executable.read_bytes()).hexdigest()
     attacker_marker = tmp_path / "attacker-marker"
     real_popen = preflight.subprocess.Popen
@@ -904,27 +889,110 @@ def test_verified_executable_fd_defeats_path_replacement(tmp_path, monkeypatch):
         allowed_executable=executable,
         expected_executable_sha256=expected_sha,
     )
-    if preflight.FD_EXEC_ROOT is None:
-        assert (stdout.strip(), ok, reason) == ("", False, "executable_unsupported")
-    else:
-        assert (stdout.strip(), ok, reason) == ("", True, None)
+    assert (stdout.strip(), ok, reason) == ("", True, None)
     assert not attacker_marker.exists()
+
+
+def test_darwin_sealed_copy_is_cleaned_when_fsync_fails(tmp_path, monkeypatch):
+    sys.path.insert(0, str(SERVER / "scripts"))
+    import course_mode_physical_tft_preflight as preflight
+
+    executable = tmp_path / "trusted-tool"
+    source = tmp_path / "trusted-tool.c"
+    source.write_text("int main(void){return 0;}\n")
+    subprocess.run(["/usr/bin/cc", str(source), "-o", str(executable)], check=True)
+    expected_sha = hashlib.sha256(executable.read_bytes()).hexdigest()
+    sealed_directory = tmp_path / "sealed"
+
+    def create_sealed_directory(*_args, **_kwargs):
+        sealed_directory.mkdir(mode=0o700)
+        return str(sealed_directory)
+
+    monkeypatch.setattr(preflight, "FD_EXEC_ROOT", None)
+    monkeypatch.setattr(preflight.tempfile, "mkdtemp", create_sealed_directory)
+    monkeypatch.setattr(preflight.os, "fsync", lambda _fd: (_ for _ in ()).throw(OSError("fsync")))
+    stdout, ok, reason = preflight._run(
+        [str(executable)],
+        tmp_path,
+        {"PATH": "/usr/bin:/bin"},
+        allowed_executable=executable,
+        expected_executable_sha256=expected_sha,
+    )
+    assert (stdout, ok, reason) == ("", False, "executable")
+    assert not sealed_directory.exists()
+
+
+def test_darwin_child_rejects_replaced_sealed_copy(tmp_path, monkeypatch):
+    sys.path.insert(0, str(SERVER / "scripts"))
+    import course_mode_physical_tft_preflight as preflight
+
+    executable = tmp_path / "trusted-tool"
+    source = tmp_path / "trusted-tool.c"
+    source.write_text("int main(void){return 0;}\n")
+    subprocess.run(["/usr/bin/cc", str(source), "-o", str(executable)], check=True)
+    expected_sha = hashlib.sha256(executable.read_bytes()).hexdigest()
+    attacker_marker = tmp_path / "attacker-marker"
+    sealed_directories = []
+    real_popen = preflight.subprocess.Popen
+
+    def replace_sealed_then_spawn(*args, **kwargs):
+        sealed = Path(kwargs["executable"])
+        sealed_directories.append(sealed.parent)
+        sealed.unlink()
+        sealed.write_text(f"#!/bin/sh\ntouch {attacker_marker}\n")
+        sealed.chmod(0o500)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(preflight, "FD_EXEC_ROOT", None)
+    monkeypatch.setattr(preflight.subprocess, "Popen", replace_sealed_then_spawn)
+    stdout, ok, reason = preflight._run(
+        [str(executable)],
+        tmp_path,
+        {"PATH": "/usr/bin:/bin"},
+        allowed_executable=executable,
+        expected_executable_sha256=expected_sha,
+    )
+    assert (stdout, ok, reason) == ("", False, None)
+    assert not attacker_marker.exists()
+    assert sealed_directories and all(not directory.exists() for directory in sealed_directories)
+
+
+def test_darwin_expected_identity_rejects_usr_bin_git_shim(tmp_path, session_dir, monkeypatch):
+    document = valid_input(session_dir, tmp_path)
+    identity, identity_ref = EXPECTED_IDENTITIES[str(session_dir)]
+    changed = deepcopy(identity)
+    changed["tools"]["git"] = {
+        "path": "/usr/bin/git",
+        "sha256": hashlib.sha256(Path("/usr/bin/git").read_bytes()).hexdigest(),
+    }
+    sys.path.insert(0, str(SERVER / "scripts"))
+    import course_mode_physical_tft_preflight as preflight
+
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
+    reasons = preflight.validate_input(
+        document,
+        repository_root=ROOT,
+        expected_identity=changed,
+        expected_identity_sha256=identity_ref["sha256"],
+    )
+    assert "expected_identity.tools.git" in reasons
 
 
 def test_real_host_compose_binary_is_fd_launch_compatible_when_available(tmp_path):
     candidates = [
+        Path("/Applications/Docker.app/Contents/Resources/cli-plugins/docker-compose"),
         Path("/usr/local/bin/docker-compose"),
         Path("/opt/homebrew/bin/docker-compose"),
-        Path("/Applications/Docker.app/Contents/Resources/cli-plugins/docker-compose"),
     ]
-    compose = next((path for path in candidates if path.is_file() and os.access(path, os.X_OK)), None)
+    compose = next(
+        (path for path in candidates if not path.is_symlink() and path.is_file() and os.access(path, os.X_OK)),
+        None,
+    )
     if compose is None:
         pytest.skip("host compose binary is unavailable")
     sys.path.insert(0, str(SERVER / "scripts"))
     import course_mode_physical_tft_preflight as preflight
 
-    if preflight.FD_EXEC_ROOT is None:
-        pytest.skip("host does not support execute-from-verified-fd")
     digest = hashlib.sha256(compose.read_bytes()).hexdigest()
     stdout, ok, reason = preflight._run(
         [str(compose), "version", "--short"],
