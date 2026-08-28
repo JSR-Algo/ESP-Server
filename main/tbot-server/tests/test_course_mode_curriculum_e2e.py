@@ -170,7 +170,8 @@ def test_bounded_runner_fails_closed_for_invalid_timeout(timeout: float) -> None
 
 
 @pytest.mark.parametrize("raw", [
-    b'{"contracts":[],"contracts":[]}', b'{"value":NaN}', b'{"value":Infinity}', b'\xff',
+    b'{"contracts":[],"contracts":[]}', b'{"value":NaN}', b'{"value":Infinity}',
+    b'{"value":1e999}', b'{"value":-1e999}', b'\xff',
 ])
 def test_cli_contract_input_uses_strict_json(raw: bytes, tmp_path: Path) -> None:
     path = tmp_path / "contracts.json"

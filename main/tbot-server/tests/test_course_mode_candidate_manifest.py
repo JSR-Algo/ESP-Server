@@ -382,7 +382,8 @@ def test_candidate_input_detects_path_replacement(tmp_path: Path, monkeypatch) -
 
 @pytest.mark.parametrize("raw", [
     b'{"candidateId":"one","candidateId":"two"}',
-    b'{"value":NaN}', b'{"value":Infinity}', b'{"value":-Infinity}', b'\xff',
+    b'{"value":NaN}', b'{"value":Infinity}', b'{"value":-Infinity}',
+    b'{"value":1e999}', b'{"value":-1e999}', b'\xff',
 ])
 def test_candidate_cli_uses_strict_json(raw: bytes, tmp_path: Path) -> None:
     path = tmp_path / "candidate.json"

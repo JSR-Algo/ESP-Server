@@ -87,7 +87,7 @@ Observed simulator/verifier evidence was 26 lessons, 256 activities, 6 pedagogie
 
 Final GREEN: the original focused ESP gate reported `47 passed`; after count
 binding it reported `54 passed`; the current cumulative security gate reports
-`104 passed`. The explicit-root simulator returned `status=pass`.
+`108 passed`. The explicit-root simulator returned `status=pass`.
 
 ### Security review RED/GREEN
 
@@ -119,6 +119,11 @@ focused GREEN was `24 passed`, and the final combined gate was `104 passed`.
 The only full-suite integration correction was canonicalizing the verifier-owned
 macOS temporary output from `/var` to `/private/var` before its secure read;
 caller-supplied candidate and contracts paths remain direct no-follow reads.
+
+The final bounded JSON review added positive and negative exponent-overflow
+inputs (`1e999` and `-1e999`) to both CLIs. RED was `4 failed, 9 passed` in the
+strict-JSON slice. A shared finite-checking `parse_float` hook produced `13
+passed` for that slice and `108 passed` for the combined gate.
 
 ### Fresh backend dependencies
 
