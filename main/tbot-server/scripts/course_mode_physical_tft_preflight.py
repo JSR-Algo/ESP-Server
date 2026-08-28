@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import ipaddress
 import json
 import os
 import re
+import stat
 import subprocess
-import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -88,6 +89,9 @@ EXPECTED_PARTITIONS = [
     },
 ]
 FORBIDDEN_OUTPUT = re.compile(r"(?i)(bearer|password|private.?key|secret.?value|transcript|raw.?speech|audio.?data)")
+EXPECTED_IDENTITY_ENV = "COURSE_MODE_EXPECTED_IDENTITY_SHA256"
+MAX_JSON_BYTES = 1024 * 1024
+COMMAND_TIMEOUT_SECONDS = 10
 
 
 class DuplicateKeyError(ValueError):
@@ -105,11 +109,26 @@ def _strict_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 def _load_json_bytes(payload: bytes) -> tuple[object | None, str | None]:
     try:
-        return json.loads(payload.decode("utf-8"), object_pairs_hook=_strict_pairs), None
+        return (
+            json.loads(
+                payload.decode("utf-8", errors="strict"),
+                object_pairs_hook=_strict_pairs,
+                parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+            ),
+            None,
+        )
     except DuplicateKeyError:
         return None, "duplicate_key"
-    except (json.JSONDecodeError, UnicodeError):
+    except (json.JSONDecodeError, UnicodeError, ValueError):
         return None, "invalid_json"
+
+
+def _canonical_bytes(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+
+
+def _canonical_sha256(value: object) -> str:
+    return hashlib.sha256(_canonical_bytes(value)).hexdigest()
 
 
 def _record(value: object) -> bool:
@@ -159,6 +178,58 @@ def _path_has_symlink(path: Path) -> bool:
     return any(component.is_symlink() for component in (path, *path.parents))
 
 
+def _read_file_secure(
+    path: Path,
+    *,
+    exact_size: int | None = None,
+    max_size: int | None = None,
+    hash_prefix_size: int | None = None,
+    collect: bool = False,
+) -> tuple[str | None, bytes | None, str | None]:
+    if _path_has_symlink(path):
+        return None, None, "symlink"
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None, None, "open"
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or (exact_size is not None and before.st_size != exact_size):
+            return None, None, "size"
+        if max_size is not None and before.st_size > max_size:
+            return None, None, "size"
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if max_size is not None and total > max_size:
+                return None, None, "size"
+            digest_bytes = chunk
+            if hash_prefix_size is not None:
+                remaining = max(0, hash_prefix_size - (total - len(chunk)))
+                digest_bytes = chunk[:remaining]
+            digest.update(digest_bytes)
+            if collect:
+                chunks.append(chunk)
+        after = os.fstat(fd)
+        if (before.st_dev, before.st_ino, before.st_size) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+        ) or total != before.st_size:
+            return None, None, "changed"
+        return digest.hexdigest(), b"".join(chunks) if collect else None, None
+    except OSError:
+        return None, None, "read"
+    finally:
+        os.close(fd)
+
+
 def _safe_file(value: object, session: Path | None) -> tuple[Path | None, str | None]:
     if not isinstance(value, str):
         return None, "type"
@@ -203,17 +274,29 @@ def _validate_ref(value: object, session: Path | None) -> tuple[Path | None, lis
         reasons.append("path")
     if value.get("algorithm") != "sha256" or not _real_sha(value.get("sha256")):
         reasons.append("hash")
-    if path is not None and hashlib.sha256(path.read_bytes()).hexdigest() != value.get("sha256"):
-        reasons.append("hash")
+    if path is not None:
+        digest, _, read_error = _read_file_secure(path)
+        if read_error or digest != value.get("sha256"):
+            reasons.append("hash")
     return path, sorted(set(reasons))
 
 
 def _parse_ref_json(value: object, session: Path | None, prefix: str, reasons: list[str]) -> object | None:
-    path, errors = _validate_ref(value, session)
-    reasons.extend(f"{prefix}.{error}" for error in errors)
-    if path is None or errors:
+    if not _record(value) or set(value) != REF_FIELDS:
+        reasons.append(f"{prefix}.schema")
         return None
-    parsed, error = _load_json_bytes(path.read_bytes())
+    path, path_error = _safe_file(value.get("path"), session)
+    if path_error or path is None:
+        reasons.append(f"{prefix}.path")
+        return None
+    digest, payload, read_error = _read_file_secure(path, max_size=MAX_JSON_BYTES, collect=True)
+    if read_error or payload is None:
+        reasons.append(f"{prefix}.size" if read_error == "size" else f"{prefix}.read")
+        return None
+    if value.get("algorithm") != "sha256" or not _real_sha(value.get("sha256")) or digest != value.get("sha256"):
+        reasons.append(f"{prefix}.hash")
+        return None
+    parsed, error = _load_json_bytes(payload)
     if error:
         reasons.append(f"{prefix}.{error}")
         return None
@@ -331,10 +414,10 @@ def _validate_repositories(
                     reasons.append(f"{prefix}.dirty_exceptions")
                 elif _path_has_symlink(candidate):
                     reasons.append(f"{prefix}.dirty_exception_symlink")
-                elif not candidate.is_file() or hashlib.sha256(candidate.read_bytes()).hexdigest() != item.get(
-                    "sha256"
-                ):
-                    reasons.append(f"{prefix}.dirty_exception_hash")
+                else:
+                    digest, _, read_error = _read_file_secure(candidate)
+                    if read_error or digest != item.get("sha256"):
+                        reasons.append(f"{prefix}.dirty_exception_hash")
     if task9 != TASK9_SHA:
         reasons.append("repository.firmware.ancestor")
     if expected is not None and _record(value):
@@ -378,6 +461,7 @@ def _validate_expected_identity(value: object, reasons: list[str]) -> dict[str, 
         "buildToolVersion",
         "buildConfigSha256",
         "materializerVersion",
+        "backendImageId",
     }
     if not _record(value) or set(value) != fields:
         reasons.append("expected_identity.schema")
@@ -422,6 +506,8 @@ def _validate_expected_identity(value: object, reasons: list[str]) -> dict[str, 
         or not value["buildToolVersion"]
         or not isinstance(value.get("materializerVersion"), str)
         or not value["materializerVersion"]
+        or not isinstance(value.get("backendImageId"), str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", value["backendImageId"]) is None
         or _normal_mac(value.get("robotMac")) != ROBOT_MAC
         or not _valid_uuid(value.get("sessionId"))
     ):
@@ -475,11 +561,7 @@ def _validate_materialization(
         if all(key in value for key in ("course", "source", "replacement"))
         else None
     )
-    if (
-        artifact_projection is None
-        or value.get("artifactChecksum")
-        != hashlib.sha256(json.dumps(artifact_projection, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    ):
+    if artifact_projection is None or value.get("artifactChecksum") != _canonical_sha256(artifact_projection):
         reasons.append("materialization.artifact_checksum")
     authorization = value.get("authorization")
     if not _record(authorization) or set(authorization) != {
@@ -490,7 +572,7 @@ def _validate_materialization(
         reasons.append("materialization.authorization")
     else:
         unsigned = {key: item for key, item in value.items() if key != "authorization"}
-        digest = hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        digest = _canonical_sha256(unsigned)
         if (
             authorization.get("algorithm") != "sha256"
             or authorization.get("expectedIdentitySha256") != expected_sha
@@ -675,7 +757,7 @@ def _validate_assignment(value: object, receipt: dict[str, object] | None, reaso
         or _normal_mac(item.get("robotMac")) != ROBOT_MAC
     ):
         reasons.append("assignment.identity")
-    checksum = hashlib.sha256(json.dumps(assignments, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    checksum = _canonical_sha256(assignments)
     if value.get("snapshotChecksum") != checksum:
         reasons.append("assignment.checksum")
 
@@ -702,7 +784,7 @@ def _validate_firmware_receipt(
         reasons.append("firmware_receipt.schema")
         return None
     unsigned = {key: item for key, item in value.items() if key != "integrityDigest"}
-    digest = hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    digest = _canonical_sha256(unsigned)
     app = value.get("app")
     app_fields = {"path", "offset", "maxPartitionSize", "size", "sha256"}
     if (
@@ -728,10 +810,7 @@ def _validate_firmware_receipt(
         or type(app.get("size")) is not int
         or app["size"] <= 0
         or not _real_sha(app.get("sha256"))
-        or (
-            path is not None
-            and (path.stat().st_size != app["size"] or hashlib.sha256(path.read_bytes()).hexdigest() != app["sha256"])
-        )
+        or (path is not None and _read_file_secure(path, exact_size=app["size"])[::2] != (app["sha256"], None))
     ):
         reasons.append("firmware_receipt.app")
     if expected is not None and (
@@ -776,9 +855,7 @@ def _validate_visual_pack(
     if not isinstance(phases, list) or not phases:
         reasons.append("visual_pack.phase")
         return
-    checksum = hashlib.sha256(
-        json.dumps({"phases": phases}, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    checksum = _canonical_sha256({"phases": phases})
     if value.get("checksum") != checksum or value.get("checksum") != replacement.get("visualPackChecksum"):
         reasons.append("visual_pack.checksum")
     phase_fields = {"phaseId", "activityIds", "templateId", "templateVersion", "playbackMode", "layers"}
@@ -895,11 +972,10 @@ def _validate_visual_pack(
                 or storage.resolve(strict=False) != asset.resolve(strict=False)
             ):
                 reasons.append("visual_pack.storage_path")
-            if asset is not None and (
-                asset.stat().st_size != layer.get("bytes")
-                or hashlib.sha256(asset.read_bytes()).hexdigest() != layer.get("sha256")
-            ):
-                reasons.append("visual_pack.asset_hash")
+            if asset is not None:
+                asset_digest, _, asset_error = _read_file_secure(asset, exact_size=layer.get("bytes"))
+                if asset_error or asset_digest != layer.get("sha256"):
+                    reasons.append("visual_pack.asset_hash")
             metadata = layer.get("compatibilityMetadata")
             if not _record(metadata):
                 reasons.append("visual_pack.compatibility")
@@ -990,7 +1066,7 @@ def _validate_flash(
         and isinstance(snapshot.get("partitions"), list)
     ):
         partitions = snapshot["partitions"]
-        checksum = hashlib.sha256(json.dumps(partitions, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        checksum = _canonical_sha256(partitions)
         if snapshot.get("snapshotChecksum") != checksum or _hex(snapshot.get("flashSize")) != 0x1000000:
             reasons.append("flash.partition_snapshot.identity")
         if expected is None or snapshot.get("snapshotChecksum") != expected.get("partitionTableSha256"):
@@ -1057,8 +1133,10 @@ def _validate_flash(
         app_size = _hex(app.get("size")) if app else None
         if app_size is None or type(image.get("size")) is not int or image["size"] > app_size:
             reasons.append("flash.image_range")
-        if image_path is not None and image_path.stat().st_size != image.get("size"):
-            reasons.append("flash.file_size")
+        if image_path is not None:
+            digest, _, read_error = _read_file_secure(image_path, exact_size=image.get("size"))
+            if read_error or digest != image.get("sha256"):
+                reasons.append("flash.file_size")
     if not isinstance(operations, list) or len(operations) != 3:
         reasons.append("flash.operations")
         return nvs
@@ -1092,13 +1170,17 @@ def _validate_flash(
         else:
             if offset != app_offset or type(size) is not int or size != app_size:
                 reasons.append("flash.readback_range")
-        if path is not None and path.stat().st_size != size:
-            reasons.append("flash.file_size")
+        if path is not None:
+            digest, _, read_error = _read_file_secure(path, exact_size=size if type(size) is int else None)
+            if read_error or digest != operation.get("sha256"):
+                reasons.append("flash.file_size")
     if (
         image_path is not None
         and len(operation_paths) == 3
         and operation_paths[2] is not None
-        and hashlib.sha256(operation_paths[2].read_bytes()[: image_path.stat().st_size]).hexdigest()
+        and _read_file_secure(
+            operation_paths[2], hash_prefix_size=image_doc.get("size") if type(image_doc.get("size")) is int else 0
+        )[0]
         != image_doc.get("sha256")
     ):
         reasons.append("flash.post_readback")
@@ -1142,13 +1224,19 @@ def _validate_nvs(value: object, partition: dict[str, object] | None, session: P
     ):
         reasons.append("nvs.algorithm")
     if (
-        before is not None
-        and after is not None
-        and hashlib.sha256(before.read_bytes()).hexdigest() != hashlib.sha256(after.read_bytes()).hexdigest()
+        _record(value.get("before"))
+        and _record(value.get("after"))
+        and value["before"].get("sha256") != value["after"].get("sha256")
     ):
         reasons.append("nvs.equality")
     size = _hex(partition.get("size")) if partition else None
-    if size is None or before is None or after is None or before.stat().st_size != size or after.stat().st_size != size:
+    if (
+        size is None
+        or before is None
+        or after is None
+        or _read_file_secure(before, exact_size=size)[::2] != (value["before"].get("sha256"), None)
+        or _read_file_secure(after, exact_size=size)[::2] != (value["after"].get("sha256"), None)
+    ):
         reasons.append("nvs.size")
 
 
@@ -1238,7 +1326,9 @@ def validate_input(
         return ["input.type"]
 
 
-def validate_image(document: object, expected_image: object, expected_sha: object) -> list[str]:
+def validate_image(
+    document: object, expected_image: object, expected_sha: object, expected_image_id: object
+) -> list[str]:
     if not isinstance(document, list) or len(document) != 1 or not _record(document[0]):
         return ["image.missing"]
     image = document[0]
@@ -1247,6 +1337,8 @@ def validate_image(document: object, expected_image: object, expected_sha: objec
     reasons = []
     if not isinstance(image.get("Id"), str) or re.fullmatch(r"sha256:[0-9a-f]{64}", image["Id"]) is None:
         reasons.append("image.id")
+    elif image.get("Id") != expected_image_id:
+        reasons.append("image.anchor")
     if not isinstance(expected_image, str) or image.get("RepoTags") != [expected_image]:
         reasons.append("image.reference")
     if not _record(labels) or labels.get("com.tbot.course-mode.materializer-path") != MATERIALIZER_PATH:
@@ -1330,21 +1422,64 @@ def validate_compose(compose: object, expected: object) -> list[str]:
         or mounts[0].get("read_only") is not True
     ):
         reasons.append("compose.mount")
-    if any(term in json.dumps(compose, sort_keys=True).lower() for term in ("https://", "production", "prod.")):
+    if any(term in _canonical_bytes(compose).decode().lower() for term in ("https://", "production", "prod.")):
         reasons.append("compose.production")
     return sorted(set(reasons))
 
 
-def _run(command: list[str], cwd: Path, env: dict[str, str]) -> tuple[str, bool]:
+def _run(
+    command: list[str], cwd: Path, env: dict[str, str], *, timeout_seconds: float = COMMAND_TIMEOUT_SECONDS
+) -> tuple[str, bool, str | None]:
     try:
-        result = subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True, check=False)
+        result = subprocess.run(
+            command, cwd=cwd, env=env, capture_output=True, text=False, check=False, timeout=timeout_seconds
+        )
+    except subprocess.TimeoutExpired:
+        return "", False, "timeout"
     except OSError:
-        return "", False
-    return result.stdout, result.returncode == 0
+        return "", False, "os_error"
+    try:
+        stdout = result.stdout.decode("utf-8", errors="strict")
+        result.stderr.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return "", False, "decode"
+    return stdout, result.returncode == 0, None
 
 
 def _emit(payload: dict[str, object]) -> None:
-    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False))
+
+
+def _publish_output(output: Path, payload: bytes, session: Path) -> bool:
+    if _path_has_symlink(session) or _path_has_symlink(output.parent) or output.parent.resolve() != session:
+        return False
+    temporary = session / f".preflight-{os.getpid()}-{os.urandom(8).hex()}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd: int | None = None
+    try:
+        fd = os.open(temporary, flags, 0o600)
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fsync(fd)
+        os.close(fd)
+        fd = None
+        os.link(temporary, output, follow_symlinks=False)
+        os.unlink(temporary)
+        directory_fd = os.open(session, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return True
+    except OSError:
+        return False
+    finally:
+        if fd is not None:
+            os.close(fd)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1352,12 +1487,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--expected-identity", required=True, type=Path)
-    parser.add_argument("--expected-identity-sha256", required=True)
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[3]
-    try:
-        raw = args.input.read_bytes()
-    except OSError:
+    _, raw, input_read_error = _read_file_secure(args.input, max_size=MAX_JSON_BYTES, collect=True)
+    if input_read_error or raw is None:
         _emit({"reasons": ["input.unreadable"], "valid": False})
         return 1
     expected, error = _load_json_bytes(raw)
@@ -1368,11 +1501,17 @@ def main(argv: list[str] | None = None) -> int:
     if identity_path_error or identity_path is None:
         _emit({"reasons": [f"expected_identity.path.{identity_path_error}"], "valid": False})
         return 1
-    identity_raw = identity_path.read_bytes()
-    if (
-        not _real_sha(args.expected_identity_sha256)
-        or hashlib.sha256(identity_raw).hexdigest() != args.expected_identity_sha256
-    ):
+    approved_identity_sha = os.environ.get(EXPECTED_IDENTITY_ENV)
+    if not _real_sha(approved_identity_sha):
+        _emit({"reasons": ["expected_identity.approval_missing"], "valid": False})
+        return 1
+    identity_digest, identity_raw, identity_read_error = _read_file_secure(
+        identity_path, max_size=MAX_JSON_BYTES, collect=True
+    )
+    if identity_read_error or identity_raw is None:
+        _emit({"reasons": ["expected_identity.read"], "valid": False})
+        return 1
+    if identity_digest != approved_identity_sha:
         _emit({"reasons": ["expected_identity.hash"], "valid": False})
         return 1
     identity, identity_error = _load_json_bytes(identity_raw)
@@ -1388,7 +1527,7 @@ def main(argv: list[str] | None = None) -> int:
         expected,
         repository_root=root,
         expected_identity=identity,
-        expected_identity_sha256=args.expected_identity_sha256,
+        expected_identity_sha256=approved_identity_sha,
     )
     if reasons:
         _emit({"reasons": reasons, "valid": False})
@@ -1406,15 +1545,17 @@ def main(argv: list[str] | None = None) -> int:
             ("sha", ["rev-parse", "HEAD"]),
             ("status", ["status", "--porcelain", "--untracked-files=all"]),
         ):
-            stdout, ok = _run(["git", "-C", repo["path"], *suffix], root, env)
+            stdout, ok, run_error = _run(["git", "-C", repo["path"], *suffix], root, env)
             if not ok:
-                reasons.append(f"command.git.{name}.{label}")
+                reasons.append(f"command.git.{name}.{label}.{run_error or 'exit'}")
             else:
                 outputs[f"{name}.{label}"] = stdout
     firmware = expected["repositories"]["firmware"]
-    _, ok = _run(["git", "-C", firmware["path"], "merge-base", "--is-ancestor", TASK9_SHA, firmware["sha"]], root, env)
+    _, ok, run_error = _run(
+        ["git", "-C", firmware["path"], "merge-base", "--is-ancestor", TASK9_SHA, firmware["sha"]], root, env
+    )
     if not ok:
-        reasons.append("git.ancestor.firmware")
+        reasons.append(f"git.ancestor.firmware.{run_error or 'exit'}")
     for name in ("backend", "esp", "firmware"):
         repo = expected["repositories"][name]
         if outputs.get(f"{name}.sha", "").strip() != repo["sha"]:
@@ -1431,10 +1572,12 @@ def main(argv: list[str] | None = None) -> int:
             path = Path(repo["path"]) / item["path"]
             if _path_has_symlink(path):
                 reasons.append(f"git.dirty_symlink.{name}")
-            elif not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
-                reasons.append(f"git.dirty_hash.{name}")
-    image_out, image_ok = _run(["docker", "image", "inspect", expected["backendImage"]], root, env)
-    compose_out, compose_ok = _run(
+            else:
+                digest, _, read_error = _read_file_secure(path)
+                if read_error or digest != item["sha256"]:
+                    reasons.append(f"git.dirty_hash.{name}")
+    image_out, image_ok, image_error = _run(["docker", "image", "inspect", expected["backendImage"]], root, env)
+    compose_out, compose_ok, compose_error = _run(
         [
             "docker",
             "compose",
@@ -1452,16 +1595,23 @@ def main(argv: list[str] | None = None) -> int:
         env,
     )
     if not image_ok:
-        reasons.append("command.image")
+        reasons.append(f"command.image.{image_error or 'exit'}")
     if not compose_ok:
-        reasons.append("command.compose")
+        reasons.append(f"command.compose.{compose_error or 'exit'}")
+    inspected_image_id: str | None = None
     if image_ok:
         image_doc, parse_error = _load_json_bytes(image_out.encode())
         if parse_error:
             reasons.append("command.image_json")
         else:
+            inspected_image_id = image_doc[0].get("Id") if isinstance(image_doc, list) and image_doc else None
             reasons.extend(
-                validate_image(image_doc, expected["backendImage"], expected["repositories"]["backend"]["sha"])
+                validate_image(
+                    image_doc,
+                    expected["backendImage"],
+                    expected["repositories"]["backend"]["sha"],
+                    identity["backendImageId"],
+                )
             )
     if compose_ok:
         compose_doc, parse_error = _load_json_bytes(compose_out.encode())
@@ -1476,10 +1626,8 @@ def main(argv: list[str] | None = None) -> int:
     payload = {
         "valid": True,
         "result": "PASS",
-        "inputChecksum": hashlib.sha256(
-            json.dumps(expected, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest(),
-        "expectedIdentitySha256": args.expected_identity_sha256,
+        "expectedIdentityApproval": "environment-sha256-match",
+        "inputChecksum": _canonical_sha256(expected),
         "courseId": COURSE_ID,
         "courseKey": COURSE_KEY,
         "lessonKey": LESSON_KEY,
@@ -1495,15 +1643,15 @@ def main(argv: list[str] | None = None) -> int:
         "backendSha": expected["repositories"]["backend"]["sha"],
         "espSha": expected["repositories"]["esp"]["sha"],
         "firmwareSha": expected["repositories"]["firmware"]["sha"],
+        "backendImageId": inspected_image_id,
     }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
     if FORBIDDEN_OUTPUT.search(encoded):
         _emit({"reasons": ["output.redaction"], "valid": False})
         return 1
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=session, delete=False) as handle:
-        handle.write(encoded)
-        temporary = Path(handle.name)
-    temporary.replace(args.output)
+    if not _publish_output(args.output, encoded.encode(), session):
+        _emit({"reasons": ["output.publish"], "valid": False})
+        return 1
     _emit(payload)
     return 0
 
