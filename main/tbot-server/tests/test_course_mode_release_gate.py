@@ -14,6 +14,20 @@ import pytest
 gate = importlib.import_module("scripts.course_mode_release_gate")
 
 
+def _valid_playwright_config() -> str:
+    projects = (
+        ("course-mode-chromium-desktop", "Desktop Chrome", 1440, 900),
+        ("course-mode-webkit-desktop", "Desktop Safari", 1440, 900),
+        ("course-mode-chromium-mobile", "Pixel 7", 390, 844),
+        ("course-mode-webkit-mobile", "iPhone 13", 390, 844),
+    )
+    return "testMatch: /course-mode.*\\.spec\\.js/,\nprojects: [\n" + "\n".join(
+        f"{{ name: {name!r}, use: {{ ...devices[{device!r}], viewport: "
+        f"{{ width: {width}, height: {height} }} }} }},"
+        for name, device, width, height in projects
+    ) + "\n]"
+
+
 def _git(root: Path, *arguments: str) -> str:
     return subprocess.run(
         ["git", *arguments], cwd=root, check=True, capture_output=True, text=True,
@@ -267,6 +281,22 @@ def test_runtime_identity_requires_gate_wrapper_and_imported_helper_at_candidate
     assert gate._runtime_matches_candidate(candidate, admin_root) is False
 
 
+def test_candidate_paths_are_bound_to_commit_and_cannot_be_dirty_exceptions(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    repository = candidate["repositories"]["adminEsp"]
+    root = Path(repository["path"])
+    selected = ("main/tbot-server/scripts/course_mode_release_gate.py",)
+
+    assert gate.candidate_paths_match(repository, selected) is True
+
+    path = root / selected[0]
+    path.write_text("# drift\n")
+    repository["dirtyExceptions"] = [{
+        "path": selected[0], "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }]
+    assert gate.candidate_paths_match(repository, selected) is False
+
+
 @pytest.mark.parametrize(
     "raw",
     [
@@ -421,6 +451,37 @@ def test_esp_discovery_ignores_untracked_and_non_source_files(tmp_path: Path) ->
     )
 
 
+def test_selected_esp_test_drift_blocks_before_execution(candidate_file: Path, tmp_path: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    repository = candidate["repositories"]["adminEsp"]
+    root = Path(repository["path"])
+    selected = root / "main/tbot-server/tests/test_course_mode_selected.py"
+    selected.parent.mkdir(parents=True)
+    selected.write_text("def test_ok(): pass\n")
+    _git(root, "add", ".")
+    _git(root, "commit", "-m", "selected test")
+    repository.update(_repository(root))
+    candidate_file.write_text(json.dumps(candidate))
+    selected.write_text("def test_drift(): pass\n")
+    repository["dirtyExceptions"] = [{
+        "path": "main/tbot-server/tests/test_course_mode_selected.py",
+        "sha256": hashlib.sha256(selected.read_bytes()).hexdigest(),
+    }]
+    candidate_file.write_text(json.dumps(candidate))
+    marker = tmp_path / "must-not-run"
+    lane = gate.Lane(
+        name="esp-course-mode-full", repository="adminEsp", relative_cwd="main/tbot-server",
+        command=(sys.executable, "-c", f"from pathlib import Path;Path({str(marker)!r}).touch()"),
+        timeout_sec=5.0,
+    )
+
+    result = gate.run_gate(candidate_file, "full", lanes=(lane,))
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "esp-course-mode-full"
+    assert not marker.exists()
+
+
 def test_full_esp_lane_maps_task06_roots_and_rejects_skips(candidate_file: Path) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     lane = next(lane for lane in gate.lanes_for_mode("full") if lane.name == "esp-course-mode-full")
@@ -535,6 +596,34 @@ def test_playwright_contract_requires_named_projects_and_matching_devices(tmp_pa
     ) is False
 
 
+@pytest.mark.parametrize(
+    "script",
+    [
+        "playwright test --config=playwright.config.js --list",
+        "playwright test --config=playwright.config.js --pass-with-no-tests",
+        "playwright test --config=playwright.config.js e2e/lesson-studio/course-mode-authoring.spec.js",
+    ],
+)
+def test_playwright_contract_rejects_noncanonical_or_nonexecuting_scripts(
+    tmp_path: Path, script: str,
+) -> None:
+    web = tmp_path / "main/manager-web"
+    spec = web / "e2e/lesson-studio/course-mode-authoring.spec.js"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("test('course mode', async () => {});\n")
+    (web / "package.json").write_text(json.dumps({"scripts": {"test:e2e:course-mode": script}}))
+    (web / "playwright.config.js").write_text(_valid_playwright_config())
+    _git(tmp_path, "init", "-b", "candidate")
+    _git(tmp_path, "config", "user.email", "candidate@example.invalid")
+    _git(tmp_path, "config", "user.name", "Candidate Test")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "fixture")
+
+    assert gate.source_contract_ready(
+        tmp_path, "course-mode-playwright", _git(tmp_path, "rev-parse", "HEAD"),
+    ) is False
+
+
 def test_playwright_contract_rejects_wrong_testmatch_and_small_viewport(tmp_path: Path) -> None:
     web = tmp_path / "main/manager-web"
     spec = web / "e2e/lesson-studio/course-mode-authoring.spec.js"
@@ -564,6 +653,18 @@ def test_playwright_contract_rejects_wrong_testmatch_and_small_viewport(tmp_path
     ) is False
 
     valid_viewports = projects.replace("width: 1439", "width: 1440")
+    oversized_mobile = valid_viewports.replace(
+        "width: 390, height: 844", "width: 1000, height: 1000", 1,
+    )
+    (web / "playwright.config.js").write_text(
+        f"testMatch: /course-mode.*spec/,\nprojects: [{oversized_mobile}]",
+    )
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "oversized mobile")
+    assert gate.source_contract_ready(
+        tmp_path, "course-mode-playwright", _git(tmp_path, "rev-parse", "HEAD"),
+    ) is False
+
     (web / "playwright.config.js").write_text(f"testMatch: /rewards.*spec/,\nprojects: [{valid_viewports}]")
     _git(tmp_path, "add", ".")
     _git(tmp_path, "commit", "-m", "wrong test match")

@@ -229,6 +229,32 @@ def _candidate_matches(candidate: dict) -> bool:
         return False
 
 
+def candidate_paths_match(repository: Mapping[str, object], relative_paths: Sequence[str]) -> bool:
+    try:
+        root = Path(repository["path"]).resolve(strict=True)
+        sha = repository["sha"]
+        dirty = {item["path"] for item in repository["dirtyExceptions"]}
+        if not isinstance(sha, str):
+            return False
+        for relative in sorted(set(relative_paths)):
+            path_value = Path(relative)
+            if (
+                not relative or path_value.is_absolute() or ".." in path_value.parts
+                or relative in dirty
+            ):
+                return False
+            path = root / relative
+            if not path.is_file() or path.is_symlink():
+                return False
+            committed_blob = _candidate_git(root, "rev-parse", f"{sha}:{relative}").strip()
+            working_blob = _candidate_git(root, "hash-object", "--", relative).strip()
+            if committed_blob != working_blob:
+                return False
+        return True
+    except (KeyError, OSError, RuntimeError, TypeError):
+        return False
+
+
 def _runtime_matches_candidate(candidate: dict, runtime_root: Path | None) -> bool:
     repository = candidate["repositories"]["adminEsp"]
     expected = Path(repository["path"])
@@ -236,18 +262,13 @@ def _runtime_matches_candidate(candidate: dict, runtime_root: Path | None) -> bo
     try:
         if actual.resolve(strict=True) != expected.resolve(strict=True):
             return False
-        dirty = {item["path"] for item in repository["dirtyExceptions"]}
-        for relative in (
+        bound = (
             "main/tbot-server/scripts/course_mode_release_gate.py",
             "main/tbot-server/scripts/course_mode_candidate_manifest.py",
             "scripts/course_robot_e2e_gates.sh",
-        ):
-            if relative in dirty:
-                return False
-            committed_blob = _candidate_git(expected, "rev-parse", f"{repository['sha']}:{relative}").strip()
-            working_blob = _candidate_git(expected, "hash-object", "--", relative).strip()
-            if committed_blob != working_blob:
-                return False
+        )
+        if not candidate_paths_match(repository, bound):
+            return False
         if runtime_root is None:
             expected_script = expected / "main/tbot-server/scripts/course_mode_release_gate.py"
             expected_helper = expected / "main/tbot-server/scripts/course_mode_candidate_manifest.py"
@@ -310,6 +331,52 @@ def select_esp_software_tests(discovered: Sequence[str]) -> tuple[str, ...]:
     )
 
 
+def _playwright_spec_paths(admin_root: Path, sha: str) -> tuple[str, ...]:
+    try:
+        tracked = _candidate_git(
+            admin_root, "ls-tree", "-r", "--name-only", sha, "--",
+            "main/manager-web/e2e/lesson-studio",
+        ).splitlines()
+    except RuntimeError:
+        return ()
+    return tuple(
+        relative for relative in tracked
+        if Path(relative).name.startswith("course-mode") and relative.endswith(".spec.js")
+    )
+
+
+def lane_candidate_paths(lane: Lane, candidate: dict) -> tuple[str, ...]:
+    repository = candidate["repositories"][lane.repository]
+    root = Path(repository["path"])
+    paths: set[str] = set()
+    if lane.repository == "adminEsp" and lane.relative_cwd == "main/manager-web":
+        paths.add("main/manager-web/package.json")
+        if (root / "main/manager-web/package-lock.json").is_file():
+            paths.add("main/manager-web/package-lock.json")
+    if lane.required_source_contract == "course-mode-playwright":
+        paths.add("main/manager-web/playwright.config.js")
+        paths.update(_playwright_spec_paths(root, repository["sha"]))
+    if lane.name == "esp-course-mode-full":
+        paths.add("main/tbot-server/pyproject.toml")
+        discovered = discover_esp_course_mode_tests(root, repository["sha"])
+        paths.update(f"main/tbot-server/{relative}" for relative in select_esp_software_tests(discovered))
+    elif lane.repository == "adminEsp" and lane.relative_cwd == "main/tbot-server":
+        paths.update(
+            f"main/tbot-server/{token}" for token in lane.command
+            if token.endswith(".py") and not Path(token).is_absolute()
+        )
+    if lane.repository == "backend" and lane.command[0] in {"npm", "npx"}:
+        paths.add("package.json")
+        if (root / "package-lock.json").is_file():
+            paths.add("package-lock.json")
+    for token in lane.command:
+        if "/" in token and not token.startswith(("--", "@")) and not Path(token).is_absolute():
+            candidate_path = root / lane.relative_cwd / token
+            if candidate_path.is_file():
+                paths.add(candidate_path.relative_to(root).as_posix())
+    return tuple(sorted(paths))
+
+
 def _committed_text(admin_root: Path, sha: str, relative: str) -> str | None:
     try:
         return _candidate_git(admin_root, "show", f"{sha}:{relative}")
@@ -326,10 +393,7 @@ def source_contract_ready(admin_root: Path, contract: str, sha: str) -> bool:
         if package_raw is None or config is None:
             return False
         package = strict_json_loads(package_raw)
-        tracked = _candidate_git(
-            admin_root, "ls-tree", "-r", "--name-only", sha, "--",
-            "main/manager-web/e2e/lesson-studio",
-        ).splitlines()
+        specs = _playwright_spec_paths(admin_root, sha)
     except (json.JSONDecodeError, ValueError, RuntimeError):
         return False
     scripts = package.get("scripts") if isinstance(package, dict) else None
@@ -341,14 +405,12 @@ def source_contract_ready(admin_root: Path, contract: str, sha: str) -> bool:
     except ValueError:
         return False
     if (
-        argv[:2] != ["playwright", "test"]
-        or "--config=playwright.config.js" not in argv
-        or any(any(character in token for character in ";|&$`") for token in argv)
+        argv != ["playwright", "test", "--config=playwright.config.js"]
     ):
         return False
     if not any(
         Path(relative).name.startswith("course-mode") and relative.endswith(".spec.js")
-        for relative in tracked
+        for relative in specs
     ):
         return False
     match = re.search(r"testMatch\s*:\s*([^,\n]+)", config)
@@ -379,7 +441,11 @@ def source_contract_ready(admin_root: Path, contract: str, sha: str) -> bool:
         )
         if viewport is None:
             return False
-        if int(viewport.group(1)) < minimum_width or int(viewport.group(2)) < minimum_height:
+        width = int(viewport.group(1))
+        height = int(viewport.group(2))
+        if "mobile" in project and (width, height) != (minimum_width, minimum_height):
+            return False
+        if "desktop" in project and (width < minimum_width or height < minimum_height):
             return False
     return True
 
@@ -560,6 +626,12 @@ def run_gate(
             source = source_environment if source_environment is not None else os.environ
             for lane in selected:
                 if not _candidate_matches(candidate):
+                    report["verdict"] = "BLOCKED"
+                    report["failedLane"] = lane.name
+                    break
+                bound_paths = lane_candidate_paths(lane, candidate)
+                if bound_paths and not candidate_paths_match(repositories[lane.repository], bound_paths):
+                    report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
                     break
