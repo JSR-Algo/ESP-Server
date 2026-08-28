@@ -41,7 +41,7 @@ EXPECTED_MATRIX_ACTIONS = {
     "incorrect": "SUPPORT_WITH_CLUE", "silence": "OFFER_CHOICE_OR_RETRY",
     "vietnamese": "ADVANCE_ACTIVITY", "help": "MODEL_AND_SUPPORT",
     "asr_failure": "OWN_ASR_UNCERTAINTY", "fatigue": "RESPOND_WITHOUT_REDIRECT",
-    "refusal": "RESPOND_WITHOUT_REDIRECT", "authored_branch": "RETURN_THROUGH_AUTHORED_BRIDGE",
+    "refusal": "RESPOND_WITHOUT_REDIRECT", "authored_branch": "OPEN_CONTEXT_BRANCH",
     "safety": "PAUSE_FOR_SAFETY",
 }
 TERMINAL_STATES = {SessionState.COMPLETE, SessionState.CLOSING, SessionState.REGULATION_BREAK}
@@ -49,7 +49,8 @@ REAL_ACTIONS = {
     "ADVANCE_ACTIVITY", "COMPLETE_COURSE", "CLOSE_BY_OUTCOME", "SUPPORT_WITH_CLUE",
     "OFFER_CHOICE_OR_RETRY", "MODEL_AND_SUPPORT", "OWN_ASR_UNCERTAINTY",
     "RESPOND_WITHOUT_REDIRECT", "OPEN_CONTEXT_BRANCH", "RETURN_THROUGH_AUTHORED_BRIDGE",
-    "PAUSE_FOR_SAFETY", "DUPLICATE_IGNORED",
+    "PAUSE_FOR_SAFETY", "DUPLICATE_IGNORED", "CLOSE_BY_CHILD_CHOICE",
+    "CLOSE_BY_SAFETY_CHOICE", "PRESENT_INTERVENING_ACTIVITY",
 }
 PEDAGOGY_WEEKS = {
     "tprGesture": {1, 5, 9, 10, 14, 17},
@@ -95,12 +96,16 @@ def load_backend_contracts(root: Path | None = None) -> tuple[dict[str, Any], li
     return fixture, fixture["contracts"]
 
 
-def observation(contract: CourseModeContract, scenario: str, sequence: int) -> ChildObservation:
-    activity = contract.activity(contract.activities[0].activity_id)
+def observation(
+    contract: CourseModeContract, activity_id: str, scenario: str, sequence: int,
+    *, intent_override: str | None = None,
+) -> ChildObservation:
+    activity = contract.activity(activity_id)
     semantic, speech, language, intent, confidence, safety = RESPONSE_MATRIX[scenario]
     return ChildObservation(
         observation_id=f"sim-{scenario}-{sequence}", turn_sequence_id=sequence,
-        semantic_class=semantic, speech_class=speech, language=language, intent=intent,
+        semantic_class=semantic, speech_class=speech, language=language,
+        intent=intent_override or intent,
         engagement="engaged", safety_class=safety, assessment_eligible=True,
         confidence_band=confidence, activity_id=activity.activity_id,
         context_id=activity.context_id, now_ms=sequence * 1_000,
@@ -110,8 +115,11 @@ def observation(contract: CourseModeContract, scenario: str, sequence: int) -> C
 
 def _activity_observation(
     contract: CourseModeContract, activity_id: str, scenario: str, sequence: int,
+    *, intent_override: str | None = None,
 ) -> ChildObservation:
-    base = observation(contract, scenario, sequence)
+    base = observation(
+        contract, activity_id, scenario, sequence, intent_override=intent_override,
+    )
     activity = contract.activity(activity_id)
     return ChildObservation(**{
         **base.__dict__, "activity_id": activity_id, "context_id": activity.context_id,
@@ -119,41 +127,12 @@ def _activity_observation(
     })
 
 
-def simulate_response(contract: CourseModeContract, scenario: str) -> dict[str, Any]:
-    runtime = CourseOrchestrator(contract, started_at_ms=0, soft_deadline_ms=480_000)
-    runtime.session_state = SessionState.WORD_ACTIVE
-    decision = runtime.observe(observation(contract, scenario, 1))
-    if scenario == "authored_branch":
-        if not decision.branch_id:
-            raise AssertionError("authored story branch did not open")
-        decision = runtime.close_context_branch(
-            branch_id=decision.branch_id, bridge_intent="resume_active_word_visual",
-            child_detail_code="related_pet",
-        )
+def _record(decision: Any, scenario: str) -> dict[str, Any]:
     return {
-        "action": decision.action, "attempt": decision.attempt,
+        "scenario": scenario, "outcome": scenario, "action": decision.action,
+        "attempt": decision.attempt,
         "state": decision.next_state.value, "activityId": decision.activity_id,
     }
-
-
-def simulate_completion(contract: CourseModeContract) -> dict[str, Any]:
-    runtime = CourseOrchestrator(contract, started_at_ms=0, soft_deadline_ms=480_000)
-    runtime.session_state = SessionState.WORD_ACTIVE
-    actions: list[str] = []
-    seen: set[tuple[str, str]] = set()
-    for sequence in range(1, len(contract.activities) + 2):
-        activity_id = runtime.active_activity_id
-        identity = (activity_id, runtime.session_state.value)
-        if identity in seen:
-            raise AssertionError(f"runtime loop at {activity_id}")
-        seen.add(identity)
-        decision = runtime.observe(_activity_observation(contract, activity_id, "correct", sequence))
-        actions.append(decision.action)
-        if runtime.session_state in {SessionState.COMPLETE, SessionState.CLOSING}:
-            break
-    if runtime.session_state not in {SessionState.COMPLETE, SessionState.CLOSING}:
-        raise AssertionError("lesson did not reach terminal completion")
-    return {"steps": len(actions), "actions": actions, "state": runtime.session_state.value}
 
 
 def simulate_attempt_ceiling(contract: CourseModeContract) -> dict[str, Any]:
@@ -214,6 +193,89 @@ async def simulate_disconnect_resume(contract: CourseModeContract) -> dict[str, 
     return {"deliveryId": pending[0][1], "deduped": True}
 
 
+async def simulate_terminal_path(contract: CourseModeContract, scenario: str) -> dict[str, Any]:
+    adapter = CourseModeRuntimeAdapter(contract, clock=lambda: 1.0, wall_clock=lambda: 1.0)
+    adapter.orchestrator.session_state = SessionState.WORD_ACTIVE
+    first_arguments = _adapter_args(adapter, "correct")
+    first = await adapter.course_observe_child(first_arguments)
+    pending = adapter.pending_activity_deliveries()
+    if len(pending) != 1:
+        raise AssertionError("mid-path disconnect has no stable pending delivery")
+    restored = CourseModeRuntimeAdapter.restore(
+        contract, json.loads(json.dumps(adapter.durable_snapshot())),
+        clock=lambda: 2.0, wall_clock=lambda: 2.0,
+    )
+    replay = await restored.course_observe_child(first_arguments)
+    restored_pending = restored.pending_activity_deliveries()
+    if replay != first or len(restored_pending) != 1 or restored_pending[0][1] != pending[0][1]:
+        raise AssertionError("mid-path replay changed decision or delivery identity")
+    restored.mark_activity_decision_delivered(restored_pending[0][0].decision_id)
+    if restored.pending_activity_deliveries():
+        raise AssertionError("mid-path delivery dedupe left a pending duplicate")
+
+    runtime = restored.orchestrator
+    transitions = [{
+        "scenario": "disconnect_resume_correct", "action": first["action"],
+        "attempt": first.get("attempt", 0), "state": first["nextState"],
+        "activityId": first.get("activityId"),
+    }]
+    scenario_exercised = False
+    seen: set[tuple[Any, ...]] = set()
+    limit = len(contract.activities) * (contract.max_attempts + 2) + 8
+    for sequence in range(2, limit + 2):
+        if runtime.session_state in {SessionState.COMPLETE, SessionState.CLOSING}:
+            break
+        activity_id = runtime.active_activity_id
+        current_scenario = scenario if not scenario_exercised else "correct"
+        identity = (
+            activity_id, runtime.session_state.value, current_scenario,
+            tuple(sorted(runtime.snapshot()["activityAttempts"].items())),
+            runtime.snapshot()["activeBranchId"],
+        )
+        if identity in seen:
+            raise AssertionError(f"runtime path loop at {activity_id}/{current_scenario}")
+        seen.add(identity)
+        decision = runtime.observe(_activity_observation(
+            contract, activity_id, current_scenario, sequence,
+        ))
+        transitions.append(_record(decision, current_scenario))
+        if not scenario_exercised:
+            scenario_exercised = True
+            if decision.action != EXPECTED_MATRIX_ACTIONS[scenario]:
+                raise AssertionError(
+                    f"{scenario} emitted {decision.action}, expected {EXPECTED_MATRIX_ACTIONS[scenario]}"
+                )
+            if scenario == "authored_branch":
+                if not decision.branch_id:
+                    raise AssertionError("authored branch did not open")
+                bridged = runtime.close_context_branch(
+                    branch_id=decision.branch_id,
+                    bridge_intent="resume_active_word_visual", child_detail_code="related_pet",
+                )
+                transitions.append(_record(bridged, "authored_bridge"))
+            elif runtime.session_state in {SessionState.REGULATION_BREAK, SessionState.SAFETY_PAUSED}:
+                stopped = runtime.observe(_activity_observation(
+                    contract, runtime.active_activity_id, "correct", sequence + limit,
+                    intent_override="stop",
+                ))
+                transitions.append(_record(stopped, "safe_stop"))
+            elif runtime.session_state is SessionState.TECHNICAL_RECOVERY:
+                recovered = runtime.continue_word(now_ms=sequence * 1_000)
+                transitions.append(_record(recovered, "technical_recovery"))
+    if not scenario_exercised:
+        raise AssertionError(f"{scenario} was not exercised")
+    if runtime.session_state not in {SessionState.COMPLETE, SessionState.CLOSING}:
+        raise AssertionError(f"{scenario} path did not terminate within {limit} transitions")
+    if any(item["attempt"] > contract.max_attempts for item in transitions):
+        raise AssertionError(f"{scenario} exceeded maxAttempts")
+    return {
+        "state": runtime.session_state.value, "steps": len(transitions),
+        "visitedActivities": [item["activityId"] for item in transitions if item["activityId"]],
+        "actions": [item["action"] for item in transitions], "transitions": transitions,
+        "deliveryId": pending[0][1], "deduped": True,
+    }
+
+
 def validate_pedagogy_mapping(contracts: Iterable[CourseModeContract]) -> None:
     contracts = list(contracts)
     for pedagogy, weeks in PEDAGOGY_WEEKS.items():
@@ -226,28 +288,59 @@ def validate_pedagogy_mapping(contracts: Iterable[CourseModeContract]) -> None:
             raise AssertionError(f"{pedagogy} week mapping drift: {sorted(actual)}")
 
 
-def simulate_contracts(raw_contracts: list[dict[str, Any]]) -> dict[str, Any]:
+def _validate_visual_phases(lesson: dict[str, Any], inventory: dict[str, dict[str, Any]]) -> None:
+    contract = lesson["contract"]
+    phase_by_activity = {
+        activity_id: phase
+        for phase in lesson["phases"] for activity_id in phase["activityIds"]
+    }
+    for activity in contract["activities"]:
+        phase = phase_by_activity[activity["activityId"]]
+        layers = {layer["slot"]: layer for layer in phase["layers"]}
+        for slot in ("backgroundScene", "robotOverlay"):
+            layer = layers.get(slot)
+            published = inventory.get(layer["assetKey"] if layer else "")
+            if not published or published["publication_state"] != "published":
+                raise AssertionError(f"{activity['activityId']} missing published {slot}")
+            if published["id"] != layer["assetVersionId"] or published["sha256"] != layer["sha256"]:
+                raise AssertionError(f"{activity['activityId']} {slot} identity mismatch")
+            if not published["storage_path"]:
+                raise AssertionError(f"{activity['activityId']} {slot} path is empty")
+        if layers["backgroundScene"]["metadata"].get("mediaKind") != "image":
+            raise AssertionError(f"{activity['activityId']} background is not an image")
+        robot_metadata = layers["robotOverlay"]["metadata"]
+        if robot_metadata.get("mediaKind") != "video" or robot_metadata.get("hasAudio") is not False:
+            raise AssertionError(f"{activity['activityId']} robot fallback is not the silent video binding")
+        object_key = activity["visual"]["objectAssetKey"]
+        if object_key:
+            if layers.get("teachingObject", {}).get("assetKey") != object_key:
+                raise AssertionError(f"{activity['activityId']} object phase mismatch")
+            if inventory.get(object_key, {}).get("publication_state") != "published":
+                raise AssertionError(f"{activity['activityId']} object is not published")
+        elif set(layers) != {"backgroundScene", "robotOverlay"}:
+            raise AssertionError(f"{activity['activityId']} fallback is not a scene+robot phase")
+
+
+def simulate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
+    raw_contracts = fixture["contracts"]
     contracts = [CourseModeContract.from_mapping(value) for value in raw_contracts]
     validate_pedagogy_mapping(contracts)
+    lessons_by_week = {lesson["week"]: lesson for lesson in fixture["lessons"]}
+    inventory = {item["asset_key"]: item for item in fixture["inventory"]}
     lessons = []
     all_actions: set[str] = set()
     for week, contract in enumerate(contracts, 1):
-        matrix = {scenario: simulate_response(contract, scenario) for scenario in RESPONSE_MATRIX}
-        for scenario, expected in EXPECTED_MATRIX_ACTIONS.items():
-            if matrix[scenario]["action"] != expected:
-                raise AssertionError(
-                    f"week {week} {scenario} emitted {matrix[scenario]['action']}, expected {expected}"
-                )
-        completion = simulate_completion(contract)
+        _validate_visual_phases(lessons_by_week[week], inventory)
+        matrix = {
+            scenario: asyncio.run(simulate_terminal_path(contract, scenario))
+            for scenario in RESPONSE_MATRIX
+        }
         attempt_ceiling = simulate_attempt_ceiling(contract)
-        delivery = asyncio.run(simulate_disconnect_resume(contract))
-        actions = {result["action"] for result in matrix.values()} | set(completion["actions"])
+        actions = {action for result in matrix.values() for action in result["actions"]}
         if not actions <= REAL_ACTIONS:
             raise AssertionError(f"week {week} emitted invented actions: {sorted(actions - REAL_ACTIONS)}")
-        if any(result["attempt"] > contract.max_attempts for result in matrix.values()):
-            raise AssertionError(f"week {week} exceeded maxAttempts")
-        if completion["steps"] > len(contract.activities):
-            raise AssertionError(f"week {week} exceeded authored step bound")
+        if any(result["steps"] > len(contract.activities) * (contract.max_attempts + 2) + 8 for result in matrix.values()):
+            raise AssertionError(f"week {week} exceeded authored transition bound")
         if sum(activity.expected_duration_sec for activity in contract.activities) > contract.soft_deadline_sec:
             raise AssertionError(f"week {week} exceeded authored time bound")
         for activity in contract.activities:
@@ -270,14 +363,24 @@ def simulate_contracts(raw_contracts: list[dict[str, Any]]) -> dict[str, Any]:
         all_actions.update(actions)
         lessons.append({
             "week": week, "fixtureId": contract.fixture_id, "activityCount": len(contract.activities),
-            "completion": completion, "attemptCeiling": attempt_ceiling,
-            "matrix": matrix, "delivery": delivery,
+            "attemptCeiling": attempt_ceiling, "matrix": matrix,
         })
     return {
         "schemaVersion": 1, "simulator": "course-mode-26week.v1", "status": "pass",
         "lessonCount": len(lessons), "scenarioCount": len(RESPONSE_MATRIX),
         "pedagogyCount": len(PEDAGOGY_WEEKS), "actions": sorted(all_actions), "lessons": lessons,
     }
+
+
+def simulate_contracts(raw_contracts: list[dict[str, Any]]) -> dict[str, Any]:
+    _, canonical = load_backend_contracts()
+    fixture = dict(canonical)
+    fixture["contracts"] = raw_contracts
+    fixture["lessons"] = [
+        {**lesson, "contract": raw_contracts[index]}
+        for index, lesson in enumerate(canonical["lessons"])
+    ]
+    return simulate_fixture(fixture)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -289,9 +392,13 @@ def main(argv: list[str] | None = None) -> int:
         fixture = json.loads(args.contracts.read_text(encoding="utf-8"))
         contracts = fixture["contracts"]
     else:
-        _, contracts = load_backend_contracts(args.backend_root)
+        fixture, contracts = load_backend_contracts(args.backend_root)
+    if args.contracts:
+        fixture = fixture
     try:
-        summary = simulate_contracts(copy.deepcopy(contracts))
+        fixture = copy.deepcopy(fixture)
+        fixture["contracts"] = copy.deepcopy(contracts)
+        summary = simulate_fixture(fixture)
     except Exception as exc:
         print(json.dumps({
             "schemaVersion": 1, "simulator": "course-mode-26week.v1", "status": "fail",

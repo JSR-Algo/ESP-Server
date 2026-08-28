@@ -10,11 +10,13 @@ from pathlib import Path
 import pytest
 
 from core.lesson.course_mode_contract import CourseModeContract
+from core.lesson.course_orchestrator import CourseOrchestrator
 from scripts.course_mode_26week_simulation import (
     PEDAGOGY_WEEKS,
     RESPONSE_MATRIX,
     load_backend_contracts,
     simulate_contracts,
+    simulate_fixture,
 )
 
 
@@ -36,13 +38,24 @@ def _checksum(value: dict) -> str:
 
 def test_simulates_all_backend_generated_lessons_and_response_modes(backend_contracts) -> None:
     verifier, contracts = backend_contracts
-    summary = simulate_contracts(contracts)
+    summary = simulate_fixture(verifier)
 
     assert verifier["lessonCount"] == summary["lessonCount"] == 26
     assert summary["scenarioCount"] == len(RESPONSE_MATRIX) == 11
     assert summary["pedagogyCount"] == len(PEDAGOGY_WEEKS) == 6
-    assert all(lesson["completion"]["state"] in {"COMPLETE", "CLOSING"} for lesson in summary["lessons"])
-    assert all(lesson["delivery"]["deduped"] is True for lesson in summary["lessons"])
+    assert all(
+        path["state"] in {"COMPLETE", "CLOSING"}
+        for lesson in summary["lessons"] for path in lesson["matrix"].values()
+    )
+    assert all(
+        path["deduped"] is True and len(path["visitedActivities"]) >= 1
+        for lesson in summary["lessons"] for path in lesson["matrix"].values()
+    )
+    assert all(
+        len(lesson["matrix"][scenario]["visitedActivities"]) >= lesson["activityCount"]
+        for lesson in summary["lessons"]
+        for scenario in ("correct", "near", "vietnamese", "authored_branch", "asr_failure")
+    )
 
 
 def test_representative_pedagogies_and_fallbacks_are_explicit(backend_contracts) -> None:
@@ -81,6 +94,33 @@ def test_mutated_backend_contracts_fail_closed(backend_contracts, mutation) -> N
 
     with pytest.raises((AssertionError, ValueError)):
         simulate_contracts(mutated)
+
+
+def test_full_path_loop_detector_rejects_a_stuck_runtime(backend_contracts, monkeypatch) -> None:
+    fixture, _ = backend_contracts
+    original = CourseOrchestrator.observe
+
+    def stuck_after_advance(self, observation):
+        decision = original(self, observation)
+        if decision.action == "ADVANCE_ACTIVITY":
+            self.active_activity_id = observation.activity_id
+        return decision
+
+    monkeypatch.setattr(CourseOrchestrator, "observe", stuck_after_advance)
+    with pytest.raises(AssertionError, match="runtime path loop"):
+        simulate_fixture(copy.deepcopy(fixture))
+
+
+def test_visual_phase_mutation_is_detected(backend_contracts) -> None:
+    fixture, _ = backend_contracts
+    mutated = copy.deepcopy(fixture)
+    mutated["lessons"][18]["phases"][0]["layers"] = [
+        layer for layer in mutated["lessons"][18]["phases"][0]["layers"]
+        if layer["slot"] != "robotOverlay"
+    ]
+
+    with pytest.raises(AssertionError, match="published robotOverlay"):
+        simulate_fixture(mutated)
 
 
 def test_cli_is_deterministic_and_machine_readable() -> None:
