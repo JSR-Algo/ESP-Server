@@ -6,6 +6,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from core.lesson.runtime import CourseModeRuntimeAdapter
 from scripts.course_mode_26week_simulation import (
     _attempt_ceiling_turn_index,
     PEDAGOGY_WEEKS,
+    CourseModeSimulationError,
     RESPONSE_MATRIX,
     load_backend_contracts,
     simulate_contracts,
@@ -105,26 +107,77 @@ def test_representative_pedagogies_and_fallbacks_are_explicit(backend_contracts)
     )
 
 
-@pytest.mark.parametrize("mutation", [
-    lambda value: value["renderer"].update({"rendererId": "teebot-lesson-renderer.v4"}),
-    lambda value: value["activities"][0]["outcomes"]["help"].update(
+@pytest.mark.parametrize("mutation, message", [
+    (lambda value: value["renderer"].update({"rendererId": "teebot-lesson-renderer.v4"}), "renderer"),
+    (lambda value: value["activities"][0]["outcomes"]["help"].update(
         {"action": "retry", "activityId": value["activities"][0]["activityId"]},
-    ),
-    lambda value: next(
+    ), "outcome"),
+    (lambda value: next(
         activity for activity in value["activities"] if activity["stage"] == "RECALL"
-    )["answerPolicy"].update({"targetTextVisible": True}),
-    lambda value: value["activities"][0]["visual"].update(
+    )["answerPolicy"].update({"targetTextVisible": True}), "answer policy"),
+    (lambda value: value["activities"][0]["visual"].update(
         {"strategy": "publishedTeachingObject", "objectAssetKey": None},
-    ),
+    ), "visual"),
 ])
-def test_mutated_backend_contracts_fail_closed(backend_contracts, mutation) -> None:
+def test_mutated_backend_contracts_fail_closed(backend_contracts, mutation, message) -> None:
     _, contracts = backend_contracts
     mutated = copy.deepcopy(contracts)
     mutation(mutated[0])
     mutated[0]["contractChecksum"] = _checksum(mutated[0])
 
-    with pytest.raises((AssertionError, ValueError)):
+    with pytest.raises(CourseModeSimulationError, match=message):
         simulate_contracts(mutated)
+
+
+def test_simulate_contracts_accepts_the_canonical_contracts(backend_contracts) -> None:
+    _, contracts = backend_contracts
+
+    assert simulate_contracts(copy.deepcopy(contracts))["status"] == "pass"
+
+
+def test_top_level_contract_must_match_lesson_envelope(backend_contracts) -> None:
+    fixture, _ = backend_contracts
+    mutated = copy.deepcopy(fixture)
+    mutated["contracts"][0]["lesson"]["lessonVersion"] += 1
+    mutated["contracts"][0]["contractChecksum"] = _checksum(mutated["contracts"][0])
+
+    with pytest.raises(CourseModeSimulationError, match="envelope contract mismatch.*week 1"):
+        simulate_fixture(mutated)
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda fixture: fixture["lessons"].append({**copy.deepcopy(fixture["lessons"][0]), "week": 27}),
+    lambda fixture: fixture["lessons"].append(copy.deepcopy(fixture["lessons"][0])),
+])
+def test_lesson_envelope_rejects_extra_or_duplicate_weeks(backend_contracts, mutation) -> None:
+    fixture, _ = backend_contracts
+    mutated = copy.deepcopy(fixture)
+    mutation(mutated)
+
+    with pytest.raises(CourseModeSimulationError, match="lesson weeks must be exactly"):
+        simulate_fixture(mutated)
+
+
+def test_recomputed_object_key_drift_fails_phase_binding(backend_contracts) -> None:
+    fixture, _ = backend_contracts
+    mutated = copy.deepcopy(fixture)
+    contract = mutated["contracts"][0]
+    lesson_contract = mutated["lessons"][0]["contract"]
+    activity_index = next(
+        index for index, activity in enumerate(contract["activities"])
+        if activity["visual"]["objectAssetKey"] is not None
+    )
+    current = contract["activities"][activity_index]["visual"]["objectAssetKey"]
+    replacement = next(
+        item["asset_key"] for item in mutated["inventory"]
+        if item["asset_key"].startswith("object.") and item["asset_key"] != current
+    )
+    for value in (contract, lesson_contract):
+        value["activities"][activity_index]["visual"]["objectAssetKey"] = replacement
+        value["contractChecksum"] = _checksum(value)
+
+    with pytest.raises(CourseModeSimulationError, match="object phase mismatch"):
+        simulate_fixture(mutated)
 
 
 def test_full_path_loop_detector_rejects_a_stuck_runtime(backend_contracts, monkeypatch) -> None:
@@ -138,7 +191,7 @@ def test_full_path_loop_detector_rejects_a_stuck_runtime(backend_contracts, monk
         return decision
 
     monkeypatch.setattr(CourseOrchestrator, "observe", stuck_after_advance)
-    with pytest.raises(AssertionError, match="runtime path loop"):
+    with pytest.raises(CourseModeSimulationError, match="runtime path loop"):
         simulate_fixture(copy.deepcopy(fixture))
 
 
@@ -291,7 +344,7 @@ def test_visual_phase_mutation_is_detected(backend_contracts) -> None:
         if layer["slot"] != "robotOverlay"
     ]
 
-    with pytest.raises(AssertionError, match="published robotOverlay"):
+    with pytest.raises(CourseModeSimulationError, match="published robotOverlay"):
         simulate_fixture(mutated)
 
 
@@ -302,3 +355,54 @@ def test_cli_is_deterministic_and_machine_readable() -> None:
 
     assert first.stdout == second.stdout
     assert json.loads(first.stdout)["status"] == "pass"
+
+
+def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+    command = [sys.executable, str(ROOT / "scripts/course_mode_26week_simulation.py"), *args]
+    return subprocess.run(command, cwd=ROOT, check=False, capture_output=True, text=True, timeout=5)
+
+
+@pytest.mark.parametrize("kind", ["missing", "directory", "malformed"])
+def test_cli_input_failures_use_stable_json_envelopes(kind: str) -> None:
+    with tempfile.TemporaryDirectory(prefix="course-mode-cli-input-") as directory:
+        path = Path(directory) / "contracts.json"
+        if kind == "directory":
+            path.mkdir()
+        elif kind == "malformed":
+            path.write_text("not-json", encoding="utf-8")
+
+        completed = _run_cli("--contracts", str(path))
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 1 and completed.stderr == ""
+    assert payload["status"] == "fail"
+    assert payload["error"]["code"] == {
+        "missing": "CONTRACTS_INPUT_NOT_FOUND",
+        "directory": "CONTRACTS_INPUT_NOT_FILE",
+        "malformed": "CONTRACTS_INPUT_INVALID_JSON",
+    }[kind]
+
+
+@pytest.mark.parametrize("kind, code", [
+    ("missing-command", "BACKEND_COMMAND_NOT_FOUND"),
+    ("failure", "BACKEND_COMMAND_FAILED"),
+    ("timeout", "BACKEND_COMMAND_TIMEOUT"),
+    ("malformed", "BACKEND_OUTPUT_INVALID_JSON"),
+])
+def test_cli_backend_failures_use_stable_json_envelopes(kind: str, code: str) -> None:
+    if kind == "missing-command":
+        command = ["/definitely/missing/node"]
+    elif kind == "failure":
+        command = [sys.executable, "-c", "import sys;sys.exit(9)"]
+    elif kind == "timeout":
+        command = [sys.executable, "-c", "import time;time.sleep(1)"]
+    else:
+        command = [sys.executable, "-c", "import pathlib,sys;pathlib.Path(sys.argv[-1]).write_text('not-json')"]
+    completed = _run_cli(
+        "--backend-command-json", json.dumps(command),
+        "--backend-timeout-sec", "0.02" if kind == "timeout" else "2",
+    )
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 1 and completed.stderr == ""
+    assert payload["status"] == "fail" and payload["error"]["code"] == code

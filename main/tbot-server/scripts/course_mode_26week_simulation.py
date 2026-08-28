@@ -18,7 +18,7 @@ SERVER_ROOT = Path(__file__).resolve().parents[1]
 if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
 
-from core.lesson.course_mode_contract import CourseModeContract
+from core.lesson.course_mode_contract import CourseModeContract, CourseModeContractError
 from core.lesson.course_orchestrator import SessionState
 from core.lesson.runtime import CourseModeRuntimeAdapter
 
@@ -77,6 +77,13 @@ PEDAGOGY_MARKERS = {
 }
 
 
+class CourseModeSimulationError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
 def backend_root() -> Path:
     configured = os.environ.get("TBOT_BACKEND_COURSE_MODE_ROOT")
     if configured:
@@ -86,20 +93,40 @@ def backend_root() -> Path:
     return worktree if worktree.is_dir() else tbot_root / "tbot-backend"
 
 
-def load_backend_contracts(root: Path | None = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def load_backend_contracts(
+    root: Path | None = None, *, backend_command: list[str] | None = None,
+    timeout_sec: float = 30,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     source_root = (root or backend_root()).resolve()
     verifier = source_root / "scripts/verify-course-mode-curriculum.mjs"
     with tempfile.TemporaryDirectory(prefix="tbot-course-mode-e2e-") as directory:
         output = Path(directory) / "contracts.json"
-        completed = subprocess.run(
-            ["node", str(verifier), "--contracts-output", str(output)],
-            cwd=source_root, check=False, capture_output=True, text=True, timeout=30,
-        )
+        command = backend_command or ["node", str(verifier)]
+        try:
+            completed = subprocess.run(
+                [*command, "--contracts-output", str(output)],
+                cwd=source_root, check=False, capture_output=True, text=True,
+                timeout=timeout_sec,
+            )
+        except FileNotFoundError as exc:
+            raise CourseModeSimulationError("BACKEND_COMMAND_NOT_FOUND", str(exc)) from None
+        except subprocess.TimeoutExpired:
+            raise CourseModeSimulationError(
+                "BACKEND_COMMAND_TIMEOUT", f"backend command exceeded {timeout_sec:g}s",
+            ) from None
         if completed.returncode != 0:
-            raise RuntimeError(f"backend curriculum verifier failed: {completed.stdout}{completed.stderr}")
-        fixture = json.loads(output.read_text(encoding="utf-8"))
+            raise CourseModeSimulationError(
+                "BACKEND_COMMAND_FAILED", f"backend command exited {completed.returncode}",
+            )
+        try:
+            fixture = json.loads(output.read_text(encoding="utf-8"))
+        except (FileNotFoundError, IsADirectoryError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise CourseModeSimulationError("BACKEND_OUTPUT_INVALID_JSON", str(exc)) from None
     if fixture.get("status") != "pass" or fixture.get("lessonCount") != 26:
-        raise ValueError("backend curriculum export is not a passing 26-lesson fixture")
+        raise CourseModeSimulationError(
+            "BACKEND_OUTPUT_INVALID_ENVELOPE",
+            "backend curriculum export is not a passing 26-lesson fixture",
+        )
     return fixture, fixture["contracts"]
 
 
@@ -425,8 +452,10 @@ def validate_pedagogy_mapping(contracts: Iterable[CourseModeContract]) -> None:
             raise AssertionError(f"{pedagogy} week mapping drift: {sorted(actual)}")
 
 
-def _validate_visual_phases(lesson: dict[str, Any], inventory: dict[str, dict[str, Any]]) -> None:
-    contract = lesson["contract"]
+def _validate_visual_phases(
+    lesson: dict[str, Any], inventory: dict[str, dict[str, Any]],
+    contract: dict[str, Any],
+) -> None:
     phase_by_activity = {
         activity_id: phase
         for phase in lesson["phases"] for activity_id in phase["activityIds"]
@@ -458,16 +487,61 @@ def _validate_visual_phases(lesson: dict[str, Any], inventory: dict[str, dict[st
             raise AssertionError(f"{activity['activityId']} fallback is not a scene+robot phase")
 
 
-def simulate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
+def _normalized_json(value: Any) -> Any:
+    return json.loads(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+def _contract_drift_message(expected: dict[str, Any], actual: dict[str, Any], week: int) -> str:
+    if expected.get("renderer") != actual.get("renderer"):
+        return f"week {week} renderer differs from canonical contract"
+    for expected_activity, actual_activity in zip(
+        expected.get("activities", []), actual.get("activities", []),
+    ):
+        activity_id = expected_activity.get("activityId", "unknown")
+        if expected_activity.get("outcomes") != actual_activity.get("outcomes"):
+            return f"week {week} activity {activity_id} outcome differs from canonical contract"
+        if expected_activity.get("answerPolicy") != actual_activity.get("answerPolicy"):
+            return f"week {week} activity {activity_id} answer policy differs from canonical contract"
+        if expected_activity.get("visual") != actual_activity.get("visual"):
+            return f"week {week} activity {activity_id} visual differs from canonical contract"
+    return f"week {week} contract differs from canonical contract"
+
+
+def _simulate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
     raw_contracts = fixture["contracts"]
-    contracts = [CourseModeContract.from_mapping(value) for value in raw_contracts]
+    lesson_rows = fixture["lessons"]
+    expected_weeks = list(range(1, len(raw_contracts) + 1))
+    actual_weeks = [lesson.get("week") for lesson in lesson_rows]
+    if actual_weeks != expected_weeks:
+        raise CourseModeSimulationError(
+            "LESSON_ENVELOPE_MISMATCH",
+            f"lesson weeks must be exactly {expected_weeks}, found {actual_weeks}",
+        )
+    lessons_by_week = {lesson["week"]: lesson for lesson in lesson_rows}
+    normalized_contracts = []
+    contracts = []
+    for week, raw_contract in enumerate(raw_contracts, 1):
+        lesson = lessons_by_week.get(week)
+        if lesson is None or _normalized_json(lesson.get("contract")) != _normalized_json(raw_contract):
+            raise CourseModeSimulationError(
+                "CONTRACT_ENVELOPE_MISMATCH", f"envelope contract mismatch at week {week}",
+            )
+        normalized = _normalized_json(raw_contract)
+        normalized_contracts.append(normalized)
+        try:
+            contracts.append(CourseModeContract.from_mapping(normalized))
+        except CourseModeContractError as exc:
+            raise CourseModeSimulationError(
+                "CONTRACT_INVALID", f"week {week} {exc}",
+            ) from None
     validate_pedagogy_mapping(contracts)
-    lessons_by_week = {lesson["week"]: lesson for lesson in fixture["lessons"]}
     inventory = {item["asset_key"]: item for item in fixture["inventory"]}
     lessons = []
     all_actions: set[str] = set()
-    for week, contract in enumerate(contracts, 1):
-        _validate_visual_phases(lessons_by_week[week], inventory)
+    for week, (contract, normalized_contract) in enumerate(
+        zip(contracts, normalized_contracts), 1,
+    ):
+        _validate_visual_phases(lessons_by_week[week], inventory, normalized_contract)
         matrix = {
             scenario: asyncio.run(simulate_terminal_path(
                 contract, scenario,
@@ -514,9 +588,28 @@ def simulate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def simulate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return _simulate_fixture(fixture)
+    except CourseModeSimulationError:
+        raise
+    except (AssertionError, CourseModeContractError, KeyError, TypeError, ValueError) as exc:
+        raise CourseModeSimulationError("SIMULATION_VALIDATION_FAILED", str(exc)) from None
+
+
 def simulate_contracts(raw_contracts: list[dict[str, Any]]) -> dict[str, Any]:
-    _, canonical = load_backend_contracts()
-    fixture = dict(canonical)
+    canonical, canonical_contracts = load_backend_contracts()
+    if len(raw_contracts) != len(canonical_contracts):
+        raise CourseModeSimulationError(
+            "CONTRACT_CANONICAL_MISMATCH",
+            f"contract count {len(raw_contracts)} differs from canonical {len(canonical_contracts)}",
+        )
+    for week, (expected, actual) in enumerate(zip(canonical_contracts, raw_contracts), 1):
+        if _normalized_json(expected) != _normalized_json(actual):
+            raise CourseModeSimulationError(
+                "CONTRACT_CANONICAL_MISMATCH", _contract_drift_message(expected, actual, week),
+            )
+    fixture = copy.deepcopy(canonical)
     fixture["contracts"] = raw_contracts
     fixture["lessons"] = [
         {**lesson, "contract": raw_contracts[index]}
@@ -529,23 +622,55 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend-root", type=Path, default=None)
     parser.add_argument("--contracts", type=Path, default=None)
+    parser.add_argument("--backend-command-json", default=None)
+    parser.add_argument("--backend-timeout-sec", type=float, default=30)
     args = parser.parse_args(argv)
-    if args.contracts:
-        fixture = json.loads(args.contracts.read_text(encoding="utf-8"))
-        contracts = fixture["contracts"]
-    else:
-        fixture, contracts = load_backend_contracts(args.backend_root)
-    if args.contracts:
-        fixture = fixture
     try:
+        if args.contracts:
+            if not args.contracts.exists():
+                raise CourseModeSimulationError(
+                    "CONTRACTS_INPUT_NOT_FOUND", f"contracts input does not exist: {args.contracts}",
+                )
+            if not args.contracts.is_file():
+                raise CourseModeSimulationError(
+                    "CONTRACTS_INPUT_NOT_FILE", f"contracts input is not a file: {args.contracts}",
+                )
+            try:
+                fixture = json.loads(args.contracts.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise CourseModeSimulationError("CONTRACTS_INPUT_INVALID_JSON", str(exc)) from None
+            contracts = fixture["contracts"]
+        else:
+            backend_command = None
+            if args.backend_command_json is not None:
+                try:
+                    backend_command = json.loads(args.backend_command_json)
+                except json.JSONDecodeError as exc:
+                    raise CourseModeSimulationError("BACKEND_COMMAND_INVALID", str(exc)) from None
+                if not isinstance(backend_command, list) or not backend_command or not all(
+                    isinstance(item, str) for item in backend_command
+                ):
+                    raise CourseModeSimulationError(
+                        "BACKEND_COMMAND_INVALID", "backend command must be a non-empty JSON string array",
+                    )
+            fixture, contracts = load_backend_contracts(
+                args.backend_root, backend_command=backend_command,
+                timeout_sec=args.backend_timeout_sec,
+            )
         fixture = copy.deepcopy(fixture)
         fixture["contracts"] = copy.deepcopy(contracts)
         summary = simulate_fixture(fixture)
+    except CourseModeSimulationError as exc:
+        print(json.dumps({
+            "schemaVersion": 1, "simulator": "course-mode-26week.v1", "status": "fail",
+            "error": {"code": exc.code, "message": exc.message},
+        }, sort_keys=True, separators=(",", ":")))
+        return 1
     except Exception as exc:
         print(json.dumps({
             "schemaVersion": 1, "simulator": "course-mode-26week.v1", "status": "fail",
-            "error": f"{type(exc).__name__}: {exc}",
-        }, sort_keys=True))
+            "error": {"code": "UNEXPECTED_SIMULATION_FAILURE", "message": str(exc)},
+        }, sort_keys=True, separators=(",", ":")))
         return 1
     print(json.dumps(summary, sort_keys=True, separators=(",", ":")))
     return 0
