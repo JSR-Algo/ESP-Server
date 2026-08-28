@@ -65,6 +65,8 @@ def candidate(repositories: dict[str, Path], tmp_path: Path) -> dict:
             "contractIdentity": "courseCompanion.v2.contract.v1",
             "lessonCount": 26,
             "activityCount": 256,
+            "pedagogyCount": 6,
+            "responseClassCount": 11,
             "sourceChecksum": hashlib.sha256(
                 (repositories["backend"] / "src/lessons/course-mode/curriculum-course-mode.ts").read_bytes(),
             ).hexdigest(),
@@ -142,3 +144,42 @@ def test_candidate_binds_curriculum_checksum_to_backend_source(candidate: dict) 
     candidate["curriculum"]["sourceChecksum"] = "f" * 64
 
     assert validate_candidate(candidate) == ["curriculum.sourceChecksum"]
+
+
+@pytest.mark.parametrize("field, value", [
+    ("pedagogyCount", 5),
+    ("pedagogyCount", "6"),
+    ("responseClassCount", 10),
+    ("responseClassCount", "11"),
+])
+def test_candidate_requires_exact_curriculum_class_counts(
+    candidate: dict, field: str, value: object,
+) -> None:
+    candidate["curriculum"][field] = value
+
+    assert validate_candidate(candidate) == [f"curriculum.{field}"]
+
+
+@pytest.mark.parametrize("field", ["pedagogyCount", "responseClassCount"])
+def test_candidate_reports_missing_curriculum_class_count(candidate: dict, field: str) -> None:
+    candidate["curriculum"].pop(field)
+
+    assert validate_candidate(candidate) == ["curriculum.keys", f"curriculum.{field}"]
+
+
+def test_candidate_freeze_report_records_exact_tdd_and_simulator_evidence() -> None:
+    report = (
+        Path(__file__).resolve().parents[3]
+        / "docs/qa/ad-hoc/2026-08-29-course-mode-candidate-freeze.md"
+    ).read_text(encoding="utf-8")
+
+    for required in (
+        "COURSE_MODE_BACKEND_ROOT=/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/prod-readiness-task1-backend python3 -m pytest -q tests/test_course_mode_candidate_manifest.py tests/test_course_mode_curriculum_e2e.py",
+        "python3 scripts/course_mode_26week_simulation.py --backend-root /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/prod-readiness-task1-backend",
+        "47 passed",
+        "26 lessons, 256 activities, 6 pedagogies, and 11 response classes",
+        "missing manifest module and explicit-root resolver",
+        "checksum/SHA binding and dirty-root",
+        "Final GREEN",
+    ):
+        assert required in report

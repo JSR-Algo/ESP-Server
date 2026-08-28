@@ -63,6 +63,31 @@ backend SHA. Missing or drifting authority returns stable
 `BACKEND_ROOT_REQUIRED` or `BACKEND_IDENTITY_MISMATCH` JSON instead of searching
 sibling repositories or worktrees.
 
+## ESP TDD chronology and evidence
+
+The initial RED run failed because of the missing manifest module and explicit-root resolver:
+
+```text
+COURSE_MODE_BACKEND_ROOT=/Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/prod-readiness-task1-backend python3 -m pytest -q tests/test_course_mode_candidate_manifest.py tests/test_course_mode_curriculum_e2e.py
+```
+
+The next RED cycles rejected missing checksum/SHA binding and dirty-root
+enforcement. The minimal implementation then reached GREEN, after which the
+same focused command reported `47 passed` with stable failure-envelope tests
+still active.
+
+The committed simulator was run with explicit backend authority:
+
+```text
+python3 scripts/course_mode_26week_simulation.py --backend-root /Users/manhhodinh/Documents/TBOT/tbot-backend/.worktrees/prod-readiness-task1-backend
+```
+
+Observed simulator/verifier evidence was 26 lessons, 256 activities, 6 pedagogies, and 11 response classes, bound to backend SHA
+`0783ddba5474c418a2830a761eda78c7b57cacdf`.
+
+Final GREEN: focused ESP tests passed, the explicit-root simulator returned
+`status=pass`, and both task worktrees were clean.
+
 ## Limitations
 
 - This freeze validates source and software behavior only; it does not prove a

@@ -22,7 +22,8 @@ DIRTY_EXCEPTION_KEYS = {"path", "sha256"}
 COURSE_KEYS = {"courseId", "courseKey"}
 CURRICULUM_KEYS = {
     "courseId", "courseKey", "rendererId", "contractIdentity",
-    "lessonCount", "activityCount", "sourceChecksum",
+    "lessonCount", "activityCount", "pedagogyCount", "responseClassCount",
+    "sourceChecksum",
 }
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -164,7 +165,7 @@ def validate_candidate(candidate: Any) -> list[str]:
     curriculum = candidate.get("curriculum")
     if not isinstance(curriculum, dict) or set(curriculum) != CURRICULUM_KEYS:
         reasons.add("curriculum.keys")
-        curriculum = {}
+        curriculum = curriculum if isinstance(curriculum, dict) else {}
     if curriculum.get("courseId") != course.get("courseId"):
         reasons.add("curriculum.courseId")
     if curriculum.get("courseKey") != course.get("courseKey"):
@@ -177,6 +178,13 @@ def validate_candidate(candidate: Any) -> list[str]:
         reasons.add("curriculum.lessonCount")
     if curriculum.get("activityCount") != 256:
         reasons.add("curriculum.activityCount")
+    if type(curriculum.get("pedagogyCount")) is not int or curriculum["pedagogyCount"] != 6:
+        reasons.add("curriculum.pedagogyCount")
+    if (
+        type(curriculum.get("responseClassCount")) is not int
+        or curriculum["responseClassCount"] != 11
+    ):
+        reasons.add("curriculum.responseClassCount")
     checksum = curriculum.get("sourceChecksum")
     backend_root = repository_roots.get("backend")
     curriculum_source = (
