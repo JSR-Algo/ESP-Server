@@ -47,6 +47,7 @@ TOP_FIELDS = {
     "reviewedIdentity",
     "materializationReceipt",
     "assignmentSnapshot",
+    "firmwareBuildReceipt",
     "visualPack",
     "flashPlan",
     "nvsPreservation",
@@ -81,6 +82,10 @@ def _record(value: object) -> bool:
     return isinstance(value, dict)
 
 
+def _one_of(value: object, choices: set[str]) -> bool:
+    return isinstance(value, str) and value in choices
+
+
 def _real_sha(value: object) -> bool:
     return isinstance(value, str) and SHA256.fullmatch(value) is not None and len(set(value)) > 1
 
@@ -95,8 +100,15 @@ def _valid_uuid(value: object) -> bool:
 def _normal_mac(value: object) -> str | None:
     if not isinstance(value, str):
         return None
-    compact = re.sub(r"[^0-9a-fA-F]", "", value).lower()
-    if len(compact) != 12 or re.fullmatch(r"[0-9a-f]{12}", compact) is None:
+    if not (
+        re.fullmatch(r"[0-9a-fA-F]{12}", value)
+        or re.fullmatch(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", value)
+        or re.fullmatch(r"(?:[0-9a-fA-F]{2}-){5}[0-9a-fA-F]{2}", value)
+    ):
+        return None
+    compact = value.replace(":", "").replace("-", "").lower()
+    first_octet = int(compact[:2], 16)
+    if first_octet & 1 or compact == "0" * 12 or compact == "f" * 12:
         return None
     return ":".join(compact[index : index + 2] for index in range(0, 12, 2))
 
@@ -115,16 +127,33 @@ def _safe_file(value: object, session: Path | None) -> tuple[Path | None, str | 
     path = Path(value)
     if not path.is_absolute() or session is None:
         return None, "absolute"
+    if any(component.is_symlink() for component in (path, *path.parents)):
+        return None, "symlink"
     try:
         resolved = path.resolve(strict=True)
         root = session.resolve(strict=True)
     except OSError:
         return None, "missing"
-    if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
-        return None, "symlink"
     if not path.is_file() or not _within(resolved, root):
         return None, "boundary"
     return path, None
+
+
+def _absolute_regular_file(value: object) -> tuple[Path | None, str | None]:
+    if not isinstance(value, (str, Path)):
+        return None, "type"
+    path = Path(value)
+    if not path.is_absolute():
+        return None, "absolute"
+    if any(component.is_symlink() for component in (path, *path.parents)):
+        return None, "symlink"
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError:
+        return None, "missing"
+    if not resolved.is_file():
+        return None, "type"
+    return resolved, None
 
 
 def _validate_ref(value: object, session: Path | None) -> tuple[Path | None, list[str]]:
@@ -229,7 +258,9 @@ def _validate_local_stack(value: object, reasons: list[str]) -> None:
         reasons.append("local_stack.endpoints")
 
 
-def _validate_repositories(value: object, task9: object, reasons: list[str]) -> None:
+def _validate_repositories(
+    value: object, task9: object, expected: dict[str, object] | None, reasons: list[str]
+) -> None:
     if not _record(value) or set(value) != {"backend", "esp", "firmware"}:
         reasons.append("repository.schema")
         return
@@ -241,7 +272,12 @@ def _validate_repositories(value: object, task9: object, reasons: list[str]) -> 
             continue
         path_value = repo.get("path")
         path = Path(path_value) if isinstance(path_value, str) else None
-        if path is None or not path.is_absolute() or not path.is_dir() or path.is_symlink():
+        if (
+            path is None
+            or not path.is_absolute()
+            or not path.is_dir()
+            or any(item.is_symlink() for item in (path, *path.parents))
+        ):
             reasons.append(f"{prefix}.path")
         if not isinstance(repo.get("sha"), str) or SHA40.fullmatch(repo["sha"]) is None:
             reasons.append(f"{prefix}.sha")
@@ -249,8 +285,8 @@ def _validate_repositories(value: object, task9: object, reasons: list[str]) -> 
         if not isinstance(exceptions, list):
             reasons.append(f"{prefix}.dirty_exceptions")
             continue
-        expected = [{"path": VOICE_PATH, "sha256": VOICE_SHA}] if name == "esp" else []
-        if exceptions != expected:
+        expected_exceptions = [{"path": VOICE_PATH, "sha256": VOICE_SHA}] if name == "esp" else []
+        if exceptions != expected_exceptions:
             reasons.append(f"{prefix}.dirty_exceptions")
         if path is not None:
             for item in exceptions:
@@ -266,10 +302,112 @@ def _validate_repositories(value: object, task9: object, reasons: list[str]) -> 
                     reasons.append(f"{prefix}.dirty_exception_hash")
     if task9 != TASK9_SHA:
         reasons.append("repository.firmware.ancestor")
+    if expected is not None and _record(value):
+        for name, field in (("backend", "backendGitSha"), ("esp", "espGitSha"), ("firmware", "firmwareGitSha")):
+            repo = value.get(name)
+            if not _record(repo) or repo.get("sha") != expected.get(field):
+                reasons.append(f"repository.{name}.anchor")
+        backend = value.get("backend")
+        if not _record(backend) or backend.get("path") != expected.get("backendWorktree"):
+            reasons.append("repository.backend.worktree_anchor")
 
 
-def _validate_materialization(value: object, reasons: list[str]) -> dict[str, object] | None:
-    fields = {"schemaVersion", "mode", "result", "course", "source", "replacement", "artifactChecksum"}
+def _validate_expected_identity(value: object, reasons: list[str]) -> dict[str, object] | None:
+    initial_reason_count = len(reasons)
+    fields = {
+        "schemaVersion",
+        "courseId",
+        "courseKey",
+        "sourceLessonId",
+        "sourceLessonVersion",
+        "replacementId",
+        "replacementVersion",
+        "lessonKey",
+        "contractVersion",
+        "rendererId",
+        "visualLayoutContract",
+        "contractChecksum",
+        "manifestChecksum",
+        "stepsChecksum",
+        "visualPackChecksum",
+        "backendGitSha",
+        "backendWorktree",
+        "espGitSha",
+        "firmwareGitSha",
+        "appSha256",
+        "appSize",
+        "robotMac",
+        "sessionId",
+        "materializedPackRoot",
+    }
+    if not _record(value) or set(value) != fields:
+        reasons.append("expected_identity.schema")
+        return None
+    if (
+        value.get("schemaVersion") != 1
+        or value.get("courseId") != COURSE_ID
+        or value.get("courseKey") != COURSE_KEY
+        or value.get("lessonKey") != LESSON_KEY
+        or not _valid_uuid(value.get("sourceLessonId"))
+        or not _valid_uuid(value.get("replacementId"))
+        or value.get("sourceLessonId") == value.get("replacementId")
+        or type(value.get("sourceLessonVersion")) is not int
+        or not 1 <= value["sourceLessonVersion"] <= 1000
+        or type(value.get("replacementVersion")) is not int
+        or not 1 <= value["replacementVersion"] <= 1000
+        or (
+            value.get("contractVersion"),
+            value.get("rendererId"),
+            value.get("visualLayoutContract"),
+            value.get("contractChecksum"),
+        )
+        != (CONTRACT_VERSION, RENDERER, LAYOUT, CONTRACT_CHECKSUM)
+        or any(
+            not _real_sha(value.get(field))
+            for field in ("manifestChecksum", "stepsChecksum", "visualPackChecksum", "appSha256")
+        )
+        or any(
+            not isinstance(value.get(field), str) or SHA40.fullmatch(value[field]) is None
+            for field in ("backendGitSha", "espGitSha", "firmwareGitSha")
+        )
+        or type(value.get("appSize")) is not int
+        or value["appSize"] <= 0
+        or _normal_mac(value.get("robotMac")) != ROBOT_MAC
+        or not _valid_uuid(value.get("sessionId"))
+    ):
+        reasons.append("expected_identity.identity")
+    for field in ("backendWorktree", "materializedPackRoot"):
+        raw = value.get(field)
+        path = Path(raw) if isinstance(raw, str) else None
+        if (
+            path is None
+            or not path.is_absolute()
+            or not path.is_dir()
+            or any(item.is_symlink() for item in (path, *path.parents))
+        ):
+            reasons.append(f"expected_identity.{field}")
+    return value if len(reasons) == initial_reason_count else None
+
+
+def _validate_materialization(
+    value: object, expected: dict[str, object] | None, expected_sha: object, reasons: list[str]
+) -> dict[str, object] | None:
+    fields = {
+        "schemaVersion",
+        "mode",
+        "result",
+        "course",
+        "source",
+        "replacement",
+        "artifactChecksum",
+        "backendGitSha",
+        "backendWorktree",
+        "lifecycleMode",
+        "materializerVersion",
+        "timestamp",
+        "sessionId",
+        "authorization",
+    }
     if not _record(value) or set(value) != fields:
         reasons.append("materialization.schema")
         return None
@@ -280,6 +418,10 @@ def _validate_materialization(value: object, reasons: list[str]) -> dict[str, ob
         value.get("schemaVersion") != 1
         or value.get("mode") != "materialize"
         or value.get("result") != "pass"
+        or value.get("lifecycleMode") != "authorized-local-materialize"
+        or value.get("materializerVersion") != "course-mode-curriculum.v2"
+        or not isinstance(value.get("timestamp"), str)
+        or UTC.fullmatch(value["timestamp"]) is None
         or not _real_sha(value.get("artifactChecksum"))
     ):
         reasons.append("materialization.identity")
@@ -294,6 +436,24 @@ def _validate_materialization(value: object, reasons: list[str]) -> dict[str, ob
         != hashlib.sha256(json.dumps(artifact_projection, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     ):
         reasons.append("materialization.artifact_checksum")
+    authorization = value.get("authorization")
+    if not _record(authorization) or set(authorization) != {"algorithm", "expectedIdentitySha256", "receiptDigest"}:
+        reasons.append("materialization.authorization")
+    else:
+        unsigned = {key: item for key, item in value.items() if key != "authorization"}
+        digest = hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        if (
+            authorization.get("algorithm") != "sha256"
+            or authorization.get("expectedIdentitySha256") != expected_sha
+            or authorization.get("receiptDigest") != digest
+        ):
+            reasons.append("materialization.authorization")
+    if expected is not None and (
+        value.get("backendGitSha") != expected.get("backendGitSha")
+        or value.get("backendWorktree") != expected.get("backendWorktree")
+        or value.get("sessionId") != expected.get("sessionId")
+    ):
+        reasons.append("materialization.anchor")
     if course != {"courseId": COURSE_ID, "courseKey": COURSE_KEY}:
         reasons.append("materialization.course")
     source_fields = {"lessonId", "lessonKey", "lessonVersion", "status", "assignable"}
@@ -304,7 +464,7 @@ def _validate_materialization(value: object, reasons: list[str]) -> dict[str, ob
         or source.get("lessonKey") != LESSON_KEY
         or type(source.get("lessonVersion")) is not int
         or not 1 <= source["lessonVersion"] <= 1000
-        or source.get("status") not in {"ARCHIVED", "SUPERSEDED"}
+        or not _one_of(source.get("status"), {"ARCHIVED", "SUPERSEDED"})
         or source.get("assignable") is not False
     ):
         reasons.append("materialization.source")
@@ -349,11 +509,27 @@ def _validate_materialization(value: object, reasons: list[str]) -> dict[str, ob
         not _real_sha(replacement.get(field)) for field in ("manifestChecksum", "stepsChecksum", "visualPackChecksum")
     ):
         reasons.append("materialization.checksum")
+    if expected is not None and _record(source) and _record(replacement):
+        anchor = {
+            "sourceLessonId": source.get("lessonId"),
+            "sourceLessonVersion": source.get("lessonVersion"),
+            "replacementId": replacement.get("lessonId"),
+            "replacementVersion": replacement.get("lessonVersion"),
+            "manifestChecksum": replacement.get("manifestChecksum"),
+            "stepsChecksum": replacement.get("stepsChecksum"),
+            "visualPackChecksum": replacement.get("visualPackChecksum"),
+        }
+        if any(expected.get(key) != item for key, item in anchor.items()):
+            reasons.append("materialization.anchor")
     return value if not any(reason.startswith("materialization.") for reason in reasons) else None
 
 
 def _validate_reviewed(
-    value: object, receipt: dict[str, object] | None, backend_sha: object, reasons: list[str]
+    value: object,
+    receipt: dict[str, object] | None,
+    backend_sha: object,
+    expected: dict[str, object] | None,
+    reasons: list[str],
 ) -> None:
     fields = {
         "courseId",
@@ -386,7 +562,7 @@ def _validate_reviewed(
     if receipt is not None:
         source = receipt["source"]
         replacement = receipt["replacement"]
-        expected = {
+        receipt_projection = {
             "courseId": COURSE_ID,
             "courseKey": COURSE_KEY,
             "sourceLessonId": source["lessonId"],
@@ -402,8 +578,27 @@ def _validate_reviewed(
             "visualPackChecksum": replacement["visualPackChecksum"],
             "backendSha": backend_sha,
         }
-        if value != expected:
+        if value != receipt_projection:
             reasons.append("identity.receipt_parity")
+    if expected is not None and _record(value):
+        external_projection = {
+            "courseId": expected.get("courseId"),
+            "courseKey": expected.get("courseKey"),
+            "sourceLessonId": expected.get("sourceLessonId"),
+            "replacementId": expected.get("replacementId"),
+            "lessonKey": expected.get("lessonKey"),
+            "replacementVersion": expected.get("replacementVersion"),
+            "contractVersion": expected.get("contractVersion"),
+            "rendererId": expected.get("rendererId"),
+            "visualLayoutContract": expected.get("visualLayoutContract"),
+            "contractChecksum": expected.get("contractChecksum"),
+            "manifestChecksum": expected.get("manifestChecksum"),
+            "stepsChecksum": expected.get("stepsChecksum"),
+            "visualPackChecksum": expected.get("visualPackChecksum"),
+            "backendSha": expected.get("backendGitSha"),
+        }
+        if value != external_projection:
+            reasons.append("identity.external_anchor")
 
 
 def _validate_assignment(value: object, receipt: dict[str, object] | None, reasons: list[str]) -> None:
@@ -435,8 +630,75 @@ def _validate_assignment(value: object, receipt: dict[str, object] | None, reaso
         reasons.append("assignment.checksum")
 
 
+def _validate_firmware_receipt(
+    value: object,
+    expected: dict[str, object] | None,
+    expected_sha: object,
+    session: Path | None,
+    reasons: list[str],
+) -> dict[str, object] | None:
+    fields = {
+        "schemaVersion",
+        "result",
+        "firmwareGitSha",
+        "buildTool",
+        "buildToolVersion",
+        "buildConfigSha256",
+        "app",
+        "expectedIdentitySha256",
+        "receiptDigest",
+    }
+    if not _record(value) or set(value) != fields:
+        reasons.append("firmware_receipt.schema")
+        return None
+    unsigned = {key: item for key, item in value.items() if key != "receiptDigest"}
+    digest = hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    app = value.get("app")
+    app_fields = {"path", "offset", "maxPartitionSize", "size", "sha256"}
+    if (
+        value.get("schemaVersion") != 1
+        or value.get("result") != "pass"
+        or value.get("buildTool") != "esp-idf"
+        or not isinstance(value.get("buildToolVersion"), str)
+        or not value["buildToolVersion"]
+        or not _real_sha(value.get("buildConfigSha256"))
+        or value.get("expectedIdentitySha256") != expected_sha
+        or value.get("receiptDigest") != digest
+        or not _record(app)
+        or set(app) != app_fields
+    ):
+        reasons.append("firmware_receipt.identity")
+        return None
+    path, error = _safe_file(app.get("path"), session)
+    if error or path is None:
+        reasons.append("firmware_receipt.app_path")
+    if (
+        app.get("offset") != "0x20000"
+        or app.get("maxPartitionSize") != 0x7E0000
+        or type(app.get("size")) is not int
+        or app["size"] <= 0
+        or not _real_sha(app.get("sha256"))
+        or (
+            path is not None
+            and (path.stat().st_size != app["size"] or hashlib.sha256(path.read_bytes()).hexdigest() != app["sha256"])
+        )
+    ):
+        reasons.append("firmware_receipt.app")
+    if expected is not None and (
+        value.get("firmwareGitSha") != expected.get("firmwareGitSha")
+        or app.get("sha256") != expected.get("appSha256")
+        or app.get("size") != expected.get("appSize")
+    ):
+        reasons.append("firmware_receipt.anchor")
+    return value
+
+
 def _validate_visual_pack(
-    value: object, receipt: dict[str, object] | None, session: Path | None, reasons: list[str]
+    value: object,
+    receipt: dict[str, object] | None,
+    expected: dict[str, object] | None,
+    session: Path | None,
+    reasons: list[str],
 ) -> None:
     if not _record(value) or set(value) != {
         "state",
@@ -486,10 +748,19 @@ def _validate_visual_pack(
         "compatibilityMetadata",
     }
     seen: set[str] = set()
+    phase_ids: set[str] = set()
+    activity_ids: set[str] = set()
+    pack_root = Path(expected["materializedPackRoot"]) if expected is not None else None
     for phase in phases:
         if not _record(phase) or set(phase) != phase_fields:
             reasons.append("visual_pack.phase")
             continue
+        phase_id = phase.get("phaseId")
+        activities = phase.get("activityIds")
+        if phase_id in phase_ids or any(item in activity_ids for item in activities):
+            reasons.append("visual_pack.phase_unique")
+        phase_ids.add(phase_id)
+        activity_ids.update(activities)
         if (
             not isinstance(phase.get("phaseId"), str)
             or not isinstance(phase.get("activityIds"), list)
@@ -497,7 +768,7 @@ def _validate_visual_pack(
             or any(not isinstance(item, str) or not item for item in phase["activityIds"])
             or phase.get("templateId") != "layeredCinematic"
             or phase.get("templateVersion") != 1
-            or phase.get("playbackMode") not in {"once", "hold"}
+            or not _one_of(phase.get("playbackMode"), {"once", "hold"})
             or not isinstance(phase.get("layers"), list)
         ):
             reasons.append("visual_pack.phase")
@@ -507,13 +778,26 @@ def _validate_visual_pack(
         objects = [layer for layer in layers if _record(layer) and layer.get("slot") == "teachingObject"]
         videos = [layer for layer in layers if _record(layer) and layer.get("mediaType") == "video/mp4"]
         robots = [layer for layer in videos if layer.get("slot") == "robotOverlay"]
-        if len(backgrounds) != 1 or len(objects) > 1 or len(videos) != 1 or len(robots) != 1:
+        image_types = {"image/jpeg", "image/png"}
+        if (
+            len(backgrounds) != 1
+            or not isinstance(backgrounds[0].get("mediaType"), str)
+            or backgrounds[0].get("mediaType") not in image_types
+            or len(objects) > 1
+            or any(
+                not isinstance(layer.get("mediaType"), str) or layer.get("mediaType") not in image_types
+                for layer in objects
+            )
+            or len(videos) != 1
+            or len(robots) != 1
+            or len(layers) != len(backgrounds) + len(objects) + len(robots)
+        ):
             reasons.append("visual_pack.robot_video")
         for layer in layers:
             if not _record(layer) or set(layer) != layer_fields:
                 reasons.append("visual_pack.layer_schema")
                 continue
-            if layer.get("slot") not in {"backgroundScene", "teachingObject", "robotOverlay"}:
+            if not _one_of(layer.get("slot"), {"backgroundScene", "teachingObject", "robotOverlay"}):
                 reasons.append("visual_pack.layer_slot")
             identifiers = (
                 layer.get("assetKey"),
@@ -538,8 +822,6 @@ def _validate_visual_pack(
                 or layer.get("publicationState") != "published"
                 or layer.get("immutable") is not True
                 or not isinstance(layer.get("storagePath"), str)
-                or Path(layer["storagePath"]).is_absolute()
-                or ".." in Path(layer["storagePath"]).parts
                 or not _real_sha(layer.get("sha256"))
                 or type(layer.get("bytes")) is not int
                 or layer["bytes"] <= 0
@@ -547,10 +829,20 @@ def _validate_visual_pack(
                 or layer["width"] <= 0
                 or type(layer.get("height")) is not int
                 or layer["height"] <= 0
-                or not isinstance(layer.get("mediaType"), str)
-                or layer["mediaType"] not in {"image/jpeg", "image/png", "video/mp4"}
+                or not _one_of(layer.get("mediaType"), {"image/jpeg", "image/png", "video/mp4"})
             ):
                 reasons.append("visual_pack.layer")
+            storage = Path(layer["storagePath"]) if isinstance(layer.get("storagePath"), str) else None
+            if (
+                storage is None
+                or not storage.is_absolute()
+                or any(component.is_symlink() for component in (storage, *storage.parents))
+                or pack_root is None
+                or not _within(storage.resolve(strict=False), pack_root.resolve(strict=False))
+                or asset is None
+                or storage.resolve(strict=False) != asset.resolve(strict=False)
+            ):
+                reasons.append("visual_pack.storage_path")
             if asset is not None and (
                 asset.stat().st_size != layer.get("bytes")
                 or hashlib.sha256(asset.read_bytes()).hexdigest() != layer.get("sha256")
@@ -607,7 +899,7 @@ def _validate_visual_pack(
                     set(metadata) != keys
                     or metadata.get("mediaKind") != "image"
                     or metadata.get("mediaType") != layer.get("mediaType")
-                    or metadata.get("fit") not in {"cover", "contain"}
+                    or not _one_of(metadata.get("fit"), {"cover", "contain"})
                     or not _record(rect)
                     or set(rect) != {"x", "y", "width", "height"}
                     or any(type(rect.get(key)) is not int for key in rect)
@@ -623,15 +915,21 @@ def _hex(value: object) -> int | None:
     return int(value, 16)
 
 
-def _validate_flash(value: object, session: Path | None, reasons: list[str]) -> None:
+def _validate_flash(
+    value: object,
+    firmware_receipt: dict[str, object] | None,
+    session: Path | None,
+    reasons: list[str],
+) -> dict[str, object] | None:
     if not _record(value) or set(value) != {"partitionSnapshot", "appPartition", "image", "operations"}:
         reasons.append("flash.schema")
-        return
+        return None
     snapshot = _parse_ref_json(value.get("partitionSnapshot"), session, "flash.partition_snapshot", reasons)
     app_claim = value.get("appPartition")
     image = value.get("image")
     operations = value.get("operations")
     app: dict[str, object] | None = None
+    nvs: dict[str, object] | None = None
     if (
         _record(snapshot)
         and set(snapshot) == {"schemaVersion", "flashSize", "partitions", "snapshotChecksum"}
@@ -676,6 +974,8 @@ def _validate_flash(value: object, session: Path | None, reasons: list[str]) -> 
                 app = partition
                 if partition.get("protected") is not False or offset != 0x20000 or end != 0x800000:
                     reasons.append("flash.partition_snapshot.application")
+            elif partition.get("name") == "nvs":
+                nvs = partition
             elif partition.get("protected") is not True:
                 reasons.append("flash.partition_snapshot.protected")
         if len(partitions) != len(expected_names) or previous_end != 0x1000000:
@@ -704,7 +1004,7 @@ def _validate_flash(value: object, session: Path | None, reasons: list[str]) -> 
             reasons.append("flash.file_size")
     if not isinstance(operations, list) or len(operations) != 3:
         reasons.append("flash.operations")
-        return
+        return nvs
     expected_ops = ("read_flash", "write_flash", "read_flash")
     operation_paths: list[Path | None] = []
     app_offset = _hex(app.get("offset")) if app else None
@@ -745,14 +1045,37 @@ def _validate_flash(value: object, session: Path | None, reasons: list[str]) -> 
         != image_doc.get("sha256")
     ):
         reasons.append("flash.post_readback")
+    receipt_app = firmware_receipt.get("app") if _record(firmware_receipt) else None
+    if (
+        not _record(receipt_app)
+        or not _record(image)
+        or not _record(app_claim)
+        or (
+            image.get("path") != receipt_app.get("path")
+            or image.get("sha256") != receipt_app.get("sha256")
+            or image.get("size") != receipt_app.get("size")
+            or app_claim.get("offset") != receipt_app.get("offset")
+            or _hex(app_claim.get("size")) != receipt_app.get("maxPartitionSize")
+        )
+    ):
+        reasons.append("flash.firmware_receipt")
+    return nvs
 
 
-def _validate_nvs(value: object, session: Path | None, reasons: list[str]) -> None:
-    if not _record(value) or set(value) != {"before", "after"}:
+def _validate_nvs(value: object, partition: dict[str, object] | None, session: Path | None, reasons: list[str]) -> None:
+    if not _record(value) or set(value) != {"partition", "before", "after"}:
         reasons.append("nvs.schema")
         return
     before, before_errors = _validate_ref(value.get("before"), session)
     after, after_errors = _validate_ref(value.get("after"), session)
+    claim = value.get("partition")
+    if (
+        not _record(claim)
+        or set(claim) != {"offset", "size", "end"}
+        or partition is None
+        or claim != {key: partition.get(key) for key in ("offset", "size", "end")}
+    ):
+        reasons.append("nvs.partition")
     if before_errors or after_errors:
         reasons.append("nvs.file")
     if (
@@ -767,13 +1090,25 @@ def _validate_nvs(value: object, session: Path | None, reasons: list[str]) -> No
         and hashlib.sha256(before.read_bytes()).hexdigest() != hashlib.sha256(after.read_bytes()).hexdigest()
     ):
         reasons.append("nvs.equality")
+    size = _hex(partition.get("size")) if partition else None
+    if size is None or before is None or after is None or before.stat().st_size != size or after.stat().st_size != size:
+        reasons.append("nvs.size")
 
 
-def validate_input(document: object, *, repository_root: Path) -> list[str]:
+def _validate_input(
+    document: object,
+    *,
+    repository_root: Path,
+    expected_identity: object,
+    expected_identity_sha256: object,
+) -> list[str]:
     del repository_root
     if not _record(document):
         return ["input.not_object"]
     reasons: list[str] = []
+    external = _validate_expected_identity(expected_identity, reasons)
+    if not _real_sha(expected_identity_sha256):
+        reasons.append("expected_identity.sha256")
     if set(document) != TOP_FIELDS:
         reasons.append("input.schema")
     if (
@@ -792,7 +1127,7 @@ def validate_input(document: object, *, repository_root: Path) -> list[str]:
             if (
                 candidate.is_absolute()
                 and resolved.is_dir()
-                and not candidate.is_symlink()
+                and not any(component.is_symlink() for component in (candidate, *candidate.parents))
                 and resolved != root
                 and _within(resolved, root)
             ):
@@ -804,7 +1139,7 @@ def validate_input(document: object, *, repository_root: Path) -> list[str]:
     if not isinstance(document.get("outputDirectory"), str) or document.get("outputDirectory") != session_value:
         reasons.append("path.output")
     _validate_local_stack(document.get("localStack"), reasons)
-    _validate_repositories(document.get("repositories"), document.get("firmwareRequiredAncestor"), reasons)
+    _validate_repositories(document.get("repositories"), document.get("firmwareRequiredAncestor"), external, reasons)
     repos = document.get("repositories") if _record(document.get("repositories")) else {}
     backend = repos.get("backend") if _record(repos.get("backend")) else {}
     backend_sha = backend.get("sha")
@@ -816,14 +1151,34 @@ def validate_input(document: object, *, repository_root: Path) -> list[str]:
     materialization_doc = _parse_ref_json(
         document.get("materializationReceipt"), session, "materialization.file", reasons
     )
-    materialization = _validate_materialization(materialization_doc, reasons)
-    _validate_reviewed(document.get("reviewedIdentity"), materialization, backend_sha, reasons)
+    materialization = _validate_materialization(materialization_doc, external, expected_identity_sha256, reasons)
+    _validate_reviewed(document.get("reviewedIdentity"), materialization, backend_sha, external, reasons)
     assignment_doc = _parse_ref_json(document.get("assignmentSnapshot"), session, "assignment.file", reasons)
     _validate_assignment(assignment_doc, materialization, reasons)
-    _validate_visual_pack(document.get("visualPack"), materialization, session, reasons)
-    _validate_flash(document.get("flashPlan"), session, reasons)
-    _validate_nvs(document.get("nvsPreservation"), session, reasons)
+    firmware_doc = _parse_ref_json(document.get("firmwareBuildReceipt"), session, "firmware_receipt.file", reasons)
+    firmware_receipt = _validate_firmware_receipt(firmware_doc, external, expected_identity_sha256, session, reasons)
+    _validate_visual_pack(document.get("visualPack"), materialization, external, session, reasons)
+    nvs_partition = _validate_flash(document.get("flashPlan"), firmware_receipt, session, reasons)
+    _validate_nvs(document.get("nvsPreservation"), nvs_partition, session, reasons)
     return sorted(set(reasons))
+
+
+def validate_input(
+    document: object,
+    *,
+    repository_root: Path,
+    expected_identity: object,
+    expected_identity_sha256: object,
+) -> list[str]:
+    try:
+        return _validate_input(
+            document,
+            repository_root=repository_root,
+            expected_identity=expected_identity,
+            expected_identity_sha256=expected_identity_sha256,
+        )
+    except (KeyError, OSError, TypeError, ValueError):
+        return ["input.type"]
 
 
 def validate_image(document: object, expected_image: object, expected_sha: object) -> list[str]:
@@ -939,6 +1294,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--expected-identity", required=True, type=Path)
+    parser.add_argument("--expected-identity-sha256", required=True)
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[3]
     try:
@@ -950,7 +1307,32 @@ def main(argv: list[str] | None = None) -> int:
     if error:
         _emit({"reasons": [f"input.{error}"], "valid": False})
         return 1
-    reasons = validate_input(expected, repository_root=root)
+    identity_path, identity_path_error = _absolute_regular_file(args.expected_identity)
+    if identity_path_error or identity_path is None:
+        _emit({"reasons": [f"expected_identity.path.{identity_path_error}"], "valid": False})
+        return 1
+    identity_raw = identity_path.read_bytes()
+    if (
+        not _real_sha(args.expected_identity_sha256)
+        or hashlib.sha256(identity_raw).hexdigest() != args.expected_identity_sha256
+    ):
+        _emit({"reasons": ["expected_identity.hash"], "valid": False})
+        return 1
+    identity, identity_error = _load_json_bytes(identity_raw)
+    if identity_error:
+        _emit({"reasons": [f"expected_identity.{identity_error}"], "valid": False})
+        return 1
+    if _record(expected) and isinstance(expected.get("sessionDirectory"), str):
+        session_candidate = Path(expected["sessionDirectory"])
+        if _within(identity_path, session_candidate.resolve(strict=False)):
+            _emit({"reasons": ["expected_identity.trust_domain"], "valid": False})
+            return 1
+    reasons = validate_input(
+        expected,
+        repository_root=root,
+        expected_identity=identity,
+        expected_identity_sha256=args.expected_identity_sha256,
+    )
     if reasons:
         _emit({"reasons": reasons, "valid": False})
         return 1
@@ -1031,13 +1413,14 @@ def main(argv: list[str] | None = None) -> int:
     if reasons:
         _emit({"reasons": sorted(set(reasons)), "valid": False})
         return 1
-    reviewed = expected["reviewedIdentity"]
+    reviewed = identity
     payload = {
         "valid": True,
         "result": "PASS",
         "inputChecksum": hashlib.sha256(
             json.dumps(expected, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest(),
+        "expectedIdentitySha256": args.expected_identity_sha256,
         "courseId": COURSE_ID,
         "courseKey": COURSE_KEY,
         "lessonKey": LESSON_KEY,

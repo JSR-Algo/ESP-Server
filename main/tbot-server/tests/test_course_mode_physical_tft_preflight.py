@@ -27,6 +27,10 @@ VOICE_PATH = "main/tbot-server/tests/test_lesson_voice_output_discipline.py"
 VOICE_SHA = "08f77b5452301224b17b4b333d2d032fff40c06aa2eaea97fa90932dae7d97e3"
 APP_OFFSET = 0x20000
 APP_PARTITION_SIZE = 0x7E0000
+NVS_OFFSET = 0x9000
+NVS_SIZE = 0x4000
+SESSION_ID = "a23be10d-1f38-4c14-b563-bcc821cb809e"
+EXPECTED_IDENTITIES = {}
 
 
 @pytest.fixture
@@ -80,7 +84,7 @@ def _layer(session: Path, slot: str, media_type: str, index: int) -> dict:
         "state": "READY",
         "publicationState": "published",
         "immutable": True,
-        "storagePath": f"published/w01/{slot}-{index}",
+        "storagePath": ref["path"],
         "assetPath": ref["path"],
         "sha256": ref["sha256"],
         "bytes": len(payload),
@@ -211,12 +215,78 @@ def valid_input(session: Path, tmp_path: Path) -> dict:
     )
     image = b"candidate-application-image"
     image_ref = _write(session / "candidate-app.bin", image)
+    expected_identity = {
+        "schemaVersion": 1,
+        "courseId": "a17792f6-8d86-4ad1-a6f3-77663b4d4674",
+        "courseKey": "english-6month-4-6",
+        "sourceLessonId": SOURCE_ID,
+        "sourceLessonVersion": 1,
+        "replacementId": REPLACEMENT_ID,
+        "replacementVersion": 2,
+        "lessonKey": "w01-greetings-politeness",
+        "contractVersion": "courseCompanion.v2.contract.v1",
+        "rendererId": "teebot-lesson-renderer.v5",
+        "visualLayoutContract": "renderer-v5.layered-cinematic-layout.v1",
+        "contractChecksum": CONTRACT_SHA,
+        "manifestChecksum": MANIFEST_SHA,
+        "stepsChecksum": STEPS_SHA,
+        "visualPackChecksum": pack_sha,
+        "backendGitSha": BACKEND_SHA,
+        "backendWorktree": repos["backend"]["path"],
+        "espGitSha": ESP_SHA,
+        "firmwareGitSha": FIRMWARE_SHA,
+        "appSha256": image_ref["sha256"],
+        "appSize": len(image),
+        "robotMac": "14:c1:9f:d1:ac:20",
+        "sessionId": SESSION_ID,
+        "materializedPackRoot": str(session / "assets"),
+    }
+    expected_ref = _write_json(tmp_path / "expected-physical-identity.json", expected_identity)
+    EXPECTED_IDENTITIES[str(session)] = (expected_identity, expected_ref)
+    materialization.update(
+        {
+            "backendGitSha": BACKEND_SHA,
+            "backendWorktree": repos["backend"]["path"],
+            "lifecycleMode": "authorized-local-materialize",
+            "materializerVersion": "course-mode-curriculum.v2",
+            "timestamp": "2026-08-29T00:00:01Z",
+            "sessionId": SESSION_ID,
+        }
+    )
+    materialization["authorization"] = {
+        "algorithm": "sha256",
+        "expectedIdentitySha256": expected_ref["sha256"],
+        "receiptDigest": hashlib.sha256(
+            json.dumps(materialization, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+    materialization_ref = _write_json(session / "materialization-receipt.json", materialization)
+    firmware_receipt = {
+        "schemaVersion": 1,
+        "result": "pass",
+        "firmwareGitSha": FIRMWARE_SHA,
+        "buildTool": "esp-idf",
+        "buildToolVersion": "5.3.2",
+        "buildConfigSha256": hashlib.sha256(b"sdkconfig").hexdigest(),
+        "app": {
+            "path": image_ref["path"],
+            "offset": "0x20000",
+            "maxPartitionSize": APP_PARTITION_SIZE,
+            "size": len(image),
+            "sha256": image_ref["sha256"],
+        },
+        "expectedIdentitySha256": expected_ref["sha256"],
+    }
+    firmware_receipt["receiptDigest"] = hashlib.sha256(
+        json.dumps(firmware_receipt, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    firmware_ref = _write_json(session / "firmware-build-receipt.json", firmware_receipt)
     before = b"B" * APP_PARTITION_SIZE
     after = image + b"\xff" * (APP_PARTITION_SIZE - len(image))
     before_ref = _write(session / "app-before.bin", before)
     after_ref = _write(session / "app-after.bin", after)
-    nvs_before = _write(session / "nvs-before.bin", b"preserved-nvs")
-    nvs_after = _write(session / "nvs-after.bin", b"preserved-nvs")
+    nvs_before = _write(session / "nvs-before.bin", b"N" * NVS_SIZE)
+    nvs_after = _write(session / "nvs-after.bin", b"N" * NVS_SIZE)
     reviewed = materialization["replacement"]
     return {
         "schemaVersion": 3,
@@ -258,6 +328,7 @@ def valid_input(session: Path, tmp_path: Path) -> dict:
         },
         "materializationReceipt": materialization_ref,
         "assignmentSnapshot": assignment_ref,
+        "firmwareBuildReceipt": firmware_ref,
         "visualPack": {
             "state": "READY",
             "publicationState": "published",
@@ -277,7 +348,11 @@ def valid_input(session: Path, tmp_path: Path) -> dict:
                 {"operation": "read_flash", "offset": "0x20000", "size": APP_PARTITION_SIZE, **after_ref},
             ],
         },
-        "nvsPreservation": {"before": nvs_before, "after": nvs_after},
+        "nvsPreservation": {
+            "partition": {"offset": "0x9000", "size": "0x4000", "end": "0xd000"},
+            "before": nvs_before,
+            "after": nvs_after,
+        },
     }
 
 
@@ -366,7 +441,51 @@ def _validate(document):
     sys.path.insert(0, str(SERVER / "scripts"))
     from course_mode_physical_tft_preflight import validate_input
 
-    return validate_input(document, repository_root=ROOT)
+    repositories = document.get("repositories") if isinstance(document, dict) else None
+    backend_value = repositories.get("backend") if isinstance(repositories, dict) else None
+    backend = backend_value if isinstance(backend_value, dict) else {}
+    match = next(
+        (item for item in EXPECTED_IDENTITIES.values() if item[0]["backendWorktree"] == backend.get("path")),
+        next(reversed(EXPECTED_IDENTITIES.values())),
+    )
+    identity, ref = match
+    return validate_input(
+        document,
+        repository_root=ROOT,
+        expected_identity=identity,
+        expected_identity_sha256=ref["sha256"],
+    )
+
+
+def _validate_with_identity(document, identity, identity_sha):
+    sys.path.insert(0, str(SERVER / "scripts"))
+    from course_mode_physical_tft_preflight import validate_input
+
+    return validate_input(
+        document,
+        repository_root=ROOT,
+        expected_identity=identity,
+        expected_identity_sha256=identity_sha,
+    )
+
+
+def _rewrite_materialization(document, mutate):
+    body = json.loads(Path(document["materializationReceipt"]["path"]).read_text())
+    mutate(body)
+    body["artifactChecksum"] = hashlib.sha256(
+        json.dumps(
+            {key: body[key] for key in ("course", "source", "replacement")},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    unsigned = {key: value for key, value in body.items() if key != "authorization"}
+    body["authorization"]["receiptDigest"] = hashlib.sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    document["materializationReceipt"] = _write_json(
+        Path(document["sessionDirectory"]) / "rewritten-materialization.json", body
+    )
 
 
 def test_canonical_receipt_derived_preflight_passes_cli(tmp_path, session_dir):
@@ -375,8 +494,20 @@ def test_canonical_receipt_derived_preflight_passes_cli(tmp_path, session_dir):
     source = session_dir / "input.json"
     output = session_dir / "result.json"
     source.write_text(json.dumps(document))
+    _, expected_ref = EXPECTED_IDENTITIES[str(session_dir)]
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--input", str(source), "--output", str(output)],
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--input",
+            str(source),
+            "--output",
+            str(output),
+            "--expected-identity",
+            expected_ref["path"],
+            "--expected-identity-sha256",
+            expected_ref["sha256"],
+        ],
         cwd=ROOT,
         env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
         capture_output=True,
@@ -385,6 +516,7 @@ def test_canonical_receipt_derived_preflight_passes_cli(tmp_path, session_dir):
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout)
     assert payload["replacementId"] == REPLACEMENT_ID and payload["valid"] is True
+    assert payload["expectedIdentitySha256"] == expected_ref["sha256"]
     assert (
         payload["inputChecksum"]
         == hashlib.sha256(json.dumps(document, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -419,11 +551,138 @@ def test_receipts_are_parsed_strictly_and_are_authoritative(tmp_path, session_di
     assert "materialization.replacement" in _validate(ambiguous)
 
 
+def test_external_identity_defeats_coherent_evidence_rewrite(tmp_path, session_dir):
+    base = valid_input(session_dir, tmp_path)
+    rewritten_id = "97b892e1-0f1e-42d5-bbc4-50465042e111"
+    rewritten = deepcopy(base)
+    rewritten["reviewedIdentity"]["replacementId"] = rewritten_id
+    rewritten["assignmentSnapshot"] = deepcopy(rewritten["assignmentSnapshot"])
+    assignment = json.loads(Path(rewritten["assignmentSnapshot"]["path"]).read_text())
+    assignment["assignments"][0]["lessonId"] = rewritten_id
+    assignment["snapshotChecksum"] = hashlib.sha256(
+        json.dumps(assignment["assignments"], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    rewritten["assignmentSnapshot"] = _write_json(session_dir / "rewritten-assignment.json", assignment)
+    rewritten["visualPack"]["lessonId"] = rewritten_id
+    _rewrite_materialization(rewritten, lambda body: body["replacement"].update(lessonId=rewritten_id))
+    reasons = _validate(rewritten)
+    assert "materialization.anchor" in reasons
+    assert "identity.external_anchor" in reasons
+
+
+def test_external_identity_and_receipts_fail_closed(tmp_path, session_dir):
+    base = valid_input(session_dir, tmp_path)
+    identity, identity_ref = EXPECTED_IDENTITIES[str(session_dir)]
+    bad_mac_values = ["junk14:c1:9f:d1:ac:20", "15:c1:9f:d1:ac:20", "00:00:00:00:00:00"]
+    for mac in bad_mac_values:
+        changed = deepcopy(identity)
+        changed["robotMac"] = mac
+        assert "expected_identity.identity" in _validate_with_identity(base, changed, identity_ref["sha256"])
+
+    unsigned = deepcopy(base)
+    receipt = json.loads(Path(base["materializationReceipt"]["path"]).read_text())
+    receipt["authorization"].pop("receiptDigest")
+    unsigned["materializationReceipt"] = _write_json(session_dir / "unsigned-materialization.json", receipt)
+    assert "materialization.authorization" in _validate(unsigned)
+
+    firmware_drift = deepcopy(base)
+    firmware = json.loads(Path(base["firmwareBuildReceipt"]["path"]).read_text())
+    firmware["app"]["sha256"] = hashlib.sha256(b"other-app").hexdigest()
+    unsigned_firmware = {key: value for key, value in firmware.items() if key != "receiptDigest"}
+    firmware["receiptDigest"] = hashlib.sha256(
+        json.dumps(unsigned_firmware, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    firmware_drift["firmwareBuildReceipt"] = _write_json(session_dir / "firmware-drift.json", firmware)
+    reasons = _validate(firmware_drift)
+    assert "firmware_receipt.anchor" in reasons
+    assert "flash.firmware_receipt" in reasons
+
+
+def test_nvs_visual_identifiers_and_parent_symlinks_fail_closed(tmp_path, session_dir):
+    base = valid_input(session_dir, tmp_path)
+    short_nvs = deepcopy(base)
+    short_nvs["nvsPreservation"]["after"] = _write(session_dir / "short-nvs.bin", b"N" * (NVS_SIZE - 1))
+    assert "nvs.size" in _validate(short_nvs)
+
+    duplicate_phase = deepcopy(base)
+    duplicate_phase["visualPack"]["phases"][1]["phaseId"] = "teach"
+    assert "visual_pack.phase_unique" in _validate(duplicate_phase)
+    duplicate_activity = deepcopy(base)
+    duplicate_activity["visualPack"]["phases"][1]["activityIds"] = ["w01-a1"]
+    assert "visual_pack.phase_unique" in _validate(duplicate_activity)
+
+    linked_parent = session_dir / "linked-assets"
+    linked_parent.symlink_to(session_dir / "assets", target_is_directory=True)
+    linked = deepcopy(base)
+    linked["visualPack"]["phases"][0]["layers"][0]["assetPath"] = str(
+        linked_parent / Path(base["visualPack"]["phases"][0]["layers"][0]["assetPath"]).name
+    )
+    assert "visual_pack.asset_path" in _validate(linked)
+
+
+def test_external_identity_duplicate_keys_and_symlink_path_are_rejected(tmp_path, session_dir):
+    document = valid_input(session_dir, tmp_path)
+    source = session_dir / "input-external.json"
+    source.write_text(json.dumps(document))
+    duplicate = tmp_path / "duplicate-identity.json"
+    duplicate.write_text('{"schemaVersion":1,"schemaVersion":1}')
+    duplicate_sha = hashlib.sha256(duplicate.read_bytes()).hexdigest()
+    duplicate_result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--input",
+            str(source),
+            "--output",
+            str(session_dir / "duplicate-out.json"),
+            "--expected-identity",
+            str(duplicate),
+            "--expected-identity-sha256",
+            duplicate_sha,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(duplicate_result.stdout)["reasons"] == ["expected_identity.duplicate_key"]
+
+    _, identity_ref = EXPECTED_IDENTITIES[str(session_dir)]
+    identity_link = tmp_path / "identity-link.json"
+    identity_link.symlink_to(identity_ref["path"])
+    symlink_result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--input",
+            str(source),
+            "--output",
+            str(session_dir / "symlink-out.json"),
+            "--expected-identity",
+            str(identity_link),
+            "--expected-identity-sha256",
+            identity_ref["sha256"],
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(symlink_result.stdout)["reasons"] == ["expected_identity.path.symlink"]
+
+
 def test_duplicate_json_keys_fail_before_commands(session_dir):
     source = session_dir / "duplicate.json"
     source.write_text('{"schemaVersion":3,"schemaVersion":3}')
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--input", str(source), "--output", str(session_dir / "out.json")],
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--input",
+            str(source),
+            "--output",
+            str(session_dir / "out.json"),
+            "--expected-identity",
+            str(session_dir / "unused.json"),
+            "--expected-identity-sha256",
+            "a" * 64,
+        ],
         env={"PATH": ""},
         capture_output=True,
         text=True,
@@ -492,6 +751,12 @@ def test_layers_require_exact_schema_unique_real_files_and_one_robot_video(tmp_p
             ),
             "visual_pack.layer_slot",
         ),
+        (
+            lambda d: d["visualPack"]["phases"][0]["layers"].append(
+                _layer(session_dir, "robotOverlay", "image/png", 7)
+            ),
+            "visual_pack.robot_video",
+        ),
     ]
     for mutate, reason in cases:
         value = deepcopy(base)
@@ -526,6 +791,7 @@ def test_wrong_type_cli_inputs_always_emit_stable_json(tmp_path, session_dir):
     for index, value in enumerate(values):
         source = session_dir / f"wrong-{index}.json"
         source.write_text(json.dumps(value))
+        _, expected_ref = EXPECTED_IDENTITIES[str(session_dir)]
         result = subprocess.run(
             [
                 sys.executable,
@@ -534,6 +800,10 @@ def test_wrong_type_cli_inputs_always_emit_stable_json(tmp_path, session_dir):
                 str(source),
                 "--output",
                 str(session_dir / f"wrong-{index}-out.json"),
+                "--expected-identity",
+                expected_ref["path"],
+                "--expected-identity-sha256",
+                expected_ref["sha256"],
             ],
             env={"PATH": ""},
             capture_output=True,
@@ -542,6 +812,39 @@ def test_wrong_type_cli_inputs_always_emit_stable_json(tmp_path, session_dir):
         assert result.returncode == 1
         assert json.loads(result.stdout)["valid"] is False
         assert "Traceback" not in result.stderr
+
+
+def test_recursive_wrong_type_sweep_never_raises(tmp_path, session_dir):
+    base = valid_input(session_dir, tmp_path)
+    paths = []
+
+    def collect(value, path=()):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                paths.append((*path, key))
+                collect(item, (*path, key))
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                paths.append((*path, index))
+                collect(item, (*path, index))
+
+    def assign(value, path, replacement):
+        target = value
+        for component in path[:-1]:
+            target = target[component]
+        target[path[-1]] = replacement
+
+    collect(base)
+    for path in paths:
+        original = base
+        for component in path:
+            original = original[component]
+        replacements = ({}, [], None, 7, "wrong")
+        replacement = next(item for item in replacements if type(item) is not type(original))
+        changed = deepcopy(base)
+        assign(changed, path, replacement)
+        reasons = _validate(changed)
+        assert isinstance(reasons, list), path
 
 
 def test_compose_non_mapping_and_malformed_secret_input_are_stable(tmp_path, session_dir):
@@ -555,7 +858,18 @@ def test_compose_non_mapping_and_malformed_secret_input_are_stable(tmp_path, ses
     source = session_dir / "bad.json"
     source.write_text('{"token":"private"')
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--input", str(source), "--output", str(session_dir / "bad-out.json")],
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--input",
+            str(source),
+            "--output",
+            str(session_dir / "bad-out.json"),
+            "--expected-identity",
+            str(session_dir / "unused.json"),
+            "--expected-identity-sha256",
+            "a" * 64,
+        ],
         env={"PATH": ""},
         capture_output=True,
         text=True,
