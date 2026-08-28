@@ -145,17 +145,25 @@ def test_top_level_contract_must_match_lesson_envelope(backend_contracts) -> Non
         simulate_fixture(mutated)
 
 
-@pytest.mark.parametrize("mutation", [
-    lambda fixture: fixture["lessons"].append({**copy.deepcopy(fixture["lessons"][0]), "week": 27}),
-    lambda fixture: fixture["lessons"].append(copy.deepcopy(fixture["lessons"][0])),
+@pytest.mark.parametrize("mutation, code", [
+    (lambda fixture: fixture["lessons"].append(
+        {**copy.deepcopy(fixture["lessons"][0]), "week": 27},
+    ), "LESSON_ENVELOPE_COUNT"),
+    (lambda fixture: fixture["lessons"].__setitem__(
+        -1, copy.deepcopy(fixture["lessons"][0]),
+    ), "LESSON_WEEK_DUPLICATE"),
+    (lambda fixture: fixture["lessons"].pop(), "LESSON_ENVELOPE_COUNT"),
 ])
-def test_lesson_envelope_rejects_extra_or_duplicate_weeks(backend_contracts, mutation) -> None:
+def test_lesson_envelope_rejects_extra_duplicate_or_missing_weeks(
+    backend_contracts, mutation, code,
+) -> None:
     fixture, _ = backend_contracts
     mutated = copy.deepcopy(fixture)
     mutation(mutated)
 
-    with pytest.raises(CourseModeSimulationError, match="lesson weeks must be exactly"):
+    with pytest.raises(CourseModeSimulationError) as caught:
         simulate_fixture(mutated)
+    assert caught.value.code == code
 
 
 def test_recomputed_object_key_drift_fails_phase_binding(backend_contracts) -> None:

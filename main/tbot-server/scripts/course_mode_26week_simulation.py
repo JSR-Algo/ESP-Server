@@ -510,11 +510,27 @@ def _contract_drift_message(expected: dict[str, Any], actual: dict[str, Any], we
 def _simulate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
     raw_contracts = fixture["contracts"]
     lesson_rows = fixture["lessons"]
-    expected_weeks = list(range(1, len(raw_contracts) + 1))
+    if not isinstance(raw_contracts, list) or len(raw_contracts) != 26:
+        raise CourseModeSimulationError(
+            "CONTRACT_ENVELOPE_COUNT", "top-level contracts must contain exactly 26 rows",
+        )
+    if not isinstance(lesson_rows, list) or len(lesson_rows) != 26:
+        raise CourseModeSimulationError(
+            "LESSON_ENVELOPE_COUNT", "lessons envelope must contain exactly 26 rows",
+        )
+    if any(not isinstance(lesson, dict) or type(lesson.get("week")) is not int for lesson in lesson_rows):
+        raise CourseModeSimulationError(
+            "LESSON_WEEK_INVALID", "every lesson week must be an integer",
+        )
     actual_weeks = [lesson.get("week") for lesson in lesson_rows]
+    if len(set(actual_weeks)) != len(actual_weeks):
+        raise CourseModeSimulationError(
+            "LESSON_WEEK_DUPLICATE", f"lesson weeks contain duplicates: {actual_weeks}",
+        )
+    expected_weeks = list(range(1, 27))
     if actual_weeks != expected_weeks:
         raise CourseModeSimulationError(
-            "LESSON_ENVELOPE_MISMATCH",
+            "LESSON_WEEK_ORDER_MISMATCH",
             f"lesson weeks must be exactly {expected_weeks}, found {actual_weeks}",
         )
     lessons_by_week = {lesson["week"]: lesson for lesson in lesson_rows}
