@@ -4,6 +4,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,7 @@ from scripts.course_mode_26week_simulation import (
     CourseModeSimulationError,
     RESPONSE_MATRIX,
     load_backend_contracts,
+    resolve_backend_root,
     simulate_contracts,
     simulate_fixture,
     simulate_terminal_path,
@@ -27,11 +29,54 @@ from scripts.course_mode_26week_simulation import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+BACKEND_ROOT = Path(os.environ["COURSE_MODE_BACKEND_ROOT"])
 
 
 @pytest.fixture(scope="module")
 def backend_contracts() -> tuple[dict, list[dict]]:
-    return load_backend_contracts()
+    return load_backend_contracts(BACKEND_ROOT)
+
+
+def test_backend_source_must_be_explicit_and_committed(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("COURSE_MODE_BACKEND_ROOT", raising=False)
+
+    result = resolve_backend_root(None)
+
+    assert result.error == "BACKEND_ROOT_REQUIRED"
+
+
+def test_backend_source_can_be_bound_to_candidate_sha() -> None:
+    sha = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=BACKEND_ROOT,
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+    result = resolve_backend_root(BACKEND_ROOT, expected_sha=sha)
+
+    assert result.error is None and result.path == BACKEND_ROOT.resolve()
+
+
+def test_backend_source_rejects_candidate_identity_mismatch() -> None:
+    result = resolve_backend_root(BACKEND_ROOT, expected_sha="f" * 40)
+
+    assert result.error == "BACKEND_IDENTITY_MISMATCH"
+
+
+def test_backend_source_rejects_uncommitted_runtime_authority(tmp_path: Path) -> None:
+    root = tmp_path / "backend"
+    verifier = root / "scripts/verify-course-mode-curriculum.mjs"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text("", encoding="utf-8")
+    subprocess.run(["git", "init", "-b", "candidate"], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "candidate@example.invalid"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Candidate Test"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-m", "fixture"], cwd=root, check=True, capture_output=True)
+    verifier.write_text("// dirty\n", encoding="utf-8")
+
+    result = resolve_backend_root(root)
+
+    assert result.error == "BACKEND_IDENTITY_MISMATCH"
 
 
 def _checksum(value: dict) -> str:
@@ -47,6 +92,7 @@ def test_simulates_all_backend_generated_lessons_and_response_modes(backend_cont
     summary = simulate_fixture(verifier)
 
     assert verifier["lessonCount"] == summary["lessonCount"] == 26
+    assert verifier["backendSha"] == summary["backendSha"]
     assert summary["scenarioCount"] == len(RESPONSE_MATRIX) == 11
     assert summary["pedagogyCount"] == len(PEDAGOGY_WEEKS) == 6
     assert all(
@@ -375,7 +421,10 @@ def test_visual_phase_mutation_is_detected(backend_contracts) -> None:
 
 
 def test_cli_is_deterministic_and_machine_readable() -> None:
-    command = [sys.executable, str(ROOT / "scripts/course_mode_26week_simulation.py")]
+    command = [
+        sys.executable, str(ROOT / "scripts/course_mode_26week_simulation.py"),
+        "--backend-root", str(BACKEND_ROOT),
+    ]
     first = subprocess.run(command, cwd=ROOT, check=True, capture_output=True, text=True, timeout=45)
     second = subprocess.run(command, cwd=ROOT, check=True, capture_output=True, text=True, timeout=45)
 
@@ -386,6 +435,29 @@ def test_cli_is_deterministic_and_machine_readable() -> None:
 def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
     command = [sys.executable, str(ROOT / "scripts/course_mode_26week_simulation.py"), *args]
     return subprocess.run(command, cwd=ROOT, check=False, capture_output=True, text=True, timeout=5)
+
+
+def test_cli_requires_explicit_backend_root(monkeypatch) -> None:
+    monkeypatch.delenv("COURSE_MODE_BACKEND_ROOT", raising=False)
+    completed = _run_cli()
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 1 and completed.stderr == ""
+    assert payload["error"]["code"] == "BACKEND_ROOT_REQUIRED"
+
+
+def test_cli_rejects_candidate_backend_identity_mismatch(tmp_path: Path) -> None:
+    candidate = {"repositories": {"backend": {"sha": "f" * 40}}}
+    path = tmp_path / "candidate.json"
+    path.write_text(json.dumps(candidate), encoding="utf-8")
+
+    completed = _run_cli(
+        "--backend-root", str(BACKEND_ROOT), "--candidate", str(path),
+    )
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 1 and completed.stderr == ""
+    assert payload["error"]["code"] == "BACKEND_IDENTITY_MISMATCH"
 
 
 @pytest.mark.parametrize("kind", ["missing", "directory", "malformed"])
@@ -425,6 +497,7 @@ def test_cli_backend_failures_use_stable_json_envelopes(kind: str, code: str) ->
     else:
         command = [sys.executable, "-c", "import pathlib,sys;pathlib.Path(sys.argv[-1]).write_text('not-json')"]
     completed = _run_cli(
+        "--backend-root", str(BACKEND_ROOT),
         "--backend-command-json", json.dumps(command),
         "--backend-timeout-sec", "0.02" if kind == "timeout" else "2",
     )

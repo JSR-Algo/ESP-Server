@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -84,20 +85,55 @@ class CourseModeSimulationError(RuntimeError):
         self.message = message
 
 
-def backend_root() -> Path:
-    configured = os.environ.get("TBOT_BACKEND_COURSE_MODE_ROOT")
-    if configured:
-        return Path(configured).resolve()
-    tbot_root = Path(__file__).resolve().parents[5]
-    worktree = tbot_root / "tbot-backend/.worktrees/course-mode-26week-single-version"
-    return worktree if worktree.is_dir() else tbot_root / "tbot-backend"
+@dataclass(frozen=True)
+class BackendRootResolution:
+    path: Path | None
+    error: str | None
+
+
+def resolve_backend_root(
+    requested: Path | None, *, expected_sha: str | None = None,
+) -> BackendRootResolution:
+    configured = requested or (
+        Path(value) if (value := os.environ.get("COURSE_MODE_BACKEND_ROOT")) else None
+    )
+    if configured is None:
+        return BackendRootResolution(None, "BACKEND_ROOT_REQUIRED")
+    if not configured.is_absolute():
+        return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
+    try:
+        root = configured.resolve(strict=True)
+    except OSError:
+        return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
+    if not root.is_dir() or not (root / "scripts/verify-course-mode-curriculum.mjs").is_file():
+        return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=root,
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"], cwd=root,
+            check=True, capture_output=True, text=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
+    if dirty or (expected_sha is not None and expected_sha != head):
+        return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
+    return BackendRootResolution(root, None)
 
 
 def load_backend_contracts(
     root: Path | None = None, *, backend_command: list[str] | None = None,
     timeout_sec: float = 30,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    source_root = (root or backend_root()).resolve()
+    resolution = resolve_backend_root(root)
+    if resolution.error or resolution.path is None:
+        raise CourseModeSimulationError(
+            resolution.error or "BACKEND_IDENTITY_MISMATCH",
+            "an explicit committed backend root is required",
+        )
+    source_root = resolution.path
     verifier = source_root / "scripts/verify-course-mode-curriculum.mjs"
     with tempfile.TemporaryDirectory(prefix="tbot-course-mode-e2e-") as directory:
         output = Path(directory) / "contracts.json"
@@ -127,6 +163,10 @@ def load_backend_contracts(
             "BACKEND_OUTPUT_INVALID_ENVELOPE",
             "backend curriculum export is not a passing 26-lesson fixture",
         )
+    fixture["backendSha"] = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=source_root,
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
     return fixture, fixture["contracts"]
 
 
@@ -621,11 +661,14 @@ def _simulate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
             "week": week, "fixtureId": contract.fixture_id, "activityCount": len(contract.activities),
             "matrix": matrix,
         })
-    return {
+    summary = {
         "schemaVersion": 1, "simulator": "course-mode-26week.v1", "status": "pass",
         "lessonCount": len(lessons), "scenarioCount": len(RESPONSE_MATRIX),
         "pedagogyCount": len(PEDAGOGY_WEEKS), "actions": sorted(all_actions), "lessons": lessons,
     }
+    if "backendSha" in fixture:
+        summary["backendSha"] = fixture["backendSha"]
+    return summary
 
 
 def simulate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
@@ -661,6 +704,7 @@ def simulate_contracts(raw_contracts: list[dict[str, Any]]) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend-root", type=Path, default=None)
+    parser.add_argument("--candidate", type=Path, default=None)
     parser.add_argument("--contracts", type=Path, default=None)
     parser.add_argument("--backend-command-json", default=None)
     parser.add_argument("--backend-timeout-sec", type=float, default=30)
@@ -681,6 +725,21 @@ def main(argv: list[str] | None = None) -> int:
                 raise CourseModeSimulationError("CONTRACTS_INPUT_INVALID_JSON", str(exc)) from None
             contracts = fixture["contracts"]
         else:
+            expected_sha = None
+            if args.candidate is not None:
+                try:
+                    candidate = json.loads(args.candidate.read_text(encoding="utf-8"))
+                    expected_sha = candidate["repositories"]["backend"]["sha"]
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError):
+                    raise CourseModeSimulationError(
+                        "BACKEND_IDENTITY_MISMATCH", "candidate backend identity is invalid",
+                    ) from None
+            resolution = resolve_backend_root(args.backend_root, expected_sha=expected_sha)
+            if resolution.error or resolution.path is None:
+                raise CourseModeSimulationError(
+                    resolution.error or "BACKEND_IDENTITY_MISMATCH",
+                    "an explicit committed backend root is required",
+                )
             backend_command = None
             if args.backend_command_json is not None:
                 try:
@@ -694,7 +753,7 @@ def main(argv: list[str] | None = None) -> int:
                         "BACKEND_COMMAND_INVALID", "backend command must be a non-empty JSON string array",
                     )
             fixture, contracts = load_backend_contracts(
-                args.backend_root, backend_command=backend_command,
+                resolution.path, backend_command=backend_command,
                 timeout_sec=args.backend_timeout_sec,
             )
         fixture = copy.deepcopy(fixture)
