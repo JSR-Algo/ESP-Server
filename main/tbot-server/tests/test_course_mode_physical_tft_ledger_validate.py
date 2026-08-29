@@ -20,7 +20,7 @@ def ledger(tmp_path: Path, candidate: dict, receipt: dict) -> dict:
         "schemaVersion": 2,
         "candidateId": candidate["candidateId"],
         "gate": "G8",
-        "journeyId": "physical-ac20-1",
+        "journeyId": receipt["journey"]["deliveryId"],
         "verdict": "PASS",
         "capturedAt": "2026-08-29T12:00:00Z",
         "receipt": receipt,
@@ -123,3 +123,24 @@ def test_ledger_requires_fresh_strict_utc_timestamp(tmp_path: Path, candidate: d
         ledger, candidate=candidate, repository_root=tmp_path, now=datetime(2026, 8, 30, 12, tzinfo=timezone.utc)
     )["reasons"]
     assert "ledger.timestamp.utc" in reasons
+
+
+def test_ledger_binds_journey_and_timestamp_to_receipt(tmp_path: Path, candidate: dict, ledger: dict) -> None:
+    from course_mode_physical_tft_ledger_validate import validate_ledger
+
+    ledger["journeyId"] = "other-delivery"
+    ledger["capturedAt"] = "2026-08-29T12:00:01Z"
+    reasons = validate_ledger(ledger, candidate=candidate, repository_root=tmp_path)["reasons"]
+    assert "ledger.journey" in reasons and "ledger.timestamp.binding" in reasons
+
+
+def test_ledger_detects_headerless_mp3_sync(tmp_path: Path, candidate: dict, ledger: dict) -> None:
+    from course_mode_physical_tft_ledger_validate import validate_ledger
+
+    content = b"\xff\xfb\x90\x64" + b"\x00" * 16
+    path = tmp_path / "capture.png"
+    path.write_bytes(content)
+    digest = hashlib.sha256(content).hexdigest()
+    ledger["evidence"][0]["sha256"] = digest
+    ledger["receipt"]["evidence"][0]["sha256"] = digest
+    assert "ledger.privacy" in validate_ledger(ledger, candidate=candidate, repository_root=tmp_path)["reasons"]

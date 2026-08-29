@@ -6,6 +6,8 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/course_mode_physical_tft_receipt_verify.py"
@@ -27,7 +29,9 @@ def _repository(root: Path) -> dict:
 
 
 @pytest.fixture
-def candidate(tmp_path: Path) -> dict:
+def candidate(tmp_path: Path, monkeypatch) -> dict:
+    import course_mode_physical_tft_preflight as preflight
+
     roots = {}
     for name in ("backend", "adminEsp", "firmware"):
         root = tmp_path / name
@@ -100,10 +104,23 @@ def candidate(tmp_path: Path) -> dict:
     identity_path.parent.mkdir(parents=True)
     identity_bytes = (json.dumps(physical_identity, sort_keys=True, separators=(",", ":")) + "\n").encode()
     identity_path.write_bytes(identity_bytes)
+    private_key = Ed25519PrivateKey.generate()
+    public_raw = private_key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    fingerprint = hashlib.sha256(public_raw).hexdigest()
+    signature_path = identity_path.with_suffix(".sig")
+    signature_path.write_bytes(private_key.sign(preflight._canonical_bytes(physical_identity)))
+    monkeypatch.setattr(preflight, "PINNED_APPROVAL_PUBLIC_KEY_RAW", public_raw)
+    monkeypatch.setattr(preflight, "PINNED_APPROVAL_KEY_FINGERPRINT", fingerprint)
     repositories["adminEsp"]["dirtyExceptions"].append(
         {
             "path": str(identity_path.relative_to(roots["adminEsp"])),
             "sha256": hashlib.sha256(identity_bytes).hexdigest(),
+        }
+    )
+    repositories["adminEsp"]["dirtyExceptions"].append(
+        {
+            "path": str(signature_path.relative_to(roots["adminEsp"])),
+            "sha256": hashlib.sha256(signature_path.read_bytes()).hexdigest(),
         }
     )
     repositories["adminEsp"]["dirtyExceptions"].sort(key=lambda item: item["path"])
@@ -133,6 +150,9 @@ def candidate(tmp_path: Path) -> dict:
                 "repositorySha": repositories["adminEsp"]["sha"],
                 "sha256": hashlib.sha256(identity_bytes).hexdigest(),
                 "identity": physical_identity,
+                "signaturePath": str(signature_path.relative_to(roots["adminEsp"])),
+                "signatureSha256": hashlib.sha256(signature_path.read_bytes()).hexdigest(),
+                "signerFingerprint": fingerprint,
             }
         },
         "evidenceRoot": str(tmp_path / "evidence"),
@@ -267,6 +287,33 @@ def test_receipt_evidence_hashes_must_match_signed_expected_artifact_map(receipt
     assert "receipt.evidence" in validate_receipt(receipt, candidate)
 
 
+def test_rewritten_identity_and_updated_dirty_hash_still_requires_pinned_signature(
+    receipt: dict, candidate: dict
+) -> None:
+    from course_mode_physical_tft_receipt_verify import validate_receipt
+
+    binding = candidate["tools"]["physicalEvidence"]
+    identity = deepcopy(binding["identity"])
+    identity["renderer"]["manifestChecksum"] = "f" * 64
+    path = Path(candidate["repositories"]["adminEsp"]["path"]) / binding["path"]
+    data = (json.dumps(identity, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    path.write_bytes(data)
+    binding["identity"] = identity
+    binding["sha256"] = hashlib.sha256(data).hexdigest()
+    for item in candidate["repositories"]["adminEsp"]["dirtyExceptions"]:
+        if item["path"] == binding["path"]:
+            item["sha256"] = binding["sha256"]
+    receipt["renderer"] = deepcopy(identity["renderer"])
+    assert "candidate.physicalEvidence.signature" in validate_receipt(receipt, candidate)
+
+
+def test_receipt_rejects_duplicate_artifact_paths_before_projection(receipt: dict, candidate: dict) -> None:
+    from course_mode_physical_tft_receipt_verify import validate_receipt
+
+    receipt["evidence"].append(deepcopy(receipt["evidence"][0]))
+    assert "receipt.evidence" in validate_receipt(receipt, candidate)
+
+
 @pytest.mark.parametrize("captured", ["2026-08-30T00:00:00", "2026-08-30T07:00:00+07:00", "2026-08-20T00:00:00Z"])
 def test_receipt_requires_fresh_strict_utc_timestamp(receipt: dict, candidate: dict, captured: str) -> None:
     from datetime import datetime, timezone
@@ -286,10 +333,32 @@ def test_malformed_candidate_types_fail_without_traceback(receipt: dict) -> None
 
 
 def test_cli_is_deterministic_bounded_and_redacted(tmp_path: Path, receipt: dict, candidate: dict) -> None:
+    import course_mode_physical_tft_preflight as preflight
+
     candidate_path, receipt_path = tmp_path / "candidate.json", tmp_path / "receipt.json"
     candidate_path.write_text(json.dumps(candidate), encoding="utf-8")
     receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
-    command = [sys.executable, str(SCRIPT), str(receipt_path), "--candidate", str(candidate_path)]
+    bootstrap = (
+        "import runpy,sys;"
+        "sys.path.insert(0,sys.argv[1]);"
+        "import course_mode_physical_tft_preflight as p;"
+        "p.PINNED_APPROVAL_PUBLIC_KEY_RAW=bytes.fromhex(sys.argv[2]);"
+        "p.PINNED_APPROVAL_KEY_FINGERPRINT=sys.argv[3];"
+        "script=sys.argv[4];sys.argv=[script,*sys.argv[5:]];"
+        "runpy.run_path(script,run_name='__main__')"
+    )
+    command = [
+        sys.executable,
+        "-c",
+        bootstrap,
+        str(SCRIPT.parent),
+        preflight.PINNED_APPROVAL_PUBLIC_KEY_RAW.hex(),
+        preflight.PINNED_APPROVAL_KEY_FINGERPRINT,
+        str(SCRIPT),
+        str(receipt_path),
+        "--candidate",
+        str(candidate_path),
+    ]
     first = subprocess.run(command, capture_output=True, text=True)
     second = subprocess.run(command, capture_output=True, text=True)
     assert first.returncode == 0 and first.stdout == second.stdout

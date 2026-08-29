@@ -15,9 +15,9 @@ pytest_plugins = ("test_course_mode_physical_tft_receipt_verify",)
 NOW = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
 
 
-def _anchors(candidate: dict) -> dict:
+def _anchors(candidate: dict, gate: str) -> dict:
     expected = candidate["tools"]["physicalEvidence"]["identity"]
-    return {
+    anchors = {
         "repositories": {name: value["sha"] for name, value in candidate["repositories"].items()},
         "images": candidate["images"],
         "firmware": candidate["firmware"],
@@ -28,6 +28,9 @@ def _anchors(candidate: dict) -> dict:
         "database": candidate["database"]["terminalReadback"],
         "receipts": candidate["database"]["replacement"],
     }
+    from course_mode_evidence_audit import ANCHORS
+
+    return {name: anchors[name] for name in ANCHORS[gate]}
 
 
 def _payload(gate: str) -> dict:
@@ -65,7 +68,7 @@ def _write(
     historical=False,
     mutate=None,
 ):
-    journey_id = journey or f"journey-{gate}"
+    journey_id = journey or f"journey-{gate.lower()}"
     support = root / "artifacts" / f"{gate}-{journey_id}.log"
     support.parent.mkdir(parents=True, exist_ok=True)
     support.write_bytes(f"redacted {gate} evidence\n".encode())
@@ -75,7 +78,7 @@ def _write(
         "gate": gate,
         "journeyId": journey_id,
         "capturedAt": captured,
-        "anchors": _anchors(candidate),
+        "anchors": _anchors(candidate, gate),
         "commands": [f"course-mode-{gate.lower()}-verify"],
         "timeline": [{"timestamp": captured, "event": "complete"}],
         "artifacts": [
@@ -167,7 +170,7 @@ def test_common_envelope_without_actual_gate_payload_is_rejected(tmp_path: Path,
         ),
         (lambda root, candidate, paths: paths[0].write_text(paths[0].read_text() + " "), "evidence.checksum"),
         (
-            lambda root, candidate, paths: _write(root, candidate, "G10", journey="journey-G0"),
+            lambda root, candidate, paths: _write(root, candidate, "G10", journey="journey-g0"),
             "evidence.journey.duplicate",
         ),
         (
@@ -275,6 +278,51 @@ def test_auditor_scans_referenced_support_artifact_content(tmp_path: Path, candi
     report["artifacts"][0]["sha256"] = hashlib.sha256(support.read_bytes()).hexdigest()
     _rewrite_report(root, envelope, report_path, report)
     assert "evidence.privacy" in audit_evidence(candidate, root, now=NOW)["reasons"]
+
+
+def test_auditor_detects_headerless_mp3_sync_in_support_artifact(tmp_path: Path, candidate: dict) -> None:
+    from course_mode_evidence_audit import audit_evidence
+
+    root = Path(candidate["evidenceRoot"])
+    _complete(root, candidate)
+    envelope = next(root.glob("G5-*.evidence.json"))
+    report_path, report = _report(root, envelope)
+    support = root / report["artifacts"][0]["path"]
+    support.write_bytes(b"\xff\xfb\x90\x64" + b"\x00" * 16)
+    report["artifacts"][0]["sha256"] = hashlib.sha256(support.read_bytes()).hexdigest()
+    _rewrite_report(root, envelope, report_path, report)
+    assert "evidence.privacy" in audit_evidence(candidate, root, now=NOW)["reasons"]
+
+
+def test_auditor_rejects_malformed_nested_anchors_without_traceback(tmp_path: Path, candidate: dict) -> None:
+    from course_mode_evidence_audit import audit_evidence
+
+    root = Path(candidate["evidenceRoot"])
+    _complete(root, candidate)
+    envelope = next(root.glob("G5-*.evidence.json"))
+    report_path, report = _report(root, envelope)
+    report["anchors"] = []
+    _rewrite_report(root, envelope, report_path, report)
+    result = audit_evidence(candidate, root, now=NOW)
+    assert "evidence.anchor.G5" in result["reasons"]
+
+
+def test_auditor_rejects_other_malformed_nested_values_without_traceback(tmp_path: Path, candidate: dict) -> None:
+    from course_mode_evidence_audit import audit_evidence
+
+    root = Path(candidate["evidenceRoot"])
+    _complete(root, candidate)
+    envelope = next(root.glob("G1-*.evidence.json"))
+    report_path, report = _report(root, envelope)
+    report["payload"]["lanes"] = [None]
+    _rewrite_report(root, envelope, report_path, report)
+    envelope = next(root.glob("G2-*.evidence.json"))
+    document = json.loads(envelope.read_text())
+    document["checksums"] = []
+    _rewrite(envelope, document)
+    result = audit_evidence(candidate, root, now=NOW)
+    assert "evidence.gate.schema.G1" in result["reasons"]
+    assert "evidence.checksums" in result["reasons"]
 
 
 def test_auditor_rejects_malformed_candidate_without_traceback(tmp_path: Path) -> None:

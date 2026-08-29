@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+import course_mode_physical_tft_preflight as physical_preflight
 from course_mode_candidate_manifest import (
     MAX_CANDIDATE_BYTES,
     _parse_rfc3339_utc,
@@ -78,16 +80,38 @@ def _physical_identity(candidate: dict) -> object:
     repositories = candidate.get("repositories")
     binding = tools.get("physicalEvidence") if isinstance(tools, dict) else None
     repo = repositories.get("adminEsp", {}) if isinstance(repositories, dict) else {}
-    if not isinstance(binding, dict) or set(binding) != {"path", "repositorySha", "sha256", "identity"}:
+    binding_fields = {
+        "path",
+        "repositorySha",
+        "sha256",
+        "identity",
+        "signaturePath",
+        "signatureSha256",
+        "signerFingerprint",
+    }
+    if not isinstance(binding, dict) or set(binding) != binding_fields:
         return None
     if binding.get("repositorySha") != repo.get("sha"):
         return None
     path = binding.get("path")
+    signature_path = binding.get("signaturePath")
     exceptions = repo.get("dirtyExceptions", [])
     matching = [item for item in exceptions if isinstance(item, dict) and item.get("path") == path]
-    if not isinstance(path, str) or len(matching) > 1:
+    signature_matching = [item for item in exceptions if isinstance(item, dict) and item.get("path") == signature_path]
+    if (
+        not isinstance(path, str)
+        or Path(path).is_absolute()
+        or ".." in Path(path).parts
+        or not isinstance(signature_path, str)
+        or Path(signature_path).is_absolute()
+        or ".." in Path(signature_path).parts
+        or len(matching) > 1
+        or len(signature_matching) > 1
+    ):
         return None
     if matching and matching[0].get("sha256") != binding.get("sha256"):
+        return None
+    if signature_matching and signature_matching[0].get("sha256") != binding.get("signatureSha256"):
         return None
     root = repo.get("path")
     digest, error = _secure_hash_relative(Path(root), path) if isinstance(root, str) else (None, "path")
@@ -95,8 +119,17 @@ def _physical_identity(candidate: dict) -> object:
         return None
     try:
         parsed = strict_json_loads(read_secure_regular(Path(root) / path, MAX_RECEIPT_BYTES))
+        signature = read_secure_regular(Path(root) / signature_path, 256)
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
         return None
+    if hashlib.sha256(signature).hexdigest() != binding.get("signatureSha256") or len(signature) != 64:
+        return None
+    valid, fingerprint = physical_preflight._verify_pinned_identity_signature(
+        physical_preflight._canonical_bytes(parsed),
+        signature,
+    )
+    if not valid or fingerprint != binding.get("signerFingerprint"):
+        return "signature-invalid"
     return parsed if parsed == binding.get("identity") else None
 
 
@@ -141,6 +174,9 @@ def validate_receipt(document: object, candidate: object, *, now: datetime | Non
     curriculum_value = candidate.get("curriculum")
     curriculum = curriculum_value if isinstance(curriculum_value, dict) else {}
     expected_evidence = _physical_identity(candidate)
+    if expected_evidence == "signature-invalid":
+        reasons.append("candidate.physicalEvidence.signature")
+        expected_evidence = {}
     if not isinstance(expected_evidence, dict):
         reasons.append("candidate.physicalEvidence")
         expected_evidence = {}
@@ -244,6 +280,7 @@ def validate_receipt(document: object, candidate: object, *, now: datetime | Non
             or not _sha(item.get("sha256"))
             for item in evidence
         )
+        or len({item.get("path") for item in evidence if isinstance(item, dict)}) != len(evidence)
         or not isinstance(expected_artifacts, dict)
         or {item.get("path"): item.get("sha256") for item in evidence if isinstance(item, dict)} != expected_artifacts
     ):

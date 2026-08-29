@@ -49,6 +49,7 @@ REPORT_FIELDS = {
     "payload",
 }
 COMMANDS = {gate: f"course-mode-{gate.lower()}-verify" for gate in GATES}
+JOURNEY_ID = re.compile(r"^[a-z0-9][a-z0-9._:-]{2,127}$")
 ANCHORS = {
     "G0": {"repositories", "course"},
     "G1": {"repositories", "images", "firmware", "course"},
@@ -95,7 +96,9 @@ def _gate_payload_valid(gate: str, payload: object) -> bool:
             set(payload) == {"lanes", "failedLane"}
             and payload["failedLane"] is None
             and isinstance(lanes, list)
-            and [row.get("name") for row in lanes if isinstance(row, dict)] == expected_lanes
+            and len(lanes) == len(expected_lanes)
+            and all(isinstance(row, dict) for row in lanes)
+            and [row.get("name") for row in lanes] == expected_lanes
             and all(set(row) == {"name", "exitCode"} and row.get("exitCode") == 0 for row in lanes)
         )
     if gate == "G2":
@@ -163,7 +166,7 @@ def audit_evidence(
             reasons.add("evidence.schema")
         documents.append(document)
         journey = document.get("journeyId")
-        if not isinstance(journey, str) or not journey:
+        if not isinstance(journey, str) or JOURNEY_ID.fullmatch(journey) is None:
             reasons.add("evidence.journey")
         journey_counts[journey] = journey_counts.get(journey, 0) + 1
         if document.get("candidateId") != candidate_id:
@@ -183,15 +186,17 @@ def audit_evidence(
         if document.get("historical") is not False:
             reasons.add("evidence.historical")
         checksums = document.get("checksums")
-        if (
-            not isinstance(checksums, dict)
-            or set(checksums) != {"report"}
-            or any(
-                not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
+        checksums_valid = (
+            isinstance(checksums, dict)
+            and set(checksums) == {"report"}
+            and all(
+                isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
                 for value in checksums.values()
             )
-        ):
+        )
+        if not checksums_valid:
             reasons.add("evidence.checksums")
+        safe_checksums = checksums if isinstance(checksums, dict) else {}
         if PRIVATE.search(json.dumps(document, sort_keys=True)):
             reasons.add("evidence.privacy")
         artifacts = document.get("artifacts")
@@ -219,7 +224,7 @@ def audit_evidence(
                     reasons.add(f"evidence.artifact.input.{gate}")
                 else:
                     actual_sha = hashlib.sha256(report_bytes).hexdigest()
-                    if expected_sha != actual_sha or checksums.get("report") != actual_sha:
+                    if expected_sha != actual_sha or safe_checksums.get("report") != actual_sha:
                         reasons.add(f"evidence.artifact.hash.{gate}")
                     report_sidecar = report_path.with_suffix(report_path.suffix + ".sha256")
                     try:
@@ -255,7 +260,7 @@ def audit_evidence(
                 reasons.add(f"evidence.report.timeline.{gate}")
             anchors = report.get("anchors")
             expected_anchors = _expected_anchors(candidate) if isinstance(candidate, dict) else {}
-            if not isinstance(anchors, dict):
+            if not isinstance(anchors, dict) or set(anchors) != ANCHORS[gate]:
                 reasons.add(f"evidence.anchor.{gate}")
             else:
                 for name in ANCHORS[gate]:
@@ -287,6 +292,8 @@ def audit_evidence(
                     if PRIVATE.search(support_text) or PRIVATE.search(support_text.replace("\x00", "")):
                         reasons.add("evidence.privacy")
                     if support_bytes.startswith(AUDIO_MAGIC):
+                        reasons.add("evidence.privacy")
+                    if len(support_bytes) >= 2 and support_bytes[0] == 0xFF and support_bytes[1] & 0xE0 == 0xE0:
                         reasons.add("evidence.privacy")
             payload = report.get("payload")
         if not _gate_payload_valid(gate, payload):

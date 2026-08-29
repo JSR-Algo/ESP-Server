@@ -62,6 +62,11 @@ def validate_ledger(
         receipt = document.get("receipt")
         receipt_reasons = validate_receipt(receipt, candidate, now=now)
         reasons.extend(receipt_reasons)
+        receipt_journey = receipt.get("journey") if isinstance(receipt, dict) else None
+        if not isinstance(receipt_journey, dict) or document.get("journeyId") != receipt_journey.get("deliveryId"):
+            reasons.append("ledger.journey")
+        if not isinstance(receipt, dict) or document.get("capturedAt") != receipt.get("capturedAt"):
+            reasons.append("ledger.timestamp.binding")
         if document.get("verdict") != "PASS" or isinstance(receipt, dict) and receipt.get("result") != "PASS":
             reasons.append("ledger.verdict")
         evidence = document.get("evidence")
@@ -94,6 +99,8 @@ def validate_ledger(
                 if PRIVATE.search(decoded) or PRIVATE.search(decoded.replace("\x00", "")):
                     reasons.append("ledger.privacy")
                 if content.startswith(AUDIO_MAGIC):
+                    reasons.append("ledger.privacy")
+                if len(content) >= 2 and content[0] == 0xFF and content[1] & 0xE0 == 0xE0:
                     reasons.append("ledger.privacy")
         if PRIVATE.search(json.dumps(document, sort_keys=True)):
             reasons.append("ledger.privacy")
