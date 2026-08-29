@@ -157,6 +157,8 @@ def audit_evidence(
             expected = read_secure_regular(sidecar, 128).decode("ascii").strip()
         except OSError:
             reasons.add("evidence.sidecar.missing")
+        except UnicodeError:
+            reasons.add("evidence.sidecar.invalid")
         else:
             if expected != hashlib.sha256(data).hexdigest():
                 reasons.add("evidence.checksum")

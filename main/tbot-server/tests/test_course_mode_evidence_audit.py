@@ -421,3 +421,30 @@ def test_cli_rejects_unsafe_output_without_leaking(tmp_path: Path, candidate: di
         text=True,
     )
     assert result.returncode == 1 and "output.unsafe" in result.stdout and "do-not-echo" not in result.stdout
+
+
+def test_cli_rejects_non_ascii_envelope_sidecar_deterministically_without_traceback(
+    tmp_path: Path, candidate: dict
+) -> None:
+    root = Path(candidate["evidenceRoot"])
+    paths = _complete(root, candidate)
+    paths[0].with_suffix(paths[0].suffix + ".sha256").write_bytes(b"\xff\n")
+    candidate_path = tmp_path / "candidate.json"
+    output = root / "audit.json"
+    candidate_path.write_text(json.dumps(candidate), encoding="utf-8")
+    command = [
+        sys.executable,
+        str(SCRIPT),
+        "--candidate",
+        str(candidate_path),
+        "--evidence-root",
+        str(root),
+        "--output",
+        str(output),
+    ]
+    first = subprocess.run(command, capture_output=True, text=True)
+    second = subprocess.run(command, capture_output=True, text=True)
+    assert first.returncode == 1 and first.stdout == second.stdout and not first.stderr and not second.stderr
+    result = json.loads(first.stdout)
+    assert "evidence.sidecar.invalid" in result["reasons"]
+    assert result["reasons"] == sorted(set(result["reasons"])) and len(first.stdout) < 2048
