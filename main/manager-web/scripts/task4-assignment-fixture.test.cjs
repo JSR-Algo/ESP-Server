@@ -74,6 +74,7 @@ test('Task 4 assignment browser phase uses WebKit and verifies row-scoped Monito
 
   assert.match(config, /course-mode-webkit-desktop/);
   assert.doesNotMatch(config, /course-mode-chromium-desktop/);
+  assert.doesNotMatch(config, /ignoreHTTPSErrors/);
   assert.match(spec, /gotoAppRoute\(page, `#\/lesson-monitoring\?keyword=\$\{DEVICE_ID\}`\)/);
   assert.match(spec, /getByTestId\('monitoring-lesson-version'\)/);
   assert.match(spec, /monitoringRow\(page, 9, 'ASSIGNED'\)\.first\(\).*toBeVisible\(\)/s);

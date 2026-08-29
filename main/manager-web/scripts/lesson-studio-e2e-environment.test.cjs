@@ -70,10 +70,15 @@ test('canonical roundtrip has no fixed localhost port and uses the shared asset 
 
 test('Playwright baseURL uses the same validated web origin helper', () => {
   const config = readFileSync(resolve(__dirname, '../playwright.config.js'), 'utf8');
+  const assignmentConfig = readFileSync(
+    resolve(__dirname, '../playwright.assignment-rollback.config.js'),
+    'utf8',
+  );
   const orchestrator = readFileSync(resolve(__dirname, 'run-task4-assignment-phase.cjs'), 'utf8');
 
   assert.match(config, /baseURL: lessonStudioWebOrigin\(\)/);
   assert.doesNotMatch(config, /ignoreHTTPSErrors/);
+  assert.doesNotMatch(assignmentConfig, /ignoreHTTPSErrors/);
   assert.doesNotMatch(config, /LESSON_STUDIO_E2E_BASE_URL \|\|/);
   assert.match(orchestrator, /const mediaHostname = 'task4-media\.localhost'/);
   assert.doesNotMatch(orchestrator, /admin\.tjbot\.vn/);
