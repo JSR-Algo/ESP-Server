@@ -126,10 +126,16 @@ def _add_node_install(candidate: dict, repository_name: str, relative_cwd: str, 
     install_parent = root / relative_cwd
     lock = install_parent / "package-lock.json"
     ignored = install_parent / ".gitignore"
+    package_manifest = install_parent / "package.json"
     install_parent.mkdir(parents=True, exist_ok=True)
     lock.write_text('{"lockfileVersion":3}\n', encoding="utf-8")
     ignored.write_text("node_modules/\n", encoding="utf-8")
-    _git(root, "add", str(lock.relative_to(root)), str(ignored.relative_to(root)))
+    if not package_manifest.exists():
+        package_manifest.write_text('{"scripts":{"test":"true"}}\n', encoding="utf-8")
+    _git(
+        root, "add", str(lock.relative_to(root)), str(ignored.relative_to(root)),
+        str(package_manifest.relative_to(root)),
+    )
     _git(root, "commit", "-m", f"add {key} lock")
     repository.update(_repository(root))
     install = install_parent / "node_modules"
@@ -459,6 +465,22 @@ def test_report_is_written_atomically_and_strictly(candidate_file: Path, tmp_pat
 
     assert json.loads(report.read_text(encoding="utf-8")) == result
     assert list((tmp_path / "evidence").glob(".report.json.*")) == []
+
+
+def test_atomic_report_handles_partial_os_writes(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = tmp_path / "evidence/report.json"
+    real_write = gate.os.write
+
+    def partial_write(descriptor: int, payload) -> int:
+        return real_write(descriptor, bytes(payload[:7]))
+
+    monkeypatch.setattr(gate.os, "write", partial_write)
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(), report_path=report)
+
+    assert json.loads(report.read_text(encoding="utf-8")) == result
 
 
 def test_last_lane_repository_drift_blocks_after_successful_subprocess(
@@ -928,6 +950,16 @@ def test_node_install_tree_rejects_unbound_or_unsafe_changes(
     assert gate.node_install_authorized(lane, candidate) is False
 
 
+def test_node_install_symlink_loop_fails_closed_without_exception(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    install = _add_node_install(candidate, "backend", ".", "backend")
+    (install / "loop-a").symlink_to("loop-b")
+    (install / "loop-b").symlink_to("loop-a")
+    lane = gate.Lane("backend-node", "backend", ".", ("node", "script.js"), 5.0)
+
+    assert gate.node_install_authorized(lane, candidate) is False
+
+
 def test_node_install_metadata_binds_lock_digest_counts_and_bytes(candidate_file: Path) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     _add_node_install(candidate, "backend", ".", "backend")
@@ -1024,6 +1056,70 @@ def test_node_install_is_revalidated_after_lane_execution(
 
     assert result["verdict"] == "BLOCKED"
     assert result["failedLane"] == "backend-node"
+
+
+def test_node_digest_calls_scale_with_current_node_lanes_not_all_checkpoints(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "backend", ".", "backend")
+    _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    lanes = (
+        gate.Lane("backend-node", "backend", ".", ("node", "-e", ""), 5.0),
+        gate.Lane("python-one", "adminEsp", "main/tbot-server", (sys.executable, "-c", "pass"), 5.0),
+        gate.Lane("backend-npm", "backend", ".", ("npm", "test"), 5.0),
+        gate.Lane("admin-npm", "adminEsp", "main/manager-web", ("npm", "test"), 5.0),
+        gate.Lane("python-two", "adminEsp", "main/tbot-server", (sys.executable, "-c", "pass"), 5.0),
+    )
+    real_descriptor = gate._node_tree_descriptor
+    calls = 0
+
+    def counted_descriptor(root: Path):
+        nonlocal calls
+        calls += 1
+        return real_descriptor(root)
+
+    monkeypatch.setattr(gate, "_node_tree_descriptor", counted_descriptor)
+    monkeypatch.setattr(gate, "_resolve_command", lambda command: command)
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *_args, **_kwargs: gate._manifest.BoundedCommandResult(0, "", None),
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=lanes)
+
+    assert result["verdict"] == "PASS"
+    assert calls == 11
+
+
+def test_install_mutation_between_lanes_blocks_before_next_relevant_lane(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    install = _add_node_install(candidate, "backend", ".", "backend")
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    marker = tmp_path / "must-not-run"
+    lanes = (
+        gate.Lane("python-mutator", "adminEsp", "main/tbot-server", ("python", "mutate"), 5.0),
+        gate.Lane("backend-node", "backend", ".", ("node", "script.js"), 5.0),
+    )
+
+    def run(command, **_kwargs):
+        if command[0] == "python":
+            (install / "fixture-package/index.js").write_text("changed\n", encoding="utf-8")
+        else:
+            marker.touch()
+        return gate._manifest.BoundedCommandResult(0, "", None)
+
+    monkeypatch.setattr(gate, "_resolve_command", lambda command: command)
+    monkeypatch.setattr(gate, "run_bounded_command", run)
+
+    result = gate.run_gate(candidate_file, "quick", lanes=lanes)
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "backend-node"
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize("repository_name", ["backend", "firmware"])

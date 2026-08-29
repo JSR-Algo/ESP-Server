@@ -467,7 +467,7 @@ def _secure_file_sha256(path: Path, max_bytes: int) -> str | None:
         ):
             return None
         return digest.hexdigest()
-    except OSError:
+    except (OSError, RuntimeError):
         return None
     finally:
         if descriptor is not None:
@@ -593,7 +593,7 @@ def _node_tree_descriptor(root: Path) -> dict | None:
                         after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
                         if _stat_identity(after) != _stat_identity(before):
                             return False
-                    except (OSError, ValueError):
+                    except (OSError, RuntimeError, ValueError):
                         return False
                     state["totalBytes"] += len(target_bytes)
                     if state["totalBytes"] > MAX_NODE_INSTALL_BYTES:
@@ -621,7 +621,7 @@ def _node_tree_descriptor(root: Path) -> dict | None:
             "entryCount": state["entryCount"],
             "totalBytes": state["totalBytes"],
         }
-    except OSError:
+    except (OSError, RuntimeError):
         return None
     finally:
         if root_fd is not None:
@@ -717,7 +717,7 @@ def _has_unbound_node_modules(project_root: Path, allowed_root: Path) -> bool | 
         ):
             return None
         return result
-    except (OSError, ValueError):
+    except (OSError, RuntimeError, ValueError):
         return None
     finally:
         if root_fd is not None:
@@ -781,13 +781,13 @@ def node_install_authorized(
             if cache is not None:
                 cache[cache_key] = observed
         return _json_exact_equal(metadata, observed)
-    except (KeyError, OSError, TypeError, ValueError):
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError):
         return False
 
 
 def release_state_matches(
     candidate_path: Path, candidate: dict, lanes: Sequence[Lane], runtime_root: Path | None,
-    require_runtime: bool,
+    require_runtime: bool, node_lanes: Sequence[Lane] | None = None,
 ) -> bool:
     current = _load_candidate(candidate_path)
     if current != candidate or current is None or validate_candidate(current):
@@ -797,14 +797,15 @@ def release_state_matches(
     if require_runtime and not _runtime_matches_candidate(candidate, runtime_root):
         return False
     repositories = candidate["repositories"]
-    node_cache: dict = {}
     for lane in lanes:
         if not lane_dirty_exceptions_authorized(lane, candidate):
             return False
-        if not node_install_authorized(lane, candidate, node_cache):
-            return False
         bound_paths = lane_candidate_paths(lane, candidate)
         if bound_paths and not candidate_paths_match(repositories[lane.repository], bound_paths):
+            return False
+    node_cache: dict = {}
+    for lane in lanes if node_lanes is None else node_lanes:
+        if not node_install_authorized(lane, candidate, node_cache):
             return False
     return True
 
@@ -1086,7 +1087,12 @@ def _write_report_atomic(path: Path, report: dict, parent_fd: int | None = None)
         else:
             return False
         try:
-            os.write(descriptor, payload)
+            remaining = memoryview(payload)
+            while remaining:
+                written = os.write(descriptor, remaining)
+                if written <= 0:
+                    return False
+                remaining = remaining[written:]
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
@@ -1242,6 +1248,7 @@ def run_gate(
             for lane in selected:
                 if not release_state_matches(
                     candidate_path, candidate, selected, runtime_root, require_runtime,
+                    node_lanes=(lane,),
                 ):
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
@@ -1263,6 +1270,7 @@ def run_gate(
                     break
                 if not release_state_matches(
                     candidate_path, candidate, selected, runtime_root, require_runtime,
+                    node_lanes=(lane,),
                 ):
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
@@ -1309,6 +1317,7 @@ def run_gate(
                 })
                 if not release_state_matches(
                     candidate_path, candidate, selected, runtime_root, require_runtime,
+                    node_lanes=(lane,),
                 ):
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
