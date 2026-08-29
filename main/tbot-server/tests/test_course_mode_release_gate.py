@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib
 import json
+import os
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -116,6 +118,34 @@ def _commit_then_dirty(candidate: dict, repository_name: str, relative: str) -> 
         "path": relative,
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
     }]
+
+
+def _add_node_install(candidate: dict, repository_name: str, relative_cwd: str, key: str) -> Path:
+    repository = candidate["repositories"][repository_name]
+    root = Path(repository["path"])
+    install_parent = root / relative_cwd
+    lock = install_parent / "package-lock.json"
+    ignored = install_parent / ".gitignore"
+    install_parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text('{"lockfileVersion":3}\n', encoding="utf-8")
+    ignored.write_text("node_modules/\n", encoding="utf-8")
+    _git(root, "add", str(lock.relative_to(root)), str(ignored.relative_to(root)))
+    _git(root, "commit", "-m", f"add {key} lock")
+    repository.update(_repository(root))
+    install = install_parent / "node_modules"
+    package = install / "fixture-package"
+    package.mkdir(parents=True)
+    (package / "index.js").write_text("module.exports = 1;\n", encoding="utf-8")
+    binaries = install / ".bin"
+    binaries.mkdir()
+    for name in ("playwright", "vitest"):
+        binary = binaries / name
+        binary.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+        binary.chmod(0o755)
+    candidate.setdefault("tools", {}).setdefault("nodeInstalls", {})[key] = (
+        gate.describe_node_install(install, lock)
+    )
+    return install
 
 
 @pytest.fixture
@@ -518,6 +548,20 @@ def test_failed_corrective_report_write_removes_stale_pass(
     assert not report.exists()
 
 
+def test_failed_initial_report_write_removes_preexisting_stale_pass(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = tmp_path / "evidence/report.json"
+    report.write_text('{"verdict":"PASS"}\n', encoding="utf-8")
+    monkeypatch.setattr(gate, "_write_report_atomic", lambda *_args: False)
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(), report_path=report)
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "report"
+    assert not report.exists()
+
+
 def test_last_lane_candidate_manifest_drift_is_revalidated(candidate_file: Path) -> None:
     lane = _lane(
         "last",
@@ -780,7 +824,7 @@ def test_lane_dirty_runtime_dependencies_have_no_execution_authority(
     assert not marker.exists()
 
 
-def test_unselected_standalone_voice_test_dirty_exception_is_not_lane_authority(
+def test_unselected_standalone_voice_test_dirty_exception_blocks_admin_lane(
     candidate_file: Path, tmp_path: Path,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
@@ -793,13 +837,13 @@ def test_unselected_standalone_voice_test_dirty_exception_is_not_lane_authority(
         (sys.executable, "-c", f"from pathlib import Path;Path({str(marker)!r}).touch()"), 5.0,
     )
 
-    assert gate.lane_dirty_exceptions_authorized(lane, candidate) is True
+    assert gate.lane_dirty_exceptions_authorized(lane, candidate) is False
     result = gate.run_gate(candidate_file, "full", lanes=(lane,))
-    assert result["verdict"] == "PASS"
-    assert marker.is_file()
+    assert result["verdict"] == "BLOCKED"
+    assert not marker.exists()
 
 
-def test_imported_standalone_test_is_selected_execution_authority(candidate_file: Path) -> None:
+def test_all_admin_test_dirty_exceptions_are_rejected(candidate_file: Path) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     repository = candidate["repositories"]["adminEsp"]
     root = Path(repository["path"])
@@ -821,7 +865,6 @@ def test_imported_standalone_test_is_selected_execution_authority(candidate_file
         (sys.executable, "-m", "pytest", "-q", "tests/test_selected.py"), 5.0,
     )
 
-    assert "main/tbot-server/tests/test_dependency.py" in gate.lane_candidate_paths(lane, candidate)
     assert gate.lane_dirty_exceptions_authorized(lane, candidate) is False
 
 
@@ -840,6 +883,147 @@ def test_admin_lane_rejects_dirty_exceptions_outside_unselected_standalone_tests
     )
 
     assert gate.lane_dirty_exceptions_authorized(lane, candidate) is False
+
+
+def test_node_lane_requires_candidate_bound_install_metadata(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = gate.Lane("backend-node", "backend", ".", ("node", "script.js"), 5.0)
+
+    assert gate.node_install_authorized(lane, candidate) is False
+
+    _add_node_install(candidate, "backend", ".", "backend")
+
+    assert gate.node_install_authorized(lane, candidate) is True
+
+
+def test_non_node_lane_does_not_require_install_metadata(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = gate.Lane(
+        "esp-python", "adminEsp", "main/tbot-server",
+        (sys.executable, "-c", "pass"), 5.0,
+    )
+
+    assert gate.node_install_authorized(lane, candidate) is True
+
+
+@pytest.mark.parametrize("mutation", ["content", "mode", "outside-symlink", "special"])
+def test_node_install_tree_rejects_unbound_or_unsafe_changes(
+    candidate_file: Path, tmp_path: Path, mutation: str,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    install = _add_node_install(candidate, "backend", ".", "backend")
+    lane = gate.Lane("backend-node", "backend", ".", ("node", "script.js"), 5.0)
+    target = install / "fixture-package/index.js"
+    if mutation == "content":
+        target.write_text("module.exports = 2;\n", encoding="utf-8")
+    elif mutation == "mode":
+        target.chmod(0o755)
+    elif mutation == "outside-symlink":
+        target.unlink()
+        target.symlink_to(tmp_path / "outside.js")
+    else:
+        target.unlink()
+        os.mkfifo(target.parent / "unsafe.fifo")
+
+    assert gate.node_install_authorized(lane, candidate) is False
+
+
+def test_node_install_metadata_binds_lock_digest_counts_and_bytes(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "backend", ".", "backend")
+    lane = gate.Lane("backend-node", "backend", ".", ("npm", "test"), 5.0)
+    metadata = candidate["tools"]["nodeInstalls"]["backend"]
+
+    for field, replacement in (
+        ("packageLockSha256", "0" * 64),
+        ("entryCount", metadata["treeDigest"]["entryCount"] + 1),
+        ("totalBytes", metadata["treeDigest"]["totalBytes"] + 1),
+    ):
+        altered = json.loads(json.dumps(candidate))
+        if field == "packageLockSha256":
+            altered["tools"]["nodeInstalls"]["backend"][field] = replacement
+        else:
+            altered["tools"]["nodeInstalls"]["backend"]["treeDigest"][field] = replacement
+        assert gate.node_install_authorized(lane, altered) is False
+
+
+def test_admin_manager_node_install_uses_exact_manager_web_root(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    lane = gate.Lane(
+        "admin-node", "adminEsp", "main/manager-web", ("npx", "playwright", "test"), 5.0,
+    )
+
+    assert gate.node_install_authorized(lane, candidate) is True
+    candidate["tools"]["nodeInstalls"]["adminManagerWeb"]["root"] = str(
+        Path(candidate["repositories"]["adminEsp"]["path"]) / "node_modules"
+    )
+    assert gate.node_install_authorized(lane, candidate) is False
+
+
+def test_npx_lane_requires_candidate_bound_local_binary(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    install = _add_node_install(candidate, "backend", ".", "backend")
+    lane = gate.Lane("backend-npx", "backend", ".", ("npx", "vitest", "run"), 5.0)
+
+    assert gate.node_install_authorized(lane, candidate) is True
+    (install / ".bin/vitest").unlink()
+    assert gate.node_install_authorized(lane, candidate) is False
+
+
+def test_node_install_rejects_ancestor_node_modules(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    repository_root = Path(candidate["repositories"]["adminEsp"]["path"])
+    (repository_root / "node_modules").mkdir()
+    lane = gate.Lane(
+        "admin-node", "adminEsp", "main/manager-web", ("npm", "test"), 5.0,
+    )
+
+    assert gate.node_install_authorized(lane, candidate) is False
+
+
+def test_node_install_rejects_nested_ignored_node_modules(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "backend", ".", "backend")
+    repository_root = Path(candidate["repositories"]["backend"]["path"])
+    nested = repository_root / "src/node_modules/unbound-package"
+    nested.mkdir(parents=True)
+    (nested / "index.js").write_text("module.exports = 'unbound';\n", encoding="utf-8")
+    lane = gate.Lane("backend-node", "backend", ".", ("node", "src/run.js"), 5.0)
+
+    assert gate.node_install_authorized(lane, candidate) is False
+
+
+def test_node_install_rejects_casefold_equivalent_nested_install(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "backend", ".", "backend")
+    repository_root = Path(candidate["repositories"]["backend"]["path"])
+    (repository_root / "src/NODE_MODULES").mkdir(parents=True)
+    lane = gate.Lane("backend-node", "backend", ".", ("node", "src/run.js"), 5.0)
+
+    assert gate.node_install_authorized(lane, candidate) is False
+
+
+def test_node_install_is_revalidated_after_lane_execution(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    install = _add_node_install(candidate, "backend", ".", "backend")
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    lane = gate.Lane("backend-node", "backend", ".", ("node", "script.js"), 5.0)
+
+    def mutate_install(*_args, **_kwargs):
+        (install / "fixture-package/index.js").write_text("changed\n", encoding="utf-8")
+        return gate._manifest.BoundedCommandResult(0, "", None)
+
+    monkeypatch.setattr(gate, "run_bounded_command", mutate_install)
+    monkeypatch.setattr(gate, "_resolve_command", lambda command: command)
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "backend-node"
 
 
 @pytest.mark.parametrize("repository_name", ["backend", "firmware"])
@@ -898,7 +1082,7 @@ def test_physical_preflight_rejects_dirty_admin_paths_outside_unselected_tests(
     assert not marker.exists()
 
 
-def test_physical_preflight_allows_protected_unselected_voice_exception(
+def test_physical_preflight_blocks_protected_unselected_voice_exception(
     candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
@@ -919,8 +1103,8 @@ def test_physical_preflight_allows_protected_unselected_voice_exception(
         runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
     )
 
-    assert result["verdict"] == "PASS"
-    assert marker.is_file()
+    assert result["verdict"] == "BLOCKED"
+    assert not marker.exists()
 
 
 def test_full_esp_lane_maps_task06_roots_and_rejects_skips(candidate_file: Path) -> None:
@@ -1074,6 +1258,18 @@ def test_playwright_contract_rejects_json_type_substitution(
     _, sha = _commit_playwright_fixture(tmp_path, contract=contract, config="module.exports = {};\n")
 
     assert gate.source_contract_ready(tmp_path, "course-mode-playwright", sha) is False
+
+
+def test_release_gate_source_is_python_39_compatible() -> None:
+    source = Path(gate.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source, feature_version=(3, 9))
+
+    assert not any(
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "zip"
+        and any(keyword.arg == "strict" for keyword in node.keywords)
+        for node in ast.walk(tree)
+    )
+    assert ".stat(follow_symlinks=" not in source
 
 
 @pytest.mark.parametrize("contract_raw", ["{", '{"version":1,"version":1}'])

@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import contextlib
+import hashlib
 import importlib
 import json
 import math
@@ -50,6 +50,12 @@ BASE_ENVIRONMENT = {
 }
 MAX_LANE_OUTPUT_BYTES = 4 * 1024 * 1024
 MAX_REPORT_BYTES = 1024 * 1024
+MAX_NODE_INSTALL_ENTRIES = 250_000
+MAX_NODE_INSTALL_BYTES = 2 * 1024 * 1024 * 1024
+MAX_NODE_INSTALL_DEPTH = 128
+MAX_NODE_PROJECT_SCAN_ENTRIES = 500_000
+MAX_PACKAGE_LOCK_BYTES = 32 * 1024 * 1024
+NODE_TREE_SCHEMA = "sha256-path-mode-bytes-symlink-v1"
 MODES = ("quick", "full", "live-db", "physical-preflight")
 COURSE_MODE_SOFTWARE_TESTS = "@course-mode-software-tests"
 PLAYWRIGHT_CONTRACT_PATH = "main/manager-web/course-mode.playwright.contract.json"
@@ -370,35 +376,6 @@ def _playwright_spec_paths(admin_root: Path, sha: str) -> tuple[str, ...]:
     )
 
 
-def _python_test_dependencies(root: Path, sha: str, selected: set[str]) -> set[str]:
-    pending = list(selected)
-    dependencies: set[str] = set()
-    while pending:
-        relative = pending.pop()
-        source = _committed_text(root, sha, relative)
-        if source is None:
-            continue
-        try:
-            tree = ast.parse(source)
-        except (SyntaxError, ValueError):
-            continue
-        module_names = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                module_names.update(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                module_names.add(node.module)
-        for module in module_names:
-            name = module.removeprefix("tests.")
-            if "." in name or not name.startswith("test_"):
-                continue
-            dependency = f"main/tbot-server/tests/{name}.py"
-            if dependency not in selected and dependency not in dependencies:
-                dependencies.add(dependency)
-                pending.append(dependency)
-    return dependencies
-
-
 def lane_candidate_paths(lane: Lane, candidate: dict) -> tuple[str, ...]:
     repository = candidate["repositories"][lane.repository]
     root = Path(repository["path"])
@@ -420,9 +397,7 @@ def lane_candidate_paths(lane: Lane, candidate: dict) -> tuple[str, ...]:
             f"main/tbot-server/{token}" for token in lane.command
             if token.endswith(".py") and not Path(token).is_absolute()
         )
-    if lane.repository == "adminEsp" and lane.relative_cwd == "main/tbot-server":
-        paths.update(_python_test_dependencies(root, repository["sha"], paths))
-    if lane.repository == "backend" and lane.command[0] in {"npm", "npx"}:
+    if lane.repository == "backend" and lane.command[0] in {"npm", "npx", "node"}:
         paths.add("package.json")
         if (root / "package-lock.json").is_file():
             paths.add("package-lock.json")
@@ -449,32 +424,365 @@ def lane_dirty_exceptions_authorized(lane: Lane, candidate: dict) -> bool:
         return not dirty
     if lane.repository != "adminEsp":
         return False
-    root = Path(repository["path"])
-    selected = set(lane_candidate_paths(lane, candidate))
-    for relative in dirty:
-        path = Path(relative)
-        is_unselected_standalone_test = (
-            path.parent == Path("main/tbot-server/tests")
-            and path.name.startswith("test_")
-            and path.suffix == ".py"
-            and relative not in selected
-        )
-        if not is_unselected_standalone_test or _test_module_referenced(
-            root, repository["sha"], relative,
+    return not dirty
+
+
+def _digest_field(digest: "hashlib._Hash", value: bytes) -> None:
+    digest.update(len(value).to_bytes(8, "big"))
+    digest.update(value)
+
+
+def _stat_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
+        metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns,
+    )
+
+
+def _secure_file_sha256(path: Path, max_bytes: int) -> str | None:
+    descriptor = None
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > max_bytes:
+            return None
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            return None
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, max_bytes + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                return None
+            digest.update(chunk)
+        after = path.lstat()
+        final = os.fstat(descriptor)
+        if (
+            _stat_identity(after) != _stat_identity(before)
+            or _stat_identity(final) != _stat_identity(opened)
+        ):
+            return None
+        return digest.hexdigest()
+    except OSError:
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _node_tree_descriptor(root: Path) -> dict | None:
+    root_fd = None
+    try:
+        if not root.is_absolute() or root.is_symlink() or root.resolve(strict=True) != root:
+            return None
+        root_before = root.lstat()
+        if not stat.S_ISDIR(root_before.st_mode):
+            return None
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        root_opened = os.fstat(root_fd)
+        if (root_opened.st_dev, root_opened.st_ino) != (root_before.st_dev, root_before.st_ino):
+            return None
+        digest = hashlib.sha256()
+        _digest_field(digest, NODE_TREE_SCHEMA.encode("ascii"))
+        _digest_field(digest, b"directory")
+        _digest_field(digest, b".")
+        _digest_field(digest, str(stat.S_IMODE(root_before.st_mode)).encode("ascii"))
+        state = {"entryCount": 1, "totalBytes": 0}
+
+        def visit(directory_fd: int, relative_parent: Path, depth: int) -> bool:
+            if depth > MAX_NODE_INSTALL_DEPTH:
+                return False
+            try:
+                names = sorted(entry.name for entry in os.scandir(directory_fd))
+            except OSError:
+                return False
+            for name in names:
+                relative = relative_parent / name
+                relative_bytes = relative.as_posix().encode("utf-8")
+                if len(relative_bytes) > 4096:
+                    return False
+                try:
+                    before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                except OSError:
+                    return False
+                state["entryCount"] += 1
+                if state["entryCount"] > MAX_NODE_INSTALL_ENTRIES:
+                    return False
+                mode = stat.S_IMODE(before.st_mode)
+                if stat.S_ISDIR(before.st_mode):
+                    _digest_field(digest, b"directory")
+                    _digest_field(digest, relative_bytes)
+                    _digest_field(digest, str(mode).encode("ascii"))
+                    child_fd = None
+                    try:
+                        child_fd = os.open(
+                            name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=directory_fd,
+                        )
+                        opened = os.fstat(child_fd)
+                        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                            return False
+                        if not visit(child_fd, relative, depth + 1):
+                            return False
+                        after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                        final = os.fstat(child_fd)
+                        if (
+                            _stat_identity(after) != _stat_identity(before)
+                            or _stat_identity(final) != _stat_identity(opened)
+                        ):
+                            return False
+                    except OSError:
+                        return False
+                    finally:
+                        if child_fd is not None:
+                            os.close(child_fd)
+                elif stat.S_ISREG(before.st_mode):
+                    if before.st_nlink != 1:
+                        return False
+                    state["totalBytes"] += before.st_size
+                    if state["totalBytes"] > MAX_NODE_INSTALL_BYTES:
+                        return False
+                    _digest_field(digest, b"regular")
+                    _digest_field(digest, relative_bytes)
+                    _digest_field(digest, str(mode).encode("ascii"))
+                    _digest_field(digest, str(before.st_size).encode("ascii"))
+                    file_fd = None
+                    try:
+                        file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                        opened = os.fstat(file_fd)
+                        if (
+                            _stat_identity(opened) != _stat_identity(before)
+                        ):
+                            return False
+                        remaining = before.st_size
+                        while remaining:
+                            chunk = os.read(file_fd, min(1024 * 1024, remaining))
+                            if not chunk:
+                                return False
+                            digest.update(chunk)
+                            remaining -= len(chunk)
+                        if os.read(file_fd, 1):
+                            return False
+                        after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                        final = os.fstat(file_fd)
+                        if (
+                            _stat_identity(after) != _stat_identity(before)
+                            or _stat_identity(final) != _stat_identity(opened)
+                        ):
+                            return False
+                    except OSError:
+                        return False
+                    finally:
+                        if file_fd is not None:
+                            os.close(file_fd)
+                elif stat.S_ISLNK(before.st_mode):
+                    try:
+                        target = os.readlink(name, dir_fd=directory_fd)
+                        target_bytes = os.fsencode(target)
+                        resolved = (
+                            Path(target) if Path(target).is_absolute()
+                            else root / relative.parent / target
+                        ).resolve(strict=True)
+                        resolved.relative_to(root)
+                        if os.readlink(name, dir_fd=directory_fd) != target:
+                            return False
+                        after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                        if _stat_identity(after) != _stat_identity(before):
+                            return False
+                    except (OSError, ValueError):
+                        return False
+                    state["totalBytes"] += len(target_bytes)
+                    if state["totalBytes"] > MAX_NODE_INSTALL_BYTES:
+                        return False
+                    _digest_field(digest, b"symlink")
+                    _digest_field(digest, relative_bytes)
+                    _digest_field(digest, str(mode).encode("ascii"))
+                    _digest_field(digest, target_bytes)
+                else:
+                    return False
+            return True
+
+        if not visit(root_fd, Path(), 0):
+            return None
+        root_after = root.lstat()
+        root_final = os.fstat(root_fd)
+        if (
+            _stat_identity(root_after) != _stat_identity(root_before)
+            or _stat_identity(root_final) != _stat_identity(root_opened)
+        ):
+            return None
+        return {
+            "schema": NODE_TREE_SCHEMA,
+            "sha256": digest.hexdigest(),
+            "entryCount": state["entryCount"],
+            "totalBytes": state["totalBytes"],
+        }
+    except OSError:
+        return None
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
+
+
+def describe_node_install(root: Path, package_lock: Path) -> dict:
+    tree = _node_tree_descriptor(root)
+    lock_digest = _secure_file_sha256(package_lock, MAX_PACKAGE_LOCK_BYTES)
+    if tree is None or lock_digest is None:
+        raise ValueError("unsafe Node installation")
+    return {
+        "version": 1,
+        "root": str(root),
+        "packageLockSha256": lock_digest,
+        "treeDigest": tree,
+    }
+
+
+def _has_unbound_node_modules(project_root: Path, allowed_root: Path) -> bool | None:
+    root_fd = None
+    try:
+        if (
+            not project_root.is_absolute() or project_root.is_symlink()
+            or project_root.resolve(strict=True) != project_root
+        ):
+            return None
+        allowed_relative = allowed_root.relative_to(project_root)
+        root_before = project_root.lstat()
+        root_fd = os.open(project_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        root_opened = os.fstat(root_fd)
+        if _stat_identity(root_opened) != _stat_identity(root_before):
+            return None
+        state = {"entries": 0}
+
+        def visit(directory_fd: int, relative_parent: Path, depth: int) -> bool | None:
+            if depth > MAX_NODE_INSTALL_DEPTH:
+                return None
+            try:
+                names = sorted(entry.name for entry in os.scandir(directory_fd))
+            except OSError:
+                return None
+            for name in names:
+                relative = relative_parent / name
+                state["entries"] += 1
+                if state["entries"] > MAX_NODE_PROJECT_SCAN_ENTRIES:
+                    return None
+                try:
+                    before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                except OSError:
+                    return None
+                if name.casefold() == "node_modules":
+                    if relative != allowed_relative or not stat.S_ISDIR(before.st_mode):
+                        return True
+                    continue
+                if relative == Path(".git"):
+                    continue
+                if stat.S_ISDIR(before.st_mode):
+                    child_fd = None
+                    try:
+                        child_fd = os.open(
+                            name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=directory_fd,
+                        )
+                        opened = os.fstat(child_fd)
+                        if _stat_identity(opened) != _stat_identity(before):
+                            return None
+                        result = visit(child_fd, relative, depth + 1)
+                        if result is not False:
+                            return result
+                        after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                        final = os.fstat(child_fd)
+                        if (
+                            _stat_identity(after) != _stat_identity(before)
+                            or _stat_identity(final) != _stat_identity(opened)
+                        ):
+                            return None
+                    except OSError:
+                        return None
+                    finally:
+                        if child_fd is not None:
+                            os.close(child_fd)
+                elif not (stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode)):
+                    return None
+            return False
+
+        result = visit(root_fd, Path(), 0)
+        root_after = project_root.lstat()
+        root_final = os.fstat(root_fd)
+        if (
+            _stat_identity(root_after) != _stat_identity(root_before)
+            or _stat_identity(root_final) != _stat_identity(root_opened)
+        ):
+            return None
+        return result
+    except (OSError, ValueError):
+        return None
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
+
+
+def _node_install_requirement(lane: Lane) -> tuple[str, str] | None:
+    if lane.command[0] not in {"npm", "npx", "node"}:
+        return None
+    if lane.repository == "backend" and lane.relative_cwd == ".":
+        return "backend", "."
+    if lane.repository == "adminEsp" and lane.relative_cwd == "main/manager-web":
+        return "adminManagerWeb", "main/manager-web"
+    return "", ""
+
+
+def node_install_authorized(
+    lane: Lane, candidate: dict, cache: dict | None = None,
+) -> bool:
+    requirement = _node_install_requirement(lane)
+    if requirement is None:
+        return True
+    key, relative_cwd = requirement
+    if not key:
+        return False
+    try:
+        repository = candidate["repositories"][lane.repository]
+        repository_root = Path(repository["path"]).resolve(strict=True)
+        install_parent = repository_root / relative_cwd
+        install_root = install_parent / "node_modules"
+        package_lock = install_parent / "package-lock.json"
+        if any(
+            os.path.lexists(ancestor / "node_modules")
+            for ancestor in install_parent.parents
         ):
             return False
-    return True
-
-
-def _test_module_referenced(root: Path, sha: str, relative: str) -> bool:
-    module_name = Path(relative).stem
-    try:
-        matches = _candidate_git(
-            root, "grep", "-l", "-F", module_name, sha, "--", "main/tbot-server/**/*.py",
-        ).splitlines()
-    except RuntimeError:
+        if _has_unbound_node_modules(install_parent, install_root) is not False:
+            return False
+        if lane.command[0] == "npx":
+            if len(lane.command) < 2 or "/" in lane.command[1] or lane.command[1] in {".", ".."}:
+                return False
+            local_binary = install_root / ".bin" / lane.command[1]
+            binary_metadata = local_binary.lstat()
+            if stat.S_ISLNK(binary_metadata.st_mode):
+                local_binary.resolve(strict=True).relative_to(install_root)
+            elif not stat.S_ISREG(binary_metadata.st_mode):
+                return False
+        metadata = candidate["tools"]["nodeInstalls"][key]
+        if not isinstance(metadata, dict) or set(metadata) != {
+            "version", "root", "packageLockSha256", "treeDigest",
+        }:
+            return False
+        if type(metadata["version"]) is not int or metadata["version"] != 1:
+            return False
+        if metadata["root"] != str(install_root):
+            return False
+        cache_key = (key, str(install_root), str(package_lock))
+        observed = cache.get(cache_key) if cache is not None else None
+        if observed is None:
+            observed = describe_node_install(install_root, package_lock)
+            if cache is not None:
+                cache[cache_key] = observed
+        return _json_exact_equal(metadata, observed)
+    except (KeyError, OSError, TypeError, ValueError):
         return False
-    return any(match.partition(":")[2] != relative for match in matches)
 
 
 def release_state_matches(
@@ -489,8 +797,11 @@ def release_state_matches(
     if require_runtime and not _runtime_matches_candidate(candidate, runtime_root):
         return False
     repositories = candidate["repositories"]
+    node_cache: dict = {}
     for lane in lanes:
         if not lane_dirty_exceptions_authorized(lane, candidate):
+            return False
+        if not node_install_authorized(lane, candidate, node_cache):
             return False
         bound_paths = lane_candidate_paths(lane, candidate)
         if bound_paths and not candidate_paths_match(repositories[lane.repository], bound_paths):
@@ -514,8 +825,7 @@ def _json_exact_equal(actual: object, expected: object) -> bool:
         )
     if isinstance(expected, list):
         return len(actual) == len(expected) and all(
-            _json_exact_equal(item, expected_item)
-            for item, expected_item in zip(actual, expected, strict=True)
+            _json_exact_equal(actual[index], expected[index]) for index in range(len(expected))
         )
     return actual == expected
 
@@ -1020,6 +1330,7 @@ def run_gate(
     if report_path is not None:
         assert report_parent_fd is not None
         if not _write_report_atomic(report_path, report, report_parent_fd):
+            _invalidate_report(report_path, report_parent_fd)
             os.close(report_parent_fd)
             return _blocked(report.get("candidateId"), "report")
         if (
