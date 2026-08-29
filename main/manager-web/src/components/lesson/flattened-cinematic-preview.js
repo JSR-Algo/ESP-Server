@@ -102,12 +102,32 @@ export function applyChromaKey(data, chromaKey) {
 
   const tolerance = Math.max(0, Number(chromaKey.tolerance) || 0);
   const feather = Math.max(0, Number(chromaKey.feather) || 0);
+  const hue = (red, green, blue) => {
+    const max = Math.max(red, green, blue);
+    const min = Math.min(red, green, blue);
+    const delta = max - min;
+    if (delta === 0) return null;
+    const sector = max === red
+      ? ((green - blue) / delta) % 6
+      : max === green ? ((blue - red) / delta) + 2 : ((red - green) / delta) + 4;
+    return (sector * 60 + 360) % 360;
+  };
+  const keyHue = hue(color.r, color.g, color.b);
+  const saturatedKey = keyHue !== null
+    && Math.max(color.r, color.g, color.b) - Math.min(color.r, color.g, color.b) >= 200;
   for (let index = 0; index < data.length; index += 4) {
-    const distance = Math.max(
+    const rgbDistance = Math.max(
       Math.abs(data[index] - color.r),
       Math.abs(data[index + 1] - color.g),
       Math.abs(data[index + 2] - color.b)
     );
+    const pixelMax = Math.max(data[index], data[index + 1], data[index + 2]);
+    const pixelMin = Math.min(data[index], data[index + 1], data[index + 2]);
+    const pixelHue = saturatedKey && pixelMax - pixelMin >= 128
+      ? hue(data[index], data[index + 1], data[index + 2]) : null;
+    const hueDistance = pixelHue === null ? Number.POSITIVE_INFINITY
+      : Math.min(Math.abs(pixelHue - keyHue), 360 - Math.abs(pixelHue - keyHue));
+    const distance = Math.min(rgbDistance, hueDistance);
     if (distance <= tolerance) {
       data[index + 3] = 0;
     } else if (feather > 0 && distance < tolerance + feather) {

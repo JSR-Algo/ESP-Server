@@ -204,7 +204,7 @@ assertSourceIncludes(editorSource, 'isCourseModeV5()', 'Course Mode v5 must be t
 assertSourceIncludes(editorSource, 'hasLoadedCourseModeAuthority()', 'Course Mode v5 authoring must require persisted Course Mode authority');
 assertSourceIncludes(editorSource, 'filterRobotVideoAssets', 'robot picker must fail closed to real MJPEG MP4 robot videos');
 assertSourceIncludes(editorSource, 'applyLessonVisualSelection(patch)', 'both selectors must share one lesson-level save path');
-assertSourceIncludes(editorSource, 'buildLessonVisualRequest(this.lessonVisualPair, patch)', 'every save must merge and validate both visual ids');
+assertSourceIncludes(editorSource, 'buildLessonVisualRequest(nextPair)', 'every save must validate the accumulated visual selection');
 assertSourceIncludes(editorSource, 'Api.lesson.applyLessonVisuals(', 'visual selection must use the lesson-level API');
 assertSourceIncludes(editorSource, 'savingLessonVisuals: false', 'visual selection needs an explicit saving state');
 assertSourceIncludes(editorSource, 'pendingLessonVisualPair: null', 'incomplete local pairs need explicit pending state');
@@ -243,6 +243,112 @@ assert.match(selectedVisualVersionIdSource, /slot === 'robotOverlay'[\s\S]*this\
 const selectCinematicLayerSource = extractObjectMethod(editorSource, 'selectCinematicLayer');
 assert.match(selectCinematicLayerSource, /selection\.slot === 'robotOverlay'[\s\S]*this\.isCourseModeV5[\s\S]*applyLessonVisualSelection\(\{[\s\S]*robotAssetVersionId:\s*selection\.assetVersionId[\s\S]*robotAssetKey:\s*asset\.assetKey/m, 'Course Mode v5 robot selector must use the atomic lesson visual triple save');
 assert.match(selectCinematicLayerSource, /if \(!this\.isCourseModeV5\)[\s\S]*Api\.lesson\.setVisualRef\(/m, 'legacy non-v5 robot authoring must keep the old per-step visual ref path');
+
+const sequentialVisualSelectionSource = extractObjectMethod(editorSource, 'applyLessonVisualSelection');
+const appliedVisualRequests = [];
+const applySequentialLessonVisualSelection = vm.runInNewContext(
+  `(${sequentialVisualSelectionSource.replace(/^applyLessonVisualSelection/, 'function applyLessonVisualSelection')})`,
+  {
+    Api: { lesson: { applyLessonVisuals: (_lessonId, request) => appliedVisualRequests.push(request) } },
+    buildLessonVisualRequest,
+    Object,
+  },
+);
+function visualSelectionContext(isCourseModeV5) {
+  return {
+    isDraft: true,
+    isCourseModeV5,
+    savingLessonVisuals: false,
+    savingStep: false,
+    rebindingSharedVisual: false,
+    assetMutating: false,
+    sharedImpactReconciling: false,
+    savingStepKeys: {},
+    addingStep: false,
+    reordering: false,
+    deletingStepKey: '',
+    steps: [{}],
+    lessonVisualPair: {
+      backgroundAssetVersionId: '',
+      backgroundAssetKey: '',
+      objectAssetVersionId: '',
+      objectAssetKey: '',
+      robotAssetVersionId: '',
+      robotAssetKey: '',
+    },
+    pendingLessonVisualPair: null,
+    lessonVisualReconciliationRequired: false,
+    lessonId: 'lesson-visual-sequence',
+    lessonLoadRequestId: 1,
+    lessonVisualSaveRequestId: 0,
+    editorDestroying: false,
+    pushCinematicStep() {},
+    $nextTick(callback) { callback(); },
+    $t(key) { return key; },
+    $message: { warning() {}, error() {}, success() {} },
+  };
+}
+
+const courseV5VisualContext = visualSelectionContext(true);
+assert.equal(applySequentialLessonVisualSelection.call(courseV5VisualContext, {
+  backgroundAssetVersionId: 'background-v5',
+  backgroundAssetKey: 'background.farm',
+}), false);
+assert.equal(applySequentialLessonVisualSelection.call(courseV5VisualContext, {
+  objectAssetVersionId: 'object-v5',
+  objectAssetKey: 'object.barn',
+}), false);
+assert.equal(appliedVisualRequests.length, 0, 'an incomplete Course Mode v5 triple must remain local and must not bind');
+assert.equal(applySequentialLessonVisualSelection.call(courseV5VisualContext, {
+  robotAssetVersionId: 'robot-v5',
+  robotAssetKey: 'robot.teacher',
+}), true);
+assert.deepEqual(JSON.parse(JSON.stringify(appliedVisualRequests)), [{
+  backgroundAssetVersionId: 'background-v5',
+  objectAssetVersionId: 'object-v5',
+  robotAssetVersionId: 'robot-v5',
+}], 'sequential Course Mode v5 picker clicks must submit one accumulated visual triple');
+
+appliedVisualRequests.length = 0;
+const changedV5VisualContext = visualSelectionContext(true);
+changedV5VisualContext.lessonVisualPair = {
+  backgroundAssetVersionId: 'background-kept',
+  backgroundAssetKey: 'background.kept',
+  objectAssetVersionId: 'object-old',
+  objectAssetKey: 'object.old',
+  robotAssetVersionId: 'robot-kept',
+  robotAssetKey: 'robot.kept',
+};
+assert.equal(applySequentialLessonVisualSelection.call(changedV5VisualContext, {
+  objectAssetVersionId: 'object-new',
+  objectAssetKey: 'object.new',
+}), true);
+assert.deepEqual(JSON.parse(JSON.stringify(appliedVisualRequests)), [{
+  backgroundAssetVersionId: 'background-kept',
+  objectAssetVersionId: 'object-new',
+  robotAssetVersionId: 'robot-kept',
+}], 'changing one Course Mode v5 visual must preserve the other two selections');
+
+appliedVisualRequests.length = 0;
+const legacyV4VisualContext = visualSelectionContext(false);
+assert.equal(applySequentialLessonVisualSelection.call(legacyV4VisualContext, {
+  backgroundAssetVersionId: 'background-v4',
+  backgroundAssetKey: 'background.legacy',
+}), false);
+assert.equal(applySequentialLessonVisualSelection.call(legacyV4VisualContext, {
+  objectAssetVersionId: 'object-v4',
+  objectAssetKey: 'object.legacy',
+}), true);
+assert.deepEqual(JSON.parse(JSON.stringify(appliedVisualRequests)), [{
+  backgroundAssetVersionId: 'background-v4',
+  objectAssetVersionId: 'object-v4',
+}], 'legacy v4 picker clicks must keep the two-layer request contract');
+
+assert.match(
+  editorSource,
+  /'\$route\.query\.lessonId'\(value, previous\)\s*\{[\s\S]*?this\.pendingLessonVisualPair\s*=\s*null;[\s\S]*?this\.fetchAll\(\);/m,
+  'lesson navigation must clear an incomplete pending visual selection before loading the next lesson',
+);
 
 const isCourseModeV5Source = extractObjectMethod(editorSource, 'isCourseModeV5');
 const isCourseModeV5 = vm.runInNewContext(`(${isCourseModeV5Source.replace(/^isCourseModeV5/, 'function isCourseModeV5')})`);
@@ -1049,6 +1155,7 @@ function verifyPreviewAuthorityClearsOnLessonFetchContract() {
     clearPromptSaveState,
     resetLessonAssetGenerationStatus() {},
     resetTVideoJourneyState() {},
+    loadCourseModeContract() {},
     loadLessonAssetGenerationStatus() {},
     fetchSteps() {},
     loadTVideoJourney() {},
@@ -1192,6 +1299,7 @@ function buildProofChainContext(overrides = {}) {
       this.savingStep = false;
     },
     resetTVideoJourneyState() {},
+    loadCourseModeContract() {},
     loadLessonAssetGenerationStatus() {},
     fetchSteps() {},
     loadTVideoJourney() {},

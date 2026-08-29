@@ -34,7 +34,11 @@
     "test:web-cache-policy": "node scripts/check-web-cache-policy.mjs",
     "test:e2e:lesson-studio:reset": "node scripts/reset-lesson-studio-e2e-state.cjs",
     "test:e2e:lesson-studio:reset:test": "node --test scripts/reset-lesson-studio-e2e-state.test.cjs",
-    "test:e2e:lesson-studio": "playwright test --config=playwright.config.js"
+    "test:e2e:lesson-studio": "playwright test --config=playwright.lesson-studio.config.js",
+    "test:e2e:course-mode": "playwright test --config=playwright.config.js",
+    "test:course-mode:assignment-fixture": "node --test scripts/task4-assignment-fixture.test.cjs",
+    "test:e2e:course-mode:assignment:new": "node scripts/run-task4-assignment-phase.cjs new",
+    "test:e2e:course-mode:assignment:rollback": "node scripts/run-task4-assignment-phase.cjs rollback"
   },
   "dependencies": {
     "axios": "^1.19.0",

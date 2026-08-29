@@ -10,6 +10,8 @@ import importlib
 import json
 import math
 import os
+import posixpath
+import re
 import secrets
 import shutil
 import stat
@@ -59,6 +61,35 @@ NODE_TREE_SCHEMA = "sha256-path-mode-bytes-symlink-v1"
 MODES = ("quick", "full", "live-db", "physical-preflight")
 COURSE_MODE_SOFTWARE_TESTS = "@course-mode-software-tests"
 PLAYWRIGHT_CONTRACT_PATH = "main/manager-web/course-mode.playwright.contract.json"
+PLAYWRIGHT_SOURCE_PATHS = (
+    "docs/docker/docker-compose.lesson-studio-e2e.yml",
+    "docs/docker/lesson-studio-e2e/seed-postgres.sql",
+    "main/manager-web/e2e/lesson-studio/course-mode-authoring.spec.js-snapshots/course-mode-step-1-course-mode-webkit-desktop-darwin.png",
+    "main/manager-web/e2e/lesson-studio/course-mode-authoring.spec.js-snapshots/course-mode-step-1-course-mode-webkit-mobile-darwin.png",
+    "main/manager-web/e2e/lesson-studio/course-mode-authoring.spec.js-snapshots/course-mode-step-2-course-mode-webkit-desktop-darwin.png",
+    "main/manager-web/e2e/lesson-studio/course-mode-authoring.spec.js-snapshots/course-mode-step-2-course-mode-webkit-mobile-darwin.png",
+    "main/manager-web/playwright.lesson-studio.config.js",
+    "main/manager-web/scripts/check-canonical-demo-ui.mjs",
+    "main/manager-web/scripts/check-flattened-cinematic-preview.mjs",
+    "main/manager-web/scripts/check-lesson-assignment-ui-contracts.mjs",
+    "main/manager-web/scripts/check-lesson-builder-logic.cjs",
+    "main/manager-web/scripts/check-lesson-editor-ui-contracts.mjs",
+    "main/manager-web/scripts/check-lesson-visual-selection.cjs",
+    "main/manager-web/scripts/check-robot-lesson-preview.mjs",
+    "main/manager-web/scripts/lesson-studio-e2e-environment.test.cjs",
+    "main/manager-web/scripts/page-errors-helper.test.cjs",
+    "main/manager-web/src/apis/module/lesson.js",
+    "main/manager-web/src/components/lesson/CinematicVideoLayer.vue",
+    "main/manager-web/src/components/lesson/RobotEspTftProjectionPreview.vue",
+    "main/manager-web/src/components/lesson/flattened-cinematic-preview.js",
+    "main/manager-web/src/components/lesson/robot-preview-projection.js",
+    "main/manager-web/src/i18n/en.js",
+    "main/manager-web/src/i18n/vi.js",
+    "main/manager-web/src/views/LessonEditor.vue",
+    "main/manager-web/src/views/LessonMonitoring.vue",
+    "main/manager-web/src/views/login.vue",
+    "main/manager-web/tests/browser/lesson-builder-main.js",
+)
 PLAYWRIGHT_PROJECTS = (
     "course-mode-chromium-desktop",
     "course-mode-webkit-desktop",
@@ -70,6 +101,33 @@ PLAYWRIGHT_PROJECT_CONTRACT = (
     {"name": "course-mode-webkit-desktop", "device": "Desktop Safari", "viewport": {"width": 1440, "height": 900}},
     {"name": "course-mode-chromium-mobile", "device": "Pixel 7", "viewport": {"width": 390, "height": 844}},
     {"name": "course-mode-webkit-mobile", "device": "iPhone 13", "viewport": {"width": 390, "height": 844}},
+)
+PLAYWRIGHT_ASSIGNMENT_CONTRACT = {
+    "fixtureCommand": "node --test scripts/task4-assignment-fixture.test.cjs",
+    "newCommand": "node scripts/run-task4-assignment-phase.cjs new",
+    "rollbackCommand": "node scripts/run-task4-assignment-phase.cjs rollback",
+    "sourcePaths": [
+        "docs/docker/task4-admin-assignment/bootstrap.cjs",
+        "docs/docker/task4-admin-assignment/docker-compose.new.yml",
+        "docs/docker/task4-admin-assignment/docker-compose.rollback.yml",
+        "docs/docker/task4-admin-assignment/serve-media.cjs",
+        "main/manager-web/e2e/lesson-studio/assignment-rollback-phase.spec.js",
+        "main/manager-web/playwright.assignment-rollback.config.js",
+        "main/manager-web/scripts/prepare-task4-media-templates.cjs",
+        "main/manager-web/scripts/run-task4-assignment-phase.cjs",
+        "main/manager-web/scripts/task4-assignment-fixture.test.cjs",
+    ],
+}
+PLAYWRIGHT_ASSIGNMENT_SCRIPTS = {
+    "test:course-mode:assignment-fixture": PLAYWRIGHT_ASSIGNMENT_CONTRACT["fixtureCommand"],
+    "test:e2e:course-mode:assignment:new": PLAYWRIGHT_ASSIGNMENT_CONTRACT["newCommand"],
+    "test:e2e:course-mode:assignment:rollback": PLAYWRIGHT_ASSIGNMENT_CONTRACT["rollbackCommand"],
+}
+TASK4_ASSIGNMENT_CANDIDATE_ENV = (
+    "TBOT_BACKEND_WORKTREE", "TBOT_LESSON_STUDIO_BACKEND_IMAGE", "TBOT_LESSON_STUDIO_WEB_IMAGE",
+    "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME", "LESSON_STUDIO_E2E_RESOURCE_PREFIX",
+    "TASK4_ASSIGNMENT_RUNTIME_ROOT", "JWT_PUBLIC_KEY", "TBOT_DEVICE_MINT_SECRET",
+    "LESSON_ASSET_ORIGIN_BASE", "ROBOT_ESP_BASE_URL", "TBOT_FIRMWARE_WORKTREE",
 )
 PLAYWRIGHT_FIXED_CONTRACT = {
     "testDir": "./e2e/lesson-studio",
@@ -83,6 +141,7 @@ PLAYWRIGHT_FIXED_CONTRACT = {
     "reporter": [["list"], ["html", {"outputFolder": "./output/playwright-e2e/report", "open": "never"}]],
     "use": {
         "baseUrlHelper": "lessonStudioWebOrigin",
+        "ignoreHTTPSErrors": True,
         "trace": "retain-on-failure",
         "screenshot": "only-on-failure",
         "video": "retain-on-failure",
@@ -172,6 +231,23 @@ FULL_LANES = (
             required_source_contract="course-mode-playwright",
         )
         for project in PLAYWRIGHT_PROJECTS
+    ),
+    _lane(
+        "admin-course-mode-assignment-fixture", "adminEsp", "main/manager-web",
+        ("npm", "run", "test:course-mode:assignment-fixture"),
+        required_source_contract="course-mode-playwright",
+    ),
+    _lane(
+        "admin-course-mode-assignment-new", "adminEsp", "main/manager-web",
+        ("npm", "run", "test:e2e:course-mode:assignment:new"), 1200.0,
+        TASK4_ASSIGNMENT_CANDIDATE_ENV,
+        required_source_contract="course-mode-playwright",
+    ),
+    _lane(
+        "admin-course-mode-assignment-rollback", "adminEsp", "main/manager-web",
+        ("npm", "run", "test:e2e:course-mode:assignment:rollback"), 1200.0,
+        TASK4_ASSIGNMENT_CANDIDATE_ENV,
+        required_source_contract="course-mode-playwright",
     ),
     _lane(
         "esp-course-mode-full", "adminEsp", "main/tbot-server",
@@ -374,6 +450,48 @@ def _playwright_spec_paths(admin_root: Path, sha: str) -> tuple[str, ...]:
         relative for relative in tracked
         if Path(relative).name.startswith("course-mode") and relative.endswith(".spec.js")
     )
+
+
+_COMMON_JS_REQUIRE = re.compile(
+    r"^[ \t]*(?:(?:(?:const|let|var)\b[^\n=]*|})\s*=\s*)?"
+    r"require\(\s*(['\"])(\.[^'\"]*)\1\s*\)",
+    re.MULTILINE,
+)
+
+
+def _playwright_harness_paths(
+    admin_root: Path, sha: str, contract: Mapping[str, object], specs: Sequence[str],
+) -> tuple[str, ...] | None:
+    fixed = contract.get("fixed")
+    global_setup = fixed.get("globalSetup") if isinstance(fixed, dict) else None
+    if not isinstance(global_setup, str):
+        return None
+    web_prefix = "main/manager-web/"
+    pending = ["main/manager-web/playwright.config.js", *specs]
+    pending.append(web_prefix + global_setup.removeprefix("./"))
+    discovered: set[str] = set()
+    while pending:
+        relative = posixpath.normpath(pending.pop())
+        if relative in discovered:
+            continue
+        if not relative.startswith(web_prefix) or relative.startswith("../"):
+            return None
+        source = _committed_text(admin_root, sha, relative)
+        if source is None:
+            return None
+        discovered.add(relative)
+        for match in _COMMON_JS_REQUIRE.finditer(source):
+            requested = match.group(2)
+            base = posixpath.normpath(posixpath.join(posixpath.dirname(relative), requested))
+            candidates = (base, f"{base}.js", f"{base}.cjs", f"{base}.mjs", f"{base}/index.js")
+            resolved = next(
+                (candidate for candidate in candidates if _committed_text(admin_root, sha, candidate) is not None),
+                None,
+            )
+            if resolved is None or not resolved.startswith(web_prefix):
+                return None
+            pending.append(resolved)
+    return tuple(sorted(discovered))
 
 
 def lane_candidate_paths(lane: Lane, candidate: dict) -> tuple[str, ...]:
@@ -833,13 +951,22 @@ def _json_exact_equal(actual: object, expected: object) -> bool:
 
 def validate_playwright_contract(contract: object) -> bool:
     if not isinstance(contract, dict) or set(contract) != {
-        "version", "specs", "testMatch", "projects", "fixed",
+        "version", "sourcePaths", "specs", "testMatch", "projects", "assignmentPhases", "fixed",
     }:
         return False
+    source_paths = contract.get("sourcePaths")
     specs = contract.get("specs")
     test_match = contract.get("testMatch")
     if (
         type(contract.get("version")) is not int or contract.get("version") != 1
+        or not isinstance(source_paths, list)
+        or source_paths != sorted(set(source_paths))
+        or any(
+            not isinstance(relative, str) or not relative
+            or Path(relative).is_absolute() or ".." in Path(relative).parts
+            for relative in source_paths
+        )
+        or not _json_exact_equal(source_paths, list(PLAYWRIGHT_SOURCE_PATHS))
         or not isinstance(specs, list) or not specs
         or any(
             not isinstance(spec, str) or not spec.startswith("e2e/lesson-studio/")
@@ -851,6 +978,7 @@ def validate_playwright_contract(contract: object) -> bool:
         or specs != sorted(set(specs))
         or test_match != [Path(spec).name for spec in specs]
         or not _json_exact_equal(contract.get("projects"), list(PLAYWRIGHT_PROJECT_CONTRACT))
+        or not _json_exact_equal(contract.get("assignmentPhases"), PLAYWRIGHT_ASSIGNMENT_CONTRACT)
         or not _json_exact_equal(contract.get("fixed"), PLAYWRIGHT_FIXED_CONTRACT)
     ):
         return False
@@ -898,6 +1026,7 @@ def generate_playwright_config(contract: object) -> str:
         f"  reporter: {reporter},",
         "  use: {",
         "    baseURL: lessonStudioWebOrigin(),",
+        f"    ignoreHTTPSErrors: {str(fixed['use']['ignoreHTTPSErrors']).lower()},",
         f"    trace: {_js_string(fixed['use']['trace'])},",
         f"    screenshot: {_js_string(fixed['use']['screenshot'])},",
         f"    video: {_js_string(fixed['use']['video'])},",
@@ -927,7 +1056,10 @@ def source_contract_ready(admin_root: Path, contract: str, sha: str) -> bool:
         return False
     scripts = package.get("scripts") if isinstance(package, dict) else None
     script = scripts.get("test:e2e:course-mode") if isinstance(scripts, dict) else None
-    if script != "playwright test --config=playwright.config.js":
+    if (
+        script != "playwright test --config=playwright.config.js"
+        or not all(scripts.get(name) == command for name, command in PLAYWRIGHT_ASSIGNMENT_SCRIPTS.items())
+    ):
         return False
     try:
         generated = generate_playwright_config(document)
@@ -936,9 +1068,13 @@ def source_contract_ready(admin_root: Path, contract: str, sha: str) -> bool:
     normalized_specs = [relative.removeprefix("main/manager-web/") for relative in specs]
     if document["specs"] != normalized_specs or config_raw != generated:
         return False
+    harness = _playwright_harness_paths(admin_root, sha, document, specs)
+    if harness is None:
+        return False
     bound = (
         "main/manager-web/package.json", "main/manager-web/playwright.config.js",
-        PLAYWRIGHT_CONTRACT_PATH, *specs,
+        PLAYWRIGHT_CONTRACT_PATH, *harness, *document["sourcePaths"],
+        *document["assignmentPhases"]["sourcePaths"],
     )
     return candidate_paths_match(
         {"path": str(admin_root), "sha": sha, "dirtyExceptions": []}, bound,

@@ -15,8 +15,8 @@ assert.match(source, /loadCanonicalDemoContext/);
 assert.match(source, /demoSource/);
 assert.match(source, /\$route\.query\.demoSource/);
 assert.match(source, /canonicalDemoLoadSequence/);
-assert.match(playwrightConfig, /LESSON_STUDIO_E2E_BROWSER_CHANNEL/);
-assert.match(playwrightConfig, /channel:/);
+assert.match(playwrightConfig, /name: "course-mode-chromium-desktop"/);
+assert.match(playwrightConfig, /\.\.\.devices\["Desktop Chrome"\]/);
 assert.match(canonicalE2e, /source\.responseVisuals/);
 assert.match(canonicalE2e, /Number\.isFinite\(video\.duration\)/);
 

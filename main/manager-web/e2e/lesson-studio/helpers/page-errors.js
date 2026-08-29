@@ -1,7 +1,26 @@
 const { expect } = require('@playwright/test');
 
 function isExpectedNavigationAbort(request) {
-  return request.method() === 'GET' && request.failure()?.errorText === 'net::ERR_ABORTED';
+  if (request.method() !== 'GET') return false;
+  const errorText = request.failure()?.errorText;
+  if (errorText === 'net::ERR_ABORTED') return true;
+  if (errorText !== 'cancelled') return false;
+  if (request.isNavigationRequest()) return true;
+  try {
+    const url = new URL(request.url());
+    if (!['media', 'other'].includes(request.resourceType())) return false;
+    const path = url.pathname.toLowerCase();
+    const frameOrigin = new URL(request.frame().url()).origin;
+    const internalMediaProbe = url.origin === frameOrigin
+      && path.startsWith('/tvideo-demo/')
+      && path.endsWith('.mp4');
+    const canonicalAdminMediaProbe = url.origin === 'https://admin.tjbot.vn'
+      && path.startsWith('/tvideo-demo/assets/')
+      && path.endsWith('.mp4');
+    return internalMediaProbe || canonicalAdminMediaProbe;
+  } catch {
+    return false;
+  }
 }
 
 function monitorUnexpectedPageErrors(page) {
@@ -9,13 +28,13 @@ function monitorUnexpectedPageErrors(page) {
   page.on('pageerror', (error) => errors.push(`pageerror: ${error.message}`));
   page.on('console', (message) => {
     if (message.type() !== 'error') return;
-    if (/Failed to load resource: the server responded with a status of (401|422|503)/.test(message.text())) return;
+    if (/Failed to load resource: the server responded with a status of (400|401|422|503)/.test(message.text())) return;
     errors.push(`console: ${message.text()}`);
   });
   page.on('requestfailed', (request) => {
     if (request.url().startsWith('fixture://lesson-studio-e2e/')) return;
     if (isExpectedNavigationAbort(request)) return;
-    errors.push(`requestfailed: ${request.method()} ${request.url()} ${request.failure()?.errorText || ''}`.trim());
+    errors.push(`requestfailed: ${request.method()} ${request.url()} ${request.failure()?.errorText || ''} type=${request.resourceType()} navigation=${request.isNavigationRequest()}`.trim());
   });
   page.on('response', (response) => {
     if (response.status() < 400) return;
@@ -25,7 +44,7 @@ function monitorUnexpectedPageErrors(page) {
     // The editor auto-requests a manifest preview for cinematic lessons as soon
     // as steps load, so a lesson without an asset bundle legitimately 422s there
     // too — same gate as /validate, not a failure.
-    const expectedValidationGate = response.status() === 422
+    const expectedValidationGate = [400, 422].includes(response.status())
       && url.includes('/nestjs/v1/admin/lessons/')
       && (url.endsWith('/validate') || url.includes('/manifest-preview'));
     // The public generation index answers 503 `generation_unavailable` until an

@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "sourcePaths": [
+    "docs/docker/docker-compose.lesson-studio-e2e.yml",
+    "docs/docker/lesson-studio-e2e/seed-postgres.sql",
+    "main/manager-web/e2e/lesson-studio/course-mode-authoring.spec.js-snapshots/course-mode-step-1-course-mode-webkit-desktop-darwin.png",
+    "main/manager-web/e2e/lesson-studio/course-mode-authoring.spec.js-snapshots/course-mode-step-1-course-mode-webkit-mobile-darwin.png",
+    "main/manager-web/e2e/lesson-studio/course-mode-authoring.spec.js-snapshots/course-mode-step-2-course-mode-webkit-desktop-darwin.png",
+    "main/manager-web/e2e/lesson-studio/course-mode-authoring.spec.js-snapshots/course-mode-step-2-course-mode-webkit-mobile-darwin.png",
+    "main/manager-web/playwright.lesson-studio.config.js",
+    "main/manager-web/scripts/check-canonical-demo-ui.mjs",
+    "main/manager-web/scripts/check-flattened-cinematic-preview.mjs",
+    "main/manager-web/scripts/check-lesson-assignment-ui-contracts.mjs",
+    "main/manager-web/scripts/check-lesson-builder-logic.cjs",
+    "main/manager-web/scripts/check-lesson-editor-ui-contracts.mjs",
+    "main/manager-web/scripts/check-lesson-visual-selection.cjs",
+    "main/manager-web/scripts/check-robot-lesson-preview.mjs",
+    "main/manager-web/scripts/lesson-studio-e2e-environment.test.cjs",
+    "main/manager-web/scripts/page-errors-helper.test.cjs",
+    "main/manager-web/src/apis/module/lesson.js",
+    "main/manager-web/src/components/lesson/CinematicVideoLayer.vue",
+    "main/manager-web/src/components/lesson/RobotEspTftProjectionPreview.vue",
+    "main/manager-web/src/components/lesson/flattened-cinematic-preview.js",
+    "main/manager-web/src/components/lesson/robot-preview-projection.js",
+    "main/manager-web/src/i18n/en.js",
+    "main/manager-web/src/i18n/vi.js",
+    "main/manager-web/src/views/LessonEditor.vue",
+    "main/manager-web/src/views/LessonMonitoring.vue",
+    "main/manager-web/src/views/login.vue",
+    "main/manager-web/tests/browser/lesson-builder-main.js"
+  ],
+  "specs": [
+    "e2e/lesson-studio/course-mode-authoring.spec.js",
+    "e2e/lesson-studio/course-mode-insights.spec.js",
+    "e2e/lesson-studio/course-mode-lifecycle.spec.js"
+  ],
+  "testMatch": [
+    "course-mode-authoring.spec.js",
+    "course-mode-insights.spec.js",
+    "course-mode-lifecycle.spec.js"
+  ],
+  "projects": [
+    {
+      "name": "course-mode-chromium-desktop",
+      "device": "Desktop Chrome",
+      "viewport": { "width": 1440, "height": 900 }
+    },
+    {
+      "name": "course-mode-webkit-desktop",
+      "device": "Desktop Safari",
+      "viewport": { "width": 1440, "height": 900 }
+    },
+    {
+      "name": "course-mode-chromium-mobile",
+      "device": "Pixel 7",
+      "viewport": { "width": 390, "height": 844 }
+    },
+    {
+      "name": "course-mode-webkit-mobile",
+      "device": "iPhone 13",
+      "viewport": { "width": 390, "height": 844 }
+    }
+  ],
+  "assignmentPhases": {
+    "fixtureCommand": "node --test scripts/task4-assignment-fixture.test.cjs",
+    "newCommand": "node scripts/run-task4-assignment-phase.cjs new",
+    "rollbackCommand": "node scripts/run-task4-assignment-phase.cjs rollback",
+    "sourcePaths": [
+      "docs/docker/task4-admin-assignment/bootstrap.cjs",
+      "docs/docker/task4-admin-assignment/docker-compose.new.yml",
+      "docs/docker/task4-admin-assignment/docker-compose.rollback.yml",
+      "docs/docker/task4-admin-assignment/serve-media.cjs",
+      "main/manager-web/e2e/lesson-studio/assignment-rollback-phase.spec.js",
+      "main/manager-web/playwright.assignment-rollback.config.js",
+      "main/manager-web/scripts/prepare-task4-media-templates.cjs",
+      "main/manager-web/scripts/run-task4-assignment-phase.cjs",
+      "main/manager-web/scripts/task4-assignment-fixture.test.cjs"
+    ]
+  },
+  "fixed": {
+    "testDir": "./e2e/lesson-studio",
+    "globalSetup": "./e2e/lesson-studio/global-setup.cjs",
+    "outputDir": "./output/playwright-e2e/results",
+    "timeout": 60000,
+    "expectTimeout": 10000,
+    "fullyParallel": false,
+    "workers": 1,
+    "retries": 0,
+    "reporter": [
+      ["list"],
+      ["html", { "outputFolder": "./output/playwright-e2e/report", "open": "never" }]
+    ],
+    "use": {
+      "baseUrlHelper": "lessonStudioWebOrigin",
+      "ignoreHTTPSErrors": true,
+      "trace": "retain-on-failure",
+      "screenshot": "only-on-failure",
+      "video": "retain-on-failure",
+      "serviceWorkers": "block"
+    }
+  }
+}

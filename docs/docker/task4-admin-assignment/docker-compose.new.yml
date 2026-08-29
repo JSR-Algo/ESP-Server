@@ -1,0 +1,36 @@
+services:
+  backend:
+    environment:
+      LESSON_ROLLOUT_DEVICE_ALLOWLIST: 91deb5af-c1c0-416b-956d-266d510eac5e
+      LESSON_STUDIO_NEW_ASSIGNMENTS_ENABLED: "true"
+      LESSON_STUDIO_ROLLBACK_ASSIGNMENTS_ENABLED: "false"
+      FLATTENED_CINEMATIC_RENDERER_BUILD_SHA256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      TVIDEO_FONT_BUNDLE_SHA256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      FLATTENED_CINEMATIC_PUBLIC_BASE_URL: ${TASK4_ASSIGNMENT_MEDIA_ORIGIN:?set the isolated HTTPS media origin}/
+      LESSON_ASSET_ORIGIN_BASE: ${TASK4_ASSIGNMENT_MEDIA_ORIGIN:?set the isolated HTTPS media origin}/tvideo-demo
+      LESSON_ASSET_ALLOWED_ORIGINS: ${TASK4_ASSIGNMENT_MEDIA_ORIGIN:?set the isolated HTTPS media origin}
+      TASK4_ASSIGNMENT_MEDIA_ORIGIN: ${TASK4_ASSIGNMENT_MEDIA_ORIGIN:?set the isolated HTTPS media origin}
+      TASK4_ASSIGNMENT_MEDIA_ROOT: /task4-media
+      TASK4_ASSIGNMENT_SOURCE_ROOT: /task4-source
+    volumes:
+      - ./task4-admin-assignment/bootstrap.cjs:/task4-fixture/bootstrap.cjs:ro
+      - ${TASK4_ASSIGNMENT_MEDIA_ROOT:?set the Task4 runtime media directory}:/task4-media
+
+  derivative-media:
+    image: ${TBOT_LESSON_STUDIO_BACKEND_IMAGE:?set the candidate backend image}
+    entrypoint: ["/nodejs/bin/node"]
+    command: ["/task4-fixture/serve-media.cjs"]
+    environment:
+      TASK4_ASSIGNMENT_MEDIA_ROOT: /task4-media
+      TASK4_ASSIGNMENT_MEDIA_PORT: "8443"
+    ports:
+      - "${TASK4_ASSIGNMENT_MEDIA_HOST_PORT:-18443}:8443"
+    volumes:
+      - ./task4-admin-assignment/serve-media.cjs:/task4-fixture/serve-media.cjs:ro
+      - ${TASK4_ASSIGNMENT_MEDIA_ROOT:?set the Task4 runtime media directory}:/task4-media
+      - ${TASK4_ASSIGNMENT_TLS_ROOT:?set the Task4 runtime TLS directory}:/task4-tls:ro
+      - ${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}/src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json:/task4-source/asset-manifest.json:ro
+      - ${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}/src/lessons/fixtures/tvideo-raw-code/assets/admin:/task4-source/admin:ro
+      - ${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}/src/lessons/fixtures/tvideo-raw-code/assets/esp-tft:/task4-source/esp-tft:ro
+      - ${TBOT_FIRMWARE_WORKTREE:?set the candidate firmware worktree}/lesson/assets:/task4-source/assets:ro
+    networks: [lesson-studio-e2e]
