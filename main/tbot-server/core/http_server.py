@@ -208,6 +208,10 @@ class SimpleHttpServer:
                             self.remote_unpair_handler.handle_post,
                         ),
                         web.post(
+                            "/internal/devices/{deviceId}/wifi-setup",
+                            self.remote_unpair_handler.handle_wifi_setup_post,
+                        ),
+                        web.post(
                             "/internal/devices/{deviceId}/lesson-child-response",
                             self.lesson_nudge_handler.handle_child_response_post,
                         ),

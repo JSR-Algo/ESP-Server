@@ -43,6 +43,24 @@ async def test_remote_unpair_targets_resolved_live_connection_with_fixed_command
 
 
 @pytest.mark.asyncio
+async def test_wifi_setup_targets_resolved_live_connection_without_unpairing():
+    websocket = SimpleNamespace(send=AsyncMock())
+    connection = SimpleNamespace(websocket=websocket, session_id="session-1")
+    handler = RemoteUnpairHandler({}, {"robot-connection-key": connection})
+
+    with (
+        patch.dict(os.environ, {"TBOT_DEVICE_MINT_SECRET": "mint-secret"}, clear=False),
+        patch.object(handler._connection_finder, "_find_connection", AsyncMock(return_value=connection)),
+    ):
+        response = await handler.handle_wifi_setup_post(_Request())
+
+    assert response.status == 202
+    websocket.send.assert_awaited_once_with(
+        json.dumps({"type": "system", "command": "wifi_setup"}, separators=(",", ":"))
+    )
+
+
+@pytest.mark.asyncio
 async def test_remote_unpair_rejects_offline_without_sending():
     handler = RemoteUnpairHandler({}, {})
     with (

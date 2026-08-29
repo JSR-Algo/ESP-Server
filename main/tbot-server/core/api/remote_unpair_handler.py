@@ -13,6 +13,14 @@ class RemoteUnpairHandler:
         self._connection_finder = LessonNudgeHandler(config, connections)
 
     async def handle_post(self, request: web.Request) -> web.Response:
+        return await self._deliver_system_command(request, "unpair")
+
+    async def handle_wifi_setup_post(self, request: web.Request) -> web.Response:
+        return await self._deliver_system_command(request, "wifi_setup")
+
+    async def _deliver_system_command(
+        self, request: web.Request, command: str
+    ) -> web.Response:
         auth_error = self._connection_finder._authorize(request)
         if auth_error is not None:
             return auth_error
@@ -30,7 +38,7 @@ class RemoteUnpairHandler:
         try:
             await send(
                 json.dumps(
-                    {"type": "system", "command": "unpair"},
+                    {"type": "system", "command": command},
                     separators=(",", ":"),
                 )
             )
