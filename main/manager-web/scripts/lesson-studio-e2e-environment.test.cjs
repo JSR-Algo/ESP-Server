@@ -73,7 +73,7 @@ test('Playwright baseURL uses the same validated web origin helper', () => {
   const orchestrator = readFileSync(resolve(__dirname, 'run-task4-assignment-phase.cjs'), 'utf8');
 
   assert.match(config, /baseURL: lessonStudioWebOrigin\(\)/);
-  assert.match(config, /ignoreHTTPSErrors: true/);
+  assert.doesNotMatch(config, /ignoreHTTPSErrors/);
   assert.doesNotMatch(config, /LESSON_STUDIO_E2E_BASE_URL \|\|/);
   assert.match(orchestrator, /const mediaHostname = 'task4-media\.localhost'/);
   assert.doesNotMatch(orchestrator, /admin\.tjbot\.vn/);

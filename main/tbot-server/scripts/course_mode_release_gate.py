@@ -124,10 +124,9 @@ PLAYWRIGHT_ASSIGNMENT_SCRIPTS = {
     "test:e2e:course-mode:assignment:rollback": PLAYWRIGHT_ASSIGNMENT_CONTRACT["rollbackCommand"],
 }
 TASK4_ASSIGNMENT_CANDIDATE_ENV = (
-    "TBOT_BACKEND_WORKTREE", "TBOT_LESSON_STUDIO_BACKEND_IMAGE", "TBOT_LESSON_STUDIO_WEB_IMAGE",
     "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME", "LESSON_STUDIO_E2E_RESOURCE_PREFIX",
     "TASK4_ASSIGNMENT_RUNTIME_ROOT", "JWT_PUBLIC_KEY", "TBOT_DEVICE_MINT_SECRET",
-    "LESSON_ASSET_ORIGIN_BASE", "ROBOT_ESP_BASE_URL", "TBOT_FIRMWARE_WORKTREE",
+    "LESSON_ASSET_ORIGIN_BASE", "ROBOT_ESP_BASE_URL",
 )
 PLAYWRIGHT_FIXED_CONTRACT = {
     "testDir": "./e2e/lesson-studio",
@@ -141,7 +140,6 @@ PLAYWRIGHT_FIXED_CONTRACT = {
     "reporter": [["list"], ["html", {"outputFolder": "./output/playwright-e2e/report", "open": "never"}]],
     "use": {
         "baseUrlHelper": "lessonStudioWebOrigin",
-        "ignoreHTTPSErrors": True,
         "trace": "retain-on-failure",
         "screenshot": "only-on-failure",
         "video": "retain-on-failure",
@@ -1026,7 +1024,6 @@ def generate_playwright_config(contract: object) -> str:
         f"  reporter: {reporter},",
         "  use: {",
         "    baseURL: lessonStudioWebOrigin(),",
-        f"    ignoreHTTPSErrors: {str(fixed['use']['ignoreHTTPSErrors']).lower()},",
         f"    trace: {_js_string(fixed['use']['trace'])},",
         f"    screenshot: {_js_string(fixed['use']['screenshot'])},",
         f"    video: {_js_string(fixed['use']['video'])},",
@@ -1171,8 +1168,38 @@ def _child_environment(candidate: dict, source: Mapping[str, str], lane: Lane) -
     for name in _required_environment(lane):
         if source.get(name):
             environment[name] = source[name]
+    assignment = _assignment_candidate_environment(candidate, lane)
+    if assignment is not None:
+        environment.update(assignment)
     environment.update(dict(lane.fixed_environment))
     return environment
+
+
+def _assignment_candidate_environment(candidate: dict, lane: Lane) -> dict[str, str] | None:
+    if lane.name not in {
+        "admin-course-mode-assignment-new", "admin-course-mode-assignment-rollback",
+    }:
+        return {}
+    try:
+        images = candidate["images"]
+        backend = images["lessonStudioBackend"]
+        web = images["lessonStudioWeb"]
+        values = {
+            "TBOT_BACKEND_WORKTREE": candidate["repositories"]["backend"]["path"],
+            "TBOT_FIRMWARE_WORKTREE": candidate["repositories"]["firmware"]["path"],
+            "TBOT_LESSON_STUDIO_BACKEND_IMAGE": backend["reference"],
+            "TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID": backend["id"],
+            "TBOT_LESSON_STUDIO_WEB_IMAGE": web["reference"],
+            "TBOT_LESSON_STUDIO_WEB_IMAGE_ID": web["id"],
+        }
+    except (KeyError, TypeError):
+        return None
+    if any(not isinstance(value, str) or not value for value in values.values()):
+        return None
+    for key in ("TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID", "TBOT_LESSON_STUDIO_WEB_IMAGE_ID"):
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", values[key]) is None:
+            return None
+    return values
 
 
 def _command_for_lane(lane: Lane, candidate: dict) -> tuple[str, ...] | None:
@@ -1392,6 +1419,11 @@ def run_gate(
                     break
                 required_environment = _required_environment(lane)
                 if any(not source.get(name) for name in required_environment):
+                    report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
+                    report["verdict"] = "BLOCKED"
+                    report["failedLane"] = lane.name
+                    break
+                if _assignment_candidate_environment(candidate, lane) is None:
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name

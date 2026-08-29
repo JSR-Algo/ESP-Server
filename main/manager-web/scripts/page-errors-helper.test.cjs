@@ -20,7 +20,8 @@ function request(
 }
 
 test('allows only GET requests aborted by browser navigation', () => {
-  assert.equal(isExpectedNavigationAbort(request('GET', 'net::ERR_ABORTED')), true);
+  assert.equal(isExpectedNavigationAbort(request('GET', 'net::ERR_ABORTED', true)), true);
+  assert.equal(isExpectedNavigationAbort(request('GET', 'net::ERR_ABORTED', false)), false);
   assert.equal(isExpectedNavigationAbort(request('POST', 'net::ERR_ABORTED')), false);
   assert.equal(isExpectedNavigationAbort(request('GET', 'net::ERR_CONNECTION_REFUSED')), false);
 });
@@ -51,5 +52,19 @@ test('allows WebKit cancelled only for internal Lesson Studio MP4 range probes',
   )), false);
   assert.equal(isExpectedNavigationAbort(request(
     'GET', 'cancelled', false, 'other', 'https://admin.tjbot.vn/private/farm.mp4',
+  )), false);
+  assert.equal(isExpectedNavigationAbort(request(
+    'GET', 'net::ERR_ABORTED', false, 'other', video,
+  )), true);
+  assert.equal(isExpectedNavigationAbort(request(
+    'GET', 'net::ERR_ABORTED', false, 'media',
+    'https://task4-media.localhost:18443/tvideo-demo/assets/t54-layered/robot-teach.mp4',
+  )), true);
+  assert.equal(isExpectedNavigationAbort(request(
+    'GET', 'net::ERR_ABORTED', false, 'media',
+    'https://task4-media.localhost:18443/private/robot-teach.mp4',
+  )), false);
+  assert.equal(isExpectedNavigationAbort(request(
+    'GET', 'net::ERR_ABORTED', false, 'other', 'https://attacker.invalid/tvideo-demo/assets/scenes/farm.mp4',
   )), false);
 });

@@ -87,7 +87,6 @@ def _valid_playwright_contract() -> dict:
             "reporter": [["list"], ["html", {"outputFolder": "./output/playwright-e2e/report", "open": "never"}]],
             "use": {
                 "baseUrlHelper": "lessonStudioWebOrigin",
-                "ignoreHTTPSErrors": True,
                 "trace": "retain-on-failure",
                 "screenshot": "only-on-failure",
                 "video": "retain-on-failure",
@@ -297,7 +296,16 @@ def candidate_file(tmp_path: Path) -> Path:
             "courseKey": "english-6month-4-6",
         },
         "repositories": repositories,
-        "images": {},
+        "images": {
+            "lessonStudioBackend": {
+                "reference": "local/backend:candidate",
+                "id": "sha256:" + "1" * 64,
+            },
+            "lessonStudioWeb": {
+                "reference": "local/web:candidate",
+                "id": "sha256:" + "2" * 64,
+            },
+        },
         "firmware": {},
         "database": {},
         "curriculum": {
@@ -1318,6 +1326,59 @@ def test_full_esp_lane_maps_task06_roots_and_rejects_skips(candidate_file: Path)
     assert lane.reject_pytest_skips is True
 
 
+def test_assignment_lane_identity_is_derived_only_from_candidate(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(
+        item for item in gate.lanes_for_mode("full")
+        if item.name == "admin-course-mode-assignment-new"
+    )
+    hostile = {
+        "TBOT_BACKEND_WORKTREE": "/attacker/backend",
+        "TBOT_FIRMWARE_WORKTREE": "/attacker/firmware",
+        "TBOT_LESSON_STUDIO_BACKEND_IMAGE": "attacker/backend:latest",
+        "TBOT_LESSON_STUDIO_WEB_IMAGE": "attacker/web:latest",
+        "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME": "tbot-task4-unit",
+        "LESSON_STUDIO_E2E_RESOURCE_PREFIX": "tbot-task4-unit",
+        "TASK4_ASSIGNMENT_RUNTIME_ROOT": str(Path(candidate["repositories"]["adminEsp"]["path"]) / "main/manager-web/output/task4"),
+        "JWT_PUBLIC_KEY": "test-public-key",
+        "TBOT_DEVICE_MINT_SECRET": "test-mint-secret",
+        "LESSON_ASSET_ORIGIN_BASE": "https://task4-media.localhost:18443/tvideo-demo",
+        "ROBOT_ESP_BASE_URL": "http://127.0.0.1:18013",
+    }
+
+    environment = gate._child_environment(candidate, hostile, lane)
+
+    assert environment["TBOT_BACKEND_WORKTREE"] == candidate["repositories"]["backend"]["path"]
+    assert environment["TBOT_FIRMWARE_WORKTREE"] == candidate["repositories"]["firmware"]["path"]
+    assert environment["TBOT_LESSON_STUDIO_BACKEND_IMAGE"] == "local/backend:candidate"
+    assert environment["TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID"] == "sha256:" + "1" * 64
+    assert environment["TBOT_LESSON_STUDIO_WEB_IMAGE"] == "local/web:candidate"
+    assert environment["TBOT_LESSON_STUDIO_WEB_IMAGE_ID"] == "sha256:" + "2" * 64
+    assert environment["LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME"] == "tbot-task4-unit"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda images: images.pop("lessonStudioWeb"),
+        lambda images: images["lessonStudioBackend"].pop("id"),
+        lambda images: images["lessonStudioWeb"].update({"id": "sha256:mutable"}),
+        lambda images: images["lessonStudioBackend"].update({"reference": ""}),
+    ],
+)
+def test_assignment_lane_blocks_malformed_candidate_image_identity(
+    candidate_file: Path, mutation,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    mutation(candidate["images"])
+    lane = next(
+        item for item in gate.lanes_for_mode("full")
+        if item.name == "admin-course-mode-assignment-new"
+    )
+
+    assert gate._assignment_candidate_environment(candidate, lane) is None
+
+
 @pytest.mark.parametrize("skipped,expected", [(0, False), (1, True), (7, True)])
 def test_pytest_junit_skip_detection_is_deterministic(tmp_path: Path, skipped: int, expected: bool) -> None:
     report = tmp_path / "pytest.xml"
@@ -1394,12 +1455,12 @@ def test_playwright_full_adds_explicit_new_and_rollback_assignment_lanes() -> No
     )
 
 
-def test_current_playwright_config_fails_closed_until_named_projects_are_committed() -> None:
+def test_current_playwright_source_contract_is_complete_and_committed() -> None:
     admin_root = Path(__file__).resolve().parents[3]
 
     assert gate.source_contract_ready(
         admin_root, "course-mode-playwright", _git(admin_root, "rev-parse", "HEAD"),
-    ) is False
+    ) is True
 
 
 def test_playwright_contract_requires_named_projects_and_matching_devices(tmp_path: Path) -> None:

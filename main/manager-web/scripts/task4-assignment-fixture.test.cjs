@@ -84,6 +84,7 @@ test('Task 4 assignment browser phase uses WebKit and verifies row-scoped Monito
   assert.match(spec, /assignmentId: current\.assignmentId, lessonId: lessonByVersion\.get\(9\)\.id/);
   assert.match(spec, /assignmentId: rollbackAssignment\.assignmentId, lessonId: lessonByVersion\.get\(8\)\.id/);
   assert.match(spec, /#\/course-lessons\?courseId=\$\{COURSE_ID\}/);
+  assert.doesNotMatch(spec, /ignoreHTTPSErrors|rejectUnauthorized:\s*false/);
   assert.match(spec, /getByRole\('button', \{ name: \/assign to child\/i \}\)/);
   assert.match(spec, /getByRole\('dialog', \{ name: \/assign lesson to child\/i \}\)/);
   assert.match(spec, /waitForResponse\(.*lesson-assignments/s);
@@ -97,8 +98,10 @@ test('Task 4 release commands run candidate-bound NEW and ROLLBACK orchestration
   const pkg = JSON.parse(readFileSync(resolve(__dirname, '../package.json'), 'utf8'));
 
   for (const required of [
-    'TBOT_BACKEND_WORKTREE', 'TBOT_LESSON_STUDIO_BACKEND_IMAGE',
-    'TBOT_LESSON_STUDIO_WEB_IMAGE', 'LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME',
+    'TBOT_BACKEND_WORKTREE', 'TBOT_FIRMWARE_WORKTREE',
+    'TBOT_LESSON_STUDIO_BACKEND_IMAGE', 'TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID',
+    'TBOT_LESSON_STUDIO_WEB_IMAGE', 'TBOT_LESSON_STUDIO_WEB_IMAGE_ID',
+    'LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME',
     'LESSON_STUDIO_E2E_RESOURCE_PREFIX', 'TASK4_ASSIGNMENT_RUNTIME_ROOT',
   ]) assert.match(source, new RegExp(required));
   assert.match(source, /docker[\s\S]*compose/);
@@ -108,12 +111,23 @@ test('Task 4 release commands run candidate-bound NEW and ROLLBACK orchestration
   assert.match(source, /playwright\.assignment-rollback\.config\.js/);
   assert.match(source, /const mediaHostname = 'task4-media\.localhost'/);
   assert.match(source, /TBOT_FIRMWARE_WORKTREE lacks required candidate asset/);
+  assert.match(source, /docker[\s\S]*image[\s\S]*inspect/);
+  assert.match(source, /candidate backend image ID mismatch/);
+  assert.match(source, /candidate web image ID mismatch/);
   assert.match(source, /lesson\/assets\/robot\/poses\/bright-teach\.png/);
   assert.match(source, /TASK4_ASSIGNMENT_MEDIA_ORIGIN:\s*`https:\/\/\$\{mediaHostname\}:\$\{hostPort\}`/);
   assert.match(source, /subjectAltName=DNS:\$\{mediaHostname\}/);
+  assert.match(source, /basicConstraints=critical,CA:TRUE/);
+  assert.match(source, /if \(!existsSync\(tlsKey\) \|\| !existsSync\(tlsCert\)\)/);
   assert.doesNotMatch(source, /TASK4_ASSIGNMENT_MEDIA_ORIGIN:\s*`https:\/\/127\.0\.0\.1:/);
   const fixture = readFileSync(fixturePath, 'utf8');
+  const session = readFileSync(resolve(__dirname, '../e2e/lesson-studio/helpers/session.js'), 'utf8');
+  assert.match(session, /page\.route\(\/\^https:\\\/\\\/task4-media\\\.localhost/);
+  assert.match(session, /ca,\s*servername: 'task4-media\.localhost'/s);
+  assert.doesNotMatch(session, /ignoreHTTPSErrors|rejectUnauthorized:\s*false/);
   assert.match(fixture, /reachable\.hostname === 'task4-media\.localhost'/);
+  assert.match(fixture, /ca: readFileSync\('\/task4-tls\/cert\.pem'\)/);
+  assert.doesNotMatch(fixture, /rejectUnauthorized:\s*false/);
   assert.equal(pkg.scripts['test:e2e:course-mode:assignment:new'], 'node scripts/run-task4-assignment-phase.cjs new');
   assert.equal(pkg.scripts['test:e2e:course-mode:assignment:rollback'], 'node scripts/run-task4-assignment-phase.cjs rollback');
 });

@@ -14,7 +14,6 @@ module.exports = defineConfig({
   reporter: [["list"], ["html", {"open": "never", "outputFolder": "./output/playwright-e2e/report"}]],
   use: {
     baseURL: lessonStudioWebOrigin(),
-    ignoreHTTPSErrors: true,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",

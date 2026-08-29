@@ -4,7 +4,7 @@ process.env.FLATTENED_CINEMATIC_RENDERER_BUILD_SHA256 ||= 'a'.repeat(64);
 process.env.TVIDEO_FONT_BUNDLE_SHA256 ||= 'b'.repeat(64);
 
 const { createHash } = require('node:crypto');
-const { createReadStream } = require('node:fs');
+const { createReadStream, readFileSync } = require('node:fs');
 const { copyFile, link, mkdir, open, rm, stat } = require('node:fs/promises');
 const { get: httpsGet } = require('node:https');
 const { dirname, join } = require('node:path');
@@ -419,7 +419,10 @@ async function verifyServedBytes(url, expectedSha, expectedBytes) {
     let bytes = 0;
     const reachable = new URL(url);
     if (reachable.hostname === 'task4-media.localhost') reachable.hostname = 'host.docker.internal';
-    const request = httpsGet(reachable, { rejectUnauthorized: false }, (response) => {
+    const request = httpsGet(reachable, {
+      ca: readFileSync('/task4-tls/cert.pem'),
+      servername: 'task4-media.localhost',
+    }, (response) => {
       if (response.statusCode !== 200) {
         response.resume();
         reject(new Error(`fixture media URL returned ${response.statusCode}`));

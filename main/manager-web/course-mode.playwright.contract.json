@@ -92,7 +92,6 @@
     ],
     "use": {
       "baseUrlHelper": "lessonStudioWebOrigin",
-      "ignoreHTTPSErrors": true,
       "trace": "retain-on-failure",
       "screenshot": "only-on-failure",
       "video": "retain-on-failure",

@@ -9,7 +9,8 @@ if (!['new', 'rollback'].includes(phase)) throw new Error('usage: run-task4-assi
 
 const required = [
   'TBOT_BACKEND_WORKTREE', 'TBOT_LESSON_STUDIO_BACKEND_IMAGE',
-  'TBOT_LESSON_STUDIO_WEB_IMAGE', 'LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME',
+  'TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID', 'TBOT_LESSON_STUDIO_WEB_IMAGE',
+  'TBOT_LESSON_STUDIO_WEB_IMAGE_ID', 'LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME',
   'LESSON_STUDIO_E2E_RESOURCE_PREFIX', 'TASK4_ASSIGNMENT_RUNTIME_ROOT',
   'JWT_PUBLIC_KEY', 'TBOT_DEVICE_MINT_SECRET', 'LESSON_ASSET_ORIGIN_BASE',
   'ROBOT_ESP_BASE_URL', 'TBOT_FIRMWARE_WORKTREE',
@@ -70,12 +71,49 @@ const run = (command, args, options = {}) => execFileSync(command, args, {
   cwd: repoRoot, env: environment, stdio: 'inherit', ...options,
 });
 const composeRun = (...args) => run('docker', [...compose, ...args]);
+const verifyImageIdentity = (reference, expectedId, mismatchMessage) => {
+  const actualId = execFileSync('docker', ['image', 'inspect', '--format={{.Id}}', reference], {
+    cwd: repoRoot, env: environment, encoding: 'utf8',
+  }).trim();
+  if (actualId !== expectedId) throw new Error(mismatchMessage);
+};
 
-run('openssl', [
-  'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2',
-  `-subj`, `/CN=${mediaHostname}`, '-addext', `subjectAltName=DNS:${mediaHostname}`,
-  '-keyout', resolve(tlsRoot, 'key.pem'), '-out', resolve(tlsRoot, 'cert.pem'),
-]);
+verifyImageIdentity(
+  environment.TBOT_LESSON_STUDIO_BACKEND_IMAGE,
+  environment.TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID,
+  'candidate backend image ID mismatch',
+);
+verifyImageIdentity(
+  environment.TBOT_LESSON_STUDIO_WEB_IMAGE,
+  environment.TBOT_LESSON_STUDIO_WEB_IMAGE_ID,
+  'candidate web image ID mismatch',
+);
+
+const tlsKey = resolve(tlsRoot, 'key.pem');
+const tlsCert = resolve(tlsRoot, 'cert.pem');
+const tlsCertificateIsUsable = () => {
+  if (!existsSync(tlsKey) || !existsSync(tlsCert)) return false;
+  try {
+    execFileSync('openssl', ['x509', '-checkend', '3600', '-noout', '-in', tlsCert], {
+      cwd: repoRoot, env: environment, stdio: 'ignore',
+    });
+    return execFileSync('openssl', ['x509', '-text', '-noout', '-in', tlsCert], {
+      cwd: repoRoot, env: environment, encoding: 'utf8',
+    }).includes('CA:TRUE');
+  } catch {
+    return false;
+  }
+};
+if (!tlsCertificateIsUsable()) {
+  run('openssl', [
+    'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2',
+    `-subj`, `/CN=${mediaHostname}`,
+    '-addext', `subjectAltName=DNS:${mediaHostname}`,
+    '-addext', 'basicConstraints=critical,CA:TRUE',
+    '-addext', 'keyUsage=critical,digitalSignature,keyEncipherment,keyCertSign',
+    '-keyout', tlsKey, '-out', tlsCert,
+  ]);
+}
 run(process.execPath, [resolve(__dirname, 'prepare-task4-media-templates.cjs')], {
   env: { ...environment, TASK4_ASSIGNMENT_MEDIA_ROOT: mediaRoot },
 });

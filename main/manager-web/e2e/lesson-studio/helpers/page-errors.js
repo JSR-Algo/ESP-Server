@@ -3,8 +3,7 @@ const { expect } = require('@playwright/test');
 function isExpectedNavigationAbort(request) {
   if (request.method() !== 'GET') return false;
   const errorText = request.failure()?.errorText;
-  if (errorText === 'net::ERR_ABORTED') return true;
-  if (errorText !== 'cancelled') return false;
+  if (!['net::ERR_ABORTED', 'cancelled'].includes(errorText)) return false;
   if (request.isNavigationRequest()) return true;
   try {
     const url = new URL(request.url());
@@ -17,7 +16,10 @@ function isExpectedNavigationAbort(request) {
     const canonicalAdminMediaProbe = url.origin === 'https://admin.tjbot.vn'
       && path.startsWith('/tvideo-demo/assets/')
       && path.endsWith('.mp4');
-    return internalMediaProbe || canonicalAdminMediaProbe;
+    const task4FixtureMediaProbe = /^https:\/\/task4-media\.localhost:\d+$/.test(url.origin)
+      && path.startsWith('/tvideo-demo/assets/')
+      && path.endsWith('.mp4');
+    return internalMediaProbe || canonicalAdminMediaProbe || task4FixtureMediaProbe;
   } catch {
     return false;
   }

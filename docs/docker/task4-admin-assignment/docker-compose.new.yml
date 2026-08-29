@@ -15,6 +15,7 @@ services:
     volumes:
       - ./task4-admin-assignment/bootstrap.cjs:/task4-fixture/bootstrap.cjs:ro
       - ${TASK4_ASSIGNMENT_MEDIA_ROOT:?set the Task4 runtime media directory}:/task4-media
+      - ${TASK4_ASSIGNMENT_TLS_ROOT:?set the Task4 runtime TLS directory}:/task4-tls:ro
 
   derivative-media:
     image: ${TBOT_LESSON_STUDIO_BACKEND_IMAGE:?set the candidate backend image}
