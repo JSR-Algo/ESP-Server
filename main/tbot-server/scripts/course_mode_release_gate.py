@@ -9,7 +9,6 @@ import importlib
 import json
 import math
 import os
-import re
 import shlex
 import shutil
 import stat
@@ -50,6 +49,8 @@ BASE_ENVIRONMENT = {
 }
 MAX_LANE_OUTPUT_BYTES = 4 * 1024 * 1024
 MAX_REPORT_BYTES = 1024 * 1024
+MAX_CONFIG_OUTPUT_BYTES = 64 * 1024
+CONFIG_EVALUATION_TIMEOUT_SEC = 5.0
 MODES = ("quick", "full", "live-db", "physical-preflight")
 COURSE_MODE_SOFTWARE_TESTS = "@course-mode-software-tests"
 PLAYWRIGHT_PROJECTS = (
@@ -416,6 +417,27 @@ def lane_dirty_exceptions_authorized(lane: Lane, candidate: dict) -> bool:
     return True
 
 
+def release_state_matches(
+    candidate_path: Path, candidate: dict, lanes: Sequence[Lane], runtime_root: Path | None,
+    require_runtime: bool,
+) -> bool:
+    current = _load_candidate(candidate_path)
+    if current != candidate or current is None or validate_candidate(current):
+        return False
+    if not _candidate_matches(candidate):
+        return False
+    if require_runtime and not _runtime_matches_candidate(candidate, runtime_root):
+        return False
+    repositories = candidate["repositories"]
+    for lane in lanes:
+        if not lane_dirty_exceptions_authorized(lane, candidate):
+            return False
+        bound_paths = lane_candidate_paths(lane, candidate)
+        if bound_paths and not candidate_paths_match(repositories[lane.repository], bound_paths):
+            return False
+    return True
+
+
 def _committed_text(admin_root: Path, sha: str, relative: str) -> str | None:
     try:
         return _candidate_git(admin_root, "show", f"{sha}:{relative}")
@@ -423,13 +445,157 @@ def _committed_text(admin_root: Path, sha: str, relative: str) -> str | None:
         return None
 
 
+def _node_executable() -> Path | None:
+    candidates = [Path("/opt/homebrew/bin/node"), Path("/usr/local/bin/node"), Path("/usr/bin/node")]
+    return next((path for path in candidates if path.is_file() and os.access(path, os.X_OK)), None)
+
+
+def _evaluate_playwright_config(admin_root: Path, specs: Sequence[str]) -> dict | None:
+    node = _node_executable()
+    web = admin_root / "main/manager-web"
+    config = web / "playwright.config.js"
+    if node is None:
+        return None
+    evaluator = r"""
+const { randomUUID } = require('crypto');
+const { Worker } = require('worker_threads');
+const workerSource = String.raw`
+  const { parentPort, workerData } = require('worker_threads');
+  const fs = require('fs');
+  const Module = require('module');
+  const path = require('path');
+  const post = parentPort.postMessage.bind(parentPort);
+  const receiveOnce = parentPort.once.bind(parentPort);
+  const safe = {
+    entries: Object.entries.bind(Object),
+    every: Function.call.bind(Array.prototype.every),
+    filter: Function.call.bind(Array.prototype.filter),
+    isArray: Array.isArray.bind(Array),
+    map: Function.call.bind(Array.prototype.map),
+    regexSource: Function.call.bind(Object.getOwnPropertyDescriptor(RegExp.prototype, 'source').get),
+    regexTest: Function.call.bind(RegExp.prototype.test),
+    some: Function.call.bind(Array.prototype.some),
+    stringify: JSON.stringify.bind(JSON),
+  };
+  try {
+    const originalLoad = Module._load;
+    Module._load = (request, parent, isMain) => {
+      if (request === 'worker_threads' || request === 'node:worker_threads') {
+        throw new Error('worker channel denied during preload');
+      }
+      return originalLoad(request, parent, isMain);
+    };
+    Object.defineProperties(process, {
+      exit: { value: () => { throw new Error('process.exit denied'); } },
+      reallyExit: { value: () => { throw new Error('process.reallyExit denied'); } },
+      getBuiltinModule: { value: undefined },
+    });
+    const web = path.dirname(workerData.configPath);
+    const playwrightPath = require.resolve('@playwright/test', { paths: [web] });
+    const playwright = require(playwrightPath);
+    const helperPath = path.join(web, 'scripts/lesson-studio-e2e-environment.cjs');
+    const helper = fs.existsSync(helperPath) ? require(helperPath) : null;
+    const guardedLoad = (request) => {
+      if (request === '@playwright/test' || request === playwrightPath) return playwright;
+      if (helper && (request === './scripts/lesson-studio-e2e-environment.cjs' || request === helperPath)) {
+        return helper;
+      }
+      throw new Error('module denied during config evaluation');
+    };
+    Object.defineProperties(Module, {
+      _load: { value: guardedLoad, writable: false, configurable: false },
+      createRequire: { value: undefined, writable: false, configurable: false },
+    });
+    post({ ready: true });
+    receiveOnce('message', (message) => {
+      try {
+        if (!message || typeof message.nonce !== 'string') throw new Error('missing nonce');
+        const loaded = originalLoad(workerData.configPath, null, true);
+        const config = loaded && loaded.default ? loaded.default : loaded;
+        const requiredDevices = {
+          'course-mode-chromium-desktop': 'Desktop Chrome',
+          'course-mode-webkit-desktop': 'Desktop Safari',
+          'course-mode-chromium-mobile': 'Pixel 7',
+          'course-mode-webkit-mobile': 'iPhone 13',
+        };
+        const patterns = safe.isArray(config && config.testMatch)
+          ? config.testMatch : [config && config.testMatch];
+        const deviceMatches = (use, name) => {
+          const expected = playwright.devices[name];
+          return expected && safe.every(safe.entries(expected), ([key, value]) =>
+            key === 'viewport' || (use && safe.stringify(use[key]) === safe.stringify(value))
+          );
+        };
+        post({ nonce: message.nonce, result: {
+          testMatch: safe.map(patterns, (value) => {
+            try { return safe.regexSource(value); } catch (_error) { return null; }
+          }),
+          matchedSpecs: safe.filter(workerData.specs, (spec) => safe.some(patterns, (value) => {
+            try { value.lastIndex = 0; return safe.regexTest(value, spec); } catch (_error) { return false; }
+          })),
+          projects: safe.isArray(config && config.projects) ? safe.map(config.projects, (project) => ({
+            name: project && project.name,
+            viewport: project && project.use && project.use.viewport,
+            device: project && deviceMatches(project.use, requiredDevices[project.name])
+              ? requiredDevices[project.name] : null,
+          })) : null,
+        }});
+      } catch (_error) {
+        process.exitCode = 1;
+      }
+    });
+  } catch (_error) {
+    process.exitCode = 1;
+  }
+`;
+const worker = new Worker(workerSource, {
+  eval: true,
+  stdout: true,
+  stderr: true,
+  workerData: {
+    configPath: process.argv[1],
+    specs: JSON.parse(process.argv[2]),
+  },
+});
+let trustedMessage = null;
+let nonce = null;
+worker.on('message', (message) => {
+  if (message && message.ready === true && nonce === null) {
+    nonce = randomUUID();
+    worker.postMessage({ nonce });
+  } else if (message && nonce !== null && message.nonce === nonce && trustedMessage === null) {
+    trustedMessage = message.result;
+  }
+});
+worker.on('error', () => { process.exitCode = 1; });
+worker.on('exit', (code) => {
+  if (code !== 0 || trustedMessage === null) {
+    process.exitCode = 1;
+    return;
+  }
+  process.stdout.write(JSON.stringify(trustedMessage));
+});
+"""
+    result = run_bounded_command(
+        [str(node), "-e", evaluator, str(config.resolve()), json.dumps(list(specs))], cwd=web,
+        timeout_sec=CONFIG_EVALUATION_TIMEOUT_SEC, max_output_bytes=MAX_CONFIG_OUTPUT_BYTES,
+        env=dict(BASE_ENVIRONMENT),
+    )
+    if result.error or result.returncode != 0:
+        return None
+    try:
+        evaluated = strict_json_loads(result.stdout)
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return None
+    return evaluated if isinstance(evaluated, dict) else None
+
+
 def source_contract_ready(admin_root: Path, contract: str, sha: str) -> bool:
     if contract != "course-mode-playwright":
         return False
     try:
         package_raw = _committed_text(admin_root, sha, "main/manager-web/package.json")
-        config = _committed_text(admin_root, sha, "main/manager-web/playwright.config.js")
-        if package_raw is None or config is None:
+        if package_raw is None:
             return False
         package = strict_json_loads(package_raw)
         specs = _playwright_spec_paths(admin_root, sha)
@@ -452,8 +618,17 @@ def source_contract_ready(admin_root: Path, contract: str, sha: str) -> bool:
         for relative in specs
     ):
         return False
-    match = re.search(r"testMatch\s*:\s*([^,\n]+)", config)
-    if match is None or "course-mode" not in match.group(1):
+    bound = (
+        "main/manager-web/package.json", "main/manager-web/playwright.config.js", *specs,
+    )
+    if not candidate_paths_match(
+        {"path": str(admin_root), "sha": sha, "dirtyExceptions": []}, bound,
+    ):
+        return False
+    evaluated = _evaluate_playwright_config(admin_root, specs)
+    if evaluated is None or not candidate_paths_match(
+        {"path": str(admin_root), "sha": sha, "dirtyExceptions": []}, bound,
+    ):
         return False
     projects = {
         "course-mode-chromium-desktop": ("Desktop Chrome", 1440, 900),
@@ -461,27 +636,34 @@ def source_contract_ready(admin_root: Path, contract: str, sha: str) -> bool:
         "course-mode-chromium-mobile": ("Pixel 7", 390, 844),
         "course-mode-webkit-mobile": ("iPhone 13", 390, 844),
     }
-    positions = {}
-    for project in projects:
-        found = re.search(rf"name\s*:\s*(['\"]){re.escape(project)}\1", config)
-        if found is None:
+    test_match = evaluated.get("testMatch")
+    matched_specs = evaluated.get("matchedSpecs")
+    actual_projects = evaluated.get("projects")
+    if (
+        not isinstance(test_match, list)
+        or not all(isinstance(pattern, str) for pattern in test_match)
+        or matched_specs != list(specs)
+        or not isinstance(actual_projects, list)
+        or len(actual_projects) != len(projects)
+    ):
+        return False
+    by_name = {
+        item.get("name"): item for item in actual_projects
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    if set(by_name) != set(projects):
+        return False
+    for project, (device, minimum_width, minimum_height) in projects.items():
+        item = by_name[project]
+        if item.get("device") != device:
             return False
-        positions[project] = found.start()
-    ordered = sorted(positions, key=positions.get)
-    for index, project in enumerate(ordered):
-        start = positions[project]
-        end = positions[ordered[index + 1]] if index + 1 < len(ordered) else min(len(config), start + 1200)
-        block = config[start:end]
-        device, minimum_width, minimum_height = projects[project]
-        if re.search(rf"devices\[(['\"]){re.escape(device)}\1\]", block) is None:
+        viewport = item.get("viewport")
+        if not isinstance(viewport, dict) or set(viewport) != {"width", "height"}:
             return False
-        viewport = re.search(
-            r"viewport\s*:\s*\{[^}]*width\s*:\s*(\d+)[^}]*height\s*:\s*(\d+)", block,
-        )
-        if viewport is None:
+        width = viewport.get("width")
+        height = viewport.get("height")
+        if type(width) is not int or type(height) is not int:
             return False
-        width = int(viewport.group(1))
-        height = int(viewport.group(2))
         if "mobile" in project and (width, height) != (minimum_width, minimum_height):
             return False
         if "desktop" in project and (width < minimum_width or height < minimum_height):
@@ -651,6 +833,7 @@ def run_gate(
         report = _blocked(candidate_id, "candidate-runtime")
     else:
         selected = tuple(lanes) if lanes is not None else lanes_for_mode(mode)
+        require_runtime = lanes is None
         repositories = candidate["repositories"]
         lane_names = [lane.name for lane in selected]
         if (
@@ -664,17 +847,9 @@ def run_gate(
             }
             source = source_environment if source_environment is not None else os.environ
             for lane in selected:
-                if not _candidate_matches(candidate):
-                    report["verdict"] = "BLOCKED"
-                    report["failedLane"] = lane.name
-                    break
-                if not lane_dirty_exceptions_authorized(lane, candidate):
-                    report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
-                    report["verdict"] = "BLOCKED"
-                    report["failedLane"] = lane.name
-                    break
-                bound_paths = lane_candidate_paths(lane, candidate)
-                if bound_paths and not candidate_paths_match(repositories[lane.repository], bound_paths):
+                if not release_state_matches(
+                    candidate_path, candidate, selected, runtime_root, require_runtime,
+                ):
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
@@ -688,6 +863,13 @@ def run_gate(
                 if lane.required_source_contract and not source_contract_ready(
                     Path(repositories["adminEsp"]["path"]), lane.required_source_contract,
                     repositories["adminEsp"]["sha"],
+                ):
+                    report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
+                    report["verdict"] = "BLOCKED"
+                    report["failedLane"] = lane.name
+                    break
+                if not release_state_matches(
+                    candidate_path, candidate, selected, runtime_root, require_runtime,
                 ):
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
@@ -732,6 +914,12 @@ def run_gate(
                 report["lanes"].append({
                     "name": lane.name, "exitCode": exit_code, "durationMs": duration_ms,
                 })
+                if not release_state_matches(
+                    candidate_path, candidate, selected, runtime_root, require_runtime,
+                ):
+                    report["verdict"] = "BLOCKED"
+                    report["failedLane"] = lane.name
+                    break
                 if result.error or result.returncode != 0:
                     report["verdict"] = "FAIL"
                     report["failedLane"] = lane.name
@@ -740,6 +928,12 @@ def run_gate(
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
                     break
+            if not release_state_matches(
+                candidate_path, candidate, selected, runtime_root, require_runtime,
+            ):
+                report["verdict"] = "BLOCKED"
+                if report["failedLane"] is None:
+                    report["failedLane"] = selected[-1].name if selected else "candidate-runtime"
     if report_path is not None and not _write_report_atomic(report_path, report):
         return _blocked(report.get("candidateId"), "report")
     return report
@@ -751,12 +945,24 @@ def _emit(report: dict) -> None:
     ))
 
 
+def lane_inventory() -> dict[str, list[str]]:
+    return {mode: [lane.name for lane in lanes_for_mode(mode)] for mode in MODES}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--candidate", required=True, type=Path)
+    parser.add_argument("--candidate", type=Path)
     parser.add_argument("--mode", choices=MODES, default="quick")
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--list-lanes", action="store_true")
     args = parser.parse_args(argv)
+    if args.list_lanes:
+        if args.candidate is not None or args.report is not None:
+            parser.error("--list-lanes cannot be combined with candidate execution")
+        print(json.dumps(lane_inventory(), sort_keys=True, separators=(",", ":")))
+        return 0
+    if args.candidate is None:
+        parser.error("--candidate is required")
     report = run_gate(args.candidate, args.mode, report_path=args.report)
     _emit(report)
     return 0 if report["verdict"] == "PASS" else 1

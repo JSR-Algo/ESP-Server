@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -14,6 +15,12 @@ import pytest
 gate = importlib.import_module("scripts.course_mode_release_gate")
 
 
+@pytest.fixture(autouse=True)
+def _test_node_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    executable = shutil.which("node")
+    monkeypatch.setattr(gate, "_node_executable", lambda: Path(executable) if executable else None)
+
+
 def _valid_playwright_config() -> str:
     projects = (
         ("course-mode-chromium-desktop", "Desktop Chrome", 1440, 900),
@@ -21,11 +28,30 @@ def _valid_playwright_config() -> str:
         ("course-mode-chromium-mobile", "Pixel 7", 390, 844),
         ("course-mode-webkit-mobile", "iPhone 13", 390, 844),
     )
-    return "testMatch: /course-mode.*\\.spec\\.js/,\nprojects: [\n" + "\n".join(
+    return "const { devices } = require('@playwright/test');\nmodule.exports = {\n" \
+        "testMatch: /course-mode.*\\.spec\\.js/,\nprojects: [\n" + "\n".join(
         f"{{ name: {name!r}, use: {{ ...devices[{device!r}], viewport: "
         f"{{ width: {width}, height: {height} }} }} }},"
         for name, device, width, height in projects
-    ) + "\n]"
+    ) + "\n]};\n"
+
+
+def _write_playwright_runtime(web: Path) -> None:
+    module = web / "node_modules/@playwright/test/index.js"
+    module.parent.mkdir(parents=True, exist_ok=True)
+    module.write_text(
+        "const descriptor = (id, browser) => ({ userAgent: id, screen: { width: 100, height: 100 }, "
+        "deviceScaleFactor: 1, isMobile: id.includes('mobile'), hasTouch: id.includes('mobile'), "
+        "defaultBrowserType: browser });\n"
+        "exports.devices = {\n"
+        "  'Desktop Chrome': descriptor('desktop-chrome', 'chromium'),\n"
+        "  'Desktop Safari': descriptor('desktop-safari', 'webkit'),\n"
+        "  'Pixel 7': descriptor('mobile-chrome', 'chromium'),\n"
+        "  'iPhone 13': descriptor('mobile-safari', 'webkit'),\n"
+        "};\n"
+        "exports.defineConfig = (value) => value;\n",
+        encoding="utf-8",
+    )
 
 
 def _git(root: Path, *arguments: str) -> str:
@@ -181,7 +207,7 @@ def test_identity_drift_before_next_lane_is_blocked(candidate_file: Path) -> Non
     )
 
     assert result["verdict"] == "BLOCKED"
-    assert result["failedLane"] == "dependent"
+    assert result["failedLane"] == "drift"
     assert [lane["name"] for lane in result["lanes"]] == ["drift"]
 
 
@@ -369,6 +395,52 @@ def test_report_is_written_atomically_and_strictly(candidate_file: Path, tmp_pat
 
     assert json.loads(report.read_text(encoding="utf-8")) == result
     assert list(tmp_path.glob(".report.json.*")) == []
+
+
+def test_last_lane_repository_drift_blocks_after_successful_subprocess(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    tracked = Path(candidate["repositories"]["adminEsp"]["path"]) / "tracked.txt"
+    lane = _lane(
+        "last",
+        f"from pathlib import Path;Path({str(tracked)!r}).write_text('mutated')",
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "last"
+    assert result["lanes"][0]["exitCode"] == 0
+
+
+def test_final_revalidation_never_publishes_pass_report_after_lane_drift(
+    candidate_file: Path, tmp_path: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    tracked = Path(candidate["repositories"]["firmware"]["path"]) / "tracked.txt"
+    report = tmp_path / "report.json"
+    lane = _lane(
+        "last",
+        f"from pathlib import Path;Path({str(tracked)!r}).write_text('mutated')",
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,), report_path=report)
+
+    assert result["verdict"] == "BLOCKED"
+    assert json.loads(report.read_text(encoding="utf-8"))["verdict"] == "BLOCKED"
+
+
+def test_last_lane_candidate_manifest_drift_is_revalidated(candidate_file: Path) -> None:
+    lane = _lane(
+        "last",
+        f"from pathlib import Path;Path({str(candidate_file)!r}).write_text('{{}}')",
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "last"
 
 
 def test_unsafe_report_destination_fails_closed(candidate_file: Path, tmp_path: Path) -> None:
@@ -745,6 +817,7 @@ def test_playwright_contract_requires_named_projects_and_matching_devices(tmp_pa
     (web / "package.json").write_text(json.dumps({
         "scripts": {"test:e2e:course-mode": "playwright test --config=playwright.config.js"},
     }))
+    _write_playwright_runtime(web)
     projects = {
         "course-mode-chromium-desktop": "Desktop Chrome",
         "course-mode-webkit-desktop": "Desktop Safari",
@@ -757,11 +830,12 @@ def test_playwright_contract_requires_named_projects_and_matching_devices(tmp_pa
         "course-mode-chromium-mobile": (390, 844),
         "course-mode-webkit-mobile": (390, 844),
     }
-    config = "testMatch: /course-mode.*\\.spec\\.js/,\nprojects: [\n" + "\n".join(
+    config = "const { devices } = require('@playwright/test');\nmodule.exports = {\n" \
+        "testMatch: /course-mode.*\\.spec\\.js/,\nprojects: [\n" + "\n".join(
         f"{{ name: {name!r}, use: {{ ...devices[{device!r}], viewport: "
         f"{{ width: {viewports[name][0]}, height: {viewports[name][1]} }} }} }},"
         for name, device in projects.items()
-    ) + "\n]"
+    ) + "\n]};\n"
     (web / "playwright.config.js").write_text(config)
     _git(tmp_path, "init", "-b", "candidate")
     _git(tmp_path, "config", "user.email", "candidate@example.invalid")
@@ -779,7 +853,6 @@ def test_playwright_contract_requires_named_projects_and_matching_devices(tmp_pa
         tmp_path, "course-mode-playwright", _git(tmp_path, "rev-parse", "HEAD"),
     ) is False
 
-
 @pytest.mark.parametrize(
     "script",
     [
@@ -796,6 +869,7 @@ def test_playwright_contract_rejects_noncanonical_or_nonexecuting_scripts(
     spec.parent.mkdir(parents=True)
     spec.write_text("test('course mode', async () => {});\n")
     (web / "package.json").write_text(json.dumps({"scripts": {"test:e2e:course-mode": script}}))
+    _write_playwright_runtime(web)
     (web / "playwright.config.js").write_text(_valid_playwright_config())
     _git(tmp_path, "init", "-b", "candidate")
     _git(tmp_path, "config", "user.email", "candidate@example.invalid")
@@ -816,6 +890,7 @@ def test_playwright_contract_rejects_wrong_testmatch_and_small_viewport(tmp_path
     (web / "package.json").write_text(json.dumps({
         "scripts": {"test:e2e:course-mode": "playwright test --config=playwright.config.js"},
     }))
+    _write_playwright_runtime(web)
     projects = "\n".join(
         f"{{ name: {name!r}, use: {{ ...devices[{device!r}], viewport: {{ width: {width}, height: {height} }} }} }},"
         for name, device, width, height in (
@@ -825,7 +900,10 @@ def test_playwright_contract_rejects_wrong_testmatch_and_small_viewport(tmp_path
             ("course-mode-webkit-mobile", "iPhone 13", 390, 844),
         )
     )
-    (web / "playwright.config.js").write_text(f"testMatch: /course-mode.*spec/,\nprojects: [{projects}]")
+    (web / "playwright.config.js").write_text(
+        "const { devices } = require('@playwright/test');\nmodule.exports = {"
+        f"testMatch: /course-mode.*spec/, projects: [{projects}]}};\n",
+    )
     _git(tmp_path, "init", "-b", "candidate")
     _git(tmp_path, "config", "user.email", "candidate@example.invalid")
     _git(tmp_path, "config", "user.name", "Candidate Test")
@@ -841,7 +919,8 @@ def test_playwright_contract_rejects_wrong_testmatch_and_small_viewport(tmp_path
         "width: 390, height: 844", "width: 1000, height: 1000", 1,
     )
     (web / "playwright.config.js").write_text(
-        f"testMatch: /course-mode.*spec/,\nprojects: [{oversized_mobile}]",
+        "const { devices } = require('@playwright/test');\nmodule.exports = {"
+        f"testMatch: /course-mode.*spec/, projects: [{oversized_mobile}]}};\n",
     )
     _git(tmp_path, "add", ".")
     _git(tmp_path, "commit", "-m", "oversized mobile")
@@ -849,12 +928,251 @@ def test_playwright_contract_rejects_wrong_testmatch_and_small_viewport(tmp_path
         tmp_path, "course-mode-playwright", _git(tmp_path, "rev-parse", "HEAD"),
     ) is False
 
-    (web / "playwright.config.js").write_text(f"testMatch: /rewards.*spec/,\nprojects: [{valid_viewports}]")
+    (web / "playwright.config.js").write_text(
+        "const { devices } = require('@playwright/test');\nmodule.exports = {"
+        f"testMatch: /rewards.*spec/, projects: [{valid_viewports}]}};\n",
+    )
     _git(tmp_path, "add", ".")
     _git(tmp_path, "commit", "-m", "wrong test match")
     assert gate.source_contract_ready(
         tmp_path, "course-mode-playwright", _git(tmp_path, "rev-parse", "HEAD"),
     ) is False
+
+
+def test_playwright_contract_ignores_valid_shapes_spoofed_in_comments(
+    tmp_path: Path,
+) -> None:
+    web = tmp_path / "main/manager-web"
+    spec = web / "e2e/lesson-studio/course-mode-authoring.spec.js"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("test('course mode', async () => {});\n")
+    (web / "package.json").write_text(json.dumps({
+        "scripts": {"test:e2e:course-mode": "playwright test --config=playwright.config.js"},
+    }))
+    _write_playwright_runtime(web)
+    (web / "playwright.config.js").write_text(
+        "const { devices } = require('@playwright/test');\n"
+        "// testMatch: /course-mode.*spec/, projects: [\n"
+        "// { name: 'course-mode-chromium-desktop', use: { ...devices['Desktop Chrome'], "
+        "viewport: { width: 1440, height: 900 } } }\n"
+        "module.exports = { testMatch: /rewards.*spec/, projects: [] };\n",
+    )
+    _git(tmp_path, "init", "-b", "candidate")
+    _git(tmp_path, "config", "user.email", "candidate@example.invalid")
+    _git(tmp_path, "config", "user.name", "Candidate Test")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "fixture")
+
+    assert gate.source_contract_ready(
+        tmp_path, "course-mode-playwright", _git(tmp_path, "rev-parse", "HEAD"),
+    ) is False
+
+
+def test_playwright_contract_rejects_direct_stdout_result_spoof(tmp_path: Path) -> None:
+    web = tmp_path / "main/manager-web"
+    spec = web / "e2e/lesson-studio/course-mode-authoring.spec.js"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("test('course mode', async () => {});\n")
+    (web / "package.json").write_text(json.dumps({
+        "scripts": {"test:e2e:course-mode": "playwright test --config=playwright.config.js"},
+    }))
+    _write_playwright_runtime(web)
+    forged = {
+        "testMatch": ["course-mode.*spec"],
+        "matchedSpecs": ["main/manager-web/e2e/lesson-studio/course-mode-authoring.spec.js"],
+        "projects": [],
+    }
+    (web / "playwright.config.js").write_text(
+        f"process.stdout.write({json.dumps(json.dumps(forged))}); process.exit(0);\n",
+    )
+    _git(tmp_path, "init", "-b", "candidate")
+    _git(tmp_path, "config", "user.email", "candidate@example.invalid")
+    _git(tmp_path, "config", "user.name", "Candidate Test")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "fixture")
+
+    assert gate.source_contract_ready(
+        tmp_path, "course-mode-playwright", _git(tmp_path, "rev-parse", "HEAD"),
+    ) is False
+
+
+@pytest.mark.parametrize("pattern", [r"^(?!.*course-mode).*\.spec\.js$", r"never-matches-course-mode"])
+def test_playwright_contract_requires_testmatch_to_cover_committed_specs(
+    tmp_path: Path, pattern: str,
+) -> None:
+    web = tmp_path / "main/manager-web"
+    spec = web / "e2e/lesson-studio/course-mode-authoring.spec.js"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("test('course mode', async () => {});\n")
+    (web / "package.json").write_text(json.dumps({
+        "scripts": {"test:e2e:course-mode": "playwright test --config=playwright.config.js"},
+    }))
+    _write_playwright_runtime(web)
+    config = _valid_playwright_config().replace(
+        "/course-mode.*\\.spec\\.js/", f"/{pattern}/",
+    )
+    (web / "playwright.config.js").write_text(config)
+    _git(tmp_path, "init", "-b", "candidate")
+    _git(tmp_path, "config", "user.email", "candidate@example.invalid")
+    _git(tmp_path, "config", "user.name", "Candidate Test")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "fixture")
+
+    assert gate.source_contract_ready(
+        tmp_path, "course-mode-playwright", _git(tmp_path, "rev-parse", "HEAD"),
+    ) is False
+
+
+def test_playwright_contract_rejects_hardcoded_synthetic_device_fields(tmp_path: Path) -> None:
+    web = tmp_path / "main/manager-web"
+    spec = web / "e2e/lesson-studio/course-mode-authoring.spec.js"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("test('course mode', async () => {});\n")
+    (web / "package.json").write_text(json.dumps({
+        "scripts": {"test:e2e:course-mode": "playwright test --config=playwright.config.js"},
+    }))
+    _write_playwright_runtime(web)
+    projects = "\n".join(
+        f"{{ name: {name!r}, use: {{ userAgent: {device!r}, deviceScaleFactor: 1, "
+        f"isMobile: {str(mobile).lower()}, hasTouch: {str(mobile).lower()}, "
+        f"viewport: {{ width: {width}, height: {height} }} }} }},"
+        for name, device, mobile, width, height in (
+            ("course-mode-chromium-desktop", "Desktop Chrome", False, 1440, 900),
+            ("course-mode-webkit-desktop", "Desktop Safari", False, 1440, 900),
+            ("course-mode-chromium-mobile", "Pixel 7", True, 390, 844),
+            ("course-mode-webkit-mobile", "iPhone 13", True, 390, 844),
+        )
+    )
+    (web / "playwright.config.js").write_text(
+        f"module.exports = {{ testMatch: /course-mode.*spec/, projects: [{projects}] }};\n",
+    )
+    _git(tmp_path, "init", "-b", "candidate")
+    _git(tmp_path, "config", "user.email", "candidate@example.invalid")
+    _git(tmp_path, "config", "user.name", "Candidate Test")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "fixture")
+
+    assert gate.source_contract_ready(
+        tmp_path, "course-mode-playwright", _git(tmp_path, "rev-parse", "HEAD"),
+    ) is False
+
+
+def test_playwright_contract_cannot_branch_on_synthetic_frozen_devices(tmp_path: Path) -> None:
+    web = tmp_path / "main/manager-web"
+    spec = web / "e2e/lesson-studio/course-mode-authoring.spec.js"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("test('course mode', async () => {});\n")
+    (web / "package.json").write_text(json.dumps({
+        "scripts": {"test:e2e:course-mode": "playwright test --config=playwright.config.js"},
+    }))
+    _write_playwright_runtime(web)
+    valid = _valid_playwright_config()
+    valid = valid.replace(
+        "module.exports = {",
+        "module.exports = Object.isFrozen(devices['Desktop Chrome']) "
+        "? { testMatch: /rewards/, projects: [] } : {",
+    )
+    (web / "playwright.config.js").write_text(valid)
+    _git(tmp_path, "init", "-b", "candidate")
+    _git(tmp_path, "config", "user.email", "candidate@example.invalid")
+    _git(tmp_path, "config", "user.name", "Candidate Test")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "fixture")
+
+    assert gate.source_contract_ready(
+        tmp_path, "course-mode-playwright", _git(tmp_path, "rev-parse", "HEAD"),
+    ) is True
+
+
+def test_playwright_preload_cannot_capture_nonce_through_node_builtin_alias(tmp_path: Path) -> None:
+    web = tmp_path / "main/manager-web"
+    spec = web / "e2e/lesson-studio/course-mode-authoring.spec.js"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("test('course mode', async () => {});\n")
+    (web / "package.json").write_text(json.dumps({
+        "scripts": {"test:e2e:course-mode": "playwright test --config=playwright.config.js"},
+    }))
+    forged = {
+        "testMatch": ["course-mode.*spec"],
+        "matchedSpecs": ["main/manager-web/e2e/lesson-studio/course-mode-authoring.spec.js"],
+        "projects": [
+            {"name": name, "viewport": {"width": width, "height": height}, "device": device}
+            for name, device, width, height in (
+                ("course-mode-chromium-desktop", "Desktop Chrome", 1440, 900),
+                ("course-mode-webkit-desktop", "Desktop Safari", 1440, 900),
+                ("course-mode-chromium-mobile", "Pixel 7", 390, 844),
+                ("course-mode-webkit-mobile", "iPhone 13", 390, 844),
+            )
+        ],
+    }
+    module = web / "node_modules/@playwright/test/index.js"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "const { parentPort } = require('node:worker_threads');\n"
+        f"const forged = {json.dumps(forged)};\n"
+        "parentPort.once('message', ({ nonce }) => parentPort.postMessage({ nonce, result: forged }));\n"
+        "exports.devices = {}; exports.defineConfig = (value) => value;\n",
+    )
+    (web / "playwright.config.js").write_text("module.exports = {};\n")
+    _git(tmp_path, "init", "-b", "candidate")
+    _git(tmp_path, "config", "user.email", "candidate@example.invalid")
+    _git(tmp_path, "config", "user.name", "Candidate Test")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "fixture")
+
+    assert gate.source_contract_ready(
+        tmp_path, "course-mode-playwright", _git(tmp_path, "rev-parse", "HEAD"),
+    ) is False
+
+
+def test_playwright_config_evaluation_does_not_receive_ambient_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    web = tmp_path / "main/manager-web"
+    spec = web / "e2e/lesson-studio/course-mode-authoring.spec.js"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("test('course mode', async () => {});\n")
+    (web / "package.json").write_text(json.dumps({
+        "scripts": {"test:e2e:course-mode": "playwright test --config=playwright.config.js"},
+    }))
+    _write_playwright_runtime(web)
+    (web / "playwright.config.js").write_text(
+        "if (process.env.TBOT_REVIEW_SECRET) throw new Error('ambient secret leaked');\n"
+        + _valid_playwright_config(),
+    )
+    _git(tmp_path, "init", "-b", "candidate")
+    _git(tmp_path, "config", "user.email", "candidate@example.invalid")
+    _git(tmp_path, "config", "user.name", "Candidate Test")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "fixture")
+    monkeypatch.setenv("TBOT_REVIEW_SECRET", "must-not-leak")
+
+    assert gate.source_contract_ready(
+        tmp_path, "course-mode-playwright", _git(tmp_path, "rev-parse", "HEAD"),
+    ) is True
+
+
+def test_playwright_config_evaluation_is_bounded_and_uses_sanitized_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    web = tmp_path / "main/manager-web"
+    web.mkdir(parents=True)
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured.update({"command": command, **kwargs})
+        return gate._manifest.BoundedCommandResult(1, "", None)
+
+    monkeypatch.setattr(gate, "_node_executable", lambda: Path("/trusted/node"))
+    monkeypatch.setattr(gate, "run_bounded_command", fake_run)
+    monkeypatch.setenv("TBOT_REVIEW_SECRET", "must-not-leak")
+
+    assert gate._evaluate_playwright_config(tmp_path, ()) is None
+    assert captured["command"][0] == "/trusted/node"
+    assert captured["timeout_sec"] == gate.CONFIG_EVALUATION_TIMEOUT_SEC
+    assert captured["max_output_bytes"] == gate.MAX_CONFIG_OUTPUT_BYTES
+    assert captured["env"] == gate.BASE_ENVIRONMENT
+    assert "TBOT_REVIEW_SECRET" not in captured["env"]
 
 
 def test_live_db_adds_to_full_and_physical_mode_is_read_only_preflight() -> None:
