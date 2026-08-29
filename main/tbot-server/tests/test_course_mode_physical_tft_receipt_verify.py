@@ -411,6 +411,130 @@ def test_malformed_candidate_types_fail_without_traceback(receipt: dict) -> None
     assert reasons == sorted(reasons) and reasons
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda receipt, candidate: receipt.update(lesson="truthy-not-a-record"),
+        lambda receipt, candidate: candidate["repositories"].update(adminEsp="truthy-not-a-record"),
+        lambda receipt, candidate: candidate["repositories"]["adminEsp"].update(dirtyExceptions=1),
+        lambda receipt, candidate: candidate["repositories"]["adminEsp"].update(dirtyExceptions=[None]),
+        lambda receipt, candidate: candidate["repositories"]["backend"].update(sha=1),
+        lambda receipt, candidate: candidate["tools"].update(physicalEvidence=[]),
+        lambda receipt, candidate: candidate.update(database=[]),
+        lambda receipt, candidate: receipt.update(evidence=[{"path": [], "sha256": []}]),
+    ],
+)
+def test_nested_fuzz_matrix_returns_sorted_reasons_without_traceback(receipt: dict, candidate: dict, mutation) -> None:
+    from course_mode_physical_tft_receipt_verify import validate_receipt
+
+    mutation(receipt, candidate)
+    reasons = validate_receipt(receipt, candidate)
+    assert reasons == sorted(set(reasons)) and reasons
+
+
+def test_signed_identity_non_record_returns_reason_without_traceback(
+    receipt: dict, candidate: dict, monkeypatch
+) -> None:
+    from course_mode_physical_tft_receipt_verify import validate_receipt
+
+    candidate["tools"]["physicalEvidence"]["identity"] = []
+    _resign_physical_identity(candidate, monkeypatch)
+    reasons = validate_receipt(receipt, candidate)
+    assert "candidate.physicalEvidence" in reasons
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("candidateBinding", []),
+        ("evidenceArtifacts", []),
+        ("renderer", "truthy-not-a-record"),
+        ("journey", []),
+        ("database", "truthy-not-a-record"),
+    ],
+)
+def test_signed_identity_nested_fuzz_returns_reasons_without_traceback(
+    receipt: dict, candidate: dict, monkeypatch, field: str, value
+) -> None:
+    from course_mode_physical_tft_receipt_verify import validate_receipt
+
+    candidate["tools"]["physicalEvidence"]["identity"][field] = value
+    _resign_physical_identity(candidate, monkeypatch)
+    reasons = validate_receipt(receipt, candidate)
+    assert reasons == sorted(set(reasons)) and reasons
+
+
+def test_all_nested_receipt_and_candidate_sections_fail_closed(receipt: dict, candidate: dict) -> None:
+    from course_mode_physical_tft_receipt_verify import validate_receipt
+
+    receipt_fields = (
+        "course",
+        "lesson",
+        "replacement",
+        "renderer",
+        "repositories",
+        "backendImage",
+        "firmware",
+        "protectedSource",
+        "device",
+        "journey",
+        "database",
+        "evidence",
+    )
+    candidate_fields = ("course", "repositories", "images", "firmware", "database", "curriculum", "tools")
+    malformed_values = (None, True, 1, "truthy-not-a-record", [])
+    for field in receipt_fields:
+        for value in malformed_values:
+            changed = deepcopy(receipt)
+            changed[field] = value
+            reasons = validate_receipt(changed, candidate)
+            assert reasons == sorted(set(reasons)) and reasons, (field, value)
+    for field in candidate_fields:
+        for value in malformed_values:
+            changed = deepcopy(candidate)
+            changed[field] = value
+            reasons = validate_receipt(receipt, changed)
+            assert reasons == sorted(set(reasons)) and reasons, (field, value)
+
+
+def test_malformed_cli_is_deterministic_bounded_and_no_traceback(
+    tmp_path: Path, receipt: dict, candidate: dict
+) -> None:
+    import course_mode_physical_tft_preflight as preflight
+
+    candidate["repositories"]["adminEsp"] = "truthy-not-a-record"
+    candidate_path, receipt_path = tmp_path / "malformed-candidate.json", tmp_path / "malformed-receipt.json"
+    candidate_path.write_text(json.dumps(candidate), encoding="utf-8")
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    bootstrap = (
+        "import runpy,sys;"
+        "sys.path.insert(0,sys.argv[1]);"
+        "import course_mode_physical_tft_preflight as p;"
+        "p.PINNED_APPROVAL_PUBLIC_KEY_RAW=bytes.fromhex(sys.argv[2]);"
+        "p.PINNED_APPROVAL_KEY_FINGERPRINT=sys.argv[3];"
+        "script=sys.argv[4];sys.argv=[script,*sys.argv[5:]];"
+        "runpy.run_path(script,run_name='__main__')"
+    )
+    command = [
+        sys.executable,
+        "-c",
+        bootstrap,
+        str(SCRIPT.parent),
+        preflight.PINNED_APPROVAL_PUBLIC_KEY_RAW.hex(),
+        preflight.PINNED_APPROVAL_KEY_FINGERPRINT,
+        str(SCRIPT),
+        str(receipt_path),
+        "--candidate",
+        str(candidate_path),
+    ]
+    first = subprocess.run(command, capture_output=True, text=True)
+    second = subprocess.run(command, capture_output=True, text=True)
+    assert first.returncode == 1 and first.stdout == second.stdout and not first.stderr and not second.stderr
+    result = json.loads(first.stdout)
+    assert result["valid"] is False and result["reasons"] == sorted(set(result["reasons"]))
+    assert len(first.stdout) < 1024
+
+
 def test_cli_is_deterministic_bounded_and_redacted(tmp_path: Path, receipt: dict, candidate: dict) -> None:
     import course_mode_physical_tft_preflight as preflight
 

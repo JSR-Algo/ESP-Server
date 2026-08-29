@@ -121,7 +121,7 @@ def main(argv=None) -> int:
             candidate=strict_json_loads(read_secure_regular(args.candidate, MAX_CANDIDATE_BYTES)),
             repository_root=args.repository_root,
         )
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+    except (AttributeError, KeyError, OSError, TypeError, UnicodeError, json.JSONDecodeError, ValueError):
         result = {"candidateId": None, "reasons": ["input.invalid"], "valid": False}
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0 if result["valid"] else 1

@@ -51,9 +51,16 @@ def _nonempty(value: object) -> bool:
     return isinstance(value, str) and bool(value)
 
 
+def _record(value: object) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
 def _protected(candidate: dict) -> object:
     repositories = candidate.get("repositories")
-    repo = repositories.get("adminEsp", {}) if isinstance(repositories, dict) else {}
+    repo = _record(repositories.get("adminEsp")) if isinstance(repositories, dict) else {}
+    exceptions = repo.get("dirtyExceptions")
+    if not isinstance(exceptions, list) or any(not isinstance(item, dict) for item in exceptions):
+        return None
     path = "main/tbot-server/tests/test_lesson_voice_output_discipline.py"
     root_value = repo.get("path")
     digest, error = _secure_hash_relative(Path(root_value), path) if isinstance(root_value, str) else (None, "path")
@@ -63,7 +70,7 @@ def _protected(candidate: dict) -> object:
         "binding": "repository",
         "sha256": digest,
     }
-    matches = [item for item in repo.get("dirtyExceptions", []) if isinstance(item, dict) and item.get("path") == path]
+    matches = [item for item in exceptions if item.get("path") == path]
     if error is not None:
         return None
     return (
@@ -79,7 +86,7 @@ def _physical_identity(candidate: dict) -> object:
     tools = candidate.get("tools")
     repositories = candidate.get("repositories")
     binding = tools.get("physicalEvidence") if isinstance(tools, dict) else None
-    repo = repositories.get("adminEsp", {}) if isinstance(repositories, dict) else {}
+    repo = _record(repositories.get("adminEsp")) if isinstance(repositories, dict) else {}
     binding_fields = {
         "path",
         "repositorySha",
@@ -95,9 +102,11 @@ def _physical_identity(candidate: dict) -> object:
         return None
     path = binding.get("path")
     signature_path = binding.get("signaturePath")
-    exceptions = repo.get("dirtyExceptions", [])
-    matching = [item for item in exceptions if isinstance(item, dict) and item.get("path") == path]
-    signature_matching = [item for item in exceptions if isinstance(item, dict) and item.get("path") == signature_path]
+    exceptions = repo.get("dirtyExceptions")
+    if not isinstance(exceptions, list) or any(not isinstance(item, dict) for item in exceptions):
+        return None
+    matching = [item for item in exceptions if item.get("path") == path]
+    signature_matching = [item for item in exceptions if item.get("path") == signature_path]
     if (
         not isinstance(path, str)
         or Path(path).is_absolute()
@@ -131,6 +140,8 @@ def _physical_identity(candidate: dict) -> object:
     if not valid or fingerprint != binding.get("signerFingerprint"):
         return "signature-invalid"
     if parsed != binding.get("identity"):
+        return None
+    if not isinstance(parsed, dict):
         return None
     curriculum = candidate.get("curriculum")
     database = candidate.get("database")
@@ -183,6 +194,7 @@ def validate_receipt(document: object, candidate: object, *, now: datetime | Non
     if document.get("course") != candidate.get("course"):
         reasons.append("receipt.course")
     lesson = document.get("lesson")
+    lesson_record = _record(lesson)
     if (
         not isinstance(lesson, dict)
         or set(lesson) != {"lessonId", "lessonKey", "lessonVersion"}
@@ -227,7 +239,7 @@ def validate_receipt(document: object, candidate: object, *, now: datetime | Non
         not isinstance(replacement, dict)
         or set(replacement)
         != {"sourceLessonId", "replacementLessonId", "materializationReceiptSha256", "cutoverReceiptSha256"}
-        or replacement.get("replacementLessonId") != (lesson or {}).get("lessonId")
+        or replacement.get("replacementLessonId") != lesson_record.get("lessonId")
         or replacement.get("sourceLessonId") == replacement.get("replacementLessonId")
         or not _sha(replacement.get("materializationReceiptSha256"))
         or not _sha(replacement.get("cutoverReceiptSha256"))
@@ -242,7 +254,7 @@ def validate_receipt(document: object, candidate: object, *, now: datetime | Non
     if (
         document.get("repositories") != expected_repositories
         or set(expected_repositories) != {"backend", "adminEsp", "firmware"}
-        or not all(SHA40.fullmatch(value or "") for value in expected_repositories.values())
+        or not all(isinstance(value, str) and SHA40.fullmatch(value) for value in expected_repositories.values())
     ):
         reasons.append("receipt.repositories")
     images = candidate.get("images")
@@ -339,7 +351,7 @@ def main(argv=None) -> int:
         )
         reasons = validate_receipt_pair(receipt, rerun, candidate)
         candidate_id = candidate.get("candidateId") if isinstance(candidate, dict) else None
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+    except (AttributeError, KeyError, OSError, TypeError, UnicodeError, json.JSONDecodeError, ValueError):
         reasons, candidate_id = ["input.invalid"], None
     print(
         json.dumps(
