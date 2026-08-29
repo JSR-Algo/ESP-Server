@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import importlib
 import json
 import math
 import os
-import shlex
+import secrets
 import shutil
 import stat
 import tempfile
@@ -49,16 +50,39 @@ BASE_ENVIRONMENT = {
 }
 MAX_LANE_OUTPUT_BYTES = 4 * 1024 * 1024
 MAX_REPORT_BYTES = 1024 * 1024
-MAX_CONFIG_OUTPUT_BYTES = 64 * 1024
-CONFIG_EVALUATION_TIMEOUT_SEC = 5.0
 MODES = ("quick", "full", "live-db", "physical-preflight")
 COURSE_MODE_SOFTWARE_TESTS = "@course-mode-software-tests"
+PLAYWRIGHT_CONTRACT_PATH = "main/manager-web/course-mode.playwright.contract.json"
 PLAYWRIGHT_PROJECTS = (
     "course-mode-chromium-desktop",
     "course-mode-webkit-desktop",
     "course-mode-chromium-mobile",
     "course-mode-webkit-mobile",
 )
+PLAYWRIGHT_PROJECT_CONTRACT = (
+    {"name": "course-mode-chromium-desktop", "device": "Desktop Chrome", "viewport": {"width": 1440, "height": 900}},
+    {"name": "course-mode-webkit-desktop", "device": "Desktop Safari", "viewport": {"width": 1440, "height": 900}},
+    {"name": "course-mode-chromium-mobile", "device": "Pixel 7", "viewport": {"width": 390, "height": 844}},
+    {"name": "course-mode-webkit-mobile", "device": "iPhone 13", "viewport": {"width": 390, "height": 844}},
+)
+PLAYWRIGHT_FIXED_CONTRACT = {
+    "testDir": "./e2e/lesson-studio",
+    "globalSetup": "./e2e/lesson-studio/global-setup.cjs",
+    "outputDir": "./output/playwright-e2e/results",
+    "timeout": 60000,
+    "expectTimeout": 10000,
+    "fullyParallel": False,
+    "workers": 1,
+    "retries": 0,
+    "reporter": [["list"], ["html", {"outputFolder": "./output/playwright-e2e/report", "open": "never"}]],
+    "use": {
+        "baseUrlHelper": "lessonStudioWebOrigin",
+        "trace": "retain-on-failure",
+        "screenshot": "only-on-failure",
+        "video": "retain-on-failure",
+        "serviceWorkers": "block",
+    },
+}
 SAFE_PHYSICAL_CONTRACT_TESTS = {
     "test_course_mode_physical_tft_compose.py",
     "test_course_mode_physical_tft_ledger_validate.py",
@@ -346,6 +370,35 @@ def _playwright_spec_paths(admin_root: Path, sha: str) -> tuple[str, ...]:
     )
 
 
+def _python_test_dependencies(root: Path, sha: str, selected: set[str]) -> set[str]:
+    pending = list(selected)
+    dependencies: set[str] = set()
+    while pending:
+        relative = pending.pop()
+        source = _committed_text(root, sha, relative)
+        if source is None:
+            continue
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError):
+            continue
+        module_names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                module_names.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                module_names.add(node.module)
+        for module in module_names:
+            name = module.removeprefix("tests.")
+            if "." in name or not name.startswith("test_"):
+                continue
+            dependency = f"main/tbot-server/tests/{name}.py"
+            if dependency not in selected and dependency not in dependencies:
+                dependencies.add(dependency)
+                pending.append(dependency)
+    return dependencies
+
+
 def lane_candidate_paths(lane: Lane, candidate: dict) -> tuple[str, ...]:
     repository = candidate["repositories"][lane.repository]
     root = Path(repository["path"])
@@ -356,6 +409,7 @@ def lane_candidate_paths(lane: Lane, candidate: dict) -> tuple[str, ...]:
             paths.add("main/manager-web/package-lock.json")
     if lane.required_source_contract == "course-mode-playwright":
         paths.add("main/manager-web/playwright.config.js")
+        paths.add(PLAYWRIGHT_CONTRACT_PATH)
         paths.update(_playwright_spec_paths(root, repository["sha"]))
     if lane.name == "esp-course-mode-full":
         paths.add("main/tbot-server/pyproject.toml")
@@ -366,6 +420,8 @@ def lane_candidate_paths(lane: Lane, candidate: dict) -> tuple[str, ...]:
             f"main/tbot-server/{token}" for token in lane.command
             if token.endswith(".py") and not Path(token).is_absolute()
         )
+    if lane.repository == "adminEsp" and lane.relative_cwd == "main/tbot-server":
+        paths.update(_python_test_dependencies(root, repository["sha"], paths))
     if lane.repository == "backend" and lane.command[0] in {"npm", "npx"}:
         paths.add("package.json")
         if (root / "package-lock.json").is_file():
@@ -385,26 +441,17 @@ def lane_dirty_exceptions_authorized(lane: Lane, candidate: dict) -> bool:
             for name in ("backend", "firmware")
         ):
             return False
-        dirty = {
-            item["path"] for item in candidate["repositories"][lane.repository]["dirtyExceptions"]
-        }
+        repository = candidate["repositories"][lane.repository]
+        dirty = {item["path"] for item in repository["dirtyExceptions"]}
     except (KeyError, TypeError):
         return False
     if lane.repository in {"backend", "firmware"}:
         return not dirty
     if lane.repository != "adminEsp":
         return False
-    if lane.relative_cwd == "main/manager-web":
-        return not any(path.startswith("main/manager-web/") for path in dirty)
-    if lane.relative_cwd != "main/tbot-server":
-        return not dirty
-
+    root = Path(repository["path"])
     selected = set(lane_candidate_paths(lane, candidate))
     for relative in dirty:
-        if not relative.startswith("main/tbot-server/"):
-            if lane.name == "physical-tft-preflight":
-                return False
-            continue
         path = Path(relative)
         is_unselected_standalone_test = (
             path.parent == Path("main/tbot-server/tests")
@@ -412,9 +459,22 @@ def lane_dirty_exceptions_authorized(lane: Lane, candidate: dict) -> bool:
             and path.suffix == ".py"
             and relative not in selected
         )
-        if not is_unselected_standalone_test:
+        if not is_unselected_standalone_test or _test_module_referenced(
+            root, repository["sha"], relative,
+        ):
             return False
     return True
+
+
+def _test_module_referenced(root: Path, sha: str, relative: str) -> bool:
+    module_name = Path(relative).stem
+    try:
+        matches = _candidate_git(
+            root, "grep", "-l", "-F", module_name, sha, "--", "main/tbot-server/**/*.py",
+        ).splitlines()
+    except RuntimeError:
+        return False
+    return any(match.partition(":")[2] != relative for match in matches)
 
 
 def release_state_matches(
@@ -445,149 +505,99 @@ def _committed_text(admin_root: Path, sha: str, relative: str) -> str | None:
         return None
 
 
-def _node_executable() -> Path | None:
-    candidates = [Path("/opt/homebrew/bin/node"), Path("/usr/local/bin/node"), Path("/usr/bin/node")]
-    return next((path for path in candidates if path.is_file() and os.access(path, os.X_OK)), None)
+def _json_exact_equal(actual: object, expected: object) -> bool:
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return actual.keys() == expected.keys() and all(
+            _json_exact_equal(actual[key], value) for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _json_exact_equal(item, expected_item)
+            for item, expected_item in zip(actual, expected, strict=True)
+        )
+    return actual == expected
 
 
-def _evaluate_playwright_config(admin_root: Path, specs: Sequence[str]) -> dict | None:
-    node = _node_executable()
-    web = admin_root / "main/manager-web"
-    config = web / "playwright.config.js"
-    if node is None:
-        return None
-    evaluator = r"""
-const { randomUUID } = require('crypto');
-const { Worker } = require('worker_threads');
-const workerSource = String.raw`
-  const { parentPort, workerData } = require('worker_threads');
-  const fs = require('fs');
-  const Module = require('module');
-  const path = require('path');
-  const post = parentPort.postMessage.bind(parentPort);
-  const receiveOnce = parentPort.once.bind(parentPort);
-  const safe = {
-    entries: Object.entries.bind(Object),
-    every: Function.call.bind(Array.prototype.every),
-    filter: Function.call.bind(Array.prototype.filter),
-    isArray: Array.isArray.bind(Array),
-    map: Function.call.bind(Array.prototype.map),
-    regexSource: Function.call.bind(Object.getOwnPropertyDescriptor(RegExp.prototype, 'source').get),
-    regexTest: Function.call.bind(RegExp.prototype.test),
-    some: Function.call.bind(Array.prototype.some),
-    stringify: JSON.stringify.bind(JSON),
-  };
-  try {
-    const originalLoad = Module._load;
-    Module._load = (request, parent, isMain) => {
-      if (request === 'worker_threads' || request === 'node:worker_threads') {
-        throw new Error('worker channel denied during preload');
-      }
-      return originalLoad(request, parent, isMain);
-    };
-    Object.defineProperties(process, {
-      exit: { value: () => { throw new Error('process.exit denied'); } },
-      reallyExit: { value: () => { throw new Error('process.reallyExit denied'); } },
-      getBuiltinModule: { value: undefined },
-    });
-    const web = path.dirname(workerData.configPath);
-    const playwrightPath = require.resolve('@playwright/test', { paths: [web] });
-    const playwright = require(playwrightPath);
-    const helperPath = path.join(web, 'scripts/lesson-studio-e2e-environment.cjs');
-    const helper = fs.existsSync(helperPath) ? require(helperPath) : null;
-    const guardedLoad = (request) => {
-      if (request === '@playwright/test' || request === playwrightPath) return playwright;
-      if (helper && (request === './scripts/lesson-studio-e2e-environment.cjs' || request === helperPath)) {
-        return helper;
-      }
-      throw new Error('module denied during config evaluation');
-    };
-    Object.defineProperties(Module, {
-      _load: { value: guardedLoad, writable: false, configurable: false },
-      createRequire: { value: undefined, writable: false, configurable: false },
-    });
-    post({ ready: true });
-    receiveOnce('message', (message) => {
-      try {
-        if (!message || typeof message.nonce !== 'string') throw new Error('missing nonce');
-        const loaded = originalLoad(workerData.configPath, null, true);
-        const config = loaded && loaded.default ? loaded.default : loaded;
-        const requiredDevices = {
-          'course-mode-chromium-desktop': 'Desktop Chrome',
-          'course-mode-webkit-desktop': 'Desktop Safari',
-          'course-mode-chromium-mobile': 'Pixel 7',
-          'course-mode-webkit-mobile': 'iPhone 13',
-        };
-        const patterns = safe.isArray(config && config.testMatch)
-          ? config.testMatch : [config && config.testMatch];
-        const deviceMatches = (use, name) => {
-          const expected = playwright.devices[name];
-          return expected && safe.every(safe.entries(expected), ([key, value]) =>
-            key === 'viewport' || (use && safe.stringify(use[key]) === safe.stringify(value))
-          );
-        };
-        post({ nonce: message.nonce, result: {
-          testMatch: safe.map(patterns, (value) => {
-            try { return safe.regexSource(value); } catch (_error) { return null; }
-          }),
-          matchedSpecs: safe.filter(workerData.specs, (spec) => safe.some(patterns, (value) => {
-            try { value.lastIndex = 0; return safe.regexTest(value, spec); } catch (_error) { return false; }
-          })),
-          projects: safe.isArray(config && config.projects) ? safe.map(config.projects, (project) => ({
-            name: project && project.name,
-            viewport: project && project.use && project.use.viewport,
-            device: project && deviceMatches(project.use, requiredDevices[project.name])
-              ? requiredDevices[project.name] : null,
-          })) : null,
-        }});
-      } catch (_error) {
-        process.exitCode = 1;
-      }
-    });
-  } catch (_error) {
-    process.exitCode = 1;
-  }
-`;
-const worker = new Worker(workerSource, {
-  eval: true,
-  stdout: true,
-  stderr: true,
-  workerData: {
-    configPath: process.argv[1],
-    specs: JSON.parse(process.argv[2]),
-  },
-});
-let trustedMessage = null;
-let nonce = null;
-worker.on('message', (message) => {
-  if (message && message.ready === true && nonce === null) {
-    nonce = randomUUID();
-    worker.postMessage({ nonce });
-  } else if (message && nonce !== null && message.nonce === nonce && trustedMessage === null) {
-    trustedMessage = message.result;
-  }
-});
-worker.on('error', () => { process.exitCode = 1; });
-worker.on('exit', (code) => {
-  if (code !== 0 || trustedMessage === null) {
-    process.exitCode = 1;
-    return;
-  }
-  process.stdout.write(JSON.stringify(trustedMessage));
-});
-"""
-    result = run_bounded_command(
-        [str(node), "-e", evaluator, str(config.resolve()), json.dumps(list(specs))], cwd=web,
-        timeout_sec=CONFIG_EVALUATION_TIMEOUT_SEC, max_output_bytes=MAX_CONFIG_OUTPUT_BYTES,
-        env=dict(BASE_ENVIRONMENT),
-    )
-    if result.error or result.returncode != 0:
-        return None
-    try:
-        evaluated = strict_json_loads(result.stdout)
-    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
-        return None
-    return evaluated if isinstance(evaluated, dict) else None
+def validate_playwright_contract(contract: object) -> bool:
+    if not isinstance(contract, dict) or set(contract) != {
+        "version", "specs", "testMatch", "projects", "fixed",
+    }:
+        return False
+    specs = contract.get("specs")
+    test_match = contract.get("testMatch")
+    if (
+        type(contract.get("version")) is not int or contract.get("version") != 1
+        or not isinstance(specs, list) or not specs
+        or any(
+            not isinstance(spec, str) or not spec.startswith("e2e/lesson-studio/")
+            or Path(spec).name != spec.removeprefix("e2e/lesson-studio/")
+            or not spec.startswith("e2e/lesson-studio/course-mode")
+            or not spec.endswith(".spec.js")
+            for spec in specs
+        )
+        or specs != sorted(set(specs))
+        or test_match != [Path(spec).name for spec in specs]
+        or not _json_exact_equal(contract.get("projects"), list(PLAYWRIGHT_PROJECT_CONTRACT))
+        or not _json_exact_equal(contract.get("fixed"), PLAYWRIGHT_FIXED_CONTRACT)
+    ):
+        return False
+    return True
+
+
+def _js_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=True)
+
+
+def generate_playwright_config(contract: object) -> str:
+    if not validate_playwright_contract(contract):
+        raise ValueError("invalid Course Mode Playwright contract")
+    assert isinstance(contract, dict)
+    fixed = contract["fixed"]
+    projects = contract["projects"]
+    project_lines = []
+    for project in projects:
+        viewport = project["viewport"]
+        project_lines.extend([
+            "    {",
+            f"      name: {_js_string(project['name'])},",
+            "      use: {",
+            f"        ...devices[{_js_string(project['device'])}],",
+            f"        viewport: {{ width: {viewport['width']}, height: {viewport['height']} }},",
+            "      },",
+            "    },",
+        ])
+    test_matches = ", ".join(_js_string(value) for value in contract["testMatch"])
+    reporter = json.dumps(fixed["reporter"], sort_keys=True, separators=(", ", ": "))
+    return "\n".join([
+        "const { defineConfig, devices } = require('@playwright/test');",
+        "const { lessonStudioWebOrigin } = require('./scripts/lesson-studio-e2e-environment.cjs');",
+        "",
+        "module.exports = defineConfig({",
+        f"  testDir: {_js_string(fixed['testDir'])},",
+        f"  globalSetup: {_js_string(fixed['globalSetup'])},",
+        f"  testMatch: [{test_matches}],",
+        f"  outputDir: {_js_string(fixed['outputDir'])},",
+        f"  timeout: {fixed['timeout']},",
+        f"  expect: {{ timeout: {fixed['expectTimeout']} }},",
+        f"  fullyParallel: {str(fixed['fullyParallel']).lower()},",
+        f"  workers: {fixed['workers']},",
+        f"  retries: {fixed['retries']},",
+        f"  reporter: {reporter},",
+        "  use: {",
+        "    baseURL: lessonStudioWebOrigin(),",
+        f"    trace: {_js_string(fixed['use']['trace'])},",
+        f"    screenshot: {_js_string(fixed['use']['screenshot'])},",
+        f"    video: {_js_string(fixed['use']['video'])},",
+        f"    serviceWorkers: {_js_string(fixed['use']['serviceWorkers'])},",
+        "  },",
+        "  projects: [",
+        *project_lines,
+        "  ],",
+        "});",
+        "",
+    ])
 
 
 def source_contract_ready(admin_root: Path, contract: str, sha: str) -> bool:
@@ -595,80 +605,33 @@ def source_contract_ready(admin_root: Path, contract: str, sha: str) -> bool:
         return False
     try:
         package_raw = _committed_text(admin_root, sha, "main/manager-web/package.json")
-        if package_raw is None:
+        contract_raw = _committed_text(admin_root, sha, PLAYWRIGHT_CONTRACT_PATH)
+        config_raw = _committed_text(admin_root, sha, "main/manager-web/playwright.config.js")
+        if package_raw is None or contract_raw is None or config_raw is None:
             return False
         package = strict_json_loads(package_raw)
+        document = strict_json_loads(contract_raw)
         specs = _playwright_spec_paths(admin_root, sha)
     except (json.JSONDecodeError, ValueError, RuntimeError):
         return False
     scripts = package.get("scripts") if isinstance(package, dict) else None
     script = scripts.get("test:e2e:course-mode") if isinstance(scripts, dict) else None
-    if not isinstance(script, str):
+    if script != "playwright test --config=playwright.config.js":
         return False
     try:
-        argv = shlex.split(script)
+        generated = generate_playwright_config(document)
     except ValueError:
         return False
-    if (
-        argv != ["playwright", "test", "--config=playwright.config.js"]
-    ):
-        return False
-    if not any(
-        Path(relative).name.startswith("course-mode") and relative.endswith(".spec.js")
-        for relative in specs
-    ):
+    normalized_specs = [relative.removeprefix("main/manager-web/") for relative in specs]
+    if document["specs"] != normalized_specs or config_raw != generated:
         return False
     bound = (
-        "main/manager-web/package.json", "main/manager-web/playwright.config.js", *specs,
+        "main/manager-web/package.json", "main/manager-web/playwright.config.js",
+        PLAYWRIGHT_CONTRACT_PATH, *specs,
     )
-    if not candidate_paths_match(
+    return candidate_paths_match(
         {"path": str(admin_root), "sha": sha, "dirtyExceptions": []}, bound,
-    ):
-        return False
-    evaluated = _evaluate_playwright_config(admin_root, specs)
-    if evaluated is None or not candidate_paths_match(
-        {"path": str(admin_root), "sha": sha, "dirtyExceptions": []}, bound,
-    ):
-        return False
-    projects = {
-        "course-mode-chromium-desktop": ("Desktop Chrome", 1440, 900),
-        "course-mode-webkit-desktop": ("Desktop Safari", 1440, 900),
-        "course-mode-chromium-mobile": ("Pixel 7", 390, 844),
-        "course-mode-webkit-mobile": ("iPhone 13", 390, 844),
-    }
-    test_match = evaluated.get("testMatch")
-    matched_specs = evaluated.get("matchedSpecs")
-    actual_projects = evaluated.get("projects")
-    if (
-        not isinstance(test_match, list)
-        or not all(isinstance(pattern, str) for pattern in test_match)
-        or matched_specs != list(specs)
-        or not isinstance(actual_projects, list)
-        or len(actual_projects) != len(projects)
-    ):
-        return False
-    by_name = {
-        item.get("name"): item for item in actual_projects
-        if isinstance(item, dict) and isinstance(item.get("name"), str)
-    }
-    if set(by_name) != set(projects):
-        return False
-    for project, (device, minimum_width, minimum_height) in projects.items():
-        item = by_name[project]
-        if item.get("device") != device:
-            return False
-        viewport = item.get("viewport")
-        if not isinstance(viewport, dict) or set(viewport) != {"width", "height"}:
-            return False
-        width = viewport.get("width")
-        height = viewport.get("height")
-        if type(width) is not int or type(height) is not int:
-            return False
-        if "mobile" in project and (width, height) != (minimum_width, minimum_height):
-            return False
-        if "desktop" in project and (width < minimum_width or height < minimum_height):
-            return False
-    return True
+    )
 
 
 def pytest_report_has_skips(path: Path) -> bool | None:
@@ -777,40 +740,152 @@ def _command_for_lane(lane: Lane, candidate: dict) -> tuple[str, ...] | None:
     return lane.command
 
 
-def _write_report_atomic(path: Path, report: dict) -> bool:
+def _write_report_atomic(path: Path, report: dict, parent_fd: int | None = None) -> bool:
     payload = json.dumps(
         report, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
     ).encode("utf-8") + b"\n"
     if len(payload) > MAX_REPORT_BYTES or not path.is_absolute():
         return False
+    owned_fd = parent_fd is None
+    temporary = None
     try:
-        parent = path.parent.resolve(strict=True)
-        if not parent.is_dir() or path.parent != parent:
+        if parent_fd is None:
+            parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        descriptor_parent = os.fstat(parent_fd)
+        named_parent = os.stat(path.parent, follow_symlinks=False)
+        if (descriptor_parent.st_dev, descriptor_parent.st_ino) != (
+            named_parent.st_dev, named_parent.st_ino,
+        ):
             return False
-        if path.exists() or path.is_symlink():
-            current = path.lstat()
+        try:
+            current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
             if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
                 return False
-        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=parent)
+        except FileNotFoundError:
+            pass
+        for _ in range(32):
+            temporary = f".{path.name}.{secrets.token_hex(8)}"
+            try:
+                descriptor = os.open(
+                    temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600, dir_fd=parent_fd,
+                )
+                break
+            except FileExistsError:
+                continue
+        else:
+            return False
         try:
             os.write(descriptor, payload)
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
-        directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        temporary_stat = os.stat(temporary, dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISREG(temporary_stat.st_mode) or temporary_stat.st_nlink != 1:
+            return False
+        os.replace(temporary, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        temporary = None
+        os.fsync(parent_fd)
+        named_parent = os.stat(path.parent, follow_symlinks=False)
+        if (descriptor_parent.st_dev, descriptor_parent.st_ino) != (
+            named_parent.st_dev, named_parent.st_ino,
+        ):
+            _invalidate_report(path, parent_fd)
+            return False
         return True
     except OSError:
-        try:
-            os.unlink(temporary)
-        except (OSError, UnboundLocalError):
-            pass
         return False
+    finally:
+        if temporary is not None and parent_fd is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary, dir_fd=parent_fd)
+        if owned_fd and parent_fd is not None:
+            os.close(parent_fd)
+
+
+def _path_overlaps(left: Path, right: Path) -> bool:
+    try:
+        left.relative_to(right)
+        return True
+    except ValueError:
+        try:
+            right.relative_to(left)
+            return True
+        except ValueError:
+            return False
+
+
+def _prepare_report_destination(
+    candidate_path: Path, candidate: dict, report_path: Path,
+) -> int | None:
+    if not report_path.is_absolute():
+        return None
+    parent_fd = None
+    try:
+        evidence_value = Path(candidate["evidenceRoot"])
+        if not evidence_value.is_absolute() or evidence_value.is_symlink():
+            return None
+        evidence_root = evidence_value.resolve(strict=True)
+        if evidence_value != evidence_root or not evidence_root.is_dir():
+            return None
+        candidate_input = candidate_path.resolve(strict=True)
+        repository_roots = [
+            Path(candidate["repositories"][name]["path"]).resolve(strict=True)
+            for name in ("backend", "adminEsp", "firmware")
+        ]
+        if _path_overlaps(evidence_root, candidate_input) or any(
+            _path_overlaps(evidence_root, root) for root in repository_roots
+        ):
+            return None
+        parent_value = report_path.parent
+        parent = parent_value.resolve(strict=True)
+        if parent_value != parent or not parent.is_dir():
+            return None
+        parent.relative_to(evidence_root)
+        if report_path == evidence_root or report_path.is_symlink():
+            return None
+        expected_evidence = evidence_root.stat()
+        parent_fd = os.open(evidence_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        opened_evidence = os.fstat(parent_fd)
+        if (opened_evidence.st_dev, opened_evidence.st_ino) != (
+            expected_evidence.st_dev, expected_evidence.st_ino,
+        ):
+            return None
+        for component in parent.relative_to(evidence_root).parts:
+            next_fd = os.open(
+                component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd,
+            )
+            os.close(parent_fd)
+            parent_fd = next_fd
+        expected_parent = parent.stat()
+        actual_parent = os.fstat(parent_fd)
+        if (actual_parent.st_dev, actual_parent.st_ino) != (expected_parent.st_dev, expected_parent.st_ino):
+            return None
+        try:
+            metadata = os.stat(report_path.name, dir_fd=parent_fd, follow_symlinks=False)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                return None
+        except FileNotFoundError:
+            pass
+        if any(
+            _path_overlaps(report_path, protected)
+            for protected in (candidate_input, *repository_roots)
+        ):
+            return None
+        prepared = parent_fd
+        parent_fd = None
+        return prepared
+    except (KeyError, OSError, TypeError, ValueError):
+        return None
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
+def _invalidate_report(path: Path, parent_fd: int) -> None:
+    with contextlib.suppress(OSError):
+        os.unlink(path.name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
 
 
 def run_gate(
@@ -825,6 +900,14 @@ def run_gate(
 ) -> dict:
     candidate = _load_candidate(candidate_path)
     candidate_id = candidate.get("candidateId") if isinstance(candidate, dict) else None
+    selected: tuple[Lane, ...] = ()
+    require_runtime = False
+    report_parent_fd = None
+    if report_path is not None:
+        if candidate is not None:
+            report_parent_fd = _prepare_report_destination(candidate_path, candidate, report_path)
+        if report_parent_fd is None:
+            return _blocked(candidate_id if isinstance(candidate_id, str) else None, "report")
     if candidate is None or validate_candidate(candidate):
         report = _blocked(candidate_id if isinstance(candidate_id, str) else None, "candidate")
     elif mode not in MODES or type(max_output_bytes) is not int or max_output_bytes <= 0:
@@ -934,8 +1017,23 @@ def run_gate(
                 report["verdict"] = "BLOCKED"
                 if report["failedLane"] is None:
                     report["failedLane"] = selected[-1].name if selected else "candidate-runtime"
-    if report_path is not None and not _write_report_atomic(report_path, report):
-        return _blocked(report.get("candidateId"), "report")
+    if report_path is not None:
+        assert report_parent_fd is not None
+        if not _write_report_atomic(report_path, report, report_parent_fd):
+            os.close(report_parent_fd)
+            return _blocked(report.get("candidateId"), "report")
+        if (
+            report["verdict"] == "PASS"
+            and not release_state_matches(
+                candidate_path, candidate, selected, runtime_root, require_runtime,
+            )
+        ):
+            report = _blocked(candidate_id, selected[-1].name if selected else "candidate-runtime")
+            if not _write_report_atomic(report_path, report, report_parent_fd):
+                _invalidate_report(report_path, report_parent_fd)
+                os.close(report_parent_fd)
+                return _blocked(candidate_id, "report")
+        os.close(report_parent_fd)
     return report
 
 
