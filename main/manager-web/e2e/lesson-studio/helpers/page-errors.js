@@ -7,19 +7,26 @@ function isExpectedNavigationAbort(request) {
   if (request.isNavigationRequest()) return true;
   try {
     const url = new URL(request.url());
-    if (!['media', 'other'].includes(request.resourceType())) return false;
+    const resourceType = request.resourceType();
     const path = url.pathname.toLowerCase();
     const frameOrigin = new URL(request.frame().url()).origin;
-    const internalMediaProbe = url.origin === frameOrigin
+    const internalMediaProbe = ['media', 'other'].includes(resourceType)
+      && url.origin === frameOrigin
       && path.startsWith('/tvideo-demo/')
       && path.endsWith('.mp4');
-    const canonicalAdminMediaProbe = url.origin === 'https://admin.tjbot.vn'
+    const canonicalAdminMediaProbe = ['media', 'other'].includes(resourceType)
+      && url.origin === 'https://admin.tjbot.vn'
       && path.startsWith('/tvideo-demo/assets/')
       && path.endsWith('.mp4');
-    const task4FixtureMediaProbe = /^https:\/\/task4-media\.localhost:\d+$/.test(url.origin)
+    const task4FixtureMediaProbe = ['media', 'other'].includes(resourceType)
+      && /^https:\/\/task4-media\.localhost:\d+$/.test(url.origin)
       && path.startsWith('/tvideo-demo/assets/')
       && path.endsWith('.mp4');
-    return internalMediaProbe || canonicalAdminMediaProbe || task4FixtureMediaProbe;
+    const canonicalAdminImage = resourceType === 'image'
+      && url.origin === 'https://admin.tjbot.vn'
+      && path.startsWith('/tvideo-demo/assets/');
+    return internalMediaProbe || canonicalAdminMediaProbe || task4FixtureMediaProbe
+      || canonicalAdminImage;
   } catch {
     return false;
   }

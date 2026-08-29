@@ -116,6 +116,7 @@ PLAYWRIGHT_ASSIGNMENT_CONTRACT = {
         "main/manager-web/scripts/prepare-task4-media-templates.cjs",
         "main/manager-web/scripts/run-task4-assignment-phase.cjs",
         "main/manager-web/scripts/task4-assignment-fixture.test.cjs",
+        "main/manager-web/scripts/task4-image-identity.cjs",
     ],
 }
 PLAYWRIGHT_ASSIGNMENT_SCRIPTS = {
@@ -127,6 +128,51 @@ TASK4_ASSIGNMENT_CANDIDATE_ENV = (
     "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME", "LESSON_STUDIO_E2E_RESOURCE_PREFIX",
     "TASK4_ASSIGNMENT_RUNTIME_ROOT", "JWT_PUBLIC_KEY", "TBOT_DEVICE_MINT_SECRET",
     "LESSON_ASSET_ORIGIN_BASE", "ROBOT_ESP_BASE_URL",
+)
+TASK4_BACKEND_MOUNT_ROOTS = (
+    "src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json",
+    "src/lessons/fixtures/tvideo-raw-code/assets/admin",
+    "src/lessons/fixtures/tvideo-raw-code/assets/esp-tft",
+)
+TASK4_FIRMWARE_MOUNT_ROOTS = ("lesson/assets",)
+TASK4_BACKEND_MOUNT_INPUTS = (
+    "src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json",
+    "src/lessons/fixtures/tvideo-raw-code/assets/admin/deep-barn-farm-background-6s.mp4",
+    "src/lessons/fixtures/tvideo-raw-code/assets/admin/source/objects/barn.png",
+    "src/lessons/fixtures/tvideo-raw-code/assets/admin/source/robot-alive/robots-bright-alive-k3-glowface.png",
+    "src/lessons/fixtures/tvideo-raw-code/assets/admin/source/scenes/scene-07-farm.png",
+    "src/lessons/fixtures/tvideo-raw-code/assets/esp-tft/barn-192.png",
+    "src/lessons/fixtures/tvideo-raw-code/assets/esp-tft/robots-bright-alive-k3-glowface-192.png",
+    "src/lessons/fixtures/tvideo-raw-code/assets/esp-tft/scene-07-farm-320x180.jpg",
+)
+TASK4_FIRMWARE_MOUNT_INPUTS = (
+    "lesson/assets/background/barn-round-field-poster.jpg",
+    "lesson/assets/background/barn-round-field.mp4",
+    "lesson/assets/objects/barn-raw-candidate-0.png",
+    "lesson/assets/objects/barn.png",
+    "lesson/assets/objects/farm-raw-candidate-0.png",
+    "lesson/assets/objects/farm.png",
+    "lesson/assets/objects/hay-raw-candidate-0.png",
+    "lesson/assets/objects/hay.png",
+    "lesson/assets/reference/barn-celebrate.png",
+    "lesson/assets/reference/barn-step-1.png",
+    "lesson/assets/reference/barn-step-2.png",
+    "lesson/assets/reference/barn-step-3.png",
+    "lesson/assets/reference/lesson-w01-barn.png",
+    "lesson/assets/robot/bright-black-sprite-sheet-source.png",
+    "lesson/assets/robot/bright-sprite-atlas.json",
+    "lesson/assets/robot/bright-sprite-atlas.png",
+    "lesson/assets/robot/poses/bright-cards.png",
+    "lesson/assets/robot/poses/bright-celebrate.png",
+    "lesson/assets/robot/poses/bright-idle.png",
+    "lesson/assets/robot/poses/bright-listening.png",
+    "lesson/assets/robot/poses/bright-side.png",
+    "lesson/assets/robot/poses/bright-teach.png",
+    "lesson/assets/robot/poses/bright-thinking.png",
+    "lesson/assets/robot/poses/bright-wave.png",
+    "lesson/assets/robot/rive-source/teebot-face-import-v2.svg",
+    "lesson/assets/robot/rive-source/teebot-face.svg",
+    "lesson/assets/robot/rive-source/teebot-states-reference.svg",
 )
 PLAYWRIGHT_FIXED_CONTRACT = {
     "testDir": "./e2e/lesson-studio",
@@ -357,6 +403,46 @@ def candidate_paths_match(repository: Mapping[str, object], relative_paths: Sequ
                 return False
         return True
     except (KeyError, OSError, RuntimeError, TypeError):
+        return False
+
+
+def assignment_input_sources_ready(candidate: dict) -> bool:
+    try:
+        repositories = candidate["repositories"]
+        selections = (
+            (repositories["backend"], TASK4_BACKEND_MOUNT_ROOTS),
+            (repositories["firmware"], TASK4_FIRMWARE_MOUNT_ROOTS),
+        )
+        for repository, roots in selections:
+            dirty = tuple(item["path"] for item in repository["dirtyExceptions"])
+            if any(
+                dirty_path == root or dirty_path.startswith(f"{root}/")
+                or root.startswith(f"{dirty_path}/")
+                for dirty_path in dirty for root in roots
+            ):
+                return False
+            tracked = tuple(filter(None, _candidate_git(
+                Path(repository["path"]), "ls-tree", "-r", "--name-only", "-z",
+                repository["sha"], "--", *roots,
+            ).split("\0")))
+            if not tracked or not candidate_paths_match(repository, tracked):
+                return False
+            repository_root = Path(repository["path"])
+            current: set[str] = set()
+            for relative in roots:
+                mounted = repository_root / relative
+                if mounted.is_symlink() or not mounted.exists():
+                    return False
+                candidates = (mounted,) if mounted.is_file() else mounted.rglob("*")
+                for path in candidates:
+                    if path.is_symlink():
+                        return False
+                    if path.is_file():
+                        current.add(path.relative_to(repository_root).as_posix())
+            if current != set(tracked):
+                return False
+        return True
+    except (KeyError, RuntimeError, TypeError):
         return False
 
 
@@ -1424,6 +1510,13 @@ def run_gate(
                     report["failedLane"] = lane.name
                     break
                 if _assignment_candidate_environment(candidate, lane) is None:
+                    report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
+                    report["verdict"] = "BLOCKED"
+                    report["failedLane"] = lane.name
+                    break
+                if lane.name in {
+                    "admin-course-mode-assignment-new", "admin-course-mode-assignment-rollback",
+                } and not assignment_input_sources_ready(candidate):
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name

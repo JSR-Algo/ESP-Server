@@ -3,6 +3,10 @@
 const { execFileSync } = require('node:child_process');
 const { existsSync, mkdirSync, realpathSync } = require('node:fs');
 const { resolve } = require('node:path');
+const {
+  inspectAndPinCandidateImages,
+  verifyStartedServiceImages,
+} = require('./task4-image-identity.cjs');
 
 const phase = process.argv[2];
 if (!['new', 'rollback'].includes(phase)) throw new Error('usage: run-task4-assignment-phase.cjs new|rollback');
@@ -71,23 +75,16 @@ const run = (command, args, options = {}) => execFileSync(command, args, {
   cwd: repoRoot, env: environment, stdio: 'inherit', ...options,
 });
 const composeRun = (...args) => run('docker', [...compose, ...args]);
-const verifyImageIdentity = (reference, expectedId, mismatchMessage) => {
-  const actualId = execFileSync('docker', ['image', 'inspect', '--format={{.Id}}', reference], {
+const pinnedImages = inspectAndPinCandidateImages({
+  backendReference: environment.TBOT_LESSON_STUDIO_BACKEND_IMAGE,
+  backendId: environment.TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID,
+  webReference: environment.TBOT_LESSON_STUDIO_WEB_IMAGE,
+  webId: environment.TBOT_LESSON_STUDIO_WEB_IMAGE_ID,
+}, (reference) => execFileSync('docker', ['image', 'inspect', '--format={{.Id}}', reference], {
     cwd: repoRoot, env: environment, encoding: 'utf8',
-  }).trim();
-  if (actualId !== expectedId) throw new Error(mismatchMessage);
-};
-
-verifyImageIdentity(
-  environment.TBOT_LESSON_STUDIO_BACKEND_IMAGE,
-  environment.TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID,
-  'candidate backend image ID mismatch',
-);
-verifyImageIdentity(
-  environment.TBOT_LESSON_STUDIO_WEB_IMAGE,
-  environment.TBOT_LESSON_STUDIO_WEB_IMAGE_ID,
-  'candidate web image ID mismatch',
-);
+  }).trim());
+environment.TBOT_LESSON_STUDIO_BACKEND_IMAGE = pinnedImages.backendImage;
+environment.TBOT_LESSON_STUDIO_WEB_IMAGE = pinnedImages.webImage;
 
 const tlsKey = resolve(tlsRoot, 'key.pem');
 const tlsCert = resolve(tlsRoot, 'cert.pem');
@@ -130,6 +127,20 @@ if (phase === 'new') {
   composeRun('up', '-d', '--no-deps', 'derivative-media');
   composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', 'verify-new');
 }
+
+verifyStartedServiceImages({
+  backend: pinnedImages.backendImage,
+  web: pinnedImages.webImage,
+  'derivative-media': pinnedImages.backendImage,
+}, (service) => {
+  const container = execFileSync('docker', [...compose, 'ps', '-q', service], {
+    cwd: repoRoot, env: environment, encoding: 'utf8',
+  }).trim();
+  if (!container) return '';
+  return execFileSync('docker', ['inspect', '--format={{.Image}}', container], {
+    cwd: repoRoot, env: environment, encoding: 'utf8',
+  }).trim();
+});
 
 run(process.execPath, [
   resolve(repoRoot, 'main/manager-web/node_modules/@playwright/test/cli.js'),

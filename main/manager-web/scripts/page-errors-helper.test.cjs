@@ -68,3 +68,26 @@ test('allows WebKit cancelled only for internal Lesson Studio MP4 range probes',
     'GET', 'net::ERR_ABORTED', false, 'other', 'https://attacker.invalid/tvideo-demo/assets/scenes/farm.mp4',
   )), false);
 });
+
+test('allows browser-aborted canonical admin asset images without hiding other failures', () => {
+  assert.equal(isExpectedNavigationAbort(request(
+    'GET', 'net::ERR_ABORTED', false, 'image',
+    'https://admin.tjbot.vn/tvideo-demo/assets/objects/hay.png',
+  )), true);
+  assert.equal(isExpectedNavigationAbort(request(
+    'GET', 'cancelled', false, 'image',
+    'https://admin.tjbot.vn/tvideo-demo/assets/robot/bright-teach.webp',
+  )), true);
+  assert.equal(isExpectedNavigationAbort(request(
+    'GET', 'net::ERR_ABORTED', false, 'image',
+    'https://attacker.invalid/tvideo-demo/assets/objects/hay.png',
+  )), false);
+  assert.equal(isExpectedNavigationAbort(request(
+    'GET', 'net::ERR_CERT_AUTHORITY_INVALID', false, 'image',
+    'https://admin.tjbot.vn/tvideo-demo/assets/objects/hay.png',
+  )), false);
+  assert.equal(isExpectedNavigationAbort(request(
+    'GET', 'net::ERR_ABORTED', false, 'xhr',
+    'https://admin.tjbot.vn/tvideo-demo/assets/objects/hay.png',
+  )), false);
+});

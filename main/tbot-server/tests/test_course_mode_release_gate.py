@@ -73,6 +73,7 @@ def _valid_playwright_contract() -> dict:
                 "main/manager-web/scripts/prepare-task4-media-templates.cjs",
                 "main/manager-web/scripts/run-task4-assignment-phase.cjs",
                 "main/manager-web/scripts/task4-assignment-fixture.test.cjs",
+                "main/manager-web/scripts/task4-image-identity.cjs",
             ],
         },
         "fixed": {
@@ -160,6 +161,7 @@ def _commit_playwright_fixture(
         "main/manager-web/scripts/prepare-task4-media-templates.cjs": "module.exports = {};\n",
         "main/manager-web/scripts/run-task4-assignment-phase.cjs": "module.exports = {};\n",
         "main/manager-web/scripts/task4-assignment-fixture.test.cjs": "require('node:test')('fixture', () => {});\n",
+        "main/manager-web/scripts/task4-image-identity.cjs": "module.exports = {};\n",
     }
     for relative, source in assignment_files.items():
         path = root / relative
@@ -268,6 +270,15 @@ def candidate_file(tmp_path: Path) -> Path:
             curriculum = root / "src/lessons/course-mode/curriculum-course-mode.ts"
             curriculum.parent.mkdir(parents=True)
             curriculum.write_text("export const curriculum = 26;\n", encoding="utf-8")
+            for relative in gate.TASK4_BACKEND_MOUNT_INPUTS:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(relative.encode("utf-8"))
+        if name == "firmware":
+            for relative in gate.TASK4_FIRMWARE_MOUNT_INPUTS:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(relative.encode("utf-8"))
         if name == "adminEsp":
             python_gate = root / "main/tbot-server/scripts/course_mode_release_gate.py"
             manifest_helper = root / "main/tbot-server/scripts/course_mode_candidate_manifest.py"
@@ -1377,6 +1388,33 @@ def test_assignment_lane_blocks_malformed_candidate_image_identity(
     )
 
     assert gate._assignment_candidate_environment(candidate, lane) is None
+
+
+def test_assignment_mount_inputs_are_bound_to_backend_and_firmware_commits(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+
+    assert gate.assignment_input_sources_ready(candidate) is True
+
+    backend = Path(candidate["repositories"]["backend"]["path"])
+    (backend / gate.TASK4_BACKEND_MOUNT_INPUTS[0]).write_bytes(b"retag-race-input")
+    assert gate.assignment_input_sources_ready(candidate) is False
+
+
+@pytest.mark.parametrize("repository,relative", [
+    ("backend", "src/lessons/fixtures/tvideo-raw-code/assets/admin"),
+    ("backend", "src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json"),
+    ("firmware", "lesson/assets"),
+    ("firmware", "lesson/assets/robot/poses/bright-teach.png"),
+])
+def test_assignment_mount_inputs_reject_overlapping_dirty_exceptions(
+    candidate_file: Path, repository: str, relative: str,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    candidate["repositories"][repository]["dirtyExceptions"] = [{
+        "path": relative, "sha256": "1" * 64,
+    }]
+
+    assert gate.assignment_input_sources_ready(candidate) is False
 
 
 @pytest.mark.parametrize("skipped,expected", [(0, False), (1, True), (7, True)])

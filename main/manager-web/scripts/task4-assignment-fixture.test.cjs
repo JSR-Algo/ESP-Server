@@ -2,11 +2,38 @@ const assert = require('node:assert/strict');
 const { existsSync, readFileSync } = require('node:fs');
 const { resolve } = require('node:path');
 const test = require('node:test');
+const {
+  inspectAndPinCandidateImages,
+  verifyStartedServiceImages,
+} = require('./task4-image-identity.cjs');
 
 const fixturePath = resolve(__dirname, '../../../docs/docker/task4-admin-assignment/bootstrap.cjs');
 const rollbackSpecPath = resolve(__dirname, '../e2e/lesson-studio/assignment-rollback-phase.spec.js');
 const playwrightConfigPath = resolve(__dirname, '../playwright.assignment-rollback.config.js');
 const orchestratorPath = resolve(__dirname, 'run-task4-assignment-phase.cjs');
+const imageIdentityPath = resolve(__dirname, 'task4-image-identity.cjs');
+
+test('Task 4 pins inspected image IDs and rejects retag or started-container drift', () => {
+  const candidate = {
+    backendReference: 'local/backend:candidate', backendId: `sha256:${'1'.repeat(64)}`,
+    webReference: 'local/web:candidate', webId: `sha256:${'2'.repeat(64)}`,
+  };
+  const pinned = inspectAndPinCandidateImages(candidate, (reference) => ({
+    'local/backend:candidate': candidate.backendId,
+    'local/web:candidate': candidate.webId,
+  })[reference]);
+  assert.deepEqual(pinned, { backendImage: candidate.backendId, webImage: candidate.webId });
+  assert.throws(
+    () => inspectAndPinCandidateImages(candidate, () => `sha256:${'3'.repeat(64)}`),
+    /candidate backend image ID mismatch/,
+  );
+  assert.doesNotThrow(() => verifyStartedServiceImages({
+    backend: candidate.backendId, web: candidate.webId, 'derivative-media': candidate.backendId,
+  }, (service) => (service === 'web' ? candidate.webId : candidate.backendId)));
+  assert.throws(() => verifyStartedServiceImages(
+    { backend: candidate.backendId }, () => `sha256:${'4'.repeat(64)}`,
+  ), /started backend container image ID mismatch/);
+});
 
 test('Task 4 assignment fixture uses canonical backend authoring and rollout code', () => {
   assert.equal(existsSync(fixturePath), true, 'assignment bootstrap must exist');
@@ -96,6 +123,7 @@ test('Task 4 assignment browser phase uses WebKit and verifies row-scoped Monito
 test('Task 4 release commands run candidate-bound NEW and ROLLBACK orchestration', () => {
   assert.equal(existsSync(orchestratorPath), true, 'assignment phase orchestrator must exist');
   const source = readFileSync(orchestratorPath, 'utf8');
+  const imageIdentitySource = readFileSync(imageIdentityPath, 'utf8');
   const pkg = JSON.parse(readFileSync(resolve(__dirname, '../package.json'), 'utf8'));
 
   for (const required of [
@@ -113,8 +141,9 @@ test('Task 4 release commands run candidate-bound NEW and ROLLBACK orchestration
   assert.match(source, /const mediaHostname = 'task4-media\.localhost'/);
   assert.match(source, /TBOT_FIRMWARE_WORKTREE lacks required candidate asset/);
   assert.match(source, /docker[\s\S]*image[\s\S]*inspect/);
-  assert.match(source, /candidate backend image ID mismatch/);
-  assert.match(source, /candidate web image ID mismatch/);
+  assert.match(imageIdentitySource, /candidate backend image ID mismatch/);
+  assert.match(imageIdentitySource, /candidate web image ID mismatch/);
+  assert.match(source, /verifyStartedServiceImages/);
   assert.match(source, /lesson\/assets\/robot\/poses\/bright-teach\.png/);
   assert.match(source, /TASK4_ASSIGNMENT_MEDIA_ORIGIN:\s*`https:\/\/\$\{mediaHostname\}:\$\{hostPort\}`/);
   assert.match(source, /subjectAltName=DNS:\$\{mediaHostname\}/);
