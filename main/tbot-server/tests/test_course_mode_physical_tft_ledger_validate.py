@@ -57,3 +57,37 @@ def test_ledger_rejects_unsafe_private_or_contradictory_evidence(tmp_path: Path,
     changed["receipt"]["database"]["terminalState"] = "FAILED"
     reasons = validate_ledger(changed, candidate=candidate, repository_root=tmp_path)["reasons"]
     assert "ledger.verdict" in reasons and "receipt.result" in reasons
+
+
+@pytest.mark.parametrize(
+    "content", [b"Authorization: Bearer do-not-echo", b"child transcript: private", b"RIFF\x00\x00\x00\x00WAVE"]
+)
+def test_ledger_scans_bounded_artifact_bytes_for_private_content(
+    tmp_path: Path,
+    candidate: dict,
+    ledger: dict,
+    content: bytes,
+) -> None:
+    from course_mode_physical_tft_ledger_validate import validate_ledger
+
+    path = tmp_path / "capture.png"
+    path.write_bytes(content)
+    digest = hashlib.sha256(content).hexdigest()
+    ledger["evidence"][0]["sha256"] = digest
+    ledger["receipt"]["evidence"][0]["sha256"] = digest
+    assert "ledger.privacy" in validate_ledger(ledger, candidate=candidate, repository_root=tmp_path)["reasons"]
+
+
+def test_ledger_rejects_symlink_and_oversized_artifact(tmp_path: Path, candidate: dict, ledger: dict) -> None:
+    from course_mode_physical_tft_ledger_validate import MAX_ARTIFACT_BYTES, validate_ledger
+
+    capture = tmp_path / "capture.png"
+    capture.unlink()
+    target = tmp_path / "target.png"
+    target.write_bytes(b"redacted")
+    capture.symlink_to(target)
+    assert "ledger.evidence.input" in validate_ledger(ledger, candidate=candidate, repository_root=tmp_path)["reasons"]
+
+    capture.unlink()
+    capture.write_bytes(b"x" * (MAX_ARTIFACT_BYTES + 1))
+    assert "ledger.evidence.input" in validate_ledger(ledger, candidate=candidate, repository_root=tmp_path)["reasons"]

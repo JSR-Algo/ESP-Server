@@ -9,12 +9,16 @@ import json
 import re
 from pathlib import Path
 
+from course_mode_candidate_manifest import MAX_CANDIDATE_BYTES, read_secure_regular, strict_json_loads
 from course_mode_physical_tft_receipt_verify import validate_receipt
 
 PRIVATE = re.compile(
     r"(?i)(child.?transcript|transcript|raw.?audio|audio\.(wav|mp3)|authorization|bearer|token|secret|password|private.?key)"
 )
+AUDIO_MAGIC = (b"RIFF", b"ID3", b"OggS", b"fLaC")
 FIELDS = {"schemaVersion", "candidateId", "gate", "journeyId", "verdict", "capturedAt", "receipt", "evidence", "notes"}
+MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
+MAX_LEDGER_BYTES = 2 * 1024 * 1024
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -60,12 +64,17 @@ def validate_ledger(document: object, *, candidate: object, repository_root: Pat
                     reasons.append("ledger.privacy")
                 path = repository_root / raw
                 try:
-                    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                    content = read_secure_regular(path, MAX_ARTIFACT_BYTES)
                 except OSError:
-                    reasons.append("ledger.evidence.missing")
+                    reasons.append("ledger.evidence.input")
                     continue
+                digest = hashlib.sha256(content).hexdigest()
                 if item.get("sha256") != digest:
                     reasons.append("ledger.evidence.hash")
+                if PRIVATE.search(content.decode("utf-8", errors="ignore")):
+                    reasons.append("ledger.privacy")
+                if content.startswith(AUDIO_MAGIC):
+                    reasons.append("ledger.privacy")
         if PRIVATE.search(json.dumps(document, sort_keys=True)):
             reasons.append("ledger.privacy")
     return {
@@ -83,11 +92,11 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         result = validate_ledger(
-            json.loads(args.ledger.read_text()),
-            candidate=json.loads(args.candidate.read_text()),
+            strict_json_loads(read_secure_regular(args.ledger, MAX_LEDGER_BYTES)),
+            candidate=strict_json_loads(read_secure_regular(args.candidate, MAX_CANDIDATE_BYTES)),
             repository_root=args.repository_root,
         )
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
         result = {"candidateId": None, "reasons": ["input.invalid"], "valid": False}
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0 if result["valid"] else 1
