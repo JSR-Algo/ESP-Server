@@ -21,9 +21,10 @@ from course_mode_physical_tft_receipt_verify import _physical_identity
 
 GATES = [f"G{i}" for i in range(11)]
 PRIVATE = re.compile(
-    r"(?i)(child.?transcript|transcript|utterance|raw.?audio|audio.?data|authorization|bearer|token|secret|password|private.?key)"
+    r"(?i)(child.?transcript|transcript|utterance|raw.?speech|raw.?audio|audio.?data|authorization|bearer|token|secret|password|private.?key)"
 )
 MAX_FILE = 1024 * 1024
+AUDIO_MAGIC = (b"RIFF", b"ID3", b"OggS", b"fLaC")
 EVIDENCE_FIELDS = {
     "schemaVersion",
     "candidateId",
@@ -33,9 +34,21 @@ EVIDENCE_FIELDS = {
     "capturedAt",
     "historical",
     "checksums",
+    "artifacts",
+}
+REPORT_FIELDS = {
+    "schemaVersion",
+    "candidateId",
+    "gate",
+    "journeyId",
+    "capturedAt",
     "anchors",
+    "commands",
+    "timeline",
+    "artifacts",
     "payload",
 }
+COMMANDS = {gate: f"course-mode-{gate.lower()}-verify" for gate in GATES}
 ANCHORS = {
     "G0": {"repositories", "course"},
     "G1": {"repositories", "images", "firmware", "course"},
@@ -55,8 +68,10 @@ def _expected_anchors(candidate: dict) -> dict[str, object]:
     physical = _physical_identity(candidate)
     if not isinstance(physical, dict):
         physical = {}
+    repositories = candidate.get("repositories")
+    repositories = repositories if isinstance(repositories, dict) else {}
     return {
-        "repositories": {name: value.get("sha") for name, value in candidate.get("repositories", {}).items()},
+        "repositories": {name: value.get("sha") for name, value in repositories.items() if isinstance(value, dict)},
         "images": {"backend": physical.get("backendImage")},
         "firmware": physical.get("firmware"),
         "course": candidate.get("course"),
@@ -75,12 +90,13 @@ def _gate_payload_valid(gate: str, payload: object) -> bool:
         return payload == {"validator": "course-mode-candidate.v1", "status": "pass", "reasons": []}
     if gate == "G1":
         lanes = payload.get("lanes")
+        expected_lanes = ["backend-full", "admin-full", "esp-full", "firmware-full"]
         return (
             set(payload) == {"lanes", "failedLane"}
             and payload["failedLane"] is None
             and isinstance(lanes, list)
-            and bool(lanes)
-            and all(isinstance(row, dict) and row.get("exitCode") == 0 for row in lanes)
+            and [row.get("name") for row in lanes if isinstance(row, dict)] == expected_lanes
+            and all(set(row) == {"name", "exitCode"} and row.get("exitCode") == 0 for row in lanes)
         )
     if gate == "G2":
         return payload == {"lessonCount": 26, "activityCount": 256, "migration": "PASS", "materialization": "PASS"}
@@ -116,11 +132,12 @@ def audit_evidence(
     now = now or datetime.now(timezone.utc)
     if isinstance(candidate, dict):
         reasons.update(f"candidate.{reason}" for reason in validate_candidate(candidate, now=now))
-    if not isinstance(candidate, dict) or Path(candidate.get("evidenceRoot", "")).resolve() != evidence_root.resolve():
+    evidence_value = candidate.get("evidenceRoot") if isinstance(candidate, dict) else None
+    if not isinstance(evidence_value, str) or Path(evidence_value).resolve() != evidence_root.resolve():
         reasons.add("evidence.root")
     excluded = {path.resolve() for path in (exclude or set())}
     try:
-        paths = sorted(path for path in evidence_root.rglob("*.json") if path.resolve() not in excluded)
+        paths = sorted(path for path in evidence_root.rglob("*.evidence.json") if path.resolve() not in excluded)
     except OSError:
         paths = []
         reasons.add("evidence.root")
@@ -142,7 +159,7 @@ def audit_evidence(
         if not isinstance(document, dict):
             reasons.add("evidence.schema")
             continue
-        if not EVIDENCE_FIELDS.issubset(document) or document.get("schemaVersion") != 1:
+        if set(document) != EVIDENCE_FIELDS or document.get("schemaVersion") != 1:
             reasons.add("evidence.schema")
         documents.append(document)
         journey = document.get("journeyId")
@@ -168,7 +185,7 @@ def audit_evidence(
         checksums = document.get("checksums")
         if (
             not isinstance(checksums, dict)
-            or not checksums
+            or set(checksums) != {"report"}
             or any(
                 not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
                 for value in checksums.values()
@@ -177,17 +194,103 @@ def audit_evidence(
             reasons.add("evidence.checksums")
         if PRIVATE.search(json.dumps(document, sort_keys=True)):
             reasons.add("evidence.privacy")
-        anchors = document.get("anchors")
-        expected_anchors = _expected_anchors(candidate) if isinstance(candidate, dict) else {}
-        if not isinstance(anchors, dict):
-            reasons.add(f"evidence.anchor.{gate}")
+        artifacts = document.get("artifacts")
+        report = None
+        if not isinstance(artifacts, list) or len(artifacts) != 1 or not isinstance(artifacts[0], dict):
+            reasons.add(f"evidence.artifact.cardinality.{gate}")
         else:
-            for name in ANCHORS[gate]:
-                if anchors.get(name) != expected_anchors.get(name):
-                    reasons.add(f"evidence.anchor.{gate}.{name}")
-        if not _gate_payload_valid(gate, document.get("payload")):
+            artifact = artifacts[0]
+            relative = artifact.get("path")
+            expected_sha = artifact.get("sha256")
+            if (
+                set(artifact) != {"type", "path", "sha256"}
+                or artifact.get("type") != f"{gate}.report"
+                or not isinstance(relative, str)
+                or Path(relative).is_absolute()
+                or ".." in Path(relative).parts
+            ):
+                reasons.add(f"evidence.artifact.schema.{gate}")
+            else:
+                report_path = evidence_root / relative
+                try:
+                    report_bytes = read_secure_regular(report_path, MAX_FILE)
+                    report = strict_json_loads(report_bytes)
+                except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+                    reasons.add(f"evidence.artifact.input.{gate}")
+                else:
+                    actual_sha = hashlib.sha256(report_bytes).hexdigest()
+                    if expected_sha != actual_sha or checksums.get("report") != actual_sha:
+                        reasons.add(f"evidence.artifact.hash.{gate}")
+                    report_sidecar = report_path.with_suffix(report_path.suffix + ".sha256")
+                    try:
+                        report_sidecar_sha = read_secure_regular(report_sidecar, 128).decode("ascii").strip()
+                    except (OSError, UnicodeError):
+                        reasons.add(f"evidence.artifact.sidecar.{gate}")
+                    else:
+                        if report_sidecar_sha != actual_sha:
+                            reasons.add(f"evidence.artifact.hash.{gate}")
+                    decoded = report_bytes.decode("utf-8", errors="ignore")
+                    if PRIVATE.search(decoded) or PRIVATE.search(decoded.replace("\x00", "")):
+                        reasons.add("evidence.privacy")
+        payload = None
+        if not isinstance(report, dict) or set(report) != REPORT_FIELDS:
+            reasons.add(f"evidence.report.schema.{gate}")
+        else:
+            if (
+                report.get("schemaVersion") != 1
+                or report.get("candidateId") != candidate_id
+                or report.get("gate") != gate
+                or report.get("journeyId") != journey
+                or report.get("capturedAt") != document.get("capturedAt")
+            ):
+                reasons.add(f"evidence.report.identity.{gate}")
+            if report.get("commands") != [COMMANDS[gate]]:
+                reasons.add(f"evidence.report.command.{gate}")
+            timeline = report.get("timeline")
+            if (
+                not isinstance(timeline, list)
+                or len(timeline) != 1
+                or timeline[0] != {"timestamp": document.get("capturedAt"), "event": "complete"}
+            ):
+                reasons.add(f"evidence.report.timeline.{gate}")
+            anchors = report.get("anchors")
+            expected_anchors = _expected_anchors(candidate) if isinstance(candidate, dict) else {}
+            if not isinstance(anchors, dict):
+                reasons.add(f"evidence.anchor.{gate}")
+            else:
+                for name in ANCHORS[gate]:
+                    if anchors.get(name) != expected_anchors.get(name):
+                        reasons.add(f"evidence.anchor.{gate}.{name}")
+            support = report.get("artifacts")
+            if not isinstance(support, list) or not support:
+                reasons.add(f"evidence.report.artifacts.{gate}")
+            else:
+                for item in support:
+                    relative = item.get("path") if isinstance(item, dict) else None
+                    if (
+                        not isinstance(item, dict)
+                        or set(item) != {"path", "sha256"}
+                        or not isinstance(relative, str)
+                        or Path(relative).is_absolute()
+                        or ".." in Path(relative).parts
+                    ):
+                        reasons.add(f"evidence.report.artifacts.{gate}")
+                        continue
+                    try:
+                        support_bytes = read_secure_regular(evidence_root / relative, MAX_FILE)
+                    except OSError:
+                        reasons.add(f"evidence.report.artifacts.{gate}")
+                        continue
+                    if hashlib.sha256(support_bytes).hexdigest() != item.get("sha256"):
+                        reasons.add(f"evidence.report.artifacts.{gate}")
+                    support_text = support_bytes.decode("utf-8", errors="ignore")
+                    if PRIVATE.search(support_text) or PRIVATE.search(support_text.replace("\x00", "")):
+                        reasons.add("evidence.privacy")
+                    if support_bytes.startswith(AUDIO_MAGIC):
+                        reasons.add("evidence.privacy")
+            payload = report.get("payload")
+        if not _gate_payload_valid(gate, payload):
             reasons.add(f"evidence.gate.schema.{gate}")
-        payload = document.get("payload")
         if isinstance(payload, dict) and (
             payload.get("completionCount", 1) != 1 or payload.get("duplicateCompletions", 0) != 0
         ):

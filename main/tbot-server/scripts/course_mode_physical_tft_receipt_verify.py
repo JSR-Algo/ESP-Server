@@ -6,10 +6,12 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from course_mode_candidate_manifest import (
     MAX_CANDIDATE_BYTES,
+    _parse_rfc3339_utc,
     _secure_hash_relative,
     read_secure_regular,
     strict_json_loads,
@@ -48,7 +50,8 @@ def _nonempty(value: object) -> bool:
 
 
 def _protected(candidate: dict) -> object:
-    repo = candidate.get("repositories", {}).get("adminEsp", {})
+    repositories = candidate.get("repositories")
+    repo = repositories.get("adminEsp", {}) if isinstance(repositories, dict) else {}
     path = "main/tbot-server/tests/test_lesson_voice_output_discipline.py"
     root_value = repo.get("path")
     digest, error = _secure_hash_relative(Path(root_value), path) if isinstance(root_value, str) else (None, "path")
@@ -71,8 +74,10 @@ def _protected(candidate: dict) -> object:
 
 
 def _physical_identity(candidate: dict) -> object:
-    binding = candidate.get("tools", {}).get("physicalEvidence")
-    repo = candidate.get("repositories", {}).get("adminEsp", {})
+    tools = candidate.get("tools")
+    repositories = candidate.get("repositories")
+    binding = tools.get("physicalEvidence") if isinstance(tools, dict) else None
+    repo = repositories.get("adminEsp", {}) if isinstance(repositories, dict) else {}
     if not isinstance(binding, dict) or set(binding) != {"path", "repositorySha", "sha256", "identity"}:
         return None
     if binding.get("repositorySha") != repo.get("sha"):
@@ -95,10 +100,13 @@ def _physical_identity(candidate: dict) -> object:
     return parsed if parsed == binding.get("identity") else None
 
 
-def validate_receipt(document: object, candidate: object) -> list[str]:
+def validate_receipt(document: object, candidate: object, *, now: datetime | None = None) -> list[str]:
     if not isinstance(document, dict) or not isinstance(candidate, dict):
         return ["receipt.schema"]
-    candidate_reasons = validate_candidate(candidate)
+    try:
+        candidate_reasons = validate_candidate(candidate, now=now)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        candidate_reasons = ["type"]
     reasons = [f"candidate.{reason}" for reason in candidate_reasons]
     if set(document) != FIELDS or document.get("schemaVersion") != 1:
         reasons.append("receipt.schema")
@@ -106,6 +114,13 @@ def validate_receipt(document: object, candidate: object) -> list[str]:
         reasons.append("receipt.candidate")
     if document.get("result") != "PASS":
         reasons.append("receipt.result")
+    captured = _parse_rfc3339_utc(document.get("capturedAt"))
+    current = now or datetime.now(timezone.utc)
+    created = _parse_rfc3339_utc(candidate.get("createdAt"))
+    if captured is None:
+        reasons.append("receipt.timestamp.utc")
+    elif (created and captured < created) or captured > current or (current - captured).total_seconds() > 7 * 86400:
+        reasons.append("receipt.timestamp.stale")
     if document.get("course") != candidate.get("course"):
         reasons.append("receipt.course")
     lesson = document.get("lesson")
@@ -123,7 +138,8 @@ def validate_receipt(document: object, candidate: object) -> list[str]:
     ):
         reasons.append("receipt.lesson")
     renderer = document.get("renderer")
-    curriculum = candidate.get("curriculum", {})
+    curriculum_value = candidate.get("curriculum")
+    curriculum = curriculum_value if isinstance(curriculum_value, dict) else {}
     expected_evidence = _physical_identity(candidate)
     if not isinstance(expected_evidence, dict):
         reasons.append("candidate.physicalEvidence")
@@ -153,11 +169,13 @@ def validate_receipt(document: object, candidate: object) -> list[str]:
         or replacement.get("sourceLessonId") == replacement.get("replacementLessonId")
         or not _sha(replacement.get("materializationReceiptSha256"))
         or not _sha(replacement.get("cutoverReceiptSha256"))
-        or replacement != candidate.get("database", {}).get("replacement")
+        or replacement
+        != (candidate.get("database", {}).get("replacement") if isinstance(candidate.get("database"), dict) else None)
         or replacement != expected_evidence.get("replacement")
     ):
         reasons.append("receipt.replacement")
-    repositories = candidate.get("repositories", {})
+    repositories = candidate.get("repositories")
+    repositories = repositories if isinstance(repositories, dict) else {}
     expected_repositories = {name: value.get("sha") for name, value in repositories.items() if isinstance(value, dict)}
     if (
         document.get("repositories") != expected_repositories
@@ -165,7 +183,8 @@ def validate_receipt(document: object, candidate: object) -> list[str]:
         or not all(SHA40.fullmatch(value or "") for value in expected_repositories.values())
     ):
         reasons.append("receipt.repositories")
-    if document.get("backendImage") != candidate.get("images", {}).get("backend") or document.get(
+    images = candidate.get("images")
+    if document.get("backendImage") != (images.get("backend") if isinstance(images, dict) else None) or document.get(
         "backendImage"
     ) != expected_evidence.get("backendImage"):
         reasons.append("receipt.image")
@@ -191,7 +210,8 @@ def validate_receipt(document: object, candidate: object) -> list[str]:
         not isinstance(journey, dict)
         or set(journey) != {"assignmentId", "lessonSessionId", "deliveryId"}
         or not all(_nonempty(journey.get(field)) for field in journey)
-        or journey != candidate.get("database", {}).get("journey")
+        or journey
+        != (candidate.get("database", {}).get("journey") if isinstance(candidate.get("database"), dict) else None)
         or journey != expected_evidence.get("journey")
     ):
         reasons.append("receipt.journey")
@@ -203,11 +223,17 @@ def validate_receipt(document: object, candidate: object) -> list[str]:
         or database.get("completionCount") != 1
         or type(database.get("progressCount")) is not int
         or database["progressCount"] <= 0
-        or database != candidate.get("database", {}).get("terminalReadback")
+        or database
+        != (
+            candidate.get("database", {}).get("terminalReadback")
+            if isinstance(candidate.get("database"), dict)
+            else None
+        )
         or database != expected_evidence.get("database")
     ):
         reasons.append("receipt.database")
     evidence = document.get("evidence")
+    expected_artifacts = expected_evidence.get("evidenceArtifacts")
     if (
         not isinstance(evidence, list)
         or not evidence
@@ -218,6 +244,8 @@ def validate_receipt(document: object, candidate: object) -> list[str]:
             or not _sha(item.get("sha256"))
             for item in evidence
         )
+        or not isinstance(expected_artifacts, dict)
+        or {item.get("path"): item.get("sha256") for item in evidence if isinstance(item, dict)} != expected_artifacts
     ):
         reasons.append("receipt.evidence")
     return sorted(set(reasons))

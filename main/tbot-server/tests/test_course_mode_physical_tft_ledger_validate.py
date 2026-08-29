@@ -22,7 +22,7 @@ def ledger(tmp_path: Path, candidate: dict, receipt: dict) -> dict:
         "gate": "G8",
         "journeyId": "physical-ac20-1",
         "verdict": "PASS",
-        "capturedAt": "2026-08-30T00:00:00Z",
+        "capturedAt": "2026-08-29T12:00:00Z",
         "receipt": receipt,
         "evidence": receipt["evidence"],
         "notes": ["adult-attended", "redacted"],
@@ -91,3 +91,35 @@ def test_ledger_rejects_symlink_and_oversized_artifact(tmp_path: Path, candidate
     capture.unlink()
     capture.write_bytes(b"x" * (MAX_ARTIFACT_BYTES + 1))
     assert "ledger.evidence.input" in validate_ledger(ledger, candidate=candidate, repository_root=tmp_path)["reasons"]
+
+
+@pytest.mark.parametrize(
+    "content", [b"utterance: private", b"raw speech bytes", b"u\x00t\x00t\x00e\x00r\x00a\x00n\x00c\x00e"]
+)
+def test_ledger_rejects_utterance_and_raw_speech_content(
+    tmp_path: Path,
+    candidate: dict,
+    ledger: dict,
+    content: bytes,
+) -> None:
+    from course_mode_physical_tft_ledger_validate import validate_ledger
+
+    path = tmp_path / "capture.png"
+    path.write_bytes(content)
+    digest = hashlib.sha256(content).hexdigest()
+    ledger["evidence"][0]["sha256"] = digest
+    ledger["receipt"]["evidence"][0]["sha256"] = digest
+    candidate["tools"]["physicalEvidence"]["identity"]["evidenceArtifacts"]["capture.png"] = digest
+    assert "ledger.privacy" in validate_ledger(ledger, candidate=candidate, repository_root=tmp_path)["reasons"]
+
+
+def test_ledger_requires_fresh_strict_utc_timestamp(tmp_path: Path, candidate: dict, ledger: dict) -> None:
+    from datetime import datetime, timezone
+
+    from course_mode_physical_tft_ledger_validate import validate_ledger
+
+    ledger["capturedAt"] = "2026-08-30T00:00:00"
+    reasons = validate_ledger(
+        ledger, candidate=candidate, repository_root=tmp_path, now=datetime(2026, 8, 30, 12, tzinfo=timezone.utc)
+    )["reasons"]
+    assert "ledger.timestamp.utc" in reasons

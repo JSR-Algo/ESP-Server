@@ -7,13 +7,19 @@ import argparse
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
-from course_mode_candidate_manifest import MAX_CANDIDATE_BYTES, read_secure_regular, strict_json_loads
+from course_mode_candidate_manifest import (
+    MAX_CANDIDATE_BYTES,
+    _parse_rfc3339_utc,
+    read_secure_regular,
+    strict_json_loads,
+)
 from course_mode_physical_tft_receipt_verify import validate_receipt
 
 PRIVATE = re.compile(
-    r"(?i)(child.?transcript|transcript|raw.?audio|audio\.(wav|mp3)|authorization|bearer|token|secret|password|private.?key)"
+    r"(?i)(child.?transcript|transcript|utterance|raw.?speech|raw.?audio|audio\.(wav|mp3)|authorization|bearer|token|secret|password|private.?key)"
 )
 AUDIO_MAGIC = (b"RIFF", b"ID3", b"OggS", b"fLaC")
 FIELDS = {"schemaVersion", "candidateId", "gate", "journeyId", "verdict", "capturedAt", "receipt", "evidence", "notes"}
@@ -29,7 +35,13 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
-def validate_ledger(document: object, *, candidate: object, repository_root: Path) -> dict[str, object]:
+def validate_ledger(
+    document: object,
+    *,
+    candidate: object,
+    repository_root: Path,
+    now: datetime | None = None,
+) -> dict[str, object]:
     reasons = []
     if not isinstance(document, dict) or not isinstance(candidate, dict):
         reasons.append("ledger.schema")
@@ -38,10 +50,17 @@ def validate_ledger(document: object, *, candidate: object, repository_root: Pat
             reasons.append("ledger.schema")
         if document.get("candidateId") != candidate.get("candidateId"):
             reasons.append("ledger.candidate")
+        captured = _parse_rfc3339_utc(document.get("capturedAt"))
+        current = now or datetime.now(timezone.utc)
+        created = _parse_rfc3339_utc(candidate.get("createdAt"))
+        if captured is None:
+            reasons.append("ledger.timestamp.utc")
+        elif (created and captured < created) or captured > current or (current - captured).total_seconds() > 7 * 86400:
+            reasons.append("ledger.timestamp.stale")
         if document.get("gate") != "G8" or not isinstance(document.get("journeyId"), str):
             reasons.append("ledger.identity")
         receipt = document.get("receipt")
-        receipt_reasons = validate_receipt(receipt, candidate)
+        receipt_reasons = validate_receipt(receipt, candidate, now=now)
         reasons.extend(receipt_reasons)
         if document.get("verdict") != "PASS" or isinstance(receipt, dict) and receipt.get("result") != "PASS":
             reasons.append("ledger.verdict")
@@ -71,7 +90,8 @@ def validate_ledger(document: object, *, candidate: object, repository_root: Pat
                 digest = hashlib.sha256(content).hexdigest()
                 if item.get("sha256") != digest:
                     reasons.append("ledger.evidence.hash")
-                if PRIVATE.search(content.decode("utf-8", errors="ignore")):
+                decoded = content.decode("utf-8", errors="ignore")
+                if PRIVATE.search(decoded) or PRIVATE.search(decoded.replace("\x00", "")):
                     reasons.append("ledger.privacy")
                 if content.startswith(AUDIO_MAGIC):
                     reasons.append("ledger.privacy")

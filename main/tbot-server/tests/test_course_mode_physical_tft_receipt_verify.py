@@ -78,6 +78,7 @@ def candidate(tmp_path: Path) -> dict:
     }
     journey = {"assignmentId": "assignment-1", "lessonSessionId": "session-1", "deliveryId": "delivery-1"}
     database = {"terminalState": "COMPLETED", "completionCount": 1, "progressCount": 9}
+    evidence_artifacts = {"capture.png": hashlib.sha256(b"redacted visual evidence").hexdigest()}
     backend_image = {"image": "local/backend:candidate", "imageId": "sha256:" + "4" * 64}
     firmware_identity = {
         "gitSha": repositories["firmware"]["sha"],
@@ -93,6 +94,7 @@ def candidate(tmp_path: Path) -> dict:
         "firmware": firmware_identity,
         "journey": journey,
         "database": database,
+        "evidenceArtifacts": evidence_artifacts,
     }
     identity_path = roots["adminEsp"] / "task-artifacts/candidate/expected-physical-identity.json"
     identity_path.parent.mkdir(parents=True)
@@ -151,7 +153,7 @@ def receipt(candidate: dict) -> dict:
         "schemaVersion": 1,
         "candidateId": candidate["candidateId"],
         "result": "PASS",
-        "capturedAt": "2026-08-30T00:00:00Z",
+        "capturedAt": "2026-08-29T12:00:00Z",
         "course": deepcopy(candidate["course"]),
         "lesson": deepcopy(candidate["tools"]["physicalEvidence"]["identity"]["lesson"]),
         "replacement": deepcopy(candidate["tools"]["physicalEvidence"]["identity"]["replacement"]),
@@ -163,7 +165,10 @@ def receipt(candidate: dict) -> dict:
         "device": deepcopy(candidate["tools"]["physicalEvidence"]["identity"]["device"]),
         "journey": deepcopy(candidate["database"]["journey"]),
         "database": deepcopy(candidate["database"]["terminalReadback"]),
-        "evidence": [{"path": "captures/final.png", "sha256": "d" * 64}],
+        "evidence": [
+            {"path": path, "sha256": sha256}
+            for path, sha256 in candidate["tools"]["physicalEvidence"]["identity"]["evidenceArtifacts"].items()
+        ],
     }
 
 
@@ -253,6 +258,31 @@ def test_forging_candidate_dict_and_receipt_cannot_bypass_signed_physical_identi
     changed = deepcopy(receipt)
     changed["database"] = deepcopy(forged["database"]["terminalReadback"])
     assert "receipt.database" in validate_receipt(changed, forged)
+
+
+def test_receipt_evidence_hashes_must_match_signed_expected_artifact_map(receipt: dict, candidate: dict) -> None:
+    from course_mode_physical_tft_receipt_verify import validate_receipt
+
+    receipt["evidence"][0]["sha256"] = "f" * 64
+    assert "receipt.evidence" in validate_receipt(receipt, candidate)
+
+
+@pytest.mark.parametrize("captured", ["2026-08-30T00:00:00", "2026-08-30T07:00:00+07:00", "2026-08-20T00:00:00Z"])
+def test_receipt_requires_fresh_strict_utc_timestamp(receipt: dict, candidate: dict, captured: str) -> None:
+    from datetime import datetime, timezone
+
+    from course_mode_physical_tft_receipt_verify import validate_receipt
+
+    receipt["capturedAt"] = captured
+    reasons = validate_receipt(receipt, candidate, now=datetime(2026, 8, 30, 12, tzinfo=timezone.utc))
+    assert any(reason.startswith("receipt.timestamp") for reason in reasons)
+
+
+def test_malformed_candidate_types_fail_without_traceback(receipt: dict) -> None:
+    from course_mode_physical_tft_receipt_verify import validate_receipt
+
+    reasons = validate_receipt(receipt, {"tools": [], "repositories": [], "database": []})
+    assert reasons == sorted(reasons) and reasons
 
 
 def test_cli_is_deterministic_bounded_and_redacted(tmp_path: Path, receipt: dict, candidate: dict) -> None:
