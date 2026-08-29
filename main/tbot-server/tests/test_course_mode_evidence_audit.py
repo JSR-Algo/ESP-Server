@@ -82,7 +82,12 @@ def _write(
         "commands": [f"course-mode-{gate.lower()}-verify"],
         "timeline": [{"timestamp": captured, "event": "complete"}],
         "artifacts": [
-            {"path": str(support.relative_to(root)), "sha256": hashlib.sha256(support.read_bytes()).hexdigest()}
+            {
+                "id": f"{gate}.support.1",
+                "type": f"{gate}.log",
+                "path": str(support.relative_to(root)),
+                "sha256": hashlib.sha256(support.read_bytes()).hexdigest(),
+            }
         ],
         "payload": _payload(gate),
     }
@@ -292,6 +297,67 @@ def test_auditor_detects_headerless_mp3_sync_in_support_artifact(tmp_path: Path,
     report["artifacts"][0]["sha256"] = hashlib.sha256(support.read_bytes()).hexdigest()
     _rewrite_report(root, envelope, report_path, report)
     assert "evidence.privacy" in audit_evidence(candidate, root, now=NOW)["reasons"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00M4A isom",
+        b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00isommp42"
+        + b"\x00\x00\x00\x14hdlr\x00\x00\x00\x00\x00\x00\x00\x00soun",
+        b"ADIF" + b"\x00" * 16,
+        b"\x56\xe0" + b"\x00" * 16,
+    ],
+)
+def test_auditor_detects_common_aac_containers(tmp_path: Path, candidate: dict, content: bytes) -> None:
+    from course_mode_evidence_audit import audit_evidence
+
+    root = Path(candidate["evidenceRoot"])
+    _complete(root, candidate)
+    envelope = next(root.glob("G5-*.evidence.json"))
+    report_path, report = _report(root, envelope)
+    support = root / report["artifacts"][0]["path"]
+    support.write_bytes(content)
+    report["artifacts"][0]["sha256"] = hashlib.sha256(content).hexdigest()
+    _rewrite_report(root, envelope, report_path, report)
+    assert "evidence.privacy" in audit_evidence(candidate, root, now=NOW)["reasons"]
+
+
+def test_auditor_requires_exact_unique_support_artifacts(tmp_path: Path, candidate: dict) -> None:
+    from course_mode_evidence_audit import audit_evidence
+
+    root = Path(candidate["evidenceRoot"])
+    _complete(root, candidate)
+    envelope = next(root.glob("G5-*.evidence.json"))
+    report_path, report = _report(root, envelope)
+    report["artifacts"].append(dict(report["artifacts"][0]))
+    _rewrite_report(root, envelope, report_path, report)
+    assert "evidence.report.artifacts.G5" in audit_evidence(candidate, root, now=NOW)["reasons"]
+
+
+def test_auditor_rejects_unhashable_support_identity_without_traceback(tmp_path: Path, candidate: dict) -> None:
+    from course_mode_evidence_audit import audit_evidence
+
+    root = Path(candidate["evidenceRoot"])
+    _complete(root, candidate)
+    envelope = next(root.glob("G5-*.evidence.json"))
+    report_path, report = _report(root, envelope)
+    report["artifacts"][0]["id"] = []
+    _rewrite_report(root, envelope, report_path, report)
+    assert "evidence.report.artifacts.G5" in audit_evidence(candidate, root, now=NOW)["reasons"]
+
+
+def test_auditor_rejects_unhashable_journey_without_traceback(tmp_path: Path, candidate: dict) -> None:
+    from course_mode_evidence_audit import audit_evidence
+
+    root = Path(candidate["evidenceRoot"])
+    _complete(root, candidate)
+    envelope = next(root.glob("G5-*.evidence.json"))
+    document = json.loads(envelope.read_text())
+    document["journeyId"] = []
+    _rewrite(envelope, document)
+    result = audit_evidence(candidate, root, now=NOW)
+    assert "evidence.journey" in result["reasons"]
 
 
 def test_auditor_rejects_malformed_nested_anchors_without_traceback(tmp_path: Path, candidate: dict) -> None:

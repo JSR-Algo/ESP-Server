@@ -130,7 +130,33 @@ def _physical_identity(candidate: dict) -> object:
     )
     if not valid or fingerprint != binding.get("signerFingerprint"):
         return "signature-invalid"
-    return parsed if parsed == binding.get("identity") else None
+    if parsed != binding.get("identity"):
+        return None
+    curriculum = candidate.get("curriculum")
+    database = candidate.get("database")
+    expected_binding = {
+        "candidateId": candidate.get("candidateId"),
+        "createdAt": candidate.get("createdAt"),
+        "expiresAt": candidate.get("expiresAt"),
+        "course": candidate.get("course"),
+        "curriculum": {
+            "sourceChecksum": curriculum.get("sourceChecksum"),
+            "rendererId": curriculum.get("rendererId"),
+            "contractIdentity": curriculum.get("contractIdentity"),
+        }
+        if isinstance(curriculum, dict)
+        else None,
+        "repositories": {name: value.get("sha") for name, value in repositories.items() if isinstance(value, dict)}
+        if isinstance(repositories, dict)
+        else None,
+        "images": candidate.get("images"),
+        "firmware": candidate.get("firmware"),
+        "database": database,
+        "protectedSource": _protected(candidate),
+    }
+    if parsed.get("candidateBinding") != expected_binding or not isinstance(database, dict):
+        return "signature-invalid"
+    return parsed
 
 
 def validate_receipt(document: object, candidate: object, *, now: datetime | None = None) -> list[str]:

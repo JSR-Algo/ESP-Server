@@ -28,6 +28,31 @@ def _repository(root: Path) -> dict:
     }
 
 
+def _resign_physical_identity(candidate: dict, monkeypatch) -> None:
+    import course_mode_physical_tft_preflight as preflight
+
+    binding = candidate["tools"]["physicalEvidence"]
+    repo = candidate["repositories"]["adminEsp"]
+    identity_path = Path(repo["path"]) / binding["path"]
+    identity_bytes = (json.dumps(binding["identity"], sort_keys=True, separators=(",", ":")) + "\n").encode()
+    identity_path.write_bytes(identity_bytes)
+    private_key = Ed25519PrivateKey.generate()
+    public_raw = private_key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    fingerprint = hashlib.sha256(public_raw).hexdigest()
+    signature_path = Path(repo["path"]) / binding["signaturePath"]
+    signature_path.write_bytes(private_key.sign(preflight._canonical_bytes(binding["identity"])))
+    binding["sha256"] = hashlib.sha256(identity_bytes).hexdigest()
+    binding["signatureSha256"] = hashlib.sha256(signature_path.read_bytes()).hexdigest()
+    binding["signerFingerprint"] = fingerprint
+    for item in repo["dirtyExceptions"]:
+        if item["path"] == binding["path"]:
+            item["sha256"] = binding["sha256"]
+        elif item["path"] == binding["signaturePath"]:
+            item["sha256"] = binding["signatureSha256"]
+    monkeypatch.setattr(preflight, "PINNED_APPROVAL_PUBLIC_KEY_RAW", public_raw)
+    monkeypatch.setattr(preflight, "PINNED_APPROVAL_KEY_FINGERPRINT", fingerprint)
+
+
 @pytest.fixture
 def candidate(tmp_path: Path, monkeypatch) -> dict:
     import course_mode_physical_tft_preflight as preflight
@@ -90,15 +115,40 @@ def candidate(tmp_path: Path, monkeypatch) -> dict:
         "applicationSize": 1234,
     }
     physical_identity = {
-        "lesson": lesson,
-        "replacement": replacement,
-        "renderer": renderer,
-        "device": device,
-        "backendImage": backend_image,
-        "firmware": firmware_identity,
-        "journey": journey,
-        "database": database,
-        "evidenceArtifacts": evidence_artifacts,
+        "candidateBinding": {
+            "candidateId": "course-mode-2026-08-29.1",
+            "createdAt": "2026-08-29T00:00:00Z",
+            "expiresAt": "2026-09-05T00:00:00Z",
+            "course": {"courseId": "course-1", "courseKey": "english-6month-4-6"},
+            "curriculum": {
+                "sourceChecksum": hashlib.sha256(curriculum_source.read_bytes()).hexdigest(),
+                "rendererId": "teebot-lesson-renderer.v5",
+                "contractIdentity": "courseCompanion.v2.contract.v1",
+            },
+            "repositories": {name: value["sha"] for name, value in repositories.items()},
+            "images": {"backend": deepcopy(backend_image)},
+            "firmware": deepcopy(firmware_identity),
+            "database": {
+                "replacement": deepcopy(replacement),
+                "journey": deepcopy(journey),
+                "terminalReadback": deepcopy(database),
+            },
+            "protectedSource": {
+                "path": str(voice.relative_to(roots["adminEsp"])),
+                "repositorySha": repositories["adminEsp"]["sha"],
+                "binding": "dirtyException",
+                "sha256": repositories["adminEsp"]["dirtyExceptions"][0]["sha256"],
+            },
+        },
+        "lesson": deepcopy(lesson),
+        "replacement": deepcopy(replacement),
+        "renderer": deepcopy(renderer),
+        "device": deepcopy(device),
+        "backendImage": deepcopy(backend_image),
+        "firmware": deepcopy(firmware_identity),
+        "journey": deepcopy(journey),
+        "database": deepcopy(database),
+        "evidenceArtifacts": deepcopy(evidence_artifacts),
     }
     identity_path = roots["adminEsp"] / "task-artifacts/candidate/expected-physical-identity.json"
     identity_path.parent.mkdir(parents=True)
@@ -130,9 +180,13 @@ def candidate(tmp_path: Path, monkeypatch) -> dict:
         "expiresAt": "2026-09-05T00:00:00Z",
         "course": {"courseId": "course-1", "courseKey": "english-6month-4-6"},
         "repositories": repositories,
-        "images": {"backend": backend_image},
-        "firmware": firmware_identity,
-        "database": {"replacement": replacement, "journey": journey, "terminalReadback": database},
+        "images": {"backend": deepcopy(backend_image)},
+        "firmware": deepcopy(firmware_identity),
+        "database": {
+            "replacement": deepcopy(replacement),
+            "journey": deepcopy(journey),
+            "terminalReadback": deepcopy(database),
+        },
         "curriculum": {
             "courseId": "course-1",
             "courseKey": "english-6month-4-6",
@@ -228,7 +282,7 @@ def test_protected_source_binding_follows_candidate_dirty_exception(receipt: dic
     assert "candidate.repositories.adminEsp.dirtyExceptions.hash" in validate_receipt(receipt, candidate)
 
 
-def test_protected_source_can_bind_clean_candidate_repository_sha(receipt: dict, candidate: dict) -> None:
+def test_protected_source_can_bind_clean_candidate_repository_sha(receipt: dict, candidate: dict, monkeypatch) -> None:
     from course_mode_physical_tft_receipt_verify import validate_receipt
 
     repo = Path(candidate["repositories"]["adminEsp"]["path"])
@@ -245,6 +299,10 @@ def test_protected_source_can_bind_clean_candidate_repository_sha(receipt: dict,
         "binding": "repository",
         "sha256": hashlib.sha256(voice.read_bytes()).hexdigest(),
     }
+    candidate["tools"]["physicalEvidence"]["identity"]["candidateBinding"]["protectedSource"] = deepcopy(
+        receipt["protectedSource"]
+    )
+    _resign_physical_identity(candidate, monkeypatch)
     assert validate_receipt(receipt, candidate) == []
 
 
@@ -304,6 +362,27 @@ def test_rewritten_identity_and_updated_dirty_hash_still_requires_pinned_signatu
         if item["path"] == binding["path"]:
             item["sha256"] = binding["sha256"]
     receipt["renderer"] = deepcopy(identity["renderer"])
+    assert "candidate.physicalEvidence.signature" in validate_receipt(receipt, candidate)
+
+
+@pytest.mark.parametrize(
+    "rewrite",
+    [
+        lambda candidate: candidate.update(candidateId="course-mode-2026-08-29.2"),
+        lambda candidate: candidate["course"].update(courseId="course-2"),
+        lambda candidate: candidate["curriculum"].update(sourceChecksum="f" * 64),
+        lambda candidate: candidate["repositories"]["backend"].update(sha="f" * 40),
+        lambda candidate: candidate.update(createdAt="2026-08-28T00:00:00Z"),
+        lambda candidate: candidate["images"]["backend"].update(imageId="sha256:" + "f" * 64),
+    ],
+)
+def test_candidate_anchor_rewrite_without_resigning_is_rejected(receipt: dict, candidate: dict, rewrite) -> None:
+    from course_mode_physical_tft_receipt_verify import validate_receipt
+
+    rewrite(candidate)
+    receipt["candidateId"] = candidate["candidateId"]
+    receipt["course"] = deepcopy(candidate["course"])
+    receipt["repositories"] = {name: value["sha"] for name, value in candidate["repositories"].items()}
     assert "candidate.physicalEvidence.signature" in validate_receipt(receipt, candidate)
 
 

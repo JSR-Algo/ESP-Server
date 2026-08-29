@@ -144,3 +144,24 @@ def test_ledger_detects_headerless_mp3_sync(tmp_path: Path, candidate: dict, led
     ledger["evidence"][0]["sha256"] = digest
     ledger["receipt"]["evidence"][0]["sha256"] = digest
     assert "ledger.privacy" in validate_ledger(ledger, candidate=candidate, repository_root=tmp_path)["reasons"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00M4A isom",
+        b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00isommp42"
+        + b"\x00\x00\x00\x14hdlr\x00\x00\x00\x00\x00\x00\x00\x00soun",
+        b"ADIF" + b"\x00" * 16,
+        b"\x56\xe0" + b"\x00" * 16,
+    ],
+)
+def test_ledger_detects_common_aac_containers(tmp_path: Path, candidate: dict, ledger: dict, content: bytes) -> None:
+    from course_mode_physical_tft_ledger_validate import validate_ledger
+
+    path = tmp_path / "capture.png"
+    path.write_bytes(content)
+    digest = hashlib.sha256(content).hexdigest()
+    ledger["evidence"][0]["sha256"] = digest
+    ledger["receipt"]["evidence"][0]["sha256"] = digest
+    assert "ledger.privacy" in validate_ledger(ledger, candidate=candidate, repository_root=tmp_path)["reasons"]

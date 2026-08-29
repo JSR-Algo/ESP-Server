@@ -17,6 +17,7 @@ from course_mode_candidate_manifest import (
     strict_json_loads,
     validate_candidate,
 )
+from course_mode_evidence_privacy import contains_audio
 from course_mode_physical_tft_receipt_verify import _physical_identity
 
 GATES = [f"G{i}" for i in range(11)]
@@ -24,7 +25,6 @@ PRIVATE = re.compile(
     r"(?i)(child.?transcript|transcript|utterance|raw.?speech|raw.?audio|audio.?data|authorization|bearer|token|secret|password|private.?key)"
 )
 MAX_FILE = 1024 * 1024
-AUDIO_MAGIC = (b"RIFF", b"ID3", b"OggS", b"fLaC")
 EVIDENCE_FIELDS = {
     "schemaVersion",
     "candidateId",
@@ -63,6 +63,7 @@ ANCHORS = {
     "G9": {"repositories", "images", "firmware", "course", "lesson", "journey", "database", "receipts"},
     "G10": {"repositories", "images", "firmware", "course", "lesson", "device", "receipts"},
 }
+SUPPORT_ARTIFACTS = {gate: {"count": 1, "ids": {f"{gate}.support.1"}, "types": {f"{gate}.log"}} for gate in GATES}
 
 
 def _expected_anchors(candidate: dict) -> dict[str, object]:
@@ -168,7 +169,8 @@ def audit_evidence(
         journey = document.get("journeyId")
         if not isinstance(journey, str) or JOURNEY_ID.fullmatch(journey) is None:
             reasons.add("evidence.journey")
-        journey_counts[journey] = journey_counts.get(journey, 0) + 1
+        else:
+            journey_counts[journey] = journey_counts.get(journey, 0) + 1
         if document.get("candidateId") != candidate_id:
             reasons.add("evidence.candidate")
         if document.get("gate") not in GATES:
@@ -267,14 +269,27 @@ def audit_evidence(
                     if anchors.get(name) != expected_anchors.get(name):
                         reasons.add(f"evidence.anchor.{gate}.{name}")
             support = report.get("artifacts")
-            if not isinstance(support, list) or not support:
+            expected_support = SUPPORT_ARTIFACTS[gate]
+            if (
+                not isinstance(support, list)
+                or len(support) != expected_support["count"]
+                or any(not isinstance(item, dict) for item in support)
+                or any(
+                    not isinstance(item.get(field), str)
+                    for item in support
+                    for field in ("id", "type", "path", "sha256")
+                )
+                or {item.get("id") for item in support} != expected_support["ids"]
+                or {item.get("type") for item in support} != expected_support["types"]
+                or len({item.get("path") for item in support}) != len(support)
+            ):
                 reasons.add(f"evidence.report.artifacts.{gate}")
             else:
                 for item in support:
                     relative = item.get("path") if isinstance(item, dict) else None
                     if (
                         not isinstance(item, dict)
-                        or set(item) != {"path", "sha256"}
+                        or set(item) != {"id", "type", "path", "sha256"}
                         or not isinstance(relative, str)
                         or Path(relative).is_absolute()
                         or ".." in Path(relative).parts
@@ -291,9 +306,7 @@ def audit_evidence(
                     support_text = support_bytes.decode("utf-8", errors="ignore")
                     if PRIVATE.search(support_text) or PRIVATE.search(support_text.replace("\x00", "")):
                         reasons.add("evidence.privacy")
-                    if support_bytes.startswith(AUDIO_MAGIC):
-                        reasons.add("evidence.privacy")
-                    if len(support_bytes) >= 2 and support_bytes[0] == 0xFF and support_bytes[1] & 0xE0 == 0xE0:
+                    if contains_audio(support_bytes):
                         reasons.add("evidence.privacy")
             payload = report.get("payload")
         if not _gate_payload_valid(gate, payload):

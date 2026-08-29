@@ -16,12 +16,12 @@ from course_mode_candidate_manifest import (
     read_secure_regular,
     strict_json_loads,
 )
+from course_mode_evidence_privacy import contains_audio
 from course_mode_physical_tft_receipt_verify import validate_receipt
 
 PRIVATE = re.compile(
     r"(?i)(child.?transcript|transcript|utterance|raw.?speech|raw.?audio|audio\.(wav|mp3)|authorization|bearer|token|secret|password|private.?key)"
 )
-AUDIO_MAGIC = (b"RIFF", b"ID3", b"OggS", b"fLaC")
 FIELDS = {"schemaVersion", "candidateId", "gate", "journeyId", "verdict", "capturedAt", "receipt", "evidence", "notes"}
 MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 MAX_LEDGER_BYTES = 2 * 1024 * 1024
@@ -98,9 +98,7 @@ def validate_ledger(
                 decoded = content.decode("utf-8", errors="ignore")
                 if PRIVATE.search(decoded) or PRIVATE.search(decoded.replace("\x00", "")):
                     reasons.append("ledger.privacy")
-                if content.startswith(AUDIO_MAGIC):
-                    reasons.append("ledger.privacy")
-                if len(content) >= 2 and content[0] == 0xFF and content[1] & 0xE0 == 0xE0:
+                if contains_audio(content):
                     reasons.append("ledger.privacy")
         if PRIVATE.search(json.dumps(document, sort_keys=True)):
             reasons.append("ledger.privacy")
