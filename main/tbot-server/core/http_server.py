@@ -17,6 +17,7 @@ from core.api.lesson_sd_fanout_handler import LessonSdFanoutHandler
 from core.api.lesson_sd_materialize_handler import LessonSdMaterializeHandler
 from core.lesson import runtime_counters as lesson_runtime_counters
 from core.api.ota_handler import OTAHandler, is_placeholder_websocket_url
+from core.api.remote_unpair_handler import RemoteUnpairHandler
 from core.api.vision_handler import VisionHandler
 from core.lesson.esp_build_identity import (
     approved_identities_from_config,
@@ -96,6 +97,10 @@ class SimpleHttpServer:
             connections=self.lesson_connections,
         )
         self.lesson_nudge_handler = LessonNudgeHandler(
+            config,
+            self.lesson_connections,
+        )
+        self.remote_unpair_handler = RemoteUnpairHandler(
             config,
             self.lesson_connections,
         )
@@ -197,6 +202,10 @@ class SimpleHttpServer:
                         web.post(
                             "/internal/devices/{deviceId}/lesson-nudge",
                             self.lesson_nudge_handler.handle_post,
+                        ),
+                        web.post(
+                            "/internal/devices/{deviceId}/remote-unpair",
+                            self.remote_unpair_handler.handle_post,
                         ),
                         web.post(
                             "/internal/devices/{deviceId}/lesson-child-response",
