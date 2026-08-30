@@ -5,9 +5,12 @@ import hashlib
 import importlib
 import json
 import os
+import shutil
 import socket
+import stat
 import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -205,6 +208,15 @@ def _repository(root: Path) -> dict:
     }
 
 
+def _refresh_image_reference(candidate: dict, repository_name: str) -> None:
+    if repository_name not in {"backend", "adminEsp"}:
+        return
+    repository = candidate["repositories"][repository_name]
+    key = "lessonStudioBackend" if repository_name == "backend" else "lessonStudioWeb"
+    image = "local/tbot-backend" if repository_name == "backend" else "local/tbot-server-web"
+    candidate["images"][key]["reference"] = f"{image}:course-mode-physical-tft-{repository['sha']}"
+
+
 def _commit_then_dirty(candidate: dict, repository_name: str, relative: str) -> None:
     repository = candidate["repositories"][repository_name]
     root = Path(repository["path"])
@@ -214,6 +226,15 @@ def _commit_then_dirty(candidate: dict, repository_name: str, relative: str) -> 
     _git(root, "add", relative)
     _git(root, "commit", "-m", f"add {Path(relative).name}")
     repository.update(_repository(root))
+    _refresh_image_reference(candidate, repository_name)
+    if repository_name == "firmware":
+        evidence_path = Path(candidate["firmware"]["evidenceManifestPath"])
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["sourceCommit"] = repository["sha"]
+        evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+        candidate["firmware"]["evidenceManifestSha256"] = hashlib.sha256(
+            evidence_path.read_bytes(),
+        ).hexdigest()
     path.write_text("dirty runtime bytes\n", encoding="utf-8")
     repository["dirtyExceptions"] = [{
         "path": relative,
@@ -239,6 +260,7 @@ def _add_node_install(candidate: dict, repository_name: str, relative_cwd: str, 
     )
     _git(root, "commit", "-m", f"add {key} lock")
     repository.update(_repository(root))
+    _refresh_image_reference(candidate, repository_name)
     install = install_parent / "node_modules"
     package = install / "fixture-package"
     package.mkdir(parents=True)
@@ -256,7 +278,7 @@ def _add_node_install(candidate: dict, repository_name: str, relative_cwd: str, 
 
 
 @pytest.fixture
-def candidate_file(tmp_path: Path) -> Path:
+def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     repositories = {}
     for name in ("backend", "adminEsp", "firmware"):
         root = tmp_path / name
@@ -270,6 +292,9 @@ def candidate_file(tmp_path: Path) -> Path:
             curriculum = root / "src/lessons/course-mode/curriculum-course-mode.ts"
             curriculum.parent.mkdir(parents=True)
             curriculum.write_text("export const curriculum = 26;\n", encoding="utf-8")
+            migration = root / "src/database/migrations/127_shared_visual_layered_cinematic_compatibility.sql"
+            migration.parent.mkdir(parents=True)
+            migration.write_text("SELECT 127;\n", encoding="utf-8")
             for relative in gate.TASK4_BACKEND_MOUNT_INPUTS:
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -304,6 +329,89 @@ def candidate_file(tmp_path: Path) -> Path:
     browser.chmod(0o755)
     tree, error = gate.secure_browser_bundle_descriptor(browser.parent)
     assert error is None and tree is not None
+    docker = tmp_path / "docker"
+    backend_ref = f"local/tbot-backend:course-mode-physical-tft-{repositories['backend']['sha']}"
+    web_ref = f"local/tbot-server-web:course-mode-physical-tft-{repositories['adminEsp']['sha']}"
+    docker.write_text(
+        f"#!{sys.executable}\nimport json,sys\n"
+        f"backend_source={repositories['backend']['remoteUrl']!r}\n"
+        f"web_source={repositories['adminEsp']['remoteUrl']!r}\n"
+        "ref=sys.argv[-1]\nvalue=None\n"
+        "if ref.startswith('local/tbot-backend:course-mode-physical-tft-'): value={'Id':'sha256:'+'1'*64,'Config':{'Labels':{'org.opencontainers.image.revision':ref.rsplit('-',1)[-1],'org.opencontainers.image.source':backend_source}}}\n"
+        "elif ref.startswith('local/tbot-server-web:course-mode-physical-tft-'): value={'Id':'sha256:'+'2'*64,'Config':{'Labels':{'org.opencontainers.image.revision':ref.rsplit('-',1)[-1],'org.opencontainers.image.source':web_source}}}\n"
+        "elif ref=='postgres:16-alpine': value={'Id':'sha256:'+'3'*64,'Config':{'Labels':{}}}\n"
+        "print(json.dumps(value)) if value is not None else sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    monkeypatch.setattr(gate._manifest, "TRUSTED_DOCKER_EXECUTABLE", docker)
+    firmware_dir = tmp_path / "firmware-artifact"
+    firmware_dir.mkdir()
+    app = firmware_dir / "xiaozhi.bin"
+    elf = firmware_dir / "xiaozhi.elf"
+    app.write_bytes(b"firmware-app")
+    elf.write_bytes(b"firmware-elf")
+    evidence = firmware_dir / "manifest.json"
+    evidence_payload = {
+        "status": "PASS", "profile": "production", "board": "LCDWiki ES3C35P", "target": "esp32s3",
+        "sourceCommit": repositories["firmware"]["sha"], "createdAt": "2099-01-01T00:00:00Z",
+        "app": {"file": app.name, "offset": "0x20000", "bytes": app.stat().st_size,
+                "sha256": hashlib.sha256(app.read_bytes()).hexdigest()},
+        "elf": {"file": elf.name, "bytes": elf.stat().st_size,
+                "sha256": hashlib.sha256(elf.read_bytes()).hexdigest()},
+        "partition": {"bytes": 1024, "freeBytes": 1024 - app.stat().st_size,
+                      "freePercent": round((1024 - app.stat().st_size) / 1024 * 100, 6)},
+        "reproducibility": {"appByteIdentical": True, "elfByteIdentical": True,
+                            "independentCleanBuilds": 2, "ccacheEnabled": False},
+        "toolchain": {"espIdf": "v5.5.4", "espIdfCommit": "a" * 40, "python": "3.9.6",
+                      "compiler": "fixture", "cmake": "fixture", "ninja": "fixture"},
+        "config": {"sdkconfigSha256": "a" * 64, "sdkconfigDefaultsLocalSha256": "b" * 64,
+                   "dependenciesLockSha256": "c" * 64, "appReproducibleBuild": True,
+                   "productionConfigAudit": "PASS", "productionArtifactAudit": "PASS"},
+        "tests": {"projectSourceGate": "1378 passed", "firmwareVersionAndCourseGates": "18 passed"},
+        "safety": {"flashed": False, "serialAccessed": False, "hilRun": False,
+                   "physicalDeviceAccessed": False},
+    }
+    evidence.write_text(json.dumps(evidence_payload), encoding="utf-8")
+    node = {}
+    for key, version in (("backend", "v22.23.2"), ("adminManagerWeb", "v20.20.2")):
+        prefix = tmp_path / f"node-{key}"
+        executable = prefix / "bin/node"
+        executable.parent.mkdir(parents=True)
+        executable.write_text(f"#!/bin/sh\nif [ \"$1\" = --version ]; then echo {version}; else exec python3 \"$@\"; fi\n", encoding="utf-8")
+        executable.chmod(0o755)
+        package_tools = {}
+        for tool in ("npm", "npx"):
+            entrypoint = prefix / f"lib/node_modules/npm/bin/{tool}-cli.js"
+            entrypoint.parent.mkdir(parents=True, exist_ok=True)
+            entrypoint.write_text("raise SystemExit(0)\n", encoding="utf-8")
+            package_tools[tool] = {"entrypoint": str(entrypoint),
+                                   "sha256": hashlib.sha256(entrypoint.read_bytes()).hexdigest()}
+        package_root = prefix / "lib/node_modules/npm"
+        package_tree = gate._manifest.secure_node_package_tree_descriptor(package_root)
+        assert package_tree is not None
+        node[key] = {"version": version, "executable": str(executable),
+                     "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+                     "packageRoot": str(package_root),
+                     "packageRootMode": package_tree["rootMode"],
+                     "packageTreeSha256": package_tree["sha256"],
+                     **package_tools}
+    esp_idf = tmp_path / "esp-idf"
+    (esp_idf / "tools/cmake").mkdir(parents=True)
+    (esp_idf / "tools/cmake/version.cmake").write_text(
+        "set(IDF_VERSION_MAJOR 5)\nset(IDF_VERSION_MINOR 5)\nset(IDF_VERSION_PATCH 4)\n",
+        encoding="utf-8",
+    )
+    _git(esp_idf, "init", "-b", "candidate")
+    _git(esp_idf, "config", "user.email", "candidate@example.invalid")
+    _git(esp_idf, "config", "user.name", "Candidate Test")
+    _git(esp_idf, "add", ".")
+    _git(esp_idf, "commit", "-m", "fixture")
+    esp_commit = _git(esp_idf, "rev-parse", "HEAD")
+    monkeypatch.setattr(gate._manifest, "CANONICAL_ESP_IDF_ROOT", esp_idf)
+    evidence_payload["toolchain"]["espIdfCommit"] = esp_commit
+    evidence.write_text(json.dumps(evidence_payload), encoding="utf-8")
+    migration = Path(repositories["backend"]["path"]) / "src/database/migrations/127_shared_visual_layered_cinematic_compatibility.sql"
     candidate = {
         "candidateId": "course-mode-2099-01-01.1",
         "createdAt": "2099-01-01T00:00:00Z",
@@ -315,16 +423,25 @@ def candidate_file(tmp_path: Path) -> Path:
         "repositories": repositories,
         "images": {
             "lessonStudioBackend": {
-                "reference": "local/backend:candidate",
+                "reference": backend_ref,
                 "id": "sha256:" + "1" * 64,
             },
             "lessonStudioWeb": {
-                "reference": "local/web:candidate",
+                "reference": web_ref,
                 "id": "sha256:" + "2" * 64,
             },
         },
-        "firmware": {},
-        "database": {},
+        "firmware": {
+            "appPath": str(app), "appOffset": "0x20000", "appBytes": app.stat().st_size,
+            "appSha256": hashlib.sha256(app.read_bytes()).hexdigest(),
+            "elfSha256": hashlib.sha256(elf.read_bytes()).hexdigest(),
+            "partitionBytes": 1024, "freeBytes": 1024 - app.stat().st_size,
+            "evidenceManifestPath": str(evidence),
+            "evidenceManifestSha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+        },
+        "database": {"engineImage": "postgres:16-alpine", "engineImageId": "sha256:" + "3" * 64,
+                     "migrationHead": migration.name,
+                     "migrationHeadSha256": hashlib.sha256(migration.read_bytes()).hexdigest()},
         "curriculum": {
             "courseId": "10000000-0000-4000-8000-000000000001",
             "courseKey": "english-6month-4-6",
@@ -337,6 +454,7 @@ def candidate_file(tmp_path: Path) -> Path:
             "sourceChecksum": hashlib.sha256(curriculum_path.read_bytes()).hexdigest(),
         },
         "tools": {
+            "nodeInstalls": {},
             "robotPreviewBrowser": {
                 "version": 2,
                 "engine": "chromium-headless-shell",
@@ -344,6 +462,12 @@ def candidate_file(tmp_path: Path) -> Path:
                 "root": str(browser.parent),
                 "executable": browser.name,
                 "treeDigest": tree,
+            }, "node": node, "espIdf": {
+                "version": "v5.5.4", "commit": esp_commit, "root": str(esp_idf),
+                "versionFile": "tools/cmake/version.cmake",
+                "versionFileSha256": hashlib.sha256(
+                    (esp_idf / "tools/cmake/version.cmake").read_bytes(),
+                ).hexdigest(),
             },
         },
         "evidenceRoot": str(evidence_root),
@@ -368,7 +492,6 @@ def test_success_report_is_stable_and_machine_readable(candidate_file: Path) -> 
     result = gate.run_gate(
         candidate_file, "quick", lanes=(_lane("one", "raise SystemExit(0)"),),
     )
-
     assert result == {
         "candidateId": "course-mode-2099-01-01.1",
         "verdict": "PASS",
@@ -378,6 +501,1317 @@ def test_success_report_is_stable_and_machine_readable(candidate_file: Path) -> 
     assert type(result["lanes"][0]["durationMs"]) is int
     assert result["lanes"][0]["durationMs"] >= 0
     assert json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+@pytest.mark.parametrize("artifact", ["app", "elf", "node", "migration"])
+def test_release_state_rechecks_external_artifact_identity(
+    candidate_file: Path, artifact: str,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    if artifact == "app":
+        Path(candidate["firmware"]["appPath"]).write_bytes(b"drift")
+    elif artifact == "elf":
+        evidence = json.loads(Path(candidate["firmware"]["evidenceManifestPath"]).read_text())
+        (Path(candidate["firmware"]["evidenceManifestPath"]).parent / evidence["elf"]["file"]).write_bytes(b"drift")
+    elif artifact == "node":
+        Path(candidate["tools"]["node"]["backend"]["executable"]).write_text("#!/bin/sh\necho v0.0.0\n")
+    else:
+        root = Path(candidate["repositories"]["backend"]["path"])
+        (root / "src/database/migrations" / candidate["database"]["migrationHead"]).write_text("SELECT 0;\n")
+
+    assert gate.release_state_matches(candidate_file, candidate, (), None, False) is False
+
+
+def test_node_lane_executes_candidate_descriptor_not_ambient_path(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "backend", ".", "backend")
+    evidence_path = Path(candidate["firmware"]["evidenceManifestPath"])
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    evidence["sourceCommit"] = candidate["repositories"]["firmware"]["sha"]
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    candidate["firmware"]["evidenceManifestSha256"] = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    hostile = tmp_path / "hostile"
+    hostile.mkdir()
+    (hostile / "node").write_text("#!/bin/sh\nexit 91\n", encoding="utf-8")
+    (hostile / "node").chmod(0o755)
+    monkeypatch.setattr(gate, "SECURE_PATH", str(hostile))
+    lane = gate.Lane("candidate-node", "backend", ".", ("node", "--version"), 5.0)
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "PASS"
+
+
+def test_replaced_candidate_npm_entrypoint_is_blocked_before_execution(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "backend", ".", "backend")
+    entrypoint = Path(candidate["tools"]["node"]["backend"]["npm"]["entrypoint"])
+    marker = entrypoint.parent / "must-not-execute"
+    entrypoint.write_text(f"from pathlib import Path\nPath({str(marker)!r}).write_text('bad')\n")
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    lane = gate.Lane("backend-npm", "backend", ".", ("npm", "test"), 5.0)
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "BLOCKED"
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("tool", ["npm", "npx"])
+def test_staged_package_manager_keeps_complete_descriptor_bound_package_tree(
+    candidate_file: Path, tool: str,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "backend", ".", "backend")
+    descriptor = candidate["tools"]["node"]["backend"]
+    package_root = Path(descriptor["npm"]["entrypoint"]).parent.parent
+    library = package_root / "lib/cli.py"
+    library.parent.mkdir(parents=True, exist_ok=True)
+    library.write_text("print('fixture-npm-1.0.0')\n", encoding="utf-8")
+    for manager in ("npm", "npx"):
+        entrypoint = Path(descriptor[manager]["entrypoint"])
+        entrypoint.write_text(
+            "from pathlib import Path\n"
+            "exec((Path(__file__).parent.parent / 'lib/cli.py').read_text())\n",
+            encoding="utf-8",
+        )
+        descriptor[manager]["sha256"] = hashlib.sha256(entrypoint.read_bytes()).hexdigest()
+    package_tree = gate._manifest.secure_node_package_tree_descriptor(package_root)
+    assert package_tree is not None
+    descriptor["packageRoot"] = str(package_root)
+    descriptor["packageRootMode"] = package_tree["rootMode"]
+    descriptor["packageTreeSha256"] = package_tree["sha256"]
+
+    stage = gate.stage_execution_candidate(
+        candidate, (gate.Lane(f"backend-{tool}", "backend", ".", (tool, "--version"), 5.0),),
+    )
+    try:
+        staged = stage.candidate["tools"]["node"]["backend"]
+        assert str(package_root) not in json.dumps(staged)
+        result = subprocess.run(
+            [staged["executable"], staged[tool]["entrypoint"], "--version"],
+            cwd=stage.candidate["repositories"]["backend"]["path"],
+            env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"},
+            text=True, capture_output=True, check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "fixture-npm-1.0.0"
+    finally:
+        stage.cleanup()
+
+
+def test_real_staged_npm_and_npx_run_without_original_tool_paths(candidate_file: Path) -> None:
+    node_path = shutil.which("node")
+    assert node_path is not None
+    node = Path(node_path).resolve()
+    package_root = node.parent.parent / "lib/node_modules/npm"
+    assert package_root.is_dir()
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "backend", ".", "backend")
+    package_tree = gate._manifest.secure_node_package_tree_descriptor(package_root)
+    assert package_tree is not None
+    version = subprocess.run(
+        [node, "--version"], text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    descriptor = {
+        "version": version,
+        "executable": str(node),
+        "sha256": hashlib.sha256(node.read_bytes()).hexdigest(),
+        "packageRoot": str(package_root),
+        "packageRootMode": package_tree["rootMode"],
+        "packageTreeSha256": package_tree["sha256"],
+    }
+    for tool in ("npm", "npx"):
+        entrypoint = package_root / f"bin/{tool}-cli.js"
+        descriptor[tool] = {
+            "entrypoint": str(entrypoint),
+            "sha256": hashlib.sha256(entrypoint.read_bytes()).hexdigest(),
+        }
+    candidate["tools"]["node"]["backend"] = descriptor
+    lanes = tuple(
+        gate.Lane(f"real-{tool}", "backend", ".", (tool, "--version"), 10.0)
+        for tool in ("npm", "npx")
+    )
+
+    stage = gate.stage_execution_candidate(candidate, lanes)
+    try:
+        staged = stage.candidate["tools"]["node"]["backend"]
+        serialized = json.dumps(staged)
+        assert str(node) not in serialized
+        assert str(package_root) not in serialized
+        for tool in ("npm", "npx"):
+            result = subprocess.run(
+                [staged["executable"], staged[tool]["entrypoint"], "--version"],
+                cwd=stage.candidate["repositories"]["backend"]["path"],
+                env={"PATH": str(Path(staged["executable"]).parent) + ":/usr/bin:/bin"},
+                text=True, capture_output=True, check=False,
+            )
+            assert result.returncode == 0, result.stderr
+            assert result.stdout.strip()
+            assert str(package_root) not in result.stdout + result.stderr
+    finally:
+        stage.cleanup()
+
+
+def test_lane_executes_private_snapshot_after_original_source_is_replaced(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    source = Path(candidate["repositories"]["adminEsp"]["path"]) / "snapshot-source.txt"
+    source.write_text("original", encoding="utf-8")
+    _git(source.parent, "add", source.name)
+    _git(source.parent, "commit", "-m", "snapshot fixture")
+    candidate["repositories"]["adminEsp"] = _repository(source.parent)
+    _refresh_image_reference(candidate, "adminEsp")
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    original_stage = gate.stage_execution_candidate
+
+    def stage_then_replace(value: dict, lanes):
+        staged = original_stage(value, lanes)
+        source.write_text("mutated", encoding="utf-8")
+        return staged
+
+    monkeypatch.setattr(gate, "stage_execution_candidate", stage_then_replace)
+    lane = gate.Lane(
+        "snapshot-source", "adminEsp", ".",
+        (sys.executable, "-c", "from pathlib import Path;assert Path('snapshot-source.txt').read_text()=='original'"),
+        5.0,
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "PASS"
+
+
+def test_snapshot_cleanup_runs_after_lane_failure(candidate_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    observed = []
+    original_stage = gate.stage_execution_candidate
+
+    def record_stage(candidate: dict, lanes):
+        staged = original_stage(candidate, lanes)
+        observed.append(staged.root)
+        return staged
+
+    monkeypatch.setattr(gate, "stage_execution_candidate", record_stage)
+    result = gate.run_gate(candidate_file, "quick", lanes=(_lane("fail", "raise SystemExit(1)"),))
+
+    assert result["verdict"] == "FAIL"
+    assert observed and not observed[0].exists()
+
+
+def test_lane_cleanup_removes_zero_mode_runtime_directories(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[Path] = []
+    original = gate.LaneExecution.cleanup
+
+    def record_cleanup(self):
+        observed.append(self.root)
+        return original(self)
+
+    monkeypatch.setattr(gate.LaneExecution, "cleanup", record_cleanup)
+    lane = _lane(
+        "hostile-cleanup-permissions",
+        "import os;from pathlib import Path;"
+        "[Path(os.environ[name]).chmod(0) for name in "
+        "('HOME','XDG_CACHE_HOME','COURSE_MODE_LANE_REPORT_ROOT')]",
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "PASS", result
+    assert observed and all(not root.exists() for root in observed)
+
+
+def test_lane_cannot_rename_root_to_evade_cleanup(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[gate.LaneExecution] = []
+    original_create = gate.ExecutionStage.create_lane_execution
+    original_remove = gate._remove_owned_tree
+
+    def record_lane(self):
+        execution = original_create(self)
+        observed.append(execution)
+        return execution
+
+    monkeypatch.setattr(gate.ExecutionStage, "create_lane_execution", record_lane)
+    lane = _lane(
+        "rename-cleanup-root",
+        "import os;from pathlib import Path;"
+        "root=Path(os.environ['HOME']).parents[1];"
+        "root.rename(root.with_name(root.name+'-retained'))",
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "cleanup"
+    assert result["retainedOwner"] == "current-process"
+    assert observed
+    moved = observed[0].root.with_name(observed[0].root.name + "-retained")
+    assert result["retainedPaths"] == [str(moved)]
+    assert moved.exists()
+    original_remove(moved)
+
+
+def test_owned_cleanup_rejects_root_swap_between_stat_and_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "owned-root"
+    root.mkdir()
+    (root / "secret.txt").write_text("retained", encoding="utf-8")
+    identity = gate._owned_tree_identity(root)
+    renamed = tmp_path / "renamed-root"
+    original_open = gate.os.open
+    swapped = False
+
+    def swap_then_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and path == root.name and dir_fd is not None:
+            swapped = True
+            root.rename(renamed)
+            root.mkdir()
+            (root / "decoy.txt").write_text("decoy", encoding="utf-8")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(gate.os, "open", swap_then_open)
+
+    assert gate._remove_owned_tree(root, identity) is False
+    assert (renamed / "secret.txt").read_text(encoding="utf-8") == "retained"
+
+    monkeypatch.setattr(gate.os, "open", original_open)
+    gate._remove_owned_tree(root)
+    gate._remove_owned_tree(renamed)
+
+
+def test_owned_cleanup_rejects_child_swap_between_stat_and_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "owned-root"
+    child = root / "child"
+    child.mkdir(parents=True)
+    (child / "secret.txt").write_text("retained", encoding="utf-8")
+    identity = gate._owned_tree_identity(root)
+    renamed = root / "renamed-child"
+    original_open = gate.os.open
+    swapped = False
+
+    def swap_then_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and path == child.name and dir_fd is not None:
+            swapped = True
+            child.rename(renamed)
+            child.mkdir()
+            (child / "decoy.txt").write_text("decoy", encoding="utf-8")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(gate.os, "open", swap_then_open)
+
+    assert gate._remove_owned_tree(root, identity) is False
+    assert (renamed / "secret.txt").read_text(encoding="utf-8") == "retained"
+
+    monkeypatch.setattr(gate.os, "open", original_open)
+    gate._remove_owned_tree(root)
+
+
+def test_owned_cleanup_rejects_root_swap_immediately_before_rmdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "owned-root"
+    root.mkdir()
+    identity = gate._owned_tree_identity(root)
+    renamed = tmp_path / "renamed-root"
+    original_rmdir = gate.os.rmdir
+    swapped = False
+
+    def swap_then_rmdir(path, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and path == root.name and dir_fd is not None:
+            swapped = True
+            root.rename(renamed)
+            root.mkdir()
+        return original_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(gate.os, "rmdir", swap_then_rmdir)
+
+    assert gate._remove_owned_tree(root, identity) is False
+    assert renamed.exists()
+
+    monkeypatch.setattr(gate.os, "rmdir", original_rmdir)
+    gate._remove_owned_tree(renamed)
+
+
+def test_owned_cleanup_rejects_child_swap_immediately_before_rmdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "owned-root"
+    child = root / "child"
+    child.mkdir(parents=True)
+    identity = gate._owned_tree_identity(root)
+    renamed = root / "renamed-child"
+    original_rmdir = gate.os.rmdir
+    swapped = False
+
+    def swap_then_rmdir(path, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and path == child.name and dir_fd is not None:
+            swapped = True
+            child.rename(renamed)
+            child.mkdir()
+        return original_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(gate.os, "rmdir", swap_then_rmdir)
+
+    assert gate._remove_owned_tree(root, identity) is False
+    assert renamed.exists()
+
+    monkeypatch.setattr(gate.os, "rmdir", original_rmdir)
+    gate._remove_owned_tree(root)
+
+
+@pytest.mark.parametrize("leaf_type", ["file", "symlink"])
+def test_owned_cleanup_rejects_leaf_swap_at_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, leaf_type: str,
+) -> None:
+    root = tmp_path / "owned-root"
+    root.mkdir()
+    leaf = root / "leaf"
+    if leaf_type == "file":
+        leaf.write_text("owned", encoding="utf-8")
+    else:
+        leaf.symlink_to("target")
+    identity = gate._owned_tree_identity(root)
+    escaped = tmp_path / f"escaped-{leaf_type}"
+    original_unlink = gate.os.unlink
+    swapped = False
+
+    def swap_then_unlink(path, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and dir_fd is not None:
+            swapped = True
+            directory = gate._directory_fd_path(dir_fd)
+            assert directory is not None
+            current = directory / path
+            current.rename(escaped)
+            if leaf_type == "file":
+                current.write_text("decoy", encoding="utf-8")
+            else:
+                current.symlink_to("decoy")
+        return original_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(gate.os, "unlink", swap_then_unlink)
+
+    assert gate._remove_owned_tree(root, identity) is False
+    assert escaped.exists() or escaped.is_symlink()
+
+    monkeypatch.setattr(gate.os, "unlink", original_unlink)
+    original_unlink(escaped)
+    gate._remove_owned_tree(root, identity)
+
+
+def test_owned_cleanup_removes_fifo_without_quarantine(tmp_path: Path) -> None:
+    root = tmp_path / "owned-root"
+    root.mkdir()
+    leaf = root / "fifo"
+    os.mkfifo(leaf)
+    identity = gate._owned_tree_identity(root)
+
+    assert gate._remove_owned_tree(root, identity) is True
+    assert not root.exists()
+    assert not list(root.parent.glob(".course-mode-cleanup-*"))
+
+
+def test_owned_cleanup_fails_closed_for_unix_socket_without_unlink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(tempfile.mkdtemp(prefix="cm-socket-", dir="/private/tmp"))
+    leaf = root / "socket"
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind(str(leaf))
+    listener.close()
+    identity = gate._owned_tree_identity(root)
+    unlink_calls = 0
+    original_unlink = gate.os.unlink
+
+    def swap_if_called(*args, **kwargs):
+        nonlocal unlink_calls
+        unlink_calls += 1
+        return original_unlink(*args, **kwargs)
+
+    monkeypatch.setattr(gate.os, "unlink", swap_if_called)
+
+    assert gate._remove_owned_tree(root, identity) is False
+    assert unlink_calls == 0
+    assert leaf.exists()
+    assert not list(root.glob(".course-mode-cleanup-*"))
+    monkeypatch.setattr(gate.os, "unlink", original_unlink)
+    original_unlink(leaf)
+    root.rmdir()
+
+
+def test_lane_cleanup_reports_cross_parent_move_during_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "owned-root"
+    root.mkdir()
+    destination_parent = tmp_path / "relocated"
+    destination_parent.mkdir()
+    relocated = destination_parent / "owned-root"
+    execution = gate.LaneExecution(
+        root, {}, {}, gate._owned_tree_identity(root), gate._open_snapshot_directory(root),
+    )
+    original_rmdir = gate.os.rmdir
+    swapped = False
+
+    def move_then_rmdir(path, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and path == root.name and dir_fd is not None:
+            swapped = True
+            root.rename(relocated)
+            root.mkdir()
+        return original_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(gate.os, "rmdir", move_then_rmdir)
+
+    assert execution.cleanup() is False
+    assert execution.retained_path() == relocated
+    assert relocated.exists()
+
+    monkeypatch.setattr(gate.os, "rmdir", original_rmdir)
+    gate._remove_owned_tree(relocated)
+
+
+@pytest.mark.parametrize("owner_type", ["stage", "lane"])
+def test_repeated_cleanup_cannot_hide_retained_moved_root(
+    tmp_path: Path, owner_type: str,
+) -> None:
+    root = tmp_path / f"owned-{owner_type}"
+    root.mkdir()
+    retained = tmp_path / f"retained-{owner_type}"
+    identity = gate._owned_tree_identity(root)
+    descriptor = gate._open_snapshot_directory(root)
+    if owner_type == "stage":
+        owner = gate.ExecutionStage(root, {}, identity, descriptor)
+    else:
+        owner = gate.LaneExecution(root, {}, {}, identity, descriptor)
+
+    root.rename(retained)
+
+    assert owner.cleanup() is False
+    assert owner.cleanup() is False
+    assert owner.retained_path() == retained
+    assert retained.exists()
+    gate._remove_owned_tree(retained, identity)
+
+
+@pytest.mark.parametrize("owner_type", ["stage", "lane"])
+def test_successful_cleanup_remains_successful_when_repeated(
+    tmp_path: Path, owner_type: str,
+) -> None:
+    root = tmp_path / f"owned-{owner_type}"
+    root.mkdir()
+    identity = gate._owned_tree_identity(root)
+    descriptor = gate._open_snapshot_directory(root)
+    if owner_type == "stage":
+        owner = gate.ExecutionStage(root, {}, identity, descriptor)
+    else:
+        owner = gate.LaneExecution(root, {}, {}, identity, descriptor)
+
+    assert owner.cleanup() is True
+    assert owner.cleanup() is True
+    assert not root.exists()
+
+
+def test_gate_reports_lane_root_moved_to_another_parent(
+    candidate_file: Path, tmp_path: Path,
+) -> None:
+    relocated = tmp_path / "relocated-lane"
+    lane = _lane(
+        "relocate-cleanup-root",
+        "import os;from pathlib import Path;"
+        "root=Path(os.environ['HOME']).parents[1];"
+        f"root.rename(Path({str(relocated)!r}))",
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "cleanup"
+    assert result["retainedOwner"] == "current-process"
+    assert result["retainedPaths"] == [str(relocated)]
+    assert relocated.exists()
+    gate._remove_owned_tree(relocated)
+
+
+def test_report_serialization_escapes_surrogate_retained_paths(tmp_path: Path) -> None:
+    report_path = tmp_path / "report.json"
+    retained = "/tmp/retained-\udcff"
+    report = {
+        "verdict": "BLOCKED",
+        "failedLane": "cleanup",
+        "retainedOwner": "current-process",
+        "retainedPaths": [retained],
+    }
+
+    assert gate._write_report_atomic(report_path, report) is True
+    payload = report_path.read_bytes()
+    assert b"\\udcff" in payload
+    assert json.loads(payload) == report
+
+
+def test_gate_reports_retained_snapshot_when_owned_cleanup_cannot_finish(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retained: list[Path] = []
+    original = gate._remove_owned_tree
+
+    def refuse_lane_cleanup(
+        path: Path, expected_identity: tuple[int, int] | None = None,
+    ) -> bool:
+        if path.name.startswith("course-mode-lane-"):
+            retained.append(path)
+            return False
+        return original(path, expected_identity)
+
+    monkeypatch.setattr(gate, "_remove_owned_tree", refuse_lane_cleanup)
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(_lane("cleanup-owner", "pass"),))
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "cleanup"
+    assert result["retainedOwner"] == "current-process"
+    assert result["retainedPaths"] == sorted({str(path) for path in retained})
+    for path in set(retained):
+        original(path)
+
+
+def test_lane_construction_cleanup_failure_still_removes_snapshot(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retained: list[Path] = []
+    snapshots: list[Path] = []
+    original_remove = gate._remove_owned_tree
+    original_stage = gate.stage_execution_candidate
+
+    def record_stage(candidate, lanes):
+        stage = original_stage(candidate, lanes)
+        snapshots.append(stage.root)
+        return stage
+
+    def refuse_lane_cleanup(
+        path: Path, expected_identity: tuple[int, int] | None = None,
+    ) -> bool:
+        if path.name.startswith("course-mode-lane-"):
+            retained.append(path)
+            return False
+        return original_remove(path, expected_identity)
+
+    monkeypatch.setattr(gate, "stage_execution_candidate", record_stage)
+    monkeypatch.setattr(gate, "_remove_owned_tree", refuse_lane_cleanup)
+    monkeypatch.setattr(
+        gate, "_make_tree_owner_writable",
+        lambda _root: (_ for _ in ()).throw(OSError("forced lane construction failure")),
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(_lane("cleanup-owner", "pass"),))
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "cleanup"
+    assert result["retainedOwner"] == "current-process"
+    assert result["retainedPaths"] == sorted({str(path) for path in retained})
+    assert snapshots and all(not path.exists() for path in snapshots)
+    for path in set(retained):
+        original_remove(path)
+
+
+def test_lane_descriptor_open_failure_removes_created_root(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    stage = gate.stage_execution_candidate(candidate, (_lane("descriptor-open", "pass"),))
+    lane_roots: list[Path] = []
+    original_mkdtemp = gate.tempfile.mkdtemp
+    original_open = gate._open_snapshot_directory
+
+    def record_mkdtemp(*args, **kwargs):
+        path = Path(original_mkdtemp(*args, **kwargs))
+        if kwargs.get("prefix") == "course-mode-lane-":
+            lane_roots.append(path)
+        return str(path)
+
+    def refuse_lane_descriptor(path: Path) -> int:
+        if path.name.startswith("course-mode-lane-"):
+            raise OSError("forced descriptor failure")
+        return original_open(path)
+
+    monkeypatch.setattr(gate.tempfile, "mkdtemp", record_mkdtemp)
+    monkeypatch.setattr(gate, "_open_snapshot_directory", refuse_lane_descriptor)
+    try:
+        with pytest.raises(OSError, match="forced descriptor failure"):
+            stage.create_lane_execution()
+        assert lane_roots and all(not path.exists() for path in lane_roots)
+    finally:
+        stage.cleanup()
+
+
+def test_lane_construction_failure_reports_cross_parent_retained_path(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    stage = gate.stage_execution_candidate(candidate, (_lane("lane-retained", "pass"),))
+    relocated = tmp_path / "relocated-lane"
+    original_copytree = gate.shutil.copytree
+    original_remove = gate._remove_owned_tree
+
+    def move_then_fail(source, destination, **kwargs):
+        raise OSError("forced lane construction failure")
+
+    def move_during_cleanup(path, _identity):
+        Path(path).rename(relocated)
+        return False
+
+    monkeypatch.setattr(gate.shutil, "copytree", move_then_fail)
+    monkeypatch.setattr(gate, "_remove_owned_tree", move_during_cleanup)
+    try:
+        with pytest.raises(gate.RetainedStagingError) as caught:
+            stage.create_lane_execution()
+        assert caught.value.paths == (str(relocated),)
+        assert relocated.exists()
+    finally:
+        monkeypatch.setattr(gate.shutil, "copytree", original_copytree)
+        monkeypatch.setattr(gate, "_remove_owned_tree", original_remove)
+        original_remove(relocated)
+        stage.cleanup()
+
+
+def test_stage_identity_failure_removes_created_root(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    stage_roots: list[Path] = []
+    original_mkdtemp = gate.tempfile.mkdtemp
+    original_identity = gate._owned_tree_identity
+
+    def record_mkdtemp(*args, **kwargs):
+        path = Path(original_mkdtemp(*args, **kwargs))
+        if kwargs.get("prefix") == "course-mode-stage-":
+            stage_roots.append(path)
+        return str(path)
+
+    def refuse_stage_identity(path: Path) -> tuple[int, int]:
+        if path.name.startswith("course-mode-stage-"):
+            raise OSError("forced stage identity failure")
+        return original_identity(path)
+
+    monkeypatch.setattr(gate.tempfile, "mkdtemp", record_mkdtemp)
+    monkeypatch.setattr(gate, "_owned_tree_identity", refuse_stage_identity)
+
+    with pytest.raises(OSError, match="forced stage identity failure"):
+        gate.stage_execution_candidate(candidate, (_lane("stage-identity", "pass"),))
+    assert stage_roots and all(not path.exists() for path in stage_roots)
+
+
+def test_stage_construction_failure_reports_cross_parent_retained_path(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    relocated = tmp_path / "relocated-stage"
+    original_archive = gate._archive_repository
+    original_remove = gate._remove_owned_tree
+
+    def move_then_fail(_source, _sha, destination, _state):
+        raise OSError("forced stage construction failure")
+
+    def move_during_cleanup(path, _identity):
+        Path(path).rename(relocated)
+        return False
+
+    monkeypatch.setattr(gate, "_archive_repository", move_then_fail)
+    monkeypatch.setattr(gate, "_remove_owned_tree", move_during_cleanup)
+    try:
+        with pytest.raises(gate.RetainedStagingError) as caught:
+            gate.stage_execution_candidate(candidate, ())
+        assert caught.value.paths == (str(relocated),)
+        assert relocated.exists()
+    finally:
+        monkeypatch.setattr(gate, "_archive_repository", original_archive)
+        monkeypatch.setattr(gate, "_remove_owned_tree", original_remove)
+        original_remove(relocated)
+
+
+def test_staged_child_context_contains_no_original_repository_or_node_paths(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "backend", ".", "backend")
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    originals = {
+        descriptor["path"] for descriptor in candidate["repositories"].values()
+    } | {
+        candidate["tools"]["node"]["backend"]["executable"],
+        candidate["tools"]["node"]["backend"]["npm"]["entrypoint"],
+    }
+    observed = {}
+
+    def capture(command, *, cwd, env, **_kwargs):
+        observed.update(command=command, cwd=str(cwd), env=env)
+        return gate._manifest.BoundedCommandResult(0, "", None)
+
+    monkeypatch.setattr(gate, "run_bounded_command", capture)
+    result = gate.run_gate(
+        candidate_file, "quick",
+        lanes=(gate.Lane("backend-npm", "backend", ".", ("npm", "test"), 5.0),),
+    )
+
+    assert result["verdict"] == "PASS"
+    child_context = json.dumps(observed, sort_keys=True)
+    assert all(original not in child_context for original in originals)
+
+
+def test_snapshot_cleanup_runs_after_unexpected_runner_error(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = []
+    original_stage = gate.stage_execution_candidate
+
+    def record_stage(candidate: dict, lanes):
+        staged = original_stage(candidate, lanes)
+        observed.append(staged.root)
+        return staged
+
+    monkeypatch.setattr(gate, "stage_execution_candidate", record_stage)
+    monkeypatch.setattr(
+        gate, "run_bounded_command", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        gate.run_gate(candidate_file, "quick", lanes=(_lane("error", "pass"),))
+
+    assert observed and not observed[0].exists()
+
+
+def test_snapshot_copy_preserves_read_only_directory_modes_after_population(tmp_path: Path) -> None:
+    source = tmp_path / "read-only-source"
+    child = source / "nested"
+    child.mkdir(parents=True)
+    (child / "payload.txt").write_text("payload", encoding="utf-8")
+    child.chmod(0o555)
+    source.chmod(0o555)
+    destination = tmp_path / "snapshot"
+
+    gate._copy_snapshot_tree(source, destination, {"entries": 0, "bytes": 0})
+
+    assert (destination / "nested/payload.txt").read_text(encoding="utf-8") == "payload"
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o555
+    assert stat.S_IMODE((destination / "nested").stat().st_mode) == 0o555
+
+
+def test_unexpected_runner_error_reports_cleanup_failure(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retained: list[Path] = []
+    original_remove = gate._remove_owned_tree
+
+    def refuse_lane_cleanup(
+        path: Path, expected_identity: tuple[int, int] | None = None,
+    ) -> bool:
+        if path.name.startswith("course-mode-lane-"):
+            retained.append(path)
+            return False
+        return original_remove(path, expected_identity)
+
+    monkeypatch.setattr(gate, "_remove_owned_tree", refuse_lane_cleanup)
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(_lane("error", "pass"),))
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "cleanup"
+    assert result["retainedOwner"] == "current-process"
+    assert result["retainedPaths"] == sorted({str(path) for path in retained})
+    for path in set(retained):
+        original_remove(path)
+
+
+def test_assignment_environment_uses_image_ids_not_mutable_tags(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(item for item in gate.FULL_LANES if item.name == "admin-course-mode-assignment-new")
+
+    environment = gate._child_environment(candidate, {}, lane)
+
+    assert environment["TBOT_LESSON_STUDIO_BACKEND_IMAGE"] == candidate["images"]["lessonStudioBackend"]["id"]
+    assert environment["TBOT_LESSON_STUDIO_WEB_IMAGE"] == candidate["images"]["lessonStudioWeb"]["id"]
+
+
+def test_snapshot_rejects_tree_over_entry_limit(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    monkeypatch.setattr(gate, "MAX_SNAPSHOT_ENTRIES", 2)
+
+    with pytest.raises(ValueError, match="entry limit"):
+        gate.stage_execution_candidate(candidate, ())
+
+
+def test_snapshot_rejects_tree_over_byte_limit(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    monkeypatch.setattr(gate, "MAX_SNAPSHOT_BYTES", 1)
+
+    with pytest.raises(ValueError, match="byte limit"):
+        gate.stage_execution_candidate(candidate, ())
+
+
+def test_git_archive_rejects_oversized_blob_before_content_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    destination = tmp_path / "archive"
+    object_id = "a" * 40
+    calls = 0
+
+    def bounded(command, **_kwargs):
+        nonlocal calls
+        calls += 1
+        stdout = object_id if calls == 1 else f"100644 blob {object_id}\tbig.bin\0"
+        return gate._manifest.BoundedCommandResult(0, stdout, None)
+
+    class Input:
+        def write(self, _value): return None
+        def flush(self): return None
+        def close(self): return None
+
+    class Output:
+        def __init__(self): self.read_sizes = []
+        def readline(self): return f"{object_id} blob {3 * 1024 ** 3}\n".encode()
+        def read(self, size):
+            self.read_sizes.append(size)
+            raise AssertionError("oversized blob content must not be read")
+
+    class Process:
+        def __init__(self):
+            self.stdin = Input()
+            self.stdout = Output()
+            self.stderr = None
+            self.returncode = 0
+        def wait(self, timeout=None): return 0
+        def poll(self): return self.returncode
+        def kill(self): raise AssertionError("completed fake process must not be killed")
+
+    process = Process()
+    monkeypatch.setattr(gate._manifest, "run_bounded_command", bounded)
+    monkeypatch.setattr(gate.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    with pytest.raises(ValueError, match="file byte limit"):
+        gate._archive_repository(source, object_id, destination, {"entries": 0, "bytes": 0})
+    assert process.stdout.read_sizes == []
+
+
+def test_git_archive_rejects_oversized_symlink_before_content_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    destination = tmp_path / "archive"
+    object_id = "c" * 40
+    calls = 0
+
+    def bounded(command, **_kwargs):
+        nonlocal calls
+        calls += 1
+        stdout = object_id if calls == 1 else f"120000 blob {object_id}\tlink\0"
+        return gate._manifest.BoundedCommandResult(0, stdout, None)
+
+    class Input:
+        def write(self, _value): return None
+        def flush(self): return None
+        def close(self): return None
+
+    class Output:
+        read_sizes = []
+        def readline(self): return f"{object_id} blob {gate.MAX_GIT_SYMLINK_BYTES + 1}\n".encode()
+        def read(self, size):
+            self.read_sizes.append(size)
+            raise AssertionError("oversized symlink content must not be read")
+
+    class Process:
+        def __init__(self):
+            self.stdin, self.stdout, self.stderr = Input(), Output(), None
+            self.returncode = 0
+        def wait(self, timeout=None): return 0
+        def poll(self): return self.returncode
+        def kill(self): raise AssertionError("completed fake process must not be killed")
+
+    process = Process()
+    monkeypatch.setattr(gate._manifest, "run_bounded_command", bounded)
+    monkeypatch.setattr(gate.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    with pytest.raises(ValueError, match="symlink byte limit"):
+        gate._archive_repository(source, object_id, destination, {"entries": 0, "bytes": 0})
+    assert process.stdout.read_sizes == []
+
+
+def test_git_archive_rejects_bounded_ls_tree_overflow_before_cat_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    object_id = "b" * 40
+    calls = 0
+
+    def bounded(command, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return gate._manifest.BoundedCommandResult(0, object_id, None)
+        return gate._manifest.BoundedCommandResult(None, "", "output")
+
+    monkeypatch.setattr(gate._manifest, "run_bounded_command", bounded)
+    monkeypatch.setattr(
+        gate.subprocess, "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("cat-file must not start")),
+    )
+
+    with pytest.raises(ValueError, match="candidate archive failed"):
+        gate._archive_repository(
+            source, object_id, tmp_path / "archive", {"entries": 0, "bytes": 0},
+        )
+
+
+def test_snapshot_rejects_tree_over_depth_limit(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    monkeypatch.setattr(gate, "MAX_SNAPSHOT_DEPTH", 0)
+
+    with pytest.raises(ValueError, match="depth limit"):
+        gate.stage_execution_candidate(candidate, ())
+
+
+def test_snapshot_ignores_untracked_escaping_symlink(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    repository = Path(candidate["repositories"]["backend"]["path"])
+    (repository / "escape").symlink_to("../candidate.json")
+
+    stage = gate.stage_execution_candidate(candidate, ())
+    try:
+        staged = Path(stage.candidate["repositories"]["backend"]["path"])
+        assert not os.path.lexists(staged / "escape")
+    finally:
+        stage.cleanup()
+
+
+def test_snapshot_ignores_untracked_special_file(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    repository = Path(candidate["repositories"]["backend"]["path"])
+    fifo = repository / "unsafe.fifo"
+    os.mkfifo(fifo)
+
+    stage = gate.stage_execution_candidate(candidate, ())
+    try:
+        staged = Path(stage.candidate["repositories"]["backend"]["path"])
+        assert not (staged / "unsafe.fifo").exists()
+    finally:
+        stage.cleanup()
+
+
+def test_snapshot_uses_commit_object_when_worktree_file_mutates_during_archive(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    source = Path(candidate["repositories"]["backend"]["path"]) / "tracked.txt"
+    source_identity = (source.stat().st_dev, source.stat().st_ino)
+    original_read = gate.os.read
+    mutated = False
+
+    def mutate_during_read(descriptor: int, size: int) -> bytes:
+        nonlocal mutated
+        metadata = os.fstat(descriptor)
+        if not mutated and (metadata.st_dev, metadata.st_ino) == source_identity:
+            mutated = True
+            source.write_text("mutated while copying", encoding="utf-8")
+        return original_read(descriptor, size)
+
+    monkeypatch.setattr(gate.os, "read", mutate_during_read)
+
+    stage = gate.stage_execution_candidate(candidate, ())
+    try:
+        staged = Path(stage.candidate["repositories"]["backend"]["path"])
+        assert (staged / "tracked.txt").read_text(encoding="utf-8") == "backend"
+    finally:
+        stage.cleanup()
+
+
+def test_snapshot_construction_failure_removes_partial_tree(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    stage_root = tmp_path / "partial-stage"
+    stage_root.mkdir()
+    monkeypatch.setattr(gate.tempfile, "mkdtemp", lambda **_kwargs: str(stage_root))
+    monkeypatch.setattr(gate, "MAX_SNAPSHOT_ENTRIES", 0)
+
+    with pytest.raises(ValueError):
+        gate.stage_execution_candidate(candidate, ())
+
+    assert not stage_root.exists()
+
+
+def test_repository_mutation_after_validation_never_reaches_lane(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    tracked = Path(candidate["repositories"]["adminEsp"]["path"]) / "tracked.txt"
+    marker = tmp_path / "mutated-by-race"
+    original_release_state_matches = gate.release_state_matches
+    mutated = False
+
+    def validate_then_mutate(*args, **kwargs):
+        nonlocal mutated
+        result = original_release_state_matches(*args, **kwargs)
+        if result and not mutated:
+            tracked.write_text("poisoned", encoding="utf-8")
+            mutated = True
+        return result
+
+    monkeypatch.setattr(gate, "release_state_matches", validate_then_mutate)
+    lane = _lane(
+        "validation-open-race",
+        "from pathlib import Path;"
+        f"Path({str(marker)!r}).touch() if Path('tracked.txt').read_text() == 'poisoned' else None",
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "PASS", result
+    assert not marker.exists()
+
+
+def test_snapshot_reads_literal_commit_when_replace_ref_targets_other_bytes(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    repository = candidate["repositories"]["adminEsp"]
+    root = Path(repository["path"])
+    original = repository["sha"]
+    (root / "tracked.txt").write_text("replacement", encoding="utf-8")
+    _git(root, "add", "tracked.txt")
+    _git(root, "commit", "-m", "replacement object")
+    replacement = _git(root, "rev-parse", "HEAD")
+    _git(root, "reset", "--hard", original)
+    _git(root, "replace", original, replacement)
+
+    stage = gate.stage_execution_candidate(candidate, ())
+    try:
+        staged = Path(stage.candidate["repositories"]["adminEsp"]["path"])
+        assert (staged / "tracked.txt").read_text(encoding="utf-8") == "adminEsp"
+    finally:
+        stage.cleanup()
+
+
+def test_snapshot_ignores_export_attributes_and_preserves_literal_blob_bytes(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    repository = candidate["repositories"]["adminEsp"]
+    root = Path(repository["path"])
+    (root / ".gitattributes").write_text(
+        "kept.txt export-ignore\nsubstituted.txt export-subst\n", encoding="utf-8",
+    )
+    (root / "kept.txt").write_text("must remain\n", encoding="utf-8")
+    literal = "$Format:%H$\n"
+    (root / "substituted.txt").write_text(literal, encoding="utf-8")
+    _git(root, "add", ".gitattributes", "kept.txt", "substituted.txt")
+    _git(root, "commit", "-m", "export attributes")
+    repository.update(_repository(root))
+    _refresh_image_reference(candidate, "adminEsp")
+
+    stage = gate.stage_execution_candidate(candidate, ())
+    try:
+        staged = Path(stage.candidate["repositories"]["adminEsp"]["path"])
+        assert (staged / "kept.txt").read_text(encoding="utf-8") == "must remain\n"
+        assert (staged / "substituted.txt").read_text(encoding="utf-8") == literal
+    finally:
+        stage.cleanup()
+
+
+def test_each_lane_gets_a_fresh_verified_repository_snapshot(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lanes = (
+        _lane("poison-first-snapshot", "from pathlib import Path;Path('tracked.txt').write_text('poisoned')"),
+        _lane("verify-fresh-second-snapshot", "from pathlib import Path;assert Path('tracked.txt').read_text() == 'adminEsp'"),
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=lanes)
+
+    assert result["verdict"] == "PASS", result
+    assert [item["exitCode"] for item in result["lanes"]] == [0, 0]
+
+
+def test_lane_workspace_is_writable_for_real_build_outputs_and_is_destroyed(
+    candidate_file: Path, tmp_path: Path,
+) -> None:
+    observed_roots: list[Path] = []
+    code = (
+        "from pathlib import Path;"
+        "Path('dist/nested').mkdir(parents=True);"
+        "Path('dist/nested/artifact.js').write_text('built');"
+        "Path('.course-cache').mkdir();"
+        "Path('.course-cache/result.json').write_text('{}')"
+    )
+    original = gate.LaneExecution.cleanup
+
+    def record_cleanup(self):
+        observed_roots.append(self.root)
+        return original(self)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(gate.LaneExecution, "cleanup", record_cleanup)
+        result = gate.run_gate(candidate_file, "quick", lanes=(_lane("real-write", code),))
+
+    assert result["verdict"] == "PASS", result
+    assert observed_roots and all(not root.exists() for root in observed_roots)
+
+
+def test_writable_lane_copy_cannot_mutate_immutable_verified_base(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    stage = gate.stage_execution_candidate(candidate, ())
+    execution = stage.create_lane_execution()
+    try:
+        base_file = Path(stage.candidate["repositories"]["adminEsp"]["path"]) / "tracked.txt"
+        lane_file = Path(execution.candidate["repositories"]["adminEsp"]["path"]) / "tracked.txt"
+        assert stat.S_IMODE(base_file.stat().st_mode) & 0o222 == 0
+        assert stat.S_IMODE(lane_file.stat().st_mode) & stat.S_IWUSR
+        lane_file.write_text("lane mutation", encoding="utf-8")
+        assert base_file.read_text(encoding="utf-8") == "adminEsp"
+    finally:
+        execution.cleanup()
+        stage.cleanup()
+
+
+def test_staged_node_package_root_preserves_bound_mode(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "backend", ".", "backend")
+    descriptor = candidate["tools"]["node"]["backend"]
+    package_root = Path(descriptor["packageRoot"])
+    package_root.chmod(0o700)
+    package_tree = gate._manifest.secure_node_package_tree_descriptor(package_root)
+    assert package_tree is not None
+    descriptor["packageRootMode"] = package_tree["rootMode"]
+    descriptor["packageTreeSha256"] = package_tree["sha256"]
+
+    stage = gate.stage_execution_candidate(
+        candidate, (gate.Lane("backend-node", "backend", ".", ("node", "--version"), 5.0),),
+    )
+    execution = stage.create_lane_execution()
+    try:
+        staged_root = Path(execution.candidate["tools"]["node"]["backend"]["packageRoot"])
+        assert stat.S_IMODE(staged_root.stat().st_mode) == 0o700
+    finally:
+        execution.cleanup()
+        stage.cleanup()
+
+
+def test_snapshot_directory_open_rejects_symlink_parent(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    child = real / "child"
+    child.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        descriptor = gate._open_snapshot_directory(alias / "child")
+        os.close(descriptor)
+
+
+def test_snapshot_symlink_validation_is_lexical_and_never_calls_path_resolve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "target.txt").write_text("safe", encoding="utf-8")
+    (source / "nested").mkdir()
+    (source / "nested/link.txt").symlink_to("../target.txt")
+    destination = tmp_path / "destination"
+
+    monkeypatch.setattr(
+        Path, "resolve",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Path.resolve forbidden")),
+    )
+
+    gate._copy_snapshot_tree(source, destination, {"entries": 0, "bytes": 0})
+
+    assert (destination / "nested/link.txt").is_symlink()
+    assert os.readlink(destination / "nested/link.txt") == "../target.txt"
+
+
+def test_staging_rejects_tool_bytes_changed_after_validation(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "backend", ".", "backend")
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    executable = Path(candidate["tools"]["node"]["backend"]["executable"])
+    marker = tmp_path / "unverified-tool-executed"
+    original_release_state_matches = gate.release_state_matches
+    mutated = False
+
+    def validate_then_mutate(*args, **kwargs):
+        nonlocal mutated
+        result = original_release_state_matches(*args, **kwargs)
+        if result and not mutated:
+            executable.write_text(f"#!/bin/sh\ntouch {marker}\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            mutated = True
+        return result
+
+    monkeypatch.setattr(gate, "release_state_matches", validate_then_mutate)
+    lane = gate.Lane("tool-race", "backend", ".", ("node", "--version"), 5.0)
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "snapshot"
+    assert not marker.exists()
+
+
+def test_snapshot_overlays_only_hash_bound_dirty_exception(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    repository = candidate["repositories"]["adminEsp"]
+    source = Path(repository["path"]) / "tracked.txt"
+    source.write_text("authorized dirty bytes", encoding="utf-8")
+    repository["dirtyExceptions"] = [{
+        "path": "tracked.txt",
+        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+    }]
+
+    stage = gate.stage_execution_candidate(candidate, ())
+    try:
+        staged = Path(stage.candidate["repositories"]["adminEsp"]["path"])
+        assert (staged / "tracked.txt").read_text(encoding="utf-8") == "authorized dirty bytes"
+    finally:
+        stage.cleanup()
+
+
+def test_snapshot_rejects_dirty_exception_hash_drift(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    repository = candidate["repositories"]["adminEsp"]
+    source = Path(repository["path"]) / "tracked.txt"
+    source.write_text("changed after authorization", encoding="utf-8")
+    repository["dirtyExceptions"] = [{"path": "tracked.txt", "sha256": "0" * 64}]
+
+    with pytest.raises(ValueError, match="descriptor mismatch"):
+        gate.stage_execution_candidate(candidate, ())
 
 
 def test_admin_browser_environment_is_only_candidate_bound_descriptor(candidate_file: Path) -> None:
@@ -467,7 +1901,7 @@ def test_lane_failure_stops_dependent_lanes(candidate_file: Path, tmp_path: Path
     assert not marker.exists()
 
 
-def test_identity_drift_before_next_lane_is_blocked(candidate_file: Path) -> None:
+def test_original_repository_drift_does_not_change_staged_lane(candidate_file: Path) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     tracked = Path(candidate["repositories"]["adminEsp"]["path"]) / "tracked.txt"
     result = gate.run_gate(
@@ -479,9 +1913,8 @@ def test_identity_drift_before_next_lane_is_blocked(candidate_file: Path) -> Non
         ),
     )
 
-    assert result["verdict"] == "BLOCKED"
-    assert result["failedLane"] == "drift"
-    assert [lane["name"] for lane in result["lanes"]] == ["drift"]
+    assert result["verdict"] == "PASS"
+    assert [lane["name"] for lane in result["lanes"]] == ["drift", "dependent"]
 
 
 def test_missing_required_capability_is_skipped_and_blocks(candidate_file: Path) -> None:
@@ -1111,11 +2544,15 @@ def test_child_environment_is_sanitized_and_path_shadow_is_ignored(
     (shadow / "python3").write_text("#!/bin/sh\nexit 91\n", encoding="utf-8")
     (shadow / "python3").chmod(0o755)
     code = (
-        "import os;"
-        "assert os.environ['HOME']=='/nonexistent';"
-        "assert os.environ['PATH']==%r;"
+        "import os;from pathlib import Path;"
+        f"assert os.environ['HOME']!={str(tmp_path)!r};"
+        "assert Path(os.environ['HOME']).is_dir();"
+        "assert os.access(os.environ['HOME'], os.W_OK);"
+        "assert Path(os.environ['TMPDIR']).is_dir();"
+        "assert Path(os.environ['XDG_CACHE_HOME']).is_dir();"
+        f"assert os.environ['PATH']=={gate.SECURE_PATH!r};"
         "assert 'TOP_SECRET' not in os.environ"
-    ) % gate.SECURE_PATH
+    )
 
     result = gate.run_gate(
         candidate_file,
@@ -1242,7 +2679,7 @@ def test_atomic_report_handles_partial_os_writes(
     assert json.loads(report.read_text(encoding="utf-8")) == result
 
 
-def test_last_lane_repository_drift_blocks_after_successful_subprocess(
+def test_last_lane_original_repository_drift_does_not_invalidate_snapshot(
     candidate_file: Path,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
@@ -1254,12 +2691,11 @@ def test_last_lane_repository_drift_blocks_after_successful_subprocess(
 
     result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
 
-    assert result["verdict"] == "BLOCKED"
-    assert result["failedLane"] == "last"
+    assert result["verdict"] == "PASS"
     assert result["lanes"][0]["exitCode"] == 0
 
 
-def test_final_revalidation_never_publishes_pass_report_after_lane_drift(
+def test_report_can_pass_when_only_original_repository_drifts_after_snapshot(
     candidate_file: Path, tmp_path: Path,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
@@ -1272,11 +2708,11 @@ def test_final_revalidation_never_publishes_pass_report_after_lane_drift(
 
     result = gate.run_gate(candidate_file, "quick", lanes=(lane,), report_path=report)
 
-    assert result["verdict"] == "BLOCKED"
-    assert json.loads(report.read_text(encoding="utf-8"))["verdict"] == "BLOCKED"
+    assert result["verdict"] == "PASS"
+    assert json.loads(report.read_text(encoding="utf-8"))["verdict"] == "PASS"
 
 
-def test_report_write_is_followed_by_release_state_revalidation(
+def test_report_write_does_not_revalidate_mutable_original_repository(
     candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
@@ -1297,12 +2733,12 @@ def test_report_write_is_followed_by_release_state_revalidation(
 
     result = gate.run_gate(candidate_file, "quick", lanes=(), report_path=report)
 
-    assert result["verdict"] == "BLOCKED"
-    assert writes == 2
-    assert json.loads(report.read_text(encoding="utf-8"))["verdict"] == "BLOCKED"
+    assert result["verdict"] == "PASS"
+    assert writes == 1
+    assert json.loads(report.read_text(encoding="utf-8"))["verdict"] == "PASS"
 
 
-def test_failed_corrective_report_write_removes_stale_pass(
+def test_original_repository_drift_does_not_require_corrective_report(
     candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
@@ -1324,9 +2760,8 @@ def test_failed_corrective_report_write_removes_stale_pass(
 
     result = gate.run_gate(candidate_file, "quick", lanes=(), report_path=report)
 
-    assert result["verdict"] == "BLOCKED"
-    assert result["failedLane"] == "report"
-    assert not report.exists()
+    assert result["verdict"] == "PASS"
+    assert report.exists()
 
 
 def test_failed_initial_report_write_removes_preexisting_stale_pass(
@@ -1533,6 +2968,7 @@ def test_selected_esp_test_drift_blocks_before_execution(candidate_file: Path, t
     _git(root, "add", ".")
     _git(root, "commit", "-m", "selected test")
     repository.update(_repository(root))
+    _refresh_image_reference(candidate, "adminEsp")
     candidate_file.write_text(json.dumps(candidate))
     selected.write_text("def test_drift(): pass\n")
     repository["dirtyExceptions"] = [{
@@ -1653,6 +3089,7 @@ def test_all_admin_test_dirty_exceptions_are_rejected(candidate_file: Path) -> N
     _git(root, "add", ".")
     _git(root, "commit", "-m", "add imported test fixture")
     repository.update(_repository(root))
+    _refresh_image_reference(candidate, "adminEsp")
     dependency.write_text("VALUE = 'dirty'\n", encoding="utf-8")
     repository["dirtyExceptions"] = [{
         "path": "main/tbot-server/tests/test_dependency.py",
@@ -1830,8 +3267,7 @@ def test_node_install_is_revalidated_after_lane_execution(
 
     result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
 
-    assert result["verdict"] == "BLOCKED"
-    assert result["failedLane"] == "backend-node"
+    assert result["verdict"] == "PASS"
 
 
 def test_node_digest_calls_scale_with_current_node_lanes_not_all_checkpoints(
@@ -1866,10 +3302,10 @@ def test_node_digest_calls_scale_with_current_node_lanes_not_all_checkpoints(
     result = gate.run_gate(candidate_file, "quick", lanes=lanes)
 
     assert result["verdict"] == "PASS"
-    assert calls == 11
+    assert calls == 5
 
 
-def test_install_mutation_between_lanes_blocks_before_next_relevant_lane(
+def test_original_install_mutation_between_lanes_blocks_fresh_snapshot(
     candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
@@ -1894,7 +3330,7 @@ def test_install_mutation_between_lanes_blocks_before_next_relevant_lane(
     result = gate.run_gate(candidate_file, "quick", lanes=lanes)
 
     assert result["verdict"] == "BLOCKED"
-    assert result["failedLane"] == "backend-node"
+    assert result["failedLane"] == "snapshot"
     assert not marker.exists()
 
 
@@ -2014,9 +3450,9 @@ def test_assignment_lane_identity_is_derived_only_from_candidate(candidate_file:
 
     assert environment["TBOT_BACKEND_WORKTREE"] == candidate["repositories"]["backend"]["path"]
     assert environment["TBOT_FIRMWARE_WORKTREE"] == candidate["repositories"]["firmware"]["path"]
-    assert environment["TBOT_LESSON_STUDIO_BACKEND_IMAGE"] == "local/backend:candidate"
+    assert environment["TBOT_LESSON_STUDIO_BACKEND_IMAGE"] == candidate["images"]["lessonStudioBackend"]["id"]
     assert environment["TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID"] == "sha256:" + "1" * 64
-    assert environment["TBOT_LESSON_STUDIO_WEB_IMAGE"] == "local/web:candidate"
+    assert environment["TBOT_LESSON_STUDIO_WEB_IMAGE"] == candidate["images"]["lessonStudioWeb"]["id"]
     assert environment["TBOT_LESSON_STUDIO_WEB_IMAGE_ID"] == "sha256:" + "2" * 64
     assert environment["LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME"] == "tbot-task4-unit"
 

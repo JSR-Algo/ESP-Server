@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import contextlib
 import hashlib
 import json
@@ -45,6 +46,8 @@ CONTRACT_IDENTITY = "courseCompanion.v2.contract.v1"
 MAX_CANDIDATE_BYTES = 1024 * 1024
 MAX_DIRTY_FILE_BYTES = 4 * 1024 * 1024
 MAX_BROWSER_EXECUTABLE_BYTES = 512 * 1024 * 1024
+MAX_FIRMWARE_ARTIFACT_BYTES = 128 * 1024 * 1024
+MAX_FIRMWARE_MANIFEST_BYTES = 1024 * 1024
 MAX_BROWSER_BUNDLE_DEPTH = 128
 MAX_GIT_OUTPUT_BYTES = 1024 * 1024
 GIT_TIMEOUT_SEC = 10.0
@@ -53,6 +56,11 @@ _GIT_CANDIDATES = (
     Path("/usr/bin/git"),
 )
 TRUSTED_GIT_EXECUTABLE = next((path for path in _GIT_CANDIDATES if path.is_file()), _GIT_CANDIDATES[-1])
+_DOCKER_CANDIDATES = (Path("/usr/local/bin/docker"), Path("/opt/homebrew/bin/docker"))
+TRUSTED_DOCKER_EXECUTABLE = next(
+    (path for path in _DOCKER_CANDIDATES if path.is_file()), _DOCKER_CANDIDATES[0],
+)
+CANONICAL_ESP_IDF_ROOT = Path("/Users/manhhodinh/esp/esp-idf")
 SECURE_ENV = {
     "PATH": "/usr/bin:/bin",
     "LANG": "C",
@@ -67,6 +75,30 @@ SECURE_ENV = {
 BROWSER_DESCRIPTOR_KEYS = {"version", "engine", "revision", "root", "executable", "treeDigest"}
 BROWSER_TREE_KEYS = {"schema", "sha256", "entryCount", "totalBytes"}
 BROWSER_TREE_SCHEMA = "sha256-path-mode-bytes-v1"
+IMAGE_KEYS = {"lessonStudioBackend", "lessonStudioWeb"}
+IMAGE_DESCRIPTOR_KEYS = {"reference", "id"}
+FIRMWARE_KEYS = {
+    "appPath", "appOffset", "appBytes", "appSha256", "elfSha256",
+    "partitionBytes", "freeBytes", "evidenceManifestPath", "evidenceManifestSha256",
+}
+DATABASE_KEYS = {"engineImage", "engineImageId", "migrationHead", "migrationHeadSha256"}
+TOOLS_KEYS = {"nodeInstalls", "robotPreviewBrowser", "node", "espIdf"}
+NODE_KEYS = {"backend", "adminManagerWeb"}
+NODE_DESCRIPTOR_KEYS = {
+    "version", "executable", "sha256", "packageRoot", "packageRootMode",
+    "packageTreeSha256", "npm", "npx",
+}
+NODE_ENTRYPOINT_KEYS = {"entrypoint", "sha256"}
+ESP_IDF_KEYS = {"version", "commit", "root", "versionFile", "versionFileSha256"}
+NODE_INSTALL_KEYS = {"version", "root", "packageLockSha256", "treeDigest"}
+NODE_TREE_KEYS = {"schema", "sha256", "entryCount", "totalBytes"}
+NODE_TREE_SCHEMA = "sha256-path-mode-bytes-symlink-v1"
+NODE_PACKAGE_TREE_SCHEMA = "sha256-root-mode-path-mode-bytes-v1"
+SECURE_NODE_PACKAGE_ROOT_MODES = {0o700, 0o755}
+FIRMWARE_MANIFEST_KEYS = {
+    "status", "profile", "board", "target", "sourceCommit", "createdAt", "app", "elf",
+    "partition", "reproducibility", "toolchain", "config", "tests", "safety",
+}
 
 
 @dataclass(frozen=True)
@@ -354,104 +386,243 @@ def secure_executable_descriptor(path: Path) -> tuple[dict[str, Any] | None, str
         os.close(parent_fd)
 
 
+def secure_regular_descriptor(
+    path: Path, max_bytes: int, *, include_content: bool = False,
+) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        if not path.is_absolute() or str(path) != str(path.resolve(strict=True)):
+            return None, "path"
+        parent_fd = _open_directory_secure(path.parent)
+    except OSError:
+        return None, "path"
+    file_fd: int | None = None
+    try:
+        file_fd = os.open(path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+        before = os.fstat(file_fd)
+        if (
+            not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+            or before.st_size < 0 or before.st_size > max_bytes
+        ):
+            return None, "path"
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(file_fd, min(1024 * 1024, remaining))
+            if not chunk:
+                return None, "changed"
+            digest.update(chunk)
+            if include_content:
+                chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(file_fd, 1):
+            return None, "changed"
+        after = os.fstat(file_fd)
+        current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        identity = (
+            before.st_dev, before.st_ino, before.st_mode, before.st_nlink,
+            before.st_size, before.st_mtime_ns, before.st_ctime_ns,
+        )
+        if identity != (
+            after.st_dev, after.st_ino, after.st_mode, after.st_nlink,
+            after.st_size, after.st_mtime_ns, after.st_ctime_ns,
+        ) or identity != (
+            current.st_dev, current.st_ino, current.st_mode, current.st_nlink,
+            current.st_size, current.st_mtime_ns, current.st_ctime_ns,
+        ):
+            return None, "changed"
+        descriptor: dict[str, Any] = {"sha256": digest.hexdigest(), "bytes": before.st_size}
+        if include_content:
+            descriptor["content"] = b"".join(chunks)
+        return descriptor, None
+    except OSError:
+        return None, "path"
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        os.close(parent_fd)
+
+
+def _docker_image_descriptor(reference: str) -> dict[str, Any] | None:
+    if (
+        not isinstance(reference, str) or not reference or len(reference) > 512
+        or any(character.isspace() or ord(character) < 32 for character in reference)
+    ):
+        return None
+    result = run_bounded_command(
+        [str(TRUSTED_DOCKER_EXECUTABLE), "image", "inspect", "--format", "{{json .}}", reference],
+        cwd=Path("/"), env=SECURE_ENV, timeout_sec=10.0, max_output_bytes=1024 * 1024,
+    )
+    if result.error or result.returncode != 0:
+        return None
+    try:
+        observed = strict_json_loads(result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(observed, dict):
+        return None
+    return observed
+
+
 def _digest_field(digest: Any, value: bytes) -> None:
     digest.update(len(value).to_bytes(8, "big"))
     digest.update(value)
 
 
+def _tree_metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
+        metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns,
+    )
+
+
+def _secure_browser_bundle_descriptor_fd(
+    root_fd: int, root_metadata: os.stat_result,
+) -> tuple[dict[str, Any] | None, str | None]:
+    digest = hashlib.sha256()
+    state = {"entryCount": 0, "totalBytes": 0}
+
+    def visit(directory_fd: int, relative_parent: Path, depth: int) -> bool:
+        if depth > MAX_BROWSER_BUNDLE_DEPTH:
+            return False
+        for name in sorted(entry.name for entry in os.scandir(directory_fd)):
+            relative = relative_parent / name
+            metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            state["entryCount"] += 1
+            if state["entryCount"] > 10_000:
+                return False
+            mode = stat.S_IMODE(metadata.st_mode)
+            if stat.S_ISDIR(metadata.st_mode):
+                child_fd = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=directory_fd,
+                )
+                try:
+                    if _tree_metadata_identity(os.fstat(child_fd)) != _tree_metadata_identity(metadata):
+                        return False
+                    _digest_field(digest, b"directory")
+                    _digest_field(digest, relative.as_posix().encode())
+                    _digest_field(digest, str(mode).encode())
+                    if not visit(child_fd, relative, depth + 1):
+                        return False
+                    if (
+                        _tree_metadata_identity(os.fstat(child_fd))
+                        != _tree_metadata_identity(metadata)
+                        or _tree_metadata_identity(
+                            os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                        ) != _tree_metadata_identity(metadata)
+                    ):
+                        return False
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+                state["totalBytes"] += metadata.st_size
+                if state["totalBytes"] > MAX_BROWSER_EXECUTABLE_BYTES:
+                    return False
+                file_fd = os.open(
+                    name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd,
+                )
+                try:
+                    identity = _tree_metadata_identity(metadata)
+                    if _tree_metadata_identity(os.fstat(file_fd)) != identity:
+                        return False
+                    _digest_field(digest, b"regular")
+                    _digest_field(digest, relative.as_posix().encode())
+                    _digest_field(digest, str(mode).encode())
+                    _digest_field(digest, str(metadata.st_size).encode())
+                    remaining = metadata.st_size
+                    while remaining:
+                        chunk = os.read(file_fd, min(1024 * 1024, remaining))
+                        if not chunk:
+                            return False
+                        digest.update(chunk)
+                        remaining -= len(chunk)
+                    if (
+                        _tree_metadata_identity(os.fstat(file_fd)) != identity
+                        or _tree_metadata_identity(
+                            os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                        ) != identity
+                    ):
+                        return False
+                finally:
+                    os.close(file_fd)
+            else:
+                return False
+        return True
+
+    if not visit(root_fd, Path(), 0):
+        return None, "tree"
+    if _tree_metadata_identity(os.fstat(root_fd)) != _tree_metadata_identity(root_metadata):
+        return None, "changed"
+    return {
+        "schema": BROWSER_TREE_SCHEMA, "sha256": digest.hexdigest(),
+        "entryCount": state["entryCount"], "totalBytes": state["totalBytes"],
+    }, None
+
+
 def secure_browser_bundle_descriptor(root: Path) -> tuple[dict[str, Any] | None, str | None]:
+    root_fd = None
     try:
         if not root.is_absolute() or str(root) != str(root.resolve(strict=True)) or root.is_symlink():
             return None, "path"
         root_before = root.lstat()
         if not stat.S_ISDIR(root_before.st_mode):
             return None, "path"
-        digest = hashlib.sha256()
-        state = {"entryCount": 0, "totalBytes": 0}
-
-        def visit(directory: Path, relative_parent: Path, depth: int) -> bool:
-            if depth > MAX_BROWSER_BUNDLE_DEPTH:
-                return False
-            for entry in sorted(os.scandir(directory), key=lambda item: item.name):
-                relative = relative_parent / entry.name
-                metadata = entry.stat(follow_symlinks=False)
-                state["entryCount"] += 1
-                if state["entryCount"] > 10_000:
-                    return False
-                mode = stat.S_IMODE(metadata.st_mode)
-                if stat.S_ISDIR(metadata.st_mode):
-                    _digest_field(digest, b"directory")
-                    _digest_field(digest, relative.as_posix().encode())
-                    _digest_field(digest, str(mode).encode())
-                    if not visit(Path(entry.path), relative, depth + 1):
-                        return False
-                    after = os.stat(entry.path, follow_symlinks=False)
-                    if (
-                        metadata.st_dev, metadata.st_ino, metadata.st_mode,
-                        metadata.st_nlink, metadata.st_mtime_ns, metadata.st_ctime_ns,
-                    ) != (
-                        after.st_dev, after.st_ino, after.st_mode,
-                        after.st_nlink, after.st_mtime_ns, after.st_ctime_ns,
-                    ):
-                        return False
-                elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
-                    state["totalBytes"] += metadata.st_size
-                    if state["totalBytes"] > MAX_BROWSER_EXECUTABLE_BYTES:
-                        return False
-                    file_fd = os.open(entry.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-                    try:
-                        opened = os.fstat(file_fd)
-                        identity = (
-                            metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
-                            metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns,
-                        )
-                        if identity != (
-                            opened.st_dev, opened.st_ino, opened.st_mode, opened.st_nlink,
-                            opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns,
-                        ):
-                            return False
-                        _digest_field(digest, b"regular")
-                        _digest_field(digest, relative.as_posix().encode())
-                        _digest_field(digest, str(mode).encode())
-                        _digest_field(digest, str(metadata.st_size).encode())
-                        remaining = metadata.st_size
-                        while remaining:
-                            chunk = os.read(file_fd, min(1024 * 1024, remaining))
-                            if not chunk:
-                                return False
-                            digest.update(chunk)
-                            remaining -= len(chunk)
-                        after = os.fstat(file_fd)
-                        named = os.stat(entry.path, follow_symlinks=False)
-                        if identity != (
-                            after.st_dev, after.st_ino, after.st_mode, after.st_nlink,
-                            after.st_size, after.st_mtime_ns, after.st_ctime_ns,
-                        ) or identity != (
-                            named.st_dev, named.st_ino, named.st_mode, named.st_nlink,
-                            named.st_size, named.st_mtime_ns, named.st_ctime_ns,
-                        ):
-                            return False
-                    finally:
-                        os.close(file_fd)
-                else:
-                    return False
-            return True
-
-        if not visit(root, Path(), 0):
-            return None, "tree"
-        root_after = root.lstat()
-        if (root_before.st_dev, root_before.st_ino, root_before.st_mtime_ns) != (
-            root_after.st_dev, root_after.st_ino, root_after.st_mtime_ns,
-        ):
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+        if _tree_metadata_identity(os.fstat(root_fd)) != _tree_metadata_identity(root_before):
             return None, "changed"
-        return {
-            "schema": BROWSER_TREE_SCHEMA, "sha256": digest.hexdigest(),
-            "entryCount": state["entryCount"], "totalBytes": state["totalBytes"],
-        }, None
+        descriptor, error = _secure_browser_bundle_descriptor_fd(root_fd, root_before)
+        if error is not None:
+            return descriptor, error
+        if _tree_metadata_identity(root.lstat()) != _tree_metadata_identity(root_before):
+            return None, "changed"
+        return descriptor, None
     except RecursionError:
         return None, "tree"
     except (OSError, UnicodeEncodeError):
         return None, "path"
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
+
+
+def secure_node_package_tree_descriptor(root: Path) -> dict[str, Any] | None:
+    root_fd = None
+    try:
+        metadata = root.lstat()
+    except (OSError, UnicodeEncodeError):
+        return None
+    root_mode = stat.S_IMODE(metadata.st_mode)
+    if (
+        not stat.S_ISDIR(metadata.st_mode) or root.is_symlink()
+        or root_mode not in SECURE_NODE_PACKAGE_ROOT_MODES
+    ):
+        return None
+    try:
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+        if _tree_metadata_identity(os.fstat(root_fd)) != _tree_metadata_identity(metadata):
+            return None
+        descriptor, error = _secure_browser_bundle_descriptor_fd(root_fd, metadata)
+        if error is not None or descriptor is None:
+            return None
+        final_metadata = root.lstat()
+    except (OSError, UnicodeEncodeError):
+        return None
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
+    if _tree_metadata_identity(final_metadata) != _tree_metadata_identity(metadata):
+        return None
+    digest = hashlib.sha256()
+    _digest_field(digest, NODE_PACKAGE_TREE_SCHEMA.encode("ascii"))
+    _digest_field(digest, str(root_mode).encode("ascii"))
+    _digest_field(digest, descriptor["sha256"].encode("ascii"))
+    return {
+        **descriptor,
+        "schema": NODE_PACKAGE_TREE_SCHEMA,
+        "sha256": digest.hexdigest(),
+        "rootMode": root_mode,
+    }
 
 
 def _validate_robot_preview_browser(value: Any, reasons: set[str], *, verify_identity: bool) -> None:
@@ -597,11 +768,445 @@ def _parse_rfc3339_utc(value: Any) -> datetime | None:
         return None
 
 
+def _validate_images(
+    value: Any, repositories: dict[str, Any], reasons: set[str], *, verify_identity: bool,
+    verify_provenance: bool,
+) -> None:
+    if not isinstance(value, dict) or set(value) != IMAGE_KEYS:
+        reasons.add("images.keys")
+        value = value if isinstance(value, dict) else {}
+    for name in sorted(IMAGE_KEYS):
+        descriptor = value.get(name)
+        prefix = f"images.{name}"
+        if not isinstance(descriptor, dict) or set(descriptor) != IMAGE_DESCRIPTOR_KEYS:
+            reasons.add(f"{prefix}.keys")
+            continue
+        reference = descriptor.get("reference")
+        image_id = descriptor.get("id")
+        repository_name = "backend" if name == "lessonStudioBackend" else "adminEsp"
+        repository = repositories.get(repository_name) if isinstance(repositories, dict) else None
+        expected_prefix = "local/tbot-backend" if name == "lessonStudioBackend" else "local/tbot-server-web"
+        expected_reference = (
+            f"{expected_prefix}:course-mode-physical-tft-{repository.get('sha')}"
+            if isinstance(repository, dict) else None
+        )
+        if not isinstance(reference, str) or not reference:
+            reasons.add(f"{prefix}.reference")
+        elif verify_provenance and reference != expected_reference:
+            reasons.add(f"{prefix}.reference")
+        if not isinstance(image_id, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None:
+            reasons.add(f"{prefix}.id")
+        elif verify_identity and verify_provenance:
+            observed = _docker_image_descriptor(reference)
+            labels = (
+                observed.get("Config", {}).get("Labels")
+                if isinstance(observed, dict) and isinstance(observed.get("Config"), dict) else None
+            )
+            if not isinstance(observed, dict) or observed.get("Id") != image_id:
+                reasons.add(f"{prefix}.id")
+            if (
+                not isinstance(labels, dict) or not isinstance(repository, dict)
+                or labels.get("org.opencontainers.image.revision") != repository.get("sha")
+                or labels.get("org.opencontainers.image.source") != repository.get("remoteUrl")
+            ):
+                reasons.add(f"{prefix}.provenance")
+
+
+def _firmware_manifest_schema_valid(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != FIRMWARE_MANIFEST_KEYS:
+        return False
+    exact = {
+        "app": {"file", "offset", "bytes", "sha256"},
+        "elf": {"file", "bytes", "sha256"},
+        "partition": {"bytes", "freeBytes", "freePercent"},
+        "reproducibility": {"appByteIdentical", "elfByteIdentical", "independentCleanBuilds", "ccacheEnabled"},
+        "toolchain": {"espIdf", "espIdfCommit", "python", "compiler", "cmake", "ninja"},
+        "config": {"sdkconfigSha256", "sdkconfigDefaultsLocalSha256", "dependenciesLockSha256",
+                   "appReproducibleBuild", "productionConfigAudit", "productionArtifactAudit"},
+        "tests": {"projectSourceGate", "firmwareVersionAndCourseGates"},
+        "safety": {"flashed", "serialAccessed", "hilRun", "physicalDeviceAccessed"},
+    }
+    return all(isinstance(value.get(name), dict) and set(value[name]) == keys for name, keys in exact.items())
+
+
+def _validate_firmware(
+    value: Any, repositories: dict[str, Any], tools: dict[str, Any], reasons: set[str],
+    *, verify_identity: bool, candidate_created: datetime | None, candidate_expires: datetime | None,
+) -> None:
+    if not isinstance(value, dict) or set(value) != FIRMWARE_KEYS:
+        reasons.add("firmware.keys")
+        return
+    for field in ("appSha256", "elfSha256", "evidenceManifestSha256"):
+        if not isinstance(value.get(field), str) or SHA256_RE.fullmatch(value[field]) is None:
+            reasons.add(f"firmware.{field}")
+    for field in ("appBytes", "partitionBytes", "freeBytes"):
+        if type(value.get(field)) is not int or value[field] < 0:
+            reasons.add(f"firmware.{field}")
+    if value.get("appOffset") != "0x20000":
+        reasons.add("firmware.appOffset")
+    if (
+        type(value.get("appBytes")) is int and type(value.get("partitionBytes")) is int
+        and type(value.get("freeBytes")) is int
+        and value["partitionBytes"] - value["appBytes"] != value["freeBytes"]
+    ):
+        reasons.add("firmware.freeBytes")
+    for field in ("appPath", "evidenceManifestPath"):
+        if not isinstance(value.get(field), str) or not Path(value[field]).is_absolute():
+            reasons.add(f"firmware.{field}")
+    if not verify_identity or any(reason.startswith("firmware.") for reason in reasons):
+        return
+    manifest_descriptor, manifest_error = secure_regular_descriptor(
+        Path(value["evidenceManifestPath"]), MAX_FIRMWARE_MANIFEST_BYTES, include_content=True,
+    )
+    if manifest_error or manifest_descriptor is None or manifest_descriptor["sha256"] != value["evidenceManifestSha256"]:
+        reasons.add("firmware.evidenceManifestSha256")
+        return
+    try:
+        evidence = strict_json_loads(manifest_descriptor["content"])
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        reasons.add("firmware.evidenceManifestPath")
+        return
+    if not _firmware_manifest_schema_valid(evidence):
+        reasons.add("firmware.evidenceManifestPath")
+        return
+    app_path = Path(value["appPath"])
+    manifest_path = Path(value["evidenceManifestPath"])
+    app = evidence["app"]
+    elf = evidence["elf"]
+    partition = evidence["partition"]
+    safe_names = all(
+        isinstance(item.get("file"), str) and Path(item["file"]).name == item["file"]
+        for item in (app, elf)
+    )
+    if not safe_names or manifest_path.parent / app.get("file", "") != app_path:
+        reasons.add("firmware.appPath")
+        return
+    app_descriptor, app_error = secure_regular_descriptor(app_path, MAX_FIRMWARE_ARTIFACT_BYTES)
+    elf_descriptor, elf_error = secure_regular_descriptor(
+        manifest_path.parent / elf["file"], MAX_FIRMWARE_ARTIFACT_BYTES,
+    )
+    if app_error or app_descriptor is None:
+        reasons.add("firmware.appPath")
+    else:
+        if app_descriptor["bytes"] != value["appBytes"] or app.get("bytes") != value["appBytes"]:
+            reasons.add("firmware.appBytes")
+        if app_descriptor["sha256"] != value["appSha256"] or app.get("sha256") != value["appSha256"]:
+            reasons.add("firmware.appSha256")
+    if elf_error or elf_descriptor is None or elf_descriptor["sha256"] != value["elfSha256"] or elf.get("sha256") != value["elfSha256"] or elf_descriptor["bytes"] != elf.get("bytes"):
+        reasons.add("firmware.elfSha256")
+    firmware_repository = repositories.get("firmware") if isinstance(repositories, dict) else None
+    if not isinstance(firmware_repository, dict) or evidence.get("sourceCommit") != firmware_repository.get("sha"):
+        reasons.add("firmware.sourceCommit")
+    if app.get("offset") != value["appOffset"]:
+        reasons.add("firmware.appOffset")
+    if partition.get("bytes") != value["partitionBytes"]:
+        reasons.add("firmware.partitionBytes")
+    if partition.get("freeBytes") != value["freeBytes"]:
+        reasons.add("firmware.freeBytes")
+    esp_idf = tools.get("espIdf")
+    toolchain = evidence["toolchain"]
+    if not isinstance(esp_idf, dict) or toolchain.get("espIdf") != esp_idf.get("version"):
+        reasons.add("tools.espIdf.version")
+    if (
+        not isinstance(toolchain.get("espIdfCommit"), str)
+        or SHA_RE.fullmatch(toolchain["espIdfCommit"]) is None
+        or not isinstance(esp_idf, dict)
+        or toolchain["espIdfCommit"] != esp_idf.get("commit")
+    ):
+        reasons.add("tools.espIdf.commit")
+    reproducibility = evidence["reproducibility"]
+    config = evidence["config"]
+    safety = evidence["safety"]
+    evidence_created = _parse_rfc3339_utc(evidence.get("createdAt"))
+    free_percent = partition.get("freePercent")
+    expected_free_percent = (
+        round(value["freeBytes"] / value["partitionBytes"] * 100, 6)
+        if type(value.get("partitionBytes")) is int and value["partitionBytes"] > 0 else None
+    )
+    if (
+        evidence.get("status") != "PASS" or evidence.get("profile") != "production"
+        or evidence.get("board") != "LCDWiki ES3C35P" or evidence.get("target") != "esp32s3"
+        or evidence_created is None
+        or (
+            candidate_created is not None and candidate_expires is not None
+            and not candidate_created <= evidence_created < candidate_expires
+        )
+        or not isinstance(free_percent, (int, float)) or type(free_percent) is bool
+        or expected_free_percent is None or abs(float(free_percent) - expected_free_percent) > 0.000001
+        or reproducibility.get("appByteIdentical") is not True
+        or reproducibility.get("elfByteIdentical") is not True
+        or type(reproducibility.get("independentCleanBuilds")) is not int
+        or reproducibility["independentCleanBuilds"] < 2
+        or reproducibility.get("ccacheEnabled") is not False
+        or config.get("appReproducibleBuild") is not True
+        or config.get("productionConfigAudit") != "PASS"
+        or config.get("productionArtifactAudit") != "PASS"
+        or re.fullmatch(r"[1-9][0-9]* passed(?:, [0-9]+ skipped.*)?", evidence["tests"].get("projectSourceGate", "")) is None
+        or re.fullmatch(r"[1-9][0-9]* passed", evidence["tests"].get("firmwareVersionAndCourseGates", "")) is None
+        or any(safety.get(field) is not False for field in safety)
+    ):
+        reasons.add("firmware.evidenceManifestPath")
+
+
+def _validate_database(
+    value: Any, backend_root: Path | None, backend: Any, reasons: set[str], *, verify_identity: bool,
+) -> None:
+    if not isinstance(value, dict) or set(value) != DATABASE_KEYS:
+        reasons.add("database.keys")
+        return
+    image = value.get("engineImage")
+    image_id = value.get("engineImageId")
+    head = value.get("migrationHead")
+    digest = value.get("migrationHeadSha256")
+    if not isinstance(image, str) or not image:
+        reasons.add("database.engineImage")
+    if not isinstance(image_id, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None:
+        reasons.add("database.engineImageId")
+    if not isinstance(head, str) or Path(head).name != head or not head.endswith(".sql"):
+        reasons.add("database.migrationHead")
+    if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
+        reasons.add("database.migrationHeadSha256")
+    if not verify_identity:
+        return
+    if image != "postgres:16-alpine":
+        reasons.add("database.engineImage")
+    observed_image = _docker_image_descriptor(image) if isinstance(image, str) else None
+    if isinstance(image_id, str) and (
+        not isinstance(observed_image, dict) or observed_image.get("Id") != image_id
+    ):
+        reasons.add("database.engineImageId")
+    if backend_root is None or not isinstance(head, str) or Path(head).name != head:
+        reasons.add("database.migrationHead")
+        return
+    relative = f"src/database/migrations/{head}"
+    try:
+        committed_names = _git(
+            backend_root, "ls-tree", "--name-only", f"{backend['sha']}:src/database/migrations",
+        ).splitlines()
+        runtime_names = sorted(entry.name for entry in os.scandir(backend_root / "src/database/migrations"))
+    except (KeyError, OSError, RuntimeError, TypeError):
+        committed_names = []
+        runtime_names = []
+    committed_up = sorted(
+        name for name in committed_names if name.endswith(".sql") and not name.endswith(".down.sql")
+    )
+    runtime_up = sorted(
+        name for name in runtime_names if name.endswith(".sql") and not name.endswith(".down.sql")
+    )
+    if not committed_up or not runtime_up or head != committed_up[-1] or head != runtime_up[-1]:
+        reasons.add("database.migrationHead")
+    runtime, error = secure_regular_descriptor(backend_root / relative, MAX_DIRTY_FILE_BYTES)
+    try:
+        committed = _git(backend_root, "show", f"{backend['sha']}:{relative}").encode("utf-8")
+        committed_digest = hashlib.sha256(committed).hexdigest()
+    except (KeyError, RuntimeError, TypeError, UnicodeEncodeError):
+        committed_digest = None
+    if error or runtime is None or runtime["sha256"] != digest or committed_digest != digest:
+        reasons.add("database.migrationHeadSha256")
+
+
+def _validate_node_tools(value: Any, reasons: set[str], *, verify_identity: bool) -> None:
+    if not isinstance(value, dict) or set(value) != NODE_KEYS:
+        reasons.add("tools.node.keys")
+        return
+    for key in sorted(NODE_KEYS):
+        descriptor = value.get(key)
+        prefix = f"tools.node.{key}"
+        if not isinstance(descriptor, dict) or set(descriptor) != NODE_DESCRIPTOR_KEYS:
+            reasons.add(f"{prefix}.keys")
+            continue
+        version = descriptor.get("version")
+        executable = descriptor.get("executable")
+        digest = descriptor.get("sha256")
+        package_root = descriptor.get("packageRoot")
+        package_root_mode = descriptor.get("packageRootMode")
+        package_tree_sha256 = descriptor.get("packageTreeSha256")
+        if not isinstance(version, str) or re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+            reasons.add(f"{prefix}.version")
+        if not isinstance(executable, str) or not Path(executable).is_absolute():
+            reasons.add(f"{prefix}.executable")
+        elif Path(executable).name != "node" or Path(executable).parent.name != "bin":
+            reasons.add(f"{prefix}.executable")
+        if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
+            reasons.add(f"{prefix}.sha256")
+        expected_package_root = (
+            Path(executable).parent.parent / "lib/node_modules/npm"
+            if isinstance(executable, str) and Path(executable).is_absolute() else None
+        )
+        if (
+            not isinstance(package_root, str) or not Path(package_root).is_absolute()
+            or expected_package_root is None or Path(package_root) != expected_package_root
+        ):
+            reasons.add(f"{prefix}.packageRoot")
+        if (
+            type(package_root_mode) is not int
+            or package_root_mode not in SECURE_NODE_PACKAGE_ROOT_MODES
+        ):
+            reasons.add(f"{prefix}.packageRootMode")
+        if (
+            not isinstance(package_tree_sha256, str)
+            or SHA256_RE.fullmatch(package_tree_sha256) is None
+        ):
+            reasons.add(f"{prefix}.packageTreeSha256")
+        entrypoints: list[tuple[str, str, str]] = []
+        for tool in ("npm", "npx"):
+            tool_descriptor = descriptor.get(tool)
+            tool_prefix = f"{prefix}.{tool}"
+            if not isinstance(tool_descriptor, dict) or set(tool_descriptor) != NODE_ENTRYPOINT_KEYS:
+                reasons.add(f"{tool_prefix}.keys")
+                continue
+            entrypoint = tool_descriptor.get("entrypoint")
+            expected = tool_descriptor.get("sha256")
+            if not isinstance(entrypoint, str) or not Path(entrypoint).is_absolute():
+                reasons.add(f"{tool_prefix}.entrypoint")
+            elif isinstance(executable, str) and Path(executable).is_absolute():
+                expected_entrypoint = expected_package_root / f"bin/{tool}-cli.js"
+                if Path(entrypoint) != expected_entrypoint:
+                    reasons.add(f"{tool_prefix}.entrypoint")
+            if not isinstance(expected, str) or SHA256_RE.fullmatch(expected) is None:
+                reasons.add(f"{tool_prefix}.sha256")
+            if isinstance(entrypoint, str) and isinstance(expected, str):
+                entrypoints.append((tool_prefix, entrypoint, expected))
+        if not verify_identity or any(reason.startswith(prefix) for reason in reasons):
+            continue
+        observed, error = secure_executable_descriptor(Path(executable))
+        if error or observed is None:
+            reasons.add(f"{prefix}.executable")
+            continue
+        if observed["sha256"] != digest:
+            reasons.add(f"{prefix}.sha256")
+        package_tree = (
+            secure_node_package_tree_descriptor(Path(package_root))
+            if isinstance(package_root, str) else None
+        )
+        if (
+            package_tree is None
+            or package_tree["sha256"] != package_tree_sha256
+            or package_tree["rootMode"] != package_root_mode
+        ):
+            reasons.add(f"{prefix}.packageTreeSha256")
+            if package_tree is not None and package_tree["rootMode"] != package_root_mode:
+                reasons.add(f"{prefix}.packageRootMode")
+        result = run_bounded_command(
+            [executable, "--version"], cwd=Path("/"), env=SECURE_ENV,
+            timeout_sec=5.0, max_output_bytes=4096,
+        )
+        if result.error or result.returncode != 0 or result.stdout.strip() != version:
+            reasons.add(f"{prefix}.version")
+        for tool_prefix, entrypoint, expected in entrypoints:
+            observed_entrypoint, entrypoint_error = secure_regular_descriptor(
+                Path(entrypoint), MAX_DIRTY_FILE_BYTES,
+            )
+            if entrypoint_error or observed_entrypoint is None:
+                reasons.add(f"{tool_prefix}.entrypoint")
+            elif observed_entrypoint["sha256"] != expected:
+                reasons.add(f"{tool_prefix}.sha256")
+
+
+def _validate_esp_idf(value: Any, reasons: set[str], *, verify_identity: bool) -> None:
+    if not isinstance(value, dict) or set(value) != ESP_IDF_KEYS:
+        reasons.add("tools.espIdf.keys")
+        return
+    version = value.get("version")
+    commit = value.get("commit")
+    root = value.get("root")
+    relative = value.get("versionFile")
+    digest = value.get("versionFileSha256")
+    if not isinstance(version, str) or re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+        reasons.add("tools.espIdf.version")
+    if not isinstance(commit, str) or SHA_RE.fullmatch(commit) is None:
+        reasons.add("tools.espIdf.commit")
+    if not isinstance(root, str) or Path(root) != CANONICAL_ESP_IDF_ROOT:
+        reasons.add("tools.espIdf.root")
+    if relative != "tools/cmake/version.cmake":
+        reasons.add("tools.espIdf.versionFile")
+    if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
+        reasons.add("tools.espIdf.versionFileSha256")
+    if not verify_identity or any(reason.startswith("tools.espIdf.") for reason in reasons):
+        return
+    try:
+        checkout = Path(root)
+        observed_commit = _git(checkout, "rev-parse", "--verify", "HEAD^{commit}").strip()
+        dirty = _dirty_paths(checkout)
+    except (RuntimeError, TypeError, OSError):
+        reasons.add("tools.espIdf.identity")
+        return
+    observed, error = secure_regular_descriptor(checkout / relative, MAX_DIRTY_FILE_BYTES, include_content=True)
+    if error or observed is None or observed["sha256"] != digest or observed_commit != commit or dirty:
+        reasons.add("tools.espIdf.identity")
+        return
+    text = observed["content"].decode("utf-8", errors="strict")
+    parts = []
+    for name in ("MAJOR", "MINOR", "PATCH"):
+        match = re.search(rf"set\(IDF_VERSION_{name} ([0-9]+)\)", text)
+        if match is None:
+            reasons.add("tools.espIdf.identity")
+            return
+        parts.append(match.group(1))
+    if version != f"v{'.'.join(parts)}":
+        reasons.add("tools.espIdf.version")
+
+
+def upgrade_candidate_schema(
+    candidate: dict[str, Any], *, node_executables: dict[str, str], esp_idf_root: str,
+) -> dict[str, Any]:
+    upgraded = copy.deepcopy(candidate)
+    app_path = Path(upgraded["firmware"]["appPath"])
+    evidence_path = app_path.parent / "manifest.json"
+    evidence, evidence_error = secure_regular_descriptor(evidence_path, MAX_FIRMWARE_MANIFEST_BYTES)
+    if evidence_error or evidence is None:
+        raise ValueError("candidate schema upgrade failed")
+    upgraded["firmware"]["evidenceManifestPath"] = str(evidence_path)
+    upgraded["firmware"]["evidenceManifestSha256"] = evidence["sha256"]
+    node = {}
+    for key in sorted(NODE_KEYS):
+        executable = Path(node_executables[key])
+        observed, error = secure_executable_descriptor(executable)
+        if error or observed is None:
+            raise ValueError("candidate schema upgrade failed")
+        descriptor: dict[str, Any] = {
+            "version": candidate["tools"]["node"][key],
+            "executable": str(executable), "sha256": observed["sha256"],
+        }
+        package_root = executable.parent.parent / "lib/node_modules/npm"
+        package_tree = secure_node_package_tree_descriptor(package_root)
+        if package_tree is None:
+            raise ValueError("candidate schema upgrade failed")
+        descriptor["packageRoot"] = str(package_root)
+        descriptor["packageRootMode"] = package_tree["rootMode"]
+        descriptor["packageTreeSha256"] = package_tree["sha256"]
+        for tool in ("npm", "npx"):
+            entrypoint = executable.parent.parent / f"lib/node_modules/npm/bin/{tool}-cli.js"
+            entrypoint_observed, entrypoint_error = secure_regular_descriptor(
+                entrypoint, MAX_DIRTY_FILE_BYTES,
+            )
+            if entrypoint_error or entrypoint_observed is None:
+                raise ValueError("candidate schema upgrade failed")
+            descriptor[tool] = {
+                "entrypoint": str(entrypoint), "sha256": entrypoint_observed["sha256"],
+            }
+        node[key] = descriptor
+    upgraded["tools"]["node"] = node
+    root = Path(esp_idf_root)
+    version_file = root / "tools/cmake/version.cmake"
+    version_observed, version_error = secure_regular_descriptor(version_file, MAX_DIRTY_FILE_BYTES)
+    if version_error or version_observed is None:
+        raise ValueError("candidate schema upgrade failed")
+    upgraded["tools"]["espIdf"] = {
+        "version": candidate["tools"]["espIdf"],
+        "commit": _git(root, "rev-parse", "--verify", "HEAD^{commit}").strip(),
+        "root": str(root), "versionFile": "tools/cmake/version.cmake",
+        "versionFileSha256": version_observed["sha256"],
+    }
+    return upgraded
+
+
 def validate_candidate(
     candidate: Any, *, now: datetime | None = None, verify_external_tools: bool = True,
 ) -> list[str]:
     """Return sorted, stable and privacy-safe validation reason codes."""
     reasons: set[str] = set()
+    validation_now = now or datetime.now(timezone.utc)
     if not isinstance(candidate, dict):
         return ["candidate.type"]
     if set(candidate) != REQUIRED_KEYS:
@@ -617,16 +1222,32 @@ def validate_candidate(
     if created is not None and expires is not None:
         if created >= expires:
             reasons.add("timestamps.order")
-        elif expires <= (now or datetime.now(timezone.utc)):
+        elif expires <= validation_now:
             reasons.add("expiresAt.expired")
-    for field in ("images", "firmware", "database", "tools"):
-        if not isinstance(candidate.get(field), dict):
-            reasons.add(field)
     tools = candidate.get("tools")
     if isinstance(tools, dict):
+        if set(tools) != TOOLS_KEYS:
+            reasons.add("tools.keys")
         _validate_robot_preview_browser(
             tools.get("robotPreviewBrowser"), reasons, verify_identity=verify_external_tools,
         )
+        _validate_node_tools(tools.get("node"), reasons, verify_identity=verify_external_tools)
+        _validate_esp_idf(
+            tools.get("espIdf"), reasons, verify_identity=False,
+        )
+        installs = tools.get("nodeInstalls")
+        if not isinstance(installs, dict) or not set(installs).issubset(NODE_KEYS):
+            reasons.add("tools.nodeInstalls.keys")
+        else:
+            for key, metadata in installs.items():
+                if not isinstance(metadata, dict) or set(metadata) != NODE_INSTALL_KEYS:
+                    reasons.add(f"tools.nodeInstalls.{key}.keys")
+                    continue
+                tree = metadata.get("treeDigest")
+                if not isinstance(tree, dict) or set(tree) != NODE_TREE_KEYS or tree.get("schema") != NODE_TREE_SCHEMA:
+                    reasons.add(f"tools.nodeInstalls.{key}.treeDigest")
+    else:
+        reasons.add("tools")
     evidence_root = candidate.get("evidenceRoot")
     if not isinstance(evidence_root, str) or not Path(evidence_root).is_absolute():
         reasons.add("evidenceRoot")
@@ -648,6 +1269,43 @@ def validate_candidate(
         name: _validate_repository(name, repositories.get(name), reasons)
         for name in sorted(REPOSITORIES)
     }
+    if isinstance(tools, dict):
+        _validate_esp_idf(
+            tools.get("espIdf"), reasons,
+            verify_identity=(verify_external_tools and not any(reason.endswith(".git") for reason in reasons)),
+        )
+    for name, root in repository_roots.items():
+        prefix = f"repositories.{name}."
+        if root is not None and not any(reason.startswith(prefix) for reason in reasons):
+            value = repositories[name]
+            if not _repository_matches_candidate(root, value):
+                reasons.add(f"repositories.{name}.changed")
+    _validate_images(
+        candidate.get("images"), repositories, reasons, verify_identity=verify_external_tools,
+        verify_provenance=not any(reason.startswith("repositories.") for reason in reasons),
+    )
+    _validate_firmware(
+        candidate.get("firmware"), repositories, tools if isinstance(tools, dict) else {}, reasons,
+        verify_identity=(
+            verify_external_tools
+            and not any(reason.startswith("repositories.firmware.") for reason in reasons)
+        ),
+        candidate_created=(
+            created if created is not None and expires is not None
+            and created < expires and expires > validation_now else None
+        ),
+        candidate_expires=(
+            expires if created is not None and expires is not None
+            and created < expires and expires > validation_now else None
+        ),
+    )
+    _validate_database(
+        candidate.get("database"), repository_roots.get("backend"), repositories.get("backend"),
+        reasons, verify_identity=(
+            verify_external_tools
+            and not any(reason.startswith("repositories.backend.") for reason in reasons)
+        ),
+    )
 
     curriculum = candidate.get("curriculum")
     if not isinstance(curriculum, dict) or set(curriculum) != CURRICULUM_KEYS:
@@ -686,8 +1344,7 @@ def validate_candidate(
     for name, root in repository_roots.items():
         prefix = f"repositories.{name}."
         if root is not None and not any(reason.startswith(prefix) for reason in reasons):
-            value = repositories[name]
-            if not _repository_matches_candidate(root, value):
+            if not _repository_matches_candidate(root, repositories[name]):
                 reasons.add(f"repositories.{name}.changed")
     return sorted(reasons)
 
