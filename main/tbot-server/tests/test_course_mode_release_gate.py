@@ -214,6 +214,14 @@ def _commit_then_dirty(candidate: dict, repository_name: str, relative: str) -> 
     _git(root, "add", relative)
     _git(root, "commit", "-m", f"add {Path(relative).name}")
     repository.update(_repository(root))
+    if repository_name == "firmware":
+        evidence_path = Path(candidate["firmware"]["evidenceManifestPath"])
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["sourceCommit"] = repository["sha"]
+        evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+        candidate["firmware"]["evidenceManifestSha256"] = hashlib.sha256(
+            evidence_path.read_bytes(),
+        ).hexdigest()
     path.write_text("dirty runtime bytes\n", encoding="utf-8")
     repository["dirtyExceptions"] = [{
         "path": relative,
@@ -256,7 +264,7 @@ def _add_node_install(candidate: dict, repository_name: str, relative_cwd: str, 
 
 
 @pytest.fixture
-def candidate_file(tmp_path: Path) -> Path:
+def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     repositories = {}
     for name in ("backend", "adminEsp", "firmware"):
         root = tmp_path / name
@@ -270,6 +278,9 @@ def candidate_file(tmp_path: Path) -> Path:
             curriculum = root / "src/lessons/course-mode/curriculum-course-mode.ts"
             curriculum.parent.mkdir(parents=True)
             curriculum.write_text("export const curriculum = 26;\n", encoding="utf-8")
+            migration = root / "src/database/migrations/127_shared_visual_layered_cinematic_compatibility.sql"
+            migration.parent.mkdir(parents=True)
+            migration.write_text("SELECT 127;\n", encoding="utf-8")
             for relative in gate.TASK4_BACKEND_MOUNT_INPUTS:
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -304,6 +315,56 @@ def candidate_file(tmp_path: Path) -> Path:
     browser.chmod(0o755)
     tree, error = gate.secure_browser_bundle_descriptor(browser.parent)
     assert error is None and tree is not None
+    docker = tmp_path / "docker"
+    docker.write_text(
+        "#!/bin/sh\ncase \"$5\" in\n"
+        "local/backend:candidate) echo sha256:" + "1" * 64 + ";;\n"
+        "local/web:candidate) echo sha256:" + "2" * 64 + ";;\n"
+        "postgres:16-alpine) echo sha256:" + "3" * 64 + ";;\n"
+        "*) exit 1;;\nesac\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    monkeypatch.setattr(gate._manifest, "TRUSTED_DOCKER_EXECUTABLE", docker)
+    firmware_dir = tmp_path / "firmware-artifact"
+    firmware_dir.mkdir()
+    app = firmware_dir / "xiaozhi.bin"
+    elf = firmware_dir / "xiaozhi.elf"
+    app.write_bytes(b"firmware-app")
+    elf.write_bytes(b"firmware-elf")
+    evidence = firmware_dir / "manifest.json"
+    evidence_payload = {
+        "status": "PASS", "profile": "production", "board": "fixture", "target": "esp32s3",
+        "sourceCommit": repositories["firmware"]["sha"], "createdAt": "2099-01-01T00:00:00Z",
+        "app": {"file": app.name, "offset": "0x20000", "bytes": app.stat().st_size,
+                "sha256": hashlib.sha256(app.read_bytes()).hexdigest()},
+        "elf": {"file": elf.name, "bytes": elf.stat().st_size,
+                "sha256": hashlib.sha256(elf.read_bytes()).hexdigest()},
+        "partition": {"bytes": 1024, "freeBytes": 1024 - app.stat().st_size, "freePercent": 0.0},
+        "reproducibility": {"appByteIdentical": True, "elfByteIdentical": True,
+                            "independentCleanBuilds": 2, "ccacheEnabled": False},
+        "toolchain": {"espIdf": "v5.5.4", "espIdfCommit": "a" * 40, "python": "3.9.6",
+                      "compiler": "fixture", "cmake": "fixture", "ninja": "fixture"},
+        "config": {"sdkconfigSha256": "a" * 64, "sdkconfigDefaultsLocalSha256": "b" * 64,
+                   "dependenciesLockSha256": "c" * 64, "appReproducibleBuild": True,
+                   "productionConfigAudit": "PASS", "productionArtifactAudit": "PASS"},
+        "tests": {"projectSourceGate": "PASS", "firmwareVersionAndCourseGates": "PASS"},
+        "safety": {"flashed": False, "serialAccessed": False, "hilRun": False,
+                   "physicalDeviceAccessed": False},
+    }
+    evidence.write_text(json.dumps(evidence_payload), encoding="utf-8")
+    node = {}
+    for key, version in (("backend", "v22.23.2"), ("adminManagerWeb", "v20.20.2")):
+        executable = tmp_path / f"node-{key}"
+        executable.write_text(f"#!/bin/sh\nif [ \"$1\" = --version ]; then echo {version}; else exec python3 \"$@\"; fi\n", encoding="utf-8")
+        executable.chmod(0o755)
+        node[key] = {"version": version, "executable": str(executable),
+                     "sha256": hashlib.sha256(executable.read_bytes()).hexdigest()}
+    for tool in ("npm", "npx"):
+        executable = tmp_path / tool
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+    migration = Path(repositories["backend"]["path"]) / "src/database/migrations/127_shared_visual_layered_cinematic_compatibility.sql"
     candidate = {
         "candidateId": "course-mode-2099-01-01.1",
         "createdAt": "2099-01-01T00:00:00Z",
@@ -323,8 +384,17 @@ def candidate_file(tmp_path: Path) -> Path:
                 "id": "sha256:" + "2" * 64,
             },
         },
-        "firmware": {},
-        "database": {},
+        "firmware": {
+            "appPath": str(app), "appOffset": "0x20000", "appBytes": app.stat().st_size,
+            "appSha256": hashlib.sha256(app.read_bytes()).hexdigest(),
+            "elfSha256": hashlib.sha256(elf.read_bytes()).hexdigest(),
+            "partitionBytes": 1024, "freeBytes": 1024 - app.stat().st_size,
+            "evidenceManifestPath": str(evidence),
+            "evidenceManifestSha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+        },
+        "database": {"engineImage": "postgres:16-alpine", "engineImageId": "sha256:" + "3" * 64,
+                     "migrationHead": migration.name,
+                     "migrationHeadSha256": hashlib.sha256(migration.read_bytes()).hexdigest()},
         "curriculum": {
             "courseId": "10000000-0000-4000-8000-000000000001",
             "courseKey": "english-6month-4-6",
@@ -337,6 +407,7 @@ def candidate_file(tmp_path: Path) -> Path:
             "sourceChecksum": hashlib.sha256(curriculum_path.read_bytes()).hexdigest(),
         },
         "tools": {
+            "nodeInstalls": {},
             "robotPreviewBrowser": {
                 "version": 2,
                 "engine": "chromium-headless-shell",
@@ -344,7 +415,7 @@ def candidate_file(tmp_path: Path) -> Path:
                 "root": str(browser.parent),
                 "executable": browser.name,
                 "treeDigest": tree,
-            },
+            }, "node": node, "espIdf": "v5.5.4",
         },
         "evidenceRoot": str(evidence_root),
     }
@@ -368,7 +439,6 @@ def test_success_report_is_stable_and_machine_readable(candidate_file: Path) -> 
     result = gate.run_gate(
         candidate_file, "quick", lanes=(_lane("one", "raise SystemExit(0)"),),
     )
-
     assert result == {
         "candidateId": "course-mode-2099-01-01.1",
         "verdict": "PASS",
@@ -378,6 +448,48 @@ def test_success_report_is_stable_and_machine_readable(candidate_file: Path) -> 
     assert type(result["lanes"][0]["durationMs"]) is int
     assert result["lanes"][0]["durationMs"] >= 0
     assert json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+@pytest.mark.parametrize("artifact", ["app", "elf", "node", "migration"])
+def test_release_state_rechecks_external_artifact_identity(
+    candidate_file: Path, artifact: str,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    if artifact == "app":
+        Path(candidate["firmware"]["appPath"]).write_bytes(b"drift")
+    elif artifact == "elf":
+        evidence = json.loads(Path(candidate["firmware"]["evidenceManifestPath"]).read_text())
+        (Path(candidate["firmware"]["evidenceManifestPath"]).parent / evidence["elf"]["file"]).write_bytes(b"drift")
+    elif artifact == "node":
+        Path(candidate["tools"]["node"]["backend"]["executable"]).write_text("#!/bin/sh\necho v0.0.0\n")
+    else:
+        root = Path(candidate["repositories"]["backend"]["path"])
+        (root / "src/database/migrations" / candidate["database"]["migrationHead"]).write_text("SELECT 0;\n")
+
+    assert gate.release_state_matches(candidate_file, candidate, (), None, False) is False
+
+
+def test_node_lane_executes_candidate_descriptor_not_ambient_path(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "backend", ".", "backend")
+    evidence_path = Path(candidate["firmware"]["evidenceManifestPath"])
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    evidence["sourceCommit"] = candidate["repositories"]["firmware"]["sha"]
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    candidate["firmware"]["evidenceManifestSha256"] = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    hostile = tmp_path / "hostile"
+    hostile.mkdir()
+    (hostile / "node").write_text("#!/bin/sh\nexit 91\n", encoding="utf-8")
+    (hostile / "node").chmod(0o755)
+    monkeypatch.setattr(gate, "SECURE_PATH", str(hostile))
+    lane = gate.Lane("candidate-node", "backend", ".", ("node", "--version"), 5.0)
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "PASS"
 
 
 def test_admin_browser_environment_is_only_candidate_bound_descriptor(candidate_file: Path) -> None:

@@ -1064,7 +1064,11 @@ def release_state_matches(
     require_runtime: bool, node_lanes: Sequence[Lane] | None = None,
 ) -> bool:
     current = _load_candidate(candidate_path)
-    if current != candidate or current is None or validate_candidate(current, verify_external_tools=False):
+    if (
+        current != candidate or current is None
+        or validate_candidate(current, verify_external_tools=False)
+        or validate_candidate(current, verify_external_tools=True)
+    ):
         return False
     if not _candidate_matches(candidate):
         return False
@@ -1311,8 +1315,29 @@ def _resolve_command(command: tuple[str, ...]) -> tuple[str, ...] | None:
     return (resolved, *command[1:]) if resolved else None
 
 
+def _resolve_candidate_command(
+    command: tuple[str, ...], candidate: dict, lane: Lane,
+) -> tuple[str, ...] | None:
+    requirement = _node_install_requirement(lane)
+    if requirement is not None and requirement[0]:
+        try:
+            node = Path(candidate["tools"]["node"][requirement[0]]["executable"])
+            if command[0] == "node":
+                return _resolve_command((str(node), *command[1:]))
+            if command[0] in {"npm", "npx"}:
+                candidate_tool = node.parent / command[0]
+                return _resolve_command((str(candidate_tool), *command[1:]))
+        except (KeyError, TypeError, ValueError):
+            return None
+    return _resolve_command(command)
+
+
 def _child_environment(candidate: dict, source: Mapping[str, str], lane: Lane) -> dict[str, str]:
     environment = dict(BASE_ENVIRONMENT)
+    node_requirement = _node_install_requirement(lane)
+    if node_requirement is not None and node_requirement[0]:
+        node = Path(candidate["tools"]["node"][node_requirement[0]]["executable"])
+        environment["PATH"] = f"{node.parent}:{SECURE_PATH}"
     environment.update({
         "COURSE_MODE_BACKEND_ROOT": candidate["repositories"]["backend"]["path"],
         "COURSE_MODE_ADMIN_ESP_ROOT": candidate["repositories"]["adminEsp"]["path"],
@@ -1781,7 +1806,7 @@ def run_gate(
                     report["failedLane"] = lane.name
                     break
                 lane_command = _command_for_lane(lane, candidate)
-                command = _resolve_command(lane_command) if lane_command else None
+                command = _resolve_candidate_command(lane_command, candidate, lane) if lane_command else None
                 if command is None:
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
