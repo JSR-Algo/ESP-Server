@@ -85,3 +85,27 @@ test('fails closed on a symlink and supports linux-x64 metadata paths', async ()
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('supports the Playwright 1.60 linux-arm64 headless-shell layout', async () => {
+  const { root, metadata } = await fixture();
+  const browser = join(root, 'ms-playwright/chromium_headless_shell-1223/chrome-linux/headless_shell');
+  await mkdir(join(browser, '..'), { recursive: true });
+  await writeFile(browser, 'pinned chromium fixture\n', { mode: 0o755 });
+  try {
+    const selected = await findPinnedRobotPreviewChromium({
+      environment: {
+        TBOT_ROBOT_PREVIEW_BROWSER_PATH: browser,
+        TBOT_ROBOT_PREVIEW_BROWSER_ENGINE: 'chromium-headless-shell',
+        TBOT_ROBOT_PREVIEW_BROWSER_REVISION: '1223',
+        TBOT_ROBOT_PREVIEW_BROWSER_SHA256: '88ef122bd424e108314073f0949750d963365e49c2bacac8f45e87523f50d1a8',
+        TBOT_ROBOT_PREVIEW_BROWSER_BYTES: '24'
+      },
+      metadataPath: metadata,
+      platform: 'linux',
+      arch: 'arm64'
+    });
+    assert.equal(selected, browser);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

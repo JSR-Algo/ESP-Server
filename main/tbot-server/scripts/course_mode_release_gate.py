@@ -1046,7 +1046,7 @@ def robot_preview_browser_authorized(candidate: dict) -> bool:
         platform_suffix = {
             ("darwin", "arm64"): "chrome-headless-shell-mac-arm64/chrome-headless-shell",
             ("darwin", "x86_64"): "chrome-headless-shell-mac-x64/chrome-headless-shell",
-            ("linux", "aarch64"): "chrome-headless-shell-linux-arm64/chrome-headless-shell",
+            ("linux", "aarch64"): "chrome-linux/headless_shell",
             ("linux", "x86_64"): "chrome-headless-shell-linux64/chrome-headless-shell",
         }.get((sys.platform, machine))
         if platform_suffix is None:

@@ -18,7 +18,7 @@ function executableSuffix(platform, arch) {
   const suffix = {
     'darwin-arm64': 'chrome-headless-shell-mac-arm64/chrome-headless-shell',
     'darwin-x64': 'chrome-headless-shell-mac-x64/chrome-headless-shell',
-    'linux-arm64': 'chrome-headless-shell-linux-arm64/chrome-headless-shell',
+    'linux-arm64': 'chrome-linux/headless_shell',
     'linux-x64': 'chrome-headless-shell-linux64/chrome-headless-shell'
   }[`${platform}-${arch}`];
   if (!suffix) throw new Error(`Unsupported robot preview browser platform: ${platform}-${arch}`);

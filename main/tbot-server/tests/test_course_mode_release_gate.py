@@ -417,6 +417,32 @@ def test_admin_browser_authority_accepts_exact_binary_and_playwright_revision(ca
     assert gate.robot_preview_browser_authorized(candidate) is True
 
 
+def test_admin_browser_authority_accepts_playwright_linux_arm64_layout(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    descriptor = candidate["tools"]["robotPreviewBrowser"]
+    original = Path(descriptor["path"])
+    browser = original.parents[2] / "chromium_headless_shell-1223/chrome-linux/headless_shell"
+    browser.parent.mkdir(parents=True)
+    original.rename(browser)
+    descriptor.update({
+        "path": str(browser),
+        "sha256": hashlib.sha256(browser.read_bytes()).hexdigest(),
+        "bytes": browser.stat().st_size,
+    })
+    root = Path(candidate["repositories"]["adminEsp"]["path"])
+    metadata = root / "main/manager-web/node_modules/playwright-core/browsers.json"
+    metadata.parent.mkdir(parents=True)
+    metadata.write_text(json.dumps({
+        "browsers": [{"name": "chromium-headless-shell", "revision": "1223"}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(gate.sys, "platform", "linux")
+    monkeypatch.setattr(gate.os, "uname", lambda: type("Uname", (), {"machine": "aarch64"})())
+
+    assert gate.robot_preview_browser_authorized(candidate) is True
+
+
 def test_lane_failure_stops_dependent_lanes(candidate_file: Path, tmp_path: Path) -> None:
     marker = tmp_path / "must-not-run"
     result = gate.run_gate(
