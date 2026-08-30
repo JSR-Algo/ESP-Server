@@ -4449,6 +4449,25 @@ class GoogleLiveProvider(VoiceSessionProvider):
         event_type = event.get("type") if isinstance(event, Mapping) else None
         if event_type is not None:
             self._touch_live_activity()
+        event_generation = (
+            event.get("response_generation") if isinstance(event, Mapping) else None
+        )
+        if (
+            self._is_model_output_event(event_type, event)
+            and isinstance(event_generation, int)
+            and (
+                event_generation != self._response_generation
+                or self.is_response_cancelled(event_generation)
+            )
+        ):
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live stale_provider_event_ignored type={} "
+                "response_id={} current_response_id={}",
+                event_type,
+                event_generation,
+                self._response_generation,
+            )
+            return
         if (
             event_type == "audio_start"
             and getattr(self.conn, "google_live_lesson_prompt_output_allowed", False)
