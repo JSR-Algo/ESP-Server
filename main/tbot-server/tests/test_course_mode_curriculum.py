@@ -3,9 +3,11 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from types import MappingProxyType
+
 import pytest
 
-from core.lesson.course_mode_contract import CourseModeContract
+from core.lesson.course_mode_contract import CourseActivity, CourseModeContract, CourseModeContractError
 from core.lesson.course_orchestrator import ChildObservation, CourseOrchestrator, SessionState
 from core.lesson.interaction_templates import curriculum_outcome_name
 
@@ -66,6 +68,7 @@ def curriculum_contract() -> dict:
                 "reducedMotionFallback": "face_and_transient_focus_cue",
                 "modalities": ["speech_en", "speech_vi", "choice", "silence", "help"],
                 "expectedDurationSec": 60,
+                "responseStartSec": 1,
                 "outcomes": (
                     {
                         "correct": {"action": "advance"},
@@ -168,6 +171,58 @@ def test_curriculum_normalizes_multi_target_activity_metadata_immutably() -> Non
         )
         == "vietnamese"
     )
+
+
+def test_curriculum_accepts_and_exposes_backend_response_window_timing() -> None:
+    value = curriculum_contract()
+
+    contract = CourseModeContract.from_mapping(value)
+
+    assert {activity.response_start_sec for activity in contract.activities} == {1}
+
+
+def test_course_activity_preserves_existing_positional_constructor_layout() -> None:
+    outcomes = MappingProxyType({"correct": MappingProxyType({"action": "advance"})})
+    visual = MappingProxyType({"strategy": "publishedTeachingObject"})
+
+    activity = CourseActivity(
+        "a1", ("w01.hello",), "DISCOVER", "discover", "EXPOSED", "context.1",
+        "PRESENT_CENTER", "focus.center.primary", MappingProxyType({}), (),
+        "face_and_transient_focus_cue", ("speech_en",), 60, outcomes, visual,
+        "authoritative_graph", "shared_outcome",
+    )
+
+    assert activity.outcomes is outcomes
+    assert activity.visual is visual
+    assert activity.navigation_mode == "authoritative_graph"
+    assert activity.evidence_policy == "shared_outcome"
+    assert activity.response_start_sec == 0
+
+
+@pytest.mark.parametrize(
+    "response_start_sec,modalities,expected_duration_sec",
+    [
+        (0, ["speech_en"], 60),
+        (31, ["speech_en"], 60),
+        (60, ["speech_en"], 60),
+        (1, ["silence", "help"], 30),
+        (0, ["silence", "help"], 31),
+    ],
+)
+def test_curriculum_rejects_backend_invalid_response_window_timing(
+    response_start_sec: int,
+    modalities: list[str],
+    expected_duration_sec: int,
+) -> None:
+    value = curriculum_contract()
+    activity = value["activities"][0]
+    activity["responseStartSec"] = response_start_sec
+    activity["modalities"] = modalities
+    activity["expectedDurationSec"] = expected_duration_sec
+    value["contractChecksum"] = _checksum(value)
+
+    with pytest.raises(CourseModeContractError, match="INVALID_RESPONSE_TIMING"):
+        CourseModeContract.from_mapping(value)
 
 
 def test_curriculum_rejects_invalid_outcome_destination_graph() -> None:

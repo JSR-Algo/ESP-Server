@@ -6,9 +6,14 @@ from pathlib import Path
 import pytest
 
 from core.lesson.course_orchestrator import CourseDecision, SessionState, WordState
-from core.lesson.embodied_intent import EmbodiedIntent
 from core.lesson.course_snapshot_store import MemoryCourseModeSnapshotStore
-from core.lesson.runtime import LessonRuntime, course_mode_runtime_from_manifest
+from core.lesson.embodied_intent import EmbodiedIntent
+from core.lesson.runtime import (
+    COURSE_ACTIVITY_WIRE_INTENTS,
+    COURSE_ACTIVITY_WIRE_VISUAL_STATES,
+    LessonRuntime,
+    course_mode_runtime_from_manifest,
+)
 from core.lesson.word_mastery import EvidenceLevel
 from tests.test_course_mode_curriculum import curriculum_contract
 
@@ -54,6 +59,65 @@ async def test_lesson_runtime_emits_course_activity_frame_after_curriculum_decis
         "sessionId": "w01.session", "stepId": "a1", "sequence": 1,
         "body": {"contractVersion": "courseCompanion.v2.contract.v1", "deliveryId": "delivery-1", "activityId": "a2", "visualState": "correct", "embodiedIntent": "PRESENT_CENTER", "retainStaticLayers": True, "replayEntrance": False},
     }]
+
+
+@pytest.mark.asyncio
+async def test_course_activity_frames_project_every_semantic_intent_to_firmware_wire_enum() -> None:
+    expected = {
+        EmbodiedIntent.REST_WARM: "CALM_REGULATE",
+        EmbodiedIntent.GREET_SMALL: "PRESENT_CENTER",
+        EmbodiedIntent.INVITE_CHILD: "PRESENT_CENTER",
+        EmbodiedIntent.PRESENT_CENTER: "PRESENT_CENTER",
+        EmbodiedIntent.PRESENT_LEFT: "PRESENT_LEFT",
+        EmbodiedIntent.PRESENT_RIGHT: "PRESENT_RIGHT",
+        EmbodiedIntent.LISTEN_STILL: "LISTEN_ATTENTIVELY",
+        EmbodiedIntent.THINK_CURIOUS: "LISTEN_ATTENTIVELY",
+        EmbodiedIntent.ACKNOWLEDGE_STORY: "PRESENT_CENTER",
+        EmbodiedIntent.MODEL_WORD: "PRESENT_CENTER",
+        EmbodiedIntent.ENCOURAGE_SMALL: "ENCOURAGE_RETRY",
+        EmbodiedIntent.TRY_DIFFERENT_WAY: "ENCOURAGE_RETRY",
+        EmbodiedIntent.CELEBRATE_RECALL: "CELEBRATE_MASTERY",
+        EmbodiedIntent.CELEBRATE_MASTERY: "CELEBRATE_MASTERY",
+        EmbodiedIntent.COMFORT_CALM: "CALM_REGULATE",
+        EmbodiedIntent.PAUSE_CHOICE: "CALM_REGULATE",
+        EmbodiedIntent.GOODBYE_SMALL: "PRESENT_CENTER",
+    }
+    assert set(expected) == set(EmbodiedIntent)
+    assert expected == COURSE_ACTIVITY_WIRE_INTENTS
+    assert {
+        "teach", "listen", "thinking", "nearMiss", "incorrect", "retry",
+        "correct", "celebrate", "completion",
+    } == COURSE_ACTIVITY_WIRE_VISUAL_STATES
+    sent = []
+    lesson = object.__new__(LessonRuntime)
+    lesson.assignment_id = "assignment-1"
+    lesson.session_id = "w01.session"
+    lesson._step_id = "a1"
+    lesson._seq = 0
+
+    async def send(payload):
+        sent.append(json.loads(payload))
+
+    lesson._send = send
+
+    for index, (intent, wire_intent) in enumerate(expected.items()):
+        decision = CourseDecision(
+            f"d{index}", True, SessionState.WORD_ACTIVE, "ADVANCE_ACTIVITY",
+            "acknowledge_child", None, None, intent, False, None,
+            activity_id=f"a{index}", visual_state="correct", replay_entrance=False,
+        )
+        await lesson._send_course_activity_decision(decision, delivery_id=f"delivery-{index}")
+        assert sent[-1]["body"]["embodiedIntent"] == wire_intent
+
+    invalid = CourseDecision(
+        "invalid", True, SessionState.WORD_ACTIVE, "ADVANCE_ACTIVITY",
+        None, None, None, EmbodiedIntent.PRESENT_CENTER, False, None,
+        activity_id="invalid", visual_state="unsupported", replay_entrance=False,
+    )
+    before = len(sent)
+    with pytest.raises(ValueError, match="unsupported firmware Course activity visual state"):
+        await lesson._send_course_activity_decision(invalid, delivery_id="invalid")
+    assert len(sent) == before
 
 
 @pytest.mark.asyncio

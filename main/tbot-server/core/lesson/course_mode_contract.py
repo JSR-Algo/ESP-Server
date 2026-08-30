@@ -55,6 +55,7 @@ _CURRICULUM = {
     "reducedMotionFallback",
     "modalities",
     "expectedDurationSec",
+    "responseStartSec",
     "outcomes",
     "visual",
 }
@@ -157,6 +158,7 @@ class CourseActivity:
     visual: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     navigation_mode: str = "authoritative_graph"
     evidence_policy: str = "shared_outcome"
+    response_start_sec: int = 0
 
     @property
     def target_id(self) -> str:
@@ -329,6 +331,7 @@ class CourseModeContract:
                 _fail("UNSAFE_ASSESSMENT", "assessment leaks the answer")
             modalities = ()
             duration = 0
+            response_start_sec = 0
             outcomes = MappingProxyType({})
             visual = MappingProxyType({})
             navigation_mode = "authoritative_graph" if curriculum else "target_stage"
@@ -341,6 +344,18 @@ class CourseModeContract:
                 duration = a["expectedDurationSec"]
                 if type(duration) is not int or duration <= 0:
                     _fail("INVALID_DURATION", "invalid duration")
+                response_start_sec = a["responseStartSec"]
+                interactive = bool(set(modalities) & {"speech_en", "gesture", "choice"})
+                if (
+                    type(response_start_sec) is not int
+                    or response_start_sec < 0
+                    or response_start_sec > 30
+                    or response_start_sec >= duration
+                    or (interactive and response_start_sec < 1)
+                    or (not interactive and response_start_sec != 0)
+                    or (not interactive and duration > 30)
+                ):
+                    _fail("INVALID_RESPONSE_TIMING", "invalid response timing")
                 total += duration
                 raw_out = a["outcomes"]
                 if not isinstance(raw_out, Mapping) or not raw_out:
@@ -397,23 +412,24 @@ class CourseModeContract:
                 _fail("INVALID_ACTIVITY_FIELDS", "reduced motion fallback is invalid")
             activities.append(
                 CourseActivity(
-                    aid,
-                    tuple(raw_ids),
-                    stage,
-                    cast(str, a["activityType"]),
-                    cast(str, a["evidenceName"]),
-                    _id(a["contextId"], "contextId"),
-                    cast(str, a["embodiedIntent"]),
-                    cast(str, a["visualFocusRegion"]),
-                    _freeze(answer),
-                    tuple(cast(list[str], a["listeningTransition"])),
-                    cast(str, a["reducedMotionFallback"]),
-                    modalities,
-                    duration,
-                    outcomes,
-                    visual,
-                    navigation_mode,
-                    evidence_policy,
+                    activity_id=aid,
+                    target_ids=tuple(raw_ids),
+                    stage=stage,
+                    activity_type=cast(str, a["activityType"]),
+                    evidence_name=cast(str, a["evidenceName"]),
+                    context_id=_id(a["contextId"], "contextId"),
+                    embodied_intent=cast(str, a["embodiedIntent"]),
+                    visual_focus_region=cast(str, a["visualFocusRegion"]),
+                    answer_policy=_freeze(answer),
+                    listening_transition=tuple(cast(list[str], a["listeningTransition"])),
+                    reduced_motion_fallback=cast(str, a["reducedMotionFallback"]),
+                    modalities=modalities,
+                    expected_duration_sec=duration,
+                    outcomes=outcomes,
+                    visual=visual,
+                    navigation_mode=navigation_mode,
+                    evidence_policy=evidence_policy,
+                    response_start_sec=response_start_sec,
                 )
             )
         if curriculum and total > session["softDeadlineSec"]:

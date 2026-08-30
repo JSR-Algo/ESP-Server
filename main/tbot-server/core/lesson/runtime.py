@@ -160,6 +160,37 @@ COURSE_EVIDENCE_SEQUENCE_BASE = -3_000_000
 SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_to_sd"
 SAMPLE_SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_sample_to_sd"
 
+COURSE_ACTIVITY_WIRE_INTENTS = {
+    EmbodiedIntent.REST_WARM: "CALM_REGULATE",
+    EmbodiedIntent.GREET_SMALL: "PRESENT_CENTER",
+    EmbodiedIntent.INVITE_CHILD: "PRESENT_CENTER",
+    EmbodiedIntent.PRESENT_CENTER: "PRESENT_CENTER",
+    EmbodiedIntent.PRESENT_LEFT: "PRESENT_LEFT",
+    EmbodiedIntent.PRESENT_RIGHT: "PRESENT_RIGHT",
+    EmbodiedIntent.LISTEN_STILL: "LISTEN_ATTENTIVELY",
+    EmbodiedIntent.THINK_CURIOUS: "LISTEN_ATTENTIVELY",
+    EmbodiedIntent.ACKNOWLEDGE_STORY: "PRESENT_CENTER",
+    EmbodiedIntent.MODEL_WORD: "PRESENT_CENTER",
+    EmbodiedIntent.ENCOURAGE_SMALL: "ENCOURAGE_RETRY",
+    EmbodiedIntent.TRY_DIFFERENT_WAY: "ENCOURAGE_RETRY",
+    EmbodiedIntent.CELEBRATE_RECALL: "CELEBRATE_MASTERY",
+    EmbodiedIntent.CELEBRATE_MASTERY: "CELEBRATE_MASTERY",
+    EmbodiedIntent.COMFORT_CALM: "CALM_REGULATE",
+    EmbodiedIntent.PAUSE_CHOICE: "CALM_REGULATE",
+    EmbodiedIntent.GOODBYE_SMALL: "PRESENT_CENTER",
+}
+COURSE_ACTIVITY_WIRE_VISUAL_STATES = {
+    "teach", "listen", "thinking", "nearMiss", "incorrect", "retry",
+    "correct", "celebrate", "completion",
+}
+
+
+def course_activity_wire_intent(intent: EmbodiedIntent) -> str:
+    try:
+        return COURSE_ACTIVITY_WIRE_INTENTS[intent]
+    except KeyError as error:
+        raise ValueError("unsupported firmware Course activity embodied intent") from error
+
 
 class CourseModeRuntimeAdapter:
     course_mode_active = True
@@ -2404,6 +2435,8 @@ class LessonRuntime:
     ) -> None:
         if decision.activity_id is None:
             return
+        if decision.visual_state not in COURSE_ACTIVITY_WIRE_VISUAL_STATES:
+            raise ValueError("unsupported firmware Course activity visual state")
         frame = {
             "type": "lesson_course_activity", "assignmentId": self.assignment_id,
             "sessionId": self.session_id, "stepId": self._step_id,
@@ -2412,7 +2445,7 @@ class LessonRuntime:
                 "contractVersion": "courseCompanion.v2.contract.v1",
                 "deliveryId": delivery_id,
                 "activityId": decision.activity_id, "visualState": decision.visual_state,
-                "embodiedIntent": decision.embodied_intent.value,
+                "embodiedIntent": course_activity_wire_intent(decision.embodied_intent),
                 "retainStaticLayers": True, "replayEntrance": decision.replay_entrance,
             },
         }
