@@ -688,26 +688,34 @@ def test_snapshot_rejects_tree_over_depth_limit(
         gate.stage_execution_candidate(candidate, ())
 
 
-def test_snapshot_rejects_escaping_symlink(candidate_file: Path) -> None:
+def test_snapshot_ignores_untracked_escaping_symlink(candidate_file: Path) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     repository = Path(candidate["repositories"]["backend"]["path"])
     (repository / "escape").symlink_to("../candidate.json")
 
-    with pytest.raises(ValueError, match="unsafe symlink"):
-        gate.stage_execution_candidate(candidate, ())
+    stage = gate.stage_execution_candidate(candidate, ())
+    try:
+        staged = Path(stage.candidate["repositories"]["backend"]["path"])
+        assert not os.path.lexists(staged / "escape")
+    finally:
+        stage.cleanup()
 
 
-def test_snapshot_rejects_special_file(candidate_file: Path) -> None:
+def test_snapshot_ignores_untracked_special_file(candidate_file: Path) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     repository = Path(candidate["repositories"]["backend"]["path"])
     fifo = repository / "unsafe.fifo"
     os.mkfifo(fifo)
 
-    with pytest.raises(ValueError, match="special file"):
-        gate.stage_execution_candidate(candidate, ())
+    stage = gate.stage_execution_candidate(candidate, ())
+    try:
+        staged = Path(stage.candidate["repositories"]["backend"]["path"])
+        assert not (staged / "unsafe.fifo").exists()
+    finally:
+        stage.cleanup()
 
 
-def test_snapshot_rejects_file_mutation_during_copy(
+def test_snapshot_uses_commit_object_when_worktree_file_mutates_during_archive(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
@@ -726,8 +734,12 @@ def test_snapshot_rejects_file_mutation_during_copy(
 
     monkeypatch.setattr(gate.os, "read", mutate_during_read)
 
-    with pytest.raises(ValueError, match="changed during snapshot"):
-        gate.stage_execution_candidate(candidate, ())
+    stage = gate.stage_execution_candidate(candidate, ())
+    try:
+        staged = Path(stage.candidate["repositories"]["backend"]["path"])
+        assert (staged / "tracked.txt").read_text(encoding="utf-8") == "backend"
+    finally:
+        stage.cleanup()
 
 
 def test_snapshot_construction_failure_removes_partial_tree(
@@ -743,6 +755,143 @@ def test_snapshot_construction_failure_removes_partial_tree(
         gate.stage_execution_candidate(candidate, ())
 
     assert not stage_root.exists()
+
+
+def test_repository_mutation_after_validation_never_reaches_lane(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    tracked = Path(candidate["repositories"]["adminEsp"]["path"]) / "tracked.txt"
+    marker = tmp_path / "mutated-by-race"
+    original_release_state_matches = gate.release_state_matches
+    mutated = False
+
+    def validate_then_mutate(*args, **kwargs):
+        nonlocal mutated
+        result = original_release_state_matches(*args, **kwargs)
+        if result and not mutated:
+            tracked.write_text("poisoned", encoding="utf-8")
+            mutated = True
+        return result
+
+    monkeypatch.setattr(gate, "release_state_matches", validate_then_mutate)
+    lane = _lane(
+        "validation-open-race",
+        "from pathlib import Path;"
+        f"Path({str(marker)!r}).touch() if Path('tracked.txt').read_text() == 'poisoned' else None",
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "PASS", result
+    assert not marker.exists()
+
+
+def test_each_lane_gets_a_fresh_verified_repository_snapshot(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gate, "_make_tree_read_only", lambda _root: None)
+    lanes = (
+        _lane("poison-first-snapshot", "from pathlib import Path;Path('tracked.txt').write_text('poisoned')"),
+        _lane("verify-fresh-second-snapshot", "from pathlib import Path;assert Path('tracked.txt').read_text() == 'adminEsp'"),
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=lanes)
+
+    assert result["verdict"] == "PASS", result
+    assert [item["exitCode"] for item in result["lanes"]] == [0, 0]
+
+
+def test_snapshot_directory_open_rejects_symlink_parent(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    child = real / "child"
+    child.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        descriptor = gate._open_snapshot_directory(alias / "child")
+        os.close(descriptor)
+
+
+def test_snapshot_symlink_validation_is_lexical_and_never_calls_path_resolve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "target.txt").write_text("safe", encoding="utf-8")
+    (source / "nested").mkdir()
+    (source / "nested/link.txt").symlink_to("../target.txt")
+    destination = tmp_path / "destination"
+
+    monkeypatch.setattr(
+        Path, "resolve",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Path.resolve forbidden")),
+    )
+
+    gate._copy_snapshot_tree(source, destination, {"entries": 0, "bytes": 0})
+
+    assert (destination / "nested/link.txt").is_symlink()
+    assert os.readlink(destination / "nested/link.txt") == "../target.txt"
+
+
+def test_staging_rejects_tool_bytes_changed_after_validation(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "backend", ".", "backend")
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    executable = Path(candidate["tools"]["node"]["backend"]["executable"])
+    marker = tmp_path / "unverified-tool-executed"
+    original_release_state_matches = gate.release_state_matches
+    mutated = False
+
+    def validate_then_mutate(*args, **kwargs):
+        nonlocal mutated
+        result = original_release_state_matches(*args, **kwargs)
+        if result and not mutated:
+            executable.write_text(f"#!/bin/sh\ntouch {marker}\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            mutated = True
+        return result
+
+    monkeypatch.setattr(gate, "release_state_matches", validate_then_mutate)
+    lane = gate.Lane("tool-race", "backend", ".", ("node", "--version"), 5.0)
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "snapshot"
+    assert not marker.exists()
+
+
+def test_snapshot_overlays_only_hash_bound_dirty_exception(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    repository = candidate["repositories"]["adminEsp"]
+    source = Path(repository["path"]) / "tracked.txt"
+    source.write_text("authorized dirty bytes", encoding="utf-8")
+    repository["dirtyExceptions"] = [{
+        "path": "tracked.txt",
+        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+    }]
+
+    stage = gate.stage_execution_candidate(candidate, ())
+    try:
+        staged = Path(stage.candidate["repositories"]["adminEsp"]["path"])
+        assert (staged / "tracked.txt").read_text(encoding="utf-8") == "authorized dirty bytes"
+    finally:
+        stage.cleanup()
+
+
+def test_snapshot_rejects_dirty_exception_hash_drift(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    repository = candidate["repositories"]["adminEsp"]
+    source = Path(repository["path"]) / "tracked.txt"
+    source.write_text("changed after authorization", encoding="utf-8")
+    repository["dirtyExceptions"] = [{"path": "tracked.txt", "sha256": "0" * 64}]
+
+    with pytest.raises(ValueError, match="descriptor mismatch"):
+        gate.stage_execution_candidate(candidate, ())
 
 
 def test_admin_browser_environment_is_only_candidate_bound_descriptor(candidate_file: Path) -> None:
@@ -2229,10 +2378,10 @@ def test_node_digest_calls_scale_with_current_node_lanes_not_all_checkpoints(
     result = gate.run_gate(candidate_file, "quick", lanes=lanes)
 
     assert result["verdict"] == "PASS"
-    assert calls == 2
+    assert calls == 5
 
 
-def test_original_install_mutation_between_lanes_does_not_change_snapshot(
+def test_original_install_mutation_between_lanes_blocks_fresh_snapshot(
     candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
@@ -2256,8 +2405,9 @@ def test_original_install_mutation_between_lanes_does_not_change_snapshot(
 
     result = gate.run_gate(candidate_file, "quick", lanes=lanes)
 
-    assert result["verdict"] == "PASS"
-    assert marker.exists()
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "snapshot"
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize("repository_name", ["backend", "firmware"])

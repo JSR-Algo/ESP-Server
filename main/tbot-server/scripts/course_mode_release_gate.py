@@ -18,7 +18,9 @@ import secrets
 import shutil
 import socket
 import stat
+import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -277,10 +279,11 @@ def _snapshot_identity(metadata: os.stat_result) -> tuple[int, ...]:
 
 
 def _open_snapshot_directory(path: Path) -> int:
-    absolute = path.resolve(strict=True)
+    if not path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts[1:]):
+        raise OSError("absolute lexical path required")
     descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        for component in absolute.parts[1:]:
+        for component in path.parts[1:]:
             child = os.open(
                 component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                 dir_fd=descriptor,
@@ -293,43 +296,130 @@ def _open_snapshot_directory(path: Path) -> int:
         raise
 
 
-def _copy_open_regular(
-    source_fd: int, destination: Path, before: os.stat_result, state: dict[str, int],
-) -> None:
+def _copy_open_regular_to_fd(
+    source_fd: int, output_fd: int, before: os.stat_result, state: dict[str, int],
+) -> str:
     if before.st_nlink != 1:
         raise ValueError("unsafe hard-linked file in snapshot")
     state["bytes"] += before.st_size
     if state["bytes"] > MAX_SNAPSHOT_BYTES:
         raise ValueError("snapshot byte limit exceeded")
+    digest = hashlib.sha256()
+    remaining = before.st_size
+    while remaining:
+        chunk = os.read(source_fd, min(1024 * 1024, remaining))
+        if not chunk:
+            raise ValueError("source changed during snapshot")
+        digest.update(chunk)
+        view = memoryview(chunk)
+        while view:
+            written = os.write(output_fd, view)
+            view = view[written:]
+        remaining -= len(chunk)
+    if os.read(source_fd, 1):
+        raise ValueError("source changed during snapshot")
+    os.fsync(output_fd)
+    os.fchmod(output_fd, stat.S_IMODE(before.st_mode))
+    return digest.hexdigest()
+
+
+def _copy_open_regular(
+    source_fd: int, destination: Path, before: os.stat_result, state: dict[str, int],
+) -> str:
     output_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
-        remaining = before.st_size
-        while remaining:
-            chunk = os.read(source_fd, min(1024 * 1024, remaining))
-            if not chunk:
-                raise ValueError("source changed during snapshot")
-            view = memoryview(chunk)
-            while view:
-                written = os.write(output_fd, view)
-                view = view[written:]
-            remaining -= len(chunk)
-        if os.read(source_fd, 1):
-            raise ValueError("source changed during snapshot")
-        os.fsync(output_fd)
+        return _copy_open_regular_to_fd(source_fd, output_fd, before, state)
     finally:
         os.close(output_fd)
-    os.chmod(destination, stat.S_IMODE(before.st_mode))
+
+
+def _lexical_symlink_within_root(relative_parent: Path, target: str) -> bool:
+    if not target or "\0" in target or Path(target).is_absolute():
+        return False
+    combined = posixpath.normpath(posixpath.join(relative_parent.as_posix(), target))
+    return combined not in {"..", "."} and not combined.startswith("../")
+
+
+def _open_snapshot_relative_directory(root_fd: int, parts: Sequence[str], *, create: bool) -> int:
+    descriptor = os.dup(root_fd)
+    try:
+        for component in parts:
+            if component in {"", ".", ".."}:
+                raise OSError("unsafe relative snapshot path")
+            if create:
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(component, 0o700, dir_fd=descriptor)
+            child = os.open(
+                component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _copy_dirty_exception(
+    source_root: Path, destination_root: Path, relative: Path, expected_sha256: str,
+    state: dict[str, int],
+) -> None:
+    source_parent_fd = _open_snapshot_directory(source_root)
+    destination_root_fd = _open_snapshot_directory(destination_root)
+    source_file_fd = None
+    destination_parent_fd = None
+    output_fd = None
+    try:
+        source_directory_fd = _open_snapshot_relative_directory(
+            source_parent_fd, relative.parts[:-1], create=False,
+        )
+        os.close(source_parent_fd)
+        source_parent_fd = source_directory_fd
+        before = os.stat(relative.name, dir_fd=source_parent_fd, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("dirty exception is not a regular file")
+        source_file_fd = os.open(
+            relative.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=source_parent_fd,
+        )
+        if _snapshot_identity(os.fstat(source_file_fd)) != _snapshot_identity(before):
+            raise ValueError("source changed during snapshot")
+        destination_parent_fd = _open_snapshot_relative_directory(
+            destination_root_fd, relative.parts[:-1], create=True,
+        )
+        with contextlib.suppress(FileNotFoundError):
+            current = os.stat(relative.name, dir_fd=destination_parent_fd, follow_symlinks=False)
+            if stat.S_ISDIR(current.st_mode):
+                raise ValueError("dirty exception cannot replace directory")
+            os.unlink(relative.name, dir_fd=destination_parent_fd)
+        output_fd = os.open(
+            relative.name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=destination_parent_fd,
+        )
+        digest = _copy_open_regular_to_fd(source_file_fd, output_fd, before, state)
+        after = os.stat(relative.name, dir_fd=source_parent_fd, follow_symlinks=False)
+        if (
+            _snapshot_identity(after) != _snapshot_identity(before)
+            or _snapshot_identity(os.fstat(source_file_fd)) != _snapshot_identity(before)
+        ):
+            raise ValueError("source changed during snapshot")
+        if digest != expected_sha256:
+            raise ValueError("snapshot descriptor mismatch")
+    finally:
+        for descriptor in (output_fd, source_file_fd, destination_parent_fd, destination_root_fd, source_parent_fd):
+            if descriptor is not None:
+                os.close(descriptor)
 
 
 def _copy_snapshot_tree(
     source: Path, destination: Path, state: dict[str, int], *, exclude_git: bool = False,
 ) -> None:
-    root_before = source.lstat()
     root_fd = _open_snapshot_directory(source)
     root_opened = os.fstat(root_fd)
-    if _snapshot_identity(root_before) != _snapshot_identity(root_opened):
+    if not stat.S_ISDIR(root_opened.st_mode):
         os.close(root_fd)
-        raise ValueError("source root changed during snapshot")
+        raise ValueError("special source root in snapshot")
     destination.mkdir()
 
     def visit(directory_fd: int, relative: Path, target: Path, depth: int) -> None:
@@ -382,13 +472,8 @@ def _copy_snapshot_tree(
                     os.close(file_fd)
             elif stat.S_ISLNK(before.st_mode):
                 target_value = os.readlink(name, dir_fd=directory_fd)
-                if Path(target_value).is_absolute():
+                if not _lexical_symlink_within_root(relative_entry.parent, target_value):
                     raise ValueError("unsafe symlink in snapshot")
-                try:
-                    resolved = (source / relative_entry.parent / target_value).resolve(strict=True)
-                    resolved.relative_to(source)
-                except (OSError, RuntimeError, ValueError):
-                    raise ValueError("unsafe symlink in snapshot") from None
                 state["bytes"] += len(os.fsencode(target_value))
                 if state["bytes"] > MAX_SNAPSHOT_BYTES:
                     raise ValueError("snapshot byte limit exceeded")
@@ -404,18 +489,16 @@ def _copy_snapshot_tree(
 
     try:
         visit(root_fd, Path(), destination, 0)
-        root_after = source.lstat()
         root_final = os.fstat(root_fd)
-        if (
-            _snapshot_identity(root_after) != _snapshot_identity(root_before)
-            or _snapshot_identity(root_final) != _snapshot_identity(root_opened)
-        ):
+        if _snapshot_identity(root_final) != _snapshot_identity(root_opened):
             raise ValueError("source root changed during snapshot")
     finally:
         os.close(root_fd)
 
 
-def _copy_snapshot_file(source: Path, destination: Path, state: dict[str, int]) -> None:
+def _copy_snapshot_file(
+    source: Path, destination: Path, state: dict[str, int], *, expected_sha256: str | None = None,
+) -> str:
     parent_fd = _open_snapshot_directory(source.parent)
     file_fd = None
     try:
@@ -427,21 +510,125 @@ def _copy_snapshot_file(source: Path, destination: Path, state: dict[str, int]) 
         if _snapshot_identity(opened) != _snapshot_identity(before):
             raise ValueError("source changed during snapshot")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        _copy_open_regular(file_fd, destination, before, state)
+        digest = _copy_open_regular(file_fd, destination, before, state)
         after = os.stat(source.name, dir_fd=parent_fd, follow_symlinks=False)
         if (
             _snapshot_identity(after) != _snapshot_identity(before)
             or _snapshot_identity(os.fstat(file_fd)) != _snapshot_identity(opened)
         ):
             raise ValueError("source changed during snapshot")
+        if expected_sha256 is not None and digest != expected_sha256:
+            raise ValueError("snapshot descriptor mismatch")
+        return digest
     finally:
         if file_fd is not None:
             os.close(file_fd)
         os.close(parent_fd)
 
 
+def _archive_repository(source: Path, sha: str, destination: Path, state: dict[str, int]) -> None:
+    archive_fd, archive_name = tempfile.mkstemp(
+        prefix="course-mode-repository-", suffix=".tar", dir=destination.parent.parent,
+    )
+    os.close(archive_fd)
+    archive = Path(archive_name)
+    try:
+        command = [
+            str(_manifest.TRUSTED_GIT_EXECUTABLE), "--no-optional-locks",
+            "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+            "-c", "credential.helper=", "archive", "--format=tar", "--output", str(archive), sha,
+        ]
+        result = subprocess.run(
+            command, cwd=source, env=_manifest.SECURE_ENV, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60, check=False,
+        )
+        if result.returncode != 0:
+            raise ValueError("candidate archive failed")
+        if archive.stat().st_size > MAX_SNAPSHOT_BYTES:
+            raise ValueError("snapshot byte limit exceeded")
+        destination.mkdir()
+        destination_fd = _open_snapshot_directory(destination)
+        try:
+            with tarfile.open(archive, mode="r:") as bundle:
+                for member in bundle:
+                    relative = Path(member.name)
+                    if (
+                        not member.name or relative.is_absolute() or ".." in relative.parts
+                        or relative.as_posix() != member.name.rstrip("/")
+                    ):
+                        raise ValueError("unsafe candidate archive path")
+                    depth = len(relative.parts)
+                    if depth > MAX_SNAPSHOT_DEPTH:
+                        raise ValueError("snapshot depth limit exceeded")
+                    state["entries"] += 1
+                    if state["entries"] > MAX_SNAPSHOT_ENTRIES:
+                        raise ValueError("snapshot entry limit exceeded")
+                    parent_fd = _open_snapshot_relative_directory(
+                        destination_fd, relative.parts[:-1], create=True,
+                    )
+                    try:
+                        if member.isdir():
+                            with contextlib.suppress(FileExistsError):
+                                os.mkdir(relative.name, member.mode, dir_fd=parent_fd)
+                            child_fd = os.open(
+                                relative.name,
+                                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                dir_fd=parent_fd,
+                            )
+                            os.close(child_fd)
+                        elif member.isreg():
+                            state["bytes"] += member.size
+                            if state["bytes"] > MAX_SNAPSHOT_BYTES:
+                                raise ValueError("snapshot byte limit exceeded")
+                            source_file = bundle.extractfile(member)
+                            if source_file is None:
+                                raise ValueError("candidate archive file missing")
+                            output_fd = os.open(
+                                relative.name,
+                                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                0o600,
+                                dir_fd=parent_fd,
+                            )
+                            try:
+                                remaining = member.size
+                                while remaining:
+                                    chunk = source_file.read(min(1024 * 1024, remaining))
+                                    if not chunk:
+                                        raise ValueError("candidate archive truncated")
+                                    view = memoryview(chunk)
+                                    while view:
+                                        written = os.write(output_fd, view)
+                                        view = view[written:]
+                                    remaining -= len(chunk)
+                                if source_file.read(1):
+                                    raise ValueError("candidate archive grew")
+                                os.fchmod(output_fd, member.mode)
+                            finally:
+                                os.close(output_fd)
+                                source_file.close()
+                        elif member.issym():
+                            if not _lexical_symlink_within_root(relative.parent, member.linkname):
+                                raise ValueError("unsafe symlink in candidate archive")
+                            state["bytes"] += len(os.fsencode(member.linkname))
+                            if state["bytes"] > MAX_SNAPSHOT_BYTES:
+                                raise ValueError("snapshot byte limit exceeded")
+                            os.symlink(member.linkname, relative.name, dir_fd=parent_fd)
+                        else:
+                            raise ValueError("unsupported candidate archive entry")
+                    finally:
+                        os.close(parent_fd)
+        finally:
+            os.close(destination_fd)
+    except (OSError, subprocess.SubprocessError, tarfile.TarError) as error:
+        raise ValueError("candidate archive failed") from error
+    finally:
+        with contextlib.suppress(OSError):
+            archive.unlink()
+
+
 def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> ExecutionStage:
-    root = Path(tempfile.mkdtemp(prefix="course-mode-stage-")).resolve()
+    temporary_parent = Path("/private/tmp") if sys.platform == "darwin" else Path(tempfile.gettempdir())
+    root = Path(tempfile.mkdtemp(prefix="course-mode-stage-", dir=temporary_parent))
     staged = json.loads(json.dumps(candidate))
     try:
         state = {"entries": 0, "bytes": 0}
@@ -450,21 +637,60 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
         for name, repository in candidate["repositories"].items():
             source = Path(repository["path"])
             destination = repositories_root / name
-            _copy_snapshot_tree(source, destination, state, exclude_git=True)
+            _archive_repository(source, repository["sha"], destination, state)
+            for exception in sorted(repository["dirtyExceptions"], key=lambda item: item["path"]):
+                relative = Path(exception["path"])
+                _copy_dirty_exception(
+                    source, destination, relative, exception["sha256"], state,
+                )
             staged["repositories"][name]["path"] = str(destination)
         tools_root = root / "tools"
         for key, descriptor in candidate["tools"]["node"].items():
             prefix = tools_root / key
             node = prefix / "bin/node"
             node.parent.mkdir(parents=True)
-            _copy_snapshot_file(Path(descriptor["executable"]), node, state)
+            _copy_snapshot_file(
+                Path(descriptor["executable"]), node, state,
+                expected_sha256=descriptor["sha256"],
+            )
             staged_descriptor = staged["tools"]["node"][key]
             staged_descriptor["executable"] = str(node)
             for tool in ("npm", "npx"):
                 entrypoint = prefix / f"lib/node_modules/npm/bin/{tool}-cli.js"
                 entrypoint.parent.mkdir(parents=True, exist_ok=True)
-                _copy_snapshot_file(Path(descriptor[tool]["entrypoint"]), entrypoint, state)
+                _copy_snapshot_file(
+                    Path(descriptor[tool]["entrypoint"]), entrypoint, state,
+                    expected_sha256=descriptor[tool]["sha256"],
+                )
                 staged_descriptor[tool]["entrypoint"] = str(entrypoint)
+        requirements = {
+            requirement for lane in lanes
+            if (requirement := _node_install_requirement(lane)) is not None and requirement[0]
+        }
+        for key, relative_cwd in requirements:
+            metadata = candidate["tools"]["nodeInstalls"][key]
+            install_source = Path(metadata["root"])
+            repository_name = "backend" if key == "backend" else "adminEsp"
+            install_target = (
+                Path(staged["repositories"][repository_name]["path"])
+                / relative_cwd / "node_modules"
+            )
+            _copy_snapshot_tree(install_source, install_target, state)
+            staged_lock = install_target.parent / "package-lock.json"
+            observed = describe_node_install(install_target, staged_lock)
+            expected = json.loads(json.dumps(metadata))
+            expected["root"] = str(install_target)
+            if not _json_exact_equal(observed, expected):
+                raise ValueError("staged Node installation descriptor mismatch")
+            staged["tools"]["nodeInstalls"][key] = observed
+        if any(lane.name == "admin-browser" for lane in lanes):
+            browser = candidate["tools"]["robotPreviewBrowser"]
+            browser_target = tools_root / "robot-preview-browser"
+            _copy_snapshot_tree(Path(browser["root"]), browser_target, state)
+            observed, error = secure_browser_bundle_descriptor(browser_target)
+            if error or observed != browser["treeDigest"]:
+                raise ValueError("staged browser descriptor mismatch")
+            staged["tools"]["robotPreviewBrowser"]["root"] = str(browser_target)
         _make_tree_read_only(root)
         return ExecutionStage(root, staged)
     except Exception:
@@ -759,11 +985,11 @@ def _required_environment(lane: Lane) -> tuple[str, ...]:
 
 def discover_esp_course_mode_tests(admin_root: Path, sha: str) -> tuple[str, ...]:
     try:
-        root = admin_root.resolve(strict=True)
         tracked = _candidate_git(
-            root, "ls-tree", "-r", "--name-only", "-z", sha, "--", "main/tbot-server/tests",
+            admin_root, "ls-tree", "-r", "--name-only", "-z", sha, "--",
+            "main/tbot-server/tests",
         ).split("\0")
-    except (OSError, RuntimeError):
+    except RuntimeError:
         return ()
     discovered = []
     for relative in sorted(path for path in tracked if path):
@@ -775,9 +1001,7 @@ def discover_esp_course_mode_tests(admin_root: Path, sha: str) -> tuple[str, ...
             continue
         if name == "test_course_mode_release_gate.py":
             continue
-        path = root / relative
-        if path.is_file() and not path.is_symlink():
-            discovered.append(f"tests/{name}")
+        discovered.append(f"tests/{name}")
     return tuple(discovered)
 
 
@@ -956,20 +1180,17 @@ def _secure_file_sha256(path: Path, max_bytes: int) -> str | None:
 def _node_tree_descriptor(root: Path) -> dict | None:
     root_fd = None
     try:
-        if not root.is_absolute() or root.is_symlink() or root.resolve(strict=True) != root:
+        if not root.is_absolute():
             return None
-        root_before = root.lstat()
-        if not stat.S_ISDIR(root_before.st_mode):
-            return None
-        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        root_fd = _open_snapshot_directory(root)
         root_opened = os.fstat(root_fd)
-        if (root_opened.st_dev, root_opened.st_ino) != (root_before.st_dev, root_before.st_ino):
+        if not stat.S_ISDIR(root_opened.st_mode):
             return None
         digest = hashlib.sha256()
         _digest_field(digest, NODE_TREE_SCHEMA.encode("ascii"))
         _digest_field(digest, b"directory")
         _digest_field(digest, b".")
-        _digest_field(digest, str(stat.S_IMODE(root_before.st_mode)).encode("ascii"))
+        _digest_field(digest, str(stat.S_IMODE(root_opened.st_mode)).encode("ascii"))
         state = {"entryCount": 1, "totalBytes": 0}
 
         def visit(directory_fd: int, relative_parent: Path, depth: int) -> bool:
@@ -1062,11 +1283,8 @@ def _node_tree_descriptor(root: Path) -> dict | None:
                     try:
                         target = os.readlink(name, dir_fd=directory_fd)
                         target_bytes = os.fsencode(target)
-                        resolved = (
-                            Path(target) if Path(target).is_absolute()
-                            else root / relative.parent / target
-                        ).resolve(strict=True)
-                        resolved.relative_to(root)
+                        if not _lexical_symlink_within_root(relative.parent, target):
+                            return False
                         if os.readlink(name, dir_fd=directory_fd) != target:
                             return False
                         after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -1087,12 +1305,8 @@ def _node_tree_descriptor(root: Path) -> dict | None:
 
         if not visit(root_fd, Path(), 0):
             return None
-        root_after = root.lstat()
         root_final = os.fstat(root_fd)
-        if (
-            _stat_identity(root_after) != _stat_identity(root_before)
-            or _stat_identity(root_final) != _stat_identity(root_opened)
-        ):
+        if _stat_identity(root_final) != _stat_identity(root_opened):
             return None
         return {
             "schema": NODE_TREE_SCHEMA,
@@ -1123,16 +1337,12 @@ def describe_node_install(root: Path, package_lock: Path) -> dict:
 def _has_unbound_node_modules(project_root: Path, allowed_root: Path) -> bool | None:
     root_fd = None
     try:
-        if (
-            not project_root.is_absolute() or project_root.is_symlink()
-            or project_root.resolve(strict=True) != project_root
-        ):
+        if not project_root.is_absolute():
             return None
         allowed_relative = allowed_root.relative_to(project_root)
-        root_before = project_root.lstat()
-        root_fd = os.open(project_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        root_fd = _open_snapshot_directory(project_root)
         root_opened = os.fstat(root_fd)
-        if _stat_identity(root_opened) != _stat_identity(root_before):
+        if not stat.S_ISDIR(root_opened.st_mode):
             return None
         state = {"entries": 0}
 
@@ -1188,12 +1398,8 @@ def _has_unbound_node_modules(project_root: Path, allowed_root: Path) -> bool | 
             return False
 
         result = visit(root_fd, Path(), 0)
-        root_after = project_root.lstat()
         root_final = os.fstat(root_fd)
-        if (
-            _stat_identity(root_after) != _stat_identity(root_before)
-            or _stat_identity(root_final) != _stat_identity(root_opened)
-        ):
+        if _stat_identity(root_final) != _stat_identity(root_opened):
             return None
         return result
     except (OSError, RuntimeError, ValueError):
@@ -1224,7 +1430,7 @@ def node_install_authorized(
         return False
     try:
         repository = candidate["repositories"][lane.repository]
-        repository_root = Path(repository["path"]).resolve(strict=True)
+        repository_root = Path(repository["path"])
         install_parent = repository_root / relative_cwd
         install_root = install_parent / "node_modules"
         package_lock = install_parent / "package-lock.json"
@@ -1241,7 +1447,9 @@ def node_install_authorized(
             local_binary = install_root / ".bin" / lane.command[1]
             binary_metadata = local_binary.lstat()
             if stat.S_ISLNK(binary_metadata.st_mode):
-                local_binary.resolve(strict=True).relative_to(install_root)
+                target = os.readlink(local_binary)
+                if not _lexical_symlink_within_root(Path(".bin"), target):
+                    return False
             elif not stat.S_ISREG(binary_metadata.st_mode):
                 return False
         metadata = candidate["tools"]["nodeInstalls"][key]
@@ -2002,18 +2210,9 @@ def run_gate(
                     report["lanes"].append({
                         "name": selected[0].name, "exitCode": None, "durationMs": 0,
                     })
-                execution_stage = None
-                execution_candidate = candidate
-            else:
-                try:
-                    execution_stage = stage_execution_candidate(candidate, selected)
-                    execution_candidate = execution_stage.candidate
-                except (OSError, RuntimeError, TypeError, ValueError):
-                    execution_stage = None
-                    execution_candidate = candidate
-                    report = _blocked(candidate_id, "snapshot")
             source = source_environment if source_environment is not None else os.environ
-            for lane in selected if execution_stage is not None else ():
+            for lane in selected if report["verdict"] == "PASS" else ():
+                execution_stage = None
                 lane_source = source
                 if lane.name == LIVE_DB_LANE.name:
                     live_db_source = _live_db_source_snapshot(source)
@@ -2057,20 +2256,30 @@ def run_gate(
                     report["failedLane"] = lane.name
                     break
                 lane_command = _command_for_lane(lane, candidate)
+                try:
+                    execution_stage = stage_execution_candidate(candidate, (lane,))
+                    execution_candidate = execution_stage.candidate
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    report["verdict"] = "BLOCKED"
+                    report["failedLane"] = "snapshot"
+                    break
                 command = _resolve_candidate_command(lane_command, execution_candidate, lane) if lane_command else None
                 if command is None:
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
+                    execution_stage.cleanup()
                     break
                 root = Path(execution_candidate["repositories"][lane.repository]["path"])
                 cwd = root / lane.relative_cwd
                 try:
-                    resolved_cwd = cwd.resolve(strict=True)
-                    resolved_cwd.relative_to(root)
-                except (OSError, ValueError):
+                    cwd_fd = _open_snapshot_directory(cwd)
+                    os.close(cwd_fd)
+                    resolved_cwd = cwd
+                except OSError:
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
+                    execution_stage.cleanup()
                     break
                 started = time.monotonic_ns()
                 junit_path: Path | None = None
@@ -2088,7 +2297,6 @@ def run_gate(
                     skip_state = pytest_report_has_skips(junit_path) if junit_path else False
                 except BaseException:
                     execution_stage.cleanup()
-                    execution_stage = None
                     raise
                 finally:
                     if junit_path is not None:
@@ -2099,6 +2307,7 @@ def run_gate(
                 report["lanes"].append({
                     "name": lane.name, "exitCode": exit_code, "durationMs": duration_ms,
                 })
+                execution_stage.cleanup()
                 if not _candidate_metadata_matches(candidate_path, candidate):
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
@@ -2111,8 +2320,6 @@ def run_gate(
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
                     break
-            if execution_stage is not None:
-                execution_stage.cleanup()
             if report["verdict"] == "PASS" and not _candidate_metadata_matches(candidate_path, candidate):
                 report = _blocked(candidate_id, selected[-1].name if selected else "candidate-runtime")
     if report_path is not None:
