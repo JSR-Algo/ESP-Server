@@ -18,6 +18,7 @@ import secrets
 import shutil
 import socket
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -39,6 +40,7 @@ run_bounded_command = _manifest.run_bounded_command
 strict_json_loads = _manifest.strict_json_loads
 validate_candidate = _manifest.validate_candidate
 _candidate_git = _manifest._git
+secure_browser_bundle_descriptor = _manifest.secure_browser_bundle_descriptor
 
 
 SECURE_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -63,6 +65,15 @@ MAX_NODE_INSTALL_DEPTH = 128
 MAX_NODE_PROJECT_SCAN_ENTRIES = 500_000
 MAX_PACKAGE_LOCK_BYTES = 32 * 1024 * 1024
 NODE_TREE_SCHEMA = "sha256-path-mode-bytes-symlink-v1"
+ROBOT_PREVIEW_BROWSER_ENVIRONMENT = {
+    "root": "TBOT_ROBOT_PREVIEW_BROWSER_ROOT",
+    "executable": "TBOT_ROBOT_PREVIEW_BROWSER_EXECUTABLE",
+    "engine": "TBOT_ROBOT_PREVIEW_BROWSER_ENGINE",
+    "revision": "TBOT_ROBOT_PREVIEW_BROWSER_REVISION",
+    "treeSha256": "TBOT_ROBOT_PREVIEW_BROWSER_TREE_SHA256",
+    "treeEntryCount": "TBOT_ROBOT_PREVIEW_BROWSER_TREE_ENTRY_COUNT",
+    "treeTotalBytes": "TBOT_ROBOT_PREVIEW_BROWSER_TREE_TOTAL_BYTES",
+}
 MODES = ("quick", "full", "live-db", "physical-preflight")
 COURSE_MODE_SOFTWARE_TESTS = "@course-mode-software-tests"
 PLAYWRIGHT_CONTRACT_PATH = "main/manager-web/course-mode.playwright.contract.json"
@@ -1010,12 +1021,50 @@ def node_install_authorized(
         return False
 
 
+def robot_preview_browser_authorized(candidate: dict) -> bool:
+    try:
+        descriptor = candidate["tools"]["robotPreviewBrowser"]
+        if not isinstance(descriptor, dict) or set(descriptor) != {
+            "version", "engine", "revision", "root", "executable", "treeDigest",
+        }:
+            return False
+        observed, error = secure_browser_bundle_descriptor(Path(descriptor["root"]))
+        if error or observed != descriptor["treeDigest"]:
+            return False
+        admin_root = Path(candidate["repositories"]["adminEsp"]["path"])
+        metadata_path = admin_root / "main/manager-web/node_modules/playwright-core/browsers.json"
+        metadata = strict_json_loads(read_secure_regular(metadata_path, 1024 * 1024))
+        browsers = metadata.get("browsers") if isinstance(metadata, dict) else None
+        entry = next(
+            item for item in browsers
+            if isinstance(item, dict) and item.get("name") == "chromium-headless-shell"
+        )
+        if entry.get("revision") != descriptor["revision"] or descriptor["engine"] != "chromium-headless-shell":
+            return False
+        machine = os.uname().machine.lower()
+        platform_suffix = {
+            ("darwin", "arm64"): "chrome-headless-shell-mac-arm64/chrome-headless-shell",
+            ("darwin", "x86_64"): "chrome-headless-shell-mac-x64/chrome-headless-shell",
+            ("linux", "aarch64"): "chrome-linux/headless_shell",
+            ("linux", "x86_64"): "chrome-headless-shell-linux64/chrome-headless-shell",
+        }.get((sys.platform, machine))
+        if platform_suffix is None:
+            return False
+        expected_root = Path(f"chromium_headless_shell-{descriptor['revision']}") / Path(platform_suffix).parent
+        return (
+            Path(descriptor["root"]).parts[-len(expected_root.parts):] == expected_root.parts
+            and descriptor["executable"] == Path(platform_suffix).name
+        )
+    except (KeyError, OSError, StopIteration, TypeError, ValueError):
+        return False
+
+
 def release_state_matches(
     candidate_path: Path, candidate: dict, lanes: Sequence[Lane], runtime_root: Path | None,
     require_runtime: bool, node_lanes: Sequence[Lane] | None = None,
 ) -> bool:
     current = _load_candidate(candidate_path)
-    if current != candidate or current is None or validate_candidate(current):
+    if current != candidate or current is None or validate_candidate(current, verify_external_tools=False):
         return False
     if not _candidate_matches(candidate):
         return False
@@ -1031,6 +1080,8 @@ def release_state_matches(
     node_cache: dict = {}
     for lane in lanes if node_lanes is None else node_lanes:
         if not node_install_authorized(lane, candidate, node_cache):
+            return False
+        if lane.name == "admin-browser" and not robot_preview_browser_authorized(candidate):
             return False
     return True
 
@@ -1283,6 +1334,17 @@ def _child_environment(candidate: dict, source: Mapping[str, str], lane: Lane) -
     if assignment is not None:
         environment.update(assignment)
     environment.update(dict(lane.fixed_environment))
+    if lane.name == "admin-browser":
+        browser = candidate["tools"]["robotPreviewBrowser"]
+        values = {
+            "root": browser["root"], "executable": browser["executable"],
+            "engine": browser["engine"], "revision": browser["revision"],
+            "treeSha256": browser["treeDigest"]["sha256"],
+            "treeEntryCount": browser["treeDigest"]["entryCount"],
+            "treeTotalBytes": browser["treeDigest"]["totalBytes"],
+        }
+        for field, name in ROBOT_PREVIEW_BROWSER_ENVIRONMENT.items():
+            environment[name] = str(values[field])
     return environment
 
 
