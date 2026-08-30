@@ -136,7 +136,7 @@ test('stalled candidate browser acquisition rejects before the outer watchdog', 
     ...deps,
   }, async () => {
     assert.fail('callback must not run before browser acquisition completes');
-  })), /test gate candidate browser acquisition timed out after 25ms/);
+  })), /test gate lifecycle timed out after 25ms/);
   assert.deepEqual(deps.state.spawned, []);
   assert.equal(deps.state.cleanupCalls, 0);
 });
@@ -180,7 +180,7 @@ test('stalled CDP command times out and cleans child, socket, and lease', async 
     label: 'test gate',
     operationTimeoutMs: 25,
     ...deps,
-  }, async ({ cdp }) => cdp('Page.enable')), /test gate CDP Page\.enable timed out after 25ms/);
+  }, async ({ cdp }) => cdp('Page.enable')), /test gate lifecycle timed out after 25ms/);
   assert.equal(deps.state.cleanupCalls, 1);
   assert.deepEqual(deps.state.spawned, ['/candidate/staged/chrome-headless-shell']);
   assert.equal(deps.state.child.signalCode, 'SIGTERM');
@@ -190,6 +190,7 @@ test('stalled CDP command times out and cleans child, socket, and lease', async 
 test('stalled candidate browser cleanup rejects before the outer watchdog after local resources close', async () => {
   const { withCandidateBoundBrowser } = await importHarness();
   const deps = dependencies();
+  const retained = [];
   deps.acquireBrowser = async () => ({
     executablePath: '/candidate/staged/chrome-headless-shell',
     cleanup: async () => {
@@ -201,11 +202,53 @@ test('stalled candidate browser cleanup rejects before the outer watchdog after 
     profileDir: '/tmp/profile',
     label: 'test gate',
     operationTimeoutMs: 25,
+    onRetainedLease: (error, lease) => retained.push({ error, lease }),
     ...deps,
-  }, async () => {})), /test gate candidate browser cleanup timed out after 25ms/);
+  }, async () => {})), /test gate lifecycle timed out after 25ms/);
   assert.equal(deps.state.cleanupCalls, 1);
+  assert.equal(retained.length, 1);
+  assert.match(retained[0].error.message, /cleanup did not complete/);
   assert.equal(deps.state.child.signalCode, 'SIGTERM');
   assert.equal(deps.state.socket.readyState, 3);
+});
+
+test('failed candidate cleanup surfaces the retained lease to its owner', async () => {
+  const { withCandidateBoundBrowser } = await importHarness();
+  const deps = dependencies();
+  const retained = [];
+  deps.acquireBrowser = async () => ({
+    executablePath: '/candidate/staged/chrome-headless-shell',
+    cleanup: async () => { deps.state.cleanupCalls += 1; throw new Error('cleanup failed'); },
+  });
+  await assert.rejects(withCandidateBoundBrowser({
+    profileDir: '/tmp/profile', label: 'test gate', operationTimeoutMs: 100,
+    onRetainedLease: (error, lease) => retained.push({ error, lease }), ...deps,
+  }, async () => {}), /cleanup failed/);
+  assert.equal(deps.state.cleanupCalls, 1);
+  assert.equal(retained.length, 1);
+  assert.match(retained[0].error.message, /cleanup did not complete/);
+});
+
+test('late acquisition retains auditable lease ownership without starting unsafe cleanup', async () => {
+  const { withCandidateBoundBrowser } = await importHarness();
+  const deps = dependencies();
+  const retained = [];
+  let cleanupCalls = 0;
+  deps.acquireBrowser = () => new Promise((resolve) => setTimeout(() => resolve({
+    executablePath: '/candidate/staged/chrome-headless-shell',
+    cleanup: async () => { cleanupCalls += 1; await new Promise(() => {}); },
+  }), 30));
+  await assert.rejects(withCandidateBoundBrowser({
+    profileDir: '/tmp/profile', label: 'late gate', operationTimeoutMs: 20,
+    onRetainedLease: (error, lease) => retained.push({ error, lease }), ...deps,
+  }, async () => {}), /late gate lifecycle timed out after 20ms/);
+  await outerWatchdog(new Promise((resolve) => {
+    const poll = () => retained.length ? resolve() : setTimeout(poll, 1);
+    poll();
+  }), 75);
+  assert.equal(cleanupCalls, 0);
+  assert.equal(retained.length, 1);
+  assert.match(retained[0].error.message, /late candidate browser lease retained/);
 });
 
 test('visual-library pre-CDP socket factory hang rejects before outer watchdog and cleans lifecycle', async () => {
@@ -217,7 +260,7 @@ test('visual-library pre-CDP socket factory hang rejects before outer watchdog a
     label: 'Lesson visual library browser',
     operationTimeoutMs: 25,
     ...deps,
-  }, async () => {})), /Lesson visual library browser DevTools socket creation timed out after 25ms/);
+  }, async () => {})), /Lesson visual library browser lifecycle timed out after 25ms/);
   assert.equal(deps.state.cleanupCalls, 1);
   assert.equal(deps.state.child.signalCode, 'SIGTERM');
   assert.equal(deps.state.socket, null);
@@ -248,7 +291,7 @@ test('late socket factory resolution is closed after creation timeout and lifecy
     ...deps,
   }, async () => {
     assert.fail('callback must not run after socket creation times out');
-  })), /Lesson visual library browser DevTools socket creation timed out after 20ms/);
+  })), /Lesson visual library browser lifecycle timed out after 20ms/);
   assert.equal(deps.state.cleanupCalls, 1);
   assert.equal(deps.state.child.signalCode, 'SIGTERM');
   await outerWatchdog(lateSocketClosed);
@@ -269,7 +312,7 @@ test('visual-library pre-CDP socket-open hang rejects before outer watchdog and 
     ...deps,
   }, async () => {
     assert.fail('pre-CDP callback must not run before the socket opens');
-  })), /Lesson visual library browser DevTools socket open timed out after 25ms/);
+  })), /Lesson visual library browser lifecycle timed out after 25ms/);
   assert.equal(deps.state.cleanupCalls, 1);
   assert.equal(deps.state.child.signalCode, 'SIGTERM');
   assert.equal(deps.state.socket.readyState, 3);
@@ -352,4 +395,62 @@ test('completed child and socket cleanup do not leave deadline timers keeping No
     encoding: 'utf8',
   });
   assert.equal(result.status, 0, result.error?.message || result.stderr);
+});
+
+test('cumulative browser phases share one absolute lifecycle deadline', async () => {
+  const { withCandidateBoundBrowser } = await importHarness();
+  const deps = dependencies();
+  deps.acquireBrowser = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 7));
+    return { executablePath: '/candidate/staged/chrome-headless-shell', cleanup: async () => { deps.state.cleanupCalls += 1; } };
+  };
+  deps.waitForDevToolsPort = async () => { await new Promise((resolve) => setTimeout(resolve, 7)); return '9222\n'; };
+  deps.fetchDevToolsTarget = async () => { await new Promise((resolve) => setTimeout(resolve, 7)); return { webSocketDebuggerUrl: 'ws://candidate-bound' }; };
+  await assert.rejects(outerWatchdog(withCandidateBoundBrowser({
+    profileDir: '/tmp/profile', label: 'global gate', operationTimeoutMs: 20, ...deps,
+  }, async () => assert.fail('callback must not outlive the global deadline')), 75), /global gate lifecycle timed out after 20ms/);
+});
+
+test('stubborn child retains the lease when it cannot be reaped before the lifecycle deadline', async () => {
+  const { withCandidateBoundBrowser } = await importHarness();
+  const deps = dependencies({ spawnBrowser: () => {
+    const child = new EventEmitter();
+    child.exitCode = null;
+    child.signalCode = null;
+    child.kill = () => true;
+    deps.state.child = child;
+    return child;
+  } });
+  await assert.rejects(outerWatchdog(withCandidateBoundBrowser({
+    profileDir: '/tmp/profile', label: 'stubborn gate', operationTimeoutMs: 25, ...deps,
+  }, async () => { throw new Error('trigger cleanup'); }), 75), /lease retained.*child.*not reaped/i);
+  assert.equal(deps.state.cleanupCalls, 0);
+});
+
+test('SIGKILL reap completes before candidate lease cleanup', async () => {
+  const { withCandidateBoundBrowser } = await importHarness();
+  const events = [];
+  const deps = dependencies({ spawnBrowser: () => {
+    const child = new EventEmitter();
+    child.exitCode = null;
+    child.signalCode = null;
+    child.kill = (signal) => {
+      events.push(signal);
+      if (signal === 'SIGKILL') queueMicrotask(() => {
+        child.signalCode = signal;
+        child.emit('exit', null, signal);
+      });
+      return true;
+    };
+    deps.state.child = child;
+    return child;
+  } });
+  deps.acquireBrowser = async () => ({
+    executablePath: '/candidate/staged/chrome-headless-shell',
+    cleanup: async () => { events.push('cleanup'); deps.state.cleanupCalls += 1; },
+  });
+  await assert.rejects(withCandidateBoundBrowser({
+    profileDir: '/tmp/profile', label: 'reap gate', operationTimeoutMs: 100, ...deps,
+  }, async () => { throw new Error('trigger cleanup'); }), /trigger cleanup/);
+  assert.deepEqual(events, ['SIGTERM', 'SIGKILL', 'cleanup']);
 });

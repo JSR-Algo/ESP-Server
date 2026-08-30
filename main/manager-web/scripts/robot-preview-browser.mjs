@@ -237,11 +237,19 @@ export async function acquirePinnedRobotPreviewChromium({
   const leaseRoot = await mkdtemp(join(stagingParent, 'tbot-robot-preview-browser-'));
   await chmod(leaseRoot, 0o700);
   let active = true;
-  const cleanup = async () => {
+  let cleanupPromise;
+  const cleanup = () => {
     if (!active) return;
-    active = false;
-    try { await makeBundleRemovable(leaseRoot); } catch {}
-    await rm(leaseRoot, { recursive: true, force: true });
+    if (cleanupPromise) return cleanupPromise;
+    cleanupPromise = (async () => {
+      try { await makeBundleRemovable(leaseRoot); } catch {}
+      await rm(leaseRoot, { recursive: true, force: true });
+      active = false;
+    })().catch((error) => {
+      cleanupPromise = undefined;
+      throw error;
+    });
+    return cleanupPromise;
   };
   try {
     const observed = await stageVerifiedBundle(descriptor.root, leaseRoot);
