@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import importlib
 import json
 import unittest
@@ -117,7 +118,7 @@ def _identity_args():
         "--firmware-identity",
         "firmware-1",
         "--config-fingerprint",
-        "sha256:4f64b552410469f6442ab03ff90cc4428762fbd347042432055778e1417db9ff",
+        "sha256:84d14c7fa49d55c1327d80fcd4259b324b1fabe8f6a360fa3f0fc793cbcd5217",
         "--fixture-sha256",
         "dbd55231b25b5de9d7cbe0e54c8b237944b25aedede780afe745802e4d1696c4",
     ]
@@ -217,7 +218,7 @@ class GoogleLiveSmokeScriptTest(unittest.TestCase):
     def test_main_round_trip_writes_v1_report_and_returns_failure(self):
         smoke = importlib.import_module("scripts.google_live_smoke")
 
-        async def fake_round_trip(_config, _audio_file, _event_timeout_sec):
+        async def fake_round_trip(_config, _pcm_chunks, _event_timeout_sec):
             return {
                 "status": "FAIL",
                 "error": {
@@ -238,7 +239,7 @@ class GoogleLiveSmokeScriptTest(unittest.TestCase):
                     str(report_path),
                     *_identity_args(),
                 ],
-            ), patch.object(smoke, "_run_round_trip", fake_round_trip):
+            ), patch.object(smoke, "_run_prepared_round_trip", fake_round_trip):
                 self.assertEqual(smoke.main(), 1)
 
             report = json.loads(report_path.read_text())
@@ -382,6 +383,91 @@ class GoogleLiveSmokeScriptTest(unittest.TestCase):
 
 
 class GoogleLiveSmokeRoundTripTest(unittest.IsolatedAsyncioTestCase):
+    async def test_reported_identity_fingerprints_exact_client_config(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        reliability = importlib.import_module("scripts.google_live_reliability")
+        captured = {}
+        captured_objects = []
+
+        def fake_client_factory(config, _logger):
+            captured.update(config)
+            captured_objects.append(config)
+            return _FakeClient(
+                events=[
+                    {"type": "audio_chunk", "audio": b"audio"},
+                    {"type": "audio_end"},
+                ]
+            )
+
+        with TemporaryDirectory() as directory:
+            fixture = Path(directory) / "speech.wav"
+            with wave.open(str(fixture), "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(8000)
+                wav_file.writeframes(b"\x01\x00" * 160)
+            fixture_sha = hashlib.sha256(fixture.read_bytes()).hexdigest()
+            base = smoke._build_env_config("gemini-live", "Kore")
+            effective = smoke._build_round_trip_config(base, fixture)
+            expected = reliability.build_candidate_identity(
+                "candidate",
+                f"sha256:{'a' * 64}",
+                "firmware",
+                effective,
+                fixture_sha,
+            )
+            args = unittest.mock.Mock(
+                candidate_git_sha="candidate",
+                candidate_image_digest=f"sha256:{'a' * 64}",
+                firmware_identity="firmware",
+                config_fingerprint=expected["configFingerprint"],
+                fixture_sha256=fixture_sha,
+                audio_file=fixture,
+            )
+
+            identity, effective_config, chunks = smoke._prepare_round_trip(
+                args,
+                base,
+                smoke._declared_candidate_identity(args),
+            )
+            with patch.object(smoke, "GoogleLiveClient", fake_client_factory):
+                result = await smoke._run_prepared_round_trip(
+                    effective_config,
+                    chunks,
+                    1,
+                )
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(captured, effective_config)
+        self.assertIs(captured_objects[0], effective_config)
+        self.assertEqual(identity, expected)
+        self.assertEqual(captured["input_sample_rate"], 8000)
+
+    def test_candidate_fingerprint_changes_with_wav_sample_rate(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        reliability = importlib.import_module("scripts.google_live_reliability")
+        base = smoke._build_env_config("gemini-live", "Kore")
+
+        with TemporaryDirectory() as directory:
+            fingerprints = []
+            for sample_rate in (8000, 24000):
+                fixture = Path(directory) / f"speech-{sample_rate}.wav"
+                with wave.open(str(fixture), "wb") as wav_file:
+                    wav_file.setnchannels(1)
+                    wav_file.setsampwidth(2)
+                    wav_file.setframerate(sample_rate)
+                    wav_file.writeframes(b"\x01\x00" * 160)
+                identity = reliability.build_candidate_identity(
+                    "candidate",
+                    f"sha256:{'a' * 64}",
+                    "firmware",
+                    smoke._build_round_trip_config(base, fixture),
+                    hashlib.sha256(fixture.read_bytes()).hexdigest(),
+                )
+                fingerprints.append(identity["configFingerprint"])
+
+        self.assertNotEqual(*fingerprints)
+
     async def test_run_round_trip_passes_production_identity_to_client(self):
         smoke = importlib.import_module("scripts.google_live_smoke")
         captured = {}
@@ -706,7 +792,7 @@ class GoogleLiveSmokeRoundTripTest(unittest.IsolatedAsyncioTestCase):
             "gitSha": "candidate-sha",
             "imageDigest": f"sha256:{'1' * 64}",
             "firmwareIdentity": "firmware-1",
-            "configFingerprint": "sha256:4f64b552410469f6442ab03ff90cc4428762fbd347042432055778e1417db9ff",
+            "configFingerprint": "sha256:84d14c7fa49d55c1327d80fcd4259b324b1fabe8f6a360fa3f0fc793cbcd5217",
             "fixtureSha256": "dbd55231b25b5de9d7cbe0e54c8b237944b25aedede780afe745802e4d1696c4",
         }
         report = smoke._build_report({"status": "PASS"}, identity)

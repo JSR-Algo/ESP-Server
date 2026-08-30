@@ -368,11 +368,11 @@ async def _run_smoke(config):
 async def _run_round_trip(config, audio_file, event_timeout_sec):
     try:
         chunks = _read_pcm_chunks(audio_file, chunk_ms=20)
-        config = _build_round_trip_config(config, audio_file)
-        return await _run_round_trip_with_retry(
-            lambda: GoogleLiveClient(config, _ConsoleLogger()),
-            pcm_chunks=chunks,
-            event_timeout_sec=event_timeout_sec,
+        effective_config = _build_round_trip_config(config, audio_file)
+        return await _run_prepared_round_trip(
+            effective_config,
+            chunks,
+            event_timeout_sec,
         )
     except (ValueError, wave.Error, FileNotFoundError):
         return {
@@ -383,6 +383,14 @@ async def _run_round_trip(config, audio_file, event_timeout_sec):
                 "message": _SAFE_ERROR_MESSAGES["audio_input_or_codec"],
             },
         }
+
+
+async def _run_prepared_round_trip(config, pcm_chunks, event_timeout_sec):
+    return await _run_round_trip_with_retry(
+        lambda: GoogleLiveClient(config, _ConsoleLogger()),
+        pcm_chunks=pcm_chunks,
+        event_timeout_sec=event_timeout_sec,
+    )
 
 
 def _fixture_sha256(path):
@@ -414,8 +422,7 @@ def _declared_candidate_identity(args):
     return identity
 
 
-def _validate_candidate_identity(args, config, declared_identity):
-    fixture_sha256 = _fixture_sha256(args.audio_file)
+def _validate_candidate_identity(args, config, declared_identity, fixture_sha256):
     if declared_identity["fixtureSha256"].lower() != fixture_sha256:
         raise ValueError("fixture SHA-256 does not match the audio file")
     try:
@@ -433,6 +440,19 @@ def _validate_candidate_identity(args, config, declared_identity):
             "config fingerprint does not match effective Google Live config"
         )
     return effective_identity
+
+
+def _prepare_round_trip(args, config, declared_identity):
+    chunks = _read_pcm_chunks(args.audio_file, chunk_ms=20)
+    effective_config = _build_round_trip_config(config, args.audio_file)
+    fixture_sha256 = _fixture_sha256(args.audio_file)
+    identity = _validate_candidate_identity(
+        args,
+        effective_config,
+        declared_identity,
+        fixture_sha256,
+    )
+    return identity, effective_config, chunks
 
 
 def _safe_failure(error, *, status="FAIL"):
@@ -469,7 +489,11 @@ def _run_report_mode(args):
     try:
         candidate_identity = _declared_candidate_identity(args)
         config = _load_cli_config(args)
-        _validate_candidate_identity(args, config, candidate_identity)
+        candidate_identity, effective_config, chunks = _prepare_round_trip(
+            args,
+            config,
+            candidate_identity,
+        )
         if not _has_resolvable_api_key(config):
             result = _safe_failure(
                 _MissingCredentialError("Google Live API key is missing"),
@@ -477,9 +501,9 @@ def _run_report_mode(args):
             )
         elif args.round_trip:
             result = asyncio.run(
-                _run_round_trip(
-                    config,
-                    args.audio_file,
+                _run_prepared_round_trip(
+                    effective_config,
+                    chunks,
                     args.event_timeout_sec,
                 )
             )
