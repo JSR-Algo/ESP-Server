@@ -421,6 +421,7 @@ def test_live_db_lane_requires_and_forwards_every_backend_live_database_variable
         "COURSE_MODE_V2_TEST_DATABASE_URL": "postgres://v2.invalid/db",
         "COURSE_MODE_TEST_DATABASE_URL": "postgres://curriculum.invalid/db",
         "DATABASE_URL": "postgres://materializer.invalid/db",
+        "COURSE_MODE_ROLLBACK_TEST_DATABASE_URL": "postgres://rollback.invalid/db",
     }
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
 
@@ -431,6 +432,32 @@ def test_live_db_lane_requires_and_forwards_every_backend_live_database_variable
     assert environment["TBOT_RUN_LIVE_DB_TESTS"] == "true"
 
 
+def test_live_db_lane_fixes_database_confirmation_instead_of_trusting_source(
+    candidate_file: Path,
+) -> None:
+    lane = gate.lanes_for_mode("live-db")[-1]
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+
+    environment = gate._child_environment(
+        candidate, {"COURSE_MODE_TEST_DATABASE_CONFIRMED": "0"}, lane,
+    )
+
+    assert environment["COURSE_MODE_TEST_DATABASE_CONFIRMED"] == "1"
+
+
+def test_live_db_lane_binds_v5_source_root_to_candidate_instead_of_ambient(
+    candidate_file: Path,
+) -> None:
+    lane = gate.lanes_for_mode("live-db")[-1]
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+
+    environment = gate._child_environment(
+        candidate, {"COURSE_MODE_V5_SOURCE_ROOT": "/hostile/ambient/source"}, lane,
+    )
+
+    assert environment["COURSE_MODE_V5_SOURCE_ROOT"] == candidate["repositories"]["adminEsp"]["path"]
+
+
 def test_live_db_blocks_if_any_backend_database_variable_is_missing(candidate_file: Path) -> None:
     lane = gate.lanes_for_mode("live-db")[-1]
     source = {
@@ -438,6 +465,31 @@ def test_live_db_blocks_if_any_backend_database_variable_is_missing(candidate_fi
         "COURSE_MODE_TEST_DATABASE_URL": "postgres://curriculum.invalid/db",
     }
 
+    result = gate.run_gate(
+        candidate_file, "live-db", lanes=(lane,), source_environment=source,
+        runtime_root=Path(json.loads(candidate_file.read_text())["repositories"]["adminEsp"]["path"]),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "live-postgres"
+    assert result["lanes"] == [{"name": "live-postgres", "exitCode": None, "durationMs": 0}]
+
+
+def test_live_db_blocks_if_rollback_database_variable_is_missing(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lane = gate.lanes_for_mode("live-db")[-1]
+    source = {
+        "COURSE_MODE_V2_TEST_DATABASE_URL": "postgres://v2.invalid/db",
+        "COURSE_MODE_TEST_DATABASE_URL": "postgres://curriculum.invalid/db",
+        "DATABASE_URL": "postgres://materializer.invalid/db",
+    }
+
+    monkeypatch.setattr(gate, "release_state_matches", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("live DB command must not run without rollback URL"),
+    )
     result = gate.run_gate(
         candidate_file, "live-db", lanes=(lane,), source_environment=source,
         runtime_root=Path(json.loads(candidate_file.read_text())["repositories"]["adminEsp"]["path"]),

@@ -331,8 +331,16 @@ LIVE_DB_LANE = _lane(
         "tests/integration/course-mode-local-materializer.integration.spec.ts",
     ),
     1800.0,
-    ("COURSE_MODE_V2_TEST_DATABASE_URL", "COURSE_MODE_TEST_DATABASE_URL", "DATABASE_URL"),
-    (("TBOT_RUN_LIVE_DB_TESTS", "true"),),
+    (
+        "COURSE_MODE_V2_TEST_DATABASE_URL",
+        "COURSE_MODE_TEST_DATABASE_URL",
+        "DATABASE_URL",
+        "COURSE_MODE_ROLLBACK_TEST_DATABASE_URL",
+    ),
+    (
+        ("TBOT_RUN_LIVE_DB_TESTS", "true"),
+        ("COURSE_MODE_TEST_DATABASE_CONFIRMED", "1"),
+    ),
 )
 
 
@@ -1254,6 +1262,8 @@ def _child_environment(candidate: dict, source: Mapping[str, str], lane: Lane) -
     for name in _required_environment(lane):
         if source.get(name):
             environment[name] = source[name]
+    if lane.name == LIVE_DB_LANE.name:
+        environment["COURSE_MODE_V5_SOURCE_ROOT"] = candidate["repositories"]["adminEsp"]["path"]
     assignment = _assignment_candidate_environment(candidate, lane)
     if assignment is not None:
         environment.update(assignment)
