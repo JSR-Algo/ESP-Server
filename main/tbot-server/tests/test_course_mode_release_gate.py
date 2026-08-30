@@ -738,7 +738,9 @@ def test_live_db_valid_distinct_production_url_is_not_forwarded_to_child(
     assert result["verdict"] == "PASS"
 
 
-@pytest.mark.parametrize("production_host", ["localhost.localdomain", "0x7f000001"])
+@pytest.mark.parametrize(
+    "production_host", ["localhost.localdomain", "0x7f000001", "2130706433"],
+)
 def test_live_db_blocks_production_resolver_aliases_to_loopback(
     candidate_file: Path,
     monkeypatch: pytest.MonkeyPatch,
