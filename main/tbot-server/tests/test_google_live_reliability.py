@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 
+import pytest
+
 from scripts.google_live_reliability import (
     GOOGLE_LIVE_LIMITS,
     SCHEMA_VERSION,
@@ -82,6 +84,38 @@ def test_redact_mapping_recursively_redacts_secret_keys_and_preserves_safe_value
     }
 
 
+def test_redact_mapping_normalizes_common_secret_key_variants_without_substring_matches() -> None:
+    source = {
+        "apiKey": "api-secret",
+        "accessToken": "access-secret",
+        "refreshToken": "refresh-secret",
+        "client_secret": "client-secret",
+        "clientSecret": "camel-secret",
+        "x-goog-api-key": "google-secret",
+        "headers": {
+            "X-Api-Key": "header-key-secret",
+            "Authorization": "Bearer header-secret",
+            "tokenizer": "safe-tokenizer",
+            "handlebars": "safe-handlebars",
+        },
+    }
+
+    assert redact_mapping(source) == {
+        "apiKey": "<redacted>",
+        "accessToken": "<redacted>",
+        "refreshToken": "<redacted>",
+        "client_secret": "<redacted>",
+        "clientSecret": "<redacted>",
+        "x-goog-api-key": "<redacted>",
+        "headers": {
+            "X-Api-Key": "<redacted>",
+            "Authorization": "<redacted>",
+            "tokenizer": "safe-tokenizer",
+            "handlebars": "safe-handlebars",
+        },
+    }
+
+
 def test_candidate_identity_is_deterministic_and_fingerprints_only_redacted_config() -> None:
     config = {"model": "gemini-live", "voice_name": "Kore", "api_key": "secret"}
     redacted = {"api_key": "<redacted>", "model": "gemini-live", "voice_name": "Kore"}
@@ -89,24 +123,68 @@ def test_candidate_identity_is_deterministic_and_fingerprints_only_redacted_conf
         json.dumps(redacted, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
 
-    identity = build_candidate_identity("abc123", "sha256:image", "fw-7", config, "fixture-hash")
+    image_digest = f"sha256:{'b' * 64}"
+    fixture_sha256 = "a" * 64
+    identity = build_candidate_identity("abc123", image_digest, "fw-7", config, fixture_sha256)
     reordered_identity = build_candidate_identity(
         "abc123",
-        "sha256:image",
+        image_digest,
         "fw-7",
         {"api_key": "different-secret", "voice_name": "Kore", "model": "gemini-live"},
-        "fixture-hash",
+        fixture_sha256,
     )
 
     assert identity == {
         "gitSha": "abc123",
-        "imageDigest": "sha256:image",
+        "imageDigest": image_digest,
         "firmwareIdentity": "fw-7",
-        "fixtureSha256": "fixture-hash",
+        "fixtureSha256": fixture_sha256,
         "configFingerprint": expected_fingerprint,
     }
     assert reordered_identity == identity
     assert "secret" not in json.dumps(identity)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("git_sha", None),
+        ("git_sha", "  "),
+        ("image_digest", ""),
+        ("firmware_identity", None),
+        ("firmware_identity", "\t"),
+        ("fixture_sha256", ""),
+    ],
+)
+def test_candidate_identity_rejects_missing_required_values(field: str, value: object) -> None:
+    values = {
+        "git_sha": "abc123",
+        "image_digest": f"sha256:{'b' * 64}",
+        "firmware_identity": "fw-7",
+        "config": {},
+        "fixture_sha256": "a" * 64,
+    }
+    values[field] = value
+
+    with pytest.raises(ValueError, match=field):
+        build_candidate_identity(**values)
+
+
+@pytest.mark.parametrize(
+    "image_digest",
+    ["sha256:image", "b" * 64, f"sha256:{'b' * 63}", f"sha256:{'g' * 64}"],
+)
+def test_candidate_identity_rejects_malformed_image_digest(image_digest: str) -> None:
+    with pytest.raises(ValueError, match="image_digest"):
+        build_candidate_identity("abc123", image_digest, "fw-7", {}, "a" * 64)
+
+
+@pytest.mark.parametrize("fixture_sha256", ["fixture", "a" * 63, "g" * 64])
+def test_candidate_identity_rejects_malformed_fixture_sha256(fixture_sha256: str) -> None:
+    with pytest.raises(ValueError, match="fixture_sha256"):
+        build_candidate_identity(
+            "abc123", f"sha256:{'b' * 64}", "fw-7", {}, fixture_sha256
+        )
 
 
 def test_latency_baseline_checks_only_shared_nonzero_metrics_at_fifteen_percent() -> None:
@@ -132,6 +210,35 @@ def test_latency_baseline_checks_only_shared_nonzero_metrics_at_fifteen_percent(
         "regressionPct": {"firstAudioP50Ms": 16.0, "firstAudioP95Ms": 13.33},
         "pass": False,
     }
+
+
+@pytest.mark.parametrize(
+    ("candidate", "baseline"),
+    [
+        ({}, {}),
+        ({"firstAudioP50Ms": 1000}, {"firstAudioP50Ms": 0}),
+        ({"firstAudioP50Ms": 1000}, {"firstAudioP95Ms": 1000}),
+    ],
+)
+def test_latency_baseline_fails_closed_without_comparable_metrics(
+    candidate: dict, baseline: dict
+) -> None:
+    result = compare_latency_baseline(candidate, baseline)
+
+    assert result["checks"] == {}
+    assert result["regressionPct"] == {}
+    assert result["pass"] is False
+    assert result["failures"] == [
+        {
+            "code": "BASELINE_METRICS_MISSING",
+            "requiredMetrics": [
+                "firstAudioP50Ms",
+                "firstAudioP95Ms",
+                "bargeinP95Ms",
+                "reconnectRecoveryP95Ms",
+            ],
+        }
+    ]
 
 
 def test_reliability_verdict_keeps_skipped_and_candidate_mismatch_failures() -> None:
@@ -174,10 +281,51 @@ def test_reliability_verdict_passes_only_all_matching_pass_layers() -> None:
     assert report["failures"] == []
 
 
-def test_percentile_handles_empty_and_rounded_nearest_rank_values() -> None:
+def test_reliability_verdict_fails_closed_without_layers() -> None:
+    report = reliability_verdict({"gitSha": "same"}, [])
+
+    assert report["status"] == "FAIL"
+    assert report["failures"] == [{"code": "LAYERS_MISSING"}]
+
+
+@pytest.mark.parametrize("name", ["", "   ", None])
+def test_reliability_verdict_rejects_empty_layer_names(name: object) -> None:
+    identity = {"gitSha": "same"}
+
+    report = reliability_verdict(
+        identity, [{"name": name, "status": "PASS", "candidateIdentity": identity}]
+    )
+
+    assert report["status"] == "FAIL"
+    assert report["failures"] == [{"code": "LAYER_NAME_MISSING", "layer": name}]
+
+
+def test_reliability_verdict_rejects_duplicate_layer_names() -> None:
+    identity = {"gitSha": "same"}
+    layer = {"name": "physical", "status": "PASS", "candidateIdentity": identity}
+
+    report = reliability_verdict(identity, [layer, dict(layer)])
+
+    assert report["status"] == "FAIL"
+    assert report["failures"] == [{"code": "DUPLICATE_LAYER_NAME", "layer": "physical"}]
+
+
+def test_percentile_uses_clamped_nearest_rank_boundaries() -> None:
     assert percentile([], 95) is None
-    assert percentile([1.1111, 2.2222, 3.3333, 4.4444], 50) == 3.333
+    values = [4.4444, 1.1111, 3.3333, 2.2222]
+    assert percentile(values, 0) == 1.111
+    assert percentile(values, 50) == 2.222
+    assert percentile(values, 95) == 4.444
+    assert percentile(values, 100) == 4.444
     assert percentile([9.87654], 95) == 9.877
+
+
+@pytest.mark.parametrize("percentile_value", [-0.001, 100.001])
+def test_percentile_rejects_values_outside_zero_to_one_hundred(
+    percentile_value: float,
+) -> None:
+    with pytest.raises(ValueError, match="between 0 and 100"):
+        percentile([1], percentile_value)
 
 
 def test_process_resource_sample_uses_resource_soak_field_contract() -> None:

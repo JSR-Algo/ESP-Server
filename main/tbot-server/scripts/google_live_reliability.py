@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
+import re
 import threading
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -12,15 +14,18 @@ from typing import Any
 from scripts.course_mode_resource_soak import _fd_count, _process_rss_bytes, monotonic_growth_slope
 
 SCHEMA_VERSION = "google-live-reliability.v1"
-SECRET_KEYS = frozenset(
+NORMALIZED_SECRET_KEYS = frozenset(
     {
-        "api_key",
+        "apikey",
         "authorization",
         "token",
-        "access_token",
-        "refresh_token",
-        "session_resumption_handle",
+        "accesstoken",
+        "refreshtoken",
+        "sessionresumptionhandle",
         "handle",
+        "clientsecret",
+        "xgoogapikey",
+        "xapikey",
     }
 )
 GOOGLE_LIVE_LIMITS = {
@@ -50,7 +55,7 @@ def redact_mapping(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
             str(key): "<redacted>"
-            if str(key).lower() in SECRET_KEYS
+            if re.sub(r"[^a-zA-Z0-9]", "", str(key)).lower() in NORMALIZED_SECRET_KEYS
             else redact_mapping(item)
             for key, item in value.items()
         }
@@ -60,14 +65,13 @@ def redact_mapping(value: Any) -> Any:
 
 
 def percentile(values: Sequence[int | float], percentile_value: float) -> float | None:
-    """Return a rounded nearest-rank percentile for a numeric sample."""
+    """Return the rounded nearest-rank percentile, clamped to the sample bounds."""
+    if not 0 <= percentile_value <= 100:
+        raise ValueError("percentile_value must be between 0 and 100")
     if not values:
         return None
     ordered = sorted(float(value) for value in values)
-    index = min(
-        len(ordered) - 1,
-        max(0, int(round((percentile_value / 100) * (len(ordered) - 1)))),
-    )
+    index = min(len(ordered) - 1, max(0, math.ceil(percentile_value / 100 * len(ordered)) - 1))
     return round(ordered[index], 3)
 
 
@@ -79,6 +83,19 @@ def build_candidate_identity(
     fixture_sha256: Any,
 ) -> dict[str, str]:
     """Bind all reliability layers to one privacy-safe candidate identity."""
+    required_values = {
+        "git_sha": git_sha,
+        "image_digest": image_digest,
+        "firmware_identity": firmware_identity,
+        "fixture_sha256": fixture_sha256,
+    }
+    for field, value in required_values.items():
+        if value is None or not str(value).strip():
+            raise ValueError(f"{field} must be non-empty")
+    if re.fullmatch(r"sha256:[0-9a-fA-F]{64}", str(image_digest)) is None:
+        raise ValueError("image_digest must be sha256: followed by 64 hexadecimal characters")
+    if re.fullmatch(r"[0-9a-fA-F]{64}", str(fixture_sha256)) is None:
+        raise ValueError("fixture_sha256 must contain exactly 64 hexadecimal characters")
     safe_config = redact_mapping(config or {})
     encoded = json.dumps(safe_config, sort_keys=True, separators=(",", ":")).encode()
     return {
@@ -111,25 +128,49 @@ def compare_latency_baseline(
             regression <= GOOGLE_LIVE_LIMITS["relativeLatencyRegressionPct"]
         )
         regressions[key] = round(regression, 2)
-    return {"checks": checks, "regressionPct": regressions, "pass": all(checks.values())}
+    result = {"checks": checks, "regressionPct": regressions, "pass": bool(checks) and all(checks.values())}
+    if not checks:
+        result["failures"] = [
+            {
+                "code": "BASELINE_METRICS_MISSING",
+                "requiredMetrics": [
+                    "firstAudioP50Ms",
+                    "firstAudioP95Ms",
+                    "bargeinP95Ms",
+                    "reconnectRecoveryP95Ms",
+                ],
+            }
+        ]
+    return result
 
 
 def reliability_verdict(
     expected_identity: Mapping[str, Any], layers: Sequence[Mapping[str, Any]]
 ) -> dict[str, Any]:
     """Fail closed when a layer is not passing or identifies another candidate."""
-    failures = []
+    failures: list[dict[str, Any]] = []
+    if not layers:
+        failures.append({"code": "LAYERS_MISSING"})
+    seen_names: set[str] = set()
     for layer in layers:
+        name = layer.get("name")
+        normalized_name = name.strip() if isinstance(name, str) else ""
+        if not normalized_name:
+            failures.append({"code": "LAYER_NAME_MISSING", "layer": name})
+        elif normalized_name in seen_names:
+            failures.append({"code": "DUPLICATE_LAYER_NAME", "layer": name})
+        else:
+            seen_names.add(normalized_name)
         if layer.get("status") != "PASS":
             failures.append(
                 {
                     "code": f"LAYER_{layer.get('status', 'MISSING')}",
-                    "layer": layer.get("name"),
+                    "layer": name,
                 }
             )
         if layer.get("candidateIdentity") != expected_identity:
             failures.append(
-                {"code": "CANDIDATE_IDENTITY_MISMATCH", "layer": layer.get("name")}
+                {"code": "CANDIDATE_IDENTITY_MISMATCH", "layer": name}
             )
     return {
         "schemaVersion": SCHEMA_VERSION,
