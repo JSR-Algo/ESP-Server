@@ -110,16 +110,37 @@ def build_candidate_identity(
 def compare_latency_baseline(
     candidate: Mapping[str, int | float], baseline: Mapping[str, int | float]
 ) -> dict[str, Any]:
-    """Compare shared nonzero latency metrics against the regression budget."""
-    checks: dict[str, bool] = {}
-    regressions: dict[str, float] = {}
-    for key in (
+    """Compare shared latency metrics against the regression budget."""
+    required_metrics = (
         "firstAudioP50Ms",
         "firstAudioP95Ms",
         "bargeinP95Ms",
         "reconnectRecoveryP95Ms",
-    ):
-        if key not in candidate or key not in baseline or not baseline[key]:
+    )
+    checks: dict[str, bool] = {}
+    regressions: dict[str, float] = {}
+    failures: list[dict[str, str]] = []
+    for key in required_metrics:
+        candidate_valid = key not in candidate or _valid_latency_metric(
+            candidate[key], positive=False
+        )
+        baseline_valid = key not in baseline or _valid_latency_metric(
+            baseline[key], positive=True
+        )
+        if not candidate_valid:
+            failures.append(
+                {"code": "LATENCY_METRIC_INVALID", "metric": key, "side": "candidate"}
+            )
+        if not baseline_valid:
+            failures.append(
+                {"code": "LATENCY_METRIC_INVALID", "metric": key, "side": "baseline"}
+            )
+        if (
+            not candidate_valid
+            or not baseline_valid
+            or key not in candidate
+            or key not in baseline
+        ):
             continue
         regression = (
             (float(candidate[key]) - float(baseline[key])) / float(baseline[key])
@@ -128,20 +149,29 @@ def compare_latency_baseline(
             regression <= GOOGLE_LIVE_LIMITS["relativeLatencyRegressionPct"]
         )
         regressions[key] = round(regression, 2)
-    result = {"checks": checks, "regressionPct": regressions, "pass": bool(checks) and all(checks.values())}
-    if not checks:
+    result: dict[str, Any] = {
+        "checks": checks,
+        "regressionPct": regressions,
+        "pass": bool(checks) and all(checks.values()) and not failures,
+    }
+    if failures:
+        result["failures"] = failures
+    elif not checks:
         result["failures"] = [
             {
                 "code": "BASELINE_METRICS_MISSING",
-                "requiredMetrics": [
-                    "firstAudioP50Ms",
-                    "firstAudioP95Ms",
-                    "bargeinP95Ms",
-                    "reconnectRecoveryP95Ms",
-                ],
+                "requiredMetrics": list(required_metrics),
             }
         ]
     return result
+
+
+def _valid_latency_metric(value: Any, *, positive: bool) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    if not math.isfinite(value):
+        return False
+    return value > 0 if positive else value >= 0
 
 
 def reliability_verdict(

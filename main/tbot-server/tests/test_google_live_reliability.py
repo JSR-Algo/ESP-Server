@@ -198,7 +198,6 @@ def test_latency_baseline_checks_only_shared_nonzero_metrics_at_fifteen_percent(
         {
             "firstAudioP50Ms": 1000,
             "firstAudioP95Ms": 1500,
-            "bargeinP95Ms": 0,
         },
     )
 
@@ -216,7 +215,6 @@ def test_latency_baseline_checks_only_shared_nonzero_metrics_at_fifteen_percent(
     ("candidate", "baseline"),
     [
         ({}, {}),
-        ({"firstAudioP50Ms": 1000}, {"firstAudioP50Ms": 0}),
         ({"firstAudioP50Ms": 1000}, {"firstAudioP95Ms": 1000}),
     ],
 )
@@ -239,6 +237,74 @@ def test_latency_baseline_fails_closed_without_comparable_metrics(
             ],
         }
     ]
+
+
+@pytest.mark.parametrize("side", ["candidate", "baseline"])
+@pytest.mark.parametrize(
+    "invalid_value",
+    [True, False, -1, float("nan"), float("inf"), float("-inf")],
+    ids=[
+        "true",
+        "false",
+        "negative",
+        "nan",
+        "positive-infinity",
+        "negative-infinity",
+    ],
+)
+def test_latency_baseline_rejects_malformed_supplied_metrics(
+    side: str, invalid_value: object
+) -> None:
+    candidate = {"firstAudioP50Ms": 1000}
+    baseline = {"firstAudioP50Ms": 1000}
+    target = candidate if side == "candidate" else baseline
+    target["firstAudioP50Ms"] = invalid_value
+
+    result = compare_latency_baseline(candidate, baseline)
+
+    assert result["checks"] == {}
+    assert result["regressionPct"] == {}
+    assert result["pass"] is False
+    assert result["failures"] == [
+        {
+            "code": "LATENCY_METRIC_INVALID",
+            "metric": "firstAudioP50Ms",
+            "side": side,
+        }
+    ]
+
+
+def test_latency_baseline_rejects_zero_baseline_metric() -> None:
+    result = compare_latency_baseline({"firstAudioP50Ms": 0}, {"firstAudioP50Ms": 0})
+
+    assert result["pass"] is False
+    assert result["failures"] == [
+        {
+            "code": "LATENCY_METRIC_INVALID",
+            "metric": "firstAudioP50Ms",
+            "side": "baseline",
+        }
+    ]
+
+
+def test_latency_baseline_preserves_valid_checks_while_failing_malformed_metric() -> None:
+    result = compare_latency_baseline(
+        {"firstAudioP50Ms": True, "firstAudioP95Ms": 1600},
+        {"firstAudioP50Ms": 1000, "firstAudioP95Ms": 1500},
+    )
+
+    assert result == {
+        "checks": {"firstAudioP95Regression": True},
+        "regressionPct": {"firstAudioP95Ms": 6.67},
+        "pass": False,
+        "failures": [
+            {
+                "code": "LATENCY_METRIC_INVALID",
+                "metric": "firstAudioP50Ms",
+                "side": "candidate",
+            }
+        ],
+    }
 
 
 def test_reliability_verdict_keeps_skipped_and_candidate_mismatch_failures() -> None:
