@@ -7,6 +7,7 @@ import argparse
 import contextlib
 import hashlib
 import importlib
+import ipaddress
 import json
 import math
 import os
@@ -1282,7 +1283,30 @@ def _child_environment(candidate: dict, source: Mapping[str, str], lane: Lane) -
     return environment
 
 
-def _local_postgres_identity(value: object) -> tuple[str, int, str] | None:
+def _postgres_host_identity(host: str | None) -> str | None:
+    if not host:
+        return None
+    normalized = host.lower().removesuffix(".")
+    if normalized == "localhost" or normalized.endswith(".localhost"):
+        return "loopback"
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        if re.fullmatch(r"[0-9.]+", normalized):
+            return None
+        labels = normalized.split(".")
+        if len(normalized) > 253 or any(
+            re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) is None
+            for label in labels
+        ):
+            return None
+        return normalized
+    if address.is_loopback:
+        return "loopback"
+    return address.compressed
+
+
+def _postgres_identity(value: object) -> tuple[str, int, str] | None:
     if (
         not isinstance(value, str)
         or not value
@@ -1296,7 +1320,7 @@ def _local_postgres_identity(value: object) -> tuple[str, int, str] | None:
         endpoint = parsed.netloc.rsplit("@", 1)[-1]
         parsed_port = parsed.port
         port = 5432 if parsed_port is None else parsed_port
-        host = parsed.hostname.lower() if parsed.hostname else None
+        host = _postgres_host_identity(parsed.hostname)
     except (UnicodeError, ValueError):
         return None
     if (
@@ -1304,7 +1328,7 @@ def _local_postgres_identity(value: object) -> tuple[str, int, str] | None:
         or not parsed.netloc
         or parsed.fragment
         or endpoint.endswith(":")
-        or host not in {"localhost", "127.0.0.1", "::1"}
+        or host is None
         or not 1 <= port <= 65535
         or any(key.lower() in POSTGRES_IDENTITY_QUERY_KEYS for key, _ in query)
     ):
@@ -1312,7 +1336,12 @@ def _local_postgres_identity(value: object) -> tuple[str, int, str] | None:
     database = unquote(parsed.path.removeprefix("/"))
     if not database or "/" in database or "\\" in database or "\x00" in database:
         return None
-    return ("loopback", port, database)
+    return (host, port, database)
+
+
+def _local_postgres_identity(value: object) -> tuple[str, int, str] | None:
+    identity = _postgres_identity(value)
+    return identity if identity is not None and identity[0] == "loopback" else None
 
 
 def _live_db_topology_ready(source: Mapping[str, str]) -> bool:
@@ -1320,7 +1349,12 @@ def _live_db_topology_ready(source: Mapping[str, str]) -> bool:
     if any(identity is None for identity in identities):
         return False
     v2, curriculum, materializer, rollback = identities
-    return v2 == curriculum and materializer == rollback and curriculum != materializer
+    if not (v2 == curriculum and materializer == rollback and curriculum != materializer):
+        return False
+    if "PRODUCTION_DATABASE_URL" not in source:
+        return True
+    production = _postgres_identity(source.get("PRODUCTION_DATABASE_URL"))
+    return production is not None and production not in {curriculum, materializer}
 
 
 def _assignment_candidate_environment(candidate: dict, lane: Lane) -> dict[str, str] | None:

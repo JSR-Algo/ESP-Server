@@ -657,6 +657,72 @@ def test_live_db_missing_port_defaults_to_postgres_port() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "production_url",
+    [
+        "postgresql://different-user@localhost:55431/course_mode_a",
+        "postgresql://different-user@candidate.localhost:55431/course_mode_a",
+        "postgres://different-user@[::1]:55432/course_mode_b",
+    ],
+)
+def test_live_db_blocks_when_production_alias_matches_either_test_database(
+    candidate_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    production_url: str,
+) -> None:
+    source = {**_live_db_source(), "PRODUCTION_DATABASE_URL": production_url}
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("live DB command must not run for a production alias"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["lanes"] == [{"name": "live-postgres", "exitCode": None, "durationMs": 0}]
+
+
+@pytest.mark.parametrize(
+    "production_url",
+    [
+        "not-a-postgres-url",
+        "postgresql://prod.internal:5432/production?host=localhost",
+    ],
+)
+def test_live_db_blocks_malformed_production_database_url(
+    candidate_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    production_url: str,
+) -> None:
+    source = {**_live_db_source(), "PRODUCTION_DATABASE_URL": production_url}
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("live DB command must not run for malformed production URL"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
+
+
+def test_live_db_valid_distinct_production_url_is_not_forwarded_to_child(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = {
+        **_live_db_source(),
+        "PRODUCTION_DATABASE_URL": "postgresql://prod.internal:5432/production",
+    }
+
+    result = _run_live_db_topology_gate(
+        candidate_file,
+        monkeypatch,
+        source,
+        "import os;assert 'PRODUCTION_DATABASE_URL' not in os.environ",
+    )
+
+    assert result["verdict"] == "PASS"
+
+
 def test_live_db_does_not_forward_ambient_production_database_url(candidate_file: Path) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     environment = gate._child_environment(
