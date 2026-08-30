@@ -53,6 +53,10 @@ def repositories(tmp_path: Path) -> dict[str, Path]:
 
 @pytest.fixture
 def candidate(repositories: dict[str, Path], tmp_path: Path) -> dict:
+    browser = tmp_path / "ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+    browser.parent.mkdir(parents=True)
+    browser.write_bytes(b"pinned chromium fixture\n")
+    browser.chmod(0o755)
     return {
         "candidateId": "course-mode-2026-08-29.1",
         "createdAt": "2026-08-29T00:00:00Z",
@@ -75,7 +79,16 @@ def candidate(repositories: dict[str, Path], tmp_path: Path) -> dict:
                 (repositories["backend"] / "src/lessons/course-mode/curriculum-course-mode.ts").read_bytes(),
             ).hexdigest(),
         },
-        "tools": {},
+        "tools": {
+            "robotPreviewBrowser": {
+                "version": 1,
+                "engine": "chromium-headless-shell",
+                "revision": "1223",
+                "path": str(browser),
+                "sha256": hashlib.sha256(browser.read_bytes()).hexdigest(),
+                "bytes": browser.stat().st_size,
+            },
+        },
         "evidenceRoot": str(tmp_path / "evidence"),
     }
 
@@ -85,6 +98,28 @@ NOW = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
 
 def test_candidate_accepts_exact_committed_repository_identity(candidate: dict) -> None:
     assert validate_candidate(candidate, now=NOW) == []
+
+
+def test_candidate_browser_is_bound_to_regular_executable_content(candidate: dict) -> None:
+    browser = Path(candidate["tools"]["robotPreviewBrowser"]["path"])
+    browser.write_bytes(b"drift")
+
+    assert validate_candidate(candidate, now=NOW) == ["tools.robotPreviewBrowser.identity"]
+
+
+def test_candidate_browser_rejects_symlink(candidate: dict, tmp_path: Path) -> None:
+    browser = Path(candidate["tools"]["robotPreviewBrowser"]["path"])
+    target = tmp_path / "browser-target"
+    browser.rename(target)
+    browser.symlink_to(target)
+
+    assert validate_candidate(candidate, now=NOW) == ["tools.robotPreviewBrowser.identity"]
+
+
+def test_candidate_browser_descriptor_has_exact_schema(candidate: dict) -> None:
+    candidate["tools"]["robotPreviewBrowser"]["fallback"] = "/Applications/Google Chrome.app"
+
+    assert validate_candidate(candidate, now=NOW) == ["tools.robotPreviewBrowser.keys"]
 
 
 def test_candidate_requires_exact_top_level_and_repository_keys(candidate: dict) -> None:

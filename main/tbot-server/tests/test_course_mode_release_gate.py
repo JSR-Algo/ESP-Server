@@ -13,7 +13,6 @@ from pathlib import Path
 
 import pytest
 
-
 gate = importlib.import_module("scripts.course_mode_release_gate")
 
 
@@ -299,6 +298,10 @@ def candidate_file(tmp_path: Path) -> Path:
     )
     evidence_root = tmp_path / "evidence"
     evidence_root.mkdir()
+    browser = tmp_path / "ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+    browser.parent.mkdir(parents=True)
+    browser.write_bytes(b"pinned chromium fixture\n")
+    browser.chmod(0o755)
     candidate = {
         "candidateId": "course-mode-2099-01-01.1",
         "createdAt": "2099-01-01T00:00:00Z",
@@ -331,7 +334,16 @@ def candidate_file(tmp_path: Path) -> Path:
             "responseClassCount": 11,
             "sourceChecksum": hashlib.sha256(curriculum_path.read_bytes()).hexdigest(),
         },
-        "tools": {},
+        "tools": {
+            "robotPreviewBrowser": {
+                "version": 1,
+                "engine": "chromium-headless-shell",
+                "revision": "1223",
+                "path": str(browser),
+                "sha256": hashlib.sha256(browser.read_bytes()).hexdigest(),
+                "bytes": browser.stat().st_size,
+            },
+        },
         "evidenceRoot": str(evidence_root),
     }
     path = tmp_path / "candidate.json"
@@ -364,6 +376,45 @@ def test_success_report_is_stable_and_machine_readable(candidate_file: Path) -> 
     assert type(result["lanes"][0]["durationMs"]) is int
     assert result["lanes"][0]["durationMs"] >= 0
     assert json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def test_admin_browser_environment_is_only_candidate_bound_descriptor(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    environment = gate._child_environment(candidate, {
+        "CHROME_BIN": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    }, next(lane for lane in gate.FULL_LANES if lane.name == "admin-browser"))
+    browser = candidate["tools"]["robotPreviewBrowser"]
+
+    assert environment["TBOT_ROBOT_PREVIEW_BROWSER_PATH"] == browser["path"]
+    assert environment["TBOT_ROBOT_PREVIEW_BROWSER_ENGINE"] == browser["engine"]
+    assert environment["TBOT_ROBOT_PREVIEW_BROWSER_REVISION"] == browser["revision"]
+    assert environment["TBOT_ROBOT_PREVIEW_BROWSER_SHA256"] == browser["sha256"]
+    assert environment["TBOT_ROBOT_PREVIEW_BROWSER_BYTES"] == str(browser["bytes"])
+    assert "CHROME_BIN" not in environment
+
+
+def test_admin_browser_authority_requires_playwright_metadata_revision(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    root = Path(candidate["repositories"]["adminEsp"]["path"])
+    metadata = root / "main/manager-web/node_modules/playwright-core/browsers.json"
+    metadata.parent.mkdir(parents=True)
+    metadata.write_text(json.dumps({
+        "browsers": [{"name": "chromium-headless-shell", "revision": "9999"}],
+    }), encoding="utf-8")
+
+    assert gate.robot_preview_browser_authorized(candidate) is False
+
+
+def test_admin_browser_authority_accepts_exact_binary_and_playwright_revision(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    root = Path(candidate["repositories"]["adminEsp"]["path"])
+    metadata = root / "main/manager-web/node_modules/playwright-core/browsers.json"
+    metadata.parent.mkdir(parents=True)
+    metadata.write_text(json.dumps({
+        "browsers": [{"name": "chromium-headless-shell", "revision": "1223"}],
+    }), encoding="utf-8")
+
+    assert gate.robot_preview_browser_authorized(candidate) is True
 
 
 def test_lane_failure_stops_dependent_lanes(candidate_file: Path, tmp_path: Path) -> None:

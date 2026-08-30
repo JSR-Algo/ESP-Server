@@ -79,7 +79,7 @@ async function runHarness({ forceSetupFailure = false, onTemp = () => {} } = {})
     const port = server.address().port;
     if (forceSetupFailure) throw new Error('forced setup failure after server acquisition');
 
-    const chromeBin = findPinnedRobotPreviewChromium();
+    const chromeBin = await findPinnedRobotPreviewChromium();
     chrome = spawn(chromeBin, ['--headless', '--disable-gpu', '--hide-scrollbars', '--force-device-scale-factor=1', '--remote-debugging-port=0', `--user-data-dir=${profileDir}`, 'about:blank'], { stdio: 'ignore' });
     const [debugPort] = (await waitForFile(join(profileDir, 'DevToolsActivePort'))).trim().split('\n');
     const target = await fetch(`http://127.0.0.1:${debugPort}/json/new?about:blank`, { method: 'PUT' }).then((response) => response.json());

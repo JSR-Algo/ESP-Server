@@ -20,7 +20,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
 REQUIRED_KEYS = {
     "candidateId", "createdAt", "expiresAt", "course", "repositories",
     "images", "firmware", "database", "curriculum", "tools", "evidenceRoot",
@@ -45,6 +44,7 @@ RENDERER_ID = "teebot-lesson-renderer.v5"
 CONTRACT_IDENTITY = "courseCompanion.v2.contract.v1"
 MAX_CANDIDATE_BYTES = 1024 * 1024
 MAX_DIRTY_FILE_BYTES = 4 * 1024 * 1024
+MAX_BROWSER_EXECUTABLE_BYTES = 512 * 1024 * 1024
 MAX_GIT_OUTPUT_BYTES = 1024 * 1024
 GIT_TIMEOUT_SEC = 10.0
 _GIT_CANDIDATES = (
@@ -63,6 +63,7 @@ SECURE_ENV = {
     "GIT_OPTIONAL_LOCKS": "0",
     "PAGER": "cat",
 }
+BROWSER_DESCRIPTOR_KEYS = {"version", "engine", "revision", "path", "sha256", "bytes"}
 
 
 @dataclass(frozen=True)
@@ -297,6 +298,86 @@ def _secure_hash_relative(root: Path, relative: str) -> tuple[str | None, str | 
         os.close(directory_fd)
 
 
+def secure_executable_descriptor(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        if not path.is_absolute() or str(path) != str(path.resolve(strict=True)):
+            return None, "path"
+        parent_fd = _open_directory_secure(path.parent)
+    except OSError:
+        return None, "path"
+    file_fd: int | None = None
+    try:
+        file_fd = os.open(path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+        before = os.fstat(file_fd)
+        if (
+            not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+            or before.st_size <= 0 or before.st_size > MAX_BROWSER_EXECUTABLE_BYTES
+            or before.st_mode & 0o111 == 0
+        ):
+            return None, "path"
+        digest = hashlib.sha256()
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(file_fd, min(1024 * 1024, remaining))
+            if not chunk:
+                return None, "changed"
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if os.read(file_fd, 1):
+            return None, "changed"
+        after = os.fstat(file_fd)
+        current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        identity = (
+            before.st_dev, before.st_ino, before.st_mode, before.st_nlink,
+            before.st_size, before.st_mtime_ns, before.st_ctime_ns,
+        )
+        if (
+            identity != (
+                after.st_dev, after.st_ino, after.st_mode, after.st_nlink,
+                after.st_size, after.st_mtime_ns, after.st_ctime_ns,
+            )
+            or identity != (
+                current.st_dev, current.st_ino, current.st_mode, current.st_nlink,
+                current.st_size, current.st_mtime_ns, current.st_ctime_ns,
+            )
+        ):
+            return None, "changed"
+        return {"path": str(path), "sha256": digest.hexdigest(), "bytes": before.st_size}, None
+    except OSError:
+        return None, "path"
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        os.close(parent_fd)
+
+
+def _validate_robot_preview_browser(value: Any, reasons: set[str], *, verify_identity: bool) -> None:
+    prefix = "tools.robotPreviewBrowser"
+    if not isinstance(value, dict) or set(value) != BROWSER_DESCRIPTOR_KEYS:
+        reasons.add(f"{prefix}.keys")
+        return
+    if type(value.get("version")) is not int or value["version"] != 1:
+        reasons.add(f"{prefix}.version")
+    if value.get("engine") != "chromium-headless-shell":
+        reasons.add(f"{prefix}.engine")
+    revision = value.get("revision")
+    if not isinstance(revision, str) or re.fullmatch(r"[1-9][0-9]*", revision) is None:
+        reasons.add(f"{prefix}.revision")
+    path = value.get("path")
+    digest = value.get("sha256")
+    size = value.get("bytes")
+    if not isinstance(path, str) or not Path(path).is_absolute():
+        reasons.add(f"{prefix}.path")
+    if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
+        reasons.add(f"{prefix}.sha256")
+    if type(size) is not int or size <= 0 or size > MAX_BROWSER_EXECUTABLE_BYTES:
+        reasons.add(f"{prefix}.bytes")
+    if verify_identity and not any(reason.startswith(f"{prefix}.") for reason in reasons):
+        observed, error = secure_executable_descriptor(Path(path))
+        if error or observed != {"path": path, "sha256": digest, "bytes": size}:
+            reasons.add(f"{prefix}.identity")
+
+
 def _valid_relative_path(value: Any) -> bool:
     if not isinstance(value, str) or not value or "\0" in value:
         return False
@@ -402,7 +483,9 @@ def _parse_rfc3339_utc(value: Any) -> datetime | None:
         return None
 
 
-def validate_candidate(candidate: Any, *, now: datetime | None = None) -> list[str]:
+def validate_candidate(
+    candidate: Any, *, now: datetime | None = None, verify_external_tools: bool = True,
+) -> list[str]:
     """Return sorted, stable and privacy-safe validation reason codes."""
     reasons: set[str] = set()
     if not isinstance(candidate, dict):
@@ -425,6 +508,11 @@ def validate_candidate(candidate: Any, *, now: datetime | None = None) -> list[s
     for field in ("images", "firmware", "database", "tools"):
         if not isinstance(candidate.get(field), dict):
             reasons.add(field)
+    tools = candidate.get("tools")
+    if isinstance(tools, dict):
+        _validate_robot_preview_browser(
+            tools.get("robotPreviewBrowser"), reasons, verify_identity=verify_external_tools,
+        )
     evidence_root = candidate.get("evidenceRoot")
     if not isinstance(evidence_root, str) or not Path(evidence_root).is_absolute():
         reasons.add("evidenceRoot")
