@@ -313,9 +313,7 @@ class GoogleLiveAudioBridge:
             if (
                 isinstance(journey_id, str)
                 and journey_id
-                and not self._evidence_first_chunk_logged
             ):
-                self._evidence_first_chunk_logged = True
                 self.logger.bind(tag="GoogleLive").info(
                     "Google Live model_output_chunk_forwarded journey_id={} "
                     "connection_id={} live_connection_id={} response_id={}",

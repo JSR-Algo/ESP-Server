@@ -3,7 +3,9 @@ import json
 import uuid
 import random
 import asyncio
+import hashlib
 import re
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -18,6 +20,17 @@ from core.providers.tools.device_mcp import MCPClient, send_mcp_initialize_messa
 
 TAG = __name__
 SAFE_EVIDENCE_JOURNEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+
+
+def _utc_now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _evidence_peer_identity_hash(conn):
+    device_id = str(getattr(conn, "device_id", "") or "")
+    client_id = str(getattr(conn, "client_id", "") or "")
+    digest = hashlib.sha256(f"{device_id}\0{client_id}".encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
 
 WAKEUP_CONFIG = {
     "refresh_time": 10,
@@ -82,6 +95,7 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
         and SAFE_EVIDENCE_JOURNEY_RE.fullmatch(evidence_journey_id)
         else None
     )
+    conn.google_live_evidence_scope = None
     audio_params = msg_json.get("audio_params")
     if audio_params:
         format = audio_params.get("format")
@@ -114,7 +128,31 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
             conn.mcp_client = MCPClient()
             send_mcp_initialize = True
 
-    await conn.websocket.send(json.dumps(conn.welcome_msg))
+    hello_ack = dict(conn.welcome_msg)
+    if conn.google_live_evidence_journey_id is not None:
+        provider = getattr(conn, "voice_provider", None)
+        prepare_scope = getattr(provider, "prepare_evidence_scope", None)
+        live_connection_id = (
+            await prepare_scope() if callable(prepare_scope) else None
+        )
+        if isinstance(live_connection_id, str) and live_connection_id:
+            scope = {
+                "journeyId": conn.google_live_evidence_journey_id,
+                "connectionId": str(conn.session_id),
+                "liveConnectionId": live_connection_id,
+                "peerIdentityHash": _evidence_peer_identity_hash(conn),
+                "serverStartUtc": _utc_now_iso(),
+            }
+            conn.google_live_evidence_scope = scope
+            hello_ack["evidenceScope"] = scope
+        else:
+            conn.google_live_evidence_journey_id = None
+            hello_ack["evidenceScope"] = {
+                "status": "FAIL",
+                "failureCode": "LIVE_SCOPE_UNAVAILABLE",
+            }
+
+    await conn.websocket.send(json.dumps(hello_ack))
     if send_mcp_initialize:
         conn.schedule_mcp_background_task(send_mcp_initialize_message(conn))
 

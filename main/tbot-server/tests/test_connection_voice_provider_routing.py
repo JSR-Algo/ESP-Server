@@ -4,6 +4,7 @@ import json
 import sys
 import types
 import unittest
+from unittest.mock import AsyncMock
 
 
 def _install_connection_import_stubs():
@@ -1049,6 +1050,161 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             connection_module.handleTextMessage = original_handle_text
 
         self.assertEqual(classic_text_calls, ['{"type":"hello","version":1}'])
+
+    async def test_evidence_finalize_awaits_cleanup_and_acks_server_utc(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.websocket = _SendingWebSocket()
+        handler.google_live_evidence_scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        cleanup_complete = asyncio.Event()
+
+        class Provider:
+            async def finalize_evidence(self):
+                cleanup_complete.set()
+                return {
+                    "status": "PASS",
+                    "liveConnectionId": "live-7",
+                    "pendingTasks": 0,
+                }
+
+        handler.voice_provider = Provider()
+        original_now = connection_module._utc_now_iso
+        connection_module._utc_now_iso = lambda: "2026-08-31T03:00:10+00:00"
+        try:
+            await handler._route_message(
+                json.dumps(
+                    {
+                        "type": "evidence_finalize",
+                        "evidenceScope": handler.google_live_evidence_scope,
+                    }
+                )
+            )
+        finally:
+            connection_module._utc_now_iso = original_now
+
+        self.assertTrue(cleanup_complete.is_set())
+        ack = json.loads(handler.websocket.sent[-1])
+        self.assertEqual(ack["type"], "evidence_finalized")
+        self.assertEqual(ack["status"], "PASS")
+        self.assertEqual(ack["evidenceScope"], handler.google_live_evidence_scope)
+        self.assertEqual(ack["serverEndUtc"], "2026-08-31T03:00:10+00:00")
+
+    async def test_evidence_finalize_rejects_scope_mismatch_without_cleanup(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.websocket = _SendingWebSocket()
+        handler.google_live_evidence_scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        provider = types.SimpleNamespace(finalize_evidence=AsyncMock())
+        handler.voice_provider = provider
+
+        await handler._route_message(
+            json.dumps(
+                {
+                    "type": "evidence_finalize",
+                    "evidenceScope": {
+                        **handler.google_live_evidence_scope,
+                        "connectionId": "other-connection",
+                    },
+                }
+            )
+        )
+
+        provider.finalize_evidence.assert_not_awaited()
+        ack = json.loads(handler.websocket.sent[-1])
+        self.assertEqual(ack["status"], "FAIL")
+        self.assertEqual(ack["failureCode"], "EVIDENCE_SCOPE_MISMATCH")
+
+    async def test_evidence_finalize_fails_closed_on_timeout(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.config["google_live"] = {"evidence_finalize_timeout_sec": 0.1}
+        handler.websocket = _SendingWebSocket()
+        handler.google_live_evidence_scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+
+        release_cleanup = asyncio.Event()
+        cancelled = []
+
+        async def never_finishes():
+            try:
+                await release_cleanup.wait()
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+        handler.voice_provider = types.SimpleNamespace(
+            finalize_evidence=never_finishes
+        )
+
+        await handler._route_message(
+            json.dumps(
+                {
+                    "type": "evidence_finalize",
+                    "evidenceScope": handler.google_live_evidence_scope,
+                }
+            )
+        )
+
+        ack = json.loads(handler.websocket.sent[-1])
+        self.assertEqual(ack["status"], "FAIL")
+        self.assertEqual(ack["failureCode"], "EVIDENCE_FINALIZE_TIMEOUT")
+        self.assertEqual(ack["evidenceScope"], handler.google_live_evidence_scope)
+        self.assertEqual(cancelled, [])
+        release_cleanup.set()
+        await asyncio.sleep(0)
+
+    async def test_evidence_finalize_rejects_changed_live_id_or_pending_cleanup(self):
+        for result in (
+            {"status": "PASS", "liveConnectionId": "live-other", "pendingTasks": 0},
+            {"status": "PASS", "liveConnectionId": "live-7", "pendingTasks": 1},
+        ):
+            with self.subTest(result=result):
+                handler = self._build_handler()
+                handler.config["voice_mode"] = {"type": "google_live"}
+                handler.websocket = _SendingWebSocket()
+                handler.google_live_evidence_scope = {
+                    "journeyId": "bargein-1",
+                    "connectionId": "server-conn-1",
+                    "liveConnectionId": "live-7",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "serverStartUtc": "2026-08-31T03:00:00+00:00",
+                }
+                handler.voice_provider = types.SimpleNamespace(
+                    finalize_evidence=AsyncMock(return_value=result)
+                )
+
+                await handler._route_message(
+                    json.dumps(
+                        {
+                            "type": "evidence_finalize",
+                            "evidenceScope": handler.google_live_evidence_scope,
+                        }
+                    )
+                )
+
+                ack = json.loads(handler.websocket.sent[-1])
+                self.assertEqual(ack["status"], "FAIL")
+                self.assertEqual(ack["failureCode"], "EVIDENCE_CLEANUP_INCOMPLETE")
+                self.assertEqual(
+                    ack["evidenceScope"], handler.google_live_evidence_scope
+                )
 
     async def test_mcp_message_routes_before_manager_bind_ready(self):
         handler = self._build_handler()

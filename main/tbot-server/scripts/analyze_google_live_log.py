@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import statistics
 import sys
@@ -19,9 +20,10 @@ import tempfile
 from collections.abc import Mapping
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from scripts.google_live_reliability import (
     GOOGLE_LIVE_LIMITS,
@@ -141,10 +143,15 @@ P_RELIABILITY_WINDOW_START = re.compile(
     r"Google Live reliability_window_start window_id=(?P<window_id>[A-Za-z0-9._:-]+) "
     r"(?:journey_id=(?P<journey_id>[A-Za-z0-9._:-]+) )?"
     r"(?:journeys=(?P<journeys>[A-Za-z0-9._:,-]+) )?"
+    r"(?:connection_id=(?P<connection_id>[A-Za-z0-9._:-]+) )?"
+    r"(?:live_connection_id=(?P<live_connection_id>[A-Za-z0-9._:-]+) )?"
+    r"(?:peer_identity_hash=(?P<peer_identity_hash>sha256:[0-9a-f]{64}) )?"
+    r"(?:server_start_utc=(?P<server_start_utc>\S+) )?"
     r"candidate_identity=(?P<candidate_identity>\{.*\})$"
 )
 P_RELIABILITY_WINDOW_END = re.compile(
-    r"Google Live reliability_window_end window_id=(?P<window_id>[A-Za-z0-9._:-]+)$"
+    r"Google Live reliability_window_end window_id=(?P<window_id>[A-Za-z0-9._:-]+)"
+    r"(?: server_end_utc=(?P<server_end_utc>\S+))?$"
 )
 P_RESPONSE_AUDIO_START = re.compile(
     r"Google Live model_audio_start_hold_input response_id=(?P<response_id>\d+)"
@@ -1305,6 +1312,18 @@ def _candidate_identity_valid(identity: Any) -> bool:
     )
 
 
+def _parse_utc_iso(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        return None
+    return parsed
+
+
 def _is_reliability_line(line: str) -> bool:
     return (
         "Google Live reliability_window_" in line
@@ -1377,12 +1396,44 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                             "start anchor candidate identity is invalid",
                         )
                     )
+                scope_values = {
+                    "journeyId": start_match.group("journey_id"),
+                    "connectionId": start_match.group("connection_id"),
+                    "liveConnectionId": start_match.group("live_connection_id"),
+                    "peerIdentityHash": start_match.group("peer_identity_hash"),
+                    "serverStartUtc": start_match.group("server_start_utc"),
+                }
+                evidence_scope = None
+                scoped_anchor_present = any(
+                    scope_values[field] is not None
+                    for field in (
+                        "connectionId",
+                        "liveConnectionId",
+                        "peerIdentityHash",
+                        "serverStartUtc",
+                    )
+                )
+                if scoped_anchor_present:
+                    if (
+                        any(value is None for value in scope_values.values())
+                        or _parse_utc_iso(scope_values["serverStartUtc"]) is None
+                    ):
+                        failures.append(
+                            _failure(
+                                "MALFORMED_EVIDENCE_SCOPE",
+                                line_number,
+                                "start anchor evidence scope is incomplete or non-UTC",
+                            )
+                        )
+                    else:
+                        evidence_scope = scope_values
                 start_anchor = {
                     "windowId": start_match.group("window_id"),
                     "timestamp": ts,
                     "line": line_number,
                     "candidateIdentity": candidate_identity,
                     "journeyId": start_match.group("journey_id"),
+                    "evidenceScope": evidence_scope,
                     "claimedJourneys": set(
                         filter(None, (start_match.group("journeys") or "").split(","))
                     ),
@@ -1440,7 +1491,21 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     "windowId": end_match.group("window_id"),
                     "timestamp": ts,
                     "line": line_number,
+                    "serverEndUtc": end_match.group("server_end_utc"),
                 }
+                if end_anchor["serverEndUtc"] is not None:
+                    server_end = _parse_utc_iso(end_anchor["serverEndUtc"])
+                    server_start = _parse_utc_iso(
+                        (start_anchor.get("evidenceScope") or {}).get("serverStartUtc")
+                    )
+                    if server_end is None or server_start is None or server_end < server_start:
+                        failures.append(
+                            _failure(
+                                "MALFORMED_EVIDENCE_WINDOW",
+                                line_number,
+                                "server evidence end must be UTC and not precede start",
+                            )
+                        )
                 active = False
                 continue
 
@@ -1525,8 +1590,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         and record["liveConnectionId"] == scoped_start.group("live_connection_id")
                         and record["replacementResponseId"] == int(scoped_start.group("response_id"))
                     ):
-                        record["orderInvalid"] |= record["phase"] != 5
-                        record["phase"] = 6
+                        record["orderInvalid"] |= record["phase"] != 4
+                        record["phase"] = 5
                 continue
             scoped_end = P_EVIDENCE_RESPONSE_END.search(line)
             if scoped_end:
@@ -1555,8 +1620,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         and record["liveConnectionId"] == scoped_end.group("live_connection_id")
                         and record["replacementResponseId"] == int(scoped_end.group("response_id"))
                     ):
-                        record["orderInvalid"] |= record["phase"] != 7
-                        record["phase"] = 8
+                        record["orderInvalid"] |= record["phase"] != 6
+                        record["phase"] = 7
                 continue
             scoped_forwarded = P_EVIDENCE_FORWARDED.search(line)
             if scoped_forwarded:
@@ -1581,7 +1646,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         record["journeyId"] == scoped_forwarded.group("journey_id")
                         and record["connectionId"] == scoped_forwarded.group("connection_id")
                         and record["liveConnectionId"] == scoped_forwarded.group("live_connection_id")
-                        and record["phase"] >= 6
+                        and record["phase"] >= 5
                         and forwarded_response_id == record["cancelledResponseId"]
                     ):
                         stale_audio_after_replacement += 1
@@ -1599,8 +1664,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         and record["liveConnectionId"] == scoped_forwarded.group("live_connection_id")
                         and record["replacementResponseId"] == forwarded_response_id
                     ):
-                        record["orderInvalid"] |= record["phase"] != 6
-                        record["phase"] = 7
+                        record["orderInvalid"] |= record["phase"] != 5
+                        record["phase"] = 6
                 continue
             scoped_interrupt_start = P_EVIDENCE_INTERRUPT_STARTED.search(line)
             if scoped_interrupt_start:
@@ -1679,10 +1744,34 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
             scoped_close = P_EVIDENCE_CONNECTION_CLOSE.search(line)
             if scoped_close:
-                observed_marker_families[scoped_close.group("journey_id")].add(
-                    "cleanup"
+                anchor_scope = start_anchor.get("evidenceScope") if start_anchor else None
+                cleanup_scope_matches = not isinstance(anchor_scope, Mapping) or (
+                    scoped_close.group("journey_id") == anchor_scope.get("journeyId")
+                    and scoped_close.group("connection_id")
+                    == anchor_scope.get("connectionId")
+                    and scoped_close.group("live_connection_id")
+                    == anchor_scope.get("liveConnectionId")
                 )
-                if int(scoped_close.group("pending_tasks")) != 0:
+                if cleanup_scope_matches:
+                    observed_marker_families[scoped_close.group("journey_id")].add(
+                        "cleanup"
+                    )
+                elif (
+                    isinstance(anchor_scope, Mapping)
+                    and scoped_close.group("journey_id")
+                    == anchor_scope.get("journeyId")
+                ):
+                    failures.append(
+                        _failure(
+                            "EVIDENCE_CLEANUP_SCOPE_MISMATCH",
+                            line_number,
+                            "cleanup marker does not match anchored evidence scope",
+                        )
+                    )
+                if (
+                    cleanup_scope_matches
+                    and int(scoped_close.group("pending_tasks")) != 0
+                ):
                     failures.append(
                         _failure(
                             "PENDING_TASK_AT_CLOSE",
@@ -1810,16 +1899,6 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
             scoped_stale = P_EVIDENCE_STALE_DROP.search(line)
             if scoped_stale:
-                for record in scoped_interrupts:
-                    if (
-                        record["journeyId"] == scoped_stale.group("journey_id")
-                        and record["connectionId"] == scoped_stale.group("connection_id")
-                        and record["liveConnectionId"] == scoped_stale.group("live_connection_id")
-                        and record["cancelledResponseId"] == int(scoped_stale.group("response_id"))
-                        and record["replacementResponseId"] == int(scoped_stale.group("current_response_id"))
-                    ):
-                        record["orderInvalid"] |= record["phase"] != 2
-                        record["phase"] = 3
                 continue
             scoped_replay = P_EVIDENCE_INTERRUPT_REPLAYED.search(line)
             if scoped_replay:
@@ -1830,8 +1909,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         and record["liveConnectionId"] == scoped_replay.group("live_connection_id")
                         and record["replacementResponseId"] == int(scoped_replay.group("response_id"))
                     ):
-                        record["orderInvalid"] |= record["phase"] != 3
-                        record["phase"] = 4
+                        record["orderInvalid"] |= record["phase"] != 2
+                        record["phase"] = 3
                 continue
             scoped_finalized = P_EVIDENCE_INTERRUPT_FINALIZED.search(line)
             if scoped_finalized:
@@ -1842,8 +1921,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         and record["liveConnectionId"] == scoped_finalized.group("live_connection_id")
                         and record["replacementResponseId"] == int(scoped_finalized.group("response_id"))
                     ):
-                        record["orderInvalid"] |= record["phase"] != 4
-                        record["phase"] = 5
+                        record["orderInvalid"] |= record["phase"] != 3
+                        record["phase"] = 4
                 continue
 
             if P_RECV_START.search(line):
@@ -2270,7 +2349,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     if scoped_interrupts:
         reported_correlations = [
             {
-                "status": "PASS" if not item["orderInvalid"] and item["phase"] == 8 else "FAIL",
+                "status": "PASS" if not item["orderInvalid"] and item["phase"] == 7 else "FAIL",
                 **{key: value for key, value in item.items() if key not in {"phase", "orderInvalid"}},
             }
             for item in scoped_interrupts
@@ -2368,16 +2447,19 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     )
     log_window = None
     if start_anchor is not None and end_anchor is not None:
+        server_start = (start_anchor.get("evidenceScope") or {}).get("serverStartUtc")
+        server_end = end_anchor.get("serverEndUtc")
         log_window = {
             "windowId": start_anchor["windowId"],
-            "start": start_anchor["timestamp"].isoformat(),
-            "end": end_anchor["timestamp"].isoformat(),
+            "start": server_start or start_anchor["timestamp"].isoformat(),
+            "end": server_end or end_anchor["timestamp"].isoformat(),
         }
     report = {
         "schemaVersion": SCHEMA_VERSION,
         "name": "google_live_log_reliability",
         "status": "PASS" if not failures else "FAIL",
         "candidateIdentity": candidate_identity,
+        "evidenceScope": start_anchor.get("evidenceScope") if start_anchor else None,
         "logWindow": log_window,
         "receiveLoopBalance": receive_loops_active,
         "maxReceiveLoopsActive": max_receive_loops_active,
@@ -2395,20 +2477,26 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
 
 
 def correlate_websocket_bargein_evidence(
-    transport_observation: dict[str, Any],
-    log_verdict: dict[str, Any],
+    transport_observation: Any,
+    log_verdict: Any,
     *,
     expected_candidate_identity: dict[str, Any],
 ) -> dict[str, Any]:
     """Upgrade Task 4's pending transport record only with exact bounded log proof."""
     failures: list[dict[str, Any]] = []
+    if not isinstance(transport_observation, Mapping):
+        failures.append(
+            {"code": "TRANSPORT_CONTRACT_MISMATCH", "field": "transport"}
+        )
+        transport_observation = {}
+    safe_log_verdict = log_verdict if isinstance(log_verdict, Mapping) else {}
     log_contract_failures = _validate_log_reliability_contract(
-        log_verdict,
+        safe_log_verdict,
         expected_candidate_identity=expected_candidate_identity,
         expected_log_window=transport_observation.get("logWindow"),
+        expected_evidence_scope=transport_observation.get("evidenceScope"),
     )
     failures.extend(log_contract_failures)
-    safe_log_verdict = log_verdict if isinstance(log_verdict, Mapping) else {}
     expected_pending = "PENDING_BOUNDED_SERVER_LOG_VERIFICATION"
     required_transport = {
         "schemaVersion": SCHEMA_VERSION,
@@ -2466,6 +2554,40 @@ def correlate_websocket_bargein_evidence(
     if transport_observation.get("logWindow") != safe_log_verdict.get("logWindow"):
         failures.append({"code": "LOG_WINDOW_MISMATCH"})
     journey_id = transport_observation.get("journeyId")
+    evidence_scope = transport_observation.get("evidenceScope")
+    if not isinstance(evidence_scope, Mapping):
+        failures.append({"code": "TRANSPORT_EVIDENCE_SCOPE_INVALID"})
+        evidence_scope = {}
+    expected_scope_fields = {
+        "journeyId": journey_id,
+        "connectionId": transport_observation.get("serverConnectionId"),
+        "liveConnectionId": transport_observation.get("liveConnectionId"),
+        "peerIdentityHash": transport_observation.get("peerIdentityHash"),
+    }
+    for scope_field, expected in expected_scope_fields.items():
+        if (
+            not isinstance(expected, str)
+            or not expected
+            or evidence_scope.get(scope_field) != expected
+        ):
+            failures.append(
+                {"code": "TRANSPORT_EVIDENCE_SCOPE_MISMATCH", "field": scope_field}
+            )
+    peer_hash = evidence_scope.get("peerIdentityHash")
+    if not isinstance(peer_hash, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", peer_hash) is None:
+        failures.append({"code": "TRANSPORT_PEER_IDENTITY_HASH_INVALID"})
+    server_start = evidence_scope.get("serverStartUtc")
+    log_window = transport_observation.get("logWindow")
+    server_start_dt = _parse_utc_iso(server_start)
+    server_end_dt = (
+        _parse_utc_iso(log_window.get("end")) if isinstance(log_window, Mapping) else None
+    )
+    if server_start_dt is None or server_end_dt is None or server_end_dt < server_start_dt:
+        failures.append({"code": "TRANSPORT_EVIDENCE_WINDOW_INVALID"})
+    if not isinstance(log_window, Mapping) or log_window.get("start") != server_start:
+        failures.append({"code": "TRANSPORT_EVIDENCE_WINDOW_MISMATCH"})
+    if safe_log_verdict.get("evidenceScope") != dict(evidence_scope):
+        failures.append({"code": "SERVER_LOG_EVIDENCE_SCOPE_MISMATCH"})
     if not isinstance(journey_id, str) or not journey_id:
         failures.append({"code": "TRANSPORT_JOURNEY_ID_INVALID"})
         matching_correlations = []
@@ -2475,7 +2597,10 @@ def correlate_websocket_bargein_evidence(
             [
                 item
                 for item in correlations
-                if isinstance(item, Mapping) and item.get("journeyId") == journey_id
+                if isinstance(item, Mapping)
+                and item.get("journeyId") == journey_id
+                and item.get("connectionId") == evidence_scope.get("connectionId")
+                and item.get("liveConnectionId") == evidence_scope.get("liveConnectionId")
             ]
             if isinstance(correlations, list)
             else []
@@ -2483,7 +2608,7 @@ def correlate_websocket_bargein_evidence(
     if len(matching_correlations) != 1:
         failures.append(
             {
-                "code": "SERVER_LOG_JOURNEY_CORRELATION_COUNT",
+                "code": "SERVER_LOG_SCOPE_CORRELATION_COUNT",
                 "observed": len(matching_correlations),
             }
         )
@@ -2518,6 +2643,7 @@ def correlate_websocket_bargein_evidence(
         "status": status,
         "candidateIdentity": expected_candidate_identity,
         "journeyId": journey_id,
+        "evidenceScope": dict(evidence_scope),
         "logWindow": safe_log_verdict.get("logWindow"),
         "correlationSource": "server_log",
         "correlationStatus": "PASS" if status == "PASS" else "FAIL",
@@ -2545,6 +2671,7 @@ def _validate_log_reliability_contract(
     *,
     expected_candidate_identity: dict[str, Any],
     expected_log_window: Any,
+    expected_evidence_scope: Any,
 ) -> list[dict[str, Any]]:
     failures: list[dict[str, Any]] = []
 
@@ -2561,6 +2688,7 @@ def _validate_log_reliability_contract(
         "status": "PASS",
         "candidateIdentity": expected_candidate_identity,
         "logWindow": expected_log_window,
+        "evidenceScope": expected_evidence_scope,
         "failures": [],
     }
     for contract_field, expected in required_values.items():
@@ -2710,6 +2838,7 @@ def _correlate_transport_cli(
     log_path: Path,
     transport_path: Path,
     expected_candidate_path: Path,
+    log_timezone_name: str = "UTC",
 ) -> dict[str, Any]:
     try:
         transport = json.loads(transport_path.read_text(encoding="utf-8"))
@@ -2745,6 +2874,7 @@ def _correlate_transport_cli(
         }
     failures = []
     journey_id = transport.get("journeyId")
+    evidence_scope = transport.get("evidenceScope")
     log_window = transport.get("logWindow")
     if transport.get("schemaVersion") != SCHEMA_VERSION:
         failures.append({"code": "TRANSPORT_SCHEMA_INVALID"})
@@ -2752,6 +2882,27 @@ def _correlate_transport_cli(
         failures.append({"code": "CANDIDATE_IDENTITY_MISMATCH"})
     if not isinstance(journey_id, str) or re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", journey_id) is None:
         failures.append({"code": "TRANSPORT_JOURNEY_ID_INVALID"})
+    if not isinstance(evidence_scope, Mapping):
+        failures.append({"code": "TRANSPORT_EVIDENCE_SCOPE_INVALID"})
+        evidence_scope = {}
+    expected_scope = {
+        "journeyId": journey_id,
+        "connectionId": transport.get("serverConnectionId"),
+        "liveConnectionId": transport.get("liveConnectionId"),
+        "peerIdentityHash": transport.get("peerIdentityHash"),
+        "serverStartUtc": (log_window or {}).get("start") if isinstance(log_window, Mapping) else None,
+    }
+    if dict(evidence_scope) != expected_scope:
+        failures.append({"code": "TRANSPORT_EVIDENCE_SCOPE_MISMATCH"})
+    if (
+        not isinstance(expected_scope["connectionId"], str)
+        or re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", expected_scope["connectionId"] or "") is None
+        or not isinstance(expected_scope["liveConnectionId"], str)
+        or re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", expected_scope["liveConnectionId"] or "") is None
+        or not isinstance(expected_scope["peerIdentityHash"], str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", expected_scope["peerIdentityHash"] or "") is None
+    ):
+        failures.append({"code": "TRANSPORT_EVIDENCE_SCOPE_INVALID"})
     if not isinstance(log_window, dict):
         failures.append({"code": "TRANSPORT_LOG_WINDOW_INVALID"})
         start = end = None
@@ -2760,8 +2911,10 @@ def _correlate_transport_cli(
             start = datetime.fromisoformat(log_window["start"])
             end = datetime.fromisoformat(log_window["end"])
             if (
-                start.tzinfo is not None
-                or end.tzinfo is not None
+                start.tzinfo is None
+                or end.tzinfo is None
+                or start.utcoffset() != timedelta(0)
+                or end.utcoffset() != timedelta(0)
                 or start > end
                 or log_window.get("windowId") != journey_id
             ):
@@ -2792,6 +2945,20 @@ def _correlate_transport_cli(
             }
         )
 
+    try:
+        log_timezone = ZoneInfo(log_timezone_name)
+    except (TypeError, ZoneInfoNotFoundError):
+        return redact_mapping(
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "name": "websocket_audio_bargein_correlated",
+                "status": "FAIL",
+                "journeyId": journey_id,
+                "candidateIdentity": expected_candidate,
+                "failures": [{"code": "LOG_TIMEZONE_INVALID"}],
+            }
+        )
+
     selected_lines = []
     with log_path.open("r", encoding="utf-8", errors="replace") as fh:
         for raw_line in fh:
@@ -2801,7 +2968,12 @@ def _correlate_transport_cli(
             scoped_marker_line, scoped_marker_valid = _scoped_marker_validation(
                 stripped_line
             )
-            in_window = timestamp is not None and start <= timestamp <= end
+            timestamp_utc = (
+                timestamp.replace(tzinfo=log_timezone).astimezone(timezone.utc)
+                if timestamp is not None
+                else None
+            )
+            in_window = timestamp_utc is not None and start <= timestamp_utc <= end
             malformed_scoped = (
                 in_window and scoped_marker_line and not scoped_marker_valid
             )
@@ -2831,15 +3003,22 @@ def _correlate_transport_cli(
                         "failures": [{"code": "MALFORMED_BOUNDED_LOG_MARKER"}],
                     }
                 )
-            if timestamp is not None and start <= timestamp <= end:
+            if timestamp_utc is not None and start <= timestamp_utc <= end:
                 selected_lines.append(raw_line.rstrip("\n"))
     identity = json.dumps(expected_candidate, sort_keys=True, separators=(",", ":"))
+    local_start = start.astimezone(log_timezone)
+    local_end = end.astimezone(log_timezone)
     bounded_lines = [
-        f"{start:%Y-%m-%d %H:%M:%S} Google Live reliability_window_start "
+        f"{local_start:%Y-%m-%d %H:%M:%S} Google Live reliability_window_start "
         f"window_id={journey_id} journey_id={journey_id} journeys=bargein "
+        f"connection_id={evidence_scope['connectionId']} "
+        f"live_connection_id={evidence_scope['liveConnectionId']} "
+        f"peer_identity_hash={evidence_scope['peerIdentityHash']} "
+        f"server_start_utc={log_window['start']} "
         f"candidate_identity={identity}",
         *selected_lines,
-        f"{end:%Y-%m-%d %H:%M:%S} Google Live reliability_window_end window_id={journey_id}",
+        f"{local_end:%Y-%m-%d %H:%M:%S} Google Live reliability_window_end "
+        f"window_id={journey_id} server_end_utc={log_window['end']}",
     ]
     with tempfile.TemporaryDirectory() as temp_dir:
         bounded_path = Path(temp_dir) / "bounded.log"
@@ -2855,6 +3034,11 @@ def _correlate_transport_cli(
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--log", required=True, type=Path, help="Path to server.log")
+    parser.add_argument(
+        "--log-timezone",
+        default=os.environ.get("TBOT_LOG_TIMEZONE", os.environ.get("TZ", "UTC")),
+        help="IANA timezone used by naive server.log timestamps",
+    )
     parser.add_argument("--out-json", type=Path, help="Optional JSON output path")
     parser.add_argument(
         "--out-md", type=Path, help="Optional markdown evidence file path"
@@ -2903,6 +3087,7 @@ def main():
             log_path=args.log,
             transport_path=args.correlate_transport,
             expected_candidate_path=args.expected_candidate_json,
+            log_timezone_name=args.log_timezone,
         )
         args.out_json.parent.mkdir(parents=True, exist_ok=True)
         args.out_json.write_text(

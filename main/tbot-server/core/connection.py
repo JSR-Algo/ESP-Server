@@ -70,6 +70,10 @@ TAG = __name__
 _sanitize_headers_for_log = sanitize_headers_for_log
 
 
+def _utc_now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def _float_or_none(value):
     try:
         return float(value)
@@ -547,6 +551,9 @@ class ConnectionHandler:
 
     async def _route_message(self, message):
         """Message routing"""
+        if isinstance(message, str) and self._is_evidence_finalize_message(message):
+            await self._handle_evidence_finalize_message(message)
+            return
         listen_state = self._listen_control_state(message) if isinstance(message, str) else None
         if listen_state in {"stop", "detect"}:
             self.client_audio_input_authorized = False
@@ -1109,6 +1116,76 @@ class ConnectionHandler:
         except (TypeError, json.JSONDecodeError):
             return False
         return isinstance(payload, dict) and payload.get("type") == "abort"
+
+    @staticmethod
+    def _is_evidence_finalize_message(message):
+        try:
+            payload = json.loads(message)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return isinstance(payload, dict) and payload.get("type") == "evidence_finalize"
+
+    async def _handle_evidence_finalize_message(self, message):
+        try:
+            payload = json.loads(message)
+        except (TypeError, json.JSONDecodeError):
+            payload = None
+        scope = getattr(self, "google_live_evidence_scope", None)
+        received_scope = payload.get("evidenceScope") if isinstance(payload, dict) else None
+        failure_code = None
+        result = None
+        if not isinstance(scope, dict) or received_scope != scope:
+            failure_code = "EVIDENCE_SCOPE_MISMATCH"
+        else:
+            provider = getattr(self, "voice_provider", None)
+            finalize = getattr(provider, "finalize_evidence", None)
+            if not callable(finalize):
+                failure_code = "EVIDENCE_PROVIDER_UNAVAILABLE"
+            else:
+                timeout = 5.0
+                google_live = (self.config or {}).get("google_live") or {}
+                try:
+                    timeout = float(
+                        google_live.get("evidence_finalize_timeout_sec", timeout)
+                    )
+                except (TypeError, ValueError):
+                    timeout = 5.0
+                finalize_task = getattr(
+                    self, "google_live_evidence_finalize_task", None
+                )
+                if finalize_task is None:
+                    finalize_task = asyncio.create_task(finalize())
+                    self.google_live_evidence_finalize_task = finalize_task
+                    finalize_task.add_done_callback(
+                        lambda task: task.exception() if not task.cancelled() else None
+                    )
+                try:
+                    result = await asyncio.wait_for(
+                        asyncio.shield(finalize_task),
+                        timeout=max(0.1, min(timeout, 30.0)),
+                    )
+                except asyncio.TimeoutError:
+                    failure_code = "EVIDENCE_FINALIZE_TIMEOUT"
+                except Exception:
+                    failure_code = "EVIDENCE_FINALIZE_FAILED"
+                if failure_code is None and (
+                    not isinstance(result, dict)
+                    or result.get("status") != "PASS"
+                    or result.get("liveConnectionId") != scope.get("liveConnectionId")
+                    or result.get("pendingTasks") != 0
+                ):
+                    failure_code = "EVIDENCE_CLEANUP_INCOMPLETE"
+        ack = {
+            "type": "evidence_finalized",
+            "status": "FAIL" if failure_code else "PASS",
+        }
+        if failure_code:
+            ack["failureCode"] = failure_code
+        if isinstance(scope, dict):
+            ack["evidenceScope"] = scope
+        if not failure_code:
+            ack["serverEndUtc"] = _utc_now_iso()
+        await self.websocket.send(json.dumps(ack))
 
     async def _wait_for_voice_provider_ready(self):
         """In manager mode, keep early user input on the selected voice provider path."""

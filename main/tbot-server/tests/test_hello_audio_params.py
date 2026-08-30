@@ -43,6 +43,12 @@ class _Conn:
         self.mcp_scheduled = []
         self.mcp_sent_counts_at_schedule = []
         self.google_live_evidence_journey_id = None
+        self.google_live_evidence_scope = None
+        self.google_live_live_connection_id = None
+        self.session_id = "server-connection-1"
+        self.device_id = "device-secret-1"
+        self.client_id = "client-secret-1"
+        self.voice_provider = None
         self.config = {
             "voice_mode": {"type": "classic_pipeline"},
             "google_live": {"output_sample_rate": 24000},
@@ -139,10 +145,45 @@ class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
     async def test_google_live_hello_activates_only_safe_evidence_journey_label(self):
         conn = _Conn()
         conn.config["voice_mode"] = {"type": "google_live"}
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(return_value="live-7")
+        )
 
-        await handleHelloMessage(conn, {"evidence_journey_id": "bargein.run-1:test"})
+        with patch.object(
+            helloHandle,
+            "_utc_now_iso",
+            return_value="2026-08-31T03:00:00+00:00",
+        ):
+            await handleHelloMessage(
+                conn, {"evidence_journey_id": "bargein.run-1:test"}
+            )
 
         self.assertEqual(conn.google_live_evidence_journey_id, "bargein.run-1:test")
+        ack = json.loads(conn.websocket.sent[0])
+        scope = ack["evidenceScope"]
+        self.assertEqual(scope["journeyId"], "bargein.run-1:test")
+        self.assertEqual(scope["connectionId"], "server-connection-1")
+        self.assertEqual(scope["liveConnectionId"], "live-7")
+        self.assertEqual(scope["serverStartUtc"], "2026-08-31T03:00:00+00:00")
+        self.assertRegex(scope["peerIdentityHash"], r"^sha256:[0-9a-f]{64}$")
+        encoded = json.dumps(ack)
+        self.assertNotIn("device-secret-1", encoded)
+        self.assertNotIn("client-secret-1", encoded)
+        self.assertEqual(conn.google_live_evidence_scope, scope)
+
+    async def test_google_live_evidence_scope_fails_closed_without_live_identity(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(return_value=None)
+        )
+
+        await handleHelloMessage(conn, {"evidence_journey_id": "bargein-1"})
+
+        ack = json.loads(conn.websocket.sent[0])
+        self.assertEqual(ack["evidenceScope"]["status"], "FAIL")
+        self.assertEqual(ack["evidenceScope"]["failureCode"], "LIVE_SCOPE_UNAVAILABLE")
+        self.assertIsNone(conn.google_live_evidence_scope)
 
     async def test_google_live_hello_rejects_unsafe_evidence_journey_without_logging_value(self):
         conn = _Conn()

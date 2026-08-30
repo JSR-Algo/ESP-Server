@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import hashlib
 import importlib
 import io
 import json
@@ -11,6 +12,16 @@ from unittest.mock import patch
 
 
 class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
+    @staticmethod
+    def _evidence_scope():
+        peer_hash = hashlib.sha256(b"robot-1\0client-1").hexdigest()
+        return {
+            "journeyId": "bargein-journey-1",
+            "connectionId": "server-connection-1",
+            "liveConnectionId": "live-7",
+            "peerIdentityHash": f"sha256:{peer_hash}",
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
     def test_queued_receive_inspection_fails_closed_for_unknown_websocket_shape(self):
         audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
 
@@ -158,10 +169,36 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         *,
         gate_interrupt_stop_on_binary=True,
         preflight_queued=False,
+        enrich_evidence=True,
     ):
+        scope = VoiceModeWebsocketAudioBargeinTest._evidence_scope()
+        normalized_messages = []
+        for message in messages:
+            if enrich_evidence and isinstance(message, str):
+                payload = json.loads(message)
+                if payload.get("type") == "hello" and "evidenceScope" not in payload:
+                    payload["evidenceScope"] = scope
+                    message = json.dumps(payload)
+            normalized_messages.append(message)
+        if enrich_evidence and not any(
+            isinstance(message, str)
+            and json.loads(message).get("type") == "evidence_finalized"
+            for message in normalized_messages
+        ):
+            normalized_messages.append(
+                json.dumps(
+                    {
+                        "type": "evidence_finalized",
+                        "status": "PASS",
+                        "evidenceScope": scope,
+                        "serverEndUtc": "2026-08-31T03:00:10+00:00",
+                    }
+                )
+            )
+
         class _WebSocket:
             def __init__(self):
-                self.messages = list(messages)
+                self.messages = list(normalized_messages)
                 self.binary_sent = asyncio.Event()
 
             def queued_message_count(self):
@@ -219,7 +256,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
                 return self.value
 
         messages = [
-            json.dumps({"type": "hello"}),
+            json.dumps({"type": "hello", "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope()}),
             b"old-response-audio",
             json.dumps({"type": "tts", "state": "start"}),
             json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}),
@@ -266,14 +303,16 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         self.assertEqual(record["correlationSource"], "server_log")
         self.assertEqual(record["journeyId"], "bargein-journey-1")
         self.assertEqual(record["candidateIdentity"]["gitSha"], "candidate-sha")
-        self.assertEqual(record["logWindow"]["start"], "2026-08-31T10:00:00")
-        self.assertEqual(record["logWindow"]["end"], "2026-08-31T10:00:01")
+        self.assertEqual(record["serverConnectionId"], "server-connection-1")
+        self.assertEqual(record["liveConnectionId"], "live-7")
+        self.assertEqual(record["logWindow"]["start"], "2026-08-31T03:00:00+00:00")
+        self.assertEqual(record["logWindow"]["end"], "2026-08-31T03:00:10+00:00")
 
     def test_run_smoke_sends_validated_evidence_journey_in_hello(self):
         audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
         captured = {}
         messages = [
-            json.dumps({"type": "hello"}),
+            json.dumps({"type": "hello", "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope()}),
             json.dumps({"type": "tts", "state": "start"}),
             json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}),
             json.dumps({"type": "tts", "state": "start"}),
@@ -302,7 +341,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
     def test_run_smoke_fails_closed_when_replacement_response_is_incomplete(self):
         audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
         messages = [
-            json.dumps({"type": "hello"}),
+            json.dumps({"type": "hello", "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope()}),
             json.dumps({"type": "tts", "state": "start"}),
             json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}),
             json.dumps({"type": "tts", "state": "start"}),
@@ -329,7 +368,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
     def test_run_smoke_does_not_accept_natural_tts_stop_as_bargein(self):
         audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
         messages = [
-            json.dumps({"type": "hello"}),
+            json.dumps({"type": "hello", "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope()}),
             json.dumps({"type": "tts", "state": "start"}),
             json.dumps({"type": "tts", "state": "stop"}),
         ]
@@ -355,7 +394,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
     def test_run_smoke_rejects_natural_stop_before_tagged_interrupt_stop(self):
         audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
         messages = [
-            json.dumps({"type": "hello"}),
+            json.dumps({"type": "hello", "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope()}),
             json.dumps({"type": "tts", "state": "start"}),
             json.dumps({"type": "tts", "state": "stop"}),
             json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}),
@@ -385,7 +424,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
     def test_run_smoke_rejects_tagged_interrupt_stop_queued_before_first_packet(self):
         audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
         messages = [
-            json.dumps({"type": "hello"}),
+            json.dumps({"type": "hello", "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope()}),
             json.dumps({"type": "tts", "state": "start"}),
             json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}),
         ]
@@ -423,7 +462,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
             class _WebSocket:
                 def __init__(self):
                     self.messages = [
-                        json.dumps({"type": "hello"}),
+                        json.dumps({"type": "hello", "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope()}),
                         json.dumps({"type": "tts", "state": "start"}),
                         json.dumps(payload),
                     ]
@@ -486,7 +525,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         class _WebSocket:
             def __init__(self):
                 self.messages = [
-                    json.dumps({"type": "hello"}),
+                    json.dumps({"type": "hello", "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope()}),
                     json.dumps({"type": "tts", "state": "start"}),
                 ]
 
@@ -555,7 +594,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
                 return self.last
 
         messages = [
-            json.dumps({"type": "hello"}),
+            json.dumps({"type": "hello", "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope()}),
             json.dumps({"type": "tts", "state": "start"}),
             json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}),
             json.dumps({"type": "tts", "state": "start"}),
@@ -595,7 +634,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
                 return self.last
 
         messages = [
-            json.dumps({"type": "hello"}),
+            json.dumps({"type": "hello", "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope()}),
             json.dumps({"type": "tts", "state": "start"}),
             json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}),
             json.dumps({"type": "tts", "state": "start"}),
@@ -640,13 +679,21 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
             def __init__(self):
                 self.stop_sent = False
                 self.messages = [
-                    json.dumps({"type": "hello"}),
+                    json.dumps({"type": "hello", "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope()}),
                     json.dumps({"type": "tts", "state": "start"}),
                 ]
                 self.after_stop = [
                     json.dumps({"type": "tts", "state": "start"}),
                     b"replacement-audio",
                     json.dumps({"type": "tts", "state": "stop"}),
+                    json.dumps(
+                        {
+                            "type": "evidence_finalized",
+                            "status": "PASS",
+                            "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope(),
+                            "serverEndUtc": "2026-08-31T03:00:10+00:00",
+                        }
+                    ),
                 ]
 
             async def send(self, payload):
@@ -708,12 +755,20 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         class _WebSocket:
             def __init__(self):
                 self.messages = [
-                    json.dumps({"type": "hello"}),
+                    json.dumps({"type": "hello", "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope()}),
                     json.dumps({"type": "tts", "state": "start"}),
                     json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}),
                     json.dumps({"type": "tts", "state": "start"}),
                     b"replacement-audio",
                     json.dumps({"type": "tts", "state": "stop"}),
+                    json.dumps(
+                        {
+                            "type": "evidence_finalized",
+                            "status": "PASS",
+                            "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope(),
+                            "serverEndUtc": "2026-08-31T03:00:10+00:00",
+                        }
+                    ),
                 ]
 
             def queued_message_count(self):
@@ -758,7 +813,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
             def __init__(self):
                 self.binary_sent = asyncio.Event()
                 self.messages = [
-                    json.dumps({"type": "hello"}),
+                    json.dumps({"type": "hello", "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope()}),
                     json.dumps({"type": "tts", "state": "start"}),
                 ]
 
@@ -846,12 +901,20 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
             def __init__(self):
                 self.binary_sent = asyncio.Event()
                 self.messages = [
-                    json.dumps({"type": "hello"}),
+                    json.dumps({"type": "hello", "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope()}),
                     json.dumps({"type": "tts", "state": "start"}),
                     json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}),
                     json.dumps({"type": "tts", "state": "start"}),
                     b"replacement-audio",
                     json.dumps({"type": "tts", "state": "stop"}),
+                    json.dumps(
+                        {
+                            "type": "evidence_finalized",
+                            "status": "PASS",
+                            "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope(),
+                            "serverEndUtc": "2026-08-31T03:00:10+00:00",
+                        }
+                    ),
                 ]
 
             async def send(self, payload):
@@ -911,12 +974,20 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
             def __init__(self):
                 self.binary_sent = asyncio.Event()
                 self.messages = [
-                    json.dumps({"type": "hello"}),
+                    json.dumps({"type": "hello", "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope()}),
                     json.dumps({"type": "tts", "state": "start"}),
                     json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}),
                     json.dumps({"type": "tts", "state": "start"}),
                     b"replacement-audio",
                     json.dumps({"type": "tts", "state": "stop"}),
+                    json.dumps(
+                        {
+                            "type": "evidence_finalized",
+                            "status": "PASS",
+                            "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope(),
+                            "serverEndUtc": "2026-08-31T03:00:10+00:00",
+                        }
+                    ),
                 ]
 
             async def send(self, payload):

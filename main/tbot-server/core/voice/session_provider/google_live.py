@@ -279,6 +279,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._voice_consent_denied = False
         self._lesson_instruction_generation = None
         self._lesson_context_signature = None
+        self._evidence_finalize_result = None
 
     async def start_session(self):
         async with self._get_lifecycle_lock():
@@ -810,30 +811,62 @@ class GoogleLiveProvider(VoiceSessionProvider):
         await self._begin_user_interrupt("explicit_interrupt")
 
     async def close(self):
+        if self._evidence_scope() is not None:
+            await self.finalize_evidence()
+            return
         self._closing = True
         self._lifecycle_generation += 1
         async with self._get_lifecycle_lock():
             await self._close_live_resources()
-            evidence_scope = self._evidence_scope()
-            if evidence_scope is not None:
-                pending_tasks = 0
-                for name, value in vars(self).items():
-                    if name.endswith("_task"):
-                        pending_tasks += int(
-                            value is not None and not value.done()
-                        )
-                    elif name.endswith("_tasks") and value is not None:
-                        pending_tasks += sum(
-                            1 for task in value if not task.done()
-                        )
-                self.conn.logger.bind(tag="GoogleLive").info(
-                    "Google Live evidence_connection_close journey_id={} "
-                    "connection_id={} live_connection_id={} pending_tasks={}",
-                    *evidence_scope,
-                    pending_tasks,
-                )
             if self._fallback_provider is not None:
                 await self._fallback_provider.close()
+
+    def _pending_evidence_task_count(self):
+        current_task = asyncio.current_task()
+        pending_tasks = 0
+        for name, value in vars(self).items():
+            if name.endswith("_task"):
+                pending_tasks += int(
+                    value is not None
+                    and value is not current_task
+                    and not value.done()
+                )
+            elif name.endswith("_tasks") and value is not None:
+                pending_tasks += sum(
+                    1
+                    for task in value
+                    if task is not current_task and not task.done()
+                )
+        return pending_tasks
+
+    async def finalize_evidence(self):
+        if self._evidence_finalize_result is not None:
+            return dict(self._evidence_finalize_result)
+        evidence_scope = self._evidence_scope()
+        if evidence_scope is None:
+            return {"status": "FAIL", "failureCode": "EVIDENCE_SCOPE_MISSING"}
+        live_connection_id = evidence_scope[2]
+        self._closing = True
+        self._lifecycle_generation += 1
+        async with self._get_lifecycle_lock():
+            if self._evidence_finalize_result is not None:
+                return dict(self._evidence_finalize_result)
+            await self._close_live_resources()
+            if self._fallback_provider is not None:
+                await self._fallback_provider.close()
+            pending_tasks = self._pending_evidence_task_count()
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live evidence_connection_close journey_id={} "
+                "connection_id={} live_connection_id={} pending_tasks={}",
+                *evidence_scope,
+                pending_tasks,
+            )
+            self._evidence_finalize_result = {
+                "status": "PASS" if pending_tasks == 0 else "FAIL",
+                "liveConnectionId": live_connection_id,
+                "pendingTasks": pending_tasks,
+            }
+            return dict(self._evidence_finalize_result)
 
     async def prepare_for_sample_lesson(self):
         if self._fallback_provider is not None:
@@ -917,6 +950,20 @@ class GoogleLiveProvider(VoiceSessionProvider):
             reason,
         )
         return await self._ensure_live_open_for_audio()
+
+    async def prepare_evidence_scope(self):
+        if not await self.ensure_live_ready("evidence_hello"):
+            return None
+        live_connection_id = self._interaction.live_connection_id
+        conn_live_connection_id = getattr(
+            self.conn, "google_live_live_connection_id", None
+        )
+        if (
+            live_connection_id is None
+            or str(live_connection_id) != str(conn_live_connection_id)
+        ):
+            return None
+        return str(live_connection_id)
 
     async def _ensure_live_open_for_audio(self, *, preserve_live_prewarm=False):
         if normalize_session_mode(getattr(self.conn, "session_mode", SessionMode.DORMANT)) == SessionMode.LESSON:
@@ -4623,6 +4670,16 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 event_generation,
                 self._response_generation,
             )
+            evidence_scope = self._evidence_scope()
+            if evidence_scope is not None:
+                self.conn.logger.bind(tag="GoogleLive").info(
+                    "Google Live evidence_stale_model_drop journey_id={} "
+                    "connection_id={} live_connection_id={} response_id={} "
+                    "current_response_id={}",
+                    *evidence_scope,
+                    event_generation,
+                    self._response_generation,
+                )
             return
         if (
             event_type == "audio_start"

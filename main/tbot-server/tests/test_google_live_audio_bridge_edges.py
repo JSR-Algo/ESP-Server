@@ -207,7 +207,7 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         bridge._locally_cancelled_response_ids = {f"old-{idx:02d}" for idx in range(25)}
         self.assertTrue(await bridge.handle_event({"type": "audio_start"}))
 
-    async def test_evidence_first_forwarded_chunk_is_logged_once_per_response(self):
+    async def test_evidence_every_forwarded_chunk_logs_response_ownership(self):
         logger = _Logger()
         conn = _Conn(websocket=_WebSocket())
         conn.google_live_evidence_journey_id = "bargein-journey-1"
@@ -230,9 +230,32 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
             and args
             and "Google Live model_output_chunk_forwarded journey_id=" in str(args[0])
         ]
-        self.assertEqual(len(markers), 1)
-        self.assertEqual(markers[0][1:], ("bargein-journey-1", "session-1", "live-7", 9))
+        self.assertEqual(len(markers), 2)
+        self.assertTrue(
+            all(
+                marker[1:] == ("bargein-journey-1", "session-1", "live-7", 9)
+                for marker in markers
+            )
+        )
         self.assertLessEqual(len(bridge._locally_cancelled_response_ids), 11)
+
+        normal_logger = _Logger()
+        normal_bridge = self.make_bridge(
+            conn=_Conn(websocket=_WebSocket()),
+            logger=normal_logger,
+            response_id_getter=lambda: 9,
+        )
+        normal_bridge._send_binary_audio_message = AsyncMock()
+        await normal_bridge.handle_event({"type": "audio_start"})
+        await normal_bridge.handle_event({"type": "audio", "audio": b"normal"})
+        self.assertFalse(
+            any(
+                args
+                and "Google Live model_output_chunk_forwarded journey_id="
+                in str(args[0])
+                for _level, args, _kwargs in normal_logger.messages
+            )
+        )
 
         bridge._moderation_block_active = True
         self.assertTrue(await bridge.handle_event({"type": "audio_start"}))

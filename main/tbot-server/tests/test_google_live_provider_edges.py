@@ -30,6 +30,9 @@ class _Logger:
     def info(self, *args, **kwargs):
         self.messages.append(("info", args, kwargs))
 
+    def debug(self, *args, **kwargs):
+        self.messages.append(("debug", args, kwargs))
+
     def warning(self, *args, **kwargs):
         self.messages.append(("warning", args, kwargs))
 
@@ -4593,6 +4596,99 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             google_live_module.time.time = original_time
 
         self.assertEqual(conn.last_activity_time, 123456.0)
+
+    async def test_provider_stale_guard_emits_optional_scoped_marker(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "bargein-journey-1"
+        conn.google_live_live_connection_id = "live-7"
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-7")
+        provider._response_generation = 8
+
+        await provider._handle_live_event(
+            {"type": "audio", "audio": b"late", "response_generation": 7}
+        )
+
+        scoped = [
+            args
+            for level, args, _kwargs in conn.logger.messages
+            if level == "info"
+            and args
+            and args[0] == (
+                "Google Live evidence_stale_model_drop journey_id={} "
+                "connection_id={} live_connection_id={} response_id={} "
+                "current_response_id={}"
+            )
+        ]
+        self.assertEqual(
+            scoped,
+            [("Google Live evidence_stale_model_drop journey_id={} connection_id={} live_connection_id={} response_id={} current_response_id={}", "bargein-journey-1", "session-1", "live-7", 7, 8)],
+        )
+
+        normal = _Conn()
+        normal_provider = self.make_provider(normal)
+        normal_provider._response_generation = 8
+        await normal_provider._handle_live_event(
+            {"type": "audio", "audio": b"late", "response_generation": 7}
+        )
+        self.assertFalse(
+            any(
+                args and "evidence_stale_model_drop" in str(args[0])
+                for _level, args, _kwargs in normal.logger.messages
+            )
+        )
+
+    async def test_evidence_finalize_is_idempotent_and_logs_cleanup_once(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "bargein-journey-1"
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-7")
+        provider._close_live_resources = AsyncMock()
+
+        first = await provider.finalize_evidence()
+        second = await provider.finalize_evidence()
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["status"], "PASS")
+        self.assertEqual(first["liveConnectionId"], "live-7")
+        self.assertEqual(first["pendingTasks"], 0)
+        provider._close_live_resources.assert_awaited_once()
+        markers = [
+            args
+            for level, args, _kwargs in conn.logger.messages
+            if level == "info"
+            and args
+            and "evidence_connection_close" in str(args[0])
+        ]
+        self.assertEqual(len(markers), 1)
+
+    async def test_evidence_finalize_survives_caller_timeout_and_close_reuses_cleanup(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "bargein-journey-1"
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-7")
+        cleanup_started = asyncio.Event()
+        release_cleanup = asyncio.Event()
+
+        async def delayed_cleanup():
+            cleanup_started.set()
+            await release_cleanup.wait()
+
+        provider._close_live_resources = AsyncMock(side_effect=delayed_cleanup)
+        finalize_task = asyncio.create_task(provider.finalize_evidence())
+        await cleanup_started.wait()
+
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(finalize_task), timeout=0.01)
+
+        self.assertFalse(finalize_task.cancelled())
+        release_cleanup.set()
+        await provider.close()
+        result = await finalize_task
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["pendingTasks"], 0)
+        provider._close_live_resources.assert_awaited_once()
 
     async def test_interrupt_flush_and_finalize_guard_edges(self):
         conn = _Conn()

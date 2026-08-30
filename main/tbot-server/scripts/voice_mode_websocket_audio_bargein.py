@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import hashlib
 import json
 import math
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +38,44 @@ DEFAULT_TEXT = (
 )
 REPLACEMENT_RESPONSE_INCOMPLETE = "REPLACEMENT_RESPONSE_INCOMPLETE"
 SAFE_JOURNEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+SAFE_SCOPE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+
+def _expected_peer_identity_hash(args):
+    digest = hashlib.sha256(
+        f"{str(args.device_id or '').strip()}\0{str(args.client_id or '').strip()}".encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    return f"sha256:{digest}"
+
+
+def _parse_server_utc(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        return None
+    return parsed
+
+
+def _validated_hello_scope(ack, *, journey_id, expected_peer_hash):
+    scope = ack.get("evidenceScope") if isinstance(ack, dict) else None
+    if not isinstance(scope, dict) or scope.get("journeyId") != journey_id:
+        return None
+    if any(
+        SAFE_SCOPE_ID_RE.fullmatch(str(scope.get(field, ""))) is None
+        for field in ("connectionId", "liveConnectionId")
+    ):
+        return None
+    if scope.get("peerIdentityHash") != expected_peer_hash:
+        return None
+    if _parse_server_utc(scope.get("serverStartUtc")) is None:
+        return None
+    return dict(scope)
 
 
 def _detect_message(text):
@@ -254,7 +293,6 @@ async def run_smoke(
     wall_clock=datetime.now,
 ):
     journey_id, candidate_identity = _evidence_context(args)
-    window_start = wall_clock().replace(tzinfo=None).isoformat(timespec="seconds")
     headers = _build_headers(args)
     if getattr(args, "audio_file", ""):
         packets = _opus_packets_from_audio_file(
@@ -293,9 +331,10 @@ async def run_smoke(
         "firstInterruptPacketSentAtMonotonicMs": None,
         "journeyId": journey_id,
         "candidateIdentity": candidate_identity,
+        "evidenceScope": None,
         "logWindow": {
             "windowId": journey_id,
-            "start": window_start,
+            "start": None,
             "end": None,
         },
     }
@@ -320,6 +359,19 @@ async def run_smoke(
             summary["binary_chunks"] += binary_count
             if ack is None:
                 raise RuntimeError("hello ack timeout")
+            evidence_scope = _validated_hello_scope(
+                ack,
+                journey_id=journey_id,
+                expected_peer_hash=_expected_peer_identity_hash(args),
+            )
+            if evidence_scope is None:
+                summary["failureCode"] = "SERVER_EVIDENCE_SCOPE_INVALID"
+                return summary
+            summary["evidenceScope"] = evidence_scope
+            summary["serverConnectionId"] = evidence_scope["connectionId"]
+            summary["liveConnectionId"] = evidence_scope["liveConnectionId"]
+            summary["peerIdentityHash"] = evidence_scope["peerIdentityHash"]
+            summary["logWindow"]["start"] = evidence_scope["serverStartUtc"]
 
             await websocket.send(json.dumps(_detect_message(args.text)))
             start, binary_count, _messages = await _recv_until(
@@ -409,12 +461,43 @@ async def run_smoke(
                 summary["failureCode"] = "SERVER_OUTPUT_GAP_EXCEEDED"
                 return summary
 
+            await websocket.send(
+                json.dumps(
+                    {
+                        "type": "evidence_finalize",
+                        "evidenceScope": evidence_scope,
+                    }
+                )
+            )
+            finalized, binary_count, _messages = await _recv_until(
+                websocket,
+                lambda payload: payload.get("type") == "evidence_finalized",
+                args.event_timeout_sec,
+            )
+            summary["binary_chunks"] += binary_count
+            if finalized is None:
+                summary["failureCode"] = "EVIDENCE_FINALIZE_TIMEOUT"
+                return summary
+            server_end = finalized.get("serverEndUtc")
+            end_utc = _parse_server_utc(server_end)
+            start_utc = _parse_server_utc(evidence_scope["serverStartUtc"])
+            if (
+                finalized.get("status") != "PASS"
+                or finalized.get("evidenceScope") != evidence_scope
+                or end_utc is None
+                or start_utc is None
+                or end_utc < start_utc
+            ):
+                summary["failureCode"] = finalized.get(
+                    "failureCode", "EVIDENCE_FINALIZE_INVALID"
+                )
+                return summary
+            summary["logWindow"]["end"] = server_end
+
             summary["status"] = "SKIPPED"
             summary["pendingCode"] = "PENDING_BOUNDED_SERVER_LOG_VERIFICATION"
     finally:
-        summary["logWindow"]["end"] = (
-            wall_clock().replace(tzinfo=None).isoformat(timespec="seconds")
-        )
+        pass
     return summary
 
 

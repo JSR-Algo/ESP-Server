@@ -23,6 +23,14 @@ CANDIDATE_IDENTITY = {
     "configFingerprint": f"sha256:{'c' * 64}",
 }
 
+EVIDENCE_SCOPE = {
+    "journeyId": "bargein-journey-1",
+    "connectionId": "conn-1",
+    "liveConnectionId": "live-1",
+    "peerIdentityHash": f"sha256:{'d' * 64}",
+    "serverStartUtc": "2026-08-31T10:00:00+00:00",
+}
+
 
 def _window_lines(
     *body,
@@ -30,19 +38,34 @@ def _window_lines(
     window_id="window-1",
     journey_id=None,
     journeys=None,
+    evidence_scope=None,
 ):
     identity = json.dumps(candidate_identity, sort_keys=True, separators=(",", ":"))
     evidence = ""
+    if journey_id is None and evidence_scope is not None:
+        journey_id = evidence_scope["journeyId"]
     if journey_id is not None:
         evidence += f"journey_id={journey_id} "
     if journeys is not None:
         evidence += f"journeys={journeys} "
+    if evidence_scope is not None:
+        evidence += (
+            f"connection_id={evidence_scope['connectionId']} "
+            f"live_connection_id={evidence_scope['liveConnectionId']} "
+            f"peer_identity_hash={evidence_scope['peerIdentityHash']} "
+            f"server_start_utc={evidence_scope['serverStartUtc']} "
+        )
+    end_scope = (
+        " server_end_utc=2026-08-31T10:00:59+00:00"
+        if evidence_scope is not None
+        else ""
+    )
     return [
         "2026-08-31 10:00:00 Google Live reliability_window_start "
         f"window_id={window_id} {evidence}candidate_identity={identity}",
         *body,
         "2026-08-31 10:00:59 Google Live reliability_window_end "
-        f"window_id={window_id}",
+        f"window_id={window_id}{end_scope}",
     ]
 
 
@@ -69,10 +92,14 @@ def _transport_observation(**overrides):
         "maxServerOutputGapMs": 60.0,
         "bargeinStopMs": 210.0,
         "candidateIdentity": CANDIDATE_IDENTITY,
+        "evidenceScope": EVIDENCE_SCOPE,
+        "serverConnectionId": EVIDENCE_SCOPE["connectionId"],
+        "liveConnectionId": EVIDENCE_SCOPE["liveConnectionId"],
+        "peerIdentityHash": EVIDENCE_SCOPE["peerIdentityHash"],
         "logWindow": {
             "windowId": "window-1",
-            "start": "2026-08-31T10:00:00",
-            "end": "2026-08-31T10:00:59",
+            "start": "2026-08-31T10:00:00+00:00",
+            "end": "2026-08-31T10:00:59+00:00",
         },
         "journeyId": "bargein-journey-1",
     }
@@ -86,6 +113,7 @@ def _valid_log_verdict(**overrides):
         "name": "google_live_log_reliability",
         "status": "PASS",
         "candidateIdentity": CANDIDATE_IDENTITY,
+        "evidenceScope": EVIDENCE_SCOPE,
         "logWindow": _transport_observation()["logWindow"],
         "receiveLoopBalance": 0,
         "maxReceiveLoopsActive": 1,
@@ -116,12 +144,14 @@ def _valid_log_verdict(**overrides):
     return verdict
 
 
-def _scoped_bargein_chain(*, journey_id, connection_id, live_connection_id, old, new):
+def _scoped_bargein_chain(
+    *, journey_id, connection_id, live_connection_id, old, new, include_stale=True
+):
     scope = (
         f"journey_id={journey_id} connection_id={connection_id} "
         f"live_connection_id={live_connection_id}"
     )
-    return [
+    markers = [
         f"Google Live evidence_response_started {scope} response_id={old}",
         f"Google Live user_interrupt_started {scope} reason=vad "
         f"cancelled_response_id={old} next_response_id={new}",
@@ -129,14 +159,19 @@ def _scoped_bargein_chain(*, journey_id, connection_id, live_connection_id, old,
         f"cancelled_response_id={old} next_response_id={new}",
         f"Google Live evidence_user_interrupted {scope} reason=vad "
         f"cancelled_response_id={old} next_response_id={new}",
-        f"Google Live evidence_stale_model_drop {scope} response_id={old} "
-        f"current_response_id={new}",
         f"Google Live evidence_interrupt_audio_replayed {scope} response_id={new}",
         f"Google Live evidence_interrupt_input_finalized {scope} response_id={new}",
         f"Google Live evidence_response_started {scope} response_id={new}",
         f"Google Live model_output_chunk_forwarded {scope} response_id={new}",
         f"Google Live evidence_response_ended {scope} response_id={new}",
     ]
+    if include_stale:
+        markers.insert(
+            4,
+            f"Google Live evidence_stale_model_drop {scope} response_id={old} "
+            f"current_response_id={new}",
+        )
+    return markers
 
 
 class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
@@ -169,6 +204,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             "2026-08-31 10:00:17 Google Live evidence_response_ended journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=8",
             "2026-08-31 10:00:18 Google Live receive loop stopped",
             journey_id="bargein-journey-1",
+            evidence_scope=EVIDENCE_SCOPE,
         )
 
         verdict = self._analyze(lines)
@@ -195,6 +231,150 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         self.assertTrue(combined["aggregateReleaseEligible"])
         self.assertEqual(combined["correlationStatus"], "PASS")
         self.assertEqual(combined["candidateIdentity"], CANDIDATE_IDENTITY)
+
+    def test_scoped_bargein_passes_without_optional_stale_drop(self):
+        body = [
+            f"2026-08-31 10:00:{second:02d} {marker}"
+            for second, marker in enumerate(
+                _scoped_bargein_chain(
+                    journey_id="bargein-journey-1",
+                    connection_id="conn-1",
+                    live_connection_id="live-1",
+                    old=7,
+                    new=8,
+                    include_stale=False,
+                ),
+                start=1,
+            )
+        ]
+        body.append(
+            "2026-08-31 10:00:20 Google Live evidence_connection_close "
+            "journey_id=bargein-journey-1 connection_id=conn-1 "
+            "live_connection_id=live-1 pending_tasks=0"
+        )
+
+        verdict = self._analyze(
+            _window_lines(
+                *body,
+                window_id="window-1",
+                journey_id="bargein-journey-1",
+                journeys="bargein",
+            )
+        )
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+
+    def test_scoped_cleanup_must_match_anchored_connection_and_live_id(self):
+        body = _scoped_bargein_chain(
+            journey_id="bargein-journey-1",
+            connection_id="conn-1",
+            live_connection_id="live-1",
+            old=7,
+            new=8,
+            include_stale=False,
+        )
+        body.append(
+            "Google Live evidence_connection_close journey_id=bargein-journey-1 "
+            "connection_id=conn-2 live_connection_id=live-2 pending_tasks=0"
+        )
+        lines = _window_lines(
+            *(f"2026-08-31 10:00:{index:02d} {marker}" for index, marker in enumerate(body, 1)),
+            journey_id="bargein-journey-1",
+            journeys="bargein",
+            evidence_scope=EVIDENCE_SCOPE,
+        )
+
+        verdict = self._analyze(lines)
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn(
+            "EVIDENCE_CLEANUP_SCOPE_MISMATCH",
+            [item["code"] for item in verdict["failures"]],
+        )
+
+    def test_foreign_journey_cleanup_does_not_poison_exact_scoped_cleanup(self):
+        body = _scoped_bargein_chain(
+            journey_id="bargein-journey-1",
+            connection_id="conn-1",
+            live_connection_id="live-1",
+            old=7,
+            new=8,
+            include_stale=False,
+        )
+        body.extend(
+            [
+                "Google Live evidence_connection_close journey_id=other-journey "
+                "connection_id=conn-2 live_connection_id=live-2 pending_tasks=5",
+                "Google Live evidence_connection_close journey_id=bargein-journey-1 "
+                "connection_id=conn-1 live_connection_id=live-1 pending_tasks=0",
+            ]
+        )
+        lines = _window_lines(
+            *(f"2026-08-31 10:00:{index:02d} {marker}" for index, marker in enumerate(body, 1)),
+            journey_id="bargein-journey-1",
+            journeys="bargein",
+            evidence_scope=EVIDENCE_SCOPE,
+        )
+
+        verdict = self._analyze(lines)
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+        self.assertEqual(verdict["staleAudioAfterReplacement"], 0)
+
+    def test_late_cancelled_chunk_after_replacement_first_chunk_fails(self):
+        chain = _scoped_bargein_chain(
+            journey_id="bargein-journey-1",
+            connection_id="conn-1",
+            live_connection_id="live-1",
+            old=7,
+            new=8,
+            include_stale=False,
+        )
+        chain.insert(
+            -1,
+            "Google Live model_output_chunk_forwarded journey_id=bargein-journey-1 "
+            "connection_id=conn-1 live_connection_id=live-1 response_id=7",
+        )
+        body = [
+            f"2026-08-31 10:00:{second:02d} {marker}"
+            for second, marker in enumerate(chain, start=1)
+        ]
+
+        verdict = self._analyze(
+            _window_lines(*body, journey_id="bargein-journey-1")
+        )
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn(
+            "STALE_AUDIO_AFTER_REPLACEMENT",
+            [item["code"] for item in verdict["failures"]],
+        )
+
+    def test_public_correlation_rejects_non_mapping_inputs_without_crash(self):
+        for name, value in {
+            "list": [],
+            "null": None,
+            "string": "secret-raw-input",
+            "number": 42,
+        }.items():
+            with self.subTest(name=name, layer="transport"):
+                combined = correlate_websocket_bargein_evidence(
+                    value,
+                    _valid_log_verdict(),
+                    expected_candidate_identity=CANDIDATE_IDENTITY,
+                )
+                self.assertEqual(combined["status"], "FAIL", combined)
+                self.assertFalse(combined["aggregateReleaseEligible"])
+                self.assertNotIn("secret-raw-input", json.dumps(combined))
+            with self.subTest(name=name, layer="log"):
+                combined = correlate_websocket_bargein_evidence(
+                    _transport_observation(),
+                    value,
+                    expected_candidate_identity=CANDIDATE_IDENTITY,
+                )
+                self.assertEqual(combined["status"], "FAIL", combined)
+                self.assertFalse(combined["aggregateReleaseEligible"])
+                self.assertNotIn("secret-raw-input", json.dumps(combined))
 
     def test_lifecycle_failures_are_fail_closed(self):
         cases = {
@@ -516,8 +696,8 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             "wrong_window": _transport_observation(
                 logWindow={
                     "windowId": "other",
-                    "start": "2026-08-31T10:00:00",
-                    "end": "2026-08-31T10:00:59",
+                    "start": "2026-08-31T10:00:00+00:00",
+                    "end": "2026-08-31T10:00:59+00:00",
                 }
             ),
             "already_passed_transport": _transport_observation(status="PASS"),
@@ -561,7 +741,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             "replacementResponseId": 8,
         }
 
-        for correlations in ([], [match, {**match, "liveConnectionId": "live-2"}]):
+        for correlations in ([], [match, dict(match)]):
             with self.subTest(count=len(correlations)):
                 combined = correlate_websocket_bargein_evidence(
                     _transport_observation(),
@@ -570,7 +750,81 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                 )
                 self.assertEqual(combined["status"], "FAIL", combined)
                 self.assertIn(
-                    "SERVER_LOG_JOURNEY_CORRELATION_COUNT",
+                    "SERVER_LOG_SCOPE_CORRELATION_COUNT",
+                    [item["code"] for item in combined["failures"]],
+                )
+
+    def test_transport_correlation_requires_exact_server_scope(self):
+        cases = {
+            "connection": _transport_observation(serverConnectionId="conn-2"),
+            "live": _transport_observation(liveConnectionId="live-2"),
+            "peer": _transport_observation(peerIdentityHash=f"sha256:{'e' * 64}"),
+            "scope": _transport_observation(
+                evidenceScope={**EVIDENCE_SCOPE, "connectionId": "conn-2"}
+            ),
+        }
+
+        for name, transport in cases.items():
+            with self.subTest(name=name):
+                combined = correlate_websocket_bargein_evidence(
+                    transport,
+                    _valid_log_verdict(),
+                    expected_candidate_identity=CANDIDATE_IDENTITY,
+                )
+                self.assertEqual(combined["status"], "FAIL", combined)
+                self.assertFalse(combined["aggregateReleaseEligible"])
+
+    def test_transport_correlation_does_not_accept_same_journey_from_other_connection(self):
+        log_verdict = _valid_log_verdict(
+            correlations=[
+                {
+                    **_valid_log_verdict()["correlations"][0],
+                    "connectionId": "conn-2",
+                }
+            ]
+        )
+
+        combined = correlate_websocket_bargein_evidence(
+            _transport_observation(),
+            log_verdict,
+            expected_candidate_identity=CANDIDATE_IDENTITY,
+        )
+
+        self.assertEqual(combined["status"], "FAIL", combined)
+        self.assertIn(
+            "SERVER_LOG_SCOPE_CORRELATION_COUNT",
+            [item["code"] for item in combined["failures"]],
+        )
+
+    def test_transport_correlation_rejects_non_utc_or_reversed_server_windows(self):
+        cases = {
+            "naive": ("2026-08-31T10:00:00", "2026-08-31T10:00:59"),
+            "offset": ("2026-08-31T17:00:00+07:00", "2026-08-31T17:00:59+07:00"),
+            "reversed": ("2026-08-31T10:01:00+00:00", "2026-08-31T10:00:59+00:00"),
+        }
+
+        for name, (start, end) in cases.items():
+            with self.subTest(name=name):
+                scope = {**EVIDENCE_SCOPE, "serverStartUtc": start}
+                window = {"windowId": "window-1", "start": start, "end": end}
+                transport = _transport_observation(
+                    evidenceScope=scope,
+                    logWindow=window,
+                )
+                log_verdict = _valid_log_verdict(
+                    evidenceScope=scope,
+                    logWindow=window,
+                )
+
+                combined = correlate_websocket_bargein_evidence(
+                    transport,
+                    log_verdict,
+                    expected_candidate_identity=CANDIDATE_IDENTITY,
+                )
+
+                self.assertEqual(combined["status"], "FAIL", combined)
+                self.assertIn(
+                    "TRANSPORT_EVIDENCE_WINDOW_INVALID",
                     [item["code"] for item in combined["failures"]],
                 )
 
@@ -631,7 +885,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         ):
             body.append(f"2026-08-31 10:00:{second:02d} {marker}")
         log_verdict = self._analyze(
-            _window_lines(*body, window_id="window-1")
+            _window_lines(*body, window_id="window-1", evidence_scope=EVIDENCE_SCOPE)
         )
 
         self.assertEqual(log_verdict["status"], "PASS", log_verdict)
@@ -1027,6 +1281,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             "2026-08-31 10:00:10 Google Live evidence_response_ended journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=8",
             "2026-08-31 10:00:11 Google Live evidence_connection_close journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 pending_tasks=0",
         ]
+        body = [line.replace("2026-08-31 10:", "2026-08-31 18:") for line in body]
         tmp, log_path = _write_log(body)
         self.addCleanup(tmp.cleanup)
         transport_path = Path(tmp.name) / "transport.json"
@@ -1035,8 +1290,8 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         transport = _transport_observation(
             logWindow={
                 "windowId": "bargein-journey-1",
-                "start": "2026-08-31T10:00:00",
-                "end": "2026-08-31T10:00:59",
+                "start": "2026-08-31T10:00:00+00:00",
+                "end": "2026-08-31T10:00:59+00:00",
             }
         )
         transport_path.write_text(json.dumps(transport), encoding="utf-8")
@@ -1049,6 +1304,8 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             str(transport_path),
             "--expected-candidate-json",
             str(candidate_path),
+            "--log-timezone",
+            "Asia/Shanghai",
             "--out-json",
             str(out_path),
         ]
@@ -1170,8 +1427,8 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                 _transport_observation(
                     logWindow={
                         "windowId": "bargein-journey-1",
-                        "start": "2026-08-31T10:00:00",
-                        "end": "2026-08-31T10:00:59",
+                        "start": "2026-08-31T10:00:00+00:00",
+                        "end": "2026-08-31T10:00:59+00:00",
                     }
                 )
             ),
@@ -1214,8 +1471,8 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                 _transport_observation(
                     logWindow={
                         "windowId": "bargein-journey-1",
-                        "start": "2026-08-31T10:00:00",
-                        "end": "2026-08-31T10:00:59",
+                        "start": "2026-08-31T10:00:00+00:00",
+                        "end": "2026-08-31T10:00:59+00:00",
                     }
                 )
             ),
@@ -1249,8 +1506,8 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         transport = _transport_observation(
             logWindow={
                 "windowId": "bargein-journey-1",
-                "start": "2026-08-31T10:00:00",
-                "end": "2026-08-31T10:00:59",
+                "start": "2026-08-31T10:00:00+00:00",
+                "end": "2026-08-31T10:00:59+00:00",
             }
         )
         transport_path.write_text(json.dumps(transport), encoding="utf-8")
@@ -1285,8 +1542,8 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                 _transport_observation(
                     logWindow={
                         "windowId": "bargein-journey-1",
-                        "start": "2026-08-31T10:00:00",
-                        "end": "2026-08-31T10:00:59",
+                        "start": "2026-08-31T10:00:00+00:00",
+                        "end": "2026-08-31T10:00:59+00:00",
                     }
                 )
             ),
@@ -1382,8 +1639,8 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                         _transport_observation(
                             logWindow={
                                 "windowId": "bargein-journey-1",
-                                "start": "2026-08-31T10:00:00",
-                                "end": "2026-08-31T10:00:59",
+                                "start": "2026-08-31T10:00:00+00:00",
+                                "end": "2026-08-31T10:00:59+00:00",
                             }
                         )
                     ),
