@@ -1317,7 +1317,10 @@ def _postgres_identity(value: object) -> tuple[str, int, str] | None:
         return None
     try:
         parsed = urlsplit(value)
-        query = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+        query = (
+            parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+            if parsed.query else []
+        )
         endpoint = parsed.netloc.rsplit("@", 1)[-1]
         parsed_port = parsed.port
         port = 5432 if parsed_port is None else parsed_port
@@ -1350,6 +1353,12 @@ def _local_postgres_identity(value: object) -> tuple[str, int, str] | None:
         return None
     if literal_host not in {"localhost", "127.0.0.1", "::1"}:
         return None
+    if literal_host == "localhost":
+        addresses = _resolved_postgres_addresses(literal_host, identity[1])
+        if addresses is None or not all(
+            ipaddress.ip_address(address).is_loopback for address in addresses
+        ):
+            return None
     return ("loopback", identity[1], identity[2])
 
 
@@ -1408,6 +1417,19 @@ def _live_db_topology_ready(source: Mapping[str, str]) -> bool:
         (port, database) == identity[1:] for identity in (curriculum, materializer)
     )
     return not aliases_test_database
+
+
+def _live_db_source_snapshot(source: Mapping[str, str]) -> dict[str, str] | None:
+    missing = object()
+    snapshot = {}
+    try:
+        for name in (*LIVE_DB_URL_VARIABLES, "PRODUCTION_DATABASE_URL"):
+            value = source.get(name, missing)
+            if value is not missing:
+                snapshot[name] = value
+    except (AttributeError, KeyError, RuntimeError, TypeError):
+        return None
+    return snapshot
 
 
 def _assignment_candidate_environment(candidate: dict, lane: Lane) -> dict[str, str] | None:
@@ -1644,6 +1666,17 @@ def run_gate(
             }
             source = source_environment if source_environment is not None else os.environ
             for lane in selected:
+                lane_source = source
+                if lane.name == LIVE_DB_LANE.name:
+                    live_db_source = _live_db_source_snapshot(source)
+                    if live_db_source is None:
+                        report["lanes"].append({
+                            "name": lane.name, "exitCode": None, "durationMs": 0,
+                        })
+                        report["verdict"] = "BLOCKED"
+                        report["failedLane"] = lane.name
+                        break
+                    lane_source = live_db_source
                 if not release_state_matches(
                     candidate_path, candidate, selected, runtime_root, require_runtime,
                     node_lanes=(lane,),
@@ -1653,12 +1686,12 @@ def run_gate(
                     report["failedLane"] = lane.name
                     break
                 required_environment = _required_environment(lane)
-                if any(not source.get(name) for name in required_environment):
+                if any(not lane_source.get(name) for name in required_environment):
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
                     break
-                if lane.name == LIVE_DB_LANE.name and not _live_db_topology_ready(source):
+                if lane.name == LIVE_DB_LANE.name and not _live_db_topology_ready(lane_source):
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
@@ -1718,7 +1751,7 @@ def run_gate(
                     result = run_bounded_command(
                         list(command), cwd=resolved_cwd, timeout_sec=lane.timeout_sec,
                         max_output_bytes=max_output_bytes,
-                        env=_child_environment(candidate, source, lane),
+                        env=_child_environment(candidate, lane_source, lane),
                     )
                     skip_state = pytest_report_has_skips(junit_path) if junit_path else False
                 finally:

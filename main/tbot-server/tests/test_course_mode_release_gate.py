@@ -515,7 +515,7 @@ def _live_db_test_lane(code: str) -> gate.Lane:
 
 def _live_db_source(
     database_a: str = "postgresql://operator@127.0.0.1:55431/course_mode_a",
-    database_b: str = "postgresql://operator@localhost:55432/course_mode_b?sslmode=disable",
+    database_b: str = "postgresql://operator@[::1]:55432/course_mode_b?sslmode=disable",
 ) -> dict[str, str]:
     return {
         "COURSE_MODE_V2_TEST_DATABASE_URL": database_a,
@@ -564,7 +564,7 @@ def test_live_db_identity_ignores_username_differences(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _live_db_source(
-        database_a="postgresql://migration@localhost:5432/course_mode",
+        database_a="postgresql://migration@127.0.0.1:5432/course_mode",
         database_b="postgresql://rollback@127.0.0.1/course_mode",
     )
     monkeypatch.setattr(
@@ -653,9 +653,130 @@ def test_live_db_accepts_exactly_two_distinct_loopback_database_identities(
 
 
 def test_live_db_missing_port_defaults_to_postgres_port() -> None:
-    assert gate._local_postgres_identity("postgresql://operator@localhost/course_mode") == (
+    assert gate._local_postgres_identity("postgresql://operator@127.0.0.1/course_mode") == (
         "loopback", 5432, "course_mode",
     )
+
+
+def test_postgres_url_without_query_does_not_call_strict_query_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gate,
+        "parse_qsl",
+        lambda *args, **kwargs: pytest.fail("empty query must not reach parse_qsl"),
+    )
+
+    assert gate._postgres_identity("postgresql://127.0.0.1:5432/course_mode") == (
+        "127.0.0.1", 5432, "course_mode",
+    )
+
+
+def test_localhost_target_requires_all_resolved_addresses_to_be_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gate.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 5432)),
+            (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("::1", 5432, 0, 0)),
+        ],
+    )
+
+    assert gate._local_postgres_identity("postgresql://localhost:5432/course_mode") == (
+        "loopback", 5432, "course_mode",
+    )
+
+
+def test_localhost_target_blocks_mixed_loopback_and_remote_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gate.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 5432)),
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("203.0.113.10", 5432)),
+        ],
+    )
+
+    assert gate._local_postgres_identity("postgresql://localhost:5432/course_mode") is None
+
+
+def test_localhost_target_blocks_unresolved_and_timed_out_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_resolution(*args, **kwargs):
+        raise socket.gaierror(socket.EAI_NONAME, "not known")
+
+    monkeypatch.setattr(gate.socket, "getaddrinfo", fail_resolution)
+    assert gate._local_postgres_identity("postgresql://localhost:5432/course_mode") is None
+
+    class NeverFinishes:
+        def __init__(self, *, target, daemon):
+            assert callable(target) and daemon is True
+
+        def start(self) -> None:
+            pass
+
+        def join(self, timeout: float) -> None:
+            assert timeout == 2.0
+
+        def is_alive(self) -> bool:
+            return True
+
+    monkeypatch.setattr(gate.threading, "Thread", NeverFinishes)
+    assert gate._local_postgres_identity("postgresql://localhost:5432/course_mode") is None
+
+
+def test_loopback_target_aliases_share_one_database_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gate.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 5432)),
+        ],
+    )
+
+    identities = {
+        gate._local_postgres_identity(url)
+        for url in (
+            "postgresql://user@localhost:5432/course_mode",
+            "postgresql://other@127.0.0.1:5432/course_mode",
+            "postgresql://third@[::1]:5432/course_mode",
+        )
+    }
+
+    assert identities == {("loopback", 5432, "course_mode")}
+
+
+def test_live_db_uses_one_validated_snapshot_of_mutable_source_environment(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MutatesAfterFirstRead(dict):
+        def __init__(self, values):
+            super().__init__(values)
+            self.reads = {}
+
+        def get(self, key, default=None):
+            self.reads[key] = self.reads.get(key, 0) + 1
+            if self.reads[key] > 1:
+                return "postgresql://prod.invalid/changed"
+            return super().get(key, default)
+
+    source = MutatesAfterFirstRead(_live_db_source())
+    result = _run_live_db_topology_gate(
+        candidate_file,
+        monkeypatch,
+        source,
+        "import os;assert os.environ['DATABASE_URL'].endswith('/course_mode_b?sslmode=disable')",
+    )
+
+    assert result["verdict"] == "PASS"
+    assert all(source.reads[name] == 1 for name in gate.LIVE_DB_URL_VARIABLES)
 
 
 @pytest.mark.parametrize(
