@@ -10,6 +10,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -872,6 +873,86 @@ def test_owned_cleanup_rejects_child_swap_immediately_before_rmdir(
     gate._remove_owned_tree(root)
 
 
+@pytest.mark.parametrize("leaf_type", ["file", "symlink"])
+def test_owned_cleanup_rejects_leaf_swap_at_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, leaf_type: str,
+) -> None:
+    root = tmp_path / "owned-root"
+    root.mkdir()
+    leaf = root / "leaf"
+    if leaf_type == "file":
+        leaf.write_text("owned", encoding="utf-8")
+    else:
+        leaf.symlink_to("target")
+    identity = gate._owned_tree_identity(root)
+    escaped = tmp_path / f"escaped-{leaf_type}"
+    original_unlink = gate.os.unlink
+    swapped = False
+
+    def swap_then_unlink(path, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and dir_fd is not None:
+            swapped = True
+            directory = gate._directory_fd_path(dir_fd)
+            assert directory is not None
+            current = directory / path
+            current.rename(escaped)
+            if leaf_type == "file":
+                current.write_text("decoy", encoding="utf-8")
+            else:
+                current.symlink_to("decoy")
+        return original_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(gate.os, "unlink", swap_then_unlink)
+
+    assert gate._remove_owned_tree(root, identity) is False
+    assert escaped.exists() or escaped.is_symlink()
+
+    monkeypatch.setattr(gate.os, "unlink", original_unlink)
+    original_unlink(escaped)
+    gate._remove_owned_tree(root, identity)
+
+
+def test_owned_cleanup_removes_fifo_without_quarantine(tmp_path: Path) -> None:
+    root = tmp_path / "owned-root"
+    root.mkdir()
+    leaf = root / "fifo"
+    os.mkfifo(leaf)
+    identity = gate._owned_tree_identity(root)
+
+    assert gate._remove_owned_tree(root, identity) is True
+    assert not root.exists()
+    assert not list(root.parent.glob(".course-mode-cleanup-*"))
+
+
+def test_owned_cleanup_fails_closed_for_unix_socket_without_unlink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(tempfile.mkdtemp(prefix="cm-socket-", dir="/private/tmp"))
+    leaf = root / "socket"
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind(str(leaf))
+    listener.close()
+    identity = gate._owned_tree_identity(root)
+    unlink_calls = 0
+    original_unlink = gate.os.unlink
+
+    def swap_if_called(*args, **kwargs):
+        nonlocal unlink_calls
+        unlink_calls += 1
+        return original_unlink(*args, **kwargs)
+
+    monkeypatch.setattr(gate.os, "unlink", swap_if_called)
+
+    assert gate._remove_owned_tree(root, identity) is False
+    assert unlink_calls == 0
+    assert leaf.exists()
+    assert not list(root.glob(".course-mode-cleanup-*"))
+    monkeypatch.setattr(gate.os, "unlink", original_unlink)
+    original_unlink(leaf)
+    root.rmdir()
+
+
 def test_lane_cleanup_reports_cross_parent_move_during_removal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -902,6 +983,47 @@ def test_lane_cleanup_reports_cross_parent_move_during_removal(
 
     monkeypatch.setattr(gate.os, "rmdir", original_rmdir)
     gate._remove_owned_tree(relocated)
+
+
+@pytest.mark.parametrize("owner_type", ["stage", "lane"])
+def test_repeated_cleanup_cannot_hide_retained_moved_root(
+    tmp_path: Path, owner_type: str,
+) -> None:
+    root = tmp_path / f"owned-{owner_type}"
+    root.mkdir()
+    retained = tmp_path / f"retained-{owner_type}"
+    identity = gate._owned_tree_identity(root)
+    descriptor = gate._open_snapshot_directory(root)
+    if owner_type == "stage":
+        owner = gate.ExecutionStage(root, {}, identity, descriptor)
+    else:
+        owner = gate.LaneExecution(root, {}, {}, identity, descriptor)
+
+    root.rename(retained)
+
+    assert owner.cleanup() is False
+    assert owner.cleanup() is False
+    assert owner.retained_path() == retained
+    assert retained.exists()
+    gate._remove_owned_tree(retained, identity)
+
+
+@pytest.mark.parametrize("owner_type", ["stage", "lane"])
+def test_successful_cleanup_remains_successful_when_repeated(
+    tmp_path: Path, owner_type: str,
+) -> None:
+    root = tmp_path / f"owned-{owner_type}"
+    root.mkdir()
+    identity = gate._owned_tree_identity(root)
+    descriptor = gate._open_snapshot_directory(root)
+    if owner_type == "stage":
+        owner = gate.ExecutionStage(root, {}, identity, descriptor)
+    else:
+        owner = gate.LaneExecution(root, {}, {}, identity, descriptor)
+
+    assert owner.cleanup() is True
+    assert owner.cleanup() is True
+    assert not root.exists()
 
 
 def test_gate_reports_lane_root_moved_to_another_parent(
@@ -1036,6 +1158,36 @@ def test_lane_descriptor_open_failure_removes_created_root(
         stage.cleanup()
 
 
+def test_lane_construction_failure_reports_cross_parent_retained_path(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    stage = gate.stage_execution_candidate(candidate, (_lane("lane-retained", "pass"),))
+    relocated = tmp_path / "relocated-lane"
+    original_copytree = gate.shutil.copytree
+    original_remove = gate._remove_owned_tree
+
+    def move_then_fail(source, destination, **kwargs):
+        raise OSError("forced lane construction failure")
+
+    def move_during_cleanup(path, _identity):
+        Path(path).rename(relocated)
+        return False
+
+    monkeypatch.setattr(gate.shutil, "copytree", move_then_fail)
+    monkeypatch.setattr(gate, "_remove_owned_tree", move_during_cleanup)
+    try:
+        with pytest.raises(gate.RetainedStagingError) as caught:
+            stage.create_lane_execution()
+        assert caught.value.paths == (str(relocated),)
+        assert relocated.exists()
+    finally:
+        monkeypatch.setattr(gate.shutil, "copytree", original_copytree)
+        monkeypatch.setattr(gate, "_remove_owned_tree", original_remove)
+        original_remove(relocated)
+        stage.cleanup()
+
+
 def test_stage_identity_failure_removes_created_root(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1061,6 +1213,34 @@ def test_stage_identity_failure_removes_created_root(
     with pytest.raises(OSError, match="forced stage identity failure"):
         gate.stage_execution_candidate(candidate, (_lane("stage-identity", "pass"),))
     assert stage_roots and all(not path.exists() for path in stage_roots)
+
+
+def test_stage_construction_failure_reports_cross_parent_retained_path(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    relocated = tmp_path / "relocated-stage"
+    original_archive = gate._archive_repository
+    original_remove = gate._remove_owned_tree
+
+    def move_then_fail(_source, _sha, destination, _state):
+        raise OSError("forced stage construction failure")
+
+    def move_during_cleanup(path, _identity):
+        Path(path).rename(relocated)
+        return False
+
+    monkeypatch.setattr(gate, "_archive_repository", move_then_fail)
+    monkeypatch.setattr(gate, "_remove_owned_tree", move_during_cleanup)
+    try:
+        with pytest.raises(gate.RetainedStagingError) as caught:
+            gate.stage_execution_candidate(candidate, ())
+        assert caught.value.paths == (str(relocated),)
+        assert relocated.exists()
+    finally:
+        monkeypatch.setattr(gate, "_archive_repository", original_archive)
+        monkeypatch.setattr(gate, "_remove_owned_tree", original_remove)
+        original_remove(relocated)
 
 
 def test_staged_child_context_contains_no_original_repository_or_node_paths(
@@ -1188,6 +1368,123 @@ def test_snapshot_rejects_tree_over_byte_limit(
 
     with pytest.raises(ValueError, match="byte limit"):
         gate.stage_execution_candidate(candidate, ())
+
+
+def test_git_archive_rejects_oversized_blob_before_content_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    destination = tmp_path / "archive"
+    object_id = "a" * 40
+    calls = 0
+
+    def bounded(command, **_kwargs):
+        nonlocal calls
+        calls += 1
+        stdout = object_id if calls == 1 else f"100644 blob {object_id}\tbig.bin\0"
+        return gate._manifest.BoundedCommandResult(0, stdout, None)
+
+    class Input:
+        def write(self, _value): return None
+        def flush(self): return None
+        def close(self): return None
+
+    class Output:
+        def __init__(self): self.read_sizes = []
+        def readline(self): return f"{object_id} blob {3 * 1024 ** 3}\n".encode()
+        def read(self, size):
+            self.read_sizes.append(size)
+            raise AssertionError("oversized blob content must not be read")
+
+    class Process:
+        def __init__(self):
+            self.stdin = Input()
+            self.stdout = Output()
+            self.stderr = None
+            self.returncode = 0
+        def wait(self, timeout=None): return 0
+        def poll(self): return self.returncode
+        def kill(self): raise AssertionError("completed fake process must not be killed")
+
+    process = Process()
+    monkeypatch.setattr(gate._manifest, "run_bounded_command", bounded)
+    monkeypatch.setattr(gate.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    with pytest.raises(ValueError, match="file byte limit"):
+        gate._archive_repository(source, object_id, destination, {"entries": 0, "bytes": 0})
+    assert process.stdout.read_sizes == []
+
+
+def test_git_archive_rejects_oversized_symlink_before_content_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    destination = tmp_path / "archive"
+    object_id = "c" * 40
+    calls = 0
+
+    def bounded(command, **_kwargs):
+        nonlocal calls
+        calls += 1
+        stdout = object_id if calls == 1 else f"120000 blob {object_id}\tlink\0"
+        return gate._manifest.BoundedCommandResult(0, stdout, None)
+
+    class Input:
+        def write(self, _value): return None
+        def flush(self): return None
+        def close(self): return None
+
+    class Output:
+        read_sizes = []
+        def readline(self): return f"{object_id} blob {gate.MAX_GIT_SYMLINK_BYTES + 1}\n".encode()
+        def read(self, size):
+            self.read_sizes.append(size)
+            raise AssertionError("oversized symlink content must not be read")
+
+    class Process:
+        def __init__(self):
+            self.stdin, self.stdout, self.stderr = Input(), Output(), None
+            self.returncode = 0
+        def wait(self, timeout=None): return 0
+        def poll(self): return self.returncode
+        def kill(self): raise AssertionError("completed fake process must not be killed")
+
+    process = Process()
+    monkeypatch.setattr(gate._manifest, "run_bounded_command", bounded)
+    monkeypatch.setattr(gate.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    with pytest.raises(ValueError, match="symlink byte limit"):
+        gate._archive_repository(source, object_id, destination, {"entries": 0, "bytes": 0})
+    assert process.stdout.read_sizes == []
+
+
+def test_git_archive_rejects_bounded_ls_tree_overflow_before_cat_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    object_id = "b" * 40
+    calls = 0
+
+    def bounded(command, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return gate._manifest.BoundedCommandResult(0, object_id, None)
+        return gate._manifest.BoundedCommandResult(None, "", "output")
+
+    monkeypatch.setattr(gate._manifest, "run_bounded_command", bounded)
+    monkeypatch.setattr(
+        gate.subprocess, "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("cat-file must not start")),
+    )
+
+    with pytest.raises(ValueError, match="candidate archive failed"):
+        gate._archive_repository(
+            source, object_id, tmp_path / "archive", {"entries": 0, "bytes": 0},
+        )
 
 
 def test_snapshot_rejects_tree_over_depth_limit(

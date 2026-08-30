@@ -68,7 +68,11 @@ MAX_NODE_PROJECT_SCAN_ENTRIES = 500_000
 MAX_PACKAGE_LOCK_BYTES = 32 * 1024 * 1024
 MAX_SNAPSHOT_ENTRIES = 750_000
 MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024 * 1024
+MAX_SNAPSHOT_FILE_BYTES = 512 * 1024 * 1024
 MAX_SNAPSHOT_DEPTH = 256
+MAX_GIT_ARCHIVE_LISTING_BYTES = 64 * 1024 * 1024
+GIT_BLOB_CHUNK_BYTES = 1024 * 1024
+MAX_GIT_SYMLINK_BYTES = 16 * 1024
 NODE_TREE_SCHEMA = "sha256-path-mode-bytes-symlink-v1"
 ROBOT_PREVIEW_BROWSER_ENVIRONMENT = {
     "root": "TBOT_ROBOT_PREVIEW_BROWSER_ROOT",
@@ -247,15 +251,17 @@ class ExecutionStage:
     identity: tuple[int, int]
     descriptor: int | None
     _retained_path: Path | None = None
+    _cleanup_succeeded: bool | None = None
 
     def cleanup(self) -> bool:
         if self.descriptor is None:
-            return not os.path.lexists(self.root)
+            return self._cleanup_succeeded is True
         actual = _directory_fd_path(self.descriptor)
         if actual is not None and actual != self.root:
             self._retained_path = actual
             os.close(self.descriptor)
             self.descriptor = None
+            self._cleanup_succeeded = False
             return False
         removed = _remove_owned_tree(self.root, self.identity)
         if not removed:
@@ -265,6 +271,7 @@ class ExecutionStage:
             )
         os.close(self.descriptor)
         self.descriptor = None
+        self._cleanup_succeeded = removed
         return removed
 
     def retained_path(self) -> Path:
@@ -310,10 +317,16 @@ class ExecutionStage:
                 lane_root, rebase(self.candidate), environment, lane_identity, lane_descriptor,
             )
         except Exception:
+            retained_path = (
+                _directory_fd_path(lane_descriptor) if lane_descriptor is not None else None
+            ) or lane_root
+            removed = _remove_owned_tree(retained_path, lane_identity)
+            if not removed and lane_descriptor is not None:
+                retained_path = _directory_fd_path(lane_descriptor) or retained_path
             if lane_descriptor is not None:
                 os.close(lane_descriptor)
-            if not _remove_owned_tree(lane_root, lane_identity):
-                raise RetainedStagingError(lane_root)
+            if not removed:
+                raise RetainedStagingError(retained_path)
             raise
 
 
@@ -325,15 +338,17 @@ class LaneExecution:
     identity: tuple[int, int]
     descriptor: int | None
     _retained_path: Path | None = None
+    _cleanup_succeeded: bool | None = None
 
     def cleanup(self) -> bool:
         if self.descriptor is None:
-            return not os.path.lexists(self.root)
+            return self._cleanup_succeeded is True
         actual = _directory_fd_path(self.descriptor)
         if actual is not None and actual != self.root:
             self._retained_path = actual
             os.close(self.descriptor)
             self.descriptor = None
+            self._cleanup_succeeded = False
             return False
         removed = _remove_owned_tree(self.root, self.identity)
         if not removed:
@@ -343,6 +358,7 @@ class LaneExecution:
             )
         os.close(self.descriptor)
         self.descriptor = None
+        self._cleanup_succeeded = removed
         return removed
 
     def retained_path(self) -> Path:
@@ -440,6 +456,54 @@ def _remove_owned_tree(root: Path, expected_identity: tuple[int, int] | None = N
         return expected_identity is None
     effective_uid = os.geteuid()
 
+    def remove_leaf(directory_fd: int, name: str, before: os.stat_result) -> None:
+        leaf_fd = None
+        try:
+            if stat.S_ISSOCK(before.st_mode):
+                raise _StagingIdentityChanged("staging socket cannot be identity-bound for removal")
+            quarantine = f".course-mode-cleanup-{secrets.token_hex(16)}"
+            os.rename(name, quarantine, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            quarantined = os.stat(quarantine, dir_fd=directory_fd, follow_symlinks=False)
+            if (
+                quarantined.st_uid != effective_uid
+                or (quarantined.st_dev, quarantined.st_ino) != (before.st_dev, before.st_ino)
+                or stat.S_IFMT(quarantined.st_mode) != stat.S_IFMT(before.st_mode)
+            ):
+                raise _StagingIdentityChanged("staging leaf identity changed")
+            if stat.S_ISREG(quarantined.st_mode):
+                os.chmod(quarantine, 0o600, dir_fd=directory_fd, follow_symlinks=False)
+                flags = os.O_RDONLY | os.O_NOFOLLOW
+            elif stat.S_ISLNK(quarantined.st_mode) and hasattr(os, "O_PATH"):
+                flags = os.O_PATH | os.O_NOFOLLOW
+            elif stat.S_ISLNK(quarantined.st_mode) and hasattr(os, "O_SYMLINK"):
+                flags = os.O_RDONLY | os.O_SYMLINK
+            elif stat.S_ISFIFO(quarantined.st_mode):
+                flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+            else:
+                raise _StagingIdentityChanged("unsupported staging leaf type")
+            leaf_fd = os.open(quarantine, flags, dir_fd=directory_fd)
+            opened = os.fstat(leaf_fd)
+            if (
+                (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            ):
+                raise _StagingIdentityChanged("staging leaf changed before removal")
+            os.unlink(quarantine, dir_fd=directory_fd)
+            try:
+                os.stat(quarantine, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                if os.fstat(leaf_fd).st_nlink != 0:
+                    raise _StagingIdentityChanged("staging leaf moved during removal")
+            else:
+                raise _StagingIdentityChanged("staging leaf path recreated")
+        except _StagingIdentityChanged:
+            raise
+        except OSError as error:
+            raise _StagingIdentityChanged("staging leaf removal raced") from error
+        finally:
+            if leaf_fd is not None:
+                os.close(leaf_fd)
+
     def clear(directory_fd: int, directory_path: Path) -> None:
         for name in sorted(entry.name for entry in os.scandir(directory_fd)):
             before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -481,7 +545,7 @@ def _remove_owned_tree(root: Path, expected_identity: tuple[int, int] | None = N
                 finally:
                     os.close(child_fd)
             else:
-                os.unlink(name, dir_fd=directory_fd)
+                remove_leaf(directory_fd, name, before)
 
     for _attempt in range(2):
         parent_fd = None
@@ -819,22 +883,24 @@ def _archive_repository(source: Path, sha: str, destination: Path, state: dict[s
         "-c", "credential.helper=",
     ]
     try:
-        resolved = subprocess.run(
+        resolved = _manifest.run_bounded_command(
             [*base, "rev-parse", "--verify", f"{sha}^{{commit}}"], cwd=source,
-            env=_manifest.SECURE_ENV, stdin=subprocess.DEVNULL, capture_output=True,
-            timeout=60, check=False,
+            env=_manifest.SECURE_ENV, timeout_sec=60, max_output_bytes=1024,
         )
-        if resolved.returncode != 0 or resolved.stdout.strip().decode("ascii") != sha:
+        if resolved.error or resolved.returncode != 0 or resolved.stdout.strip() != sha:
             raise ValueError("candidate archive failed")
-        listing = subprocess.run(
+        listing = _manifest.run_bounded_command(
             [*base, "ls-tree", "-r", "-z", "-t", "--full-tree", sha], cwd=source,
-            env=_manifest.SECURE_ENV, stdin=subprocess.DEVNULL, capture_output=True,
-            timeout=60, check=False,
+            env=_manifest.SECURE_ENV, timeout_sec=60,
+            max_output_bytes=MAX_GIT_ARCHIVE_LISTING_BYTES,
         )
-        if listing.returncode != 0:
+        if listing.error or listing.returncode != 0:
             raise ValueError("candidate archive failed")
         entries: list[tuple[str, str, str, Path]] = []
-        for raw in listing.stdout.split(b"\0"):
+        for raw_text in listing.stdout.split("\0"):
+            if "\ufffd" in raw_text:
+                raise ValueError("candidate archive failed")
+            raw = raw_text.encode("utf-8")
             if not raw:
                 continue
             header, separator, path_bytes = raw.partition(b"\t")
@@ -877,14 +943,18 @@ def _archive_repository(source: Path, sha: str, destination: Path, state: dict[s
                 if len(header) != 3 or header[0].decode("ascii") != object_id or header[1] != b"blob":
                     raise ValueError("candidate archive failed")
                 size = int(header[2])
-                state["bytes"] += size
-                if state["bytes"] > MAX_SNAPSHOT_BYTES:
+                if size < 0 or size > MAX_SNAPSHOT_FILE_BYTES:
+                    raise ValueError("snapshot file byte limit exceeded")
+                if size > MAX_SNAPSHOT_BYTES - state["bytes"]:
                     raise ValueError("snapshot byte limit exceeded")
-                content = batch.stdout.read(size)
-                if len(content) != size or batch.stdout.read(1) != b"\n":
-                    raise ValueError("candidate archive truncated")
+                state["bytes"] += size
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if mode == "120000":
+                    if size > MAX_GIT_SYMLINK_BYTES:
+                        raise ValueError("snapshot symlink byte limit exceeded")
+                    content = batch.stdout.read(size)
+                    if len(content) != size:
+                        raise ValueError("candidate archive truncated")
                     link = content.decode("utf-8")
                     if not _lexical_symlink_within_root(relative.parent, link):
                         raise ValueError("unsafe symlink in candidate archive")
@@ -892,15 +962,23 @@ def _archive_repository(source: Path, sha: str, destination: Path, state: dict[s
                 elif mode in {"100644", "100755"}:
                     output_fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
                     try:
-                        view = memoryview(content)
-                        while view:
-                            written = os.write(output_fd, view)
-                            view = view[written:]
+                        remaining = size
+                        while remaining:
+                            chunk = batch.stdout.read(min(GIT_BLOB_CHUNK_BYTES, remaining))
+                            if not chunk:
+                                raise ValueError("candidate archive truncated")
+                            remaining -= len(chunk)
+                            view = memoryview(chunk)
+                            while view:
+                                written = os.write(output_fd, view)
+                                view = view[written:]
                         os.fchmod(output_fd, 0o755 if mode == "100755" else 0o644)
                     finally:
                         os.close(output_fd)
                 else:
                     raise ValueError("unsupported candidate archive entry")
+                if batch.stdout.read(1) != b"\n":
+                    raise ValueError("candidate archive truncated")
         finally:
             if batch.stdin is not None:
                 batch.stdin.close()
@@ -921,8 +999,10 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
     temporary_parent = Path("/private/tmp") if sys.platform == "darwin" else Path(tempfile.gettempdir())
     root = Path(tempfile.mkdtemp(prefix="course-mode-stage-", dir=temporary_parent))
     root_identity: tuple[int, int] | None = None
+    root_descriptor: int | None = None
     try:
         root_identity = _owned_tree_identity(root)
+        root_descriptor = _open_snapshot_directory(root)
         staged = json.loads(json.dumps(candidate))
         state = {"entries": 0, "bytes": 0}
         repositories_root = root / "repositories"
@@ -997,10 +1077,20 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
                 raise ValueError("staged browser descriptor mismatch")
             staged["tools"]["robotPreviewBrowser"]["root"] = str(browser_target)
         _make_tree_read_only(root)
-        return ExecutionStage(root, staged, root_identity, _open_snapshot_directory(root))
+        stage = ExecutionStage(root, staged, root_identity, root_descriptor)
+        root_descriptor = None
+        return stage
     except Exception:
-        if not _remove_owned_tree(root, root_identity):
-            raise RetainedStagingError(root)
+        retained_path = (
+            _directory_fd_path(root_descriptor) if root_descriptor is not None else None
+        ) or root
+        removed = _remove_owned_tree(retained_path, root_identity)
+        if not removed and root_descriptor is not None:
+            retained_path = _directory_fd_path(root_descriptor) or retained_path
+        if root_descriptor is not None:
+            os.close(root_descriptor)
+        if not removed:
+            raise RetainedStagingError(retained_path)
         raise
 
 
