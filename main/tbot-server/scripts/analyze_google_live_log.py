@@ -260,6 +260,8 @@ P_EVIDENCE_REPLAYED_BUFFERED = re.compile(
     r"connection_id=(?P<connection_id>\S+) attempt=(?P<attempt>\d+) "
     r"from_live_connection_id=(?P<from_live_connection_id>\S+) "
     r"to_live_connection_id=(?P<to_live_connection_id>\S+)"
+    r"(?: reason=(?P<reason>\S+))?"
+    r"(?: frames=(?P<frames>\d+) bytes=(?P<bytes>\d+))?$"
 )
 P_EVIDENCE_RECONNECT_OUTCOME = re.compile(
     r"Google Live evidence_reconnect_(?P<outcome>succeeded|failed) "
@@ -1472,6 +1474,38 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             return False
         return True
 
+    def record_scoped_replay_batch(
+        line_number: int, replay_match: re.Match[str]
+    ) -> None:
+        replay_candidates = [
+            state
+            for state in scoped_reconnects.values()
+            if state.get("ready") and not state.get("terminalCount")
+        ]
+        if len(replay_candidates) == 1:
+            state = replay_candidates[0]
+            if state.get("pendingReplayBatch") is not None:
+                failures.append(
+                    _failure(
+                        "DUPLICATE_BUFFER_REPLAY",
+                        line_number,
+                        "one provisional reconnect emitted multiple replay batches",
+                    )
+                )
+            else:
+                state["pendingReplayBatch"] = (
+                    int(replay_match.group("frames")),
+                    int(replay_match.group("bytes")),
+                )
+        else:
+            failures.append(
+                _failure(
+                    "BUFFER_REPLAY_WITHOUT_SUCCESSFUL_REOPEN",
+                    line_number,
+                    "buffered replay does not have one provisional ready attempt",
+                )
+            )
+
     with log_path.open("r", encoding="utf-8", errors="replace") as fh:
         for line_number, raw_line in enumerate(fh, 1):
             line = raw_line.rstrip("\n")
@@ -1666,6 +1700,26 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     )
                 )
             previous_ts = ts
+
+            if (
+                "Google Live evidence_replayed_buffered_audio" in line
+                and P_EVIDENCE_REPLAYED_BUFFERED.search(line) is None
+            ):
+                marker_journey = re.search(r"\bjourney_id=(\S+)", line)
+                anchored_journey = start_anchor.get("journeyId") if start_anchor else None
+                if (
+                    anchored_journey is None
+                    or marker_journey is None
+                    or marker_journey.group(1) == anchored_journey
+                ):
+                    failures.append(
+                        _failure(
+                            "MALFORMED_RELIABILITY_LOG_LINE",
+                            line_number,
+                            "scoped replay marker has incomplete or invalid fields",
+                        )
+                    )
+                    continue
 
             anchor_scope = start_anchor.get("evidenceScope") if start_anchor else None
             if isinstance(anchor_scope, Mapping) and (
@@ -2038,6 +2092,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 scoped_reconnects[key] = {
                     "ready": False,
                     "replayed": False,
+                    "pendingReplayBatch": None,
                     "terminalCount": 0,
                     "reason": scoped_reconnect_start.group("reason"),
                     "fromLiveConnectionId": scoped_reconnect_start.group(
@@ -2122,6 +2177,11 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     != scoped_buffer_replay.group("from_live_connection_id")
                     or state.get("toLiveConnectionId")
                     != scoped_buffer_replay.group("to_live_connection_id")
+                    or (
+                        scoped_buffer_replay.group("reason") is not None
+                        and state.get("reason")
+                        != scoped_buffer_replay.group("reason")
+                    )
                 ):
                     failures.append(
                         _failure(
@@ -2134,8 +2194,33 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     failures.append(
                         _failure("RECONNECT_MARKER_AFTER_TERMINAL", line_number, str(key))
                     )
+                elif state.get("pendingReplayBatch") is None:
+                    failures.append(
+                        _failure(
+                            "BUFFER_REPLAY_WITHOUT_BUFFERED_BATCH",
+                            line_number,
+                            str(key),
+                        )
+                    )
                 else:
-                    state["replayed"] = True
+                    scoped_batch = (
+                        int(scoped_buffer_replay.group("frames")),
+                        int(scoped_buffer_replay.group("bytes")),
+                    ) if scoped_buffer_replay.group("frames") is not None else None
+                    if state.get("replayed") or (
+                        scoped_batch is not None
+                        and scoped_batch != state.get("pendingReplayBatch")
+                    ):
+                        failures.append(
+                            _failure(
+                                "BUFFER_REPLAY_BATCH_MISMATCH",
+                                line_number,
+                                str(key),
+                            )
+                        )
+                    else:
+                        state["replayed"] = True
+                        state["pendingReplayBatch"] = None
                 observed_marker_families[journey_id].add("reconnect_replay")
                 continue
             scoped_reconnect_outcome = P_EVIDENCE_RECONNECT_OUTCOME.search(line)
@@ -2165,6 +2250,14 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     )
                 if state is not None:
                     outcome = scoped_reconnect_outcome.group("outcome")
+                    if state.get("pendingReplayBatch") is not None:
+                        failures.append(
+                            _failure(
+                                "COVERAGE_MISSING",
+                                line_number,
+                                "reconnect_replay",
+                            )
+                        )
                     if (
                         outcome == "succeeded"
                         and state.get("terminalCount") == 0
@@ -2451,6 +2544,10 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 or P_HANDOFF_ACQUIRED.search(line)
                 or P_HANDOFF_RELEASED.search(line)
             ):
+                if P_REPLAYED_BUFFERED_AUDIO.search(line):
+                    record_scoped_replay_batch(
+                        line_number, P_REPLAYED_BUFFERED_AUDIO.search(line)
+                    )
                 continue
 
             if P_RECV_START.search(line):
@@ -2597,6 +2694,10 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 or P_RECONNECT_FAILED.search(line)
                 or P_REPLAYED_BUFFERED_AUDIO.search(line)
             ):
+                if P_REPLAYED_BUFFERED_AUDIO.search(line):
+                    record_scoped_replay_batch(
+                        line_number, P_REPLAYED_BUFFERED_AUDIO.search(line)
+                    )
                 continue
             if reconnect_owner:
                 current_reopen = f"attempt-{reconnect_owner.group('attempt')}"

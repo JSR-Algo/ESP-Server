@@ -3930,6 +3930,49 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(provider._interrupt_input_can_finalize())
         self.assertGreater(provider._interrupt_capture_elapsed_ms(), 0)
 
+    async def test_buffered_replay_marker_uses_pending_transition_before_commit(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        attempt = provider._begin_evidence_reconnect("network")
+        transition = provider._accept_evidence_reconnect_ready("live-2")
+        provider._response_generation = 3
+        provider._pending_reconnect_audio.append((3, b"audio"))
+
+        await provider._forward_pending_reconnect_audio()
+
+        self.assertEqual(provider._evidence_pending_reconnect, transition)
+        self.assertEqual(provider._evidence_live_connection_transitions, [])
+        self.assertEqual(attempt["attempt"], 1)
+        self.assertIsNone(provider._evidence_transition_for_attempt(2))
+        self.assertTrue(
+            any(
+                args
+                and "evidence_replayed_buffered_audio" in str(args[0])
+                and args[3:] == (1, "live-1", "live-2", "network", 1, 5)
+                for level, args, _kwargs in conn.logger.messages
+                if level == "info"
+            )
+        )
+        provider._commit_evidence_reconnect(transition)
+        self.assertIsNone(provider._evidence_transition_for_attempt(1))
+        conn.logger.messages.clear()
+        provider._pending_reconnect_audio.append((3, b"late"))
+
+        await provider._forward_pending_reconnect_audio()
+
+        self.assertFalse(
+            any(
+                args and "evidence_replayed_buffered_audio" in str(args[0])
+                for level, args, _kwargs in conn.logger.messages
+                if level == "info"
+            )
+        )
+
     async def test_intent_ack_tool_and_error_edges(self):
         conn = _Conn()
         conn.func_handler = _FuncHandler()
