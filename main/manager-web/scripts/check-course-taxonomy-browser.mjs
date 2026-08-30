@@ -16,32 +16,18 @@
  *  - Reverting the create-dialog default to '6-8'/'en' -> defaults assert fails.
  */
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import WebSocket from 'ws';
+import { withCandidateBoundBrowser } from './_lib/candidate-browser-harness.mjs';
 
 const managerRoot = normalize(join(dirname(fileURLToPath(import.meta.url)), '..'));
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.ico': 'image/x-icon' };
-let temp; let server; let chrome; let socket;
-
-async function stopChild(child) {
-  if (!child || child.exitCode !== null) return;
-  child.kill('SIGTERM');
-  await Promise.race([new Promise((r) => child.once('exit', r)), new Promise((r) => setTimeout(r, 1500))]);
-  if (child.exitCode === null) child.kill('SIGKILL');
-}
-async function waitForFile(path) {
-  for (let i = 0; i < 200; i += 1) {
-    if (existsSync(path)) return readFileSync(path, 'utf8');
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  throw new Error(`timeout: ${path}`);
-}
+let temp; let server;
 
 try {
   temp = await mkdtemp(join(tmpdir(), 'tbot-course-taxonomy-'));
@@ -71,51 +57,19 @@ try {
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 
-  const chromeBin = [
-    process.env.CHROME_BIN,
-    join(homedir(), 'Library/Caches/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-mac-arm64/chrome-headless-shell'),
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  ].filter(Boolean).find(existsSync);
-  assert.ok(chromeBin, 'Chromium is required');
-
-  chrome = spawn(chromeBin, ['--headless', '--disable-gpu', '--remote-debugging-port=0', `--user-data-dir=${profileDir}`, 'about:blank'], { stdio: 'ignore' });
-  const [debugPort] = (await waitForFile(join(profileDir, 'DevToolsActivePort'))).trim().split('\n');
-  const target = await fetch(`http://127.0.0.1:${debugPort}/json/new?about:blank`, { method: 'PUT' }).then((r) => r.json());
-  socket = new WebSocket(target.webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); });
-
-  let id = 0;
-  const pending = new Map();
   const runtimeErrors = [];
-  socket.on('message', (raw) => {
-    const message = JSON.parse(raw);
-    if (message.method === 'Runtime.exceptionThrown') {
-      runtimeErrors.push(message.params.exceptionDetails.exception?.description || message.params.exceptionDetails.text);
-    }
-    if (message.id && pending.has(message.id)) {
-      const p = pending.get(message.id);
-      pending.delete(message.id);
-      message.error ? p.reject(new Error(message.error.message)) : p.resolve(message.result);
-    }
-  });
-  const cdp = (method, params = {}) => new Promise((resolve, reject) => {
-    const commandId = ++id;
-    pending.set(commandId, { resolve, reject });
-    socket.send(JSON.stringify({ id: commandId, method, params }));
-  });
-  const evaluate = async (expression) => {
-    const result = await cdp('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
-    if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
-    return result.result.value;
-  };
+  await withCandidateBoundBrowser({
+    profileDir,
+    label: 'Course taxonomy browser',
+    onMessage: (message) => {
+      if (message.method === 'Runtime.exceptionThrown') runtimeErrors.push(message.params.exceptionDetails.exception?.description || message.params.exceptionDetails.text);
+    },
+  }, async ({ cdp, evaluate, waitForReadiness }) => {
 
   await cdp('Page.enable');
   await cdp('Runtime.enable');
   await cdp('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/` });
-  for (let i = 0; i < 200 && !(await evaluate('Boolean(window.__COURSE_TAXONOMY_READY__)')); i += 1) {
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  assert.ok(await evaluate('Boolean(window.__COURSE_TAXONOMY_READY__)'), 'harness did not become ready');
+  await waitForReadiness('Boolean(window.__COURSE_TAXONOMY_READY__)', 'course taxonomy fixture readiness', 'document.body.innerText');
 
   // 1. The create dialog must default to values that exist in the seeded content.
   const defaults = await evaluate('window.__OPEN_CREATE__()');
@@ -155,9 +109,8 @@ try {
 
   assert.deepEqual(runtimeErrors, [], `page runtime errors: ${runtimeErrors.join('\n')}`);
   console.log('check-course-taxonomy-browser: OK');
+  });
 } finally {
-  if (socket) socket.close();
-  await stopChild(chrome);
   if (server) await new Promise((resolve) => server.close(resolve));
   if (temp) await rm(temp, { recursive: true, force: true });
 }
