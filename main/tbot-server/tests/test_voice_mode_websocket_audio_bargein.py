@@ -30,17 +30,30 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         return SimpleNamespace(**values)
 
     @staticmethod
-    def _connect_for(messages, captured=None):
+    def _connect_for(messages, captured=None, *, gate_interrupt_stop_on_binary=True):
         class _WebSocket:
             def __init__(self):
                 self.messages = list(messages)
+                self.binary_sent = asyncio.Event()
 
-            async def send(self, _payload):
+            async def send(self, payload):
+                if isinstance(payload, bytes):
+                    self.binary_sent.set()
+                    if captured is not None:
+                        captured.setdefault("sentBinary", []).append(payload)
                 return None
 
             async def recv(self):
                 if not self.messages:
                     raise asyncio.TimeoutError
+                next_message = self.messages[0]
+                if (
+                    gate_interrupt_stop_on_binary
+                    and isinstance(next_message, str)
+                    and json.loads(next_message).get("reason") == "interrupt"
+                    and not self.binary_sent.is_set()
+                ):
+                    await self.binary_sent.wait()
                 return self.messages.pop(0)
 
             async def close(self):
@@ -143,15 +156,19 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         with patch.object(
             audio_bargein.websockets,
             "connect",
-            self._connect_for(messages),
+            self._connect_for(messages, gate_interrupt_stop_on_binary=False),
         ), patch.object(
             audio_bargein, "_opus_packets", return_value=[b"interrupt-opus"]
-        ), patch.object(
-            audio_bargein.asyncio, "sleep", _sleep
-        ), self.assertRaisesRegex(RuntimeError, "audio interrupt tts stop timeout"):
-            asyncio.run(audio_bargein.run_smoke(self._args()))
+        ), patch.object(audio_bargein.asyncio, "sleep", _sleep):
+            record = asyncio.run(audio_bargein.run_smoke(self._args()))
 
-    def test_run_smoke_ignores_natural_stop_before_tagged_interrupt_stop(self):
+        self.assertEqual(record["status"], "FAIL")
+        self.assertEqual(
+            record["failureCode"], "OLD_RESPONSE_COMPLETED_BEFORE_INTERRUPT"
+        )
+        self.assertFalse(record["oldResponseStopped"])
+
+    def test_run_smoke_rejects_natural_stop_before_tagged_interrupt_stop(self):
         audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
         messages = [
             json.dumps({"type": "hello"}),
@@ -175,14 +192,45 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         ), patch.object(audio_bargein.asyncio, "sleep", _sleep):
             record = asyncio.run(audio_bargein.run_smoke(self._args()))
 
-        self.assertEqual(record["status"], "PASS")
-        self.assertTrue(record["oldResponseStopped"])
+        self.assertEqual(record["status"], "FAIL")
+        self.assertEqual(
+            record["failureCode"], "OLD_RESPONSE_COMPLETED_BEFORE_INTERRUPT"
+        )
+        self.assertFalse(record["oldResponseStopped"])
+
+    def test_run_smoke_rejects_tagged_interrupt_stop_queued_before_first_packet(self):
+        audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
+        messages = [
+            json.dumps({"type": "hello"}),
+            json.dumps({"type": "tts", "state": "start"}),
+            json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}),
+        ]
+
+        async def _sleep(_seconds):
+            return None
+
+        with patch.object(
+            audio_bargein.websockets,
+            "connect",
+            self._connect_for(messages, gate_interrupt_stop_on_binary=False),
+        ), patch.object(
+            audio_bargein, "_opus_packets", return_value=[b"interrupt-opus"]
+        ), patch.object(audio_bargein.asyncio, "sleep", _sleep):
+            record = asyncio.run(audio_bargein.run_smoke(self._args()))
+
+        self.assertEqual(record["status"], "FAIL")
+        self.assertEqual(
+            record["failureCode"], "INTERRUPT_STOP_BEFORE_FIRST_PACKET"
+        )
+        self.assertIsNone(record["firstInterruptPacketSentAtMonotonicMs"])
+        self.assertFalse(record["oldResponseStopped"])
 
     def test_run_smoke_fails_closed_when_replacement_audio_gap_exceeds_budget(self):
         audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
 
         class _Clock:
             def __init__(self):
+                self.last = 0.0
                 self.values = iter(
                     [
                         0.0,
@@ -193,6 +241,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
                         0.05,
                         0.06,
                         0.07,
+                        0.08,
                         0.40,
                         0.41,
                         0.42,
@@ -200,7 +249,8 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
                 )
 
             def __call__(self):
-                return next(self.values)
+                self.last = next(self.values, self.last)
+                return self.last
 
         messages = [
             json.dumps({"type": "hello"}),
@@ -233,10 +283,14 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
 
         class _Clock:
             def __init__(self):
-                self.values = iter([0.0, 0.6, 0.7, 0.71, 0.72, 0.73, 0.74, 0.75, 0.76])
+                self.last = 0.0
+                self.values = iter(
+                    [0.0, 0.0, 0.1, 0.7, 0.71, 0.72, 0.73, 0.74, 0.75, 0.76]
+                )
 
             def __call__(self):
-                return next(self.values)
+                self.last = next(self.values, self.last)
+                return self.last
 
         messages = [
             json.dumps({"type": "hello"}),
@@ -269,8 +323,16 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         all_packets_sent = False
 
         class _Clock:
+            def __init__(self):
+                self.calls = 0
+
             def __call__(self):
-                return 0.6 if all_packets_sent else (0.1 if first_packet_sent.is_set() else 0.0)
+                self.calls += 1
+                if self.calls <= 3:
+                    return 0.0
+                if self.calls == 4:
+                    return 0.1
+                return 0.1 + (self.calls - 4) * 0.01
 
         class _WebSocket:
             def __init__(self):
@@ -282,14 +344,13 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
                 self.after_stop = [
                     json.dumps({"type": "tts", "state": "start"}),
                     b"replacement-audio",
-                    json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}),
+                    json.dumps({"type": "tts", "state": "stop"}),
                 ]
 
             async def send(self, payload):
                 nonlocal all_packets_sent
                 if isinstance(payload, bytes):
                     first_packet_sent.set()
-                    await asyncio.sleep(0)
                     if payload == b"packet-3":
                         all_packets_sent = True
 
@@ -332,6 +393,12 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
 
         self.assertEqual(record["status"], "PASS", record)
         self.assertEqual(record["bargeinStopMs"], 100.0)
+        self.assertEqual(record["firstInterruptPacketSentAtMonotonicMs"], 0.0)
+        self.assertEqual(record["correlationSource"], "server_log")
+        self.assertEqual(
+            record["correlationStatus"], "PENDING_BOUNDED_SERVER_LOG_VERIFICATION"
+        )
+        self.assertFalse(record["aggregateReleaseEligible"])
 
     def test_run_smoke_cancels_stop_observer_when_audio_send_fails(self):
         audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
@@ -340,6 +407,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
 
         class _WebSocket:
             def __init__(self):
+                self.binary_sent = asyncio.Event()
                 self.messages = [
                     json.dumps({"type": "hello"}),
                     json.dumps({"type": "tts", "state": "start"}),
@@ -427,6 +495,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
 
         class _WebSocket:
             def __init__(self):
+                self.binary_sent = asyncio.Event()
                 self.messages = [
                     json.dumps({"type": "hello"}),
                     json.dumps({"type": "tts", "state": "start"}),
@@ -436,10 +505,18 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
                     json.dumps({"type": "tts", "state": "stop"}),
                 ]
 
-            async def send(self, _payload):
-                return None
+            async def send(self, payload):
+                if isinstance(payload, bytes):
+                    self.binary_sent.set()
 
             async def recv(self):
+                if (
+                    self.messages
+                    and isinstance(self.messages[0], str)
+                    and json.loads(self.messages[0]).get("reason") == "interrupt"
+                    and not self.binary_sent.is_set()
+                ):
+                    await self.binary_sent.wait()
                 return self.messages.pop(0)
 
             async def close(self):
@@ -483,6 +560,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
 
         class _WebSocket:
             def __init__(self):
+                self.binary_sent = asyncio.Event()
                 self.messages = [
                     json.dumps({"type": "hello"}),
                     json.dumps({"type": "tts", "state": "start"}),
@@ -495,8 +573,16 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
             async def send(self, payload):
                 if isinstance(payload, bytes):
                     sent_binary.append(payload)
+                    self.binary_sent.set()
 
             async def recv(self):
+                if (
+                    self.messages
+                    and isinstance(self.messages[0], str)
+                    and json.loads(self.messages[0]).get("reason") == "interrupt"
+                    and not self.binary_sent.is_set()
+                ):
+                    await self.binary_sent.wait()
                 return self.messages.pop(0)
 
             async def close(self):

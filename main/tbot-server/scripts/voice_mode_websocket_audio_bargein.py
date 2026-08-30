@@ -10,6 +10,8 @@ from pathlib import Path
 import numpy as np
 import websockets
 
+_yield_once = asyncio.sleep
+
 SERVER_ROOT = Path(__file__).resolve().parents[1]
 if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
@@ -114,16 +116,60 @@ async def _collect_replacement_response(websocket, *, timeout_sec, clock=time.mo
     }
 
 
-async def _observe_interrupt_stop(websocket, *, timeout_sec, clock):
-    stop, binary_count, messages = await _recv_until(
-        websocket,
-        lambda payload: (
-            _is_tts_state(payload, "stop")
-            and payload.get("reason") == "interrupt"
-        ),
-        timeout_sec,
-    )
-    return stop, binary_count, messages, clock()
+async def _observe_interrupt_stop(
+    websocket,
+    *,
+    timeout_sec,
+    clock,
+    observer_ready,
+    first_packet_sent,
+):
+    deadline = clock() + timeout_sec
+    binary_count = 0
+    observer_ready.set()
+    while True:
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return {"stop": None, "binaryCount": binary_count}
+        try:
+            message = await asyncio.wait_for(
+                websocket.recv(),
+                timeout=max(0.01, remaining),
+            )
+        except asyncio.TimeoutError:
+            return {"stop": None, "binaryCount": binary_count}
+        observed_at = clock()
+        if isinstance(message, bytes):
+            binary_count += 1
+            continue
+        try:
+            payload = json.loads(message)
+        except json.JSONDecodeError:
+            continue
+        if not _is_tts_state(payload, "stop"):
+            continue
+        if not first_packet_sent.is_set():
+            failure_code = (
+                "INTERRUPT_STOP_BEFORE_FIRST_PACKET"
+                if payload.get("reason") == "interrupt"
+                else "OLD_RESPONSE_COMPLETED_BEFORE_INTERRUPT"
+            )
+            return {
+                "stop": None,
+                "binaryCount": binary_count,
+                "failureCode": failure_code,
+            }
+        if payload.get("reason") != "interrupt":
+            return {
+                "stop": None,
+                "binaryCount": binary_count,
+                "failureCode": "OLD_RESPONSE_COMPLETED_WITHOUT_INTERRUPT",
+            }
+        return {
+            "stop": payload,
+            "binaryCount": binary_count,
+            "observedAt": observed_at,
+        }
 
 
 async def run_smoke(args, *, clock=time.monotonic):
@@ -157,6 +203,9 @@ async def run_smoke(args, *, clock=time.monotonic):
         "maxServerOutputGapMs": 0.0,
         "bargeinStopMs": None,
         "correlationSource": "server_log",
+        "correlationStatus": "PENDING_BOUNDED_SERVER_LOG_VERIFICATION",
+        "aggregateReleaseEligible": False,
+        "firstInterruptPacketSentAtMonotonicMs": None,
     }
 
     async with websockets.connect(
@@ -190,31 +239,51 @@ async def run_smoke(args, *, clock=time.monotonic):
         summary["tts_starts"] += 1
 
         await asyncio.sleep(args.interrupt_delay_sec)
-        interrupt_sent_at = clock()
+        observer_ready = asyncio.Event()
+        first_packet_sent = asyncio.Event()
         stop_task = asyncio.create_task(
             _observe_interrupt_stop(
                 websocket,
                 timeout_sec=args.interrupt_timeout_sec,
                 clock=clock,
+                observer_ready=observer_ready,
+                first_packet_sent=first_packet_sent,
             )
         )
         try:
-            for packet in packets:
-                await websocket.send(packet)
-                await asyncio.sleep(args.frame_duration_ms / 1000)
-            stop, binary_count, _messages, stop_observed_at = await stop_task
+            await observer_ready.wait()
+            # Let an already-queued terminal frame win before any interrupt audio.
+            await _yield_once(0)
+            if stop_task.done():
+                stop_result = await stop_task
+            else:
+                for packet in packets:
+                    await websocket.send(packet)
+                    if not first_packet_sent.is_set():
+                        first_packet_sent_at = clock()
+                        summary["firstInterruptPacketSentAtMonotonicMs"] = round(
+                            first_packet_sent_at * 1000,
+                            3,
+                        )
+                        first_packet_sent.set()
+                    await asyncio.sleep(args.frame_duration_ms / 1000)
+                stop_result = await stop_task
         finally:
             if not stop_task.done():
                 stop_task.cancel()
                 await asyncio.gather(stop_task, return_exceptions=True)
 
-        summary["binary_chunks"] += binary_count
+        summary["binary_chunks"] += stop_result["binaryCount"]
+        if stop_result.get("failureCode"):
+            summary["failureCode"] = stop_result["failureCode"]
+            return summary
+        stop = stop_result["stop"]
         if stop is None:
             raise RuntimeError("audio interrupt tts stop timeout")
         summary["tts_stops"] += 1
         summary["oldResponseStopped"] = True
         summary["bargeinStopMs"] = round(
-            (stop_observed_at - interrupt_sent_at) * 1000,
+            (stop_result["observedAt"] - first_packet_sent_at) * 1000,
             1,
         )
 
