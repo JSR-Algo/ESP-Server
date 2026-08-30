@@ -114,6 +114,15 @@ async def _collect_replacement_response(websocket, *, timeout_sec, clock=time.mo
     }
 
 
+async def _observe_interrupt_stop(websocket, *, timeout_sec, clock):
+    stop, binary_count, messages = await _recv_until(
+        websocket,
+        lambda payload: _is_tts_state(payload, "stop"),
+        timeout_sec,
+    )
+    return stop, binary_count, messages, clock()
+
+
 async def run_smoke(args, *, clock=time.monotonic):
     headers = _build_headers(args)
     if getattr(args, "audio_file", ""):
@@ -179,16 +188,23 @@ async def run_smoke(args, *, clock=time.monotonic):
 
         await asyncio.sleep(args.interrupt_delay_sec)
         interrupt_sent_at = clock()
-        for packet in packets:
-            await websocket.send(packet)
-            await asyncio.sleep(args.frame_duration_ms / 1000)
-
-        stop, binary_count, _messages = await _recv_until(
-            websocket,
-            lambda payload: _is_tts_state(payload, "stop"),
-            args.interrupt_timeout_sec,
+        stop_task = asyncio.create_task(
+            _observe_interrupt_stop(
+                websocket,
+                timeout_sec=args.interrupt_timeout_sec,
+                clock=clock,
+            )
         )
-        stop_observed_at = clock()
+        try:
+            for packet in packets:
+                await websocket.send(packet)
+                await asyncio.sleep(args.frame_duration_ms / 1000)
+            stop, binary_count, _messages, stop_observed_at = await stop_task
+        finally:
+            if not stop_task.done():
+                stop_task.cancel()
+                await asyncio.gather(stop_task, return_exceptions=True)
+
         summary["binary_chunks"] += binary_count
         if stop is None:
             raise RuntimeError("audio interrupt tts stop timeout")

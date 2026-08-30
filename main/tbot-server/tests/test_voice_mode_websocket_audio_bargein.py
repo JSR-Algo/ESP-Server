@@ -94,7 +94,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         ), patch.object(audio_bargein.asyncio, "sleep", _sleep):
             record = asyncio.run(audio_bargein.run_smoke(self._args(), clock=_Clock()))
 
-        self.assertEqual(record["status"], "PASS")
+        self.assertEqual(record["status"], "PASS", record)
         self.assertTrue(record["oldResponseStopped"])
         self.assertTrue(record["replacementResponseStarted"])
         self.assertEqual(record["replacementBinaryChunks"], 2)
@@ -213,6 +213,139 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         self.assertEqual(record["status"], "FAIL")
         self.assertEqual(record["failureCode"], "BARGEIN_STOP_LATENCY_EXCEEDED")
         self.assertEqual(record["bargeinStopMs"], 600.0)
+
+    def test_run_smoke_observes_interrupt_stop_while_audio_is_still_streaming(self):
+        audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
+        first_packet_sent = asyncio.Event()
+        all_packets_sent = False
+
+        class _Clock:
+            def __call__(self):
+                return 0.6 if all_packets_sent else (0.1 if first_packet_sent.is_set() else 0.0)
+
+        class _WebSocket:
+            def __init__(self):
+                self.stop_sent = False
+                self.messages = [
+                    json.dumps({"type": "hello"}),
+                    json.dumps({"type": "tts", "state": "start"}),
+                ]
+                self.after_stop = [
+                    json.dumps({"type": "tts", "state": "start"}),
+                    b"replacement-audio",
+                    json.dumps({"type": "tts", "state": "stop"}),
+                ]
+
+            async def send(self, payload):
+                nonlocal all_packets_sent
+                if isinstance(payload, bytes):
+                    first_packet_sent.set()
+                    await asyncio.sleep(0)
+                    if payload == b"packet-3":
+                        all_packets_sent = True
+
+            async def recv(self):
+                if self.messages:
+                    return self.messages.pop(0)
+                if not self.stop_sent:
+                    if not first_packet_sent.is_set():
+                        await first_packet_sent.wait()
+                    self.stop_sent = True
+                    return json.dumps(
+                        {"type": "tts", "state": "stop", "reason": "interrupt"}
+                    )
+                if self.after_stop:
+                    return self.after_stop.pop(0)
+                raise asyncio.TimeoutError
+
+        class _Connect:
+            async def __aenter__(self):
+                return _WebSocket()
+
+            async def __aexit__(self, *_exc):
+                return False
+
+        with patch.object(
+            audio_bargein.websockets,
+            "connect",
+            lambda *_args, **_kwargs: _Connect(),
+        ), patch.object(
+            audio_bargein,
+            "_opus_packets",
+            return_value=[b"packet-1", b"packet-2", b"packet-3"],
+        ):
+            record = asyncio.run(
+                audio_bargein.run_smoke(
+                    self._args(frame_duration_ms=0, interrupt_delay_sec=0),
+                    clock=_Clock(),
+                )
+            )
+
+        self.assertEqual(record["status"], "PASS", record)
+        self.assertEqual(record["bargeinStopMs"], 100.0)
+
+    def test_run_smoke_cancels_stop_observer_when_audio_send_fails(self):
+        audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
+        observer_cancelled = False
+        socket_exited = False
+
+        class _WebSocket:
+            def __init__(self):
+                self.messages = [
+                    json.dumps({"type": "hello"}),
+                    json.dumps({"type": "tts", "state": "start"}),
+                ]
+
+            async def send(self, payload):
+                if isinstance(payload, bytes):
+                    await asyncio.sleep(0)
+                    raise RuntimeError("synthetic send failure")
+
+            async def recv(self):
+                if self.messages:
+                    return self.messages.pop(0)
+                await asyncio.Event().wait()
+
+        class _Connect:
+            async def __aenter__(self):
+                return _WebSocket()
+
+            async def __aexit__(self, *_exc):
+                nonlocal socket_exited
+                socket_exited = True
+                return False
+
+        real_observer = audio_bargein._observe_interrupt_stop
+
+        async def _tracked_observer(*args, **kwargs):
+            nonlocal observer_cancelled
+            try:
+                return await real_observer(*args, **kwargs)
+            except asyncio.CancelledError:
+                observer_cancelled = True
+                raise
+
+        with patch.object(
+            audio_bargein.websockets,
+            "connect",
+            lambda *_args, **_kwargs: _Connect(),
+        ), patch.object(
+            audio_bargein,
+            "_opus_packets",
+            return_value=[b"packet-1"],
+        ), patch.object(
+            audio_bargein,
+            "_observe_interrupt_stop",
+            _tracked_observer,
+        ), self.assertRaisesRegex(RuntimeError, "synthetic send failure"):
+            asyncio.run(
+                audio_bargein.run_smoke(
+                    self._args(frame_duration_ms=0, interrupt_delay_sec=0)
+                )
+            )
+
+        self.assertTrue(observer_cancelled)
+        self.assertTrue(socket_exited)
 
     def test_opus_packets_from_audio_file_uses_converter(self):
         audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
