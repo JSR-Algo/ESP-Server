@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
+import errno
 import hashlib
 import hmac
 import ipaddress
@@ -107,6 +109,7 @@ DARWIN_GIT_IMPLEMENTATIONS = {
     Path("/Library/Developer/CommandLineTools/usr/bin/git"),
     Path("/Applications/Xcode.app/Contents/Developer/usr/bin/git"),
 }
+DARWIN_PREFLIGHT_TOOL_ROOT = Path("/usr/local/libexec/tbot-preflight")
 PINNED_APPROVAL_PUBLIC_KEY_RAW: bytes | None = None
 PINNED_APPROVAL_KEY_FINGERPRINT = "unprovisioned"
 
@@ -316,6 +319,71 @@ def _absolute_regular_file(value: object) -> tuple[Path | None, str | None]:
     if not resolved.is_file():
         return None, "type"
     return resolved, None
+
+
+def _darwin_tool_path_is_approved(name: str, path: Path, expected_sha256: object) -> bool:
+    if not isinstance(expected_sha256, str) or SHA256.fullmatch(expected_sha256) is None:
+        return False
+    if name == "git":
+        return path in DARWIN_GIT_IMPLEMENTATIONS
+    basename = {"docker": "docker", "dockerCompose": "docker-compose"}.get(name)
+    return basename is not None and path == DARWIN_PREFLIGHT_TOOL_ROOT / expected_sha256 / basename
+
+
+def _darwin_path_has_extended_acl(path: Path) -> bool:
+    if sys.platform != "darwin":
+        return False
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.acl_get_file.argtypes = [ctypes.c_char_p, ctypes.c_int]
+        libc.acl_get_file.restype = ctypes.c_void_p
+        libc.acl_get_entry.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+        libc.acl_get_entry.restype = ctypes.c_int
+        libc.acl_free.argtypes = [ctypes.c_void_p]
+        libc.acl_free.restype = ctypes.c_int
+        ctypes.set_errno(0)
+        acl = libc.acl_get_file(os.fsencode(path), 0x00000100)
+        if not acl:
+            return ctypes.get_errno() != errno.ENOENT
+        try:
+            entry = ctypes.c_void_p()
+            result = libc.acl_get_entry(acl, 0, ctypes.byref(entry))
+            return result == 0 or (result == -1 and ctypes.get_errno() != errno.EINVAL)
+        finally:
+            libc.acl_free(acl)
+    except (AttributeError, OSError, TypeError):
+        return True
+
+
+def _darwin_path_is_root_owned_immutable(path: Path, opened: os.stat_result | None = None) -> bool:
+    if not path.is_absolute():
+        return False
+    for component in (path, *path.parents):
+        if _darwin_path_has_extended_acl(component):
+            return False
+        try:
+            metadata = component.lstat()
+        except OSError:
+            return False
+        if stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_mode & 0o022:
+            return False
+        if component != path and not stat.S_ISDIR(metadata.st_mode):
+            return False
+    try:
+        current = path.stat(follow_symlinks=False)
+    except OSError:
+        return False
+    if not stat.S_ISREG(current.st_mode) or current.st_mode & 0o111 == 0:
+        return False
+    if opened is None:
+        return True
+    return (opened.st_dev, opened.st_ino, opened.st_size, opened.st_uid, opened.st_mode) == (
+        current.st_dev,
+        current.st_ino,
+        current.st_size,
+        current.st_uid,
+        current.st_mode,
+    )
 
 
 def _validate_ref(value: object, session: Path | None) -> tuple[Path | None, list[str]]:
@@ -589,7 +657,13 @@ def _validate_expected_identity(value: object, reasons: list[str]) -> dict[str, 
             if (
                 path is None
                 or not path.is_absolute()
-                or (sys.platform == "darwin" and name == "git" and path not in DARWIN_GIT_IMPLEMENTATIONS)
+                or (
+                    sys.platform == "darwin"
+                    and (
+                        not _darwin_tool_path_is_approved(name, path, tool.get("sha256"))
+                        or not _darwin_path_is_root_owned_immutable(path)
+                    )
+                )
                 or _path_has_symlink(path)
                 or not os.access(path, os.X_OK)
                 or not _secure_hash_matches(path, tool.get("sha256"))
@@ -1538,86 +1612,9 @@ def _run(
         return "", False, "executable_unsupported"
 
     executable_fd: int | None = None
-    sealed_directory: Path | None = None
     launch_executable: str | None = None
     launch_pass_fds: tuple[int, ...] = ()
     launch_identity: tuple[int, int, int, int, int] | None = None
-
-    def darwin_direct_path_is_trusted(path: Path, opened: os.stat_result) -> bool:
-        for component in (path, *path.parents):
-            try:
-                metadata = component.lstat()
-            except OSError:
-                return False
-            if stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_mode & 0o022:
-                return False
-        try:
-            current = path.stat(follow_symlinks=False)
-        except OSError:
-            return False
-        return (opened.st_dev, opened.st_ino, opened.st_size, opened.st_uid, opened.st_mode) == (
-            current.st_dev,
-            current.st_ino,
-            current.st_size,
-            current.st_uid,
-            current.st_mode,
-        )
-
-    def seal_verified_fd(fd: int, expected_digest: str) -> tuple[Path | None, str | None]:
-        directory = Path(tempfile.mkdtemp(prefix="tbot-preflight-tool-"))
-        target = directory / "tool"
-        target_fd: int | None = None
-        sealed = False
-        try:
-            directory.chmod(0o700)
-            target_fd = os.open(target, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o700)
-            os.lseek(fd, 0, os.SEEK_SET)
-            source_digest = hashlib.sha256()
-            while chunk := os.read(fd, 1024 * 1024):
-                source_digest.update(chunk)
-                view = memoryview(chunk)
-                while view:
-                    view = view[os.write(target_fd, view) :]
-            os.fsync(target_fd)
-            os.lseek(target_fd, 0, os.SEEK_SET)
-            sealed_digest = hashlib.sha256()
-            while chunk := os.read(target_fd, 1024 * 1024):
-                sealed_digest.update(chunk)
-            metadata = os.fstat(target_fd)
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_size != os.fstat(fd).st_size
-                or not hmac.compare_digest(source_digest.hexdigest(), expected_digest)
-                or not hmac.compare_digest(sealed_digest.hexdigest(), expected_digest)
-            ):
-                return None, "executable"
-            os.fchmod(target_fd, 0o500)
-            os.fsync(target_fd)
-            directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-            sealed = True
-            return target, None
-        except OSError:
-            return None, "executable"
-        finally:
-            if target_fd is not None:
-                os.close(target_fd)
-            if not sealed:
-                with contextlib.suppress(FileNotFoundError):
-                    target.unlink()
-                with contextlib.suppress(FileNotFoundError):
-                    directory.rmdir()
-
-    def cleanup_sealed() -> None:
-        if sealed_directory is None:
-            return
-        with contextlib.suppress(FileNotFoundError):
-            (sealed_directory / "tool").unlink()
-        with contextlib.suppress(FileNotFoundError):
-            sealed_directory.rmdir()
 
     try:
         executable_fd = _open_file_secure(allowed_executable)
@@ -1636,28 +1633,16 @@ def _run(
             launch_executable = str(FD_EXEC_ROOT / str(executable_fd))
             launch_pass_fds = (executable_fd,)
             launch_identity = (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_uid, metadata.st_mode)
-        elif darwin_direct_path_is_trusted(allowed_executable, metadata):
+        elif _darwin_path_is_root_owned_immutable(allowed_executable, metadata):
             launch_executable = str(allowed_executable)
             launch_identity = (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_uid, metadata.st_mode)
         else:
-            sealed_path, seal_error = seal_verified_fd(executable_fd, expected_executable_sha256)
-            if seal_error or sealed_path is None:
-                os.close(executable_fd)
-                return "", False, seal_error or "executable"
-            sealed_directory = sealed_path.parent
-            launch_executable = str(sealed_path)
-            sealed_metadata = sealed_path.stat(follow_symlinks=False)
-            launch_identity = (
-                sealed_metadata.st_dev,
-                sealed_metadata.st_ino,
-                sealed_metadata.st_size,
-                sealed_metadata.st_uid,
-                sealed_metadata.st_mode,
-            )
+            os.close(executable_fd)
+            executable_fd = None
+            return "", False, "executable"
     except OSError:
         if executable_fd is not None:
             os.close(executable_fd)
-        cleanup_sealed()
         return "", False, "executable"
 
     def limit_and_isolate() -> None:
@@ -1745,6 +1730,8 @@ def _run(
                 stderr_file.read().decode("utf-8", errors="strict")
             except UnicodeDecodeError:
                 return "", False, "decode"
+            if return_code == 126:
+                return "", False, "executable"
             return stdout, return_code == 0, None
     except (OSError, subprocess.SubprocessError):
         return "", False, "os_error"
@@ -1752,7 +1739,6 @@ def _run(
         if executable_fd is not None:
             with contextlib.suppress(OSError):
                 os.close(executable_fd)
-        cleanup_sealed()
 
 
 def _emit(payload: dict[str, object]) -> None:
