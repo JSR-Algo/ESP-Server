@@ -6,6 +6,36 @@ import { acquirePinnedRobotPreviewChromium } from '../robot-preview-browser.mjs'
 
 const DEFAULT_OPERATION_TIMEOUT_MS = 60000;
 const DEFAULT_READINESS_TIMEOUT_MS = 10000;
+const retainedLeaseRecords = new Set();
+
+function retainAndDrainLease(error, lease) {
+  const record = { error, lease, cleanup: null };
+  retainedLeaseRecords.add(record);
+  process.emitWarning(error);
+  record.cleanup = Promise.resolve().then(() => lease.cleanup()).then(
+    () => retainedLeaseRecords.delete(record),
+    (cleanupError) => process.emitWarning(new Error(`${error.message}; cleanup failed`, { cause: cleanupError })),
+  );
+  return record.cleanup;
+}
+
+function retainAndDrainLateAcquisition(error, acquisition) {
+  const record = { error, lease: null, cleanup: null };
+  retainedLeaseRecords.add(record);
+  process.emitWarning(error);
+  record.cleanup = acquisition.then((lease) => {
+    record.lease = lease;
+    return lease?.cleanup();
+  }).then(
+    () => retainedLeaseRecords.delete(record),
+    (cleanupError) => process.emitWarning(new Error(`${error.message}; cleanup failed`, { cause: cleanupError })),
+  );
+  return record.cleanup;
+}
+
+export async function drainRetainedCandidateBrowserLeases() {
+  await Promise.allSettled([...retainedLeaseRecords].map((record) => record.cleanup));
+}
 
 function delay(timeoutMs) {
   return new Promise((resolve) => setTimeout(resolve, timeoutMs));
@@ -86,7 +116,7 @@ export async function withCandidateBoundBrowser({
   readinessTimeoutMs = DEFAULT_READINESS_TIMEOUT_MS,
   readinessPollMs = 50,
   onMessage = () => {},
-  onRetainedLease = (error) => process.emitWarning(error),
+  onRetainedLease = null,
 }, run) {
   let lease;
   let child;
@@ -96,12 +126,15 @@ export async function withCandidateBoundBrowser({
   let rejectLifecycle;
   const lifecycleDeadline = Date.now() + operationTimeoutMs;
   const cleanupReserveMs = Math.min(1000, Math.max(5, Math.floor(operationTimeoutMs / 5)));
+  const childReapReserveMs = Math.max(1, Math.floor(cleanupReserveMs / 2));
+  const socketCloseReserveMs = Math.max(1, Math.floor(cleanupReserveMs / 5));
   const runtimeDeadline = lifecycleDeadline - cleanupReserveMs;
   const remainingMs = () => Math.max(0, lifecycleDeadline - Date.now());
   const runtimeRemainingMs = () => Math.max(0, runtimeDeadline - Date.now());
   const lifecycleTimeout = () => new Error(`${label} lifecycle timed out after ${operationTimeoutMs}ms`);
   const lifecycleFailure = new Promise((_, reject) => { rejectLifecycle = reject; });
   lifecycleFailure.catch(() => {});
+  const reportRetainedLease = onRetainedLease || retainAndDrainLease;
 
   const failLifecycle = (error) => {
     rejectLifecycle(error);
@@ -142,11 +175,17 @@ export async function withCandidateBoundBrowser({
     try {
       lease = await lifecycleBounded(acquisition, `${label} candidate browser acquisition`);
     } catch (error) {
-      acquisition.then((lateLease) => {
-        if (lateLease) onRetainedLease(
-          new Error(`${label} late candidate browser lease retained after lifecycle deadline`), lateLease
+      if (onRetainedLease) {
+        acquisition.then((lateLease) => {
+          if (lateLease) onRetainedLease(
+            new Error(`${label} late candidate browser lease retained after lifecycle deadline`), lateLease
+          );
+        }, () => {});
+      } else {
+        retainAndDrainLateAcquisition(
+          new Error(`${label} late candidate browser lease retained after lifecycle deadline`), acquisition
         );
-      }, () => {});
+      }
       throw error;
     }
     child = spawnBrowser(lease.executablePath, [
@@ -249,8 +288,9 @@ export async function withCandidateBoundBrowser({
       `${label} callback`,
     );
   } finally {
-    await closeSocket(socket, remainingMs()).catch(() => {});
-    await stopChild(child, remainingMs, label);
+    const childDeadline = Date.now() + Math.min(childReapReserveMs, remainingMs());
+    await stopChild(child, () => Math.max(0, Math.min(remainingMs(), childDeadline - Date.now())), label);
+    await closeSocket(socket, Math.min(socketCloseReserveMs, remainingMs())).catch(() => {});
     if (lease) {
       try {
         await lifecycleBounded(
@@ -261,7 +301,7 @@ export async function withCandidateBoundBrowser({
           remainingMs,
         );
       } catch (error) {
-        onRetainedLease(new Error(`${label} candidate browser lease cleanup did not complete`, { cause: error }), lease);
+        reportRetainedLease(new Error(`${label} candidate browser lease cleanup did not complete`, { cause: error }), lease);
         throw error;
       }
     }

@@ -133,6 +133,7 @@ test('stalled candidate browser acquisition rejects before the outer watchdog', 
     profileDir: '/tmp/profile',
     label: 'test gate',
     operationTimeoutMs: 25,
+    onRetainedLease: () => {},
     ...deps,
   }, async () => {
     assert.fail('callback must not run before browser acquisition completes');
@@ -453,4 +454,55 @@ test('SIGKILL reap completes before candidate lease cleanup', async () => {
     profileDir: '/tmp/profile', label: 'reap gate', operationTimeoutMs: 100, ...deps,
   }, async () => { throw new Error('trigger cleanup'); }), /trigger cleanup/);
   assert.deepEqual(events, ['SIGTERM', 'SIGKILL', 'cleanup']);
+});
+
+test('silent socket shutdown cannot starve child reap or candidate cleanup', async () => {
+  const { withCandidateBoundBrowser } = await importHarness();
+  const events = [];
+  const deps = dependencies({ spawnBrowser: () => {
+    const child = new EventEmitter();
+    child.exitCode = null;
+    child.signalCode = null;
+    child.kill = (signal) => {
+      events.push(signal);
+      if (signal === 'SIGTERM') setTimeout(() => {
+        child.signalCode = signal;
+        child.emit('exit', null, signal);
+      }, 1);
+      return true;
+    };
+    deps.state.child = child;
+    return child;
+  } });
+  deps.createDevToolsSocket = () => {
+    const socket = fakeSocket();
+    socket.close = () => {};
+    socket.terminate = () => { events.push('terminate'); socket.readyState = 3; };
+    deps.state.socket = socket;
+    return socket;
+  };
+  deps.acquireBrowser = async () => ({
+    executablePath: '/candidate/staged/chrome-headless-shell',
+    cleanup: async () => { events.push('cleanup'); deps.state.cleanupCalls += 1; },
+  });
+  await withCandidateBoundBrowser({
+    profileDir: '/tmp/profile', label: 'silent socket gate', operationTimeoutMs: 100, ...deps,
+  }, async () => {});
+  assert.deepEqual(events, ['SIGTERM', 'terminate', 'cleanup']);
+  assert.equal(deps.state.cleanupCalls, 1);
+});
+
+test('default late-lease owner drains acquisition that resolves during cleanup reserve', async () => {
+  const { withCandidateBoundBrowser, drainRetainedCandidateBrowserLeases } = await importHarness();
+  let cleanupCalls = 0;
+  const deps = dependencies();
+  deps.acquireBrowser = () => new Promise((resolve) => setTimeout(() => resolve({
+    executablePath: '/candidate/staged/chrome-headless-shell',
+    cleanup: async () => { cleanupCalls += 1; },
+  }), 45));
+  await assert.rejects(withCandidateBoundBrowser({
+    profileDir: '/tmp/profile', label: 'default late gate', operationTimeoutMs: 50, ...deps,
+  }, async () => {}), /default late gate lifecycle timed out after 50ms/);
+  await outerWatchdog(drainRetainedCandidateBrowserLeases(), 100);
+  assert.equal(cleanupCalls, 1);
 });
