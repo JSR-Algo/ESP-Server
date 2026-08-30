@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -48,6 +48,9 @@ test('stages candidate-bound bundle and cleans the private lease', async () => {
     const lease = await acquirePinnedRobotPreviewChromium({ ...value, stagingParent: value.base });
     assert.equal(await readFile(lease.executablePath, 'utf8'), CONTENT);
     assert.equal((await readdir(join(lease.executablePath, '..'))).includes('icudtl.dat'), true);
+    assert.equal((await lstat(join(lease.executablePath, '..'))).mode & 0o777, 0o500);
+    assert.equal((await lstat(lease.executablePath)).mode & 0o777, 0o500);
+    assert.equal((await lstat(join(lease.executablePath, '../icudtl.dat'))).mode & 0o777, 0o400);
     await lease.cleanup();
     assert.deepEqual((await readdir(value.base)).sort(), ['browsers.json', 'chromium_headless_shell-1223']);
   } finally {
@@ -83,6 +86,42 @@ test('identity failure removes partial staged bundle', async () => {
       acquirePinnedRobotPreviewChromium({ ...value, stagingParent: value.base }),
       /identity does not match/
     );
+    assert.equal((await readdir(value.base)).some((name) => name.startsWith('tbot-robot-preview-browser-')), false);
+  } finally {
+    await rm(value.base, { recursive: true, force: true });
+  }
+});
+
+test('afterStage substitution of sealed executable fails closed and cleans lease', async () => {
+  const value = await fixture();
+  try {
+    await assert.rejects(acquirePinnedRobotPreviewChromium({
+      ...value,
+      stagingParent: value.base,
+      afterStage: async ({ stagedRoot }) => {
+        await chmod(stagedRoot, 0o700);
+        const staged = join(stagedRoot, value.executable);
+        await rename(staged, `${staged}.verified`);
+        await writeFile(staged, 'malicious staged replacement\n', { mode: 0o500 });
+      }
+    }), /staged browser/);
+    assert.equal((await readdir(value.base)).some((name) => name.startsWith('tbot-robot-preview-browser-')), false);
+  } finally {
+    await rm(value.base, { recursive: true, force: true });
+  }
+});
+
+test('caller cleanup removes sealed lease after simulated spawn failure', async () => {
+  const value = await fixture();
+  try {
+    const lease = await acquirePinnedRobotPreviewChromium({ ...value, stagingParent: value.base });
+    try {
+      throw new Error('simulated spawn failure');
+    } catch (error) {
+      assert.match(error.message, /spawn failure/);
+    } finally {
+      await lease.cleanup();
+    }
     assert.equal((await readdir(value.base)).some((name) => name.startsWith('tbot-robot-preview-browser-')), false);
   } finally {
     await rm(value.base, { recursive: true, force: true });

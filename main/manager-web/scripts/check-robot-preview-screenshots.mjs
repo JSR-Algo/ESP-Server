@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { EventEmitter } from 'node:events';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join, normalize } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -14,13 +15,27 @@ const repo = dirname(fileURLToPath(import.meta.url));
 const managerRoot = normalize(join(repo, '..'));
 const update = process.argv.includes('--update');
 const cleanupSelfTest = process.argv.includes('--test-setup-cleanup');
+const spawnCleanupSelfTest = process.argv.includes('--test-spawn-cleanup');
+const childCleanupSelfTest = process.argv.includes('--test-child-cleanup');
+const runtimeExitSelfTest = process.argv.includes('--test-runtime-exit-cleanup');
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.ico': 'image/x-icon' };
 
-async function waitForFile(path, timeoutMs = 10000) {
+async function waitForFile(path, timeoutMs = 10000, signal = null) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
+    if (signal?.aborted) throw signal.reason;
     if (existsSync(path)) return readFile(path, 'utf8');
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      }, 50);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
   }
   throw new Error(`Timed out waiting for ${path}`);
 }
@@ -32,16 +47,18 @@ async function closeServer(server) {
 }
 
 async function stopChild(child) {
-  if (!child || child.exitCode !== null) return;
+  // Failed asynchronous spawns have no pid and may emit `error` without ever emitting `exit`.
+  if (!child || child.exitCode !== null || child.signalCode !== null || child.pid == null) return;
   child.kill('SIGTERM');
   await Promise.race([
     new Promise((resolve) => child.once('exit', resolve)),
     new Promise((resolve) => setTimeout(resolve, 2000))
   ]);
-  if (child.exitCode === null) {
+  if (child.exitCode === null && child.signalCode === null) {
     const exited = new Promise((resolve) => child.once('exit', resolve));
-    child.kill('SIGKILL');
-    await exited;
+    if (child.kill('SIGKILL')) {
+      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 2000))]);
+    }
   }
 }
 
@@ -54,12 +71,13 @@ async function closeSocket(socket) {
   if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
 }
 
-async function runHarness({ forceSetupFailure = false, onTemp = () => {} } = {}) {
+async function runHarness({ forceSetupFailure = false, onTemp = () => {}, spawnBrowser = spawn, afterSocketOpen = async () => {} } = {}) {
   let temp = null;
   let server = null;
   let chrome = null;
   let browserLease = null;
   let socket = null;
+  const pending = new Map();
   try {
     temp = await mkdtemp(join(tmpdir(), 'tbot-component-preview-'));
     onTemp(temp);
@@ -81,14 +99,37 @@ async function runHarness({ forceSetupFailure = false, onTemp = () => {} } = {})
     if (forceSetupFailure) throw new Error('forced setup failure after server acquisition');
 
     browserLease = await acquirePinnedRobotPreviewChromium();
-    chrome = spawn(browserLease.executablePath, ['--headless', '--disable-gpu', '--hide-scrollbars', '--force-device-scale-factor=1', '--remote-debugging-port=0', `--user-data-dir=${profileDir}`, 'about:blank'], { stdio: 'ignore' });
-    const [debugPort] = (await waitForFile(join(profileDir, 'DevToolsActivePort'))).trim().split('\n');
-    const target = await fetch(`http://127.0.0.1:${debugPort}/json/new?about:blank`, { method: 'PUT' }).then((response) => response.json());
+    chrome = spawnBrowser(browserLease.executablePath, ['--headless', '--disable-gpu', '--hide-scrollbars', '--force-device-scale-factor=1', '--remote-debugging-port=0', `--user-data-dir=${profileDir}`, 'about:blank'], { stdio: 'ignore' });
+    let rejectLifecycle;
+    let lifecycleError = null;
+    const lifecycleFailure = new Promise((_, reject) => { rejectLifecycle = reject; });
+    lifecycleFailure.catch(() => {});
+    const failLifecycle = (error) => {
+      if (lifecycleError) return;
+      lifecycleError = error;
+      for (const handlers of pending.values()) handlers.reject(error);
+      pending.clear();
+      rejectLifecycle(error);
+    };
+    const raceLifecycle = (operation) => Promise.race([operation, lifecycleFailure]);
+    chrome.once('error', (error) => failLifecycle(new Error(`Robot preview Chromium failed to spawn: ${error.message}`)));
+    chrome.once('exit', (code, signal) => failLifecycle(new Error(`Robot preview Chromium exited during preview: code=${code} signal=${signal}`)));
+    const startupController = new AbortController();
+    let portFile;
+    try {
+      portFile = await raceLifecycle(waitForFile(join(profileDir, 'DevToolsActivePort'), 10000, startupController.signal));
+    } finally {
+      startupController.abort(new Error('Chromium startup wait completed'));
+    }
+    const [debugPort] = portFile.trim().split('\n');
+    const target = await raceLifecycle(fetch(`http://127.0.0.1:${debugPort}/json/new?about:blank`, { method: 'PUT' }).then((response) => response.json()));
     socket = new WebSocket(target.webSocketDebuggerUrl);
-    await new Promise((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); });
+    socket.on('error', (error) => failLifecycle(new Error(`Robot preview DevTools socket failed: ${error.message}`)));
+    socket.on('close', () => failLifecycle(new Error('Robot preview DevTools socket closed')));
+    await raceLifecycle(new Promise((resolve) => socket.once('open', resolve)));
+    await raceLifecycle(afterSocketOpen({ chrome, socket }));
 
     let commandId = 0;
-    const pending = new Map();
     socket.on('message', (raw) => {
       const message = JSON.parse(raw);
       if (message.id && pending.has(message.id)) {
@@ -96,7 +137,7 @@ async function runHarness({ forceSetupFailure = false, onTemp = () => {} } = {})
         message.error ? handlers.reject(new Error(message.error.message)) : handlers.resolve(message.result);
       }
     });
-    const cdp = (method, params = {}) => new Promise((resolve, reject) => { const id = ++commandId; pending.set(id, { resolve, reject }); socket.send(JSON.stringify({ id, method, params })); });
+    const cdp = (method, params = {}) => raceLifecycle(new Promise((resolve, reject) => { const id = ++commandId; pending.set(id, { resolve, reject }); socket.send(JSON.stringify({ id, method, params })); }));
     const evaluate = async (expression) => (await cdp('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })).result.value;
     const waitReady = async () => { for (let i = 0; i < 100; i += 1) { if (await evaluate('Boolean(window.__ROBOT_PREVIEW_READY__)')) return; await new Promise((resolve) => setTimeout(resolve, 50)); } throw new Error('Mounted RobotLessonPreview did not become ready'); };
     const settleVisuals = () => evaluate(`(async()=>{await Promise.all([...document.images].map(img=>img.complete?Promise.resolve():new Promise((resolve,reject)=>{img.addEventListener('load',resolve,{once:true});img.addEventListener('error',reject,{once:true})})));if(document.fonts)await document.fonts.ready;await Promise.all(document.getAnimations().map(animation=>animation.finished.catch(()=>{})));await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));return true})()`);
@@ -133,15 +174,85 @@ async function runHarness({ forceSetupFailure = false, onTemp = () => {} } = {})
     assert.equal(await evaluate(`document.querySelector('[role="alert"]')?.textContent.includes('Firmware-incompatible preview')`), true);
     console.log('mounted RobotLessonPreview browser behavior and actual PNG baselines 3/5/8 PASS');
   } finally {
-    await closeSocket(socket);
-    await stopChild(chrome);
-    await browserLease?.cleanup();
-    await closeServer(server);
-    if (temp) await rm(temp, { recursive: true, force: true });
+    let cleanupError = null;
+    for (const operation of [
+      () => closeSocket(socket),
+      () => stopChild(chrome),
+      () => browserLease?.cleanup(),
+      () => closeServer(server),
+      () => temp ? rm(temp, { recursive: true, force: true }) : Promise.resolve()
+    ]) {
+      try { await operation(); } catch (error) { cleanupError ||= error; }
+    }
+    if (cleanupError) throw cleanupError;
   }
 }
 
-if (cleanupSelfTest) {
+if (childCleanupSelfTest) {
+  const controller = new AbortController();
+  const cancelledWait = waitForFile(join(tmpdir(), 'tbot-file-that-must-not-exist'), 10000, controller.signal);
+  controller.abort(new Error('waitForFile cancelled'));
+  await Promise.race([
+    assert.rejects(cancelledWait, /waitForFile cancelled/),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('waitForFile did not cancel promptly')), 500))
+  ]);
+  const child = new EventEmitter();
+  child.exitCode = null;
+  child.signalCode = null;
+  child.pid = 1234;
+  let killCount = 0;
+  child.kill = (signal) => {
+    killCount += 1;
+    if (killCount > 1) return false;
+    queueMicrotask(() => { child.signalCode = signal; child.emit('exit', null, signal); });
+    return true;
+  };
+  await Promise.race([
+    stopChild(child),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('stopChild hung after signal exit')), 3000))
+  ]);
+  console.log('mounted RobotLessonPreview child cleanup PASS');
+} else if (runtimeExitSelfTest) {
+  await assert.rejects(runHarness({
+    afterSocketOpen: async ({ chrome }) => { chrome.kill('SIGKILL'); }
+  }), /(?:Chromium exited during preview|DevTools socket closed)/);
+  console.log('mounted RobotLessonPreview runtime-exit cleanup PASS');
+} else if (spawnCleanupSelfTest) {
+  const prefixes = ['tbot-component-preview-', 'tbot-robot-preview-browser-'];
+  const before = new Set((await readdir(tmpdir())).filter((name) => prefixes.some((prefix) => name.startsWith(prefix))));
+  for (const code of ['ENOENT', 'EACCES']) {
+    const failingSpawn = () => {
+      const child = new EventEmitter();
+      child.exitCode = null;
+      child.signalCode = null;
+      child.pid = undefined;
+      child.kill = () => true;
+      queueMicrotask(() => {
+        child.emit('error', Object.assign(new Error(`simulated ${code}`), { code }));
+      });
+      return child;
+    };
+    await assert.rejects(runHarness({ spawnBrowser: failingSpawn }), new RegExp(`failed to spawn: simulated ${code}`));
+  }
+  const earlyExitSpawn = () => {
+    const child = new EventEmitter();
+    child.exitCode = null;
+    child.signalCode = null;
+    child.pid = 1234;
+    child.kill = () => true;
+    queueMicrotask(() => {
+      child.signalCode = 'SIGKILL';
+      child.emit('exit', null, child.signalCode);
+    });
+    return child;
+  };
+  await assert.rejects(runHarness({ spawnBrowser: earlyExitSpawn }), /exited during preview: code=null signal=SIGKILL/);
+  const leaked = (await readdir(tmpdir())).filter(
+    (name) => prefixes.some((prefix) => name.startsWith(prefix)) && !before.has(name)
+  );
+  assert.deepEqual(leaked, [], 'spawn failure must clean browser lease and harness temp directories');
+  console.log('mounted RobotLessonPreview spawn-failure cleanup PASS');
+} else if (cleanupSelfTest) {
   let tempPath = null;
   await assert.rejects(runHarness({ forceSetupFailure: true, onTemp: (path) => { tempPath = path; } }), /forced setup failure/);
   assert.ok(tempPath && !existsSync(tempPath), 'setup-failure cleanup must remove its temp directory');
