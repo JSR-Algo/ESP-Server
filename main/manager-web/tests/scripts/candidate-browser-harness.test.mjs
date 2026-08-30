@@ -50,6 +50,25 @@ function fakeSocket(onCommand = (_message, respond) => respond({})) {
   return socket;
 }
 
+function unopenedSocket() {
+  const socket = new EventEmitter();
+  socket.readyState = 0;
+  socket.send = () => {};
+  socket.close = () => {
+    socket.readyState = 3;
+    queueMicrotask(() => socket.emit('close'));
+  };
+  socket.terminate = socket.close;
+  return socket;
+}
+
+function outerWatchdog(operation, timeoutMs = 250) {
+  return Promise.race([
+    operation,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`outer watchdog fired after ${timeoutMs}ms`)), timeoutMs)),
+  ]);
+}
+
 function dependencies({ onCommand, spawnBrowser } = {}) {
   const state = { cleanupCalls: 0, spawned: [], child: null, socket: null };
   return {
@@ -147,6 +166,41 @@ test('stalled CDP command times out and cleans child, socket, and lease', async 
   }, async ({ cdp }) => cdp('Page.enable')), /test gate CDP Page\.enable timed out after 25ms/);
   assert.equal(deps.state.cleanupCalls, 1);
   assert.deepEqual(deps.state.spawned, ['/candidate/staged/chrome-headless-shell']);
+  assert.equal(deps.state.child.signalCode, 'SIGTERM');
+  assert.equal(deps.state.socket.readyState, 3);
+});
+
+test('visual-library pre-CDP socket factory hang rejects before outer watchdog and cleans lifecycle', async () => {
+  const { withCandidateBoundBrowser } = await importHarness();
+  const deps = dependencies();
+  deps.createDevToolsSocket = () => new Promise(() => {});
+  await assert.rejects(outerWatchdog(withCandidateBoundBrowser({
+    profileDir: '/tmp/visual-library-profile',
+    label: 'Lesson visual library browser',
+    operationTimeoutMs: 25,
+    ...deps,
+  }, async () => {})), /Lesson visual library browser DevTools socket creation timed out after 25ms/);
+  assert.equal(deps.state.cleanupCalls, 1);
+  assert.equal(deps.state.child.signalCode, 'SIGTERM');
+  assert.equal(deps.state.socket, null);
+});
+
+test('visual-library pre-CDP socket-open hang rejects before outer watchdog and cleans lifecycle', async () => {
+  const { withCandidateBoundBrowser } = await importHarness();
+  const deps = dependencies();
+  deps.createDevToolsSocket = () => {
+    deps.state.socket = unopenedSocket();
+    return deps.state.socket;
+  };
+  await assert.rejects(outerWatchdog(withCandidateBoundBrowser({
+    profileDir: '/tmp/visual-library-profile',
+    label: 'Lesson visual library browser',
+    operationTimeoutMs: 25,
+    ...deps,
+  }, async () => {
+    assert.fail('pre-CDP callback must not run before the socket opens');
+  })), /Lesson visual library browser DevTools socket open timed out after 25ms/);
+  assert.equal(deps.state.cleanupCalls, 1);
   assert.equal(deps.state.child.signalCode, 'SIGTERM');
   assert.equal(deps.state.socket.readyState, 3);
 });

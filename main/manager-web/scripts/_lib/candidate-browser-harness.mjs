@@ -119,7 +119,10 @@ export async function withCandidateBoundBrowser({
     } finally {
       fetchController.abort();
     }
-    socket = await createDevToolsSocket(target.webSocketDebuggerUrl);
+    socket = await bounded(
+      createDevToolsSocket(target.webSocketDebuggerUrl),
+      `${label} DevTools socket creation`,
+    );
     socket.on('error', (error) => failLifecycle(new Error(`${label} DevTools socket failed: ${error.message}`)));
     socket.on('close', () => failLifecycle(new Error(`${label} DevTools socket closed`)));
     socket.on('message', (raw) => {
