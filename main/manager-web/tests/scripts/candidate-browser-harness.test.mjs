@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -291,4 +292,64 @@ test('stalled readiness polling is bounded and cleans the candidate lifecycle', 
   assert.equal(deps.state.cleanupCalls, 1);
   assert.equal(deps.state.child.signalCode, 'SIGTERM');
   assert.equal(deps.state.socket.readyState, 3);
+});
+
+test('stalled readiness evaluation uses the remaining readiness deadline', async () => {
+  const { withCandidateBoundBrowser } = await importHarness();
+  const deps = dependencies({ onCommand: () => {} });
+  await assert.rejects(outerWatchdog(withCandidateBoundBrowser({
+    profileDir: '/tmp/profile',
+    label: 'test gate',
+    operationTimeoutMs: 100,
+    readinessTimeoutMs: 20,
+    ...deps,
+  }, async ({ waitForReadiness }) => waitForReadiness(
+    'Boolean(window.__READY__)', 'fixture readiness', 'document.body?.innerText'
+  )), 75), /fixture readiness timed out after 20ms/);
+  assert.equal(deps.state.cleanupCalls, 1);
+  assert.equal(deps.state.child.signalCode, 'SIGTERM');
+  assert.equal(deps.state.socket.readyState, 3);
+});
+
+test('completed child and socket cleanup do not leave deadline timers keeping Node alive', () => {
+  const harnessUrl = pathToFileURL(join(managerRoot, 'scripts/_lib/candidate-browser-harness.mjs')).href;
+  const source = `
+    import { EventEmitter } from 'node:events';
+    import { withCandidateBoundBrowser } from ${JSON.stringify(harnessUrl)};
+    const child = new EventEmitter();
+    child.exitCode = null;
+    child.signalCode = null;
+    child.kill = (signal) => {
+      queueMicrotask(() => {
+        child.signalCode = signal;
+        child.emit('exit', null, signal);
+      });
+    };
+    const socket = new EventEmitter();
+    socket.readyState = 0;
+    socket.send = (payload) => {
+      const message = JSON.parse(payload);
+      queueMicrotask(() => socket.emit('message', JSON.stringify({ id: message.id, result: {} })));
+    };
+    socket.close = () => {
+      socket.readyState = 3;
+      queueMicrotask(() => socket.emit('close'));
+    };
+    socket.terminate = socket.close;
+    setTimeout(() => { socket.readyState = 1; socket.emit('open'); }, 0);
+    await withCandidateBoundBrowser({
+      profileDir: '/tmp/profile',
+      label: 'timer test',
+      acquireBrowser: async () => ({ executablePath: '/candidate/chrome', cleanup: async () => {} }),
+      spawnBrowser: () => child,
+      waitForDevToolsPort: async () => '9222\\n',
+      fetchDevToolsTarget: async () => ({ webSocketDebuggerUrl: 'ws://candidate-bound' }),
+      createDevToolsSocket: () => socket,
+    }, async () => {});
+  `;
+  const result = spawnSync(process.execPath, ['--unhandled-rejections=strict', '--input-type=module', '-e', source], {
+    timeout: 750,
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.error?.message || result.stderr);
 });

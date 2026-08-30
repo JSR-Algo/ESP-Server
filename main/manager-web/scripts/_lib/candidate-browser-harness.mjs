@@ -11,12 +11,28 @@ function delay(timeoutMs) {
   return new Promise((resolve) => setTimeout(resolve, timeoutMs));
 }
 
+function waitForEventOrTimeout(emitter, event, timeoutMs, action = () => {}, isComplete = () => false) {
+  return new Promise((resolve) => {
+    let timer;
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      emitter.off(event, onEvent);
+      resolve(value);
+    };
+    const onEvent = () => finish(true);
+    emitter.once(event, onEvent);
+    timer = setTimeout(() => finish(false), timeoutMs);
+    action();
+    if (isComplete()) finish(true);
+  });
+}
+
 async function waitForChildExit(child, timeoutMs) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return true;
-  return Promise.race([
-    new Promise((resolve) => child.once('exit', () => resolve(true))),
-    delay(timeoutMs).then(() => false),
-  ]);
+  return waitForEventOrTimeout(child, 'exit', timeoutMs);
 }
 
 async function stopChild(child) {
@@ -33,9 +49,10 @@ async function closeSocket(socket) {
   const ignoreClosingError = () => {};
   socket.on('error', ignoreClosingError);
   try {
-    const closed = new Promise((resolve) => socket.once('close', resolve));
-    socket.close();
-    if (!await Promise.race([closed.then(() => true), delay(500).then(() => false)])) socket.terminate();
+    const closed = await waitForEventOrTimeout(
+      socket, 'close', 500, () => socket.close(), () => socket.readyState === 3
+    );
+    if (!closed) socket.terminate();
   } finally {
     socket.off('error', ignoreClosingError);
   }
@@ -157,25 +174,51 @@ export async function withCandidateBoundBrowser({
     });
     await bounded(new Promise((resolve) => socket.once('open', resolve)), `${label} DevTools socket open`);
 
-    const cdp = (method, params = {}) => {
+    const cdp = (method, params = {}, timeoutMs = operationTimeoutMs, operationLabel = `${label} CDP ${method}`) => {
       const id = ++commandId;
       const response = new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
       socket.send(JSON.stringify({ id, method, params }));
-      return bounded(response, `${label} CDP ${method}`).finally(() => pending.delete(id));
+      return bounded(response, operationLabel, timeoutMs).finally(() => pending.delete(id));
     };
-    const evaluate = async (expression) => {
-      const result = await cdp('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+    const evaluate = async (
+      expression, timeoutMs = operationTimeoutMs, operationLabel = `${label} CDP Runtime.evaluate`
+    ) => {
+      const result = await cdp(
+        'Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, timeoutMs, operationLabel
+      );
       if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
       return result.result.value;
     };
     const waitForReadiness = async (expression, readinessLabel, detailExpression = null) => {
       const deadline = Date.now() + readinessTimeoutMs;
+      const timedOut = (detail = '') => new Error(
+        `${readinessLabel} timed out after ${readinessTimeoutMs}ms${detail}`
+      );
+      const readinessEvaluate = async (value, evaluationLabel) => {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) throw timedOut();
+        const operationLabel = `${label} ${readinessLabel} ${evaluationLabel}`;
+        try {
+          return await evaluate(value, remainingMs, operationLabel);
+        } catch (error) {
+          if (Date.now() >= deadline || error.message === `${operationLabel} timed out after ${remainingMs}ms`) {
+            throw timedOut();
+          }
+          throw error;
+        }
+      };
       while (Date.now() < deadline) {
-        if (await evaluate(expression)) return;
-        await bounded(delay(readinessPollMs), `${label} ${readinessLabel} poll`, readinessPollMs + operationTimeoutMs);
+        if (await readinessEvaluate(expression, 'evaluation')) return;
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) break;
+        if (detailExpression && remainingMs <= readinessPollMs) {
+          const detail = await readinessEvaluate(detailExpression, 'diagnostic');
+          throw timedOut(`: ${detail}`);
+        }
+        const pollMs = Math.min(readinessPollMs, remainingMs);
+        await bounded(delay(pollMs), `${label} ${readinessLabel} poll`, pollMs);
       }
-      const detail = detailExpression ? `: ${await evaluate(detailExpression)}` : '';
-      throw new Error(`${readinessLabel} timed out after ${readinessTimeoutMs}ms${detail}`);
+      throw timedOut();
     };
 
     return await run({ cdp, evaluate, waitForReadiness, browserExecutablePath: lease.executablePath });
