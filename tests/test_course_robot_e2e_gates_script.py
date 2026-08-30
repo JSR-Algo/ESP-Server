@@ -32,6 +32,7 @@ def test_canonical_gate_does_not_delegate_to_workspace_convenience_script() -> N
         "COURSE_MODE_V2_TEST_DATABASE_URL",
         "COURSE_MODE_TEST_DATABASE_URL",
         "DATABASE_URL",
+        "COURSE_MODE_ROLLBACK_TEST_DATABASE_URL",
     ):
         assert allowed in script
     assert "exec env -i" not in script
@@ -39,6 +40,103 @@ def test_canonical_gate_does_not_delegate_to_workspace_convenience_script() -> N
     assert "dist/" not in script
     assert "coverage/" not in script
     assert ".pytest_cache" not in script
+
+
+def test_canonical_gate_forwards_complete_live_db_snapshot_without_other_secrets(
+    tmp_path: Path,
+) -> None:
+    fixture = _shell_fixture(tmp_path)
+    probe = fixture / "main/tbot-server/scripts/course_mode_release_gate.py"
+    probe.write_text(
+        "import json, os\n"
+        "keys = [key for key in os.environ if key.endswith('DATABASE_URL')]\n"
+        "print(json.dumps({key: os.environ[key] for key in sorted(keys)}))\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=fixture, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "environment probe"], cwd=fixture,
+        check=True, capture_output=True,
+    )
+    source = {
+        **os.environ,
+        "COURSE_MODE_V2_TEST_DATABASE_URL": "postgresql://127.0.0.1:55431/course_a",
+        "COURSE_MODE_TEST_DATABASE_URL": "postgresql://127.0.0.1:55431/course_a",
+        "DATABASE_URL": "postgresql://127.0.0.1:55432/course_b",
+        "COURSE_MODE_ROLLBACK_TEST_DATABASE_URL": "postgresql://127.0.0.1:55432/course_b",
+        "PRODUCTION_DATABASE_URL": "postgresql://production.invalid/production",
+        "UNRELATED_DATABASE_URL": "postgresql://must-not-forward.invalid/secret",
+    }
+
+    result = subprocess.run(
+        [str(fixture / "scripts/course_robot_e2e_gates.sh"), "--candidate", "unused.json"],
+        cwd=fixture, env=source, capture_output=True, text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "COURSE_MODE_ROLLBACK_TEST_DATABASE_URL": source["COURSE_MODE_ROLLBACK_TEST_DATABASE_URL"],
+        "COURSE_MODE_TEST_DATABASE_URL": source["COURSE_MODE_TEST_DATABASE_URL"],
+        "COURSE_MODE_V2_TEST_DATABASE_URL": source["COURSE_MODE_V2_TEST_DATABASE_URL"],
+        "DATABASE_URL": source["DATABASE_URL"],
+        "PRODUCTION_DATABASE_URL": source["PRODUCTION_DATABASE_URL"],
+    }
+
+
+def test_canonical_gate_does_not_materialize_absent_optional_production_url(tmp_path: Path) -> None:
+    fixture = _shell_fixture(tmp_path)
+    probe = fixture / "main/tbot-server/scripts/course_mode_release_gate.py"
+    probe.write_text(
+        "import os\n"
+        "raise SystemExit(91 if 'PRODUCTION_DATABASE_URL' in os.environ else 0)\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=fixture, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "environment probe"], cwd=fixture,
+        check=True, capture_output=True,
+    )
+    source = {key: value for key, value in os.environ.items() if key != "PRODUCTION_DATABASE_URL"}
+
+    result = subprocess.run(
+        [str(fixture / "scripts/course_robot_e2e_gates.sh"), "--candidate", "unused.json"],
+        cwd=fixture, env=source, capture_output=True, text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_canonical_gate_preserves_empty_and_reserved_optional_production_urls(tmp_path: Path) -> None:
+    fixture = _shell_fixture(tmp_path)
+    probe = fixture / "main/tbot-server/scripts/course_mode_release_gate.py"
+    probe.write_text(
+        "import json, os\n"
+        "print(json.dumps({\n"
+        "    'present': 'PRODUCTION_DATABASE_URL' in os.environ,\n"
+        "    'value': os.environ.get('PRODUCTION_DATABASE_URL'),\n"
+        "}))\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=fixture, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "environment probe"], cwd=fixture,
+        check=True, capture_output=True,
+    )
+
+    for value in (
+        "",
+        "postgresql://user:p@ss;word@production.invalid/db?sslmode=require&application_name=a%20b#fragment",
+    ):
+        result = subprocess.run(
+            [str(fixture / "scripts/course_robot_e2e_gates.sh"), "--candidate", "unused.json"],
+            cwd=fixture,
+            env={**os.environ, "PRODUCTION_DATABASE_URL": value},
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"present": True, "value": value}
 
 
 def _shell_fixture(tmp_path: Path) -> Path:
