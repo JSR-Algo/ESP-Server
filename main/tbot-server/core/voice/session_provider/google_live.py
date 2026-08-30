@@ -3180,6 +3180,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._receive_task = asyncio.create_task(
             self._receive_events_loop(generation)
         )
+        await self._replay_pending_interrupt_audio("live_session_open")
+        self.conn.client_abort = False
 
     async def _reset_conversation_live_context(self, reason):
         if normalize_session_mode(
@@ -4460,7 +4462,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 or self.is_response_cancelled(event_generation)
             )
         ):
-            self.conn.logger.bind(tag="GoogleLive").info(
+            log = self.conn.logger.bind(tag="GoogleLive")
+            log_method = (
+                log.debug
+                if event_type in {"audio", "audio_chunk"}
+                else log.info
+            )
+            log_method(
                 "Google Live stale_provider_event_ignored type={} "
                 "response_id={} current_response_id={}",
                 event_type,

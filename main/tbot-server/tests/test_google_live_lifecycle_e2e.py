@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from core.voice.google_live.client import GoogleLiveClient
+from core.voice.google_live.interaction_controller import InteractionState
 from core.voice.session_orchestrator import SessionMode
 from core.voice.session_provider.google_live import GoogleLiveProvider
 
@@ -20,6 +21,21 @@ HISTORICAL_REGRESSION_NODE_IDS = (
     "tests/test_google_live_reconnect.py::ClassifyErrorRoutingTest::test_invalid_config_error_logs_no_retry_and_returns_false",
     "tests/test_audio_rate_controller_edges.py::test_controller_constructs_without_a_running_loop_and_rebinds_between_loops",
 )
+
+EXPECTED_PROVIDER_TASK_FIELDS = {
+    "_receive_task",
+    "_input_flush_task",
+    "_forced_interrupt_flush_task",
+    "_waiting_model_timeout_task",
+    "_user_audio_window_task",
+    "_lesson_child_transcript_timeout_task",
+    "_start_lesson_asr_fallback_task",
+    "_func_handler_bootstrap_task",
+    "_live_prewarm_task",
+    "_wake_greeting_task",
+    "_proactive_reconnect_task",
+    "_idle_close_task",
+}
 
 
 @dataclass
@@ -36,6 +52,7 @@ class LifecycleResult:
     replacement_transcripts: list[str] = field(default_factory=list)
     final_interaction_state: str = ""
     pending_owned_tasks: tuple[str, ...] = ()
+    owned_task_fields: tuple[str, ...] = ()
 
 
 class _Logger:
@@ -136,14 +153,19 @@ class _TimeoutRecoveryRuntime:
     _step_passive = False
     _step_completed = False
 
-    def __init__(self):
+    def __init__(self, conn):
+        self.conn = conn
         self.timeout_reasons = []
+        self.first_timeout_seen = asyncio.Event()
 
     def conversation_tool_path_active(self):
         return True
 
     async def conversation_live_interruption(self, reason):
         self.timeout_reasons.append(reason)
+        if len(self.timeout_reasons) == 1:
+            self.conn.config["google_live"]["recv_timeout_sec"] = None
+            self.first_timeout_seen.set()
         return SimpleNamespace(
             accepted=len(self.timeout_reasons) == 1,
             code="RECONNECT_ONCE",
@@ -187,11 +209,15 @@ class _FakeLiveSession:
         self.counters = counters
         self.incoming = asyncio.Queue()
         self.realtime_inputs = []
+        self.audio_frames = []
         self.client_content_inputs = []
         self.closed = False
 
     async def send_realtime_input(self, **kwargs):
         self.realtime_inputs.append(kwargs)
+        audio = kwargs.get("audio")
+        if isinstance(audio, dict) and isinstance(audio.get("data"), bytes):
+            self.audio_frames.append(audio["data"].rstrip(b"\x00"))
 
     async def send_client_content(self, **kwargs):
         self.client_content_inputs.append(kwargs)
@@ -230,6 +256,8 @@ class _FakeLiveContext:
     async def __aenter__(self):
         self.entered = True
         self.transport.counters.session_enter()
+        if self.transport.session_enter_hook is not None:
+            self.transport.session_enter_hook(self.session)
         return self.session
 
     async def __aexit__(self, _exc_type, _exc, _tb):
@@ -267,7 +295,33 @@ class _FakeTransport:
         self.clients = []
         self.sessions = []
         self.connect_configs = []
+        self.session_enter_hook = None
         self.module = _FakeGenaiModule(self)
+
+
+class _FrameMarker(bytes):
+    def __new__(cls, value):
+        return super().__new__(cls, value + (b"\x00" if len(value) % 2 else b""))
+
+
+class _FrameBoundaryBuffer:
+    def __init__(self):
+        self.frames = []
+
+    def extend(self, frame):
+        self.frames.append(frame)
+
+    def __len__(self):
+        return 1_000_000 if self.frames else 0
+
+    def __getitem__(self, _key):
+        return bytes(self.frames[0])
+
+    def __delitem__(self, _key):
+        self.frames.pop(0)
+
+    def clear(self):
+        self.frames.clear()
 
 
 class _InProcessGoogleLiveClient(GoogleLiveClient):
@@ -327,14 +381,17 @@ def _successful_replay_count(logger):
 
 def _pending_provider_tasks(provider):
     owned = {
-        "receive": provider._receive_task,
-        "input_flush": provider._input_flush_task,
-        "forced_interrupt_flush": provider._forced_interrupt_flush_task,
-        "waiting_model_timeout": provider._waiting_model_timeout_task,
+        name: value
+        for name, value in vars(provider).items()
+        if name.endswith("_task")
     }
     return tuple(
         name for name, task in owned.items() if task is not None and not task.done()
     )
+
+
+def _provider_task_fields(provider):
+    return tuple(sorted(name for name in vars(provider) if name.endswith("_task")))
 
 
 async def _run_lifecycle_journey():
@@ -348,6 +405,11 @@ async def _run_lifecycle_journey():
         return client
 
     provider = GoogleLiveProvider(conn, client_factory=client_factory)
+    def install_replacement_frame_boundary(_session):
+        if len(transport.sessions) == 2:
+            provider._bridge._input_live_chunk_buffer = _FrameBoundaryBuffer()
+
+    transport.session_enter_hook = install_replacement_frame_boundary
     try:
         with patch.object(
             GoogleLiveProvider,
@@ -373,8 +435,8 @@ async def _run_lifecycle_journey():
 
             await provider._begin_user_interrupt("audio_input")
             result.response_ids.append(provider.current_response_id())
-            provider._buffer_pending_interrupt_audio(b"frame-1")
-            provider._buffer_pending_interrupt_audio(b"frame-2")
+            provider._buffer_pending_interrupt_audio(_FrameMarker(b"frame-1"))
+            provider._buffer_pending_interrupt_audio(_FrameMarker(b"frame-2"))
 
             result.stale_state_before = provider._interaction.state.value
             await first_session.emit(_server_message(turn_complete=True))
@@ -387,31 +449,11 @@ async def _run_lifecycle_journey():
             await _wait_until(lambda: len(transport.sessions) == 2)
             second_session = transport.sessions[1]
             result.session_generations.append(provider._session_generation)
-
-            replayed_audio = []
-            original_forward = provider._bridge.forward_decoded_input_audio
-
-            async def capture_replayed_audio(frame):
-                replayed_audio.append(frame)
-                await original_forward(frame)
-
-            provider._bridge.forward_decoded_input_audio = capture_replayed_audio
-            conn.config["google_live"].update(
-                {
-                    "interrupt_min_capture_ms": 0,
-                    "interrupt_speech_tail_ms": 0,
-                    "interrupt_max_capture_ms": 0,
-                }
-            )
-            provider._forced_interrupt_flush_generation += 1
-            await provider._flush_interrupt_input_after_delay(
-                0,
-                provider._forced_interrupt_flush_generation,
-                provider.current_response_id(),
-                "recovery_reopen",
-            )
-            await provider._replay_pending_interrupt_audio("duplicate_unblock")
-            result.replayed_audio = replayed_audio
+            await asyncio.sleep(0)
+            assert provider._client is not None, conn.logger.messages[-20:]
+            await _wait_until(lambda: _successful_replay_count(conn.logger) == 1)
+            await _wait_until(lambda: len(second_session.audio_frames) >= 2)
+            result.replayed_audio = list(second_session.audio_frames)
             result.replay_count = _successful_replay_count(conn.logger)
 
             replacement_start = len(
@@ -452,6 +494,7 @@ async def _run_lifecycle_journey():
     result.receive_loop_max_active = transport.counters.receive_loop_max_active
     result.live_session_max_active = transport.counters.live_session_max_active
     result.pending_owned_tasks = _pending_provider_tasks(provider)
+    result.owned_task_fields = _provider_task_fields(provider)
     assert transport.counters.receive_loop_active == 0
     assert transport.counters.live_session_active == 0
     return result
@@ -460,7 +503,7 @@ async def _run_lifecycle_journey():
 async def _run_receive_timeout_recovery():
     conn = _Connection()
     conn.session_mode = SessionMode.LESSON
-    conn.lesson_runtime = _TimeoutRecoveryRuntime()
+    conn.lesson_runtime = _TimeoutRecoveryRuntime(conn)
     conn.config["google_live"].update(
         {
             "prewarm_live_on_connect": False,
@@ -482,6 +525,9 @@ async def _run_receive_timeout_recovery():
             autospec=True,
         ):
             await provider._open_live_session()
+            await asyncio.wait_for(
+                conn.lesson_runtime.first_timeout_seen.wait(), timeout=1.0
+            )
             await _wait_until(lambda: len(transport.sessions) == 2)
             replacement_session = transport.sessions[1]
             conn.google_live_lesson_prompt_output_allowed = True
@@ -516,6 +562,7 @@ async def _run_receive_timeout_recovery():
             raw for raw in conn.websocket.sent if isinstance(raw, bytes)
         ],
         "pending_owned_tasks": _pending_provider_tasks(provider),
+        "owned_task_fields": _provider_task_fields(provider),
     }
 
 
@@ -529,6 +576,66 @@ def test_historical_regression_node_ids_are_unique_and_well_named():
 
 
 @pytest.mark.asyncio
+async def test_synthetic_stream_end_keeps_stale_generation_out_of_provider_state():
+    conn = _Connection()
+    transport = _FakeTransport()
+    client = _InProcessGoogleLiveClient(
+        conn.config["google_live"], conn.logger, transport.module
+    )
+    client.set_response_generation_getter(lambda: 0)
+    await client.connect()
+    session = transport.sessions[0]
+    await session.emit(_server_message(audio=b"stale-open-audio"))
+    await session.close_transport()
+    events = client.receive_events().__aiter__()
+
+    assert (await events.__anext__())["type"] == "audio_start"
+    assert (await events.__anext__())["type"] == "audio_chunk"
+
+    provider = GoogleLiveProvider(conn)
+    provider._response_generation = 1
+    provider._cancelled_response_ids.add(0)
+    provider._interaction.begin_interrupt(response_id=1, turn_id=1)
+    conn.client_abort = True
+    provider._post_reply_hold_until = 0.0
+    provider._user_audio_allowed_until = 0.0
+
+    synthetic_audio_end = await events.__anext__()
+    assert synthetic_audio_end == {"type": "audio_end", "response_generation": 0}
+    await provider._handle_live_event(synthetic_audio_end)
+
+    assert provider._interaction.state == InteractionState.INTERRUPTING
+    assert conn.client_abort is True
+    assert provider._post_reply_hold_until == 0.0
+    assert provider._user_audio_allowed_until == 0.0
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_audio_chunks_do_not_log_at_info_on_the_hot_path():
+    conn = _Connection()
+    provider = GoogleLiveProvider(conn)
+    provider._response_generation = 2
+    provider._cancelled_response_ids.add(1)
+
+    for _ in range(2):
+        await provider._handle_live_event(
+            {
+                "type": "audio_chunk",
+                "audio": b"old",
+                "response_generation": 1,
+            }
+        )
+
+    stale_logs = [
+        level
+        for level, args, _kwargs in conn.logger.messages
+        if args and "stale_provider_event_ignored" in str(args[0])
+    ]
+    assert stale_logs == ["debug", "debug"]
+
+
+@pytest.mark.asyncio
 async def test_real_receive_timeout_routes_to_bounded_recovery_and_replacement_output():
     result = await _run_receive_timeout_recovery()
 
@@ -538,6 +645,7 @@ async def test_real_receive_timeout_routes_to_bounded_recovery_and_replacement_o
     assert result["replacement_transcripts"] == ["timeout replacement transcript"]
     assert result["device_audio"] == [b"timeout-new-audio"]
     assert result["pending_owned_tasks"] == ()
+    assert set(result["owned_task_fields"]) >= EXPECTED_PROVIDER_TASK_FIELDS
 
 
 @pytest.mark.asyncio
@@ -559,3 +667,4 @@ async def test_google_live_full_lifecycle_recovers_without_duplicate_owners_or_a
     # LISTENING is the provider's safe interactive state after model audio_end.
     assert result.final_interaction_state == "LISTENING"
     assert result.pending_owned_tasks == ()
+    assert set(result.owned_task_fields) >= EXPECTED_PROVIDER_TASK_FIELDS

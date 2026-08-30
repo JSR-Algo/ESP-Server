@@ -179,6 +179,11 @@ class GoogleLiveClient:
                         continue
                     if message is False:
                         for event in self._finish_open_audio_turn("stream_end"):
+                            if isinstance(event, dict) and origin_generation is not None:
+                                event = dict(event)
+                                event.setdefault(
+                                    "response_generation", origin_generation
+                                )
                             yield event  # pragma: no cover - coverage.py misses this async-generator yield
                         break
                     received_turn_message = True
