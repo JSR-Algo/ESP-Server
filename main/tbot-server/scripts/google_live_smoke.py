@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import hashlib
 import json
 import os
+import re
 import sys
 import time
 import wave
@@ -19,6 +21,7 @@ from config.config_loader import (  # noqa: E402
 from core.voice.google_live.client import GoogleLiveClient  # noqa: E402
 from scripts.google_live_reliability import (  # noqa: E402
     SCHEMA_VERSION,
+    build_candidate_identity,
     redact_mapping,
 )
 
@@ -37,11 +40,24 @@ _SAFE_ERROR_MESSAGES = {
     "acceptance_timeout": "Google Live round trip timed out",
     "audio_input_or_codec": "Audio fixture was empty or malformed",
     "protocol_or_event_order": "Google Live response evidence was incomplete",
+    "server_state_or_cleanup": "Google Live resources did not close cleanly",
     "unknown": "Google Live round trip failed",
 }
 
 
 class _RoundTripEvidenceError(RuntimeError):
+    pass
+
+
+class _CleanupError(RuntimeError):
+    pass
+
+
+class _MissingCredentialError(RuntimeError):
+    pass
+
+
+class _ConfigurationError(RuntimeError):
     pass
 
 
@@ -126,7 +142,12 @@ def _build_round_trip_config(config, audio_file):
 
 
 async def _run_audio_round_trip(
-    client, *, pcm_chunks, event_timeout_sec, clock=time.monotonic
+    client,
+    *,
+    pcm_chunks,
+    event_timeout_sec,
+    cleanup_timeout_sec=2.0,
+    clock=time.monotonic,
 ):
     """Send one audio fixture and collect privacy-safe response evidence."""
     chunks = list(pcm_chunks)
@@ -136,6 +157,8 @@ async def _run_audio_round_trip(
     connection_ms = None
     audio_chunks = 0
     terminal = False
+    event_stream = None
+    primary_error = None
     try:
         if not chunks or not all(isinstance(chunk, bytes) and chunk for chunk in chunks):
             raise ValueError("PCM audio is empty or malformed")
@@ -145,26 +168,21 @@ async def _run_audio_round_trip(
             await client.send_audio(chunk)
         await client.end_audio_stream()
         event_stream = client.receive_events()
-        try:
-            async with asyncio.timeout(event_timeout_sec):
-                async for event in event_stream:
-                    now_ms = round((clock() - started) * 1000, 1)
-                    if first_event_ms is None:
-                        first_event_ms = now_ms
-                    event_type = event.get("type") if isinstance(event, dict) else None
-                    if event_type == "receive_timeout":
-                        raise TimeoutError("Google Live round trip timed out")
-                    if event_type in {"audio", "audio_chunk"}:
-                        audio_chunks += 1
-                        if first_audio_ms is None:
-                            first_audio_ms = now_ms
-                    if event_type in {"audio_end", "turn_complete"}:
-                        terminal = True
-                        break
-        finally:
-            close_stream = getattr(event_stream, "aclose", None)
-            if close_stream is not None:
-                await close_stream()
+        async with asyncio.timeout(event_timeout_sec):
+            async for event in event_stream:
+                event_type = event.get("type") if isinstance(event, dict) else None
+                if event_type == "receive_timeout":
+                    continue
+                now_ms = round((clock() - started) * 1000, 1)
+                if first_event_ms is None:
+                    first_event_ms = now_ms
+                if event_type in {"audio", "audio_chunk"}:
+                    audio_chunks += 1
+                    if first_audio_ms is None:
+                        first_audio_ms = now_ms
+                if event_type in {"audio_end", "turn_complete"}:
+                    terminal = True
+                    break
         if not terminal or audio_chunks == 0:
             raise _RoundTripEvidenceError(
                 "Google Live round trip ended without terminal audio"
@@ -176,20 +194,57 @@ async def _run_audio_round_trip(
             "firstAudioMs": first_audio_ms,
             "audioChunks": audio_chunks,
         }
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        await client.close()
+        cleanup_errors = await _run_bounded_cleanups(
+            (
+                getattr(event_stream, "aclose", None),
+                getattr(client, "close", None),
+            ),
+            timeout_sec=cleanup_timeout_sec,
+        )
+        if primary_error is None and cleanup_errors:
+            raise _CleanupError("Google Live cleanup failed")
+
+
+async def _run_bounded_cleanups(cleanups, *, timeout_sec):
+    if timeout_sec <= 0:
+        raise ValueError("cleanup_timeout_sec must be positive")
+    callbacks = [cleanup for cleanup in cleanups if callable(cleanup)]
+    per_cleanup_timeout = timeout_sec / max(1, len(callbacks))
+    errors = []
+    for cleanup in callbacks:
+        try:
+            await asyncio.wait_for(cleanup(), timeout=per_cleanup_timeout)
+        except asyncio.CancelledError as error:
+            if asyncio.current_task().cancelling():
+                raise
+            errors.append(error)
+        except Exception as error:
+            errors.append(error)
+    return errors
 
 
 def _classify_error(error):
     """Classify errors without returning credential-bearing exception details."""
     if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
         return "acceptance_timeout"
+    if isinstance(error, FileNotFoundError):
+        return "audio_input_or_codec"
     if isinstance(error, (ConnectionError, OSError)):
         return "network_or_transport"
     if isinstance(error, (ValueError, wave.Error)):
         return "audio_input_or_codec"
     if isinstance(error, _RoundTripEvidenceError):
         return "protocol_or_event_order"
+    if isinstance(error, _CleanupError):
+        return "server_state_or_cleanup"
+    if isinstance(error, _MissingCredentialError):
+        return "credential_or_auth"
+    if isinstance(error, _ConfigurationError):
+        return "model_or_config"
 
     details = " ".join(
         str(value)
@@ -200,6 +255,8 @@ def _classify_error(error):
             error,
         )
     ).lower()
+    if "connect timed out" in details or "connect timeout" in details:
+        return "network_or_transport"
     if "timed out" in details or "timeout" in details:
         return "acceptance_timeout"
     if any(marker in details for marker in ("401", "403", "unauth", "permission_denied")):
@@ -229,7 +286,12 @@ def _classify_error(error):
 
 
 async def _run_round_trip_with_retry(
-    client_factory, *, pcm_chunks, event_timeout_sec, clock=time.monotonic
+    client_factory,
+    *,
+    pcm_chunks,
+    event_timeout_sec,
+    cleanup_timeout_sec=2.0,
+    clock=time.monotonic,
 ):
     chunks = list(pcm_chunks)
     attempts = 0
@@ -240,6 +302,7 @@ async def _run_round_trip_with_retry(
                 client_factory(),
                 pcm_chunks=chunks,
                 event_timeout_sec=event_timeout_sec,
+                cleanup_timeout_sec=cleanup_timeout_sec,
                 clock=clock,
             )
             return {**result, "attempts": attempts}
@@ -257,11 +320,12 @@ async def _run_round_trip_with_retry(
             }
 
 
-def _build_report(result):
+def _build_report(result, candidate_identity):
     return redact_mapping(
         {
             "schemaVersion": SCHEMA_VERSION,
             "name": "real_api",
+            "candidateIdentity": candidate_identity,
             **result,
         }
     )
@@ -321,6 +385,116 @@ async def _run_round_trip(config, audio_file, event_timeout_sec):
         }
 
 
+def _fixture_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as fixture_file:
+        for chunk in iter(lambda: fixture_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _declared_candidate_identity(args):
+    identity = {
+        "gitSha": str(args.candidate_git_sha).strip(),
+        "imageDigest": str(args.candidate_image_digest).strip(),
+        "firmwareIdentity": str(args.firmware_identity).strip(),
+        "configFingerprint": str(args.config_fingerprint).strip(),
+        "fixtureSha256": str(args.fixture_sha256).strip(),
+    }
+    if not identity["gitSha"] or not identity["firmwareIdentity"]:
+        raise _ConfigurationError(
+            "candidate git SHA and firmware identity are required"
+        )
+    if re.fullmatch(r"sha256:[0-9a-fA-F]{64}", identity["imageDigest"]) is None:
+        raise _ConfigurationError("candidate image digest is invalid")
+    if re.fullmatch(r"sha256:[0-9a-fA-F]{64}", identity["configFingerprint"]) is None:
+        raise _ConfigurationError("config fingerprint is invalid")
+    if re.fullmatch(r"[0-9a-fA-F]{64}", identity["fixtureSha256"]) is None:
+        raise _ConfigurationError("fixture SHA-256 is invalid")
+    return identity
+
+
+def _validate_candidate_identity(args, config, declared_identity):
+    fixture_sha256 = _fixture_sha256(args.audio_file)
+    if declared_identity["fixtureSha256"].lower() != fixture_sha256:
+        raise ValueError("fixture SHA-256 does not match the audio file")
+    try:
+        effective_identity = build_candidate_identity(
+            args.candidate_git_sha,
+            args.candidate_image_digest,
+            args.firmware_identity,
+            config,
+            fixture_sha256,
+        )
+    except ValueError as error:
+        raise _ConfigurationError("candidate identity is invalid") from error
+    if declared_identity != effective_identity:
+        raise _ConfigurationError(
+            "config fingerprint does not match effective Google Live config"
+        )
+    return effective_identity
+
+
+def _safe_failure(error, *, status="FAIL"):
+    error_class = _classify_error(error)
+    return {
+        "status": status,
+        "attempts": 0,
+        "error": {
+            "class": error_class,
+            "message": _SAFE_ERROR_MESSAGES[error_class],
+        },
+    }
+
+
+def _load_cli_config(args):
+    if args.manager_device_id:
+        if not args.manager_client_id:
+            raise _ConfigurationError("manager client id is required")
+        try:
+            return asyncio.run(
+                _load_manager_google_live_config(
+                    args.manager_device_id,
+                    args.manager_client_id,
+                )
+            )
+        except Exception as error:
+            raise _ConfigurationError("manager Google Live config failed") from error
+    return _build_env_config(args.model, args.voice_name)
+
+
+def _run_report_mode(args):
+    config = None
+    candidate_identity = {}
+    try:
+        candidate_identity = _declared_candidate_identity(args)
+        config = _load_cli_config(args)
+        _validate_candidate_identity(args, config, candidate_identity)
+        if not _has_resolvable_api_key(config):
+            result = _safe_failure(
+                _MissingCredentialError("Google Live API key is missing"),
+                status="SKIPPED",
+            )
+        elif args.round_trip:
+            result = asyncio.run(
+                _run_round_trip(
+                    config,
+                    args.audio_file,
+                    args.event_timeout_sec,
+                )
+            )
+        else:
+            asyncio.run(_run_smoke(config))
+            result = {"status": "PASS", "attempts": 1}
+    except Exception as error:
+        result = _safe_failure(error)
+    report = _build_report(result, candidate_identity)
+    if args.report:
+        _write_report(args.report, report)
+    print(json.dumps(report, sort_keys=True))
+    return 0 if result["status"] == "PASS" else 1
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Connect to Google Live API and immediately close."
@@ -371,17 +545,38 @@ def main():
         default=20.0,
         help="Maximum time to wait for terminal Google Live output.",
     )
+    parser.add_argument(
+        "--candidate-git-sha",
+        default=os.environ.get("GOOGLE_LIVE_CANDIDATE_GIT_SHA", ""),
+    )
+    parser.add_argument(
+        "--candidate-image-digest",
+        default=os.environ.get("GOOGLE_LIVE_CANDIDATE_IMAGE_DIGEST", ""),
+    )
+    parser.add_argument(
+        "--firmware-identity",
+        default=os.environ.get("GOOGLE_LIVE_FIRMWARE_IDENTITY", ""),
+    )
+    parser.add_argument(
+        "--config-fingerprint",
+        default=os.environ.get("GOOGLE_LIVE_CONFIG_FINGERPRINT", ""),
+        help="Expected effective config fingerprint; required with --report.",
+    )
+    parser.add_argument(
+        "--fixture-sha256",
+        default=os.environ.get("GOOGLE_LIVE_FIXTURE_SHA256", ""),
+        help="Expected SHA-256 for --audio-file; required with --report.",
+    )
     args = parser.parse_args()
 
-    if args.manager_device_id:
-        if not args.manager_client_id:
-            print("--manager-client-id is required with --manager-device-id", file=sys.stderr)
-            return 1
-        config = asyncio.run(
-            _load_manager_google_live_config(args.manager_device_id, args.manager_client_id)
-        )
-    else:
-        config = _build_env_config(args.model, args.voice_name)
+    if args.report:
+        return _run_report_mode(args)
+
+    if args.manager_device_id and not args.manager_client_id:
+        print("--manager-client-id is required with --manager-device-id", file=sys.stderr)
+        return 1
+
+    config = _load_cli_config(args)
 
     if not _has_resolvable_api_key(config):
         print("GOOGLE_API_KEY is required", file=sys.stderr)
@@ -391,10 +586,7 @@ def main():
         result = asyncio.run(
             _run_round_trip(config, args.audio_file, args.event_timeout_sec)
         )
-        report = _build_report(result)
-        if args.report:
-            _write_report(args.report, report)
-        print(json.dumps(report, sort_keys=True))
+        print(json.dumps(result, sort_keys=True))
         return 0 if result["status"] == "PASS" else 1
 
     asyncio.run(_run_smoke(config))

@@ -58,6 +58,71 @@ class _TerminalThenBlockingClient(_FakeClient):
             self.receive_closed = True
 
 
+class _HeartbeatThenBlockingClient(_FakeClient):
+    def __init__(self, heartbeat_count=1):
+        super().__init__()
+        self.heartbeat_count = heartbeat_count
+        self.receive_closed = False
+
+    async def receive_events(self):
+        try:
+            for _ in range(self.heartbeat_count):
+                yield {"type": "receive_timeout"}
+            await asyncio.Event().wait()
+        finally:
+            self.receive_closed = True
+
+
+class _CleanupClient(_FakeClient):
+    def __init__(self, *, events=(), receive_close_error=None, close_error=None, hang=False):
+        super().__init__(events=events)
+        self.receive_close_error = receive_close_error
+        self.close_error = close_error
+        self.hang = hang
+        self.receive_cleanup_cancelled = False
+        self.client_cleanup_cancelled = False
+
+    async def receive_events(self):
+        try:
+            for event in self.events:
+                yield event
+        finally:
+            try:
+                if self.hang:
+                    await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.receive_cleanup_cancelled = True
+                raise
+            if self.receive_close_error is not None:
+                raise self.receive_close_error
+
+    async def close(self):
+        self.close_calls += 1
+        try:
+            if self.hang:
+                await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.client_cleanup_cancelled = True
+            raise
+        if self.close_error is not None:
+            raise self.close_error
+
+
+def _identity_args():
+    return [
+        "--candidate-git-sha",
+        "candidate-sha",
+        "--candidate-image-digest",
+        f"sha256:{'1' * 64}",
+        "--firmware-identity",
+        "firmware-1",
+        "--config-fingerprint",
+        "sha256:4f64b552410469f6442ab03ff90cc4428762fbd347042432055778e1417db9ff",
+        "--fixture-sha256",
+        "dbd55231b25b5de9d7cbe0e54c8b237944b25aedede780afe745802e4d1696c4",
+    ]
+
+
 class GoogleLiveSmokeScriptTest(unittest.TestCase):
     def test_build_env_config_uses_secret_placeholder(self):
         smoke = importlib.import_module("scripts.google_live_smoke")
@@ -171,6 +236,7 @@ class GoogleLiveSmokeScriptTest(unittest.TestCase):
                     "--round-trip",
                     "--report",
                     str(report_path),
+                    *_identity_args(),
                 ],
             ), patch.object(smoke, "_run_round_trip", fake_round_trip):
                 self.assertEqual(smoke.main(), 1)
@@ -181,6 +247,86 @@ class GoogleLiveSmokeScriptTest(unittest.TestCase):
         self.assertEqual(report["name"], "real_api")
         self.assertEqual(report["status"], "FAIL")
         self.assertEqual(report["error"]["apiKey"], "<redacted>")
+
+    def test_missing_credentials_writes_blocking_skipped_report(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+
+        with TemporaryDirectory() as directory:
+            report_path = Path(directory) / "report.json"
+            with patch.dict("os.environ", {}, clear=True), patch(
+                "sys.argv",
+                [
+                    "google_live_smoke.py",
+                    "--round-trip",
+                    "--report",
+                    str(report_path),
+                    *_identity_args(),
+                ],
+            ):
+                self.assertEqual(smoke.main(), 1)
+            report = json.loads(report_path.read_text())
+
+        self.assertEqual(report["status"], "SKIPPED")
+        self.assertEqual(report["error"]["class"], "credential_or_auth")
+        self.assertIn("candidateIdentity", report)
+        reliability = importlib.import_module("scripts.google_live_reliability")
+        verdict = reliability.reliability_verdict(
+            report["candidateIdentity"],
+            [report],
+        )
+        self.assertEqual(verdict["status"], "FAIL")
+        self.assertEqual(verdict["failures"][0]["code"], "LAYER_SKIPPED")
+
+    def test_missing_candidate_identity_still_writes_blocking_report(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+
+        with TemporaryDirectory() as directory:
+            report_path = Path(directory) / "report.json"
+            with patch.dict("os.environ", {"GOOGLE_API_KEY": "key"}, clear=True), patch(
+                "sys.argv",
+                [
+                    "google_live_smoke.py",
+                    "--round-trip",
+                    "--report",
+                    str(report_path),
+                ],
+            ):
+                self.assertEqual(smoke.main(), 1)
+            report = json.loads(report_path.read_text())
+
+        self.assertEqual(report["status"], "FAIL")
+        self.assertEqual(report["error"]["class"], "model_or_config")
+        self.assertEqual(report["candidateIdentity"], {})
+
+    def test_manager_preflight_failure_writes_safe_report(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+
+        async def fail_manager(*_args):
+            raise RuntimeError("manager token=do-not-leak")
+
+        with TemporaryDirectory() as directory:
+            report_path = Path(directory) / "report.json"
+            with patch.dict("os.environ", {}, clear=True), patch(
+                "sys.argv",
+                [
+                    "google_live_smoke.py",
+                    "--round-trip",
+                    "--report",
+                    str(report_path),
+                    "--manager-device-id",
+                    "device",
+                    "--manager-client-id",
+                    "client",
+                    *_identity_args(),
+                ],
+            ), patch.object(smoke, "_load_manager_google_live_config", fail_manager):
+                self.assertEqual(smoke.main(), 1)
+            encoded = report_path.read_text()
+            report = json.loads(encoded)
+
+        self.assertEqual(report["status"], "FAIL")
+        self.assertEqual(report["error"]["class"], "model_or_config")
+        self.assertNotIn("do-not-leak", encoded)
 
     def test_read_pcm_chunks_requires_nonempty_mono_pcm16_wav(self):
         smoke = importlib.import_module("scripts.google_live_smoke")
@@ -393,7 +539,131 @@ class GoogleLiveSmokeRoundTripTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_receive_timeout_is_not_counted_as_a_server_response(self):
         smoke = importlib.import_module("scripts.google_live_smoke")
-        client = _FakeClient(events=[{"type": "receive_timeout"}])
+        client = _HeartbeatThenBlockingClient(heartbeat_count=2)
+
+        report = await smoke._run_round_trip_with_retry(
+            lambda: client,
+            pcm_chunks=[b"\x00\x00"],
+            event_timeout_sec=0.01,
+        )
+
+        self.assertEqual(report["status"], "FAIL")
+        self.assertEqual(report["attempts"], 1)
+        self.assertEqual(report["error"]["class"], "acceptance_timeout")
+        self.assertTrue(client.receive_closed)
+        self.assertEqual(client.close_calls, 1)
+
+    async def test_receive_timeout_heartbeats_allow_late_valid_response(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        client = _FakeClient(
+            events=[
+                {"type": "receive_timeout"},
+                {"type": "receive_timeout"},
+                {"type": "audio_chunk", "audio": b"audio"},
+                {"type": "audio_end"},
+            ]
+        )
+
+        report = await smoke._run_round_trip_with_retry(
+            lambda: client,
+            pcm_chunks=[b"\x00\x00"],
+            event_timeout_sec=1,
+        )
+
+        self.assertEqual(report["status"], "PASS")
+        self.assertEqual(report["attempts"], 1)
+
+    async def test_connect_timeout_is_retried_once_as_transport(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        clients = []
+
+        def factory():
+            client = _FakeClient(error=RuntimeError("Google Live connect timed out"))
+            clients.append(client)
+            return client
+
+        report = await smoke._run_round_trip_with_retry(
+            factory,
+            pcm_chunks=[b"\x00\x00"],
+            event_timeout_sec=1,
+        )
+
+        self.assertEqual(report["status"], "FAIL")
+        self.assertEqual(report["attempts"], 2)
+        self.assertEqual(report["error"]["class"], "network_or_transport")
+        self.assertEqual([client.close_calls for client in clients], [1, 1])
+
+    async def test_primary_failure_survives_throwing_cleanup(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        client = _CleanupClient(
+            close_error=RuntimeError("cleanup client secret"),
+        )
+
+        async def fail_send(_chunk):
+            raise smoke._RoundTripEvidenceError("primary protocol failure")
+
+        client.send_audio = fail_send
+
+        report = await smoke._run_round_trip_with_retry(
+            lambda: client,
+            pcm_chunks=[b"\x00\x00"],
+            event_timeout_sec=1,
+        )
+
+        self.assertEqual(report["error"]["class"], "protocol_or_event_order")
+        self.assertNotIn("cleanup", json.dumps(report))
+        self.assertEqual(client.close_calls, 1)
+
+    async def test_receive_generator_cleanup_failure_is_classified(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        client = _CleanupClient(
+            events=[
+                {"type": "audio_chunk", "audio": b"audio"},
+                {"type": "audio_end"},
+            ],
+            receive_close_error=RuntimeError("cleanup receive secret"),
+        )
+
+        report = await smoke._run_round_trip_with_retry(
+            lambda: client,
+            pcm_chunks=[b"\x00\x00"],
+            event_timeout_sec=1,
+        )
+
+        self.assertEqual(report["error"]["class"], "server_state_or_cleanup")
+        self.assertNotIn("secret", json.dumps(report))
+
+    async def test_hanging_cleanup_does_not_replace_primary_failure(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        client = _CleanupClient(hang=True)
+
+        async def fail_send(_chunk):
+            raise smoke._RoundTripEvidenceError("primary protocol failure")
+
+        client.send_audio = fail_send
+        report = await asyncio.wait_for(
+            smoke._run_round_trip_with_retry(
+                lambda: client,
+                pcm_chunks=[b"\x00\x00"],
+                event_timeout_sec=1,
+                cleanup_timeout_sec=0.01,
+            ),
+            timeout=0.2,
+        )
+
+        self.assertEqual(report["error"]["class"], "protocol_or_event_order")
+        self.assertTrue(client.client_cleanup_cancelled)
+        self.assertNotIn("secret", json.dumps(report))
+
+    async def test_cleanup_only_failure_has_separate_classification(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        client = _CleanupClient(
+            events=[
+                {"type": "audio_chunk", "audio": b"audio"},
+                {"type": "audio_end"},
+            ],
+            close_error=RuntimeError("cleanup client secret"),
+        )
 
         report = await smoke._run_round_trip_with_retry(
             lambda: client,
@@ -402,9 +672,48 @@ class GoogleLiveSmokeRoundTripTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(report["status"], "FAIL")
-        self.assertEqual(report["attempts"], 1)
-        self.assertEqual(report["error"]["class"], "acceptance_timeout")
-        self.assertEqual(client.close_calls, 1)
+        self.assertEqual(report["error"]["class"], "server_state_or_cleanup")
+        self.assertNotIn("secret", json.dumps(report))
+
+    async def test_hanging_cleanup_is_bounded_and_classified(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        client = _CleanupClient(
+            events=[
+                {"type": "audio_chunk", "audio": b"audio"},
+                {"type": "audio_end"},
+            ],
+            hang=True,
+        )
+
+        report = await asyncio.wait_for(
+            smoke._run_round_trip_with_retry(
+                lambda: client,
+                pcm_chunks=[b"\x00\x00"],
+                event_timeout_sec=1,
+                cleanup_timeout_sec=0.01,
+            ),
+            timeout=0.2,
+        )
+
+        self.assertEqual(report["error"]["class"], "server_state_or_cleanup")
+        self.assertTrue(client.receive_cleanup_cancelled)
+        self.assertTrue(client.client_cleanup_cancelled)
+
+    def test_real_api_report_is_task1_verdict_compatible(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        reliability = importlib.import_module("scripts.google_live_reliability")
+        identity = {
+            "gitSha": "candidate-sha",
+            "imageDigest": f"sha256:{'1' * 64}",
+            "firmwareIdentity": "firmware-1",
+            "configFingerprint": "sha256:4f64b552410469f6442ab03ff90cc4428762fbd347042432055778e1417db9ff",
+            "fixtureSha256": "dbd55231b25b5de9d7cbe0e54c8b237944b25aedede780afe745802e4d1696c4",
+        }
+        report = smoke._build_report({"status": "PASS"}, identity)
+
+        verdict = reliability.reliability_verdict(identity, [report])
+
+        self.assertEqual(verdict["status"], "PASS")
 
 
 if __name__ == "__main__":
