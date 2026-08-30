@@ -182,7 +182,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
 
     def test_balanced_window_passes_and_proves_correlated_bargein_lifecycle(self):
         lines = _window_lines(
-            "2026-08-31 10:00:01 Google Live receive loop started",
+            "2026-08-31 10:00:01 Google Live evidence_receive_loop_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 generation=1",
             "2026-08-31 10:00:05 Google Live model_audio_start_hold_input response_id=7",
             "2026-08-31 10:00:05 Google Live evidence_response_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=7",
             "2026-08-31 10:00:09 Google Live user_interrupt_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 reason=vad cancelled_response_id=7 next_response_id=8",
@@ -202,7 +202,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             "2026-08-31 10:00:16 Google Live model_output_chunk_forwarded journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=8",
             "2026-08-31 10:00:17 Google Live model_audio_end_ready_to_listen response_id=8",
             "2026-08-31 10:00:17 Google Live evidence_response_ended journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=8",
-            "2026-08-31 10:00:18 Google Live receive loop stopped",
+            "2026-08-31 10:00:18 Google Live evidence_receive_loop_stopped journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 generation=1",
             journey_id="bargein-journey-1",
             evidence_scope=EVIDENCE_SCOPE,
         )
@@ -505,6 +505,24 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             "UNRECOVERED_TIMEOUT",
             [item["code"] for item in verdict["failures"]],
         )
+
+    def test_scoped_timeout_outcomes_pair_with_each_timeout_occurrence(self):
+        scope = "journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1"
+        verdict = self._analyze(
+            _window_lines(
+                f"2026-08-31 10:00:01 Google Live evidence_receive_timeout {scope} generation=1",
+                f"2026-08-31 10:00:02 Google Live evidence_receive_timeout_outcome {scope} generation=1 outcome=unhandled",
+                f"2026-08-31 10:00:03 Google Live evidence_receive_timeout {scope} generation=1",
+                f"2026-08-31 10:00:04 Google Live evidence_receive_timeout_outcome {scope} generation=1 outcome=handled",
+                f"2026-08-31 10:00:05 Google Live evidence_receive_timeout_outcome {scope} generation=1 outcome=handled",
+                journey_id="bargein-journey-1",
+                evidence_scope=EVIDENCE_SCOPE,
+            )
+        )
+
+        codes = [item["code"] for item in verdict["failures"]]
+        self.assertIn("RECEIVE_TIMEOUT_UNHANDLED", codes)
+        self.assertIn("TIMEOUT_OUTCOME_WITHOUT_TIMEOUT", codes)
 
     def test_buffered_replay_requires_successful_reopen_marker(self):
         verdict = self._analyze(
@@ -1302,6 +1320,215 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         verdict = self._analyze(lines)
 
         self.assertEqual(verdict["status"], "PASS", verdict)
+
+    def test_scoped_receive_timeout_and_handoff_ignore_foreign_state(self):
+        scope = "journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1"
+        foreign = "journey_id=other connection_id=conn-2 live_connection_id=live-2"
+        verdict = self._analyze(
+            _window_lines(
+                f"2026-08-31 10:00:01 Google Live evidence_receive_loop_started {scope} generation=1",
+                f"2026-08-31 10:00:02 Google Live evidence_receive_loop_started {foreign} generation=1",
+                f"2026-08-31 10:00:03 Google Live evidence_receive_timeout {foreign} generation=1",
+                f"2026-08-31 10:00:04 Google Live evidence_lesson_handoff_acquired {foreign} generation=9 holder=1 reason=lesson_start",
+                f"2026-08-31 10:00:05 Google Live evidence_receive_timeout {scope} generation=1",
+                f"2026-08-31 10:00:06 Google Live evidence_receive_timeout_outcome {scope} generation=1 outcome=handled",
+                f"2026-08-31 10:00:07 Google Live evidence_lesson_handoff_acquired {scope} generation=1 holder=1 reason=lesson_start",
+                f"2026-08-31 10:00:08 Google Live evidence_lesson_handoff_released {scope} generation=1 holder=1 outcome=lesson_started",
+                f"2026-08-31 10:00:09 Google Live evidence_receive_loop_stopped {scope} generation=1",
+                journey_id="bargein-journey-1",
+                evidence_scope=EVIDENCE_SCOPE,
+            )
+        )
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+
+    def test_scoped_receive_and_handoff_invariants_fail_for_target(self):
+        scope = "journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1"
+        cases = {
+            "overlap": [
+                f"Google Live evidence_receive_loop_started {scope} generation=1",
+                f"Google Live evidence_receive_loop_started {scope} generation=2",
+            ],
+            "timeout": [
+                f"Google Live evidence_receive_timeout {scope} generation=1",
+            ],
+            "handoff": [
+                f"Google Live evidence_lesson_handoff_acquired {scope} generation=1 holder=1 reason=lesson_start",
+            ],
+        }
+        expected = {
+            "overlap": "RECEIVE_LOOP_OVERLAP",
+            "timeout": "UNRECOVERED_TIMEOUT",
+            "handoff": "UNRELEASED_LESSON_HANDOFF",
+        }
+
+        for name, markers in cases.items():
+            with self.subTest(name=name):
+                verdict = self._analyze(
+                    _window_lines(
+                        *(f"2026-08-31 10:00:{index:02d} {marker}" for index, marker in enumerate(markers, 1)),
+                        journey_id="bargein-journey-1",
+                        evidence_scope=EVIDENCE_SCOPE,
+                    )
+                )
+                self.assertIn(
+                    expected[name],
+                    [item["code"] for item in verdict["failures"]],
+                )
+
+    def test_legacy_receive_timeout_and_handoff_do_not_poison_scoped_anchor(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live receive loop started",
+                "2026-08-31 10:00:02 Google Live receive loop started",
+                "2026-08-31 10:00:03 Google Live waiting_model_timeout timeout_sec=5",
+                "2026-08-31 10:00:04 lesson_start_handoff_acquired lease=(1,1) reason=x",
+                journey_id="bargein-journey-1",
+                evidence_scope=EVIDENCE_SCOPE,
+            )
+        )
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+
+    def test_scoped_receive_timeout_and_handoff_reject_same_journey_wrong_scope(self):
+        wrong_scope = (
+            "journey_id=bargein-journey-1 connection_id=conn-wrong "
+            "live_connection_id=live-wrong"
+        )
+        markers = [
+            f"Google Live evidence_receive_loop_started {wrong_scope} generation=1",
+            f"Google Live evidence_receive_timeout {wrong_scope} generation=1",
+            f"Google Live evidence_receive_timeout_outcome {wrong_scope} generation=1 outcome=handled",
+            f"Google Live evidence_lesson_handoff_acquired {wrong_scope} generation=1 holder=1 reason=lesson_start",
+            f"Google Live evidence_lesson_handoff_released {wrong_scope} generation=1 holder=1 outcome=lesson_started",
+        ]
+
+        for marker in markers:
+            with self.subTest(marker=marker):
+                verdict = self._analyze(
+                    _window_lines(
+                        f"2026-08-31 10:00:01 {marker}",
+                        journey_id="bargein-journey-1",
+                        evidence_scope=EVIDENCE_SCOPE,
+                    )
+                )
+                self.assertIn(
+                    "EVIDENCE_SCOPE_MISMATCH",
+                    [item["code"] for item in verdict["failures"]],
+                )
+
+    def test_foreign_scoped_terminal_markers_cannot_satisfy_target_state(self):
+        scope = "journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1"
+        foreign = "journey_id=other connection_id=conn-2 live_connection_id=live-2"
+        cases = {
+            "timeout": (
+                f"Google Live evidence_receive_timeout {scope} generation=1",
+                f"Google Live evidence_receive_timeout_outcome {foreign} generation=1 outcome=handled",
+                "UNRECOVERED_TIMEOUT",
+            ),
+            "handoff": (
+                f"Google Live evidence_lesson_handoff_acquired {scope} generation=1 holder=1 reason=lesson_start",
+                f"Google Live evidence_lesson_handoff_released {foreign} generation=1 holder=1 outcome=lesson_started",
+                "UNRELEASED_LESSON_HANDOFF",
+            ),
+        }
+
+        for name, (start, terminal, expected) in cases.items():
+            with self.subTest(name=name):
+                verdict = self._analyze(
+                    _window_lines(
+                        f"2026-08-31 10:00:01 {start}",
+                        f"2026-08-31 10:00:02 {terminal}",
+                        journey_id="bargein-journey-1",
+                        evidence_scope=EVIDENCE_SCOPE,
+                    )
+                )
+                self.assertIn(
+                    expected,
+                    [item["code"] for item in verdict["failures"]],
+                )
+
+    def test_scoped_failed_timeout_and_handoff_outcomes_fail(self):
+        scope = "journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1"
+        cases = {
+            "timeout": (
+                f"Google Live evidence_receive_timeout {scope} generation=1",
+                f"Google Live evidence_receive_timeout_outcome {scope} generation=1 outcome=failed",
+                "RECEIVE_TIMEOUT_RECOVERY_FAILED",
+            ),
+            "handoff": (
+                f"Google Live evidence_lesson_handoff_acquired {scope} generation=1 holder=1 reason=lesson_start",
+                f"Google Live evidence_lesson_handoff_failed {scope} generation=1 holder=1 outcome=stale_release",
+                "LESSON_HANDOFF_FAILED",
+            ),
+        }
+
+        for name, (start, terminal, expected) in cases.items():
+            with self.subTest(name=name):
+                verdict = self._analyze(
+                    _window_lines(
+                        f"2026-08-31 10:00:01 {start}",
+                        f"2026-08-31 10:00:02 {terminal}",
+                        journey_id="bargein-journey-1",
+                        evidence_scope=EVIDENCE_SCOPE,
+                    )
+                )
+                self.assertIn(
+                    expected,
+                    [item["code"] for item in verdict["failures"]],
+                )
+
+    def test_scoped_unhandled_timeout_is_not_recovery(self):
+        scope = "journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1"
+        verdict = self._analyze(
+            _window_lines(
+                f"2026-08-31 10:00:01 Google Live evidence_receive_timeout {scope} generation=1",
+                f"2026-08-31 10:00:02 Google Live evidence_receive_timeout_outcome {scope} generation=1 outcome=unhandled",
+                journey_id="bargein-journey-1",
+                evidence_scope=EVIDENCE_SCOPE,
+            )
+        )
+
+        self.assertIn(
+            "RECEIVE_TIMEOUT_UNHANDLED",
+            [item["code"] for item in verdict["failures"]],
+        )
+
+    def test_each_scoped_timeout_requires_its_own_handled_outcome(self):
+        scope = "journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1"
+        verdict = self._analyze(
+            _window_lines(
+                f"2026-08-31 10:00:01 Google Live evidence_receive_timeout {scope} generation=1",
+                f"2026-08-31 10:00:02 Google Live evidence_receive_timeout {scope} generation=1",
+                f"2026-08-31 10:00:03 Google Live evidence_receive_timeout_outcome {scope} generation=1 outcome=handled",
+                journey_id="bargein-journey-1",
+                evidence_scope=EVIDENCE_SCOPE,
+            )
+        )
+
+        self.assertEqual(
+            [item["code"] for item in verdict["failures"]].count(
+                "UNRECOVERED_TIMEOUT"
+            ),
+            1,
+        )
+
+    def test_scoped_handoff_tracks_each_coalesced_holder(self):
+        scope = "journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1"
+        verdict = self._analyze(
+            _window_lines(
+                f"2026-08-31 10:00:01 Google Live evidence_lesson_handoff_acquired {scope} generation=1 holder=1 reason=lesson_start",
+                f"2026-08-31 10:00:02 Google Live evidence_lesson_handoff_acquired {scope} generation=1 holder=2 reason=protected_nudge",
+                f"2026-08-31 10:00:03 Google Live evidence_lesson_handoff_released {scope} generation=1 holder=1 outcome=lesson_started",
+                journey_id="bargein-journey-1",
+                evidence_scope=EVIDENCE_SCOPE,
+            )
+        )
+
+        self.assertIn(
+            "UNRELEASED_LESSON_HANDOFF",
+            [item["code"] for item in verdict["failures"]],
+        )
 
     def test_scoped_lesson_progress_must_follow_ping_for_same_step(self):
         verdict = self._analyze(

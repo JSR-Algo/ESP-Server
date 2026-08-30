@@ -2636,6 +2636,131 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(provider._waiting_model_timeout_task)
         self.assertEqual(provider._client.text, [])
 
+    async def test_receive_timeout_policy_failure_emits_scoped_failed_outcome(self):
+        async def fail_timeout_policy():
+            raise RuntimeError("policy failed")
+
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        conn.session_mode = SessionMode.LESSON
+        conn.lesson_runtime = SimpleNamespace(
+            state="RUNNING",
+            on_google_live_receive_timeout=fail_timeout_policy,
+        )
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-1")
+        provider._client = _Client(events=[{"type": "receive_timeout"}])
+        provider._bridge = _Bridge()
+        provider._session_generation = 7
+        provider._handle_runtime_failure = AsyncMock()
+
+        await provider._receive_events_loop(7)
+
+        scoped = [
+            args
+            for level, args, _kwargs in conn.logger.messages
+            if level == "info"
+            and args
+            and "evidence_receive_timeout_outcome" in str(args[0])
+        ]
+        self.assertEqual(
+            scoped,
+            [
+                (
+                    "Google Live evidence_receive_timeout_outcome journey_id={} "
+                    "connection_id={} live_connection_id={} generation={} outcome={}",
+                    "journey-1",
+                    "session-1",
+                    "live-1",
+                    7,
+                    "failed",
+                )
+            ],
+        )
+
+    async def test_receive_timeout_outcome_keeps_originating_scope_across_reconnect(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-1")
+        provider._client = _Client(events=[{"type": "receive_timeout"}])
+        provider._bridge = _Bridge()
+        provider._session_generation = 7
+        provider._handle_runtime_failure = AsyncMock()
+
+        async def reconnect_while_handling():
+            provider._session_generation = 8
+            provider._interaction.start_live_connection("live-2")
+            return True
+
+        provider._handle_receive_timeout_event = reconnect_while_handling
+
+        await provider._receive_events_loop(7)
+
+        scoped = [
+            args
+            for level, args, _kwargs in conn.logger.messages
+            if level == "info"
+            and args
+            and "evidence_receive_timeout_outcome" in str(args[0])
+        ]
+        self.assertEqual(scoped[0][1:5], ("journey-1", "session-1", "live-1", 7))
+
+    async def test_opened_client_keeps_its_original_evidence_scope(self):
+        class _ScopedClient(_Client):
+            def set_response_generation_getter(self, getter):
+                self.response_generation_getter = getter
+
+            def set_evidence_scope_getter(self, getter):
+                self.evidence_scope_getter = getter
+
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        client = _ScopedClient()
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_args: client)
+        self.provider = provider
+        provider._ensure_required_aec_ready = lambda: None
+
+        with patch.object(
+            google_live_module, "GoogleLiveAudioBridge", lambda *_a, **_k: _Bridge()
+        ):
+            await provider._open_live_session_locked()
+
+        original_scope = client.evidence_scope_getter()
+        provider._session_generation = 9
+        provider._interaction.start_live_connection("live-9")
+
+        self.assertEqual(original_scope, ("journey-1", "session-1", "1", 1))
+        self.assertEqual(client.evidence_scope_getter(), original_scope)
+
+    async def test_prepare_evidence_scope_binds_prehello_prewarmed_client(self):
+        class _ScopedClient(_Client):
+            def set_response_generation_getter(self, getter):
+                self.response_generation_getter = getter
+
+            def set_evidence_scope_getter(self, getter):
+                self.evidence_scope_getter = getter
+
+        conn = _Conn()
+        client = _ScopedClient()
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_args: client)
+        self.provider = provider
+        provider._ensure_required_aec_ready = lambda: None
+
+        with patch.object(
+            google_live_module, "GoogleLiveAudioBridge", lambda *_a, **_k: _Bridge()
+        ):
+            await provider._open_live_session_locked()
+
+        self.assertIsNone(client.evidence_scope_getter())
+        conn.google_live_evidence_journey_id = "journey-1"
+
+        self.assertEqual(await provider.prepare_evidence_scope(), "1")
+        self.assertEqual(
+            client.evidence_scope_getter(),
+            ("journey-1", "session-1", "1", 1),
+        )
+
     async def test_interrupt_does_not_forward_current_audio_when_client_disconnected(self):
         conn = _Conn()
         provider = self.make_provider(conn)

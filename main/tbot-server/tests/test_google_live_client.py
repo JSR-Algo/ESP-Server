@@ -1142,6 +1142,101 @@ class GoogleLiveClientAsyncTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_receive_events_emits_exact_scoped_lifecycle_markers(self):
+        logger = _DummyLogger()
+        session = _TimeoutThenMessageSession(
+            timeout_count=1,
+            message=SimpleNamespace(text="hello"),
+        )
+        client = _TestableGoogleLiveClient(
+            {
+                "api_key": "test-key",
+                "model": "gemini-live-test",
+                "recv_timeout_sec": 0.01,
+            },
+            logger,
+            _FakeGenaiModule(_FakeSdkClient(_FakeLiveContext(session=session))),
+        )
+        client.set_evidence_scope_getter(
+            lambda: ("journey-1", "conn-1", "live-1", 7)
+        )
+        await client.connect()
+
+        events = client.receive_events()
+        async for event in events:
+            if event == {"type": "transcript", "text": "hello", "source": "model"}:
+                break
+        await events.aclose()
+        await client.close()
+
+        scoped = [
+            args
+            for level, args, _kwargs in logger.messages
+            if level == "info"
+            and args
+            and "Google Live evidence_receive_" in str(args[0])
+        ]
+        expected_prefix = (
+            "Google Live evidence_receive_{} journey_id={} connection_id={} "
+            "live_connection_id={} generation={}",
+        )
+        self.assertEqual(
+            scoped[0],
+            (*expected_prefix, "loop_started", "journey-1", "conn-1", "live-1", 7),
+        )
+        self.assertEqual(
+            scoped[-1],
+            (*expected_prefix, "loop_stopped", "journey-1", "conn-1", "live-1", 7),
+        )
+        self.assertGreaterEqual(len(scoped[1:-1]), 1)
+        self.assertTrue(
+            all(
+                marker
+                == (*expected_prefix, "timeout", "journey-1", "conn-1", "live-1", 7)
+                for marker in scoped[1:-1]
+            ),
+        )
+
+    async def test_active_prehello_receive_loop_adopts_late_evidence_scope(self):
+        logger = _DummyLogger()
+        client = _TestableGoogleLiveClient(
+            {
+                "api_key": "test-key",
+                "model": "gemini-live-test",
+                "recv_timeout_sec": 0.01,
+            },
+            logger,
+            _FakeGenaiModule(
+                _FakeSdkClient(
+                    _FakeLiveContext(
+                        session=_TimeoutThenMessageSession(
+                            timeout_count=2,
+                            message=SimpleNamespace(text="hello"),
+                        )
+                    )
+                )
+            ),
+        )
+        await client.connect()
+        events = client.receive_events()
+
+        self.assertEqual(await _anext(events), {"type": "receive_timeout"})
+        client.set_evidence_scope_getter(
+            lambda: ("journey-1", "conn-1", "live-1", 7)
+        )
+        await events.aclose()
+        await client.close()
+
+        lifecycle = [
+            args[1]
+            for level, args, _kwargs in logger.messages
+            if level == "info"
+            and args
+            and args[0].startswith("Google Live evidence_receive_{}")
+            and args[1] in {"loop_started", "loop_stopped"}
+        ]
+        self.assertEqual(lifecycle, ["loop_started", "loop_stopped"])
+
     async def test_receive_events_flushes_audio_when_stream_ends_without_turn_complete(self):
         logger = _DummyLogger()
         session = _FakeSession(

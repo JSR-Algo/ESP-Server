@@ -58,9 +58,37 @@ class GoogleLiveClient:
         self._audio_chunk_count = 0
         self._audio_byte_count = 0
         self._response_generation_getter = None
+        self._evidence_scope_getter = None
+        self._receive_loop_active = False
+        self._evidence_receive_loop_started = False
 
     def set_response_generation_getter(self, getter):
         self._response_generation_getter = getter if callable(getter) else None
+
+    def set_evidence_scope_getter(self, getter):
+        self._evidence_scope_getter = getter if callable(getter) else None
+        if self._receive_loop_active and not self._evidence_receive_loop_started:
+            self._evidence_receive_loop_started = self._log_evidence_receive(
+                "loop_started"
+            )
+
+    def _evidence_scope(self):
+        if self._evidence_scope_getter is None:
+            return None
+        scope = self._evidence_scope_getter()
+        return scope if isinstance(scope, tuple) and len(scope) == 4 else None
+
+    def _log_evidence_receive(self, event):
+        scope = self._evidence_scope()
+        if scope is None:
+            return False
+        self.logger.bind(tag="GoogleLive").info(
+            "Google Live evidence_receive_{} journey_id={} connection_id={} "
+            "live_connection_id={} generation={}",
+            event,
+            *scope,
+        )
+        return True
 
     async def connect(self):
         genai_module = self._import_genai_module()
@@ -158,6 +186,10 @@ class GoogleLiveClient:
         if not self.connected or self._session is None:
             return
         self.logger.bind(tag="GoogleLive").info("Google Live receive loop started")
+        self._receive_loop_active = True
+        self._evidence_receive_loop_started = self._log_evidence_receive(
+            "loop_started"
+        )
         pending_message_task = None
         try:
             while self.connected and self._session is not None:
@@ -201,6 +233,10 @@ class GoogleLiveClient:
                 with suppress(asyncio.CancelledError, Exception):
                     await pending_message_task
             self.logger.bind(tag="GoogleLive").info("Google Live receive loop stopped")
+            if self._evidence_receive_loop_started:
+                self._log_evidence_receive("loop_stopped")
+            self._receive_loop_active = False
+            self._evidence_receive_loop_started = False
 
     async def _next_message(self, pending_message_task):
         recv_timeout = self._get_receive_timeout()
@@ -215,6 +251,7 @@ class GoogleLiveClient:
             )
             if not done:
                 self.logger.bind(tag="GoogleLive").warning("Google Live receive timed out")
+                self._log_evidence_receive("timeout")
                 return None, pending_message_task
             result = pending_message_task.result()
             self._log_recv_timer_reset(result)

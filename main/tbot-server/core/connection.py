@@ -2630,6 +2630,19 @@ class ConnectionHandler:
             )
         except Exception:
             pass
+        journey_id = getattr(self, "google_live_evidence_journey_id", None)
+        if isinstance(journey_id, str) and journey_id:
+            self.logger.bind(tag=TAG).info(
+                "Google Live evidence_lesson_handoff_acquired journey_id={} "
+                "connection_id={} live_connection_id={} generation={} holder={} "
+                "reason={}",
+                journey_id,
+                str(self.session_id),
+                str(getattr(self, "google_live_live_connection_id", "none")),
+                lease[0],
+                lease[1],
+                reason,
+            )
         return lease
 
     def lesson_start_handoff_token(self):
@@ -2660,13 +2673,51 @@ class ConnectionHandler:
                 )
             except Exception:
                 pass
+            journey_id = getattr(self, "google_live_evidence_journey_id", None)
+            if isinstance(journey_id, str) and journey_id:
+                generation = (
+                    lease[0]
+                    if isinstance(lease, tuple) and len(lease) == 2
+                    else self._lesson_start_handoff_active_generation or 0
+                )
+                holder = (
+                    lease[1] if isinstance(lease, tuple) and len(lease) == 2 else 0
+                )
+                self.logger.bind(tag=TAG).info(
+                    "Google Live evidence_lesson_handoff_failed journey_id={} "
+                    "connection_id={} live_connection_id={} generation={} holder={} "
+                    "outcome={}",
+                    journey_id,
+                    str(self.session_id),
+                    str(getattr(self, "google_live_live_connection_id", "none")),
+                    generation,
+                    holder,
+                    outcome,
+                )
             return False
         if self._lesson_start_handoff_context.get() == lease:
             self._lesson_start_handoff_context.set(None)
+        released_leases = (
+            tuple(sorted(self._lesson_start_handoff_holders)) if force else (lease,)
+        )
         if force:
             self._lesson_start_handoff_holders.clear()
         else:
             self._lesson_start_handoff_holders.remove(lease)
+        journey_id = getattr(self, "google_live_evidence_journey_id", None)
+        if isinstance(journey_id, str) and journey_id:
+            for released_lease in released_leases:
+                self.logger.bind(tag=TAG).info(
+                    "Google Live evidence_lesson_handoff_released journey_id={} "
+                    "connection_id={} live_connection_id={} generation={} holder={} "
+                    "outcome={}",
+                    journey_id,
+                    str(self.session_id),
+                    str(getattr(self, "google_live_live_connection_id", "none")),
+                    released_lease[0],
+                    released_lease[1],
+                    outcome,
+                )
         if self._lesson_start_handoff_holders:
             try:
                 self.logger.bind(tag=TAG).info(

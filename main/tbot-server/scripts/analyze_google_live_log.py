@@ -68,6 +68,21 @@ P_SERVER_INT_IGNORED = re.compile(r"Google Live server interruption ignored by c
 P_CONN_OPEN = re.compile(r"core\.connection - (?P<ip>\S+) conn - Headers:")
 P_GOAWAY = re.compile(r"goAway|go_away|sent 1011|received 1011|1008", re.I)
 P_RECV_TIMEOUT = re.compile(r"Google Live receive timed out")
+P_EVIDENCE_RECV_LOOP = re.compile(
+    r"Google Live evidence_receive_loop_(?P<event>started|stopped) "
+    r"journey_id=(?P<journey_id>\S+) connection_id=(?P<connection_id>\S+) "
+    r"live_connection_id=(?P<live_connection_id>\S+) generation=(?P<generation>\d+)"
+)
+P_EVIDENCE_RECV_TIMEOUT = re.compile(
+    r"Google Live evidence_receive_timeout journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"generation=(?P<generation>\d+)"
+)
+P_EVIDENCE_RECV_TIMEOUT_OUTCOME = re.compile(
+    r"Google Live evidence_receive_timeout_outcome journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"generation=(?P<generation>\d+) outcome=(?P<outcome>handled|unhandled|failed)"
+)
 P_ECHO_SUPPRESSED = re.compile(
     r"Google Live echo_suppressed reason=(?P<reason>\w+) bytes=(?P<bytes>\d+) rms=(?P<rms>\d+|n/a)"
 )
@@ -239,6 +254,17 @@ P_EVIDENCE_RECONNECT_OUTCOME = re.compile(
     r"live_connection_id=(?P<live_connection_id>\S+) attempt=(?P<attempt>\d+)"
     r"(?: error_class=(?P<error_class>\S+))?"
 )
+P_EVIDENCE_HANDOFF_ACQUIRED = re.compile(
+    r"Google Live evidence_lesson_handoff_acquired journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"generation=(?P<generation>\d+) holder=(?P<holder>\d+) reason=(?P<reason>\S+)"
+)
+P_EVIDENCE_HANDOFF_TERMINAL = re.compile(
+    r"Google Live evidence_lesson_handoff_(?P<event>released|failed) "
+    r"journey_id=(?P<journey_id>\S+) connection_id=(?P<connection_id>\S+) "
+    r"live_connection_id=(?P<live_connection_id>\S+) generation=(?P<generation>\d+) "
+    r"holder=(?P<holder>\d+) outcome=(?P<outcome>\S+)"
+)
 _SCOPED_EVIDENCE_PATTERNS = (
     P_EVIDENCE_RESPONSE_START,
     P_EVIDENCE_RESPONSE_END,
@@ -254,6 +280,11 @@ _SCOPED_EVIDENCE_PATTERNS = (
     P_EVIDENCE_REOPEN_READY,
     P_EVIDENCE_REPLAYED_BUFFERED,
     P_EVIDENCE_RECONNECT_OUTCOME,
+    P_EVIDENCE_RECV_LOOP,
+    P_EVIDENCE_RECV_TIMEOUT,
+    P_EVIDENCE_RECV_TIMEOUT_OUTCOME,
+    P_EVIDENCE_HANDOFF_ACQUIRED,
+    P_EVIDENCE_HANDOFF_TERMINAL,
 )
 P_STALE_MODEL_DROP_IDS = re.compile(
     r"Google Live stale_model_event_dropped type=(?P<type>\w+) reason=(?P<reason>\w+) "
@@ -335,6 +366,9 @@ _RELIABILITY_MARKERS = (
     P_REPLAYED_BUFFERED_AUDIO,
     P_WAITING_MODEL_TIMEOUT,
     P_RECV_TIMEOUT,
+    P_EVIDENCE_RECV_LOOP,
+    P_EVIDENCE_RECV_TIMEOUT,
+    P_EVIDENCE_RECV_TIMEOUT_OUTCOME,
     P_RECONNECT_STARTED,
     P_SILENT_SESSION_REOPEN,
     P_REOPEN_READY,
@@ -345,6 +379,8 @@ _RELIABILITY_MARKERS = (
     P_NON_RETRIABLE_CLASSIFICATION,
     P_HANDOFF_ACQUIRED,
     P_HANDOFF_RELEASED,
+    P_EVIDENCE_HANDOFF_ACQUIRED,
+    P_EVIDENCE_HANDOFF_TERMINAL,
     P_PENDING_TASK_CLOSE,
     P_LESSON_STEP_START,
     P_LESSON_STEP_PROGRESS,
@@ -1361,6 +1397,9 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     scoped_reconnects: dict[tuple[str, str, int], dict[str, Any]] = {}
     scoped_active_responses: dict[tuple[str, str], int] = {}
     scoped_lesson_pending_pings: dict[str, int] = {}
+    scoped_receive_generations: set[int] = set()
+    scoped_timeout_generations: dict[int, list[int]] = defaultdict(list)
+    scoped_handoff_generations: dict[tuple[int, int], int] = {}
 
     def scoped_marker_targets_anchor(match: re.Match[str], line_number: int) -> bool:
         anchor_scope = start_anchor.get("evidenceScope") if start_anchor else None
@@ -2026,6 +2065,123 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         record["phase"] = 4
                 continue
 
+            scoped_receive_loop = P_EVIDENCE_RECV_LOOP.search(line)
+            if scoped_receive_loop:
+                if not scoped_marker_targets_anchor(scoped_receive_loop, line_number):
+                    continue
+                generation = int(scoped_receive_loop.group("generation"))
+                if scoped_receive_loop.group("event") == "started":
+                    if scoped_receive_generations:
+                        failures.append(
+                            _failure(
+                                "RECEIVE_LOOP_OVERLAP",
+                                line_number,
+                                "more than one scoped receive loop is active",
+                            )
+                        )
+                    scoped_receive_generations.add(generation)
+                elif generation not in scoped_receive_generations:
+                    failures.append(
+                        _failure(
+                            "RECEIVE_LOOP_STOP_WITHOUT_START",
+                            line_number,
+                            str(generation),
+                        )
+                    )
+                else:
+                    scoped_receive_generations.remove(generation)
+                receive_loops_active = len(scoped_receive_generations)
+                max_receive_loops_active = max(
+                    max_receive_loops_active, receive_loops_active
+                )
+                continue
+            scoped_receive_timeout = P_EVIDENCE_RECV_TIMEOUT.search(line)
+            if scoped_receive_timeout:
+                if not scoped_marker_targets_anchor(
+                    scoped_receive_timeout, line_number
+                ):
+                    continue
+                generation = int(scoped_receive_timeout.group("generation"))
+                scoped_timeout_generations[generation].append(line_number)
+                continue
+            scoped_timeout_outcome = P_EVIDENCE_RECV_TIMEOUT_OUTCOME.search(line)
+            if scoped_timeout_outcome:
+                if not scoped_marker_targets_anchor(
+                    scoped_timeout_outcome, line_number
+                ):
+                    continue
+                generation = int(scoped_timeout_outcome.group("generation"))
+                pending_generation_timeouts = scoped_timeout_generations.get(generation)
+                if not pending_generation_timeouts:
+                    failures.append(
+                        _failure(
+                            "TIMEOUT_OUTCOME_WITHOUT_TIMEOUT",
+                            line_number,
+                            str(generation),
+                        )
+                    )
+                outcome = scoped_timeout_outcome.group("outcome")
+                timeout_line = None
+                if pending_generation_timeouts:
+                    timeout_line = pending_generation_timeouts.pop(0)
+                    if not pending_generation_timeouts:
+                        scoped_timeout_generations.pop(generation, None)
+                if outcome == "unhandled" and timeout_line is not None:
+                    failures.append(
+                        _failure(
+                            "RECEIVE_TIMEOUT_UNHANDLED",
+                            line_number,
+                            f"generation {generation} timeout at line {timeout_line}",
+                        )
+                    )
+                if outcome == "failed":
+                    failures.append(
+                        _failure(
+                            "RECEIVE_TIMEOUT_RECOVERY_FAILED",
+                            line_number,
+                            str(generation),
+                        )
+                    )
+                continue
+            scoped_handoff_acquired = P_EVIDENCE_HANDOFF_ACQUIRED.search(line)
+            if scoped_handoff_acquired:
+                if not scoped_marker_targets_anchor(
+                    scoped_handoff_acquired, line_number
+                ):
+                    continue
+                generation = int(scoped_handoff_acquired.group("generation"))
+                holder = int(scoped_handoff_acquired.group("holder"))
+                scoped_handoff_generations[(generation, holder)] = line_number
+                continue
+            scoped_handoff_terminal = P_EVIDENCE_HANDOFF_TERMINAL.search(line)
+            if scoped_handoff_terminal:
+                if not scoped_marker_targets_anchor(
+                    scoped_handoff_terminal, line_number
+                ):
+                    continue
+                generation = int(scoped_handoff_terminal.group("generation"))
+                holder = int(scoped_handoff_terminal.group("holder"))
+                handoff_key = (generation, holder)
+                if handoff_key not in scoped_handoff_generations:
+                    failures.append(
+                        _failure(
+                            "HANDOFF_TERMINAL_WITHOUT_ACQUIRE",
+                            line_number,
+                            str(handoff_key),
+                        )
+                    )
+                else:
+                    scoped_handoff_generations.pop(handoff_key, None)
+                if scoped_handoff_terminal.group("event") == "failed":
+                    failures.append(
+                        _failure(
+                            "LESSON_HANDOFF_FAILED",
+                            line_number,
+                            scoped_handoff_terminal.group("outcome"),
+                        )
+                    )
+                continue
+
             if exact_scope_active and (
                 P_INTERRUPT.search(line)
                 or P_RESPONSE_AUDIO_START.search(line)
@@ -2038,6 +2194,12 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 or P_REPLAYED_BUFFERED_AUDIO.search(line)
                 or P_PENDING_TASK_CLOSE.search(line)
                 or P_CLEAN_CONNECTION_CLOSE.search(line)
+                or P_RECV_START.search(line)
+                or P_RECV_STOP.search(line)
+                or P_WAITING_MODEL_TIMEOUT.search(line)
+                or P_RECV_TIMEOUT.search(line)
+                or P_HANDOFF_ACQUIRED.search(line)
+                or P_HANDOFF_RELEASED.search(line)
             ):
                 continue
 
@@ -2382,6 +2544,23 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     "waiting-model timeout has no bounded terminal outcome",
                 )
             )
+    for generation, timeout_lines in scoped_timeout_generations.items():
+        for timeout_line in timeout_lines:
+            failures.append(
+                _failure(
+                    "UNRECOVERED_TIMEOUT",
+                    timeout_line,
+                    f"scoped receive timeout generation {generation} has no handled outcome",
+                )
+            )
+    for handoff_key, handoff_line in scoped_handoff_generations.items():
+        failures.append(
+            _failure(
+                "UNRELEASED_LESSON_HANDOFF",
+                handoff_line,
+                f"scoped handoff {handoff_key} has no terminal outcome",
+            )
+        )
     for response_scope, response_id in scoped_active_responses.items():
         failures.append(
             _failure(

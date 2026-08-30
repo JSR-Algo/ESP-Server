@@ -964,7 +964,18 @@ class GoogleLiveProvider(VoiceSessionProvider):
             or str(live_connection_id) != str(conn_live_connection_id)
         ):
             return None
+        self._bind_client_evidence_scope(self._client, self._session_generation)
         return str(live_connection_id)
+
+    def _bind_client_evidence_scope(self, client, generation):
+        evidence_scope_getter = getattr(client, "set_evidence_scope_getter", None)
+        if not callable(evidence_scope_getter):
+            return
+        evidence_scope = self._evidence_scope()
+        client_evidence_scope = (
+            (*evidence_scope, generation) if evidence_scope is not None else None
+        )
+        evidence_scope_getter(lambda: client_evidence_scope)
 
     async def _ensure_live_open_for_audio(self, *, preserve_live_prewarm=False):
         if normalize_session_mode(getattr(self.conn, "session_mode", SessionMode.DORMANT)) == SessionMode.LESSON:
@@ -2854,7 +2865,22 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     isinstance(event, dict)
                     and event.get("type") == "receive_timeout"
                 ):
-                    await self._handle_receive_timeout_event()
+                    evidence_scope = self._evidence_scope()
+                    handled = await self._handle_receive_timeout_event()
+                    if evidence_scope is not None:
+                        outcome = (
+                            "failed"
+                            if handled is None
+                            else "handled" if handled else "unhandled"
+                        )
+                        self.conn.logger.bind(tag="GoogleLive").info(
+                            "Google Live evidence_receive_timeout_outcome "
+                            "journey_id={} connection_id={} live_connection_id={} "
+                            "generation={} outcome={}",
+                            *evidence_scope,
+                            generation,
+                            outcome,
+                        )
                     continue
                 if (
                     isinstance(event, dict)
@@ -2916,7 +2942,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 ),
                 type(exc).__name__,
             )
-            return False
+            return None
 
     def _schedule_proactive_reconnect(self, event):
         if self._closing or self._reconnecting or self._fallback_activating:
@@ -3241,6 +3267,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         generation_getter = getattr(self._client, "set_response_generation_getter", None)
         if callable(generation_getter):
             generation_getter(self.current_response_id)
+        self._bind_client_evidence_scope(self._client, generation)
         self._bridge = GoogleLiveAudioBridge(
             self.conn,
             self._client,
