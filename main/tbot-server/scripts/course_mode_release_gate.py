@@ -64,6 +64,9 @@ MAX_NODE_INSTALL_BYTES = 2 * 1024 * 1024 * 1024
 MAX_NODE_INSTALL_DEPTH = 128
 MAX_NODE_PROJECT_SCAN_ENTRIES = 500_000
 MAX_PACKAGE_LOCK_BYTES = 32 * 1024 * 1024
+MAX_SNAPSHOT_ENTRIES = 750_000
+MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024 * 1024
+MAX_SNAPSHOT_DEPTH = 256
 NODE_TREE_SCHEMA = "sha256-path-mode-bytes-symlink-v1"
 ROBOT_PREVIEW_BROWSER_ENVIRONMENT = {
     "root": "TBOT_ROBOT_PREVIEW_BROWSER_ROOT",
@@ -227,6 +230,246 @@ class Lane:
     fixed_environment: tuple[tuple[str, str], ...] = ()
     required_source_contract: str | None = None
     reject_pytest_skips: bool = False
+
+
+@dataclass
+class ExecutionStage:
+    root: Path
+    candidate: dict
+
+    def cleanup(self) -> None:
+        if not self.root.exists():
+            return
+        for directory, names, files in os.walk(self.root):
+            Path(directory).chmod(0o700)
+            for name in names:
+                path = Path(directory) / name
+                if not path.is_symlink():
+                    path.chmod(0o700)
+            for name in files:
+                path = Path(directory) / name
+                if not path.is_symlink():
+                    path.chmod(0o600)
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def __del__(self) -> None:
+        self.cleanup()
+
+
+def _make_tree_read_only(root: Path) -> None:
+    for directory, names, files in os.walk(root, topdown=False):
+        for name in files:
+            path = Path(directory) / name
+            if not path.is_symlink():
+                path.chmod(path.stat().st_mode & 0o555)
+        for name in names:
+            path = Path(directory) / name
+            if not path.is_symlink():
+                path.chmod(0o555)
+        Path(directory).chmod(0o555)
+
+
+def _snapshot_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
+        metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns,
+    )
+
+
+def _open_snapshot_directory(path: Path) -> int:
+    absolute = path.resolve(strict=True)
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for component in absolute.parts[1:]:
+            child = os.open(
+                component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _copy_open_regular(
+    source_fd: int, destination: Path, before: os.stat_result, state: dict[str, int],
+) -> None:
+    if before.st_nlink != 1:
+        raise ValueError("unsafe hard-linked file in snapshot")
+    state["bytes"] += before.st_size
+    if state["bytes"] > MAX_SNAPSHOT_BYTES:
+        raise ValueError("snapshot byte limit exceeded")
+    output_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(source_fd, min(1024 * 1024, remaining))
+            if not chunk:
+                raise ValueError("source changed during snapshot")
+            view = memoryview(chunk)
+            while view:
+                written = os.write(output_fd, view)
+                view = view[written:]
+            remaining -= len(chunk)
+        if os.read(source_fd, 1):
+            raise ValueError("source changed during snapshot")
+        os.fsync(output_fd)
+    finally:
+        os.close(output_fd)
+    os.chmod(destination, stat.S_IMODE(before.st_mode))
+
+
+def _copy_snapshot_tree(
+    source: Path, destination: Path, state: dict[str, int], *, exclude_git: bool = False,
+) -> None:
+    root_before = source.lstat()
+    root_fd = _open_snapshot_directory(source)
+    root_opened = os.fstat(root_fd)
+    if _snapshot_identity(root_before) != _snapshot_identity(root_opened):
+        os.close(root_fd)
+        raise ValueError("source root changed during snapshot")
+    destination.mkdir()
+
+    def visit(directory_fd: int, relative: Path, target: Path, depth: int) -> None:
+        if depth > MAX_SNAPSHOT_DEPTH:
+            raise ValueError("snapshot depth limit exceeded")
+        names = sorted(entry.name for entry in os.scandir(directory_fd))
+        for name in names:
+            if exclude_git and name == ".git":
+                continue
+            state["entries"] += 1
+            if state["entries"] > MAX_SNAPSHOT_ENTRIES:
+                raise ValueError("snapshot entry limit exceeded")
+            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            destination_entry = target / name
+            relative_entry = relative / name
+            if stat.S_ISDIR(before.st_mode):
+                child_fd = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd,
+                )
+                try:
+                    opened = os.fstat(child_fd)
+                    if _snapshot_identity(opened) != _snapshot_identity(before):
+                        raise ValueError("source changed during snapshot")
+                    destination_entry.mkdir(mode=stat.S_IMODE(before.st_mode))
+                    visit(child_fd, relative_entry, destination_entry, depth + 1)
+                    after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    final = os.fstat(child_fd)
+                    if (
+                        _snapshot_identity(after) != _snapshot_identity(before)
+                        or _snapshot_identity(final) != _snapshot_identity(opened)
+                    ):
+                        raise ValueError("source changed during snapshot")
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(before.st_mode):
+                file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                try:
+                    opened = os.fstat(file_fd)
+                    if _snapshot_identity(opened) != _snapshot_identity(before):
+                        raise ValueError("source changed during snapshot")
+                    _copy_open_regular(file_fd, destination_entry, before, state)
+                    after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    final = os.fstat(file_fd)
+                    if (
+                        _snapshot_identity(after) != _snapshot_identity(before)
+                        or _snapshot_identity(final) != _snapshot_identity(opened)
+                    ):
+                        raise ValueError("source changed during snapshot")
+                finally:
+                    os.close(file_fd)
+            elif stat.S_ISLNK(before.st_mode):
+                target_value = os.readlink(name, dir_fd=directory_fd)
+                if Path(target_value).is_absolute():
+                    raise ValueError("unsafe symlink in snapshot")
+                try:
+                    resolved = (source / relative_entry.parent / target_value).resolve(strict=True)
+                    resolved.relative_to(source)
+                except (OSError, RuntimeError, ValueError):
+                    raise ValueError("unsafe symlink in snapshot") from None
+                state["bytes"] += len(os.fsencode(target_value))
+                if state["bytes"] > MAX_SNAPSHOT_BYTES:
+                    raise ValueError("snapshot byte limit exceeded")
+                os.symlink(target_value, destination_entry)
+                after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if (
+                    os.readlink(name, dir_fd=directory_fd) != target_value
+                    or _snapshot_identity(after) != _snapshot_identity(before)
+                ):
+                    raise ValueError("source changed during snapshot")
+            else:
+                raise ValueError("special file in snapshot")
+
+    try:
+        visit(root_fd, Path(), destination, 0)
+        root_after = source.lstat()
+        root_final = os.fstat(root_fd)
+        if (
+            _snapshot_identity(root_after) != _snapshot_identity(root_before)
+            or _snapshot_identity(root_final) != _snapshot_identity(root_opened)
+        ):
+            raise ValueError("source root changed during snapshot")
+    finally:
+        os.close(root_fd)
+
+
+def _copy_snapshot_file(source: Path, destination: Path, state: dict[str, int]) -> None:
+    parent_fd = _open_snapshot_directory(source.parent)
+    file_fd = None
+    try:
+        before = os.stat(source.name, dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("special file in snapshot")
+        file_fd = os.open(source.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        opened = os.fstat(file_fd)
+        if _snapshot_identity(opened) != _snapshot_identity(before):
+            raise ValueError("source changed during snapshot")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _copy_open_regular(file_fd, destination, before, state)
+        after = os.stat(source.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            _snapshot_identity(after) != _snapshot_identity(before)
+            or _snapshot_identity(os.fstat(file_fd)) != _snapshot_identity(opened)
+        ):
+            raise ValueError("source changed during snapshot")
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        os.close(parent_fd)
+
+
+def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> ExecutionStage:
+    root = Path(tempfile.mkdtemp(prefix="course-mode-stage-")).resolve()
+    staged = json.loads(json.dumps(candidate))
+    try:
+        state = {"entries": 0, "bytes": 0}
+        repositories_root = root / "repositories"
+        repositories_root.mkdir()
+        for name, repository in candidate["repositories"].items():
+            source = Path(repository["path"])
+            destination = repositories_root / name
+            _copy_snapshot_tree(source, destination, state, exclude_git=True)
+            staged["repositories"][name]["path"] = str(destination)
+        tools_root = root / "tools"
+        for key, descriptor in candidate["tools"]["node"].items():
+            prefix = tools_root / key
+            node = prefix / "bin/node"
+            node.parent.mkdir(parents=True)
+            _copy_snapshot_file(Path(descriptor["executable"]), node, state)
+            staged_descriptor = staged["tools"]["node"][key]
+            staged_descriptor["executable"] = str(node)
+            for tool in ("npm", "npx"):
+                entrypoint = prefix / f"lib/node_modules/npm/bin/{tool}-cli.js"
+                entrypoint.parent.mkdir(parents=True, exist_ok=True)
+                _copy_snapshot_file(Path(descriptor[tool]["entrypoint"]), entrypoint, state)
+                staged_descriptor[tool]["entrypoint"] = str(entrypoint)
+        _make_tree_read_only(root)
+        return ExecutionStage(root, staged)
+    except Exception:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
 
 
 def _lane(
@@ -1522,22 +1765,28 @@ def _assignment_candidate_environment(candidate: dict, lane: Lane) -> dict[str, 
         images = candidate["images"]
         backend = images["lessonStudioBackend"]
         web = images["lessonStudioWeb"]
+        references = (backend["reference"], web["reference"])
         values = {
             "TBOT_BACKEND_WORKTREE": candidate["repositories"]["backend"]["path"],
             "TBOT_FIRMWARE_WORKTREE": candidate["repositories"]["firmware"]["path"],
-            "TBOT_LESSON_STUDIO_BACKEND_IMAGE": backend["reference"],
+            "TBOT_LESSON_STUDIO_BACKEND_IMAGE": backend["id"],
             "TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID": backend["id"],
-            "TBOT_LESSON_STUDIO_WEB_IMAGE": web["reference"],
+            "TBOT_LESSON_STUDIO_WEB_IMAGE": web["id"],
             "TBOT_LESSON_STUDIO_WEB_IMAGE_ID": web["id"],
         }
     except (KeyError, TypeError):
         return None
-    if any(not isinstance(value, str) or not value for value in values.values()):
+    if any(not isinstance(value, str) or not value for value in (*values.values(), *references)):
         return None
     for key in ("TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID", "TBOT_LESSON_STUDIO_WEB_IMAGE_ID"):
         if re.fullmatch(r"sha256:[0-9a-f]{64}", values[key]) is None:
             return None
     return values
+
+
+def _candidate_metadata_matches(candidate_path: Path, candidate: dict) -> bool:
+    observed = _load_candidate(candidate_path)
+    return observed is not None and _json_exact_equal(observed, candidate)
 
 
 def _command_for_lane(lane: Lane, candidate: dict) -> tuple[str, ...] | None:
@@ -1745,8 +1994,26 @@ def run_gate(
             report = {
                 "candidateId": candidate_id, "verdict": "PASS", "lanes": [], "failedLane": None,
             }
+            if not release_state_matches(
+                candidate_path, candidate, selected, runtime_root, require_runtime,
+            ):
+                report = _blocked(candidate_id, selected[0].name if selected else "candidate-runtime")
+                if selected:
+                    report["lanes"].append({
+                        "name": selected[0].name, "exitCode": None, "durationMs": 0,
+                    })
+                execution_stage = None
+                execution_candidate = candidate
+            else:
+                try:
+                    execution_stage = stage_execution_candidate(candidate, selected)
+                    execution_candidate = execution_stage.candidate
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    execution_stage = None
+                    execution_candidate = candidate
+                    report = _blocked(candidate_id, "snapshot")
             source = source_environment if source_environment is not None else os.environ
-            for lane in selected:
+            for lane in selected if execution_stage is not None else ():
                 lane_source = source
                 if lane.name == LIVE_DB_LANE.name:
                     live_db_source = _live_db_source_snapshot(source)
@@ -1758,14 +2025,6 @@ def run_gate(
                         report["failedLane"] = lane.name
                         break
                     lane_source = live_db_source
-                if not release_state_matches(
-                    candidate_path, candidate, selected, runtime_root, require_runtime,
-                    node_lanes=(lane,),
-                ):
-                    report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
-                    report["verdict"] = "BLOCKED"
-                    report["failedLane"] = lane.name
-                    break
                 required_environment = _required_environment(lane)
                 if any(not lane_source.get(name) for name in required_environment):
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
@@ -1797,22 +2056,14 @@ def run_gate(
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
                     break
-                if not release_state_matches(
-                    candidate_path, candidate, selected, runtime_root, require_runtime,
-                    node_lanes=(lane,),
-                ):
-                    report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
-                    report["verdict"] = "BLOCKED"
-                    report["failedLane"] = lane.name
-                    break
                 lane_command = _command_for_lane(lane, candidate)
-                command = _resolve_candidate_command(lane_command, candidate, lane) if lane_command else None
+                command = _resolve_candidate_command(lane_command, execution_candidate, lane) if lane_command else None
                 if command is None:
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
                     break
-                root = Path(repositories[lane.repository]["path"])
+                root = Path(execution_candidate["repositories"][lane.repository]["path"])
                 cwd = root / lane.relative_cwd
                 try:
                     resolved_cwd = cwd.resolve(strict=True)
@@ -1832,9 +2083,13 @@ def run_gate(
                     result = run_bounded_command(
                         list(command), cwd=resolved_cwd, timeout_sec=lane.timeout_sec,
                         max_output_bytes=max_output_bytes,
-                        env=_child_environment(candidate, lane_source, lane),
+                        env=_child_environment(execution_candidate, lane_source, lane),
                     )
                     skip_state = pytest_report_has_skips(junit_path) if junit_path else False
+                except BaseException:
+                    execution_stage.cleanup()
+                    execution_stage = None
+                    raise
                 finally:
                     if junit_path is not None:
                         with contextlib.suppress(OSError):
@@ -1844,10 +2099,7 @@ def run_gate(
                 report["lanes"].append({
                     "name": lane.name, "exitCode": exit_code, "durationMs": duration_ms,
                 })
-                if not release_state_matches(
-                    candidate_path, candidate, selected, runtime_root, require_runtime,
-                    node_lanes=(lane,),
-                ):
+                if not _candidate_metadata_matches(candidate_path, candidate):
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
                     break
@@ -1859,24 +2111,17 @@ def run_gate(
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
                     break
-            if not release_state_matches(
-                candidate_path, candidate, selected, runtime_root, require_runtime,
-            ):
-                report["verdict"] = "BLOCKED"
-                if report["failedLane"] is None:
-                    report["failedLane"] = selected[-1].name if selected else "candidate-runtime"
+            if execution_stage is not None:
+                execution_stage.cleanup()
+            if report["verdict"] == "PASS" and not _candidate_metadata_matches(candidate_path, candidate):
+                report = _blocked(candidate_id, selected[-1].name if selected else "candidate-runtime")
     if report_path is not None:
         assert report_parent_fd is not None
         if not _write_report_atomic(report_path, report, report_parent_fd):
             _invalidate_report(report_path, report_parent_fd)
             os.close(report_parent_fd)
             return _blocked(report.get("candidateId"), "report")
-        if (
-            report["verdict"] == "PASS"
-            and not release_state_matches(
-                candidate_path, candidate, selected, runtime_root, require_runtime,
-            )
-        ):
+        if report["verdict"] == "PASS" and not _candidate_metadata_matches(candidate_path, candidate):
             report = _blocked(candidate_id, selected[-1].name if selected else "candidate-runtime")
             if not _write_report_atomic(report_path, report, report_parent_fd):
                 _invalidate_report(report_path, report_parent_fd)

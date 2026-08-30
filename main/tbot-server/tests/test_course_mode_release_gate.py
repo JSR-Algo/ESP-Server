@@ -551,6 +551,200 @@ def test_replaced_candidate_npm_entrypoint_is_blocked_before_execution(candidate
     assert not marker.exists()
 
 
+def test_lane_executes_private_snapshot_after_original_source_is_replaced(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    source = Path(candidate["repositories"]["adminEsp"]["path"]) / "snapshot-source.txt"
+    source.write_text("original", encoding="utf-8")
+    _git(source.parent, "add", source.name)
+    _git(source.parent, "commit", "-m", "snapshot fixture")
+    candidate["repositories"]["adminEsp"] = _repository(source.parent)
+    _refresh_image_reference(candidate, "adminEsp")
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    original_stage = gate.stage_execution_candidate
+
+    def stage_then_replace(value: dict, lanes):
+        staged = original_stage(value, lanes)
+        source.write_text("mutated", encoding="utf-8")
+        return staged
+
+    monkeypatch.setattr(gate, "stage_execution_candidate", stage_then_replace)
+    lane = gate.Lane(
+        "snapshot-source", "adminEsp", ".",
+        (sys.executable, "-c", "from pathlib import Path;assert Path('snapshot-source.txt').read_text()=='original'"),
+        5.0,
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "PASS"
+
+
+def test_snapshot_cleanup_runs_after_lane_failure(candidate_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    observed = []
+    original_stage = gate.stage_execution_candidate
+
+    def record_stage(candidate: dict, lanes):
+        staged = original_stage(candidate, lanes)
+        observed.append(staged.root)
+        return staged
+
+    monkeypatch.setattr(gate, "stage_execution_candidate", record_stage)
+    result = gate.run_gate(candidate_file, "quick", lanes=(_lane("fail", "raise SystemExit(1)"),))
+
+    assert result["verdict"] == "FAIL"
+    assert observed and not observed[0].exists()
+
+
+def test_staged_child_context_contains_no_original_repository_or_node_paths(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "backend", ".", "backend")
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    originals = {
+        descriptor["path"] for descriptor in candidate["repositories"].values()
+    } | {
+        candidate["tools"]["node"]["backend"]["executable"],
+        candidate["tools"]["node"]["backend"]["npm"]["entrypoint"],
+    }
+    observed = {}
+
+    def capture(command, *, cwd, env, **_kwargs):
+        observed.update(command=command, cwd=str(cwd), env=env)
+        return gate._manifest.BoundedCommandResult(0, "", None)
+
+    monkeypatch.setattr(gate, "run_bounded_command", capture)
+    result = gate.run_gate(
+        candidate_file, "quick",
+        lanes=(gate.Lane("backend-npm", "backend", ".", ("npm", "test"), 5.0),),
+    )
+
+    assert result["verdict"] == "PASS"
+    child_context = json.dumps(observed, sort_keys=True)
+    assert all(original not in child_context for original in originals)
+
+
+def test_snapshot_cleanup_runs_after_unexpected_runner_error(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = []
+    original_stage = gate.stage_execution_candidate
+
+    def record_stage(candidate: dict, lanes):
+        staged = original_stage(candidate, lanes)
+        observed.append(staged.root)
+        return staged
+
+    monkeypatch.setattr(gate, "stage_execution_candidate", record_stage)
+    monkeypatch.setattr(
+        gate, "run_bounded_command", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        gate.run_gate(candidate_file, "quick", lanes=(_lane("error", "pass"),))
+
+    assert observed and not observed[0].exists()
+
+
+def test_assignment_environment_uses_image_ids_not_mutable_tags(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(item for item in gate.FULL_LANES if item.name == "admin-course-mode-assignment-new")
+
+    environment = gate._child_environment(candidate, {}, lane)
+
+    assert environment["TBOT_LESSON_STUDIO_BACKEND_IMAGE"] == candidate["images"]["lessonStudioBackend"]["id"]
+    assert environment["TBOT_LESSON_STUDIO_WEB_IMAGE"] == candidate["images"]["lessonStudioWeb"]["id"]
+
+
+def test_snapshot_rejects_tree_over_entry_limit(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    monkeypatch.setattr(gate, "MAX_SNAPSHOT_ENTRIES", 2)
+
+    with pytest.raises(ValueError, match="entry limit"):
+        gate.stage_execution_candidate(candidate, ())
+
+
+def test_snapshot_rejects_tree_over_byte_limit(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    monkeypatch.setattr(gate, "MAX_SNAPSHOT_BYTES", 1)
+
+    with pytest.raises(ValueError, match="byte limit"):
+        gate.stage_execution_candidate(candidate, ())
+
+
+def test_snapshot_rejects_tree_over_depth_limit(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    monkeypatch.setattr(gate, "MAX_SNAPSHOT_DEPTH", 0)
+
+    with pytest.raises(ValueError, match="depth limit"):
+        gate.stage_execution_candidate(candidate, ())
+
+
+def test_snapshot_rejects_escaping_symlink(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    repository = Path(candidate["repositories"]["backend"]["path"])
+    (repository / "escape").symlink_to("../candidate.json")
+
+    with pytest.raises(ValueError, match="unsafe symlink"):
+        gate.stage_execution_candidate(candidate, ())
+
+
+def test_snapshot_rejects_special_file(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    repository = Path(candidate["repositories"]["backend"]["path"])
+    fifo = repository / "unsafe.fifo"
+    os.mkfifo(fifo)
+
+    with pytest.raises(ValueError, match="special file"):
+        gate.stage_execution_candidate(candidate, ())
+
+
+def test_snapshot_rejects_file_mutation_during_copy(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    source = Path(candidate["repositories"]["backend"]["path"]) / "tracked.txt"
+    source_identity = (source.stat().st_dev, source.stat().st_ino)
+    original_read = gate.os.read
+    mutated = False
+
+    def mutate_during_read(descriptor: int, size: int) -> bytes:
+        nonlocal mutated
+        metadata = os.fstat(descriptor)
+        if not mutated and (metadata.st_dev, metadata.st_ino) == source_identity:
+            mutated = True
+            source.write_text("mutated while copying", encoding="utf-8")
+        return original_read(descriptor, size)
+
+    monkeypatch.setattr(gate.os, "read", mutate_during_read)
+
+    with pytest.raises(ValueError, match="changed during snapshot"):
+        gate.stage_execution_candidate(candidate, ())
+
+
+def test_snapshot_construction_failure_removes_partial_tree(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    stage_root = tmp_path / "partial-stage"
+    stage_root.mkdir()
+    monkeypatch.setattr(gate.tempfile, "mkdtemp", lambda **_kwargs: str(stage_root))
+    monkeypatch.setattr(gate, "MAX_SNAPSHOT_ENTRIES", 0)
+
+    with pytest.raises(ValueError):
+        gate.stage_execution_candidate(candidate, ())
+
+    assert not stage_root.exists()
+
+
 def test_admin_browser_environment_is_only_candidate_bound_descriptor(candidate_file: Path) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     environment = gate._child_environment(candidate, {
@@ -638,7 +832,7 @@ def test_lane_failure_stops_dependent_lanes(candidate_file: Path, tmp_path: Path
     assert not marker.exists()
 
 
-def test_identity_drift_before_next_lane_is_blocked(candidate_file: Path) -> None:
+def test_original_repository_drift_does_not_change_staged_lane(candidate_file: Path) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     tracked = Path(candidate["repositories"]["adminEsp"]["path"]) / "tracked.txt"
     result = gate.run_gate(
@@ -650,9 +844,8 @@ def test_identity_drift_before_next_lane_is_blocked(candidate_file: Path) -> Non
         ),
     )
 
-    assert result["verdict"] == "BLOCKED"
-    assert result["failedLane"] == "drift"
-    assert [lane["name"] for lane in result["lanes"]] == ["drift"]
+    assert result["verdict"] == "PASS"
+    assert [lane["name"] for lane in result["lanes"]] == ["drift", "dependent"]
 
 
 def test_missing_required_capability_is_skipped_and_blocks(candidate_file: Path) -> None:
@@ -1413,7 +1606,7 @@ def test_atomic_report_handles_partial_os_writes(
     assert json.loads(report.read_text(encoding="utf-8")) == result
 
 
-def test_last_lane_repository_drift_blocks_after_successful_subprocess(
+def test_last_lane_original_repository_drift_does_not_invalidate_snapshot(
     candidate_file: Path,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
@@ -1425,12 +1618,11 @@ def test_last_lane_repository_drift_blocks_after_successful_subprocess(
 
     result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
 
-    assert result["verdict"] == "BLOCKED"
-    assert result["failedLane"] == "last"
+    assert result["verdict"] == "PASS"
     assert result["lanes"][0]["exitCode"] == 0
 
 
-def test_final_revalidation_never_publishes_pass_report_after_lane_drift(
+def test_report_can_pass_when_only_original_repository_drifts_after_snapshot(
     candidate_file: Path, tmp_path: Path,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
@@ -1443,11 +1635,11 @@ def test_final_revalidation_never_publishes_pass_report_after_lane_drift(
 
     result = gate.run_gate(candidate_file, "quick", lanes=(lane,), report_path=report)
 
-    assert result["verdict"] == "BLOCKED"
-    assert json.loads(report.read_text(encoding="utf-8"))["verdict"] == "BLOCKED"
+    assert result["verdict"] == "PASS"
+    assert json.loads(report.read_text(encoding="utf-8"))["verdict"] == "PASS"
 
 
-def test_report_write_is_followed_by_release_state_revalidation(
+def test_report_write_does_not_revalidate_mutable_original_repository(
     candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
@@ -1468,12 +1660,12 @@ def test_report_write_is_followed_by_release_state_revalidation(
 
     result = gate.run_gate(candidate_file, "quick", lanes=(), report_path=report)
 
-    assert result["verdict"] == "BLOCKED"
-    assert writes == 2
-    assert json.loads(report.read_text(encoding="utf-8"))["verdict"] == "BLOCKED"
+    assert result["verdict"] == "PASS"
+    assert writes == 1
+    assert json.loads(report.read_text(encoding="utf-8"))["verdict"] == "PASS"
 
 
-def test_failed_corrective_report_write_removes_stale_pass(
+def test_original_repository_drift_does_not_require_corrective_report(
     candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
@@ -1495,9 +1687,8 @@ def test_failed_corrective_report_write_removes_stale_pass(
 
     result = gate.run_gate(candidate_file, "quick", lanes=(), report_path=report)
 
-    assert result["verdict"] == "BLOCKED"
-    assert result["failedLane"] == "report"
-    assert not report.exists()
+    assert result["verdict"] == "PASS"
+    assert report.exists()
 
 
 def test_failed_initial_report_write_removes_preexisting_stale_pass(
@@ -2003,8 +2194,7 @@ def test_node_install_is_revalidated_after_lane_execution(
 
     result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
 
-    assert result["verdict"] == "BLOCKED"
-    assert result["failedLane"] == "backend-node"
+    assert result["verdict"] == "PASS"
 
 
 def test_node_digest_calls_scale_with_current_node_lanes_not_all_checkpoints(
@@ -2039,10 +2229,10 @@ def test_node_digest_calls_scale_with_current_node_lanes_not_all_checkpoints(
     result = gate.run_gate(candidate_file, "quick", lanes=lanes)
 
     assert result["verdict"] == "PASS"
-    assert calls == 11
+    assert calls == 2
 
 
-def test_install_mutation_between_lanes_blocks_before_next_relevant_lane(
+def test_original_install_mutation_between_lanes_does_not_change_snapshot(
     candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
@@ -2066,9 +2256,8 @@ def test_install_mutation_between_lanes_blocks_before_next_relevant_lane(
 
     result = gate.run_gate(candidate_file, "quick", lanes=lanes)
 
-    assert result["verdict"] == "BLOCKED"
-    assert result["failedLane"] == "backend-node"
-    assert not marker.exists()
+    assert result["verdict"] == "PASS"
+    assert marker.exists()
 
 
 @pytest.mark.parametrize("repository_name", ["backend", "firmware"])
@@ -2187,9 +2376,9 @@ def test_assignment_lane_identity_is_derived_only_from_candidate(candidate_file:
 
     assert environment["TBOT_BACKEND_WORKTREE"] == candidate["repositories"]["backend"]["path"]
     assert environment["TBOT_FIRMWARE_WORKTREE"] == candidate["repositories"]["firmware"]["path"]
-    assert environment["TBOT_LESSON_STUDIO_BACKEND_IMAGE"] == candidate["images"]["lessonStudioBackend"]["reference"]
+    assert environment["TBOT_LESSON_STUDIO_BACKEND_IMAGE"] == candidate["images"]["lessonStudioBackend"]["id"]
     assert environment["TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID"] == "sha256:" + "1" * 64
-    assert environment["TBOT_LESSON_STUDIO_WEB_IMAGE"] == candidate["images"]["lessonStudioWeb"]["reference"]
+    assert environment["TBOT_LESSON_STUDIO_WEB_IMAGE"] == candidate["images"]["lessonStudioWeb"]["id"]
     assert environment["TBOT_LESSON_STUDIO_WEB_IMAGE_ID"] == "sha256:" + "2" * 64
     assert environment["LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME"] == "tbot-task4-unit"
 
