@@ -17,7 +17,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import unquote, urlsplit
 
 import httpcore
 import httpx
@@ -47,6 +47,7 @@ from core.lesson.layered_cinematic_contract import (
     is_layered_cinematic_generation_asset,
     validate_layered_cinematic_generation_asset,
 )
+from core.lesson.sd_pack_gc import SdPackGarbageCollector
 from core.lesson.sd_pack_mcp_payload import (
     FirmwareSyncPackError,
     validate_renderer_v3_shared_mp4,
@@ -273,6 +274,22 @@ async def materialize_lesson_sd_pack(
                     False,
                     "READY lesson asset pack does not match manifest",
                 )
+
+        lesson = _lesson_config(config)
+        gc = SdPackGarbageCollector(
+            store.pack_root,
+            shared_store=store,
+            gc_free_percent=lesson.get("sd_gc_free_percent", 20),
+            preload_min_free_percent=lesson.get("sd_preload_min_free_percent", 5),
+            disk_usage=shutil.disk_usage,
+        )
+        if not gc.can_preload():
+            raise MaterializationError(
+                "SD_PRELOAD_SPACE_LOW",
+                507,
+                True,
+                "SD free space is below the safe floor for a new lesson pack",
+            )
 
         pinned_addresses = await _attest_manifest_urls(normalized, resolver)
         own_client = client is None
@@ -572,7 +589,7 @@ def _validate_asset(
     _reject_field_delta(set(item.keys()), _ASSET_FIELDS)
     key = item.get("key")
     try:
-        encoded = encode_asset_basename(key)
+        encode_asset_basename(key)
     except AssetBasenameRefused:
         raise _bad("INVALID_ASSET_KEY", "Invalid asset key") from None
     digest = _sha256_value(item.get("sha256"), "INVALID_ASSET_SHA256")

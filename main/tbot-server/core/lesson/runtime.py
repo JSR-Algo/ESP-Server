@@ -157,6 +157,7 @@ from core.lesson.sd_pack_sync import request_sd_pack_sync, sd_pack_sync_timeout_
 
 TAG = "LessonRuntime"
 COURSE_EVIDENCE_SEQUENCE_BASE = -3_000_000
+COURSE_ACTIVITY_PROGRESS_SEQUENCE_BASE = -4_000_000
 SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_to_sd"
 SAMPLE_SD_ASSET_SYNC_TOOL = "self_lesson_assets_sync_sample_to_sd"
 
@@ -238,7 +239,20 @@ class CourseModeRuntimeAdapter:
         self.orchestrator.started_at_ms = self._started_at_ms
         self._course_budget_started = True
 
+    @staticmethod
+    def _valid_delivery_identity_component(value: Any) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    def _validate_delivery_scope(self) -> None:
+        if not (
+            self._valid_delivery_identity_component(self.assignment_id)
+            and self._valid_delivery_identity_component(self.lesson_session_id)
+        ):
+            raise ValueError("invalid pending activity delivery identity")
+
     def _identity_error(self, arguments: Dict[str, Any]) -> Dict[str, Any] | None:
+        if self._course_budget_started:
+            self._validate_delivery_scope()
         if arguments.get("lessonSessionId") != self.lesson_session_id:
             return {"accepted": False, "code": "LESSON_SESSION_MISMATCH"}
         turn_sequence_id = arguments.get("turnSequenceId")
@@ -287,11 +301,16 @@ class CourseModeRuntimeAdapter:
             and self.contract.activity(decision.activity_id).navigation_mode == "authoritative_graph"
             and decision.decision_id not in self._pending_activity_decision_ids
         ):
+            if self._course_budget_started:
+                self._validate_delivery_scope()
             self._pending_activity_decision_ids.append(decision.decision_id)
-            identity = ":".join((
-                self.lesson_session_id, operation, observation_id,
-                decision.activity_id, decision.decision_id,
-            ))
+            identity = json.dumps(
+                [
+                    self.assignment_id, self.lesson_session_id, operation, observation_id,
+                    decision.activity_id, decision.decision_id,
+                ],
+                ensure_ascii=False, separators=(",", ":"),
+            )
             self._activity_delivery_ids[decision.decision_id] = (
                 "course-delivery-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
             )
@@ -312,8 +331,19 @@ class CourseModeRuntimeAdapter:
     def restore_pending_activity_decision(
         self, decision_id: str, delivery_id: str | None = None,
     ) -> None:
-        if delivery_id is not None:
-            self._activity_delivery_ids[decision_id] = delivery_id
+        if not isinstance(delivery_id, str) or not delivery_id.strip():
+            raise ValueError("invalid pending activity delivery identity")
+        existing_decision_id = next(
+            (
+                pending_decision_id
+                for pending_decision_id, pending_delivery_id in self._activity_delivery_ids.items()
+                if pending_delivery_id == delivery_id and pending_decision_id != decision_id
+            ),
+            None,
+        )
+        if existing_decision_id is not None:
+            raise ValueError("duplicate pending activity delivery identity")
+        self._activity_delivery_ids[decision_id] = delivery_id
         if decision_id not in self._pending_activity_decision_ids:
             self._pending_activity_decision_ids.insert(0, decision_id)
 
@@ -345,6 +375,7 @@ class CourseModeRuntimeAdapter:
         result = self._remember(
             decision, operation=operation, observation_id=arguments["observationId"],
         )
+        self._forward_activity_progress(operation, arguments, decision)
         self._store_operation_result(operation, arguments, result)
         return result
 
@@ -511,6 +542,53 @@ class CourseModeRuntimeAdapter:
             "sessionId": self.lesson_session_id,
             "events": [event],
         }
+
+    def _activity_progress_batch(
+        self, operation: str, arguments: Dict[str, Any], decision: CourseDecision,
+    ) -> Dict[str, Any] | None:
+        if (
+            operation != "course_observe_child"
+            or decision.accepted is not True
+            or decision.action not in {"ADVANCE_ACTIVITY", "COMPLETE_COURSE"}
+            or self.forwarder is None
+            or not self.assignment_id
+        ):
+            return None
+        activity_id = arguments.get("activityId")
+        if not isinstance(activity_id, str):
+            return None
+        try:
+            activity_index = next(
+                index
+                for index, activity in enumerate(self.contract.activities, 1)
+                if activity.activity_id == activity_id
+            )
+            if self.contract.activity(activity_id).navigation_mode != "authoritative_graph":
+                return None
+        except (KeyError, StopIteration):
+            return None
+        return {
+            "assignmentId": self.assignment_id,
+            "sessionId": self.lesson_session_id,
+            "events": [{
+                "type": "step_completed",
+                "sequence": COURSE_ACTIVITY_PROGRESS_SEQUENCE_BASE - activity_index,
+                "stepId": activity_id,
+                "stepType": "course_activity",
+                "result": "success",
+            }],
+        }
+
+    def _forward_activity_progress(
+        self, operation: str, arguments: Dict[str, Any], decision: CourseDecision,
+    ) -> None:
+        batch = self._activity_progress_batch(operation, arguments, decision)
+        if batch is None:
+            return
+        if self._defer_evidence_forwarding:
+            self._pending_evidence_batches.append(batch)
+            return
+        self.forwarder.enqueue(batch)
 
     def _forward_evidence(self, decision: CourseDecision) -> None:
         batch = self._evidence_batch(decision)
@@ -858,6 +936,8 @@ class CourseModeRuntimeAdapter:
             "pendingActivityDecisionIds": list(self._pending_activity_decision_ids),
             "pendingActivityDeliveries": [
                 {
+                    "assignmentId": self.assignment_id,
+                    "lessonSessionId": self.lesson_session_id,
                     "decisionId": decision_id,
                     "deliveryId": self._activity_delivery_ids[decision_id],
                 }
@@ -932,26 +1012,58 @@ class CourseModeRuntimeAdapter:
             )
         value._course_budget_started = snapshot["courseBudgetStarted"]
         value._completion_stop_dispatched = snapshot.get("completionStopDispatched") is True
-        value._pending_activity_decision_ids = list(snapshot.get("pendingActivityDecisionIds", []))
+        pending_decision_ids = snapshot.get("pendingActivityDecisionIds", [])
+        if (
+            not isinstance(pending_decision_ids, list)
+            or any(
+                not isinstance(decision_id, str) or not decision_id.strip()
+                for decision_id in pending_decision_ids
+            )
+            or len(set(pending_decision_ids)) != len(pending_decision_ids)
+        ):
+            raise ValueError("invalid pending activity decision identity")
+        value._pending_activity_decision_ids = list(pending_decision_ids)
         pending_deliveries = snapshot.get("pendingActivityDeliveries", [])
-        value._activity_delivery_ids = {
-            item["decisionId"]: item["deliveryId"]
-            for item in pending_deliveries
-            if isinstance(item, dict)
-            and isinstance(item.get("decisionId"), str)
-            and isinstance(item.get("deliveryId"), str)
-        }
-        for decision_id in value._pending_activity_decision_ids:
-            if decision_id not in value._activity_delivery_ids:
-                decision = value._decisions[decision_id]
-                identity = ":".join((
-                    value.lesson_session_id, "legacy", decision_id,
-                    decision.activity_id or "none",
-                ))
-                value._activity_delivery_ids[decision_id] = (
-                    "course-delivery-"
-                    + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
-                )
+        if not isinstance(pending_deliveries, list):
+            raise ValueError("invalid pending activity delivery identity")
+        value._activity_delivery_ids = {}
+        delivery_decisions: dict[str, str] = {}
+        for item in pending_deliveries:
+            if not isinstance(item, dict):
+                raise ValueError("invalid pending activity delivery identity")
+            decision_id = item.get("decisionId")
+            delivery_id = item.get("deliveryId")
+            delivery_assignment_id = item.get("assignmentId")
+            delivery_session_id = item.get("lessonSessionId")
+            if (
+                not isinstance(decision_id, str) or not decision_id.strip()
+                or not isinstance(delivery_id, str) or not delivery_id.strip()
+            ):
+                raise ValueError("invalid pending activity delivery identity")
+            if value._course_budget_started and not (
+                cls._valid_delivery_identity_component(delivery_assignment_id)
+                and cls._valid_delivery_identity_component(delivery_session_id)
+            ):
+                raise ValueError("invalid pending activity delivery identity")
+            if (
+                delivery_assignment_id != value.assignment_id
+                or delivery_session_id != value.lesson_session_id
+            ):
+                raise ValueError("pending activity delivery identity mismatch")
+            if decision_id in value._activity_delivery_ids:
+                raise ValueError("duplicate pending activity delivery identity")
+            existing_decision_id = delivery_decisions.get(delivery_id)
+            if existing_decision_id is not None and existing_decision_id != decision_id:
+                raise ValueError("duplicate pending activity delivery identity")
+            value._activity_delivery_ids[decision_id] = delivery_id
+            delivery_decisions[delivery_id] = decision_id
+        if set(value._activity_delivery_ids) != set(value._pending_activity_decision_ids):
+            raise ValueError("invalid pending activity delivery identity")
+        if any(
+            decision_id not in value._decisions
+            for decision_id in value._pending_activity_decision_ids
+        ):
+            raise ValueError("unknown pending activity decision")
         value._pending_evidence_batches = copy.deepcopy(snapshot.get("pendingEvidenceBatches", []))
         return value
 
@@ -2298,6 +2410,7 @@ class LessonRuntime:
         # transitions (e.g. a late lesson_error after an earlier timeout) cannot
         # enqueue a second terminal event for the same run.
         self._failure_forwarded = False
+        self._pending_terminal_completion_batch: Dict[str, Any] | None = None
         self._completion_stop_sent = bool(
             self.course_mode is not None
             and self.course_mode._completion_stop_dispatched
@@ -2455,7 +2568,7 @@ class LessonRuntime:
         await self._send(payload)
 
     async def _deliver_pending_course_activity_frames(self) -> None:
-        """Retry durable send attempts; consumers dedupe by (sessionId, deliveryId).
+        """Retry sends; consumers dedupe by (assignmentId, sessionId, deliveryId).
 
         A successful send has no application ACK here, so a failed clear snapshot can
         resend the same logical transition with a new wire sequence.
@@ -4178,6 +4291,25 @@ class LessonRuntime:
         return True
 
     async def replay_pending_terminal_event(self) -> bool:
+        pending = self._pending_terminal_completion_batch
+        if pending is not None:
+            store = getattr(self.forwarder, "_terminal_store", None)
+            store_batch = getattr(store, "store", None)
+            device_id = getattr(self.forwarder, "device_id", None)
+            if callable(store_batch) and device_id:
+                try:
+                    await store_batch(device_id, pending)
+                except Exception as exc:
+                    self._log(
+                        "warning",
+                        f"lesson terminal outbox retry failed: {type(exc).__name__}",
+                    )
+                    return False
+            accepted = self.forwarder.enqueue(pending)
+            if accepted is False:
+                return False
+            self._pending_terminal_completion_batch = None
+            return True
         replay = getattr(self.forwarder, "replay_pending_terminal_event", None)
         if not callable(replay):
             return False
@@ -5512,7 +5644,7 @@ class LessonRuntime:
             self._cancel_visual_waiters(increment_generation=True, reason="lessonStopped")
             self._log("info", f"lesson_completed stepsCompleted={self._steps_completed}")
             self._forward_phase("completed")
-            self._forward(
+            await self._forward_terminal(
                 {
                     "type": "lesson_completed",
                     "completedAt": _wire_timestamp(),
@@ -8017,6 +8149,9 @@ class LessonRuntime:
             return
         clean = {k: v for k, v in event.items() if v is not None}
         self._log_runtime_event(clean)
+        self.forwarder.enqueue(self._forward_batch(clean))
+
+    def _forward_batch(self, clean: Dict[str, Any]) -> Dict[str, Any]:
         batch = {
             "assignmentId": self.assignment_id,
             "lessonId": self.lesson_id,
@@ -8025,7 +8160,40 @@ class LessonRuntime:
             "events": [clean],
         }
         batch.update(self._trace_context)
-        self.forwarder.enqueue(batch)
+        return batch
+
+    async def _forward_terminal(self, event: Dict[str, Any]) -> bool:
+        if self.forwarder is None:
+            return False
+        clean = {key: value for key, value in event.items() if value is not None}
+        self._log_runtime_event(clean)
+        batch = self._forward_batch(clean)
+        prepare = getattr(self.forwarder, "_with_started_event_for_replay", None)
+        if callable(prepare):
+            batch = prepare(batch)
+        store = getattr(self.forwarder, "_terminal_store", None)
+        store_batch = getattr(store, "store", None)
+        device_id = getattr(self.forwarder, "device_id", None)
+        if callable(store_batch) and device_id:
+            try:
+                await store_batch(device_id, batch)
+            except Exception as exc:
+                self._pending_terminal_completion_batch = batch
+                try:
+                    self.forwarder.pending_terminal_batch = batch
+                except Exception:
+                    pass
+                self._log(
+                    "warning",
+                    f"lesson terminal outbox write failed: {type(exc).__name__}",
+                )
+                return False
+        accepted = self.forwarder.enqueue(batch)
+        if accepted is False:
+            self._pending_terminal_completion_batch = batch
+            return False
+        self._pending_terminal_completion_batch = None
+        return True
 
     def _start_terminal_readback(self) -> None:
         """Re-read the assignment after completing it, and record what the backend says.
@@ -8128,6 +8296,12 @@ class LessonRuntime:
             "warning",
             "assignment/current read-back completion not observed: "
             f"assignmentId={assignment_id} still active state={state}",
+        )
+        replayed = await self.replay_pending_terminal_event()
+        self._log(
+            "info" if replayed else "warning",
+            "assignment/current completion reconciliation "
+            f"{'queued' if replayed else 'pending'} assignmentId={assignment_id}",
         )
 
     def _log_runtime_event(self, event: Dict[str, Any]) -> None:

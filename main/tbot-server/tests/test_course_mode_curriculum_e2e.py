@@ -14,20 +14,21 @@ import pytest
 
 import scripts.course_mode_candidate_manifest as manifest
 from core.lesson.course_mode_contract import CourseModeContract
-from core.lesson.course_orchestrator import CourseOrchestrator
+from core.lesson.course_orchestrator import CourseOrchestrator, SessionState
 from core.lesson.runtime import CourseModeRuntimeAdapter
 from scripts.course_mode_26week_simulation import (
-    _attempt_ceiling_turn_index,
     PEDAGOGY_WEEKS,
-    CourseModeSimulationError,
     RESPONSE_MATRIX,
+    CourseModeSimulationError,
+    _attempt_ceiling_turn_index,
+    _settle_decision,
     load_backend_contracts,
     resolve_backend_root,
     simulate_contracts,
     simulate_fixture,
     simulate_terminal_path,
 )
-
+from tests.test_course_mode_curriculum import curriculum_contract
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND_ROOT = Path(os.environ["COURSE_MODE_BACKEND_ROOT"])
@@ -190,6 +191,92 @@ def _checksum(value: dict) -> str:
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _nine_activity_contract() -> dict:
+    value = curriculum_contract()
+    activities = value["activities"]
+    for activity in activities:
+        activity["expectedDurationSec"] = 50
+    original_terminal = copy.deepcopy(activities[-1])
+    for target in value["targets"]:
+        if target["role"] == "primary":
+            target["activityIds"].extend(["a8", "a9"])
+    for source_id, destination_id in (("a7", "a8"), ("a8", "a9")):
+        source = copy.deepcopy(original_terminal)
+        source["activityId"] = source_id
+        source["contextId"] = f"context.{source_id[1:]}"
+        source["outcomes"] = {
+            "correct": {"action": "advance"},
+            "near": {"action": "advance"},
+            "incorrect": {"action": "support", "activityId": destination_id},
+            "silence": {"action": "retry", "activityId": destination_id},
+            "vietnamese": {"action": "advance"},
+            "help": {"action": "support", "activityId": destination_id},
+            "fatigue": {"action": "pause"},
+            "refusal": {"action": "pause"},
+        }
+        if source_id == "a7":
+            activities[-1] = source
+        else:
+            activities.append(source)
+    terminal = copy.deepcopy(original_terminal)
+    terminal["activityId"] = "a9"
+    terminal["contextId"] = "context.9"
+    activities.append(terminal)
+    value["contractChecksum"] = _checksum(value)
+    return value
+
+
+@pytest.mark.asyncio
+async def test_nine_runtime_activities_emit_nine_authoritative_progress_rows() -> None:
+    class Forwarder:
+        def __init__(self) -> None:
+            self.batches = []
+
+        def enqueue(self, batch) -> None:
+            self.batches.append(copy.deepcopy(batch))
+
+    forwarder = Forwarder()
+    runtime = CourseModeRuntimeAdapter(
+        CourseModeContract.from_mapping(_nine_activity_contract()),
+        clock=lambda: 30.0,
+        assignment_id="assignment-nine",
+        forwarder=forwarder,
+    )
+    runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
+
+    for turn in range(1, 10):
+        activity = runtime.contract.activity(runtime.orchestrator.active_activity_id)
+        result = await runtime.course_observe_child({
+            "lessonSessionId": runtime.lesson_session_id,
+            "turnSequenceId": runtime.tool_context()["identity"]["turnSequenceId"],
+            "observationId": f"activity-{turn}",
+            "semanticClass": "target_en",
+            "speechClass": "exact",
+            "language": "en",
+            "intent": "answer",
+            "engagement": "engaged",
+            "safetyClass": "normal",
+            "assessmentEligible": True,
+            "confidenceBand": "high",
+            "activityId": activity.activity_id,
+            "contextId": activity.context_id,
+            "robotAudioContaminated": False,
+            "targetTextVisible": False,
+        })
+        assert result["accepted"] is True
+        await _settle_decision(runtime, result, f"activity-{turn}")
+
+    rows = [
+        event
+        for batch in forwarder.batches
+        for event in batch["events"]
+        if event["type"] == "step_completed"
+    ]
+    assert [row["stepId"] for row in rows] == [f"a{index}" for index in range(1, 10)]
+    assert len({row["sequence"] for row in rows}) == 9
+    assert all(row["result"] == "success" for row in rows)
 
 
 def test_simulates_all_backend_generated_lessons_and_response_modes(backend_contracts) -> None:

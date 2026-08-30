@@ -171,12 +171,279 @@ async def test_activity_frame_retry_after_clear_persist_failure_reuses_delivery_
     dedupe_ledger = set()
     applied_activity_ids = []
     for frame in sent:
-        application_key = (frame["sessionId"], frame["body"]["deliveryId"])
+        application_key = (
+            frame["assignmentId"], frame["sessionId"], frame["body"]["deliveryId"],
+        )
         if application_key in dedupe_ledger:
             continue
         dedupe_ledger.add(application_key)
         applied_activity_ids.append(frame["body"]["activityId"])
     assert applied_activity_ids == ["a2"]
+
+
+@pytest.mark.asyncio
+async def test_activity_delivery_identity_is_scoped_to_assignment_session_and_delivery() -> None:
+    async def pending_delivery(assignment_id: str, session_id: str):
+        runtime = course_mode_runtime_from_manifest(
+            {"courseModeContract": curriculum_contract()}, enabled=True,
+            assignment_id=assignment_id, runtime_session_id=session_id, clock=lambda: 1.0,
+        )
+        assert runtime is not None
+        runtime.start_course_budget()
+        runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
+        await runtime.course_observe_child({
+            "lessonSessionId": session_id, "turnSequenceId": 1,
+            "observationId": "same-logical-transition", "semanticClass": "target_en",
+            "speechClass": "exact", "language": "en", "intent": "answer",
+            "engagement": "engaged", "safetyClass": "normal", "assessmentEligible": True,
+            "confidenceBand": "high", "activityId": "a1", "contextId": "context.1",
+            "robotAudioContaminated": False, "targetTextVisible": False,
+        })
+        return runtime.snapshot()["pendingActivityDeliveries"][0]
+
+    first = await pending_delivery("assignment-1", "session-1")
+    other_assignment = await pending_delivery("assignment-2", "session-1")
+    other_session = await pending_delivery("assignment-1", "session-2")
+
+    assert first["assignmentId"] == "assignment-1"
+    assert first["lessonSessionId"] == "session-1"
+    assert first["deliveryId"] != other_assignment["deliveryId"]
+    assert first["deliveryId"] != other_session["deliveryId"]
+
+
+@pytest.mark.asyncio
+async def test_pending_activity_attempt_and_delivery_identity_survive_reconnect() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": curriculum_contract()}, enabled=True,
+        assignment_id="assignment-1", runtime_session_id="session-1", clock=lambda: 1.0,
+    )
+    assert runtime is not None
+    runtime.start_course_budget()
+    runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
+    result = await runtime.course_observe_child({
+        "lessonSessionId": "session-1", "turnSequenceId": 1,
+        "observationId": "attempt-before-reconnect", "semanticClass": "other",
+        "speechClass": "wrong", "language": "en", "intent": "answer",
+        "engagement": "engaged", "safetyClass": "normal", "assessmentEligible": True,
+        "confidenceBand": "high", "activityId": "a1", "contextId": "context.1",
+        "robotAudioContaminated": False, "targetTextVisible": False,
+    })
+    snapshot = runtime.snapshot()
+    delivery = snapshot["pendingActivityDeliveries"][0]
+    assert delivery["assignmentId"] == "assignment-1"
+    assert delivery["lessonSessionId"] == "session-1"
+
+    restored = runtime.restore(
+        runtime.contract, snapshot, assignment_id="assignment-1",
+        runtime_session_id="session-1", clock=lambda: 1.0,
+    )
+    restored_decision, restored_delivery_id = restored.pending_activity_deliveries()[0]
+
+    assert restored.lesson_session_id == "session-1"
+    assert (
+        restored.orchestrator.snapshot()["activityAttempts"]
+        == snapshot["orchestrator"]["activityAttempts"]
+    )
+    assert restored_decision.decision_id == result["decisionId"]
+    assert restored_decision.attempt == 1
+    assert restored_delivery_id == delivery["deliveryId"]
+    assert restored.snapshot()["pendingActivityDeliveries"] == [delivery]
+
+
+@pytest.mark.parametrize("delivery_id", [None, "", "   ", 7])
+def test_restore_rejects_invalid_pending_delivery_identity(delivery_id) -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": curriculum_contract()}, enabled=True,
+        assignment_id="assignment-1", runtime_session_id="session-1", clock=lambda: 1.0,
+    )
+    assert runtime is not None
+    runtime.start_course_budget()
+    runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
+    decision = CourseDecision(
+        "decision-1", True, SessionState.WORD_ACTIVE, "RETRY_ACTIVITY",
+        "acknowledge_child", None, "invite_retry", EmbodiedIntent.ENCOURAGE_SMALL,
+        False, None, activity_id="a1", visual_state="retry", attempt=1,
+    )
+    runtime._decisions[decision.decision_id] = decision
+    runtime._pending_activity_decision_ids = [decision.decision_id]
+    runtime._activity_delivery_ids[decision.decision_id] = "course-delivery-1"
+    snapshot = runtime.snapshot()
+    snapshot["pendingActivityDeliveries"][0]["deliveryId"] = delivery_id
+
+    with pytest.raises(ValueError, match="invalid pending activity delivery identity"):
+        runtime.restore(
+            runtime.contract, snapshot, assignment_id="assignment-1",
+            runtime_session_id="session-1", clock=lambda: 1.0,
+        )
+
+
+@pytest.mark.parametrize("field", ["assignmentId", "lessonSessionId"])
+@pytest.mark.parametrize("value", [None, "", "   ", 7])
+def test_restore_rejects_invalid_pending_delivery_scope_after_session_start(field, value) -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": curriculum_contract()}, enabled=True,
+        assignment_id="assignment-1", runtime_session_id="session-1", clock=lambda: 1.0,
+    )
+    assert runtime is not None
+    runtime.start_course_budget()
+    runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
+    decision = CourseDecision(
+        "decision-1", True, SessionState.WORD_ACTIVE, "RETRY_ACTIVITY",
+        "acknowledge_child", None, "invite_retry", EmbodiedIntent.ENCOURAGE_SMALL,
+        False, None, activity_id="a1", visual_state="retry", attempt=1,
+    )
+    runtime._decisions[decision.decision_id] = decision
+    runtime._pending_activity_decision_ids = [decision.decision_id]
+    runtime._activity_delivery_ids[decision.decision_id] = "course-delivery-1"
+    snapshot = runtime.snapshot()
+    snapshot["pendingActivityDeliveries"][0][field] = value
+
+    with pytest.raises(ValueError, match="invalid pending activity delivery identity"):
+        runtime.restore(
+            runtime.contract, snapshot, assignment_id="assignment-1",
+            runtime_session_id="session-1", clock=lambda: 1.0,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("assignment_id", [None, "", "   ", 7])
+async def test_delivery_generation_rejects_invalid_assignment_after_session_start(
+    assignment_id,
+) -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": curriculum_contract()}, enabled=True,
+        assignment_id=assignment_id, runtime_session_id="session-1", clock=lambda: 1.0,
+    )
+    assert runtime is not None
+    runtime.start_course_budget()
+    runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
+    before = runtime.snapshot()
+
+    with pytest.raises(ValueError, match="invalid pending activity delivery identity"):
+        await runtime.course_observe_child({
+            "lessonSessionId": "session-1", "turnSequenceId": 1,
+            "observationId": "invalid-assignment-delivery", "semanticClass": "target_en",
+            "speechClass": "exact", "language": "en", "intent": "answer",
+            "engagement": "engaged", "safetyClass": "normal", "assessmentEligible": True,
+            "confidenceBand": "high", "activityId": "a1", "contextId": "context.1",
+            "robotAudioContaminated": False, "targetTextVisible": False,
+        })
+    assert runtime.snapshot() == before
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("assignmentId", "assignment-2"), ("lessonSessionId", "session-2")],
+)
+def test_restore_rejects_pending_delivery_outside_exact_identity_scope(field, value) -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": curriculum_contract()}, enabled=True,
+        assignment_id="assignment-1", runtime_session_id="session-1", clock=lambda: 1.0,
+    )
+    assert runtime is not None
+    runtime.start_course_budget()
+    runtime.orchestrator.session_state = SessionState.WORD_ACTIVE
+    decision = CourseDecision(
+        "decision-1", True, SessionState.WORD_ACTIVE, "RETRY_ACTIVITY",
+        "acknowledge_child", None, "invite_retry", EmbodiedIntent.ENCOURAGE_SMALL,
+        False, None, activity_id="a1", visual_state="retry", attempt=1,
+    )
+    runtime._decisions[decision.decision_id] = decision
+    runtime._pending_activity_decision_ids = [decision.decision_id]
+    runtime._activity_delivery_ids[decision.decision_id] = "course-delivery-1"
+    snapshot = runtime.snapshot()
+    snapshot["pendingActivityDeliveries"][0][field] = value
+
+    with pytest.raises(ValueError, match="pending activity delivery identity mismatch"):
+        runtime.restore(
+            runtime.contract, snapshot, assignment_id="assignment-1",
+            runtime_session_id="session-1", clock=lambda: 1.0,
+        )
+
+
+def test_restore_rejects_duplicate_pending_delivery_id_for_different_decisions() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": curriculum_contract()}, enabled=True,
+        assignment_id="assignment-1", runtime_session_id="session-1", clock=lambda: 1.0,
+    )
+    assert runtime is not None
+    runtime.start_course_budget()
+    decisions = [
+        CourseDecision(
+            f"decision-{index}", True, SessionState.WORD_ACTIVE, "RETRY_ACTIVITY",
+            "acknowledge_child", None, "invite_retry", EmbodiedIntent.ENCOURAGE_SMALL,
+            False, None, activity_id="a1", visual_state="retry", attempt=index,
+        )
+        for index in (1, 2)
+    ]
+    runtime._decisions = {decision.decision_id: decision for decision in decisions}
+    runtime._pending_activity_decision_ids = [decision.decision_id for decision in decisions]
+    runtime._activity_delivery_ids = {
+        decision.decision_id: "course-delivery-shared" for decision in decisions
+    }
+    snapshot = runtime.snapshot()
+
+    with pytest.raises(ValueError, match="duplicate pending activity delivery identity"):
+        runtime.restore(
+            runtime.contract, snapshot, assignment_id="assignment-1",
+            runtime_session_id="session-1", clock=lambda: 1.0,
+        )
+
+
+def test_restore_rejects_pending_delivery_for_unknown_decision() -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": curriculum_contract()}, enabled=True,
+        assignment_id="assignment-1", runtime_session_id="session-1", clock=lambda: 1.0,
+    )
+    assert runtime is not None
+    runtime.start_course_budget()
+    snapshot = runtime.snapshot()
+    snapshot["pendingActivityDecisionIds"] = ["unknown-decision"]
+    snapshot["pendingActivityDeliveries"] = [{
+        "assignmentId": "assignment-1",
+        "lessonSessionId": "session-1",
+        "decisionId": "unknown-decision",
+        "deliveryId": "course-delivery-unknown",
+    }]
+
+    with pytest.raises(ValueError, match="unknown pending activity decision"):
+        runtime.restore(
+            runtime.contract, snapshot, assignment_id="assignment-1",
+            runtime_session_id="session-1", clock=lambda: 1.0,
+        )
+
+
+@pytest.mark.parametrize(
+    "pending_ids",
+    [
+        ["decision-1", "decision-1"],
+        "decision-1",
+        ["decision-1", 7],
+    ],
+)
+def test_restore_rejects_duplicate_or_malformed_pending_decision_ids(pending_ids) -> None:
+    runtime = course_mode_runtime_from_manifest(
+        {"courseModeContract": curriculum_contract()}, enabled=True,
+        assignment_id="assignment-1", runtime_session_id="session-1", clock=lambda: 1.0,
+    )
+    assert runtime is not None
+    runtime.start_course_budget()
+    decision = CourseDecision(
+        "decision-1", True, SessionState.WORD_ACTIVE, "RETRY_ACTIVITY",
+        "acknowledge_child", None, "invite_retry", EmbodiedIntent.ENCOURAGE_SMALL,
+        False, None, activity_id="a1", visual_state="retry", attempt=1,
+    )
+    runtime._decisions[decision.decision_id] = decision
+    runtime._pending_activity_decision_ids = [decision.decision_id]
+    runtime._activity_delivery_ids[decision.decision_id] = "course-delivery-1"
+    snapshot = runtime.snapshot()
+    snapshot["pendingActivityDecisionIds"] = pending_ids
+
+    with pytest.raises(ValueError, match="invalid pending activity decision identity"):
+        runtime.restore(
+            runtime.contract, snapshot, assignment_id="assignment-1",
+            runtime_session_id="session-1", clock=lambda: 1.0,
+        )
 
 
 @pytest.mark.asyncio
@@ -310,6 +577,106 @@ class _AcknowledgingForwarder(_Forwarder):
         self.on_success = on_success
         self.on_failure = on_failure
         return True
+
+
+@pytest.mark.asyncio
+async def test_completion_is_persisted_to_terminal_outbox_before_enqueue() -> None:
+    order = []
+
+    class Store:
+        async def store(self, device_id, batch):
+            order.append(("store", device_id, batch["events"][-1]["type"]))
+
+    class Forwarder(_Forwarder):
+        device_id = "device-1"
+        _terminal_store = Store()
+
+        def enqueue(self, batch):
+            order.append(("enqueue", self.device_id, batch["events"][-1]["type"]))
+            self.batches.append(batch)
+            return True
+
+    runtime = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest={"courseModeContract": contract()}, asset_cache=object(),
+        forwarder=Forwarder(),
+    )
+
+    assert await runtime._forward_terminal({"type": "lesson_completed"}) is True
+    assert order == [
+        ("store", "device-1", "lesson_completed"),
+        ("enqueue", "device-1", "lesson_completed"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_terminal_store_failure_retains_completion_for_retry() -> None:
+    class Store:
+        fail = True
+
+        async def store(self, device_id, batch):
+            if self.fail:
+                raise OSError("outbox unavailable")
+
+    class Forwarder(_Forwarder):
+        device_id = "device-1"
+        _terminal_store = Store()
+        pending_terminal_batch = None
+
+        def enqueue(self, batch):
+            self.batches.append(batch)
+            return True
+
+    forwarder = Forwarder()
+    runtime = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest={"courseModeContract": contract()}, asset_cache=object(),
+        forwarder=forwarder,
+    )
+
+    assert await runtime._forward_terminal({"type": "lesson_completed"}) is False
+    assert forwarder.pending_terminal_batch["events"][-1]["type"] == "lesson_completed"
+    assert forwarder.batches == []
+
+    forwarder._terminal_store.fail = False
+    assert await runtime.replay_pending_terminal_event() is True
+    assert forwarder.batches == [forwarder.pending_terminal_batch]
+
+
+@pytest.mark.asyncio
+async def test_terminal_readback_replays_pending_completion_when_assignment_stays_active(
+    monkeypatch,
+) -> None:
+    import config.manage_api_client as backend_api
+
+    class Forwarder(_Forwarder):
+        base_url = "http://backend.test/v1"
+        device_id = "device-1"
+        token = "token-1"
+
+        async def drain(self):
+            return None
+
+        async def replay_pending_terminal_event(self):
+            self.replayed = getattr(self, "replayed", 0) + 1
+            return True
+
+    async def active_assignment(*args, **kwargs):
+        return {"assignmentId": "a1", "state": "RUNNING"}
+
+    monkeypatch.setattr(backend_api, "get_current_assignment", active_assignment)
+    forwarder = Forwarder()
+    runtime = LessonRuntime(
+        _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
+        manifest={"courseModeContract": contract()}, asset_cache=object(),
+        forwarder=forwarder,
+    )
+
+    await runtime._read_back_assignment_state(
+        forwarder.base_url, forwarder.device_id, forwarder.token,
+    )
+
+    assert forwarder.replayed == 1
 
 
 def test_production_lesson_runtime_activates_v2_only_with_strict_flag() -> None:
