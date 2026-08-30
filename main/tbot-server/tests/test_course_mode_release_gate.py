@@ -809,6 +809,14 @@ def test_full_lane_inventory_is_exhaustive_and_uses_candidate_roots() -> None:
     assert all(not Path(lane.relative_cwd).is_absolute() for lane in gate.lanes_for_mode("full"))
 
 
+def test_full_backend_test_lane_disables_vitest_cache() -> None:
+    backend_tests = next(
+        lane for lane in gate.lanes_for_mode("full") if lane.name == "backend-tests"
+    )
+
+    assert backend_tests.command == ("npm", "test", "--", "--no-cache")
+
+
 def test_full_esp_lane_discovers_every_committed_software_course_mode_suite() -> None:
     root = Path(__file__).resolve().parents[3]
     discovered = gate.discover_esp_course_mode_tests(root, _git(root, "rev-parse", "HEAD"))

@@ -257,7 +257,7 @@ QUICK_LANES = (
 FULL_LANES = (
     _lane("backend-lint", "backend", ".", ("npm", "run", "lint")),
     _lane("backend-typecheck", "backend", ".", ("npm", "run", "typecheck")),
-    _lane("backend-tests", "backend", ".", ("npm", "test"), 1800.0),
+    _lane("backend-tests", "backend", ".", ("npm", "test", "--", "--no-cache"), 1800.0),
     _lane("backend-build", "backend", ".", ("npm", "run", "build")),
     _lane(
         "backend-curriculum-verifier", "backend", ".",
