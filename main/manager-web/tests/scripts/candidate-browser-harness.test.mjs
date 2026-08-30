@@ -211,6 +211,43 @@ test('acquisition cancellation that does not settle completion remains bounded b
   assert.deepEqual(deps.state.spawned, []);
 });
 
+test('lease resolving during acquisition cancellation is cleaned exactly once before timeout propagates', async () => {
+  const { withCandidateBoundBrowser } = await importHarness();
+  const deps = dependencies();
+  let cancelCalls = 0;
+  let resolveCompletion;
+  const completion = new Promise((resolve) => { resolveCompletion = resolve; });
+  deps.startBrowserAcquisition = () => ({
+    retainedLeasePath: '/candidate/late',
+    leaseOwner: 'late acquisition',
+    worker: { pid: 4141 },
+    workerPid: 4141,
+    completion,
+    cancel: () => {
+      cancelCalls += 1;
+      queueMicrotask(() => resolveCompletion({
+        executablePath: '/candidate/late/chrome-headless-shell',
+        leasePath: '/candidate/late',
+        leaseOwner: 'late acquisition',
+        workerPid: 4141,
+        cleanup: async () => { deps.state.cleanupCalls += 1; },
+      }));
+    },
+  });
+  await assert.rejects(outerWatchdog(withCandidateBoundBrowser({
+    profileDir: '/tmp/profile', label: 'late lease gate', operationTimeoutMs: 25, ...deps,
+  }, async () => assert.fail('callback must not run')), 75), (error) => {
+    assert.match(error.message, /late lease gate lifecycle timed out after 25ms/);
+    assert.equal(error.retainedLeasePath, '/candidate/late');
+    assert.equal(error.leaseOwner, 'late acquisition');
+    assert.equal(error.workerPid, 4141);
+    return true;
+  });
+  assert.equal(cancelCalls, 1);
+  assert.equal(deps.state.cleanupCalls, 1);
+  assert.deepEqual(deps.state.spawned, []);
+});
+
 test('acquisition cancel rejects an asynchronous cancellation protocol', async () => {
   const { withCandidateBoundBrowser } = await importHarness();
   const deps = dependencies();

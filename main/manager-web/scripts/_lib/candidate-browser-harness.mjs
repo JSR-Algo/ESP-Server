@@ -208,7 +208,7 @@ export async function withCandidateBoundBrowser({
             if (typeof cancellation?.then === 'function') {
               throw new Error(`${label} candidate browser acquisition cancel must synchronously start owned cleanup`);
             }
-            await lifecycleBounded(
+            lease = await lifecycleBounded(
               acquisition.completion, `${label} candidate browser acquisition cancellation`,
               operationTimeoutMs, () => {}, remainingMs,
             );
