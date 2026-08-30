@@ -544,6 +544,64 @@ test('completed child and socket cleanup do not leave deadline timers keeping No
   assert.equal(result.status, 0, result.error?.message || result.stderr);
 });
 
+for (const mode of ['malformed-frame', 'handler-throw']) {
+  test(`DevTools ${mode} becomes a lifecycle failure and cleans all owned resources`, () => {
+    const harnessUrl = pathToFileURL(join(managerRoot, 'scripts/_lib/candidate-browser-harness.mjs')).href;
+    const source = `
+      import { EventEmitter } from 'node:events';
+      import { withCandidateBoundBrowser } from ${JSON.stringify(harnessUrl)};
+      const state = { cleanupCalls: 0, childKills: 0, socketCloses: 0 };
+      const child = new EventEmitter();
+      child.pid = 7171; child.exitCode = null; child.signalCode = null;
+      child.kill = (signal) => {
+        state.childKills += 1;
+        queueMicrotask(() => { child.signalCode = signal; child.emit('exit', null, signal); });
+        return true;
+      };
+      const socket = new EventEmitter();
+      socket.readyState = 0;
+      socket.send = () => {};
+      socket.close = () => {
+        state.socketCloses += 1; socket.readyState = 3;
+        queueMicrotask(() => socket.emit('close'));
+      };
+      socket.terminate = socket.close;
+      const socketCompletion = new Promise((resolve) => socket.once('close', resolve));
+      setTimeout(() => { socket.readyState = 1; socket.emit('open'); }, 0);
+      setTimeout(() => socket.emit('message', ${mode === 'malformed-frame' ? "'{not-json'" : "JSON.stringify({ event: 'probe' })"}), 5);
+      try {
+        await withCandidateBoundBrowser({
+          profileDir: '/tmp/message-failure-profile', label: ${JSON.stringify(mode)}, operationTimeoutMs: 100,
+          startBrowserAcquisition: () => ({
+            retainedLeasePath: '/candidate/message-failure', leaseOwner: 'message test', workerPid: 4141,
+            completion: Promise.resolve({
+              executablePath: '/candidate/message-failure/chrome', leasePath: '/candidate/message-failure',
+              leaseOwner: 'message test', workerPid: 4141,
+              cleanup: async () => { state.cleanupCalls += 1; },
+            }),
+            cancel: () => {},
+          }),
+          spawnBrowser: () => child,
+          waitForDevToolsPort: async () => '9222\\n',
+          fetchDevToolsTarget: async () => ({ webSocketDebuggerUrl: 'ws://candidate-bound' }),
+          startDevToolsSocket: () => ({ socket, completion: socketCompletion, cancel: () => socket.close() }),
+          onMessage: ${mode === 'handler-throw' ? "() => { throw new Error('handler exploded'); }" : '() => {}'},
+        }, async () => new Promise(() => {}));
+        throw new Error('message failure must reject the lifecycle');
+      } catch (error) {
+        if (!/${mode === 'malformed-frame' ? 'message.*invalid|JSON|Unexpected' : 'handler exploded'}/i.test(error.message)) throw error;
+      }
+      if (state.cleanupCalls !== 1 || state.childKills !== 1 || state.socketCloses !== 1) {
+        throw new Error('cleanup counts: ' + JSON.stringify(state));
+      }
+    `;
+    const result = spawnSync(process.execPath, ['--unhandled-rejections=strict', '--input-type=module', '-e', source], {
+      timeout: 1000, encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, result.error?.message || result.stderr);
+  });
+}
+
 test('cumulative browser phases share one absolute lifecycle deadline', async () => {
   const { withCandidateBoundBrowser } = await importHarness();
   const deps = dependencies();

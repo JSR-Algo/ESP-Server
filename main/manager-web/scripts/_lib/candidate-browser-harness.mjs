@@ -258,12 +258,16 @@ export async function withCandidateBoundBrowser({
     socket.on('error', (error) => failLifecycle(new Error(`${label} DevTools socket failed: ${error.message}`)));
     socket.on('close', () => failLifecycle(new Error(`${label} DevTools socket closed`)));
     socket.on('message', (raw) => {
-      const message = JSON.parse(raw);
-      onMessage(message);
-      if (message.id && pending.has(message.id)) {
-        const callbacks = pending.get(message.id);
-        pending.delete(message.id);
-        message.error ? callbacks.reject(new Error(message.error.message)) : callbacks.resolve(message.result);
+      try {
+        const message = JSON.parse(raw);
+        onMessage(message);
+        if (message.id && pending.has(message.id)) {
+          const callbacks = pending.get(message.id);
+          pending.delete(message.id);
+          message.error ? callbacks.reject(new Error(message.error.message)) : callbacks.resolve(message.result);
+        }
+      } catch (error) {
+        failLifecycle(new Error(`${label} DevTools message failed: ${error.message}`, { cause: error }));
       }
     });
     await bounded(new Promise((resolve) => socket.once('open', resolve)), `${label} DevTools socket open`);
