@@ -40,7 +40,7 @@ run_bounded_command = _manifest.run_bounded_command
 strict_json_loads = _manifest.strict_json_loads
 validate_candidate = _manifest.validate_candidate
 _candidate_git = _manifest._git
-secure_executable_descriptor = _manifest.secure_executable_descriptor
+secure_browser_bundle_descriptor = _manifest.secure_browser_bundle_descriptor
 
 
 SECURE_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -66,11 +66,13 @@ MAX_NODE_PROJECT_SCAN_ENTRIES = 500_000
 MAX_PACKAGE_LOCK_BYTES = 32 * 1024 * 1024
 NODE_TREE_SCHEMA = "sha256-path-mode-bytes-symlink-v1"
 ROBOT_PREVIEW_BROWSER_ENVIRONMENT = {
-    "path": "TBOT_ROBOT_PREVIEW_BROWSER_PATH",
+    "root": "TBOT_ROBOT_PREVIEW_BROWSER_ROOT",
+    "executable": "TBOT_ROBOT_PREVIEW_BROWSER_EXECUTABLE",
     "engine": "TBOT_ROBOT_PREVIEW_BROWSER_ENGINE",
     "revision": "TBOT_ROBOT_PREVIEW_BROWSER_REVISION",
-    "sha256": "TBOT_ROBOT_PREVIEW_BROWSER_SHA256",
-    "bytes": "TBOT_ROBOT_PREVIEW_BROWSER_BYTES",
+    "treeSha256": "TBOT_ROBOT_PREVIEW_BROWSER_TREE_SHA256",
+    "treeEntryCount": "TBOT_ROBOT_PREVIEW_BROWSER_TREE_ENTRY_COUNT",
+    "treeTotalBytes": "TBOT_ROBOT_PREVIEW_BROWSER_TREE_TOTAL_BYTES",
 }
 MODES = ("quick", "full", "live-db", "physical-preflight")
 COURSE_MODE_SOFTWARE_TESTS = "@course-mode-software-tests"
@@ -1023,14 +1025,11 @@ def robot_preview_browser_authorized(candidate: dict) -> bool:
     try:
         descriptor = candidate["tools"]["robotPreviewBrowser"]
         if not isinstance(descriptor, dict) or set(descriptor) != {
-            "version", "engine", "revision", "path", "sha256", "bytes",
+            "version", "engine", "revision", "root", "executable", "treeDigest",
         }:
             return False
-        observed, error = secure_executable_descriptor(Path(descriptor["path"]))
-        if error or observed != {
-            "path": descriptor["path"], "sha256": descriptor["sha256"],
-            "bytes": descriptor["bytes"],
-        }:
+        observed, error = secure_browser_bundle_descriptor(Path(descriptor["root"]))
+        if error or observed != descriptor["treeDigest"]:
             return False
         admin_root = Path(candidate["repositories"]["adminEsp"]["path"])
         metadata_path = admin_root / "main/manager-web/node_modules/playwright-core/browsers.json"
@@ -1051,8 +1050,11 @@ def robot_preview_browser_authorized(candidate: dict) -> bool:
         }.get((sys.platform, machine))
         if platform_suffix is None:
             return False
-        expected = Path(f"chromium_headless_shell-{descriptor['revision']}") / platform_suffix
-        return Path(descriptor["path"]).parts[-len(expected.parts):] == expected.parts
+        expected_root = Path(f"chromium_headless_shell-{descriptor['revision']}") / Path(platform_suffix).parent
+        return (
+            Path(descriptor["root"]).parts[-len(expected_root.parts):] == expected_root.parts
+            and descriptor["executable"] == Path(platform_suffix).name
+        )
     except (KeyError, OSError, StopIteration, TypeError, ValueError):
         return False
 
@@ -1334,8 +1336,15 @@ def _child_environment(candidate: dict, source: Mapping[str, str], lane: Lane) -
     environment.update(dict(lane.fixed_environment))
     if lane.name == "admin-browser":
         browser = candidate["tools"]["robotPreviewBrowser"]
+        values = {
+            "root": browser["root"], "executable": browser["executable"],
+            "engine": browser["engine"], "revision": browser["revision"],
+            "treeSha256": browser["treeDigest"]["sha256"],
+            "treeEntryCount": browser["treeDigest"]["entryCount"],
+            "treeTotalBytes": browser["treeDigest"]["totalBytes"],
+        }
         for field, name in ROBOT_PREVIEW_BROWSER_ENVIRONMENT.items():
-            environment[name] = str(browser[field])
+            environment[name] = str(values[field])
     return environment
 
 

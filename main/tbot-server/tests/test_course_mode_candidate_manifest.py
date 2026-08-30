@@ -57,6 +57,8 @@ def candidate(repositories: dict[str, Path], tmp_path: Path) -> dict:
     browser.parent.mkdir(parents=True)
     browser.write_bytes(b"pinned chromium fixture\n")
     browser.chmod(0o755)
+    tree, error = manifest.secure_browser_bundle_descriptor(browser.parent)
+    assert error is None and tree is not None
     return {
         "candidateId": "course-mode-2026-08-29.1",
         "createdAt": "2026-08-29T00:00:00Z",
@@ -81,12 +83,12 @@ def candidate(repositories: dict[str, Path], tmp_path: Path) -> dict:
         },
         "tools": {
             "robotPreviewBrowser": {
-                "version": 1,
+                "version": 2,
                 "engine": "chromium-headless-shell",
                 "revision": "1223",
-                "path": str(browser),
-                "sha256": hashlib.sha256(browser.read_bytes()).hexdigest(),
-                "bytes": browser.stat().st_size,
+                "root": str(browser.parent),
+                "executable": browser.name,
+                "treeDigest": tree,
             },
         },
         "evidenceRoot": str(tmp_path / "evidence"),
@@ -101,17 +103,18 @@ def test_candidate_accepts_exact_committed_repository_identity(candidate: dict) 
 
 
 def test_candidate_browser_is_bound_to_regular_executable_content(candidate: dict) -> None:
-    browser = Path(candidate["tools"]["robotPreviewBrowser"]["path"])
+    descriptor = candidate["tools"]["robotPreviewBrowser"]
+    browser = Path(descriptor["root"]) / descriptor["executable"]
     browser.write_bytes(b"drift")
 
     assert validate_candidate(candidate, now=NOW) == ["tools.robotPreviewBrowser.identity"]
 
 
 def test_candidate_browser_rejects_symlink(candidate: dict, tmp_path: Path) -> None:
-    browser = Path(candidate["tools"]["robotPreviewBrowser"]["path"])
+    root = Path(candidate["tools"]["robotPreviewBrowser"]["root"])
     target = tmp_path / "browser-target"
-    browser.rename(target)
-    browser.symlink_to(target)
+    target.write_bytes(b"resource")
+    (root / "unsafe-resource").symlink_to(target)
 
     assert validate_candidate(candidate, now=NOW) == ["tools.robotPreviewBrowser.identity"]
 

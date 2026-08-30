@@ -302,6 +302,8 @@ def candidate_file(tmp_path: Path) -> Path:
     browser.parent.mkdir(parents=True)
     browser.write_bytes(b"pinned chromium fixture\n")
     browser.chmod(0o755)
+    tree, error = gate.secure_browser_bundle_descriptor(browser.parent)
+    assert error is None and tree is not None
     candidate = {
         "candidateId": "course-mode-2099-01-01.1",
         "createdAt": "2099-01-01T00:00:00Z",
@@ -336,12 +338,12 @@ def candidate_file(tmp_path: Path) -> Path:
         },
         "tools": {
             "robotPreviewBrowser": {
-                "version": 1,
+                "version": 2,
                 "engine": "chromium-headless-shell",
                 "revision": "1223",
-                "path": str(browser),
-                "sha256": hashlib.sha256(browser.read_bytes()).hexdigest(),
-                "bytes": browser.stat().st_size,
+                "root": str(browser.parent),
+                "executable": browser.name,
+                "treeDigest": tree,
             },
         },
         "evidenceRoot": str(evidence_root),
@@ -385,11 +387,13 @@ def test_admin_browser_environment_is_only_candidate_bound_descriptor(candidate_
     }, next(lane for lane in gate.FULL_LANES if lane.name == "admin-browser"))
     browser = candidate["tools"]["robotPreviewBrowser"]
 
-    assert environment["TBOT_ROBOT_PREVIEW_BROWSER_PATH"] == browser["path"]
+    assert environment["TBOT_ROBOT_PREVIEW_BROWSER_ROOT"] == browser["root"]
+    assert environment["TBOT_ROBOT_PREVIEW_BROWSER_EXECUTABLE"] == browser["executable"]
     assert environment["TBOT_ROBOT_PREVIEW_BROWSER_ENGINE"] == browser["engine"]
     assert environment["TBOT_ROBOT_PREVIEW_BROWSER_REVISION"] == browser["revision"]
-    assert environment["TBOT_ROBOT_PREVIEW_BROWSER_SHA256"] == browser["sha256"]
-    assert environment["TBOT_ROBOT_PREVIEW_BROWSER_BYTES"] == str(browser["bytes"])
+    assert environment["TBOT_ROBOT_PREVIEW_BROWSER_TREE_SHA256"] == browser["treeDigest"]["sha256"]
+    assert environment["TBOT_ROBOT_PREVIEW_BROWSER_TREE_ENTRY_COUNT"] == str(browser["treeDigest"]["entryCount"])
+    assert environment["TBOT_ROBOT_PREVIEW_BROWSER_TREE_TOTAL_BYTES"] == str(browser["treeDigest"]["totalBytes"])
     assert "CHROME_BIN" not in environment
 
 
@@ -422,14 +426,16 @@ def test_admin_browser_authority_accepts_playwright_linux_arm64_layout(
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     descriptor = candidate["tools"]["robotPreviewBrowser"]
-    original = Path(descriptor["path"])
-    browser = original.parents[2] / "chromium_headless_shell-1223/chrome-linux/headless_shell"
+    original_root = Path(descriptor["root"])
+    browser = original_root.parents[1] / "chromium_headless_shell-1223/chrome-linux/headless_shell"
     browser.parent.mkdir(parents=True)
-    original.rename(browser)
+    (original_root / descriptor["executable"]).rename(browser)
+    tree, error = gate.secure_browser_bundle_descriptor(browser.parent)
+    assert error is None and tree is not None
     descriptor.update({
-        "path": str(browser),
-        "sha256": hashlib.sha256(browser.read_bytes()).hexdigest(),
-        "bytes": browser.stat().st_size,
+        "root": str(browser.parent),
+        "executable": browser.name,
+        "treeDigest": tree,
     })
     root = Path(candidate["repositories"]["adminEsp"]["path"])
     metadata = root / "main/manager-web/node_modules/playwright-core/browsers.json"
