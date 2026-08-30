@@ -7,6 +7,15 @@ from unittest.mock import patch
 
 
 class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
+    def test_queued_receive_inspection_fails_closed_for_unknown_websocket_shape(self):
+        audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "websocket queued receive inspection unavailable",
+        ):
+            audio_bargein._queued_receive_count(SimpleNamespace())
+
     @staticmethod
     def _args(**overrides):
         values = {

@@ -169,6 +169,12 @@ async def _observe_interrupt_stop(
 
 
 def _queued_receive_count(websocket):
+    """Inspect buffered input without a scheduling or timeout race.
+
+    ``queued_message_count`` is the stable harness seam. Production pins
+    websockets 14.2, whose public ``recv`` API doesn't expose buffer state, so
+    the fallback is isolated here and fails closed if that pinned shape moves.
+    """
     explicit_count = getattr(websocket, "queued_message_count", None)
     if explicit_count is not None:
         return int(explicit_count() if callable(explicit_count) else explicit_count)
