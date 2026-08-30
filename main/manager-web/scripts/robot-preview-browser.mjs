@@ -223,7 +223,9 @@ async function verifySealedBundle(root, manifest, { signal, deadline, onVerifyPr
   if (seen.size !== expected.size) throw new Error('staged browser tree is incomplete');
 }
 
-async function removeBrowserLease(root, { deadline } = {}) {
+async function removeBrowserLease(root, {
+  deadline, spawnCleanupWorker = spawn, cleanupWorkerTimeoutMs = 10000, cleanupReapTimeoutMs = 1000,
+} = {}) {
   const cleanupScript = `
     const { chmod, lstat, readdir, rm } = require('node:fs/promises');
     const root = process.argv[1];
@@ -240,12 +242,20 @@ async function removeBrowserLease(root, { deadline } = {}) {
     (async () => { try { await makeRemovable(root); } catch {} await rm(root, { recursive: true, force: true }); })()
       .catch((error) => { console.error(error.message); process.exitCode = 1; });
   `;
-  const child = spawn(process.execPath, ['-e', cleanupScript, root], { stdio: 'ignore' });
-  const remainingMs = deadline === undefined ? 10000 : Math.max(0, deadline - Date.now());
+  const child = spawnCleanupWorker(process.execPath, ['-e', cleanupScript, root], { stdio: 'ignore' });
+  const remainingMs = deadline === undefined
+    ? cleanupWorkerTimeoutMs
+    : Math.min(cleanupWorkerTimeoutMs, Math.max(0, deadline - Date.now()));
   const exited = await waitForProcessExit(child, remainingMs);
   if (!exited) {
     child.kill('SIGKILL');
-    await waitForProcessExit(child, 1000);
+    if (!await waitForProcessExit(child, cleanupReapTimeoutMs)) {
+      const error = new Error('Candidate browser cleanup worker could not be reaped after SIGKILL');
+      error.cleanupWorkerPid = child.pid;
+      error.retainedLeasePath = root;
+      error.leaseOwner = 'acquirePinnedRobotPreviewChromium';
+      throw error;
+    }
     throw new Error('Candidate browser cleanup process timed out');
   }
   if (child.exitCode !== 0) throw new Error(`Candidate browser cleanup process exited ${child.exitCode}`);
@@ -276,6 +286,9 @@ export async function acquirePinnedRobotPreviewChromium({
   onSealProgress = async () => {},
   onVerifyProgress = async () => {},
   removeLease = removeBrowserLease,
+  spawnCleanupWorker = spawn,
+  cleanupWorkerTimeoutMs = 10000,
+  cleanupReapTimeoutMs = 1000,
   cleanupRetryLimit = 3,
 } = {}) {
   throwIfAcquisitionCancelled(signal, deadline);
@@ -305,7 +318,10 @@ export async function acquirePinnedRobotPreviewChromium({
           cleanupRemainingMs,
         );
         try {
-          await removeLease(leaseRoot, { deadline, signal: cleanupController.signal });
+          await removeLease(leaseRoot, {
+            deadline, signal: cleanupController.signal, spawnCleanupWorker,
+            cleanupWorkerTimeoutMs, cleanupReapTimeoutMs,
+          });
           active = false;
           return;
         } catch (error) {
@@ -318,6 +334,7 @@ export async function acquirePinnedRobotPreviewChromium({
       const cleanupError = new Error(`Candidate browser lease cleanup failed after ${cleanupRetryLimit} attempts`, { cause: lastError });
       cleanupError.retainedLeasePath = leaseRoot;
       cleanupError.leaseOwner = 'acquirePinnedRobotPreviewChromium';
+      if (lastError?.cleanupWorkerPid !== undefined) cleanupError.cleanupWorkerPid = lastError.cleanupWorkerPid;
       throw cleanupError;
     })().catch((error) => {
       cleanupPromise = undefined;

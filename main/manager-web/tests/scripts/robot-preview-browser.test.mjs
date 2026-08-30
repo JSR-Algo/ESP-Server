@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
@@ -286,6 +287,59 @@ test('abort during sealed-file verification hashing cleans before rejection', as
       onVerifyProgress: async () => controller.abort(new Error('verify aborted')),
     }), /verify aborted/);
     assert.equal((await readdir(value.base)).some((name) => name.startsWith('tbot-robot-preview-browser-')), false);
+  } finally {
+    await rm(value.base, { recursive: true, force: true });
+  }
+});
+
+function fakeCleanupWorker({ reapAfterKill }) {
+  const child = new EventEmitter();
+  child.pid = 4242;
+  child.exitCode = null;
+  child.signalCode = null;
+  child.kill = (signal) => {
+    if (reapAfterKill) queueMicrotask(() => {
+      child.signalCode = signal;
+      child.emit('exit', null, signal);
+    });
+    return true;
+  };
+  return child;
+}
+
+test('unreaped cleanup worker exposes pid and retained lease ownership synchronously', async () => {
+  const value = await fixture();
+  value.environment.TBOT_ROBOT_PREVIEW_BROWSER_TREE_SHA256 = '0'.repeat(64);
+  try {
+    await assert.rejects(acquirePinnedRobotPreviewChromium({
+      ...value, stagingParent: value.base, deadline: Date.now() + 1000,
+      cleanupRetryLimit: 1, cleanupWorkerTimeoutMs: 1, cleanupReapTimeoutMs: 5,
+      spawnCleanupWorker: () => fakeCleanupWorker({ reapAfterKill: false }),
+    }), (error) => {
+      assert.equal(error.cleanupWorkerPid, 4242);
+      assert.equal(error.leaseOwner, 'acquirePinnedRobotPreviewChromium');
+      assert.match(error.retainedLeasePath, /tbot-robot-preview-browser-/);
+      return true;
+    });
+  } finally {
+    await rm(value.base, { recursive: true, force: true });
+  }
+});
+
+test('SIGKILL cleanup worker is reaped before timeout error returns', async () => {
+  const value = await fixture();
+  value.environment.TBOT_ROBOT_PREVIEW_BROWSER_TREE_SHA256 = '0'.repeat(64);
+  const child = fakeCleanupWorker({ reapAfterKill: true });
+  try {
+    await assert.rejects(acquirePinnedRobotPreviewChromium({
+      ...value, stagingParent: value.base, deadline: Date.now() + 1000,
+      cleanupRetryLimit: 1, cleanupWorkerTimeoutMs: 1, cleanupReapTimeoutMs: 20,
+      spawnCleanupWorker: () => child,
+    }), (error) => {
+      assert.equal(error.cleanupWorkerPid, undefined);
+      assert.equal(child.signalCode, 'SIGKILL');
+      return true;
+    });
   } finally {
     await rm(value.base, { recursive: true, force: true });
   }
