@@ -291,7 +291,9 @@ class ExecutionStage:
             lane_descriptor = _open_snapshot_directory(lane_root)
             execution_root = lane_root / "candidate"
             shutil.copytree(self.root, execution_root, symlinks=True)
-            _make_tree_owner_writable(execution_root)
+            python_runtime = self.root / "tools/python-test-runtime"
+            excluded = (execution_root / "tools/python-test-runtime",) if python_runtime.is_dir() else ()
+            _make_tree_owner_writable(execution_root, excluded_roots=excluded)
             source_prefix = str(self.root) + os.sep
             target_prefix = str(execution_root) + os.sep
 
@@ -314,8 +316,18 @@ class ExecutionStage:
                 "XDG_CACHE_HOME": str(runtime / "cache"),
                 "COURSE_MODE_LANE_REPORT_ROOT": str(runtime / "reports"),
             })
+            rebased_candidate = rebase(self.candidate)
+            if excluded:
+                descriptor = rebased_candidate["tools"]["pythonTestRuntime"]
+                observed, error = _manifest.secure_python_test_runtime_tree_descriptor(
+                    Path(descriptor["root"]),
+                )
+                if error or observed != descriptor["treeDigest"]:
+                    raise ValueError("lane Python test runtime descriptor mismatch")
+                if not _manifest.python_test_runtime_authorized(descriptor):
+                    raise ValueError("lane Python test runtime authority mismatch")
             return LaneExecution(
-                lane_root, rebase(self.candidate), environment, lane_identity, lane_descriptor,
+                lane_root, rebased_candidate, environment, lane_identity, lane_descriptor,
             )
         except Exception:
             retained_path = (
@@ -384,8 +396,14 @@ def _make_tree_read_only(root: Path) -> None:
         directory_path.chmod(directory_path.stat().st_mode & 0o555)
 
 
-def _make_tree_owner_writable(root: Path) -> None:
-    for directory, names, files in os.walk(root):
+def _make_tree_owner_writable(
+    root: Path, *, excluded_roots: Sequence[Path] = (),
+) -> None:
+    excluded = {str(path) for path in excluded_roots}
+    for directory, names, files in os.walk(root, topdown=True):
+        names[:] = [
+            name for name in names if str(Path(directory) / name) not in excluded
+        ]
         Path(directory).chmod(Path(directory).stat().st_mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
         for name in names:
             path = Path(directory) / name
@@ -763,6 +781,7 @@ def _copy_dirty_exception(
 
 def _copy_snapshot_tree(
     source: Path, destination: Path, state: dict[str, int], *, exclude_git: bool = False,
+    reject_links: bool = False,
 ) -> None:
     root_fd = _open_snapshot_directory(source)
     root_opened = os.fstat(root_fd)
@@ -805,6 +824,8 @@ def _copy_snapshot_tree(
                 finally:
                     os.close(child_fd)
             elif stat.S_ISREG(before.st_mode):
+                if reject_links and before.st_nlink != 1:
+                    raise ValueError("hardlink in strict snapshot")
                 file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
                 try:
                     opened = os.fstat(file_fd)
@@ -821,6 +842,8 @@ def _copy_snapshot_tree(
                 finally:
                     os.close(file_fd)
             elif stat.S_ISLNK(before.st_mode):
+                if reject_links:
+                    raise ValueError("symlink in strict snapshot")
                 target_value = os.readlink(name, dir_fd=directory_fd)
                 if not _lexical_symlink_within_root(relative_entry.parent, target_value):
                     raise ValueError("unsafe symlink in snapshot")
@@ -845,6 +868,82 @@ def _copy_snapshot_tree(
         destination.chmod(stat.S_IMODE(root_opened.st_mode))
     finally:
         os.close(root_fd)
+
+
+def _copy_strict_snapshot_tree_fd(
+    source: Path, destination_parent: Path, destination_name: str, state: dict[str, int],
+) -> None:
+    if not destination_name or "/" in destination_name or destination_name in {".", ".."}:
+        raise ValueError("unsafe strict snapshot destination")
+    source_fd = _open_snapshot_directory(source)
+    parent_fd = _open_snapshot_directory(destination_parent)
+    destination_fd: int | None = None
+    source_opened = os.fstat(source_fd)
+
+    def visit(source_dir_fd: int, destination_dir_fd: int, depth: int) -> None:
+        if depth > MAX_SNAPSHOT_DEPTH:
+            raise ValueError("snapshot depth limit exceeded")
+        for name in sorted(entry.name for entry in os.scandir(source_dir_fd)):
+            state["entries"] += 1
+            if state["entries"] > MAX_SNAPSHOT_ENTRIES:
+                raise ValueError("snapshot entry limit exceeded")
+            before = os.stat(name, dir_fd=source_dir_fd, follow_symlinks=False)
+            if stat.S_ISDIR(before.st_mode):
+                source_child = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=source_dir_fd,
+                )
+                destination_child: int | None = None
+                try:
+                    if _snapshot_identity(os.fstat(source_child)) != _snapshot_identity(before):
+                        raise ValueError("source changed during snapshot")
+                    os.mkdir(name, 0o700, dir_fd=destination_dir_fd)
+                    destination_child = os.open(
+                        name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        dir_fd=destination_dir_fd,
+                    )
+                    visit(source_child, destination_child, depth + 1)
+                    os.fchmod(destination_child, stat.S_IMODE(before.st_mode))
+                    if _snapshot_identity(os.fstat(source_child)) != _snapshot_identity(before):
+                        raise ValueError("source changed during snapshot")
+                finally:
+                    if destination_child is not None:
+                        os.close(destination_child)
+                    os.close(source_child)
+            elif stat.S_ISREG(before.st_mode) and before.st_nlink == 1:
+                source_file = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=source_dir_fd)
+                destination_file: int | None = None
+                try:
+                    if _snapshot_identity(os.fstat(source_file)) != _snapshot_identity(before):
+                        raise ValueError("source changed during snapshot")
+                    destination_file = os.open(
+                        name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600, dir_fd=destination_dir_fd,
+                    )
+                    _copy_open_regular_to_fd(source_file, destination_file, before, state)
+                    os.fchmod(destination_file, stat.S_IMODE(before.st_mode))
+                    if _snapshot_identity(os.fstat(source_file)) != _snapshot_identity(before):
+                        raise ValueError("source changed during snapshot")
+                finally:
+                    if destination_file is not None:
+                        os.close(destination_file)
+                    os.close(source_file)
+            else:
+                raise ValueError("link in strict snapshot")
+
+    try:
+        os.mkdir(destination_name, 0o700, dir_fd=parent_fd)
+        destination_fd = os.open(
+            destination_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd,
+        )
+        visit(source_fd, destination_fd, 0)
+        os.fchmod(destination_fd, stat.S_IMODE(source_opened.st_mode))
+        if _snapshot_identity(os.fstat(source_fd)) != _snapshot_identity(source_opened):
+            raise ValueError("source root changed during snapshot")
+    finally:
+        if destination_fd is not None:
+            os.close(destination_fd)
+        os.close(parent_fd)
+        os.close(source_fd)
 
 
 def _copy_snapshot_file(
@@ -1028,7 +1127,9 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
             )
             if source_error or source_observed != descriptor["treeDigest"]:
                 raise ValueError("Python test runtime source descriptor mismatch")
-            _copy_snapshot_tree(Path(descriptor["root"]), python_target, state)
+            _copy_strict_snapshot_tree_fd(
+                Path(descriptor["root"]), tools_root, python_target.name, state,
+            )
             observed, error = _manifest.secure_python_test_runtime_tree_descriptor(python_target)
             if error or observed != descriptor["treeDigest"]:
                 raise ValueError("staged Python test runtime descriptor mismatch")
@@ -1036,6 +1137,10 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
             if not executable.is_file() or executable.is_symlink() or not os.access(executable, os.X_OK):
                 raise ValueError("staged Python test runtime executable mismatch")
             staged["tools"]["pythonTestRuntime"]["root"] = str(python_target)
+            if not _manifest.python_test_runtime_authorized(
+                staged["tools"]["pythonTestRuntime"],
+            ):
+                raise ValueError("staged Python test runtime authority mismatch")
         requirements = {
             requirement for lane in lanes
             if (requirement := _node_install_requirement(lane)) is not None and requirement[0]

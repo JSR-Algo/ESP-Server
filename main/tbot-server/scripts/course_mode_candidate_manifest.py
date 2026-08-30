@@ -15,6 +15,7 @@ import selectors
 import signal
 import stat
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -96,13 +97,26 @@ NODE_TREE_SCHEMA = "sha256-path-mode-bytes-symlink-v1"
 NODE_PACKAGE_TREE_SCHEMA = "sha256-root-mode-path-mode-bytes-v1"
 SECURE_NODE_PACKAGE_ROOT_MODES = {0o700, 0o755}
 PYTHON_TEST_RUNTIME_KEYS = {
-    "version", "root", "executable", "pythonVersion", "pytestVersion", "treeDigest",
+    "version", "distribution", "root", "executable", "pythonVersion", "pytestVersion",
+    "treeDigest",
 }
 PYTHON_TEST_RUNTIME_TREE_KEYS = {
     "schema", "sha256", "entryCount", "totalBytes", "rootMode",
 }
 PYTHON_TEST_RUNTIME_TREE_SCHEMA = "sha256-root-mode-path-mode-bytes-v1"
-SECURE_PYTHON_TEST_RUNTIME_ROOT_MODES = {0o555, 0o700, 0o755}
+SECURE_PYTHON_TEST_RUNTIME_ROOT_MODES = {0o555}
+PYTHON_TEST_RUNTIME_DISTRIBUTION = "python-build-standalone"
+PYTHON_RUNTIME_AUTHORITY_PROBE = (
+    "import importlib,json,os,sys,sysconfig;"
+    "mods=['pytest','pytest_asyncio','aiohttp','httpx','cryptography','numpy'];"
+    "print(json.dumps({'executable':os.path.realpath(sys.executable),"
+    "'prefix':os.path.realpath(sys.prefix),'basePrefix':os.path.realpath(sys.base_prefix),"
+    "'execPrefix':os.path.realpath(sys.exec_prefix),"
+    "'baseExecPrefix':os.path.realpath(sys.base_exec_prefix),"
+    "'stdlib':os.path.realpath(sysconfig.get_path('stdlib')),'path':[os.path.realpath(p) for p in sys.path],"
+    "'modules':[os.path.realpath(importlib.import_module(m).__file__) for m in mods]},sort_keys=True))"
+)
+TRUSTED_OTOOL_EXECUTABLE = Path("/usr/bin/otool")
 FIRMWARE_MANIFEST_KEYS = {
     "status", "profile", "board", "target", "sourceCommit", "createdAt", "app", "elf",
     "partition", "reproducibility", "toolchain", "config", "tests", "safety",
@@ -485,7 +499,7 @@ def _tree_metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
 
 
 def _secure_browser_bundle_descriptor_fd(
-    root_fd: int, root_metadata: os.stat_result,
+    root_fd: int, root_metadata: os.stat_result, *, require_read_only: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     digest = hashlib.sha256()
     state = {"entryCount": 0, "totalBytes": 0}
@@ -500,6 +514,8 @@ def _secure_browser_bundle_descriptor_fd(
             if state["entryCount"] > 10_000:
                 return False
             mode = stat.S_IMODE(metadata.st_mode)
+            if require_read_only and mode & 0o222:
+                return False
             if stat.S_ISDIR(metadata.st_mode):
                 child_fd = os.open(
                     name, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
@@ -650,7 +666,9 @@ def secure_python_test_runtime_tree_descriptor(
         root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
         if _tree_metadata_identity(os.fstat(root_fd)) != _tree_metadata_identity(metadata):
             return None, "changed"
-        descriptor, error = _secure_browser_bundle_descriptor_fd(root_fd, metadata)
+        descriptor, error = _secure_browser_bundle_descriptor_fd(
+            root_fd, metadata, require_read_only=True,
+        )
         if error is not None or descriptor is None:
             return None, error or "tree"
         if _tree_metadata_identity(root.lstat()) != _tree_metadata_identity(metadata):
@@ -683,6 +701,8 @@ def _validate_python_test_runtime(
         return
     if type(value.get("version")) is not int or value["version"] != 1:
         reasons.add(f"{prefix}.version")
+    if value.get("distribution") != PYTHON_TEST_RUNTIME_DISTRIBUTION:
+        reasons.add(f"{prefix}.distribution")
     root = value.get("root")
     executable = value.get("executable")
     python_version = value.get("pythonVersion")
@@ -691,6 +711,8 @@ def _validate_python_test_runtime(
     if not isinstance(root, str) or not Path(root).is_absolute():
         reasons.add(f"{prefix}.root")
     if not _valid_relative_path(executable):
+        reasons.add(f"{prefix}.executable")
+    elif executable != "bin/python3.11":
         reasons.add(f"{prefix}.executable")
     if not isinstance(python_version, str) or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", python_version) is None:
         reasons.add(f"{prefix}.pythonVersion")
@@ -730,6 +752,199 @@ def _validate_python_test_runtime(
         if result.error or result.returncode != 0 or result.stdout.strip() != expected:
             reasons.add(f"{prefix}.identity")
             return
+    authority = run_bounded_command(
+        [str(executable_path), "-I", "-s", "-c", PYTHON_RUNTIME_AUTHORITY_PROBE],
+        cwd=Path("/"), env=version_env, timeout_sec=15.0, max_output_bytes=64 * 1024,
+    )
+    try:
+        payload = strict_json_loads(authority.stdout)
+        root_path = Path(root)
+        if (
+            authority.error or authority.returncode != 0
+            or not _python_runtime_authority_payload_valid(root_path, payload)
+            or (root_path / "pyvenv.cfg").exists()
+            or not _python_runtime_library_authority(root_path, executable_path)
+        ):
+            raise ValueError("invalid authority")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        reasons.add(f"{prefix}.authority")
+        return
+    final_observed, final_error = secure_python_test_runtime_tree_descriptor(Path(root))
+    if final_error or final_observed != tree:
+        reasons.add(f"{prefix}.identity")
+
+
+def python_test_runtime_authorized(value: Any) -> bool:
+    reasons: set[str] = set()
+    _validate_python_test_runtime(value, reasons, verify_identity=True)
+    return not reasons
+
+
+def _path_is_within(root: Path, path: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _python_runtime_authority_payload_valid(root: Path, payload: Any) -> bool:
+    if not isinstance(payload, dict) or set(payload) != {
+        "executable", "prefix", "basePrefix", "execPrefix", "baseExecPrefix",
+        "stdlib", "path", "modules",
+    }:
+        return False
+    if not isinstance(payload.get("path"), list) or not isinstance(payload.get("modules"), list):
+        return False
+    paths = [
+        payload["executable"], payload["prefix"], payload["basePrefix"],
+        payload["execPrefix"], payload["baseExecPrefix"], payload["stdlib"],
+        *payload["path"], *payload["modules"],
+    ]
+    return (
+        all(isinstance(payload[name], str) and Path(payload[name]) == root for name in (
+            "prefix", "basePrefix", "execPrefix", "baseExecPrefix",
+        ))
+        and all(
+            isinstance(path, str) and Path(path).is_absolute()
+            and _path_is_within(root, Path(path))
+            for path in paths
+        )
+    )
+
+
+def _python_runtime_library_authority(root: Path, executable: Path) -> bool:
+    if sys.platform != "darwin":
+        return True
+    macho_magics = {
+        b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe",
+        b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca", b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca",
+    }
+    macho_files: list[Path] = []
+    try:
+        for directory, _names, files in os.walk(root):
+            for name in files:
+                path = Path(directory) / name
+                with path.open("rb") as stream:
+                    if stream.read(4) in macho_magics:
+                        macho_files.append(path)
+        if executable not in macho_files or not macho_files:
+            return False
+        dependencies_result = run_bounded_command(
+            [str(TRUSTED_OTOOL_EXECUTABLE), "-L", *(str(path) for path in macho_files)],
+            cwd=Path("/"), env=SECURE_ENV, timeout_sec=30.0, max_output_bytes=16 * 1024 * 1024,
+        )
+        load_result = run_bounded_command(
+            [str(TRUSTED_OTOOL_EXECUTABLE), "-l", *(str(path) for path in macho_files)],
+            cwd=Path("/"), env=SECURE_ENV, timeout_sec=30.0, max_output_bytes=64 * 1024 * 1024,
+        )
+        if (
+            dependencies_result.error or dependencies_result.returncode != 0
+            or load_result.error or load_result.returncode != 0
+        ):
+            return False
+        dependencies_by_path = _split_otool_output(dependencies_result.stdout, macho_files)
+        loads_by_path = _split_otool_output(load_result.stdout, macho_files)
+        if dependencies_by_path is None or loads_by_path is None:
+            return False
+        for path in macho_files:
+            load_authority = _macho_load_authority(root, path, loads_by_path[path])
+            if load_authority is None:
+                return False
+            rpaths, dylib_id = load_authority
+            for line in dependencies_by_path[path].splitlines():
+                dependency = line.strip().split(" (", 1)[0]
+                if not dependency:
+                    continue
+                if dependency == dylib_id:
+                    continue
+                if dependency.startswith(("/usr/lib/", "/System/Library/")):
+                    continue
+                if dependency.startswith("@rpath/"):
+                    suffix = dependency.removeprefix("@rpath/")
+                    if not any(_internal_existing_path(root, base / suffix) for base in rpaths):
+                        return False
+                    continue
+                if dependency.startswith("@loader_path/"):
+                    resolved = path.parent / dependency.removeprefix("@loader_path/")
+                elif dependency.startswith("@executable_path/"):
+                    resolved = root / "bin" / dependency.removeprefix("@executable_path/")
+                else:
+                    return False
+                if not _internal_existing_path(root, resolved):
+                    return False
+        return True
+    except (OSError, UnicodeError):
+        return False
+
+
+def _split_otool_output(output: str, paths: list[Path]) -> dict[Path, str] | None:
+    expected = {str(path): path for path in paths}
+    result: dict[Path, list[str]] = {}
+    current: Path | None = None
+    for line in output.splitlines():
+        header = line[:-1] if line.endswith(":") else None
+        matched = next(
+            (path for text, path in expected.items() if header == text or (
+                isinstance(header, str) and header.startswith(f"{text} (architecture ")
+            )),
+            None,
+        )
+        if matched is not None:
+            current = matched
+            result.setdefault(current, [])
+        elif current is not None:
+            result[current].append(line)
+    if set(result) != set(paths):
+        return None
+    return {path: "\n".join(lines) for path, lines in result.items()}
+
+
+def _internal_existing_path(root: Path, path: Path) -> bool:
+    try:
+        return _path_is_within(root, path.resolve(strict=True))
+    except OSError:
+        return False
+
+
+def _macho_load_authority(
+    root: Path, binary: Path, output: str,
+) -> tuple[list[Path], str | None] | None:
+    values: list[Path] = []
+    command: str | None = None
+    dylib_id: str | None = None
+    for raw in output.splitlines():
+        line = raw.strip()
+        if line == "cmd LC_RPATH":
+            command = "rpath"
+            continue
+        if line == "cmd LC_ID_DYLIB":
+            command = "id"
+            continue
+        if command == "rpath" and line.startswith("path "):
+            token = line.removeprefix("path ").split(" (offset ", 1)[0]
+            command = None
+            if token == "@loader_path":
+                value = binary.parent
+            elif token.startswith("@loader_path/"):
+                value = binary.parent / token.removeprefix("@loader_path/")
+            elif token == "@executable_path":
+                value = root / "bin"
+            elif token.startswith("@executable_path/"):
+                value = root / "bin" / token.removeprefix("@executable_path/")
+            else:
+                return None
+            try:
+                resolved = value.resolve(strict=True)
+            except OSError:
+                return None
+            if not _path_is_within(root, resolved):
+                return None
+            values.append(resolved)
+        elif command == "id" and line.startswith("name "):
+            dylib_id = line.removeprefix("name ").split(" (offset ", 1)[0]
+            command = None
+    return values, dylib_id
 
 
 def _validate_robot_preview_browser(value: Any, reasons: set[str], *, verify_identity: bool) -> None:

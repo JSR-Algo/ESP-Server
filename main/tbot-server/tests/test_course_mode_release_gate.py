@@ -397,23 +397,32 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                      "packageTreeSha256": package_tree["sha256"],
                      **package_tools}
     python_root = tmp_path / "python-test-runtime"
-    python_executable = python_root / "bin/python3"
+    python_executable = python_root / "bin/python3.11"
     python_executable.parent.mkdir(parents=True)
     python_executable.write_text(
-        f"#!{sys.executable}\nimport os,runpy,sys\n"
+        f"#!{sys.executable}\nimport json,os,pathlib,runpy,sys\n"
         "if sys.argv[1:] == ['-I','-s','-c','import platform; print(platform.python_version())']:\n"
         " print('3.11.9')\n"
         "elif sys.argv[1:] == ['-I','-s','-m','pytest','--version']:\n"
         " print('pytest 8.4.1')\n"
         "elif sys.argv[1:] == ['-I','-s','-c','import pytest, pytest_asyncio']:\n"
         " pass\n"
+        "elif len(sys.argv) == 5 and sys.argv[1:4] == ['-I','-s','-c'] and 'importlib,json' in sys.argv[4]:\n"
+        " root=pathlib.Path(__file__).resolve().parents[1]; paths=[str(root/'lib/python3.11')];\n"
+        " print(json.dumps({'executable':str(root/'bin/python3.11'),'prefix':str(root),'basePrefix':str(root),"
+        "'execPrefix':str(root),'baseExecPrefix':str(root),'stdlib':paths[0],'path':paths,'modules':paths}))\n"
         "elif sys.argv[1:] == ['-I','-s','-m','pytest','-q']:\n"
         " assert os.environ.get('HOME') and os.environ['HOME'] != '/nonexistent'\n"
         "else:\n"
         " sys.argv=sys.argv[1:]; runpy.run_module('pytest', run_name='__main__')\n",
         encoding="utf-8",
     )
-    python_executable.chmod(0o755)
+    python_executable.chmod(0o555)
+    python_executable.parent.chmod(0o555)
+    python_root.chmod(0o555)
+    monkeypatch.setattr(
+        gate._manifest, "_python_runtime_library_authority", lambda _root, _executable: True,
+    )
     python_tree, python_error = gate._manifest.secure_python_test_runtime_tree_descriptor(python_root)
     assert python_error is None and python_tree is not None
     esp_idf = tmp_path / "esp-idf"
@@ -475,7 +484,8 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         },
         "tools": {
             "pythonTestRuntime": {
-                "version": 1, "root": str(python_root), "executable": "bin/python3",
+                "version": 1, "distribution": "python-build-standalone",
+                "root": str(python_root), "executable": "bin/python3.11",
                 "pythonVersion": "3.11.9", "pytestVersion": "8.4.1",
                 "treeDigest": python_tree,
             },
@@ -544,6 +554,16 @@ def test_pytest_lane_stages_and_resolves_candidate_python_runtime(candidate_file
             str(Path(staged["root"]) / staged["executable"]),
             "-I", "-s", "-m", "pytest", "--version",
         )
+        lane_execution = stage.create_lane_execution()
+        try:
+            lane_descriptor = lane_execution.candidate["tools"]["pythonTestRuntime"]
+            observed, error = gate._manifest.secure_python_test_runtime_tree_descriptor(
+                Path(lane_descriptor["root"]),
+            )
+            assert error is None
+            assert observed == lane_descriptor["treeDigest"]
+        finally:
+            assert lane_execution.cleanup() is True
     finally:
         assert stage.cleanup() is True
 
@@ -565,6 +585,9 @@ def test_python_runtime_stage_rejects_tree_attack(candidate_file: Path, attack: 
     descriptor = candidate["tools"]["pythonTestRuntime"]
     root = Path(descriptor["root"])
     executable = root / descriptor["executable"]
+    root.chmod(0o755)
+    executable.parent.chmod(0o755)
+    executable.chmod(0o755)
     unsafe = root / "unsafe"
     if attack == "symlink":
         unsafe.symlink_to(executable)
@@ -579,6 +602,55 @@ def test_python_runtime_stage_rejects_tree_attack(candidate_file: Path, attack: 
 
     with pytest.raises(ValueError, match="Python test runtime source descriptor mismatch"):
         gate.stage_execution_candidate(candidate, (lane,))
+
+
+@pytest.mark.parametrize("attack", ["symlink", "hardlink"])
+def test_strict_snapshot_copy_rejects_runtime_link_attack(tmp_path: Path, attack: str) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    payload = source / "python3"
+    payload.write_bytes(b"runtime")
+    if attack == "symlink":
+        (source / "unsafe").symlink_to(payload)
+    else:
+        os.link(payload, source / "unsafe")
+
+    with pytest.raises(ValueError, match="link in strict snapshot"):
+        gate._copy_snapshot_tree(
+            source, tmp_path / "destination", {"entries": 0, "bytes": 0},
+            reject_links=True,
+        )
+
+
+def test_strict_snapshot_copy_binds_destination_parent_fd_across_ancestor_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "python3.11").write_bytes(b"runtime")
+    destination_parent = tmp_path / "destination-parent"
+    destination_parent.mkdir()
+    moved = tmp_path / "destination-parent-opened"
+    original_mkdir = gate.os.mkdir
+    swapped = False
+
+    def swap_then_mkdir(path, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if path == "runtime" and dir_fd is not None and not swapped:
+            swapped = True
+            destination_parent.rename(moved)
+            destination_parent.mkdir()
+        return original_mkdir(path, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(gate.os, "mkdir", swap_then_mkdir)
+
+    gate._copy_strict_snapshot_tree_fd(
+        source, destination_parent, "runtime", {"entries": 0, "bytes": 0},
+    )
+
+    assert swapped is True
+    assert not (destination_parent / "runtime").exists()
+    assert (moved / "runtime/python3.11").read_bytes() == b"runtime"
 
 
 def test_non_pytest_python_command_does_not_use_candidate_test_runtime(candidate_file: Path) -> None:

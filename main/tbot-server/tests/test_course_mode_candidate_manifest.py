@@ -138,21 +138,28 @@ def candidate(repositories: dict[str, Path], tmp_path: Path, monkeypatch: pytest
                      "packageTreeSha256": package_tree["sha256"],
                      **package_tools}
     python_root = tmp_path / "python-test-runtime"
-    python_executable = python_root / "bin/python3"
+    python_executable = python_root / "bin/python3.11"
     python_executable.parent.mkdir(parents=True)
     python_executable.write_text(
-        f"#!{sys.executable}\nimport runpy,sys\n"
+        f"#!{sys.executable}\nimport json,pathlib,runpy,sys\n"
         "if sys.argv[1:] == ['-I','-s','-c','import platform; print(platform.python_version())']:\n"
         " print('3.11.9')\n"
         "elif sys.argv[1:] == ['-I','-s','-m','pytest','--version']:\n"
         " print('pytest 8.4.1')\n"
         "elif sys.argv[1:] == ['-I','-s','-c','import pytest, pytest_asyncio']:\n"
         " pass\n"
+        "elif len(sys.argv) == 5 and sys.argv[1:4] == ['-I','-s','-c'] and 'importlib,json' in sys.argv[4]:\n"
+        " root=pathlib.Path(__file__).resolve().parents[1]; paths=[str(root/'lib/python3.11')];\n"
+        " print(json.dumps({'executable':str(root/'bin/python3.11'),'prefix':str(root),'basePrefix':str(root),"
+        "'execPrefix':str(root),'baseExecPrefix':str(root),'stdlib':paths[0],'path':paths,'modules':paths}))\n"
         "else:\n"
         " sys.argv=sys.argv[1:]; runpy.run_module('pytest', run_name='__main__')\n",
         encoding="utf-8",
     )
-    python_executable.chmod(0o755)
+    python_executable.chmod(0o555)
+    python_executable.parent.chmod(0o555)
+    python_root.chmod(0o555)
+    monkeypatch.setattr(manifest, "_python_runtime_library_authority", lambda _root, _executable: True)
     python_tree, python_error = manifest.secure_python_test_runtime_tree_descriptor(python_root)
     assert python_error is None and python_tree is not None
     esp_idf = tmp_path / "esp-idf"
@@ -209,7 +216,8 @@ def candidate(repositories: dict[str, Path], tmp_path: Path, monkeypatch: pytest
         },
         "tools": {
             "pythonTestRuntime": {
-                "version": 1, "root": str(python_root), "executable": "bin/python3",
+                "version": 1, "distribution": "python-build-standalone",
+                "root": str(python_root), "executable": "bin/python3.11",
                 "pythonVersion": "3.11.9", "pytestVersion": "8.4.1",
                 "treeDigest": python_tree,
             },
@@ -245,6 +253,9 @@ def test_candidate_rejects_python_test_runtime_tree_drift(candidate: dict, mutat
     descriptor = candidate["tools"]["pythonTestRuntime"]
     root = Path(descriptor["root"])
     executable = root / descriptor["executable"]
+    root.chmod(0o755)
+    executable.parent.chmod(0o755)
+    executable.chmod(0o755)
     if mutation == "content":
         executable.write_bytes(executable.read_bytes() + b"# drift\n")
     elif mutation == "mode":
@@ -266,6 +277,65 @@ def test_python_test_runtime_descriptor_accepts_immutable_root(candidate: dict) 
     assert error is None
     assert descriptor is not None
     assert descriptor["rootMode"] == 0o555
+
+
+def test_python_test_runtime_descriptor_rejects_writable_child(candidate: dict) -> None:
+    root = Path(candidate["tools"]["pythonTestRuntime"]["root"])
+    root.chmod(0o755)
+    child = root / "writable"
+    child.write_bytes(b"unsafe")
+    child.chmod(0o777)
+    root.chmod(0o555)
+
+    descriptor, error = manifest.secure_python_test_runtime_tree_descriptor(root)
+
+    assert descriptor is None
+    assert error == "tree"
+
+
+@pytest.mark.parametrize("field", ["prefix", "basePrefix", "stdlib", "path", "modules"])
+def test_python_runtime_authority_rejects_external_path(tmp_path: Path, field: str) -> None:
+    root = tmp_path / "runtime"
+    root.mkdir()
+    payload = {
+        "executable": str(root / "bin/python3.11"),
+        "prefix": str(root), "basePrefix": str(root),
+        "execPrefix": str(root), "baseExecPrefix": str(root),
+        "stdlib": str(root / "lib/python3.11"),
+        "path": [str(root / "lib/python3.11")],
+        "modules": [str(root / "lib/python3.11/site-packages/pytest/__init__.py")],
+    }
+    payload[field] = ["/opt/homebrew/escape"] if field in {"path", "modules"} else "/opt/homebrew/escape"
+
+    assert manifest._python_runtime_authority_payload_valid(root, payload) is False
+
+
+def test_python_runtime_library_authority_rejects_non_system_absolute_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    staged = tmp_path / "staged"
+    for root in (source, staged):
+        binary = root / "bin/python3.11"
+        library = root / "lib/libpython.dylib"
+        binary.parent.mkdir(parents=True)
+        library.parent.mkdir(parents=True)
+        binary.write_bytes(b"\xcf\xfa\xed\xfe" + b"binary")
+        library.write_bytes(b"library")
+
+    def fake_otool(command, **_kwargs):
+        target = command[-1]
+        if command[1] == "-l":
+            return manifest.BoundedCommandResult(0, f"{target}:\n", None)
+        return manifest.BoundedCommandResult(
+            0, f"{target}:\n\t{source / 'lib/libpython.dylib'} (compatibility version 1.0.0)\n", None,
+        )
+
+    monkeypatch.setattr(manifest, "run_bounded_command", fake_otool)
+    monkeypatch.setattr(manifest.sys, "platform", "darwin")
+
+    assert manifest._python_runtime_library_authority(source, source / "bin/python3.11") is False
+    assert manifest._python_runtime_library_authority(staged, staged / "bin/python3.11") is False
 
 
 @pytest.mark.parametrize(
