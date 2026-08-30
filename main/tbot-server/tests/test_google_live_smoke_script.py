@@ -197,6 +197,21 @@ class GoogleLiveSmokeScriptTest(unittest.TestCase):
 
         self.assertEqual([len(chunk) for chunk in chunks], [640, 640])
 
+    def test_build_round_trip_config_preserves_production_voice_configuration(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        base = smoke._build_env_config(
+            "gemini-3.1-flash-live-preview",
+            "Kore",
+        )
+
+        config = smoke._build_round_trip_config(base, smoke.DEFAULT_AUDIO_FIXTURE)
+
+        self.assertEqual(config["model"], "gemini-3.1-flash-live-preview")
+        self.assertTrue(config["native_voice"])
+        self.assertEqual(config["voice_name"], "Kore")
+        self.assertEqual(config["language_code"], "vi-VN")
+        self.assertEqual(config["input_sample_rate"], 24000)
+
     def test_read_pcm_chunks_rejects_empty_and_wrong_format(self):
         smoke = importlib.import_module("scripts.google_live_smoke")
 
@@ -221,6 +236,37 @@ class GoogleLiveSmokeScriptTest(unittest.TestCase):
 
 
 class GoogleLiveSmokeRoundTripTest(unittest.IsolatedAsyncioTestCase):
+    async def test_run_round_trip_passes_production_identity_to_client(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        captured = {}
+
+        def fake_client_factory(config, _logger):
+            captured.update(config)
+            return _FakeClient(
+                events=[
+                    {"type": "audio_chunk", "audio": b"audio"},
+                    {"type": "audio_end"},
+                ]
+            )
+
+        config = smoke._build_env_config(
+            "gemini-3.1-flash-live-preview",
+            "Kore",
+        )
+        with patch.object(smoke, "GoogleLiveClient", fake_client_factory):
+            report = await smoke._run_round_trip(
+                config,
+                smoke.DEFAULT_AUDIO_FIXTURE,
+                1,
+            )
+
+        self.assertEqual(report["status"], "PASS")
+        self.assertEqual(captured["model"], "gemini-3.1-flash-live-preview")
+        self.assertTrue(captured["native_voice"])
+        self.assertEqual(captured["voice_name"], "Kore")
+        self.assertEqual(captured["language_code"], "vi-VN")
+        self.assertEqual(captured["input_sample_rate"], 24000)
+
     async def test_run_audio_round_trip_collects_terminal_audio_and_closes(self):
         smoke = importlib.import_module("scripts.google_live_smoke")
         client = _FakeClient(

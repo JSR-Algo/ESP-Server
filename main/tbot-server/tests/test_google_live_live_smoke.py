@@ -49,22 +49,15 @@ class GoogleLiveSmokeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_real_audio_round_trip(self):
         fixture = smoke.DEFAULT_AUDIO_FIXTURE
+        config = smoke._build_env_config(
+            os.environ.get("GOOGLE_LIVE_MODEL", smoke.GOOGLE_LIVE_DEFAULTS["model"]),
+            os.environ.get(
+                "GOOGLE_LIVE_VOICE_NAME",
+                smoke.DEFAULT_GOOGLE_LIVE_VOICE_NAME,
+            ),
+        )
         client = GoogleLiveClient(
-            {
-                "api_key": "${GOOGLE_API_KEY}",
-                "model": os.environ.get(
-                    "GOOGLE_LIVE_MODEL",
-                    "gemini-3.1-flash-live-preview",
-                ),
-                "enable_audio_input": True,
-                "enable_audio_output": True,
-                "native_voice": False,
-                "language_code": "vi-VN",
-                "input_sample_rate": smoke._read_wav_sample_rate(fixture),
-                "connect_timeout_sec": 15,
-                "recv_timeout_sec": 5,
-            },
-            _DummyLogger(),
+            smoke._build_round_trip_config(config, fixture), _DummyLogger()
         )
 
         report = await smoke._run_audio_round_trip(

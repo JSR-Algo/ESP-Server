@@ -120,6 +120,11 @@ def _read_wav_sample_rate(path):
         return wav_file.getframerate()
 
 
+def _build_round_trip_config(config, audio_file):
+    """Preserve the resolved Live identity while matching the WAV input rate."""
+    return {**config, "input_sample_rate": _read_wav_sample_rate(audio_file)}
+
+
 async def _run_audio_round_trip(
     client, *, pcm_chunks, event_timeout_sec, clock=time.monotonic
 ):
@@ -299,7 +304,7 @@ async def _run_smoke(config):
 async def _run_round_trip(config, audio_file, event_timeout_sec):
     try:
         chunks = _read_pcm_chunks(audio_file, chunk_ms=20)
-        config = {**config, "input_sample_rate": _read_wav_sample_rate(audio_file)}
+        config = _build_round_trip_config(config, audio_file)
         return await _run_round_trip_with_retry(
             lambda: GoogleLiveClient(config, _ConsoleLogger()),
             pcm_chunks=chunks,
@@ -324,7 +329,7 @@ def main():
         "--model",
         default=os.environ.get(
             "GOOGLE_LIVE_MODEL",
-            "gemini-3.1-flash-live-preview",
+            GOOGLE_LIVE_DEFAULTS["model"],
         ),
     )
     parser.add_argument(
