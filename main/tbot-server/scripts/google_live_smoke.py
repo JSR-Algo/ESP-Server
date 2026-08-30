@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -467,6 +468,16 @@ def _safe_failure(error, *, status="FAIL"):
     }
 
 
+def _validate_event_timeout(value):
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise _ConfigurationError("event timeout must be finite and positive")
+
+
 def _load_cli_config(args):
     if args.manager_device_id:
         if not args.manager_client_id:
@@ -488,28 +499,21 @@ def _run_report_mode(args):
     candidate_identity = {}
     try:
         candidate_identity = _declared_candidate_identity(args)
+        if not args.round_trip:
+            raise _ConfigurationError("--report requires --round-trip")
+        _validate_event_timeout(args.event_timeout_sec)
         config = _load_cli_config(args)
-        if args.round_trip:
-            candidate_identity, execution_config, chunks = _prepare_round_trip(
-                args,
-                config,
-                candidate_identity,
-            )
-        else:
-            candidate_identity = _validate_candidate_identity(
-                args,
-                config,
-                candidate_identity,
-                candidate_identity["fixtureSha256"],
-            )
-            execution_config = config
-            chunks = None
+        candidate_identity, execution_config, chunks = _prepare_round_trip(
+            args,
+            config,
+            candidate_identity,
+        )
         if not _has_resolvable_api_key(config):
             result = _safe_failure(
                 _MissingCredentialError("Google Live API key is missing"),
                 status="SKIPPED",
             )
-        elif args.round_trip:
+        else:
             result = asyncio.run(
                 _run_prepared_round_trip(
                     execution_config,
@@ -517,9 +521,6 @@ def _run_report_mode(args):
                     args.event_timeout_sec,
                 )
             )
-        else:
-            asyncio.run(_run_smoke(execution_config))
-            result = {"status": "PASS", "attempts": 1}
     except Exception as error:
         result = _safe_failure(error)
     report = _build_report(result, candidate_identity)
@@ -605,6 +606,12 @@ def main():
 
     if args.report:
         return _run_report_mode(args)
+
+    try:
+        _validate_event_timeout(args.event_timeout_sec)
+    except _ConfigurationError:
+        print("--event-timeout-sec must be finite and positive", file=sys.stderr)
+        return 1
 
     if args.manager_device_id and not args.manager_client_id:
         print("--manager-client-id is required with --manager-device-id", file=sys.stderr)

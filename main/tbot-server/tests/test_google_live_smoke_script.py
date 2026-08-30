@@ -264,13 +264,13 @@ class GoogleLiveSmokeScriptTest(unittest.TestCase):
         self.assertEqual(report["status"], "FAIL")
         self.assertEqual(report["error"]["apiKey"], "<redacted>")
 
-    def test_connect_only_report_fingerprints_exact_client_config_without_audio(self):
+    def test_connect_only_report_is_blocking_and_never_executes_client(self):
         smoke = importlib.import_module("scripts.google_live_smoke")
         reliability = importlib.import_module("scripts.google_live_reliability")
-        captured = {}
+        executed = []
 
-        async def fake_run_smoke(config):
-            captured.update(config)
+        async def fake_run_smoke(_config):
+            executed.append(True)
 
         with TemporaryDirectory() as directory:
             report_path = Path(directory) / "report.json"
@@ -286,19 +286,66 @@ class GoogleLiveSmokeScriptTest(unittest.TestCase):
                     *_connect_identity_args(),
                 ],
             ), patch.object(smoke, "_run_smoke", fake_run_smoke):
-                self.assertEqual(smoke.main(), 0)
+                self.assertEqual(smoke.main(), 1)
             report = json.loads(report_path.read_text())
 
-        expected = reliability.build_candidate_identity(
-            "candidate-sha",
-            f"sha256:{'1' * 64}",
-            "firmware-1",
-            captured,
-            "3" * 64,
+        verdict = reliability.reliability_verdict(
+            report["candidateIdentity"],
+            [report],
         )
-        self.assertEqual(report["status"], "PASS")
-        self.assertEqual(report["candidateIdentity"], expected)
-        self.assertNotIn("input_sample_rate", captured)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertEqual(report["error"]["class"], "model_or_config")
+        self.assertEqual(verdict["status"], "FAIL")
+        self.assertEqual(executed, [])
+
+    def test_invalid_event_timeout_writes_failure_before_preflight(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+
+        for invalid in ("nan", "inf", "-inf", "0", "-0.1"):
+            with self.subTest(invalid=invalid), TemporaryDirectory() as directory:
+                report_path = Path(directory) / "report.json"
+                with patch.dict(
+                    "os.environ", {"GOOGLE_API_KEY": "key"}, clear=True
+                ), patch(
+                    "sys.argv",
+                    [
+                        "google_live_smoke.py",
+                        "--round-trip",
+                        "--report",
+                        str(report_path),
+                        f"--event-timeout-sec={invalid}",
+                        *_identity_args(),
+                    ],
+                ), patch.object(
+                    smoke,
+                    "_load_cli_config",
+                    side_effect=AssertionError("preflight must not run"),
+                ):
+                    self.assertEqual(smoke.main(), 1)
+                report = json.loads(report_path.read_text())
+
+            self.assertEqual(report["status"], "FAIL")
+            self.assertEqual(report["error"]["class"], "model_or_config")
+
+    def test_invalid_event_timeout_without_report_uses_safe_stderr(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+
+        with patch.dict("os.environ", {"GOOGLE_API_KEY": "key"}, clear=True), patch(
+            "sys.argv",
+            [
+                "google_live_smoke.py",
+                "--round-trip",
+                "--event-timeout-sec",
+                "nan",
+            ],
+        ), patch.object(
+            smoke,
+            "_load_cli_config",
+            side_effect=AssertionError("preflight must not run"),
+        ), patch("sys.stderr") as stderr:
+            self.assertEqual(smoke.main(), 1)
+
+        self.assertTrue(stderr.write.called)
 
     def test_missing_credentials_writes_blocking_skipped_report(self):
         smoke = importlib.import_module("scripts.google_live_smoke")
