@@ -30,9 +30,15 @@ async function stopChild(child) {
 
 async function closeSocket(socket) {
   if (!socket || socket.readyState === 3) return;
-  const closed = new Promise((resolve) => socket.once('close', resolve));
-  socket.close();
-  if (!await Promise.race([closed.then(() => true), delay(500).then(() => false)])) socket.terminate();
+  const ignoreClosingError = () => {};
+  socket.on('error', ignoreClosingError);
+  try {
+    const closed = new Promise((resolve) => socket.once('close', resolve));
+    socket.close();
+    if (!await Promise.race([closed.then(() => true), delay(500).then(() => false)])) socket.terminate();
+  } finally {
+    socket.off('error', ignoreClosingError);
+  }
 }
 
 async function defaultWaitForDevToolsPort(path, timeoutMs, signal) {
@@ -119,10 +125,13 @@ export async function withCandidateBoundBrowser({
     } finally {
       fetchController.abort();
     }
-    socket = await bounded(
-      createDevToolsSocket(target.webSocketDebuggerUrl),
-      `${label} DevTools socket creation`,
-    );
+    const socketCreation = Promise.resolve(createDevToolsSocket(target.webSocketDebuggerUrl));
+    try {
+      socket = await bounded(socketCreation, `${label} DevTools socket creation`);
+    } catch (error) {
+      socketCreation.then((createdSocket) => closeSocket(createdSocket).catch(() => {}), () => {});
+      throw error;
+    }
     socket.on('error', (error) => failLifecycle(new Error(`${label} DevTools socket failed: ${error.message}`)));
     socket.on('close', () => failLifecycle(new Error(`${label} DevTools socket closed`)));
     socket.on('message', (raw) => {

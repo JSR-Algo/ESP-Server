@@ -185,6 +185,38 @@ test('visual-library pre-CDP socket factory hang rejects before outer watchdog a
   assert.equal(deps.state.socket, null);
 });
 
+test('late socket factory resolution is closed after creation timeout and lifecycle cleanup', async () => {
+  const { withCandidateBoundBrowser } = await importHarness();
+  const deps = dependencies();
+  let resolveLateSocketClosed;
+  const lateSocketClosed = new Promise((resolve) => { resolveLateSocketClosed = resolve; });
+  deps.createDevToolsSocket = () => new Promise((resolve) => {
+    setTimeout(() => {
+      deps.state.socket = unopenedSocket();
+      const close = deps.state.socket.close;
+      deps.state.socket.close = () => {
+        queueMicrotask(() => deps.state.socket.emit('error', new Error('closed before connection established')));
+        close();
+        resolveLateSocketClosed();
+      };
+      deps.state.socket.terminate = deps.state.socket.close;
+      resolve(deps.state.socket);
+    }, 50);
+  });
+  await assert.rejects(outerWatchdog(withCandidateBoundBrowser({
+    profileDir: '/tmp/visual-library-profile',
+    label: 'Lesson visual library browser',
+    operationTimeoutMs: 20,
+    ...deps,
+  }, async () => {
+    assert.fail('callback must not run after socket creation times out');
+  })), /Lesson visual library browser DevTools socket creation timed out after 20ms/);
+  assert.equal(deps.state.cleanupCalls, 1);
+  assert.equal(deps.state.child.signalCode, 'SIGTERM');
+  await outerWatchdog(lateSocketClosed);
+  assert.equal(deps.state.socket.readyState, 3);
+});
+
 test('visual-library pre-CDP socket-open hang rejects before outer watchdog and cleans lifecycle', async () => {
   const { withCandidateBoundBrowser } = await importHarness();
   const deps = dependencies();
