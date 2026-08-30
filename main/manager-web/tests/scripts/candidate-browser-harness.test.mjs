@@ -124,6 +124,22 @@ test('spawn failure cleans the candidate browser lease', async () => {
   assert.equal(deps.state.cleanupCalls, 1);
 });
 
+test('stalled candidate browser acquisition rejects before the outer watchdog', async () => {
+  const { withCandidateBoundBrowser } = await importHarness();
+  const deps = dependencies();
+  deps.acquireBrowser = () => new Promise(() => {});
+  await assert.rejects(outerWatchdog(withCandidateBoundBrowser({
+    profileDir: '/tmp/profile',
+    label: 'test gate',
+    operationTimeoutMs: 25,
+    ...deps,
+  }, async () => {
+    assert.fail('callback must not run before browser acquisition completes');
+  })), /test gate candidate browser acquisition timed out after 25ms/);
+  assert.deepEqual(deps.state.spawned, []);
+  assert.equal(deps.state.cleanupCalls, 0);
+});
+
 test('hostile ambient browser variables cannot redirect the staged candidate executable', async () => {
   const { withCandidateBoundBrowser } = await importHarness();
   const deps = dependencies();
@@ -166,6 +182,27 @@ test('stalled CDP command times out and cleans child, socket, and lease', async 
   }, async ({ cdp }) => cdp('Page.enable')), /test gate CDP Page\.enable timed out after 25ms/);
   assert.equal(deps.state.cleanupCalls, 1);
   assert.deepEqual(deps.state.spawned, ['/candidate/staged/chrome-headless-shell']);
+  assert.equal(deps.state.child.signalCode, 'SIGTERM');
+  assert.equal(deps.state.socket.readyState, 3);
+});
+
+test('stalled candidate browser cleanup rejects before the outer watchdog after local resources close', async () => {
+  const { withCandidateBoundBrowser } = await importHarness();
+  const deps = dependencies();
+  deps.acquireBrowser = async () => ({
+    executablePath: '/candidate/staged/chrome-headless-shell',
+    cleanup: async () => {
+      deps.state.cleanupCalls += 1;
+      await new Promise(() => {});
+    },
+  });
+  await assert.rejects(outerWatchdog(withCandidateBoundBrowser({
+    profileDir: '/tmp/profile',
+    label: 'test gate',
+    operationTimeoutMs: 25,
+    ...deps,
+  }, async () => {})), /test gate candidate browser cleanup timed out after 25ms/);
+  assert.equal(deps.state.cleanupCalls, 1);
   assert.equal(deps.state.child.signalCode, 'SIGTERM');
   assert.equal(deps.state.socket.readyState, 3);
 });

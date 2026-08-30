@@ -80,7 +80,7 @@ export async function withCandidateBoundBrowser({
     for (const callbacks of pending.values()) callbacks.reject(error);
     pending.clear();
   };
-  const bounded = async (operation, operationLabel, timeoutMs = operationTimeoutMs, onTimeout = () => {}) => {
+  const lifecycleBounded = async (operation, operationLabel, timeoutMs = operationTimeoutMs, onTimeout = () => {}) => {
     let timer;
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => {
@@ -89,14 +89,26 @@ export async function withCandidateBoundBrowser({
       }, timeoutMs);
     });
     try {
-      return await Promise.race([operation, lifecycleFailure, timeout]);
+      return await Promise.race([operation, timeout]);
     } finally {
       clearTimeout(timer);
     }
   };
+  const bounded = (operation, operationLabel, timeoutMs = operationTimeoutMs, onTimeout = () => {}) => lifecycleBounded(
+    Promise.race([operation, lifecycleFailure]), operationLabel, timeoutMs, onTimeout
+  );
 
   try {
-    lease = await acquireBrowser();
+    const acquisition = Promise.resolve().then(() => acquireBrowser());
+    try {
+      lease = await lifecycleBounded(acquisition, `${label} candidate browser acquisition`);
+    } catch (error) {
+      acquisition.then((lateLease) => lifecycleBounded(
+        Promise.resolve().then(() => lateLease?.cleanup()),
+        `${label} late candidate browser cleanup`,
+      ).catch(() => {}), () => {});
+      throw error;
+    }
     child = spawnBrowser(lease.executablePath, [
       '--headless', '--disable-gpu', '--remote-debugging-port=0',
       `--user-data-dir=${profileDir}`, 'about:blank',
@@ -170,6 +182,11 @@ export async function withCandidateBoundBrowser({
   } finally {
     await closeSocket(socket).catch(() => {});
     await stopChild(child).catch(() => {});
-    await lease?.cleanup();
+    if (lease) {
+      await lifecycleBounded(
+        Promise.resolve().then(() => lease.cleanup()),
+        `${label} candidate browser cleanup`,
+      );
+    }
   }
 }
