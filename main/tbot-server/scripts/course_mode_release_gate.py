@@ -12,11 +12,14 @@ import json
 import math
 import os
 import posixpath
+import queue
 import re
 import secrets
 import shutil
+import socket
 import stat
 import tempfile
+import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -1287,8 +1290,6 @@ def _postgres_host_identity(host: str | None) -> str | None:
     if not host:
         return None
     normalized = host.lower().removesuffix(".")
-    if normalized == "localhost" or normalized.endswith(".localhost"):
-        return "loopback"
     try:
         address = ipaddress.ip_address(normalized)
     except ValueError:
@@ -1301,8 +1302,8 @@ def _postgres_host_identity(host: str | None) -> str | None:
         ):
             return None
         return normalized
-    if address.is_loopback:
-        return "loopback"
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
     return address.compressed
 
 
@@ -1341,7 +1342,49 @@ def _postgres_identity(value: object) -> tuple[str, int, str] | None:
 
 def _local_postgres_identity(value: object) -> tuple[str, int, str] | None:
     identity = _postgres_identity(value)
-    return identity if identity is not None and identity[0] == "loopback" else None
+    if identity is None:
+        return None
+    try:
+        literal_host = urlsplit(value).hostname.lower()
+    except (AttributeError, UnicodeError, ValueError):
+        return None
+    if literal_host not in {"localhost", "127.0.0.1", "::1"}:
+        return None
+    return ("loopback", identity[1], identity[2])
+
+
+def _resolved_postgres_addresses(host: str, port: int) -> frozenset[str] | None:
+    results: queue.SimpleQueue[object] = queue.SimpleQueue()
+
+    def resolve() -> None:
+        try:
+            results.put(socket.getaddrinfo(
+                host, port, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM,
+                proto=socket.IPPROTO_TCP,
+            ))
+        except (OSError, UnicodeError, ValueError):
+            results.put(None)
+
+    worker = threading.Thread(target=resolve, daemon=True)
+    worker.start()
+    worker.join(2.0)
+    if worker.is_alive() or results.empty():
+        return None
+    raw = results.get()
+    if not isinstance(raw, list) or not raw or len(raw) > 32:
+        return None
+    addresses = set()
+    try:
+        for family, _, _, _, sockaddr in raw:
+            if family not in {socket.AF_INET, socket.AF_INET6} or not isinstance(sockaddr, tuple):
+                return None
+            address = ipaddress.ip_address(sockaddr[0])
+            if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+                address = address.ipv4_mapped
+            addresses.add(address.compressed)
+    except (IndexError, TypeError, ValueError):
+        return None
+    return frozenset(addresses) if addresses else None
 
 
 def _live_db_topology_ready(source: Mapping[str, str]) -> bool:
@@ -1354,7 +1397,17 @@ def _live_db_topology_ready(source: Mapping[str, str]) -> bool:
     if "PRODUCTION_DATABASE_URL" not in source:
         return True
     production = _postgres_identity(source.get("PRODUCTION_DATABASE_URL"))
-    return production is not None and production not in {curriculum, materializer}
+    if production is None:
+        return False
+    host, port, database = production
+    addresses = _resolved_postgres_addresses(host, port)
+    if addresses is None:
+        return False
+    production_is_loopback = any(ipaddress.ip_address(address).is_loopback for address in addresses)
+    aliases_test_database = production_is_loopback and any(
+        (port, database) == identity[1:] for identity in (curriculum, materializer)
+    )
+    return not aliases_test_database
 
 
 def _assignment_candidate_environment(candidate: dict, lane: Lane) -> dict[str, str] | None:

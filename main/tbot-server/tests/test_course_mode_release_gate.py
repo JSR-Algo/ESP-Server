@@ -5,6 +5,7 @@ import hashlib
 import importlib
 import json
 import os
+import socket
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -672,6 +673,13 @@ def test_live_db_blocks_when_production_alias_matches_either_test_database(
 ) -> None:
     source = {**_live_db_source(), "PRODUCTION_DATABASE_URL": production_url}
     monkeypatch.setattr(
+        gate.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 0)),
+        ],
+    )
+    monkeypatch.setattr(
         gate, "run_bounded_command",
         lambda *args, **kwargs: pytest.fail("live DB command must not run for a production alias"),
     )
@@ -712,6 +720,13 @@ def test_live_db_valid_distinct_production_url_is_not_forwarded_to_child(
         **_live_db_source(),
         "PRODUCTION_DATABASE_URL": "postgresql://prod.internal:5432/production",
     }
+    monkeypatch.setattr(
+        gate.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("203.0.113.10", 5432)),
+        ],
+    )
 
     result = _run_live_db_topology_gate(
         candidate_file,
@@ -721,6 +736,118 @@ def test_live_db_valid_distinct_production_url_is_not_forwarded_to_child(
     )
 
     assert result["verdict"] == "PASS"
+
+
+@pytest.mark.parametrize("production_host", ["localhost.localdomain", "0x7f000001"])
+def test_live_db_blocks_production_resolver_aliases_to_loopback(
+    candidate_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    production_host: str,
+) -> None:
+    source = {
+        **_live_db_source(),
+        "PRODUCTION_DATABASE_URL": f"postgresql://prod@{production_host}:55431/course_mode_a",
+    }
+    monkeypatch.setattr(
+        gate.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 55431)),
+        ],
+    )
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("resolver alias must block before command"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
+
+
+def test_live_db_blocks_ipv4_mapped_ipv6_production_alias(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = {
+        **_live_db_source(),
+        "PRODUCTION_DATABASE_URL": "postgresql://prod@mapped.invalid:55431/course_mode_a",
+    }
+    monkeypatch.setattr(
+        gate.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("::ffff:127.0.0.1", 55431, 0, 0)),
+        ],
+    )
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("mapped loopback alias must block before command"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
+
+
+def test_live_db_allows_distinct_remote_resolved_production_hostname(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = {
+        **_live_db_source(),
+        "PRODUCTION_DATABASE_URL": "postgresql://prod@production.invalid:55431/course_mode_a",
+    }
+    monkeypatch.setattr(
+        gate.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("203.0.113.10", 55431)),
+        ],
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "PASS"
+
+
+def test_live_db_blocks_unresolved_production_hostname(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = {
+        **_live_db_source(),
+        "PRODUCTION_DATABASE_URL": "postgresql://prod@unresolved.invalid:55431/course_mode_a",
+    }
+
+    def fail_resolution(*args, **kwargs):
+        raise socket.gaierror(socket.EAI_NONAME, "not known")
+
+    monkeypatch.setattr(gate.socket, "getaddrinfo", fail_resolution)
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("unresolved production host must block before command"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
+
+
+@pytest.mark.parametrize("target_host", ["localhost.localdomain", "0x7f000001"])
+def test_live_db_target_urls_reject_resolver_aliases(
+    candidate_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_host: str,
+) -> None:
+    source = _live_db_source(
+        database_a=f"postgresql://operator@{target_host}:55431/course_mode_a",
+    )
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("target DB resolver aliases must not run"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
 
 
 def test_live_db_does_not_forward_ambient_production_database_url(candidate_file: Path) -> None:
