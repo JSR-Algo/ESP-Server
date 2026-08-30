@@ -426,6 +426,7 @@ test('stubborn child retains the lease when it cannot be reaped before the lifec
     profileDir: '/tmp/profile', label: 'stubborn gate', operationTimeoutMs: 25, ...deps,
   }, async () => { throw new Error('trigger cleanup'); }), 75), /lease retained.*child.*not reaped/i);
   assert.equal(deps.state.cleanupCalls, 0);
+  assert.equal(deps.state.socket.readyState, 3);
 });
 
 test('SIGKILL reap completes before candidate lease cleanup', async () => {
@@ -505,4 +506,37 @@ test('default late-lease owner drains acquisition that resolves during cleanup r
   }, async () => {}), /default late gate lifecycle timed out after 50ms/);
   await outerWatchdog(drainRetainedCandidateBrowserLeases(), 100);
   assert.equal(cleanupCalls, 1);
+});
+
+test('retained lease cleanup is retried by later drains until it succeeds', async () => {
+  const { withCandidateBoundBrowser, drainRetainedCandidateBrowserLeases } = await importHarness();
+  const deps = dependencies();
+  let cleanupCalls = 0;
+  let releaseSecondAttempt;
+  let secondAttemptStarted;
+  const secondAttempt = new Promise((resolve) => { secondAttemptStarted = resolve; });
+  deps.acquireBrowser = async () => ({
+    executablePath: '/candidate/staged/chrome-headless-shell',
+    cleanup: async () => {
+      cleanupCalls += 1;
+      if (cleanupCalls === 1) throw new Error('first cleanup failure');
+      if (cleanupCalls === 2) {
+        secondAttemptStarted();
+        await new Promise((resolve) => { releaseSecondAttempt = resolve; });
+        throw new Error('second cleanup failure');
+      }
+    },
+  });
+  await assert.rejects(withCandidateBoundBrowser({
+    profileDir: '/tmp/profile', label: 'retry gate', operationTimeoutMs: 100, ...deps,
+  }, async () => {}), /first cleanup failure/);
+  await outerWatchdog(secondAttempt, 75);
+  const firstDrain = drainRetainedCandidateBrowserLeases();
+  releaseSecondAttempt();
+  await outerWatchdog(firstDrain, 75);
+  assert.equal(cleanupCalls, 2);
+  await outerWatchdog(drainRetainedCandidateBrowserLeases(), 75);
+  assert.equal(cleanupCalls, 3);
+  await outerWatchdog(drainRetainedCandidateBrowserLeases(), 75);
+  assert.equal(cleanupCalls, 3);
 });

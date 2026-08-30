@@ -8,33 +8,35 @@ const DEFAULT_OPERATION_TIMEOUT_MS = 60000;
 const DEFAULT_READINESS_TIMEOUT_MS = 10000;
 const retainedLeaseRecords = new Set();
 
-function retainAndDrainLease(error, lease) {
-  const record = { error, lease, cleanup: null };
+function cleanupRetainedLease(record) {
+  if (record.cleanup) return record.cleanup;
+  record.cleanup = Promise.resolve().then(async () => {
+    record.lease ||= await record.acquisition;
+    await record.lease?.cleanup();
+    retainedLeaseRecords.delete(record);
+  }).catch((cleanupError) => {
+    process.emitWarning(new Error(`${record.error.message}; cleanup failed`, { cause: cleanupError }));
+    throw cleanupError;
+  }).finally(() => {
+    record.cleanup = null;
+  });
+  return record.cleanup;
+}
+
+function retainAndDrainLease(error, lease, acquisition = null) {
+  const record = { error, lease, acquisition, cleanup: null };
   retainedLeaseRecords.add(record);
   process.emitWarning(error);
-  record.cleanup = Promise.resolve().then(() => lease.cleanup()).then(
-    () => retainedLeaseRecords.delete(record),
-    (cleanupError) => process.emitWarning(new Error(`${error.message}; cleanup failed`, { cause: cleanupError })),
-  );
-  return record.cleanup;
+  cleanupRetainedLease(record).catch(() => {});
+  return record;
 }
 
 function retainAndDrainLateAcquisition(error, acquisition) {
-  const record = { error, lease: null, cleanup: null };
-  retainedLeaseRecords.add(record);
-  process.emitWarning(error);
-  record.cleanup = acquisition.then((lease) => {
-    record.lease = lease;
-    return lease?.cleanup();
-  }).then(
-    () => retainedLeaseRecords.delete(record),
-    (cleanupError) => process.emitWarning(new Error(`${error.message}; cleanup failed`, { cause: cleanupError })),
-  );
-  return record.cleanup;
+  return retainAndDrainLease(error, null, acquisition);
 }
 
 export async function drainRetainedCandidateBrowserLeases() {
-  await Promise.allSettled([...retainedLeaseRecords].map((record) => record.cleanup));
+  await Promise.allSettled([...retainedLeaseRecords].map(cleanupRetainedLease));
 }
 
 function delay(timeoutMs) {
@@ -289,8 +291,14 @@ export async function withCandidateBoundBrowser({
     );
   } finally {
     const childDeadline = Date.now() + Math.min(childReapReserveMs, remainingMs());
-    await stopChild(child, () => Math.max(0, Math.min(remainingMs(), childDeadline - Date.now())), label);
+    let childReapError;
+    try {
+      await stopChild(child, () => Math.max(0, Math.min(remainingMs(), childDeadline - Date.now())), label);
+    } catch (error) {
+      childReapError = error;
+    }
     await closeSocket(socket, Math.min(socketCloseReserveMs, remainingMs())).catch(() => {});
+    if (childReapError) throw childReapError;
     if (lease) {
       try {
         await lifecycleBounded(
