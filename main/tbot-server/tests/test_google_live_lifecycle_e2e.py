@@ -42,7 +42,7 @@ EXPECTED_PROVIDER_TASK_FIELDS = {
 class LifecycleResult:
     receive_loop_max_active: int = 0
     live_session_max_active: int = 0
-    replayed_audio: list[bytes] = field(default_factory=list)
+    replayed_transport_audio: list[bytes] = field(default_factory=list)
     replay_count: int = 0
     replacement_device_audio: list[bytes] = field(default_factory=list)
     response_ids: list[int] = field(default_factory=list)
@@ -217,7 +217,7 @@ class _FakeLiveSession:
         self.realtime_inputs.append(kwargs)
         audio = kwargs.get("audio")
         if isinstance(audio, dict) and isinstance(audio.get("data"), bytes):
-            self.audio_frames.append(audio["data"].rstrip(b"\x00"))
+            self.audio_frames.append(audio["data"])
 
     async def send_client_content(self, **kwargs):
         self.client_content_inputs.append(kwargs)
@@ -256,8 +256,6 @@ class _FakeLiveContext:
     async def __aenter__(self):
         self.entered = True
         self.transport.counters.session_enter()
-        if self.transport.session_enter_hook is not None:
-            self.transport.session_enter_hook(self.session)
         return self.session
 
     async def __aexit__(self, _exc_type, _exc, _tb):
@@ -295,33 +293,12 @@ class _FakeTransport:
         self.clients = []
         self.sessions = []
         self.connect_configs = []
-        self.session_enter_hook = None
         self.module = _FakeGenaiModule(self)
 
 
 class _FrameMarker(bytes):
     def __new__(cls, value):
         return super().__new__(cls, value + (b"\x00" if len(value) % 2 else b""))
-
-
-class _FrameBoundaryBuffer:
-    def __init__(self):
-        self.frames = []
-
-    def extend(self, frame):
-        self.frames.append(frame)
-
-    def __len__(self):
-        return 1_000_000 if self.frames else 0
-
-    def __getitem__(self, _key):
-        return bytes(self.frames[0])
-
-    def __delitem__(self, _key):
-        self.frames.pop(0)
-
-    def clear(self):
-        self.frames.clear()
 
 
 class _InProcessGoogleLiveClient(GoogleLiveClient):
@@ -405,11 +382,6 @@ async def _run_lifecycle_journey():
         return client
 
     provider = GoogleLiveProvider(conn, client_factory=client_factory)
-    def install_replacement_frame_boundary(_session):
-        if len(transport.sessions) == 2:
-            provider._bridge._input_live_chunk_buffer = _FrameBoundaryBuffer()
-
-    transport.session_enter_hook = install_replacement_frame_boundary
     try:
         with patch.object(
             GoogleLiveProvider,
@@ -452,8 +424,8 @@ async def _run_lifecycle_journey():
             await asyncio.sleep(0)
             assert provider._client is not None, conn.logger.messages[-20:]
             await _wait_until(lambda: _successful_replay_count(conn.logger) == 1)
-            await _wait_until(lambda: len(second_session.audio_frames) >= 2)
-            result.replayed_audio = list(second_session.audio_frames)
+            await _wait_until(lambda: len(second_session.audio_frames) >= 1)
+            result.replayed_transport_audio = list(second_session.audio_frames)
             result.replay_count = _successful_replay_count(conn.logger)
 
             replacement_start = len(
@@ -654,7 +626,10 @@ async def test_google_live_full_lifecycle_recovers_without_duplicate_owners_or_a
 
     assert result.receive_loop_max_active == 1
     assert result.live_session_max_active == 1
-    assert result.replayed_audio == [b"frame-1", b"frame-2"]
+    assert result.replayed_transport_audio == [b"frame-1\x00frame-2\x00"]
+    assert result.replayed_transport_audio[0].replace(b"\x00", b"") == (
+        b"frame-1frame-2"
+    )
     assert result.replay_count == 1
     assert result.replacement_device_audio == [b"new-audio"]
     assert result.response_ids == sorted(set(result.response_ids))
