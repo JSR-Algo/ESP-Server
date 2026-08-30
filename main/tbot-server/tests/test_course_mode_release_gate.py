@@ -815,9 +815,11 @@ def test_full_esp_lane_discovers_every_committed_software_course_mode_suite() ->
     expected = (
         "tests/test_course_mode_candidate_manifest.py",
         "tests/test_course_mode_contract.py",
+        "tests/test_course_mode_cross_process_e2e.py",
         "tests/test_course_mode_curriculum.py",
         "tests/test_course_mode_curriculum_e2e.py",
         "tests/test_course_mode_e2e_journeys.py",
+        "tests/test_course_mode_evidence_audit.py",
         "tests/test_course_mode_forwarder.py",
         "tests/test_course_mode_physical_tft_compose.py",
         "tests/test_course_mode_physical_tft_ledger_validate.py",
@@ -835,6 +837,8 @@ def test_full_esp_lane_discovers_every_committed_software_course_mode_suite() ->
     assert discovered == expected
     assert "tests/test_course_mode_candidate_manifest.py" in discovered
     assert "tests/test_course_mode_task07_evidence_validate.py" in discovered
+    assert gate.classify_esp_course_mode_test("tests/test_course_mode_cross_process_e2e.py") == "software"
+    assert gate.classify_esp_course_mode_test("tests/test_course_mode_evidence_audit.py") == "software"
     assert "tests/test_google_live_course_mode.py" in discovered
     assert "tests/test_course_mode_physical_tft_preflight.py" in discovered
     assert gate.classify_esp_course_mode_test("tests/test_course_mode_physical_tft_preflight.py") == "physical-contract"

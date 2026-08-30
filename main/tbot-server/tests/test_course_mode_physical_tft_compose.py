@@ -179,6 +179,9 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
             "TBOT_COURSE_MODE_V5_MATERIALIZER_IMAGE": (
                 "local/tbot-course-mode-v5-materializer:0123456789abcdef"
             ),
+            "TBOT_LESSON_STUDIO_WEB_IMAGE": (
+                "local/tbot-server-web:course-mode-physical-tft-0123456789abcdef"
+            ),
             "TBOT_ESP_REPOSITORY_ROOT": "/tmp/task-owned-esp",
         }
     )
@@ -256,6 +259,9 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
     assert materialize["image"] == (
         "local/tbot-course-mode-v5-materializer:0123456789abcdef"
     )
+    assert web["image"] == (
+        "local/tbot-server-web:course-mode-physical-tft-0123456789abcdef"
+    )
     assert materialize["command"] == [
         "dist/lessons/course-mode/course-mode-v5-identity-materializer.js",
         "materialize",
@@ -318,6 +324,11 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
 
 def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path):
     script = PHYSICAL_TFT_UP.read_text(encoding="utf-8")
+    assert 'export TBOT_LESSON_STUDIO_WEB_IMAGE="${WEB_IMAGE}"' in script
+    assert 'git -C "${TBOT_ESP_REPOSITORY_ROOT}" archive --format=tar "${ESP_SHA}"' in script
+    assert '-f "${ESP_BUILD_CONTEXT}/Dockerfile-web"' in script
+    assert '-t "${WEB_IMAGE}" "${ESP_BUILD_CONTEXT}"' in script
+    assert '-t "${WEB_IMAGE}" "${TBOT_ESP_REPOSITORY_ROOT}"' not in script
     assert 'export LESSON_RENDERER_V3_ENABLED="true"' in script
     assert 'openssl pkey -in "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem" -pubout -outform DER' in script
     assert 'openssl pkey -pubin -in "${BACKEND_ROOT}/keys/dev-public.pem" -outform DER' in script
@@ -361,6 +372,7 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
         f"if [[ \"$*\" == *\"rev-parse --show-toplevel\"* ]]; then echo {backend}; exit 0; fi\n"
         f"if [[ \"$*\" == *\"rev-parse HEAD\"* ]]; then echo {sha}; exit 0; fi\n"
         "if [[ \"$*\" == *\"status --porcelain\"* ]]; then exit 0; fi\n"
+        f"if [[ \"$*\" == *\"archive --format=tar\"* ]]; then tar -C {ROOT} -cf - Dockerfile-web; exit 0; fi\n"
         "exit 2\n",
         encoding="utf-8",
     )
@@ -432,11 +444,20 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
         f"{materializer_image} -e require('node:fs').accessSync('/app/dist/lessons/"
         "course-mode/course-mode-v5-identity-materializer.js')"
     )
-    assert " compose --project-name tbot-course-mode-physical-tft " in f" {calls[4]} "
-    assert calls[4].endswith("config --quiet")
-    assert "unrelated-stack" not in calls[4]
-    assert "another-stack" not in calls[4]
-    assert "external-resources" not in calls[4]
+    web_image = f"local/tbot-server-web:course-mode-physical-tft-{sha}"
+    assert calls[4].startswith(
+        "docker build --pull=false --label "
+        f"org.opencontainers.image.revision={sha} --label "
+        "com.tbot.course-mode.build-source=reviewed-clean-git-worktree -f "
+    )
+    assert f"/esp-source/Dockerfile-web -t {web_image} " in calls[4]
+    assert calls[4].endswith("/esp-source")
+    assert str(ROOT) not in calls[4]
+    assert " compose --project-name tbot-course-mode-physical-tft " in f" {calls[5]} "
+    assert calls[5].endswith("config --quiet")
+    assert "unrelated-stack" not in calls[5]
+    assert "another-stack" not in calls[5]
+    assert "external-resources" not in calls[5]
     assert all(" up " not in f" {call} " for call in calls)
     assert set(Path(f"{log}.env").read_text().splitlines()) == {
         "asset=http://192.168.100.183:8102/ robot=http://192.168.100.183:8003 esp=http://192.168.100.183:8003",
