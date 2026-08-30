@@ -833,6 +833,38 @@ def test_live_db_blocks_unresolved_production_hostname(
     assert result["verdict"] == "BLOCKED"
 
 
+def test_live_db_blocks_production_resolution_timeout(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = {
+        **_live_db_source(),
+        "PRODUCTION_DATABASE_URL": "postgresql://prod@slow.invalid:55431/course_mode_a",
+    }
+
+    class NeverFinishes:
+        def __init__(self, *, target, daemon):
+            assert callable(target) and daemon is True
+
+        def start(self) -> None:
+            pass
+
+        def join(self, timeout: float) -> None:
+            assert timeout == 2.0
+
+        def is_alive(self) -> bool:
+            return True
+
+    monkeypatch.setattr(gate.threading, "Thread", NeverFinishes)
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("resolver timeout must block before command"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
+
+
 @pytest.mark.parametrize("target_host", ["localhost.localdomain", "0x7f000001"])
 def test_live_db_target_urls_reject_resolver_aliases(
     candidate_file: Path,
