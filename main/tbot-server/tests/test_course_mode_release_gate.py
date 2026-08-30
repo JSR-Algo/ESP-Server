@@ -826,6 +826,7 @@ def test_full_esp_lane_discovers_every_committed_software_course_mode_suite() ->
         "tests/test_course_mode_physical_tft_preflight.py",
         "tests/test_course_mode_physical_tft_receipt_verify.py",
         "tests/test_course_mode_renderer_v4_persistence.py",
+        "tests/test_course_mode_resource_soak.py",
         "tests/test_course_mode_runtime_compatibility.py",
         "tests/test_course_mode_runtime_integration.py",
         "tests/test_course_mode_task00_contract.py",
