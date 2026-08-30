@@ -228,6 +228,22 @@ P_EVIDENCE_RECONNECT_OUTCOME = re.compile(
     r"journey_id=(?P<journey_id>\S+) connection_id=(?P<connection_id>\S+) "
     r"attempt=(?P<attempt>\d+)(?: live_connection_id=(?P<live_connection_id>\S+)| error_class=(?P<error_class>\S+))"
 )
+_SCOPED_EVIDENCE_PATTERNS = (
+    P_EVIDENCE_RESPONSE_START,
+    P_EVIDENCE_RESPONSE_END,
+    P_EVIDENCE_FORWARDED,
+    P_EVIDENCE_INTERRUPT_STARTED,
+    P_EVIDENCE_INTERRUPT_STOPPED,
+    P_EVIDENCE_USER_INTERRUPTED,
+    P_EVIDENCE_CONNECTION_CLOSE,
+    P_EVIDENCE_STALE_DROP,
+    P_EVIDENCE_INTERRUPT_REPLAYED,
+    P_EVIDENCE_INTERRUPT_FINALIZED,
+    P_EVIDENCE_RECONNECT_STARTED,
+    P_EVIDENCE_REOPEN_READY,
+    P_EVIDENCE_REPLAYED_BUFFERED,
+    P_EVIDENCE_RECONNECT_OUTCOME,
+)
 P_STALE_MODEL_DROP_IDS = re.compile(
     r"Google Live stale_model_event_dropped type=(?P<type>\w+) reason=(?P<reason>\w+) "
     r"response_id=(?P<response_id>\d+) current_response_id=(?P<current_response_id>\d+)"
@@ -1288,6 +1304,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     observed_marker_families: dict[str, set[str]] = defaultdict(set)
     scoped_interrupts: list[dict[str, Any]] = []
     scoped_reconnects: dict[tuple[str, str, int], dict[str, Any]] = {}
+    scoped_active_responses: dict[tuple[str, str], int] = {}
 
     with log_path.open("r", encoding="utf-8", errors="replace") as fh:
         for line_number, raw_line in enumerate(fh, 1):
@@ -1454,6 +1471,20 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     int(scoped_start.group("response_id")),
                 )
                 response_starts[response_key] += 1
+                response_scope = response_key[:2]
+                active_response_id = scoped_active_responses.get(response_scope)
+                if active_response_id is not None:
+                    failures.append(
+                        _failure(
+                            "RESPONSE_OVERLAP"
+                            if active_response_id != response_key[2]
+                            else "DUPLICATE_RESPONSE_ID",
+                            line_number,
+                            str(response_key),
+                        )
+                    )
+                else:
+                    scoped_active_responses[response_scope] = response_key[2]
                 for record in scoped_interrupts:
                     if (
                         record["journeyId"] == scoped_start.group("journey_id")
@@ -1469,6 +1500,21 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 observed_marker_families[scoped_end.group("journey_id")].add(
                     "response_ended"
                 )
+                response_scope = (
+                    scoped_end.group("connection_id"),
+                    scoped_end.group("live_connection_id"),
+                )
+                response_id = int(scoped_end.group("response_id"))
+                if scoped_active_responses.get(response_scope) != response_id:
+                    failures.append(
+                        _failure(
+                            "RESPONSE_END_WITHOUT_START",
+                            line_number,
+                            str((*response_scope, response_id)),
+                        )
+                    )
+                else:
+                    scoped_active_responses.pop(response_scope, None)
                 for record in scoped_interrupts:
                     if (
                         record["journeyId"] == scoped_end.group("journey_id")
@@ -1484,12 +1530,41 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 observed_marker_families[scoped_forwarded.group("journey_id")].add(
                     "forwarded"
                 )
+                forwarded_response_id = int(scoped_forwarded.group("response_id"))
+                response_scope = (
+                    scoped_forwarded.group("connection_id"),
+                    scoped_forwarded.group("live_connection_id"),
+                )
+                if scoped_active_responses.get(response_scope) != forwarded_response_id:
+                    failures.append(
+                        _failure(
+                            "RESPONSE_CHUNK_WITHOUT_ACTIVE_RESPONSE",
+                            line_number,
+                            str((*response_scope, forwarded_response_id)),
+                        )
+                    )
                 for record in scoped_interrupts:
                     if (
                         record["journeyId"] == scoped_forwarded.group("journey_id")
                         and record["connectionId"] == scoped_forwarded.group("connection_id")
                         and record["liveConnectionId"] == scoped_forwarded.group("live_connection_id")
-                        and record["replacementResponseId"] == int(scoped_forwarded.group("response_id"))
+                        and record["phase"] >= 6
+                        and forwarded_response_id == record["cancelledResponseId"]
+                    ):
+                        stale_audio_after_replacement += 1
+                        failures.append(
+                            _failure(
+                                "STALE_AUDIO_AFTER_REPLACEMENT",
+                                line_number,
+                                "non-replacement response emitted after replacement start",
+                            )
+                        )
+                for record in scoped_interrupts:
+                    if (
+                        record["journeyId"] == scoped_forwarded.group("journey_id")
+                        and record["connectionId"] == scoped_forwarded.group("connection_id")
+                        and record["liveConnectionId"] == scoped_forwarded.group("live_connection_id")
+                        and record["replacementResponseId"] == forwarded_response_id
                     ):
                         record["orderInvalid"] |= record["phase"] != 6
                         record["phase"] = 7
@@ -1510,6 +1585,32 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         "orderInvalid": False,
                     }
                 )
+                response_scope = (
+                    scoped_interrupt_start.group("connection_id"),
+                    scoped_interrupt_start.group("live_connection_id"),
+                )
+                cancelled_response_id = int(
+                    scoped_interrupt_start.group("cancelled")
+                )
+                active_response_id = scoped_active_responses.get(response_scope)
+                if active_response_id == cancelled_response_id:
+                    scoped_active_responses.pop(response_scope, None)
+                elif active_response_id is None:
+                    failures.append(
+                        _failure(
+                            "INTERRUPT_WITHOUT_ACTIVE_RESPONSE",
+                            line_number,
+                            str((*response_scope, cancelled_response_id)),
+                        )
+                    )
+                else:
+                    failures.append(
+                        _failure(
+                            "INTERRUPT_RESPONSE_OWNERSHIP_MISMATCH",
+                            line_number,
+                            str((*response_scope, active_response_id)),
+                        )
+                    )
                 continue
             scoped_interrupt_stop = P_EVIDENCE_INTERRUPT_STOPPED.search(line)
             if scoped_interrupt_stop:
@@ -1565,7 +1666,15 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     scoped_reconnect_start.group("connection_id"),
                     int(scoped_reconnect_start.group("attempt")),
                 )
-                scoped_reconnects[key] = {"ready": False, "replayed": False}
+                if key in scoped_reconnects:
+                    failures.append(
+                        _failure("DUPLICATE_RECONNECT_ATTEMPT", line_number, str(key))
+                    )
+                scoped_reconnects[key] = {
+                    "ready": False,
+                    "replayed": False,
+                    "terminalCount": 0,
+                }
                 observed_marker_families[journey_id].add("reconnect_started")
                 continue
             scoped_reopen_ready = P_EVIDENCE_REOPEN_READY.search(line)
@@ -1580,6 +1689,10 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 if state is None:
                     failures.append(
                         _failure("REOPEN_READY_WITHOUT_ATTEMPT", line_number, str(key))
+                    )
+                elif state.get("terminalCount"):
+                    failures.append(
+                        _failure("RECONNECT_MARKER_AFTER_TERMINAL", line_number, str(key))
                     )
                 else:
                     state["ready"] = True
@@ -1610,6 +1723,10 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                             str(key),
                         )
                     )
+                elif state.get("terminalCount"):
+                    failures.append(
+                        _failure("RECONNECT_MARKER_AFTER_TERMINAL", line_number, str(key))
+                    )
                 else:
                     state["replayed"] = True
                 observed_marker_families[journey_id].add("reconnect_replay")
@@ -1635,6 +1752,27 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     failures.append(
                         _failure("RECONNECT_SUCCESS_WITHOUT_READY", line_number, str(key))
                     )
+                if state is not None:
+                    state["terminalCount"] += 1
+                    if state["terminalCount"] > 1:
+                        failures.append(
+                            _failure(
+                                "DUPLICATE_RECONNECT_OUTCOME",
+                                line_number,
+                                str(key),
+                            )
+                        )
+                    if (
+                        scoped_reconnect_outcome.group("outcome") == "failed"
+                        and state.get("replayed")
+                    ):
+                        failures.append(
+                            _failure(
+                                "REOPEN_FAILED_AFTER_BUFFER_REPLAY",
+                                line_number,
+                                str(key),
+                            )
+                        )
                 observed_marker_families[journey_id].add("reconnect_outcome")
                 continue
             scoped_stale = P_EVIDENCE_STALE_DROP.search(line)
@@ -1998,6 +2136,23 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     "UNRECOVERED_TIMEOUT",
                     timeout["line"],
                     "waiting-model timeout has no bounded terminal outcome",
+                )
+            )
+    for response_scope, response_id in scoped_active_responses.items():
+        failures.append(
+            _failure(
+                "RESPONSE_START_WITHOUT_END",
+                end_anchor["line"] if end_anchor else 0,
+                str((*response_scope, response_id)),
+            )
+        )
+    for reconnect_key, state in scoped_reconnects.items():
+        if state.get("terminalCount") != 1:
+            failures.append(
+                _failure(
+                    "RECONNECT_ATTEMPT_UNFINISHED",
+                    end_anchor["line"] if end_anchor else 0,
+                    str(reconnect_key),
                 )
             )
     if handoff_balance:
@@ -2438,6 +2593,41 @@ def _correlate_transport_cli(
     with log_path.open("r", encoding="utf-8", errors="replace") as fh:
         for raw_line in fh:
             timestamp = parse_timestamp(raw_line)
+            scoped_evidence_line = "Google Live evidence_" in raw_line
+            window_marker_line = "Google Live reliability_window_" in raw_line
+            stripped_line = raw_line.rstrip("\r\n")
+            in_window = timestamp is not None and start <= timestamp <= end
+            malformed_scoped = in_window and scoped_evidence_line and not any(
+                (match := pattern.search(stripped_line)) is not None
+                and match.end() == len(stripped_line)
+                for pattern in _SCOPED_EVIDENCE_PATTERNS
+            )
+            malformed_window = in_window and window_marker_line and not (
+                P_RELIABILITY_WINDOW_START.search(stripped_line)
+                or P_RELIABILITY_WINDOW_END.search(stripped_line)
+            )
+            if (
+                malformed_scoped
+                or malformed_window
+                or (
+                    timestamp is None
+                    and (
+                        scoped_evidence_line
+                        or window_marker_line
+                        or _is_reliability_line(raw_line)
+                    )
+                )
+            ):
+                return redact_mapping(
+                    {
+                        "schemaVersion": SCHEMA_VERSION,
+                        "name": "websocket_audio_bargein_correlated",
+                        "status": "FAIL",
+                        "journeyId": journey_id,
+                        "candidateIdentity": expected_candidate,
+                        "failures": [{"code": "MALFORMED_BOUNDED_LOG_MARKER"}],
+                    }
+                )
             if timestamp is not None and start <= timestamp <= end:
                 selected_lines.append(raw_line.rstrip("\n"))
     identity = json.dumps(expected_candidate, sort_keys=True, separators=(",", ":"))
