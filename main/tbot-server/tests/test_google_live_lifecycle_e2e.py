@@ -35,6 +35,7 @@ EXPECTED_PROVIDER_TASK_FIELDS = {
     "_wake_greeting_task",
     "_proactive_reconnect_task",
     "_idle_close_task",
+    "_session_resumption_persist_tasks",
 }
 
 
@@ -173,6 +174,31 @@ class _TimeoutRecoveryRuntime:
             reconnect_allowed=True,
             prompt="",
         )
+
+
+class _BlockingResumptionStore:
+    def __init__(self):
+        self.save_started = asyncio.Event()
+        self.release_save = asyncio.Event()
+        self.save_cancelled = asyncio.Event()
+        self.saved = []
+
+    async def save(self, device_id, handle):
+        self.save_started.set()
+        try:
+            await self.release_save.wait()
+        except asyncio.CancelledError:
+            self.save_cancelled.set()
+            raise
+        self.saved.append((device_id, handle))
+
+
+class _ImmediateResumptionStore:
+    def __init__(self):
+        self.saved = []
+
+    async def save(self, device_id, handle):
+        self.saved.append((device_id, handle))
 
 
 class _LifecycleCounters:
@@ -357,18 +383,50 @@ def _successful_replay_count(logger):
 
 
 def _pending_provider_tasks(provider):
-    owned = {
-        name: value
-        for name, value in vars(provider).items()
-        if name.endswith("_task")
-    }
-    return tuple(
-        name for name, task in owned.items() if task is not None and not task.done()
-    )
+    pending = []
+    for name, value in vars(provider).items():
+        if name.endswith("_task"):
+            if value is not None and not value.done():
+                pending.append(name)
+        elif name.endswith("_tasks"):
+            pending.extend(
+                f"{name}[{index}]"
+                for index, task in enumerate(value)
+                if not task.done()
+            )
+    return tuple(pending)
 
 
 def _provider_task_fields(provider):
-    return tuple(sorted(name for name in vars(provider) if name.endswith("_task")))
+    return tuple(
+        sorted(
+            name
+            for name in vars(provider)
+            if name.endswith("_task") or name.endswith("_tasks")
+        )
+    )
+
+
+def _collect_node_ids(node_ids):
+    from _pytest.config import get_config
+    from _pytest.main import Session
+
+    config = get_config()
+    session = None
+    session_started = False
+    try:
+        config.parse(["-q", "-p", "no:asyncio"])
+        config._do_configure()
+        session = Session.from_config(config)
+        config.hook.pytest_sessionstart(session=session)
+        session_started = True
+        return tuple(
+            item.nodeid for item in session.perform_collect(node_ids, genitems=True)
+        )
+    finally:
+        if session_started:
+            config.hook.pytest_sessionfinish(session=session, exitstatus=0)
+        config._ensure_unconfigure()
 
 
 async def _run_lifecycle_journey():
@@ -538,13 +596,56 @@ async def _run_receive_timeout_recovery():
     }
 
 
-def test_historical_regression_node_ids_are_unique_and_well_named():
+def test_historical_regression_node_ids_collect_exactly():
     assert len(HISTORICAL_REGRESSION_NODE_IDS) == 8
     assert len(set(HISTORICAL_REGRESSION_NODE_IDS)) == 8
-    for node_id in HISTORICAL_REGRESSION_NODE_IDS:
-        path, *names = node_id.split("::")
-        assert path.startswith("tests/test_") and path.endswith(".py")
-        assert names[-1].startswith("test_")
+    assert _collect_node_ids(HISTORICAL_REGRESSION_NODE_IDS) == (
+        HISTORICAL_REGRESSION_NODE_IDS
+    )
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_owned_session_resumption_persistence():
+    conn = _Connection()
+    conn.config["google_live"]["session_resumption_enabled"] = True
+    conn.live_resumption_store = _BlockingResumptionStore()
+    provider = GoogleLiveProvider(conn)
+
+    assert provider._handle_session_resumption_update(
+        {"resumable": True, "handle": "persist-handle"}
+    )
+    await asyncio.wait_for(conn.live_resumption_store.save_started.wait(), timeout=1.0)
+    assert _pending_provider_tasks(provider) == (
+        "_session_resumption_persist_tasks[0]",
+    )
+
+    await provider.close()
+
+    assert conn.live_resumption_store.save_cancelled.is_set()
+    assert _pending_provider_tasks(provider) == ()
+    assert provider._session_resumption_persist_tasks == set()
+    conn.live_resumption_store.release_save.set()
+    await asyncio.sleep(0)
+    assert conn.live_resumption_store.saved == []
+
+
+@pytest.mark.asyncio
+async def test_completed_session_resumption_persistence_releases_ownership():
+    conn = _Connection()
+    conn.config["google_live"]["session_resumption_enabled"] = True
+    conn.live_resumption_store = _ImmediateResumptionStore()
+    provider = GoogleLiveProvider(conn)
+
+    assert provider._handle_session_resumption_update(
+        {"resumable": True, "handle": "persisted-handle"}
+    )
+    await _wait_until(lambda: not provider._session_resumption_persist_tasks)
+
+    assert conn.live_resumption_store.saved == [
+        ("device-1", "persisted-handle"),
+    ]
+    assert _pending_provider_tasks(provider) == ()
+    await provider.close()
 
 
 @pytest.mark.asyncio

@@ -263,6 +263,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._last_clean_user_turn_response_id = None
         self._suppress_start_lesson_tool_call_until = 0.0
         self._skip_next_session_resumption_restore = False
+        self._session_resumption_persist_tasks = set()
         self._interaction = GoogleLiveInteractionController(conn)
         self._idle_close_task = None
         self._voice_consent_denied = False
@@ -1535,8 +1536,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
         except RuntimeError:
             return
         task = loop.create_task(self._persist_session_resumption_handle(handle))
+        self._session_resumption_persist_tasks.add(task)
 
         def _log_persist_failure(done):
+            self._session_resumption_persist_tasks.discard(done)
+            if done.cancelled():
+                return
             try:
                 done.result()
             except Exception as exc:
@@ -3053,6 +3058,17 @@ class GoogleLiveProvider(VoiceSessionProvider):
             func_handler_bootstrap_task.cancel()
             try:
                 await func_handler_bootstrap_task
+            except asyncio.CancelledError:
+                pass
+
+        persist_tasks = tuple(self._session_resumption_persist_tasks)
+        self._session_resumption_persist_tasks.clear()
+        for persist_task in persist_tasks:
+            if persist_task is current_task or persist_task.done():
+                continue
+            persist_task.cancel()
+            try:
+                await persist_task
             except asyncio.CancelledError:
                 pass
 
