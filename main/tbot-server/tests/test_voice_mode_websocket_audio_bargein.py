@@ -1,6 +1,9 @@
 import asyncio
+import contextlib
 import importlib
+import io
 import json
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -15,6 +18,36 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
             "websocket queued receive inspection unavailable",
         ):
             audio_bargein._queued_receive_count(SimpleNamespace())
+
+    def test_cli_pending_transport_evidence_is_blocking_and_never_prints_ok(self):
+        audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        async def _pending(_args):
+            return {
+                "status": "SKIPPED",
+                "pendingCode": "PENDING_BOUNDED_SERVER_LOG_VERIFICATION",
+            }
+
+        argv = [
+            "voice_mode_websocket_audio_bargein.py",
+            "--device-id",
+            "robot-1",
+            "--client-id",
+            "client-1",
+        ]
+        with patch.object(audio_bargein, "run_smoke", _pending), patch.object(
+            sys, "argv", argv
+        ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            exit_code = audio_bargein.main()
+
+        self.assertEqual(exit_code, 1)
+        self.assertNotIn("AUDIO_BARGE_IN_OK", stdout.getvalue())
+        self.assertIn(
+            "PENDING_BOUNDED_SERVER_LOG_VERIFICATION",
+            stderr.getvalue(),
+        )
 
     @staticmethod
     def _args(**overrides):
@@ -126,8 +159,14 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         ), patch.object(audio_bargein.asyncio, "sleep", _sleep):
             record = asyncio.run(audio_bargein.run_smoke(self._args(), clock=_Clock()))
 
-        self.assertEqual(record["status"], "PASS", record)
-        self.assertTrue(record["oldResponseStopped"])
+        self.assertEqual(record["status"], "SKIPPED", record)
+        self.assertEqual(record["schemaVersion"], "google-live-reliability.v1")
+        self.assertEqual(record["name"], "websocket_audio_bargein_transport")
+        self.assertFalse(record["oldResponseStopped"])
+        self.assertTrue(record["interruptStopMarkerObserved"])
+        self.assertEqual(
+            record["pendingCode"], "PENDING_BOUNDED_SERVER_LOG_VERIFICATION"
+        )
         self.assertTrue(record["replacementResponseStarted"])
         self.assertEqual(record["replacementBinaryChunks"], 2)
         self.assertEqual(record["maxServerOutputGapMs"], 60.0)
@@ -528,7 +567,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(record["status"], "PASS", record)
+        self.assertEqual(record["status"], "SKIPPED", record)
         self.assertEqual(record["bargeinStopMs"], 100.0)
         self.assertEqual(record["firstInterruptPacketSentAtMonotonicMs"], 0.0)
         self.assertEqual(record["correlationSource"], "server_log")
@@ -536,6 +575,53 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
             record["correlationStatus"], "PENDING_BOUNDED_SERVER_LOG_VERIFICATION"
         )
         self.assertFalse(record["aggregateReleaseEligible"])
+
+    def test_readable_tagged_stop_with_zero_queue_count_never_passes_release(self):
+        audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
+
+        class _WebSocket:
+            def __init__(self):
+                self.messages = [
+                    json.dumps({"type": "hello"}),
+                    json.dumps({"type": "tts", "state": "start"}),
+                    json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}),
+                    json.dumps({"type": "tts", "state": "start"}),
+                    b"replacement-audio",
+                    json.dumps({"type": "tts", "state": "stop"}),
+                ]
+
+            def queued_message_count(self):
+                return 0
+
+            async def send(self, _message):
+                return None
+
+            async def recv(self):
+                return self.messages.pop(0)
+
+        class _Connect:
+            async def __aenter__(self):
+                return _WebSocket()
+
+            async def __aexit__(self, *_exc):
+                return False
+
+        with patch.object(
+            audio_bargein.websockets,
+            "connect",
+            lambda *_args, **_kwargs: _Connect(),
+        ), patch.object(
+            audio_bargein,
+            "_opus_packets",
+            return_value=[b"interrupt-opus"],
+        ):
+            record = asyncio.run(audio_bargein.run_smoke(self._args()))
+
+        self.assertNotEqual(record["status"], "PASS")
+        self.assertFalse(record["aggregateReleaseEligible"])
+        self.assertEqual(
+            record["correlationStatus"], "PENDING_BOUNDED_SERVER_LOG_VERIFICATION"
+        )
 
     def test_run_smoke_cancels_stop_observer_when_audio_send_fails(self):
         audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
@@ -685,7 +771,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
 
         self.assertEqual(summary["tts_starts"], 2)
         self.assertEqual(summary["tts_stops"], 2)
-        self.assertEqual(summary["status"], "PASS")
+        self.assertEqual(summary["status"], "SKIPPED")
         self.assertEqual(captured["additional_headers"]["device-id"], "robot-1")
         self.assertEqual(captured["additional_headers"]["client-id"], "client-1")
         self.assertEqual(captured["additional_headers"]["authorization"], "Bearer tok-1")

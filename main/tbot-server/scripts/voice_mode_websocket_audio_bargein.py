@@ -16,7 +16,10 @@ if str(SERVER_ROOT) not in sys.path:
 
 from core.utils.opus_encoder_utils import OpusEncoderUtils  # noqa: E402
 from core.utils.util import audio_to_data_stream  # noqa: E402
-from scripts.google_live_reliability import GOOGLE_LIVE_LIMITS  # noqa: E402
+from scripts.google_live_reliability import (  # noqa: E402
+    GOOGLE_LIVE_LIMITS,
+    SCHEMA_VERSION,
+)
 from scripts.voice_mode_websocket_soak import (  # noqa: E402
     _build_headers,
     _hello_message,
@@ -238,12 +241,15 @@ async def run_smoke(args, *, clock=time.monotonic):
         raise RuntimeError("no opus packets generated")
 
     summary = {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": "websocket_audio_bargein_transport",
         "status": "FAIL",
         "opus_packets": len(packets),
         "tts_starts": 0,
         "tts_stops": 0,
         "binary_chunks": 0,
         "oldResponseStopped": False,
+        "interruptStopMarkerObserved": False,
         "replacementResponseStarted": False,
         "replacementResponseStopped": False,
         "replacementBinaryChunks": 0,
@@ -327,7 +333,7 @@ async def run_smoke(args, *, clock=time.monotonic):
         if stop is None:
             raise RuntimeError("audio interrupt tts stop timeout")
         summary["tts_stops"] += 1
-        summary["oldResponseStopped"] = True
+        summary["interruptStopMarkerObserved"] = True
         summary["bargeinStopMs"] = round(
             (stop_result["observedAt"] - first_packet_sent_at) * 1000,
             1,
@@ -362,7 +368,8 @@ async def run_smoke(args, *, clock=time.monotonic):
             summary["failureCode"] = "SERVER_OUTPUT_GAP_EXCEEDED"
             return summary
 
-        summary["status"] = "PASS"
+        summary["status"] = "SKIPPED"
+        summary["pendingCode"] = "PENDING_BOUNDED_SERVER_LOG_VERIFICATION"
     return summary
 
 
@@ -392,6 +399,13 @@ def main():
     except Exception as exc:
         print(f"AUDIO_BARGE_IN_FAIL {exc}", file=sys.stderr)
         return 1
+    if summary["status"] == "SKIPPED":
+        print(
+            "AUDIO_BARGE_IN_PENDING "
+            f"pending_code={summary.get('pendingCode', 'UNKNOWN')}",
+            file=sys.stderr,
+        )
+        return 1
     if summary["status"] != "PASS":
         print(
             "AUDIO_BARGE_IN_FAIL "
@@ -399,16 +413,8 @@ def main():
             file=sys.stderr,
         )
         return 1
-    print(
-        "AUDIO_BARGE_IN_OK "
-        f"opus_packets={summary['opus_packets']} "
-        f"tts_starts={summary['tts_starts']} "
-        f"tts_stops={summary['tts_stops']} "
-        f"binary_chunks={summary['binary_chunks']} "
-        f"replacement_binary_chunks={summary['replacementBinaryChunks']} "
-        f"bargein_stop_ms={summary['bargeinStopMs']}"
-    )
-    return 0
+    print("AUDIO_BARGE_IN_FAIL unexpected standalone PASS", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
