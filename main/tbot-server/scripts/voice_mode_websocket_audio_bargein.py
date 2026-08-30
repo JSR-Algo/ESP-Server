@@ -10,8 +10,6 @@ from pathlib import Path
 import numpy as np
 import websockets
 
-_yield_once = asyncio.sleep
-
 SERVER_ROOT = Path(__file__).resolve().parents[1]
 if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
@@ -121,12 +119,10 @@ async def _observe_interrupt_stop(
     *,
     timeout_sec,
     clock,
-    observer_ready,
     first_packet_sent,
 ):
     deadline = clock() + timeout_sec
     binary_count = 0
-    observer_ready.set()
     while True:
         remaining = deadline - clock()
         if remaining <= 0:
@@ -170,6 +166,51 @@ async def _observe_interrupt_stop(
             "binaryCount": binary_count,
             "observedAt": observed_at,
         }
+
+
+def _queued_receive_count(websocket):
+    explicit_count = getattr(websocket, "queued_message_count", None)
+    if explicit_count is not None:
+        return int(explicit_count() if callable(explicit_count) else explicit_count)
+    recv_messages = getattr(websocket, "recv_messages", None)
+    frames = getattr(recv_messages, "frames", None)
+    if frames is not None:
+        return len(frames)
+    legacy_messages = getattr(websocket, "messages", None)
+    if isinstance(legacy_messages, list):
+        return 0
+    if legacy_messages is not None:
+        return len(legacy_messages)
+    raise RuntimeError("websocket queued receive inspection unavailable")
+
+
+async def _drain_preflight_terminal(websocket, *, timeout_sec):
+    deadline = time.monotonic() + timeout_sec
+    while _queued_receive_count(websocket) > 0:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return "PREFLIGHT_RECEIVE_TIMEOUT"
+        try:
+            message = await asyncio.wait_for(
+                websocket.recv(),
+                timeout=max(0.01, remaining),
+            )
+        except asyncio.TimeoutError:
+            return "PREFLIGHT_RECEIVE_TIMEOUT"
+        if isinstance(message, bytes):
+            continue
+        try:
+            payload = json.loads(message)
+        except json.JSONDecodeError:
+            continue
+        if not _is_tts_state(payload, "stop"):
+            continue
+        return (
+            "INTERRUPT_STOP_BEFORE_FIRST_PACKET"
+            if payload.get("reason") == "interrupt"
+            else "OLD_RESPONSE_COMPLETED_BEFORE_INTERRUPT"
+        )
+    return None
 
 
 async def run_smoke(args, *, clock=time.monotonic):
@@ -239,35 +280,34 @@ async def run_smoke(args, *, clock=time.monotonic):
         summary["tts_starts"] += 1
 
         await asyncio.sleep(args.interrupt_delay_sec)
-        observer_ready = asyncio.Event()
+        preflight_failure = await _drain_preflight_terminal(
+            websocket,
+            timeout_sec=args.interrupt_timeout_sec,
+        )
+        if preflight_failure is not None:
+            summary["failureCode"] = preflight_failure
+            return summary
         first_packet_sent = asyncio.Event()
         stop_task = asyncio.create_task(
             _observe_interrupt_stop(
                 websocket,
                 timeout_sec=args.interrupt_timeout_sec,
                 clock=clock,
-                observer_ready=observer_ready,
                 first_packet_sent=first_packet_sent,
             )
         )
         try:
-            await observer_ready.wait()
-            # Let an already-queued terminal frame win before any interrupt audio.
-            await _yield_once(0)
-            if stop_task.done():
-                stop_result = await stop_task
-            else:
-                for packet in packets:
-                    await websocket.send(packet)
-                    if not first_packet_sent.is_set():
-                        first_packet_sent_at = clock()
-                        summary["firstInterruptPacketSentAtMonotonicMs"] = round(
-                            first_packet_sent_at * 1000,
-                            3,
-                        )
-                        first_packet_sent.set()
-                    await asyncio.sleep(args.frame_duration_ms / 1000)
-                stop_result = await stop_task
+            for packet in packets:
+                await websocket.send(packet)
+                if not first_packet_sent.is_set():
+                    first_packet_sent_at = clock()
+                    summary["firstInterruptPacketSentAtMonotonicMs"] = round(
+                        first_packet_sent_at * 1000,
+                        3,
+                    )
+                    first_packet_sent.set()
+                await asyncio.sleep(args.frame_duration_ms / 1000)
+            stop_result = await stop_task
         finally:
             if not stop_task.done():
                 stop_task.cancel()

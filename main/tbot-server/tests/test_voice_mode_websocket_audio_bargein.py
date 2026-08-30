@@ -30,11 +30,20 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         return SimpleNamespace(**values)
 
     @staticmethod
-    def _connect_for(messages, captured=None, *, gate_interrupt_stop_on_binary=True):
+    def _connect_for(
+        messages,
+        captured=None,
+        *,
+        gate_interrupt_stop_on_binary=True,
+        preflight_queued=False,
+    ):
         class _WebSocket:
             def __init__(self):
                 self.messages = list(messages)
                 self.binary_sent = asyncio.Event()
+
+            def queued_message_count(self):
+                return int(preflight_queued and not self.binary_sent.is_set())
 
             async def send(self, payload):
                 if isinstance(payload, bytes):
@@ -49,6 +58,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
                 next_message = self.messages[0]
                 if (
                     gate_interrupt_stop_on_binary
+                    and not preflight_queued
                     and isinstance(next_message, str)
                     and json.loads(next_message).get("reason") == "interrupt"
                     and not self.binary_sent.is_set()
@@ -156,7 +166,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         with patch.object(
             audio_bargein.websockets,
             "connect",
-            self._connect_for(messages, gate_interrupt_stop_on_binary=False),
+            self._connect_for(messages, preflight_queued=True),
         ), patch.object(
             audio_bargein, "_opus_packets", return_value=[b"interrupt-opus"]
         ), patch.object(audio_bargein.asyncio, "sleep", _sleep):
@@ -186,7 +196,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         with patch.object(
             audio_bargein.websockets,
             "connect",
-            self._connect_for(messages),
+            self._connect_for(messages, preflight_queued=True),
         ), patch.object(
             audio_bargein, "_opus_packets", return_value=[b"interrupt-opus"]
         ), patch.object(audio_bargein.asyncio, "sleep", _sleep):
@@ -212,7 +222,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         with patch.object(
             audio_bargein.websockets,
             "connect",
-            self._connect_for(messages, gate_interrupt_stop_on_binary=False),
+            self._connect_for(messages, preflight_queued=True),
         ), patch.object(
             audio_bargein, "_opus_packets", return_value=[b"interrupt-opus"]
         ), patch.object(audio_bargein.asyncio, "sleep", _sleep):
@@ -224,6 +234,124 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         )
         self.assertIsNone(record["firstInterruptPacketSentAtMonotonicMs"])
         self.assertFalse(record["oldResponseStopped"])
+
+    def test_preflight_barrier_classifies_delayed_queued_stops_before_send(self):
+        audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
+
+        async def _run_case(reason, expected_code):
+            recv_entered = asyncio.Event()
+            release_recv = asyncio.Event()
+            binary_sent = []
+            payload = {"type": "tts", "state": "stop"}
+            if reason is not None:
+                payload["reason"] = reason
+
+            class _WebSocket:
+                def __init__(self):
+                    self.messages = [
+                        json.dumps({"type": "hello"}),
+                        json.dumps({"type": "tts", "state": "start"}),
+                        json.dumps(payload),
+                    ]
+
+                def queued_message_count(self):
+                    return int(len(self.messages) == 1)
+
+                async def send(self, message):
+                    if isinstance(message, bytes):
+                        binary_sent.append(message)
+
+                async def recv(self):
+                    if len(self.messages) == 1:
+                        recv_entered.set()
+                        await release_recv.wait()
+                    return self.messages.pop(0)
+
+            class _Connect:
+                async def __aenter__(self):
+                    return _WebSocket()
+
+                async def __aexit__(self, *_exc):
+                    return False
+
+            async def _release_preflight():
+                await recv_entered.wait()
+                self.assertEqual(binary_sent, [])
+                release_recv.set()
+
+            coordinator = asyncio.create_task(_release_preflight())
+            try:
+                with patch.object(
+                    audio_bargein.websockets,
+                    "connect",
+                    lambda *_args, **_kwargs: _Connect(),
+                ), patch.object(
+                    audio_bargein,
+                    "_opus_packets",
+                    return_value=[b"interrupt-opus"],
+                ):
+                    record = await audio_bargein.run_smoke(self._args())
+            finally:
+                await coordinator
+
+            self.assertEqual(record["failureCode"], expected_code)
+            self.assertIsNone(record["firstInterruptPacketSentAtMonotonicMs"])
+            self.assertEqual(binary_sent, [])
+
+        asyncio.run(
+            _run_case(None, "OLD_RESPONSE_COMPLETED_BEFORE_INTERRUPT")
+        )
+        asyncio.run(
+            _run_case("interrupt", "INTERRUPT_STOP_BEFORE_FIRST_PACKET")
+        )
+
+    def test_preflight_barrier_times_out_without_sending_interrupt_audio(self):
+        audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
+        binary_sent = []
+
+        class _WebSocket:
+            def __init__(self):
+                self.messages = [
+                    json.dumps({"type": "hello"}),
+                    json.dumps({"type": "tts", "state": "start"}),
+                ]
+
+            def queued_message_count(self):
+                return int(not self.messages)
+
+            async def send(self, message):
+                if isinstance(message, bytes):
+                    binary_sent.append(message)
+
+            async def recv(self):
+                if self.messages:
+                    return self.messages.pop(0)
+                await asyncio.Event().wait()
+
+        class _Connect:
+            async def __aenter__(self):
+                return _WebSocket()
+
+            async def __aexit__(self, *_exc):
+                return False
+
+        with patch.object(
+            audio_bargein.websockets,
+            "connect",
+            lambda *_args, **_kwargs: _Connect(),
+        ), patch.object(
+            audio_bargein,
+            "_opus_packets",
+            return_value=[b"interrupt-opus"],
+        ):
+            record = asyncio.run(
+                audio_bargein.run_smoke(
+                    self._args(interrupt_timeout_sec=0.01)
+                )
+            )
+
+        self.assertEqual(record["failureCode"], "PREFLIGHT_RECEIVE_TIMEOUT")
+        self.assertEqual(binary_sent, [])
 
     def test_run_smoke_fails_closed_when_replacement_audio_gap_exceeds_budget(self):
         audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
@@ -315,7 +443,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
 
         self.assertEqual(record["status"], "FAIL")
         self.assertEqual(record["failureCode"], "BARGEIN_STOP_LATENCY_EXCEEDED")
-        self.assertEqual(record["bargeinStopMs"], 600.0)
+        self.assertEqual(record["bargeinStopMs"], 700.0)
 
     def test_run_smoke_observes_interrupt_stop_while_audio_is_still_streaming(self):
         audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
