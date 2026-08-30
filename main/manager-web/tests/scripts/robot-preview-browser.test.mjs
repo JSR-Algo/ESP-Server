@@ -318,7 +318,10 @@ function fakeCleanupWorker({ reapAfterKill, spawnError, runtimeError, pid = 4242
   return child;
 }
 
-function fakeAcquisitionWorker({ pid = 4343, spawnError, reapAfterKill = true } = {}) {
+function fakeAcquisitionWorker({
+  pid = 4343, spawnError, reapAfterKill = true,
+  sigtermError, sigkillError, sigkillResult = true,
+} = {}) {
   const child = new EventEmitter();
   child.pid = pid;
   child.exitCode = null;
@@ -326,11 +329,13 @@ function fakeAcquisitionWorker({ pid = 4343, spawnError, reapAfterKill = true } 
   child.connected = true;
   child.send = () => true;
   child.kill = (signal) => {
+    if (signal === 'SIGTERM' && sigtermError) throw Object.assign(new Error(sigtermError), { code: sigtermError });
+    if (signal === 'SIGKILL' && sigkillError) throw Object.assign(new Error(sigkillError), { code: sigkillError });
     if (reapAfterKill && signal === 'SIGKILL') queueMicrotask(() => {
       child.signalCode = signal;
       child.emit('exit', null, signal);
     });
-    return true;
+    return signal === 'SIGKILL' ? sigkillResult : true;
   };
   if (spawnError) queueMicrotask(() => child.emit('error', Object.assign(new Error(spawnError), { code: spawnError })));
   return child;
@@ -382,6 +387,37 @@ test('hung acquisition worker is killed and reaped before its retained lease is 
     await rm(value.base, { recursive: true, force: true });
   }
 });
+
+for (const failure of [
+  { name: 'SIGTERM EPERM', options: { sigtermError: 'EPERM', reapAfterKill: false }, detail: /EPERM/ },
+  { name: 'SIGKILL EPERM', options: { sigkillError: 'EPERM', reapAfterKill: false }, detail: /EPERM/ },
+  { name: 'SIGKILL false', options: { sigkillResult: false, reapAfterKill: false }, detail: /not delivered/ },
+]) {
+  test(`acquisition worker ${failure.name} remains explicitly owned and does not clean its lease`, async () => {
+    const value = await fixture();
+    let cleanupCalls = 0;
+    try {
+      await assert.rejects(acquirePinnedRobotPreviewChromium({
+        ...value, stagingParent: value.base, deadline: Date.now() + 20,
+        acquisitionWorkerReapTimeoutMs: 20,
+        spawnAcquisitionWorker: () => fakeAcquisitionWorker(failure.options),
+        removeLease: async () => { cleanupCalls += 1; },
+      }), (error) => {
+        assert.match(error.message, /acquisition worker could not be reaped/i);
+        assert.match(error.retainedLeasePath, /tbot-robot-preview-browser-/);
+        assert.equal(error.leaseOwner, 'acquirePinnedRobotPreviewChromium');
+        assert.equal(error.workerPid, 4343);
+        const causes = [error.cause?.message, error.cause?.cause?.message].filter(Boolean).join(' ');
+        assert.match(causes, failure.detail);
+        assert.match(causes, /deadline exceeded/);
+        return true;
+      });
+      assert.equal(cleanupCalls, 0);
+    } finally {
+      await rm(value.base, { recursive: true, force: true });
+    }
+  });
+}
 
 for (const code of ['EAGAIN', 'ENOENT']) {
   test(`asynchronous acquisition worker spawn ${code} never crashes and retains auditable cleanup ownership`, async () => {

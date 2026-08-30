@@ -486,14 +486,26 @@ function deserializeError(value) {
 }
 
 async function terminateOwnedWorker(child, deadline, timeoutMs) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return true;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return { reaped: true };
   const remainingMs = () => deadline === undefined
     ? timeoutMs
     : Math.max(0, Math.min(timeoutMs, deadline - Date.now()));
-  child.kill('SIGTERM');
-  if (await waitForProcessExit(child, Math.floor(remainingMs() / 2))) return true;
-  child.kill('SIGKILL');
-  return waitForProcessExit(child, remainingMs());
+  let deliveryError;
+  try {
+    if (!child.kill('SIGTERM')) deliveryError = new Error('Candidate browser acquisition worker SIGTERM was not delivered');
+  } catch (error) {
+    deliveryError = error;
+  }
+  if (await waitForProcessExit(child, Math.floor(remainingMs() / 2))) return { reaped: true };
+  try {
+    if (!child.kill('SIGKILL')) deliveryError = new Error('Candidate browser acquisition worker SIGKILL was not delivered', {
+      cause: deliveryError,
+    });
+  } catch (error) {
+    deliveryError = new Error(error.message, { cause: deliveryError });
+    if (error.code !== undefined) deliveryError.code = error.code;
+  }
+  return { reaped: await waitForProcessExit(child, remainingMs()), error: deliveryError };
 }
 
 export function startPinnedRobotPreviewChromiumAcquisition({
@@ -645,8 +657,11 @@ export function startPinnedRobotPreviewChromiumAcquisition({
   const completion = (async () => {
     try {
       const result = await workerResult;
-      if (!await terminateOwnedWorker(worker, cleanupDeadline, acquisitionWorkerReapTimeoutMs)) {
-        throw acquisitionOwnership(new Error('Candidate browser acquisition worker could not be reaped after success'), leaseRoot, workerPid);
+      const termination = await terminateOwnedWorker(worker, cleanupDeadline, acquisitionWorkerReapTimeoutMs);
+      if (!termination.reaped) {
+        throw acquisitionOwnership(new Error('Candidate browser acquisition worker could not be reaped after success', {
+          cause: termination.error,
+        }), leaseRoot, workerPid);
       }
       const cleanup = (options) => {
         const cleanupLeaseDeadline = options?.deadline;
@@ -665,12 +680,18 @@ export function startPinnedRobotPreviewChromiumAcquisition({
       };
     } catch (error) {
       const spawnFailedWithoutChild = workerSpawnFailed && !(Number.isSafeInteger(worker?.pid) && worker.pid > 0);
-      const reaped = spawnFailedWithoutChild
-        || await terminateOwnedWorker(worker, cleanupDeadline, acquisitionWorkerReapTimeoutMs);
+      const termination = spawnFailedWithoutChild
+        ? { reaped: true }
+        : await terminateOwnedWorker(worker, cleanupDeadline, acquisitionWorkerReapTimeoutMs);
       const ownedError = acquisitionOwnership(error, leaseRoot, workerPid);
-      if (!reaped) {
+      if (!termination.reaped) {
+        let cause = ownedError;
+        if (termination.error) {
+          cause = new Error(termination.error.message, { cause: ownedError });
+          if (termination.error.code !== undefined) cause.code = termination.error.code;
+        }
         throw acquisitionOwnership(
-          new Error('Candidate browser acquisition worker could not be reaped after SIGKILL', { cause: ownedError }),
+          new Error('Candidate browser acquisition worker could not be reaped after SIGKILL', { cause }),
           leaseRoot,
           workerPid,
         );
