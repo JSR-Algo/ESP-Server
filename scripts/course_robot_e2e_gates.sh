@@ -64,11 +64,18 @@ PYTHON=/opt/homebrew/bin/python3
 [ -x "${PYTHON}" ] || PYTHON=/usr/bin/python3
 [ -x "${PYTHON}" ] || { echo "trusted python3 is unavailable" >&2; exit 1; }
 
+PRODUCTION_DATABASE_ARGUMENT=
+if [ "${PRODUCTION_DATABASE_URL+x}" = x ]; then
+  PRODUCTION_DATABASE_ARGUMENT="PRODUCTION_DATABASE_URL=${PRODUCTION_DATABASE_URL}"
+fi
+
 exec /usr/bin/env -i \
   PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin \
   HOME=/nonexistent LANG=C LC_ALL=C \
   COURSE_MODE_V2_TEST_DATABASE_URL="${COURSE_MODE_V2_TEST_DATABASE_URL-}" \
   COURSE_MODE_TEST_DATABASE_URL="${COURSE_MODE_TEST_DATABASE_URL-}" \
   DATABASE_URL="${DATABASE_URL-}" \
+  COURSE_MODE_ROLLBACK_TEST_DATABASE_URL="${COURSE_MODE_ROLLBACK_TEST_DATABASE_URL-}" \
+  ${PRODUCTION_DATABASE_ARGUMENT:+"${PRODUCTION_DATABASE_ARGUMENT}"} \
   COURSE_MODE_ADMIN_E2E_READY="${COURSE_MODE_ADMIN_E2E_READY-}" \
   "${PYTHON}" "${REPOSITORY_ROOT}/main/tbot-server/scripts/course_mode_release_gate.py" "$@"
