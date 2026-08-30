@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import contextlib
 import hashlib
 import json
@@ -59,6 +60,7 @@ _DOCKER_CANDIDATES = (Path("/usr/local/bin/docker"), Path("/opt/homebrew/bin/doc
 TRUSTED_DOCKER_EXECUTABLE = next(
     (path for path in _DOCKER_CANDIDATES if path.is_file()), _DOCKER_CANDIDATES[0],
 )
+CANONICAL_ESP_IDF_ROOT = Path("/Users/manhhodinh/esp/esp-idf")
 SECURE_ENV = {
     "PATH": "/usr/bin:/bin",
     "LANG": "C",
@@ -84,7 +86,7 @@ TOOLS_KEYS = {"nodeInstalls", "robotPreviewBrowser", "node", "espIdf"}
 NODE_KEYS = {"backend", "adminManagerWeb"}
 NODE_DESCRIPTOR_KEYS = {"version", "executable", "sha256", "npm", "npx"}
 NODE_ENTRYPOINT_KEYS = {"entrypoint", "sha256"}
-ESP_IDF_KEYS = {"version", "commit"}
+ESP_IDF_KEYS = {"version", "commit", "root", "versionFile", "versionFileSha256"}
 NODE_INSTALL_KEYS = {"version", "root", "packageLockSha256", "treeDigest"}
 NODE_TREE_KEYS = {"schema", "sha256", "entryCount", "totalBytes"}
 NODE_TREE_SCHEMA = "sha256-path-mode-bytes-symlink-v1"
@@ -436,18 +438,23 @@ def secure_regular_descriptor(
         os.close(parent_fd)
 
 
-def _docker_image_id(reference: str) -> str | None:
+def _docker_image_descriptor(reference: str) -> dict[str, Any] | None:
     if (
         not isinstance(reference, str) or not reference or len(reference) > 512
         or any(character.isspace() or ord(character) < 32 for character in reference)
     ):
         return None
     result = run_bounded_command(
-        [str(TRUSTED_DOCKER_EXECUTABLE), "image", "inspect", "--format", "{{.Id}}", reference],
-        cwd=Path("/"), env=SECURE_ENV, timeout_sec=10.0, max_output_bytes=4096,
+        [str(TRUSTED_DOCKER_EXECUTABLE), "image", "inspect", "--format", "{{json .}}", reference],
+        cwd=Path("/"), env=SECURE_ENV, timeout_sec=10.0, max_output_bytes=1024 * 1024,
     )
-    observed = result.stdout.strip()
-    if result.error or result.returncode != 0 or re.fullmatch(r"sha256:[0-9a-f]{64}", observed) is None:
+    if result.error or result.returncode != 0:
+        return None
+    try:
+        observed = strict_json_loads(result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(observed, dict):
         return None
     return observed
 
@@ -695,7 +702,10 @@ def _parse_rfc3339_utc(value: Any) -> datetime | None:
         return None
 
 
-def _validate_images(value: Any, reasons: set[str], *, verify_identity: bool) -> None:
+def _validate_images(
+    value: Any, repositories: dict[str, Any], reasons: set[str], *, verify_identity: bool,
+    verify_provenance: bool,
+) -> None:
     if not isinstance(value, dict) or set(value) != IMAGE_KEYS:
         reasons.add("images.keys")
         value = value if isinstance(value, dict) else {}
@@ -707,12 +717,33 @@ def _validate_images(value: Any, reasons: set[str], *, verify_identity: bool) ->
             continue
         reference = descriptor.get("reference")
         image_id = descriptor.get("id")
+        repository_name = "backend" if name == "lessonStudioBackend" else "adminEsp"
+        repository = repositories.get(repository_name) if isinstance(repositories, dict) else None
+        expected_prefix = "local/tbot-backend" if name == "lessonStudioBackend" else "local/tbot-server-web"
+        expected_reference = (
+            f"{expected_prefix}:course-mode-physical-tft-{repository.get('sha')}"
+            if isinstance(repository, dict) else None
+        )
         if not isinstance(reference, str) or not reference:
+            reasons.add(f"{prefix}.reference")
+        elif verify_provenance and reference != expected_reference:
             reasons.add(f"{prefix}.reference")
         if not isinstance(image_id, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None:
             reasons.add(f"{prefix}.id")
-        elif verify_identity and _docker_image_id(reference) != image_id:
-            reasons.add(f"{prefix}.id")
+        elif verify_identity and verify_provenance:
+            observed = _docker_image_descriptor(reference)
+            labels = (
+                observed.get("Config", {}).get("Labels")
+                if isinstance(observed, dict) and isinstance(observed.get("Config"), dict) else None
+            )
+            if not isinstance(observed, dict) or observed.get("Id") != image_id:
+                reasons.add(f"{prefix}.id")
+            if (
+                not isinstance(labels, dict) or not isinstance(repository, dict)
+                or labels.get("org.opencontainers.image.revision") != repository.get("sha")
+                or labels.get("org.opencontainers.image.source") != repository.get("remoteUrl")
+            ):
+                reasons.add(f"{prefix}.provenance")
 
 
 def _firmware_manifest_schema_valid(value: Any) -> bool:
@@ -734,7 +765,7 @@ def _firmware_manifest_schema_valid(value: Any) -> bool:
 
 def _validate_firmware(
     value: Any, repositories: dict[str, Any], tools: dict[str, Any], reasons: set[str],
-    *, verify_identity: bool,
+    *, verify_identity: bool, candidate_created: datetime | None, candidate_expires: datetime | None,
 ) -> None:
     if not isinstance(value, dict) or set(value) != FIRMWARE_KEYS:
         reasons.add("firmware.keys")
@@ -820,8 +851,22 @@ def _validate_firmware(
     reproducibility = evidence["reproducibility"]
     config = evidence["config"]
     safety = evidence["safety"]
+    evidence_created = _parse_rfc3339_utc(evidence.get("createdAt"))
+    free_percent = partition.get("freePercent")
+    expected_free_percent = (
+        round(value["freeBytes"] / value["partitionBytes"] * 100, 6)
+        if type(value.get("partitionBytes")) is int and value["partitionBytes"] > 0 else None
+    )
     if (
         evidence.get("status") != "PASS" or evidence.get("profile") != "production"
+        or evidence.get("board") != "LCDWiki ES3C35P" or evidence.get("target") != "esp32s3"
+        or evidence_created is None
+        or (
+            candidate_created is not None and candidate_expires is not None
+            and not candidate_created <= evidence_created < candidate_expires
+        )
+        or not isinstance(free_percent, (int, float)) or type(free_percent) is bool
+        or expected_free_percent is None or abs(float(free_percent) - expected_free_percent) > 0.000001
         or reproducibility.get("appByteIdentical") is not True
         or reproducibility.get("elfByteIdentical") is not True
         or type(reproducibility.get("independentCleanBuilds")) is not int
@@ -830,6 +875,8 @@ def _validate_firmware(
         or config.get("appReproducibleBuild") is not True
         or config.get("productionConfigAudit") != "PASS"
         or config.get("productionArtifactAudit") != "PASS"
+        or re.fullmatch(r"[1-9][0-9]* passed(?:, [0-9]+ skipped.*)?", evidence["tests"].get("projectSourceGate", "")) is None
+        or re.fullmatch(r"[1-9][0-9]* passed", evidence["tests"].get("firmwareVersionAndCourseGates", "")) is None
         or any(safety.get(field) is not False for field in safety)
     ):
         reasons.add("firmware.evidenceManifestPath")
@@ -855,7 +902,12 @@ def _validate_database(
         reasons.add("database.migrationHeadSha256")
     if not verify_identity:
         return
-    if isinstance(image_id, str) and _docker_image_id(image) != image_id:
+    if image != "postgres:16-alpine":
+        reasons.add("database.engineImage")
+    observed_image = _docker_image_descriptor(image) if isinstance(image, str) else None
+    if isinstance(image_id, str) and (
+        not isinstance(observed_image, dict) or observed_image.get("Id") != image_id
+    ):
         reasons.add("database.engineImageId")
     if backend_root is None or not isinstance(head, str) or Path(head).name != head:
         reasons.add("database.migrationHead")
@@ -904,6 +956,8 @@ def _validate_node_tools(value: Any, reasons: set[str], *, verify_identity: bool
             reasons.add(f"{prefix}.version")
         if not isinstance(executable, str) or not Path(executable).is_absolute():
             reasons.add(f"{prefix}.executable")
+        elif Path(executable).name != "node" or Path(executable).parent.name != "bin":
+            reasons.add(f"{prefix}.executable")
         if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
             reasons.add(f"{prefix}.sha256")
         entrypoints: list[tuple[str, str, str]] = []
@@ -917,6 +971,13 @@ def _validate_node_tools(value: Any, reasons: set[str], *, verify_identity: bool
             expected = tool_descriptor.get("sha256")
             if not isinstance(entrypoint, str) or not Path(entrypoint).is_absolute():
                 reasons.add(f"{tool_prefix}.entrypoint")
+            elif isinstance(executable, str) and Path(executable).is_absolute():
+                expected_entrypoint = (
+                    Path(executable).parent.parent
+                    / f"lib/node_modules/npm/bin/{tool}-cli.js"
+                )
+                if Path(entrypoint) != expected_entrypoint:
+                    reasons.add(f"{tool_prefix}.entrypoint")
             if not isinstance(expected, str) or SHA256_RE.fullmatch(expected) is None:
                 reasons.add(f"{tool_prefix}.sha256")
             if isinstance(entrypoint, str) and isinstance(expected, str):
@@ -945,11 +1006,103 @@ def _validate_node_tools(value: Any, reasons: set[str], *, verify_identity: bool
                 reasons.add(f"{tool_prefix}.sha256")
 
 
+def _validate_esp_idf(value: Any, reasons: set[str], *, verify_identity: bool) -> None:
+    if not isinstance(value, dict) or set(value) != ESP_IDF_KEYS:
+        reasons.add("tools.espIdf.keys")
+        return
+    version = value.get("version")
+    commit = value.get("commit")
+    root = value.get("root")
+    relative = value.get("versionFile")
+    digest = value.get("versionFileSha256")
+    if not isinstance(version, str) or re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+        reasons.add("tools.espIdf.version")
+    if not isinstance(commit, str) or SHA_RE.fullmatch(commit) is None:
+        reasons.add("tools.espIdf.commit")
+    if not isinstance(root, str) or Path(root) != CANONICAL_ESP_IDF_ROOT:
+        reasons.add("tools.espIdf.root")
+    if relative != "tools/cmake/version.cmake":
+        reasons.add("tools.espIdf.versionFile")
+    if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
+        reasons.add("tools.espIdf.versionFileSha256")
+    if not verify_identity or any(reason.startswith("tools.espIdf.") for reason in reasons):
+        return
+    try:
+        checkout = Path(root)
+        observed_commit = _git(checkout, "rev-parse", "--verify", "HEAD^{commit}").strip()
+        dirty = _dirty_paths(checkout)
+    except (RuntimeError, TypeError, OSError):
+        reasons.add("tools.espIdf.identity")
+        return
+    observed, error = secure_regular_descriptor(checkout / relative, MAX_DIRTY_FILE_BYTES, include_content=True)
+    if error or observed is None or observed["sha256"] != digest or observed_commit != commit or dirty:
+        reasons.add("tools.espIdf.identity")
+        return
+    text = observed["content"].decode("utf-8", errors="strict")
+    parts = []
+    for name in ("MAJOR", "MINOR", "PATCH"):
+        match = re.search(rf"set\(IDF_VERSION_{name} ([0-9]+)\)", text)
+        if match is None:
+            reasons.add("tools.espIdf.identity")
+            return
+        parts.append(match.group(1))
+    if version != f"v{'.'.join(parts)}":
+        reasons.add("tools.espIdf.version")
+
+
+def upgrade_candidate_schema(
+    candidate: dict[str, Any], *, node_executables: dict[str, str], esp_idf_root: str,
+) -> dict[str, Any]:
+    upgraded = copy.deepcopy(candidate)
+    app_path = Path(upgraded["firmware"]["appPath"])
+    evidence_path = app_path.parent / "manifest.json"
+    evidence, evidence_error = secure_regular_descriptor(evidence_path, MAX_FIRMWARE_MANIFEST_BYTES)
+    if evidence_error or evidence is None:
+        raise ValueError("candidate schema upgrade failed")
+    upgraded["firmware"]["evidenceManifestPath"] = str(evidence_path)
+    upgraded["firmware"]["evidenceManifestSha256"] = evidence["sha256"]
+    node = {}
+    for key in sorted(NODE_KEYS):
+        executable = Path(node_executables[key])
+        observed, error = secure_executable_descriptor(executable)
+        if error or observed is None:
+            raise ValueError("candidate schema upgrade failed")
+        descriptor: dict[str, Any] = {
+            "version": candidate["tools"]["node"][key],
+            "executable": str(executable), "sha256": observed["sha256"],
+        }
+        for tool in ("npm", "npx"):
+            entrypoint = executable.parent.parent / f"lib/node_modules/npm/bin/{tool}-cli.js"
+            entrypoint_observed, entrypoint_error = secure_regular_descriptor(
+                entrypoint, MAX_DIRTY_FILE_BYTES,
+            )
+            if entrypoint_error or entrypoint_observed is None:
+                raise ValueError("candidate schema upgrade failed")
+            descriptor[tool] = {
+                "entrypoint": str(entrypoint), "sha256": entrypoint_observed["sha256"],
+            }
+        node[key] = descriptor
+    upgraded["tools"]["node"] = node
+    root = Path(esp_idf_root)
+    version_file = root / "tools/cmake/version.cmake"
+    version_observed, version_error = secure_regular_descriptor(version_file, MAX_DIRTY_FILE_BYTES)
+    if version_error or version_observed is None:
+        raise ValueError("candidate schema upgrade failed")
+    upgraded["tools"]["espIdf"] = {
+        "version": candidate["tools"]["espIdf"],
+        "commit": _git(root, "rev-parse", "--verify", "HEAD^{commit}").strip(),
+        "root": str(root), "versionFile": "tools/cmake/version.cmake",
+        "versionFileSha256": version_observed["sha256"],
+    }
+    return upgraded
+
+
 def validate_candidate(
     candidate: Any, *, now: datetime | None = None, verify_external_tools: bool = True,
 ) -> list[str]:
     """Return sorted, stable and privacy-safe validation reason codes."""
     reasons: set[str] = set()
+    validation_now = now or datetime.now(timezone.utc)
     if not isinstance(candidate, dict):
         return ["candidate.type"]
     if set(candidate) != REQUIRED_KEYS:
@@ -965,7 +1118,7 @@ def validate_candidate(
     if created is not None and expires is not None:
         if created >= expires:
             reasons.add("timestamps.order")
-        elif expires <= (now or datetime.now(timezone.utc)):
+        elif expires <= validation_now:
             reasons.add("expiresAt.expired")
     tools = candidate.get("tools")
     if isinstance(tools, dict):
@@ -975,16 +1128,9 @@ def validate_candidate(
             tools.get("robotPreviewBrowser"), reasons, verify_identity=verify_external_tools,
         )
         _validate_node_tools(tools.get("node"), reasons, verify_identity=verify_external_tools)
-        esp_idf = tools.get("espIdf")
-        if not isinstance(esp_idf, dict) or set(esp_idf) != ESP_IDF_KEYS:
-            reasons.add("tools.espIdf.keys")
-        else:
-            if not isinstance(esp_idf.get("version"), str) or re.fullmatch(
-                r"v[0-9]+\.[0-9]+\.[0-9]+", esp_idf["version"],
-            ) is None:
-                reasons.add("tools.espIdf.version")
-            if not isinstance(esp_idf.get("commit"), str) or SHA_RE.fullmatch(esp_idf["commit"]) is None:
-                reasons.add("tools.espIdf.commit")
+        _validate_esp_idf(
+            tools.get("espIdf"), reasons, verify_identity=False,
+        )
         installs = tools.get("nodeInstalls")
         if not isinstance(installs, dict) or not set(installs).issubset(NODE_KEYS):
             reasons.add("tools.nodeInstalls.keys")
@@ -1019,18 +1165,34 @@ def validate_candidate(
         name: _validate_repository(name, repositories.get(name), reasons)
         for name in sorted(REPOSITORIES)
     }
+    if isinstance(tools, dict):
+        _validate_esp_idf(
+            tools.get("espIdf"), reasons,
+            verify_identity=(verify_external_tools and not any(reason.endswith(".git") for reason in reasons)),
+        )
     for name, root in repository_roots.items():
         prefix = f"repositories.{name}."
         if root is not None and not any(reason.startswith(prefix) for reason in reasons):
             value = repositories[name]
             if not _repository_matches_candidate(root, value):
                 reasons.add(f"repositories.{name}.changed")
-    _validate_images(candidate.get("images"), reasons, verify_identity=verify_external_tools)
+    _validate_images(
+        candidate.get("images"), repositories, reasons, verify_identity=verify_external_tools,
+        verify_provenance=not any(reason.startswith("repositories.") for reason in reasons),
+    )
     _validate_firmware(
         candidate.get("firmware"), repositories, tools if isinstance(tools, dict) else {}, reasons,
         verify_identity=(
             verify_external_tools
             and not any(reason.startswith("repositories.firmware.") for reason in reasons)
+        ),
+        candidate_created=(
+            created if created is not None and expires is not None
+            and created < expires and expires > validation_now else None
+        ),
+        candidate_expires=(
+            expires if created is not None and expires is not None
+            and created < expires and expires > validation_now else None
         ),
     )
     _validate_database(

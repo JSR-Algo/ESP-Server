@@ -205,6 +205,15 @@ def _repository(root: Path) -> dict:
     }
 
 
+def _refresh_image_reference(candidate: dict, repository_name: str) -> None:
+    if repository_name not in {"backend", "adminEsp"}:
+        return
+    repository = candidate["repositories"][repository_name]
+    key = "lessonStudioBackend" if repository_name == "backend" else "lessonStudioWeb"
+    image = "local/tbot-backend" if repository_name == "backend" else "local/tbot-server-web"
+    candidate["images"][key]["reference"] = f"{image}:course-mode-physical-tft-{repository['sha']}"
+
+
 def _commit_then_dirty(candidate: dict, repository_name: str, relative: str) -> None:
     repository = candidate["repositories"][repository_name]
     root = Path(repository["path"])
@@ -214,6 +223,7 @@ def _commit_then_dirty(candidate: dict, repository_name: str, relative: str) -> 
     _git(root, "add", relative)
     _git(root, "commit", "-m", f"add {Path(relative).name}")
     repository.update(_repository(root))
+    _refresh_image_reference(candidate, repository_name)
     if repository_name == "firmware":
         evidence_path = Path(candidate["firmware"]["evidenceManifestPath"])
         evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
@@ -247,6 +257,7 @@ def _add_node_install(candidate: dict, repository_name: str, relative_cwd: str, 
     )
     _git(root, "commit", "-m", f"add {key} lock")
     repository.update(_repository(root))
+    _refresh_image_reference(candidate, repository_name)
     install = install_parent / "node_modules"
     package = install / "fixture-package"
     package.mkdir(parents=True)
@@ -316,12 +327,17 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     tree, error = gate.secure_browser_bundle_descriptor(browser.parent)
     assert error is None and tree is not None
     docker = tmp_path / "docker"
+    backend_ref = f"local/tbot-backend:course-mode-physical-tft-{repositories['backend']['sha']}"
+    web_ref = f"local/tbot-server-web:course-mode-physical-tft-{repositories['adminEsp']['sha']}"
     docker.write_text(
-        "#!/bin/sh\ncase \"$5\" in\n"
-        "local/backend:candidate) echo sha256:" + "1" * 64 + ";;\n"
-        "local/web:candidate) echo sha256:" + "2" * 64 + ";;\n"
-        "postgres:16-alpine) echo sha256:" + "3" * 64 + ";;\n"
-        "*) exit 1;;\nesac\n",
+        f"#!{sys.executable}\nimport json,sys\n"
+        f"backend_source={repositories['backend']['remoteUrl']!r}\n"
+        f"web_source={repositories['adminEsp']['remoteUrl']!r}\n"
+        "ref=sys.argv[-1]\nvalue=None\n"
+        "if ref.startswith('local/tbot-backend:course-mode-physical-tft-'): value={'Id':'sha256:'+'1'*64,'Config':{'Labels':{'org.opencontainers.image.revision':ref.rsplit('-',1)[-1],'org.opencontainers.image.source':backend_source}}}\n"
+        "elif ref.startswith('local/tbot-server-web:course-mode-physical-tft-'): value={'Id':'sha256:'+'2'*64,'Config':{'Labels':{'org.opencontainers.image.revision':ref.rsplit('-',1)[-1],'org.opencontainers.image.source':web_source}}}\n"
+        "elif ref=='postgres:16-alpine': value={'Id':'sha256:'+'3'*64,'Config':{'Labels':{}}}\n"
+        "print(json.dumps(value)) if value is not None else sys.exit(1)\n",
         encoding="utf-8",
     )
     docker.chmod(0o755)
@@ -334,13 +350,14 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     elf.write_bytes(b"firmware-elf")
     evidence = firmware_dir / "manifest.json"
     evidence_payload = {
-        "status": "PASS", "profile": "production", "board": "fixture", "target": "esp32s3",
+        "status": "PASS", "profile": "production", "board": "LCDWiki ES3C35P", "target": "esp32s3",
         "sourceCommit": repositories["firmware"]["sha"], "createdAt": "2099-01-01T00:00:00Z",
         "app": {"file": app.name, "offset": "0x20000", "bytes": app.stat().st_size,
                 "sha256": hashlib.sha256(app.read_bytes()).hexdigest()},
         "elf": {"file": elf.name, "bytes": elf.stat().st_size,
                 "sha256": hashlib.sha256(elf.read_bytes()).hexdigest()},
-        "partition": {"bytes": 1024, "freeBytes": 1024 - app.stat().st_size, "freePercent": 0.0},
+        "partition": {"bytes": 1024, "freeBytes": 1024 - app.stat().st_size,
+                      "freePercent": round((1024 - app.stat().st_size) / 1024 * 100, 6)},
         "reproducibility": {"appByteIdentical": True, "elfByteIdentical": True,
                             "independentCleanBuilds": 2, "ccacheEnabled": False},
         "toolchain": {"espIdf": "v5.5.4", "espIdfCommit": "a" * 40, "python": "3.9.6",
@@ -348,25 +365,43 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "config": {"sdkconfigSha256": "a" * 64, "sdkconfigDefaultsLocalSha256": "b" * 64,
                    "dependenciesLockSha256": "c" * 64, "appReproducibleBuild": True,
                    "productionConfigAudit": "PASS", "productionArtifactAudit": "PASS"},
-        "tests": {"projectSourceGate": "PASS", "firmwareVersionAndCourseGates": "PASS"},
+        "tests": {"projectSourceGate": "1378 passed", "firmwareVersionAndCourseGates": "18 passed"},
         "safety": {"flashed": False, "serialAccessed": False, "hilRun": False,
                    "physicalDeviceAccessed": False},
     }
     evidence.write_text(json.dumps(evidence_payload), encoding="utf-8")
     node = {}
     for key, version in (("backend", "v22.23.2"), ("adminManagerWeb", "v20.20.2")):
-        executable = tmp_path / f"node-{key}"
+        prefix = tmp_path / f"node-{key}"
+        executable = prefix / "bin/node"
+        executable.parent.mkdir(parents=True)
         executable.write_text(f"#!/bin/sh\nif [ \"$1\" = --version ]; then echo {version}; else exec python3 \"$@\"; fi\n", encoding="utf-8")
         executable.chmod(0o755)
         package_tools = {}
         for tool in ("npm", "npx"):
-            entrypoint = tmp_path / f"{key}-{tool}.js"
+            entrypoint = prefix / f"lib/node_modules/npm/bin/{tool}-cli.js"
+            entrypoint.parent.mkdir(parents=True, exist_ok=True)
             entrypoint.write_text("raise SystemExit(0)\n", encoding="utf-8")
             package_tools[tool] = {"entrypoint": str(entrypoint),
                                    "sha256": hashlib.sha256(entrypoint.read_bytes()).hexdigest()}
         node[key] = {"version": version, "executable": str(executable),
                      "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
                      **package_tools}
+    esp_idf = tmp_path / "esp-idf"
+    (esp_idf / "tools/cmake").mkdir(parents=True)
+    (esp_idf / "tools/cmake/version.cmake").write_text(
+        "set(IDF_VERSION_MAJOR 5)\nset(IDF_VERSION_MINOR 5)\nset(IDF_VERSION_PATCH 4)\n",
+        encoding="utf-8",
+    )
+    _git(esp_idf, "init", "-b", "candidate")
+    _git(esp_idf, "config", "user.email", "candidate@example.invalid")
+    _git(esp_idf, "config", "user.name", "Candidate Test")
+    _git(esp_idf, "add", ".")
+    _git(esp_idf, "commit", "-m", "fixture")
+    esp_commit = _git(esp_idf, "rev-parse", "HEAD")
+    monkeypatch.setattr(gate._manifest, "CANONICAL_ESP_IDF_ROOT", esp_idf)
+    evidence_payload["toolchain"]["espIdfCommit"] = esp_commit
+    evidence.write_text(json.dumps(evidence_payload), encoding="utf-8")
     migration = Path(repositories["backend"]["path"]) / "src/database/migrations/127_shared_visual_layered_cinematic_compatibility.sql"
     candidate = {
         "candidateId": "course-mode-2099-01-01.1",
@@ -379,11 +414,11 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "repositories": repositories,
         "images": {
             "lessonStudioBackend": {
-                "reference": "local/backend:candidate",
+                "reference": backend_ref,
                 "id": "sha256:" + "1" * 64,
             },
             "lessonStudioWeb": {
-                "reference": "local/web:candidate",
+                "reference": web_ref,
                 "id": "sha256:" + "2" * 64,
             },
         },
@@ -418,7 +453,13 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                 "root": str(browser.parent),
                 "executable": browser.name,
                 "treeDigest": tree,
-            }, "node": node, "espIdf": {"version": "v5.5.4", "commit": "a" * 40},
+            }, "node": node, "espIdf": {
+                "version": "v5.5.4", "commit": esp_commit, "root": str(esp_idf),
+                "versionFile": "tools/cmake/version.cmake",
+                "versionFileSha256": hashlib.sha256(
+                    (esp_idf / "tools/cmake/version.cmake").read_bytes(),
+                ).hexdigest(),
+            },
         },
         "evidenceRoot": str(evidence_root),
     }
@@ -1663,6 +1704,7 @@ def test_selected_esp_test_drift_blocks_before_execution(candidate_file: Path, t
     _git(root, "add", ".")
     _git(root, "commit", "-m", "selected test")
     repository.update(_repository(root))
+    _refresh_image_reference(candidate, "adminEsp")
     candidate_file.write_text(json.dumps(candidate))
     selected.write_text("def test_drift(): pass\n")
     repository["dirtyExceptions"] = [{
@@ -1783,6 +1825,7 @@ def test_all_admin_test_dirty_exceptions_are_rejected(candidate_file: Path) -> N
     _git(root, "add", ".")
     _git(root, "commit", "-m", "add imported test fixture")
     repository.update(_repository(root))
+    _refresh_image_reference(candidate, "adminEsp")
     dependency.write_text("VALUE = 'dirty'\n", encoding="utf-8")
     repository["dirtyExceptions"] = [{
         "path": "main/tbot-server/tests/test_dependency.py",
@@ -2144,9 +2187,9 @@ def test_assignment_lane_identity_is_derived_only_from_candidate(candidate_file:
 
     assert environment["TBOT_BACKEND_WORKTREE"] == candidate["repositories"]["backend"]["path"]
     assert environment["TBOT_FIRMWARE_WORKTREE"] == candidate["repositories"]["firmware"]["path"]
-    assert environment["TBOT_LESSON_STUDIO_BACKEND_IMAGE"] == "local/backend:candidate"
+    assert environment["TBOT_LESSON_STUDIO_BACKEND_IMAGE"] == candidate["images"]["lessonStudioBackend"]["reference"]
     assert environment["TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID"] == "sha256:" + "1" * 64
-    assert environment["TBOT_LESSON_STUDIO_WEB_IMAGE"] == "local/web:candidate"
+    assert environment["TBOT_LESSON_STUDIO_WEB_IMAGE"] == candidate["images"]["lessonStudioWeb"]["reference"]
     assert environment["TBOT_LESSON_STUDIO_WEB_IMAGE_ID"] == "sha256:" + "2" * 64
     assert environment["LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME"] == "tbot-task4-unit"
 

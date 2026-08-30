@@ -63,14 +63,23 @@ def candidate(repositories: dict[str, Path], tmp_path: Path, monkeypatch: pytest
     tree, error = manifest.secure_browser_bundle_descriptor(browser.parent)
     assert error is None and tree is not None
     docker = tmp_path / "docker"
+    backend_ref = f"local/tbot-backend:course-mode-physical-tft-{_git(repositories['backend'], 'rev-parse', 'HEAD')}"
+    web_ref = f"local/tbot-server-web:course-mode-physical-tft-{_git(repositories['adminEsp'], 'rev-parse', 'HEAD')}"
+    docker_payloads = {
+        backend_ref: {"Id": "sha256:" + "1" * 64, "Config": {"Labels": {
+            "org.opencontainers.image.revision": _git(repositories["backend"], "rev-parse", "HEAD"),
+            "org.opencontainers.image.source": "https://example.invalid/backend.git",
+        }}},
+        web_ref: {"Id": "sha256:" + "2" * 64, "Config": {"Labels": {
+            "org.opencontainers.image.revision": _git(repositories["adminEsp"], "rev-parse", "HEAD"),
+            "org.opencontainers.image.source": "https://example.invalid/adminEsp.git",
+        }}},
+        "postgres:16-alpine": {"Id": "sha256:" + "3" * 64, "Config": {"Labels": {}}},
+    }
     docker.write_text(
-        "#!/bin/sh\n"
-        "case \"$5\" in\n"
-        "  local/backend:candidate) echo sha256:" + "1" * 64 + ";;\n"
-        "  local/web:candidate) echo sha256:" + "2" * 64 + ";;\n"
-        "  postgres:16-alpine) echo sha256:" + "3" * 64 + ";;\n"
-        "  *) exit 1;;\n"
-        "esac\n",
+        f"#!{sys.executable}\nimport json,sys\npayloads={docker_payloads!r}\n"
+        "value=payloads.get(sys.argv[-1])\n"
+        "print(json.dumps(value)) if value is not None else sys.exit(1)\n",
         encoding="utf-8",
     )
     docker.chmod(0o755)
@@ -83,14 +92,15 @@ def candidate(repositories: dict[str, Path], tmp_path: Path, monkeypatch: pytest
     elf.write_bytes(b"firmware-elf")
     evidence = firmware_dir / "manifest.json"
     evidence_payload = {
-        "status": "PASS", "profile": "production", "board": "fixture", "target": "esp32s3",
+        "status": "PASS", "profile": "production", "board": "LCDWiki ES3C35P", "target": "esp32s3",
         "sourceCommit": repositories["firmware"] and _git(repositories["firmware"], "rev-parse", "HEAD"),
         "createdAt": "2026-08-29T00:00:00Z",
         "app": {"file": app.name, "offset": "0x20000", "bytes": app.stat().st_size,
                 "sha256": hashlib.sha256(app.read_bytes()).hexdigest()},
         "elf": {"file": elf.name, "bytes": elf.stat().st_size,
                 "sha256": hashlib.sha256(elf.read_bytes()).hexdigest()},
-        "partition": {"bytes": 1024, "freeBytes": 1024 - app.stat().st_size, "freePercent": 0.0},
+        "partition": {"bytes": 1024, "freeBytes": 1024 - app.stat().st_size,
+                      "freePercent": round((1024 - app.stat().st_size) / 1024 * 100, 6)},
         "reproducibility": {"appByteIdentical": True, "elfByteIdentical": True,
                             "independentCleanBuilds": 2, "ccacheEnabled": False},
         "toolchain": {"espIdf": "v5.5.4", "espIdfCommit": "a" * 40, "python": "3.9.6",
@@ -98,25 +108,43 @@ def candidate(repositories: dict[str, Path], tmp_path: Path, monkeypatch: pytest
         "config": {"sdkconfigSha256": "a" * 64, "sdkconfigDefaultsLocalSha256": "b" * 64,
                    "dependenciesLockSha256": "c" * 64, "appReproducibleBuild": True,
                    "productionConfigAudit": "PASS", "productionArtifactAudit": "PASS"},
-        "tests": {"projectSourceGate": "PASS", "firmwareVersionAndCourseGates": "PASS"},
+        "tests": {"projectSourceGate": "1378 passed", "firmwareVersionAndCourseGates": "18 passed"},
         "safety": {"flashed": False, "serialAccessed": False, "hilRun": False,
                    "physicalDeviceAccessed": False},
     }
     evidence.write_text(json.dumps(evidence_payload), encoding="utf-8")
     node = {}
     for key, version in (("backend", "v22.23.2"), ("adminManagerWeb", "v20.20.2")):
-        executable = tmp_path / f"node-{key}"
+        prefix = tmp_path / f"node-{key}"
+        executable = prefix / "bin/node"
+        executable.parent.mkdir(parents=True)
         executable.write_text(f"#!/bin/sh\necho {version}\n", encoding="utf-8")
         executable.chmod(0o755)
         package_tools = {}
         for tool in ("npm", "npx"):
-            entrypoint = tmp_path / f"{key}-{tool}.sh"
+            entrypoint = prefix / f"lib/node_modules/npm/bin/{tool}-cli.js"
+            entrypoint.parent.mkdir(parents=True, exist_ok=True)
             entrypoint.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             package_tools[tool] = {"entrypoint": str(entrypoint),
                                    "sha256": hashlib.sha256(entrypoint.read_bytes()).hexdigest()}
         node[key] = {"version": version, "executable": str(executable),
                      "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
                      **package_tools}
+    esp_idf = tmp_path / "esp-idf"
+    (esp_idf / "tools/cmake").mkdir(parents=True)
+    (esp_idf / "tools/cmake/version.cmake").write_text(
+        "set(IDF_VERSION_MAJOR 5)\nset(IDF_VERSION_MINOR 5)\nset(IDF_VERSION_PATCH 4)\n",
+        encoding="utf-8",
+    )
+    _git(esp_idf, "init", "-b", "candidate")
+    _git(esp_idf, "config", "user.email", "candidate@example.invalid")
+    _git(esp_idf, "config", "user.name", "Candidate Test")
+    _git(esp_idf, "add", ".")
+    _git(esp_idf, "commit", "-m", "fixture")
+    esp_commit = _git(esp_idf, "rev-parse", "HEAD")
+    monkeypatch.setattr(manifest, "CANONICAL_ESP_IDF_ROOT", esp_idf)
+    evidence_payload["toolchain"]["espIdfCommit"] = esp_commit
+    evidence.write_text(json.dumps(evidence_payload), encoding="utf-8")
     migration = repositories["backend"] / "src/database/migrations/127_shared_visual_layered_cinematic_compatibility.sql"
     return {
         "candidateId": "course-mode-2026-08-29.1",
@@ -125,8 +153,8 @@ def candidate(repositories: dict[str, Path], tmp_path: Path, monkeypatch: pytest
         "course": {"courseId": "10000000-0000-4000-8000-000000000001", "courseKey": "english-6month-4-6"},
         "repositories": {name: _repository(root) for name, root in repositories.items()},
         "images": {
-            "lessonStudioBackend": {"reference": "local/backend:candidate", "id": "sha256:" + "1" * 64},
-            "lessonStudioWeb": {"reference": "local/web:candidate", "id": "sha256:" + "2" * 64},
+            "lessonStudioBackend": {"reference": backend_ref, "id": "sha256:" + "1" * 64},
+            "lessonStudioWeb": {"reference": web_ref, "id": "sha256:" + "2" * 64},
         },
         "firmware": {
             "appPath": str(app), "appOffset": "0x20000", "appBytes": app.stat().st_size,
@@ -163,7 +191,13 @@ def candidate(repositories: dict[str, Path], tmp_path: Path, monkeypatch: pytest
                 "root": str(browser.parent),
                 "executable": browser.name,
                 "treeDigest": tree,
-            }, "node": node, "espIdf": {"version": "v5.5.4", "commit": "a" * 40},
+            }, "node": node, "espIdf": {
+                "version": "v5.5.4", "commit": esp_commit, "root": str(esp_idf),
+                "versionFile": "tools/cmake/version.cmake",
+                "versionFileSha256": hashlib.sha256(
+                    (esp_idf / "tools/cmake/version.cmake").read_bytes(),
+                ).hexdigest(),
+            },
         },
         "evidenceRoot": str(tmp_path / "evidence"),
     }
@@ -219,6 +253,78 @@ def test_candidate_rejects_mutated_node_package_manager_entrypoint(candidate: di
     entrypoint.write_text("#!/bin/sh\nexit 91\n", encoding="utf-8")
 
     assert "tools.node.backend.npm.sha256" in validate_candidate(candidate, now=NOW)
+
+
+def test_candidate_rejects_hashed_node_entrypoint_outside_canonical_install(candidate: dict, tmp_path: Path) -> None:
+    arbitrary = tmp_path / "arbitrary-npm.js"
+    arbitrary.write_text("process.exit(0)\n", encoding="utf-8")
+    npm = candidate["tools"]["node"]["backend"]["npm"]
+    npm.update(entrypoint=str(arbitrary), sha256=hashlib.sha256(arbitrary.read_bytes()).hexdigest())
+
+    assert "tools.node.backend.npm.entrypoint" in validate_candidate(candidate, now=NOW)
+
+
+def test_candidate_rejects_image_role_and_oci_provenance_mutation(candidate: dict) -> None:
+    candidate["images"]["lessonStudioBackend"]["reference"] = candidate["images"]["lessonStudioWeb"]["reference"]
+
+    assert "images.lessonStudioBackend.reference" in validate_candidate(candidate, now=NOW)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("board", "wrong"), ("target", "esp32"), ("createdAt", "2000-01-01T00:00:00Z"),
+])
+def test_candidate_rejects_firmware_platform_or_stale_evidence(
+    candidate: dict, field: str, value: str,
+) -> None:
+    path = Path(candidate["firmware"]["evidenceManifestPath"])
+    evidence = json.loads(path.read_text(encoding="utf-8"))
+    evidence[field] = value
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+    candidate["firmware"]["evidenceManifestSha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    assert "firmware.evidenceManifestPath" in validate_candidate(candidate, now=NOW)
+
+
+def test_candidate_rejects_firmware_free_percent_drift(candidate: dict) -> None:
+    path = Path(candidate["firmware"]["evidenceManifestPath"])
+    evidence = json.loads(path.read_text(encoding="utf-8"))
+    evidence["partition"]["freePercent"] += 0.1
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+    candidate["firmware"]["evidenceManifestSha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    assert "firmware.evidenceManifestPath" in validate_candidate(candidate, now=NOW)
+
+
+def test_candidate_rejects_esp_idf_checkout_drift(candidate: dict) -> None:
+    root = Path(candidate["tools"]["espIdf"]["root"])
+    (root / "tools/cmake/version.cmake").write_text("set(IDF_VERSION_MAJOR 0)\n", encoding="utf-8")
+
+    assert "tools.espIdf.identity" in validate_candidate(candidate, now=NOW)
+
+
+def test_candidate_schema_upgrade_is_deterministic_without_writing_input(candidate: dict) -> None:
+    legacy = json.loads(json.dumps(candidate))
+    legacy["firmware"].pop("evidenceManifestPath")
+    legacy["firmware"].pop("evidenceManifestSha256")
+    legacy["tools"]["node"] = {
+        key: descriptor["version"] for key, descriptor in candidate["tools"]["node"].items()
+    }
+    legacy["tools"]["espIdf"] = candidate["tools"]["espIdf"]["version"]
+    before = json.loads(json.dumps(legacy))
+
+    first = manifest.upgrade_candidate_schema(
+        legacy, node_executables={
+            key: descriptor["executable"] for key, descriptor in candidate["tools"]["node"].items()
+        }, esp_idf_root=candidate["tools"]["espIdf"]["root"],
+    )
+    second = manifest.upgrade_candidate_schema(
+        legacy, node_executables={
+            key: descriptor["executable"] for key, descriptor in candidate["tools"]["node"].items()
+        }, esp_idf_root=candidate["tools"]["espIdf"]["root"],
+    )
+
+    assert legacy == before
+    assert first == second == candidate
 
 
 def test_candidate_requires_latest_committed_and_runtime_up_migration(candidate: dict) -> None:
