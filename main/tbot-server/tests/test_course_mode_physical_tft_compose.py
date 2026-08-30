@@ -7,7 +7,6 @@ import yaml
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-
 ROOT = Path(__file__).resolve().parents[3]
 BASE_COMPOSE = ROOT / "docs/docker/docker-compose.lesson-studio-e2e.yml"
 OVERLAY_COMPOSE = ROOT / "docs/docker/docker-compose.course-mode-physical-tft.yml"
@@ -108,6 +107,7 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
     assert set(overlay["services"]) == {
         "backend",
         "course-mode-materialize",
+        "postgres",
         "seed-postgres",
         "seed-mysql",
         "web",
@@ -147,6 +147,13 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
     assert overlay["services"]["backend"]["extra_hosts"] == [
         "host.docker.internal:host-gateway"
     ]
+    assert overlay["services"]["postgres"]["ports"] == ["127.0.0.1:5432:5432"]
+    assert overlay["services"]["backend"]["labels"] == {
+        "com.tbot.course-mode.restart-target": "backend"
+    }
+    assert overlay["services"]["postgres"]["labels"] == {
+        "com.tbot.course-mode.readback-boundary": "postgres"
+    }
     assert all("seed" not in str(value).lower() for value in materialize.values())
     assert all(".sql" not in str(value).lower() for value in materialize.values())
 
@@ -195,6 +202,7 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
     )
     compose = json.loads(result.stdout)
     backend = compose["services"]["backend"]
+    postgres = compose["services"]["postgres"]
     materialize = compose["services"]["course-mode-materialize"]
     web = compose["services"]["web"]
 
@@ -220,6 +228,10 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
             "protocol": "tcp",
         }
     ]
+    assert postgres["ports"] == [{
+        "mode": "ingress", "host_ip": "127.0.0.1", "target": 5432,
+        "published": "5432", "protocol": "tcp",
+    }]
     assert backend["extra_hosts"] == ["host.docker.internal=host-gateway"]
     required_environment = (
         "COURSE_MODE_V2_PUBLISH_ENABLED",
