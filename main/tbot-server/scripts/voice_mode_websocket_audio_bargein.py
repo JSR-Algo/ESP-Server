@@ -117,7 +117,10 @@ async def _collect_replacement_response(websocket, *, timeout_sec, clock=time.mo
 async def _observe_interrupt_stop(websocket, *, timeout_sec, clock):
     stop, binary_count, messages = await _recv_until(
         websocket,
-        lambda payload: _is_tts_state(payload, "stop"),
+        lambda payload: (
+            _is_tts_state(payload, "stop")
+            and payload.get("reason") == "interrupt"
+        ),
         timeout_sec,
     )
     return stop, binary_count, messages, clock()

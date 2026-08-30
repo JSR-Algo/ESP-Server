@@ -129,6 +129,55 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         self.assertEqual(record["replacementBinaryChunks"], 0)
         self.assertNotIn("tok-1", json.dumps(record))
 
+    def test_run_smoke_does_not_accept_natural_tts_stop_as_bargein(self):
+        audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
+        messages = [
+            json.dumps({"type": "hello"}),
+            json.dumps({"type": "tts", "state": "start"}),
+            json.dumps({"type": "tts", "state": "stop"}),
+        ]
+
+        async def _sleep(_seconds):
+            return None
+
+        with patch.object(
+            audio_bargein.websockets,
+            "connect",
+            self._connect_for(messages),
+        ), patch.object(
+            audio_bargein, "_opus_packets", return_value=[b"interrupt-opus"]
+        ), patch.object(
+            audio_bargein.asyncio, "sleep", _sleep
+        ), self.assertRaisesRegex(RuntimeError, "audio interrupt tts stop timeout"):
+            asyncio.run(audio_bargein.run_smoke(self._args()))
+
+    def test_run_smoke_ignores_natural_stop_before_tagged_interrupt_stop(self):
+        audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
+        messages = [
+            json.dumps({"type": "hello"}),
+            json.dumps({"type": "tts", "state": "start"}),
+            json.dumps({"type": "tts", "state": "stop"}),
+            json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}),
+            json.dumps({"type": "tts", "state": "start"}),
+            b"replacement-audio",
+            json.dumps({"type": "tts", "state": "stop"}),
+        ]
+
+        async def _sleep(_seconds):
+            return None
+
+        with patch.object(
+            audio_bargein.websockets,
+            "connect",
+            self._connect_for(messages),
+        ), patch.object(
+            audio_bargein, "_opus_packets", return_value=[b"interrupt-opus"]
+        ), patch.object(audio_bargein.asyncio, "sleep", _sleep):
+            record = asyncio.run(audio_bargein.run_smoke(self._args()))
+
+        self.assertEqual(record["status"], "PASS")
+        self.assertTrue(record["oldResponseStopped"])
+
     def test_run_smoke_fails_closed_when_replacement_audio_gap_exceeds_budget(self):
         audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
 
@@ -233,7 +282,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
                 self.after_stop = [
                     json.dumps({"type": "tts", "state": "start"}),
                     b"replacement-audio",
-                    json.dumps({"type": "tts", "state": "stop"}),
+                    json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}),
                 ]
 
             async def send(self, payload):
@@ -381,7 +430,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
                 self.messages = [
                     json.dumps({"type": "hello"}),
                     json.dumps({"type": "tts", "state": "start"}),
-                    json.dumps({"type": "tts", "state": "stop"}),
+                    json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}),
                     json.dumps({"type": "tts", "state": "start"}),
                     b"replacement-audio",
                     json.dumps({"type": "tts", "state": "stop"}),
@@ -437,7 +486,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
                 self.messages = [
                     json.dumps({"type": "hello"}),
                     json.dumps({"type": "tts", "state": "start"}),
-                    json.dumps({"type": "tts", "state": "stop"}),
+                    json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}),
                     json.dumps({"type": "tts", "state": "start"}),
                     b"replacement-audio",
                     json.dumps({"type": "tts", "state": "stop"}),
