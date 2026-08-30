@@ -151,10 +151,11 @@ export async function withCandidateBoundBrowser({
       );
     } catch (error) {
       acquisitionController.abort(error);
-      await lifecycleBounded(acquisition, `${label} aborted candidate browser acquisition cleanup`, operationTimeoutMs,
-        () => {}, remainingMs).catch((acquisitionError) => {
-        if (/Candidate browser lease cleanup failed/.test(acquisitionError.message)) throw acquisitionError;
-      });
+      try {
+        await acquisition;
+      } catch (acquisitionError) {
+        if (acquisitionError.retainedLeasePath) throw acquisitionError;
+      }
       throw error;
     }
     child = spawnBrowser(lease.executablePath, [

@@ -480,3 +480,29 @@ test('silent socket shutdown cannot starve child reap or candidate cleanup', asy
   assert.deepEqual(events, ['SIGTERM', 'terminate', 'cleanup']);
   assert.equal(deps.state.cleanupCalls, 1);
 });
+
+test('reserve exhaustion waits for acquisition-owned cleanup terminal error with explicit ownership', async () => {
+  const { withCandidateBoundBrowser } = await importHarness();
+  const deps = dependencies();
+  let cleanupActive = false;
+  deps.acquireBrowser = ({ signal, deadline }) => new Promise((_, reject) => {
+    signal.addEventListener('abort', () => {
+      cleanupActive = true;
+      setTimeout(() => {
+        cleanupActive = false;
+        const error = new Error('owned cleanup could not finish');
+        error.retainedLeasePath = '/tmp/auditable-retained-browser-lease';
+        error.leaseOwner = 'test acquisition';
+        reject(error);
+      }, Math.max(0, deadline - Date.now()));
+    }, { once: true });
+  });
+  await assert.rejects(outerWatchdog(withCandidateBoundBrowser({
+    profileDir: '/tmp/profile', label: 'owned gate', operationTimeoutMs: 20, ...deps,
+  }, async () => {}), 75), (error) => {
+    assert.equal(error.retainedLeasePath, '/tmp/auditable-retained-browser-lease');
+    assert.equal(error.leaseOwner, 'test acquisition');
+    return true;
+  });
+  assert.equal(cleanupActive, false);
+});

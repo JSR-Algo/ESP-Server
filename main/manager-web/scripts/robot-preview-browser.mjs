@@ -1,6 +1,7 @@
 import { constants } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -146,18 +147,25 @@ async function stageVerifiedBundle(sourceRoot, stagingRoot, { signal, deadline, 
   return { treeDigest: { schema: TREE_SCHEMA, sha256: hash.digest('hex'), ...state }, manifest };
 }
 
-async function sealBundle(root, manifest) {
+async function sealBundle(root, manifest, { signal, deadline, onSealProgress }) {
   for (const entry of manifest.filter((item) => item.type === 'regular')) {
+    throwIfAcquisitionCancelled(signal, deadline);
     await chmod(join(root, entry.path), entry.mode & 0o111 ? 0o500 : 0o400);
+    await onSealProgress(entry);
   }
   const directories = manifest
     .filter((item) => item.type === 'directory')
     .sort((left, right) => right.path.split('/').length - left.path.split('/').length);
-  for (const entry of directories) await chmod(join(root, entry.path), 0o500);
+  for (const entry of directories) {
+    throwIfAcquisitionCancelled(signal, deadline);
+    await chmod(join(root, entry.path), 0o500);
+    await onSealProgress(entry);
+  }
+  throwIfAcquisitionCancelled(signal, deadline);
   await chmod(root, 0o500);
 }
 
-async function verifySealedBundle(root, manifest) {
+async function verifySealedBundle(root, manifest, { signal, deadline, onVerifyProgress }) {
   const expected = new Map(manifest.map((entry) => [entry.path, entry]));
   const seen = new Set();
   const rootMetadata = await lstat(root, { bigint: true });
@@ -166,6 +174,7 @@ async function verifySealedBundle(root, manifest) {
   async function visit(directory, relativeParent = '') {
     const entries = await readdir(directory, { withFileTypes: true });
     for (const entry of entries) {
+      throwIfAcquisitionCancelled(signal, deadline);
       const relativePath = relativeParent ? `${relativeParent}/${entry.name}` : entry.name;
       const expectedEntry = expected.get(relativePath);
       if (!expectedEntry || seen.has(relativePath)) throw new Error('staged browser tree has unexpected entries');
@@ -191,11 +200,13 @@ async function verifySealedBundle(root, manifest) {
         const buffer = Buffer.allocUnsafe(1024 * 1024);
         let offset = 0n;
         while (offset < before.size) {
+          throwIfAcquisitionCancelled(signal, deadline);
           const length = Number(before.size - offset > BigInt(buffer.length) ? BigInt(buffer.length) : before.size - offset);
           const { bytesRead } = await handle.read(buffer, 0, length, Number(offset));
           if (!bytesRead) throw new Error('staged browser file changed during verification');
           hash.update(buffer.subarray(0, bytesRead));
           offset += BigInt(bytesRead);
+          await onVerifyProgress({ path, offset, size: before.size });
         }
         const after = await handle.stat({ bigint: true });
         const named = await lstat(path, { bigint: true });
@@ -212,21 +223,43 @@ async function verifySealedBundle(root, manifest) {
   if (seen.size !== expected.size) throw new Error('staged browser tree is incomplete');
 }
 
-async function makeBundleRemovable(root) {
-  const metadata = await lstat(root);
-  if (!metadata.isDirectory()) return;
-  await chmod(root, 0o700);
-  for (const entry of await readdir(root, { withFileTypes: true })) {
-    const path = join(root, entry.name);
-    const child = await lstat(path);
-    if (child.isDirectory()) await makeBundleRemovable(path);
-    else if (child.isFile()) await chmod(path, 0o600);
+async function removeBrowserLease(root, { deadline } = {}) {
+  const cleanupScript = `
+    const { chmod, lstat, readdir, rm } = require('node:fs/promises');
+    const root = process.argv[1];
+    async function makeRemovable(path) {
+      const metadata = await lstat(path);
+      if (!metadata.isDirectory()) return;
+      await chmod(path, 0o700);
+      for (const entry of await readdir(path, { withFileTypes: true })) {
+        const child = path + '/' + entry.name;
+        if (entry.isDirectory()) await makeRemovable(child);
+        else if (entry.isFile()) await chmod(child, 0o600);
+      }
+    }
+    (async () => { try { await makeRemovable(root); } catch {} await rm(root, { recursive: true, force: true }); })()
+      .catch((error) => { console.error(error.message); process.exitCode = 1; });
+  `;
+  const child = spawn(process.execPath, ['-e', cleanupScript, root], { stdio: 'ignore' });
+  const remainingMs = deadline === undefined ? 10000 : Math.max(0, deadline - Date.now());
+  const exited = await waitForProcessExit(child, remainingMs);
+  if (!exited) {
+    child.kill('SIGKILL');
+    await waitForProcessExit(child, 1000);
+    throw new Error('Candidate browser cleanup process timed out');
   }
+  if (child.exitCode !== 0) throw new Error(`Candidate browser cleanup process exited ${child.exitCode}`);
 }
 
-async function removeBrowserLease(root) {
-  try { await makeBundleRemovable(root); } catch {}
-  await rm(root, { recursive: true, force: true });
+function waitForProcessExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let timer;
+    const finish = (value) => { clearTimeout(timer); child.off('exit', onExit); resolve(value); };
+    const onExit = () => finish(true);
+    child.once('exit', onExit);
+    timer = setTimeout(() => finish(false), timeoutMs);
+  });
 }
 
 export async function acquirePinnedRobotPreviewChromium({
@@ -240,6 +273,8 @@ export async function acquirePinnedRobotPreviewChromium({
   signal,
   deadline,
   onStageProgress = async () => {},
+  onSealProgress = async () => {},
+  onVerifyProgress = async () => {},
   removeLease = removeBrowserLease,
   cleanupRetryLimit = 3,
 } = {}) {
@@ -263,16 +298,27 @@ export async function acquirePinnedRobotPreviewChromium({
     cleanupPromise = (async () => {
       let lastError;
       for (let attempt = 1; attempt <= cleanupRetryLimit; attempt += 1) {
+        const cleanupController = new AbortController();
+        const cleanupRemainingMs = deadline === undefined ? 10000 : Math.max(0, deadline - Date.now());
+        const cleanupTimer = setTimeout(
+          () => cleanupController.abort(new Error('Candidate browser cleanup deadline exceeded')),
+          cleanupRemainingMs,
+        );
         try {
-          await removeLease(leaseRoot);
+          await removeLease(leaseRoot, { deadline, signal: cleanupController.signal });
           active = false;
           return;
         } catch (error) {
           lastError = error;
           if (deadline !== undefined && Date.now() >= deadline) break;
+        } finally {
+          clearTimeout(cleanupTimer);
         }
       }
-      throw new Error(`Candidate browser lease cleanup failed after ${cleanupRetryLimit} attempts`, { cause: lastError });
+      const cleanupError = new Error(`Candidate browser lease cleanup failed after ${cleanupRetryLimit} attempts`, { cause: lastError });
+      cleanupError.retainedLeasePath = leaseRoot;
+      cleanupError.leaseOwner = 'acquirePinnedRobotPreviewChromium';
+      throw cleanupError;
     })().catch((error) => {
       cleanupPromise = undefined;
       throw error;
@@ -285,10 +331,10 @@ export async function acquirePinnedRobotPreviewChromium({
     if (JSON.stringify(observed.treeDigest) !== JSON.stringify(descriptor.treeDigest)) throw new Error('Candidate browser bundle identity does not match staged content');
     await beforeSeal({ sourceRoot: descriptor.root, stagedRoot: leaseRoot });
     throwIfAcquisitionCancelled(signal, deadline);
-    await sealBundle(leaseRoot, observed.manifest);
+    await sealBundle(leaseRoot, observed.manifest, { signal, deadline, onSealProgress });
     await afterStage({ sourceRoot: descriptor.root, stagedRoot: leaseRoot });
     throwIfAcquisitionCancelled(signal, deadline);
-    await verifySealedBundle(leaseRoot, observed.manifest);
+    await verifySealedBundle(leaseRoot, observed.manifest, { signal, deadline, onVerifyProgress });
     throwIfAcquisitionCancelled(signal, deadline);
     return { executablePath: join(leaseRoot, descriptor.executable), cleanup };
   } catch (error) {

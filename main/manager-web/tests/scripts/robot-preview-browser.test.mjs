@@ -261,3 +261,32 @@ test('transient acquisition cleanup failure is retried before rejection', async 
     await rm(value.base, { recursive: true, force: true });
   }
 });
+
+test('abort during seal traversal cleans the staged lease before rejection', async () => {
+  const value = await fixture({ nestedDirectoryMode: 0o700 });
+  const controller = new AbortController();
+  try {
+    await assert.rejects(acquirePinnedRobotPreviewChromium({
+      ...value, stagingParent: value.base, signal: controller.signal, deadline: Date.now() + 1000,
+      onSealProgress: async () => controller.abort(new Error('seal aborted')),
+    }), /seal aborted/);
+    assert.equal((await readdir(value.base)).some((name) => name.startsWith('tbot-robot-preview-browser-')), false);
+  } finally {
+    await chmod(join(value.root, 'resources'), 0o700).catch(() => {});
+    await rm(value.base, { recursive: true, force: true });
+  }
+});
+
+test('abort during sealed-file verification hashing cleans before rejection', async () => {
+  const value = await fixture();
+  const controller = new AbortController();
+  try {
+    await assert.rejects(acquirePinnedRobotPreviewChromium({
+      ...value, stagingParent: value.base, signal: controller.signal, deadline: Date.now() + 1000,
+      onVerifyProgress: async () => controller.abort(new Error('verify aborted')),
+    }), /verify aborted/);
+    assert.equal((await readdir(value.base)).some((name) => name.startsWith('tbot-robot-preview-browser-')), false);
+  } finally {
+    await rm(value.base, { recursive: true, force: true });
+  }
+});
