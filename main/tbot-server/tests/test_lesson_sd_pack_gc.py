@@ -1,9 +1,13 @@
 import hashlib
 import json
-import os
 import multiprocessing
+import os
 from pathlib import Path
 
+import pytest
+
+from core.lesson import sd_pack_materializer as materializer
+from core.lesson.cache_key_contract import compose_asset_sd_path
 from core.lesson.sd_pack_gc import SdPackActivationState, SdPackGarbageCollector
 from core.lesson.shared_asset_store import SharedAssetStore
 
@@ -23,6 +27,61 @@ def _ready_pack(store: SharedAssetStore, cache_key: str, content: bytes) -> Path
 
 def _disk(total: int, free: int):
     return type("Usage", (), {"total": total, "used": total - free, "free": free})()
+
+
+class _AssetResponse:
+    def __init__(self, content: bytes):
+        self.content = content
+        self.status_code = 200
+        self.headers = {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc_info):
+        return False
+
+    def raise_for_status(self):
+        return None
+
+    async def aiter_bytes(self, _chunk_size):
+        yield self.content
+
+
+class _AssetClient:
+    def __init__(self, url: str, content: bytes):
+        self.url = url
+        self.content = content
+        self.requests = []
+
+    def stream(self, method: str, url: str, **_kwargs):
+        self.requests.append((method, url))
+        assert url == self.url
+        return _AssetResponse(self.content)
+
+
+async def _public_resolver(_host):
+    return ["93.184.216.34"]
+
+
+def _materialize_manifest(cache_key: str, version: int, checksum: str, content: bytes):
+    url = "https://assets.example/candidate.bin"
+    return url, {
+        "lessonId": "lesson",
+        "lessonVersion": version,
+        "profile": "espTft",
+        "manifestChecksum": checksum,
+        "cacheKey": cache_key,
+        "assets": [{
+            "key": "asset",
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size": len(content),
+            "mediaType": "application/octet-stream",
+            "critical": True,
+            "onlineUrl": url,
+            "sdPath": compose_asset_sd_path(cache_key, "asset"),
+        }],
+    }
 
 
 def test_gc_protects_exact_runtime_keys_and_deletes_only_one_lru_pack(tmp_path):
@@ -97,6 +156,67 @@ def test_preload_is_refused_below_five_percent_free(tmp_path):
     assert gc.can_preload()
     free["value"] = 4
     assert not gc.can_preload()
+
+
+@pytest.mark.asyncio
+async def test_materializer_blocks_candidate_below_disk_floor_without_evicting_rollback_pack(
+    tmp_path, monkeypatch
+):
+    pack_root = tmp_path / "tbot" / "lesson-assets"
+    store = SharedAssetStore(pack_root.parent, pack_root=pack_root)
+    previous = {
+        "cacheKey": "lesson/v1-" + "a" * 64,
+        "lessonVersion": 1,
+        "manifestChecksum": "a" * 64,
+    }
+    current = {
+        "cacheKey": "lesson/v2-" + "b" * 64,
+        "lessonVersion": 2,
+        "manifestChecksum": "b" * 64,
+    }
+    candidate = {
+        "cacheKey": "lesson/v3-" + "c" * 64,
+        "lessonVersion": 3,
+        "manifestChecksum": "c" * 64,
+    }
+    previous_pack = _ready_pack(store, previous["cacheKey"], b"previous")
+    current_pack = _ready_pack(store, current["cacheKey"], b"current")
+    activation = SdPackActivationState(store, current=previous)
+    activation.begin_candidate(current)
+    assert activation.activate_candidate(current)
+    activation.begin_candidate(candidate)
+    url, manifest = _materialize_manifest(
+        candidate["cacheKey"], candidate["lessonVersion"], candidate["manifestChecksum"], b"candidate"
+    )
+    client = _AssetClient(url, b"candidate")
+    monkeypatch.setattr(materializer.shutil, "disk_usage", lambda _path: _disk(100, 4))
+
+    with pytest.raises(materializer.MaterializationError) as exc_info:
+        await materializer.materialize_lesson_sd_pack(
+            manifest,
+            config={
+                "lesson": {
+                    "asset_pack_mount_root": str(pack_root),
+                    "asset_allowed_origins": "https://assets.example",
+                    "max_file_bytes": 1024,
+                    "max_pack_bytes": 1024,
+                    "sd_preload_min_free_percent": 5,
+                }
+            },
+            client=client,
+            resolver=_public_resolver,
+        )
+
+    assert exc_info.value.code == "SD_PRELOAD_SPACE_LOW"
+    assert client.requests == []
+    assert activation.current == current
+    assert activation.previous_known_good == previous
+    assert activation.candidate == candidate
+    assert current_pack.joinpath("READY").is_file()
+    assert previous_pack.joinpath("READY").is_file()
+    assert not store.is_pack_ready(candidate["cacheKey"])
+    assert activation.rollback(previous)
+    assert activation.current == previous
 
 
 def test_boot_cleanup_removes_parts_and_ignores_nonready_packs(tmp_path):
