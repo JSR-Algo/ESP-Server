@@ -205,3 +205,59 @@ test('keeps staged directories owner-accessible until the bundle is sealed', asy
     await rm(value.base, { recursive: true, force: true });
   }
 });
+
+test('abort during bundle copy removes the partial lease before acquisition rejects', async () => {
+  const value = await fixture();
+  const controller = new AbortController();
+  try {
+    await assert.rejects(acquirePinnedRobotPreviewChromium({
+      ...value,
+      stagingParent: value.base,
+      signal: controller.signal,
+      deadline: Date.now() + 1000,
+      onStageProgress: async () => controller.abort(new Error('copy aborted')),
+    }), /copy aborted/);
+    assert.equal((await readdir(value.base)).some((name) => name.startsWith('tbot-robot-preview-browser-')), false);
+  } finally {
+    await rm(value.base, { recursive: true, force: true });
+  }
+});
+
+test('abort after staging completes cleans the sealed lease before returning', async () => {
+  const value = await fixture();
+  const controller = new AbortController();
+  try {
+    await assert.rejects(acquirePinnedRobotPreviewChromium({
+      ...value,
+      stagingParent: value.base,
+      signal: controller.signal,
+      deadline: Date.now() + 1000,
+      afterStage: async () => controller.abort(new Error('post-stage aborted')),
+    }), /post-stage aborted/);
+    assert.equal((await readdir(value.base)).some((name) => name.startsWith('tbot-robot-preview-browser-')), false);
+  } finally {
+    await rm(value.base, { recursive: true, force: true });
+  }
+});
+
+test('transient acquisition cleanup failure is retried before rejection', async () => {
+  const value = await fixture();
+  value.environment.TBOT_ROBOT_PREVIEW_BROWSER_TREE_SHA256 = '0'.repeat(64);
+  let cleanupCalls = 0;
+  try {
+    await assert.rejects(acquirePinnedRobotPreviewChromium({
+      ...value,
+      stagingParent: value.base,
+      deadline: Date.now() + 1000,
+      removeLease: async (root) => {
+        cleanupCalls += 1;
+        if (cleanupCalls === 1) throw new Error('transient removal failure');
+        await rm(root, { recursive: true, force: true });
+      },
+    }), /identity does not match/);
+    assert.equal(cleanupCalls, 2);
+    assert.equal((await readdir(value.base)).some((name) => name.startsWith('tbot-robot-preview-browser-')), false);
+  } finally {
+    await rm(value.base, { recursive: true, force: true });
+  }
+});

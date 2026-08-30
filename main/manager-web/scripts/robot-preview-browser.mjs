@@ -54,13 +54,18 @@ function digestField(hash, value) {
   hash.update(length).update(bytes);
 }
 
+function throwIfAcquisitionCancelled(signal, deadline) {
+  if (signal?.aborted) throw signal.reason || new Error('Candidate browser acquisition aborted');
+  if (deadline !== undefined && Date.now() >= deadline) throw new Error('Candidate browser acquisition deadline exceeded');
+}
+
 export function decodeBrowserEntryName(bytes) {
   const name = bytes.toString('utf8');
   if (!Buffer.from(name, 'utf8').equals(bytes)) throw new Error('browser bundle contains an unsafe filename');
   return name;
 }
 
-async function stageVerifiedBundle(sourceRoot, stagingRoot) {
+async function stageVerifiedBundle(sourceRoot, stagingRoot, { signal, deadline, onStageProgress }) {
   // Mode 0700 isolates other users; the same UID and root remain trusted during this local gate.
   const hash = createHash('sha256');
   const state = { entryCount: 0, totalBytes: 0 };
@@ -70,6 +75,7 @@ async function stageVerifiedBundle(sourceRoot, stagingRoot) {
     const entries = await readdir(sourceDirectory, { withFileTypes: true, encoding: 'buffer' });
     entries.sort((left, right) => left.name.compare(right.name));
     for (const entry of entries) {
+      throwIfAcquisitionCancelled(signal, deadline);
       const name = decodeBrowserEntryName(entry.name);
       const source = join(sourceDirectory, name);
       const destination = join(destinationDirectory, name);
@@ -104,6 +110,7 @@ async function stageVerifiedBundle(sourceRoot, stagingRoot) {
         const buffer = Buffer.allocUnsafe(1024 * 1024);
         let offset = 0n;
         while (offset < before.size) {
+          throwIfAcquisitionCancelled(signal, deadline);
           const length = Number(before.size - offset > BigInt(buffer.length) ? BigInt(buffer.length) : before.size - offset);
           const { bytesRead } = await sourceHandle.read(buffer, 0, length, Number(offset));
           if (!bytesRead) throw new Error('browser bundle changed while staging');
@@ -118,6 +125,7 @@ async function stageVerifiedBundle(sourceRoot, stagingRoot) {
             written += result.bytesWritten;
           }
           offset += BigInt(bytesRead);
+          await onStageProgress({ source, destination, offset, size: before.size });
         }
         await destinationHandle.sync();
         const after = await sourceHandle.stat({ bigint: true });
@@ -216,6 +224,11 @@ async function makeBundleRemovable(root) {
   }
 }
 
+async function removeBrowserLease(root) {
+  try { await makeBundleRemovable(root); } catch {}
+  await rm(root, { recursive: true, force: true });
+}
+
 export async function acquirePinnedRobotPreviewChromium({
   environment = process.env,
   metadataPath = METADATA_PATH,
@@ -223,8 +236,14 @@ export async function acquirePinnedRobotPreviewChromium({
   arch = process.arch,
   stagingParent = tmpdir(),
   beforeSeal = async () => {},
-  afterStage = async () => {}
+  afterStage = async () => {},
+  signal,
+  deadline,
+  onStageProgress = async () => {},
+  removeLease = removeBrowserLease,
+  cleanupRetryLimit = 3,
 } = {}) {
+  throwIfAcquisitionCancelled(signal, deadline);
   const descriptor = descriptorFromEnvironment(environment);
   const metadata = JSON.parse(await readFile(metadataPath, 'utf8'));
   const browser = metadata.browsers?.find((entry) => entry.name === ENGINE);
@@ -242,9 +261,18 @@ export async function acquirePinnedRobotPreviewChromium({
     if (!active) return;
     if (cleanupPromise) return cleanupPromise;
     cleanupPromise = (async () => {
-      try { await makeBundleRemovable(leaseRoot); } catch {}
-      await rm(leaseRoot, { recursive: true, force: true });
-      active = false;
+      let lastError;
+      for (let attempt = 1; attempt <= cleanupRetryLimit; attempt += 1) {
+        try {
+          await removeLease(leaseRoot);
+          active = false;
+          return;
+        } catch (error) {
+          lastError = error;
+          if (deadline !== undefined && Date.now() >= deadline) break;
+        }
+      }
+      throw new Error(`Candidate browser lease cleanup failed after ${cleanupRetryLimit} attempts`, { cause: lastError });
     })().catch((error) => {
       cleanupPromise = undefined;
       throw error;
@@ -252,12 +280,16 @@ export async function acquirePinnedRobotPreviewChromium({
     return cleanupPromise;
   };
   try {
-    const observed = await stageVerifiedBundle(descriptor.root, leaseRoot);
+    const observed = await stageVerifiedBundle(descriptor.root, leaseRoot, { signal, deadline, onStageProgress });
+    throwIfAcquisitionCancelled(signal, deadline);
     if (JSON.stringify(observed.treeDigest) !== JSON.stringify(descriptor.treeDigest)) throw new Error('Candidate browser bundle identity does not match staged content');
     await beforeSeal({ sourceRoot: descriptor.root, stagedRoot: leaseRoot });
+    throwIfAcquisitionCancelled(signal, deadline);
     await sealBundle(leaseRoot, observed.manifest);
     await afterStage({ sourceRoot: descriptor.root, stagedRoot: leaseRoot });
+    throwIfAcquisitionCancelled(signal, deadline);
     await verifySealedBundle(leaseRoot, observed.manifest);
+    throwIfAcquisitionCancelled(signal, deadline);
     return { executablePath: join(leaseRoot, descriptor.executable), cleanup };
   } catch (error) {
     await cleanup();

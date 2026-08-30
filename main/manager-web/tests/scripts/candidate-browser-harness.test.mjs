@@ -128,12 +128,13 @@ test('spawn failure cleans the candidate browser lease', async () => {
 test('stalled candidate browser acquisition rejects before the outer watchdog', async () => {
   const { withCandidateBoundBrowser } = await importHarness();
   const deps = dependencies();
-  deps.acquireBrowser = () => new Promise(() => {});
+  deps.acquireBrowser = ({ signal }) => new Promise((_, reject) => {
+    signal.addEventListener('abort', () => reject(signal.reason || new Error('aborted')), { once: true });
+  });
   await assert.rejects(outerWatchdog(withCandidateBoundBrowser({
     profileDir: '/tmp/profile',
     label: 'test gate',
     operationTimeoutMs: 25,
-    onRetainedLease: () => {},
     ...deps,
   }, async () => {
     assert.fail('callback must not run before browser acquisition completes');
@@ -191,7 +192,6 @@ test('stalled CDP command times out and cleans child, socket, and lease', async 
 test('stalled candidate browser cleanup rejects before the outer watchdog after local resources close', async () => {
   const { withCandidateBoundBrowser } = await importHarness();
   const deps = dependencies();
-  const retained = [];
   deps.acquireBrowser = async () => ({
     executablePath: '/candidate/staged/chrome-headless-shell',
     cleanup: async () => {
@@ -203,53 +203,41 @@ test('stalled candidate browser cleanup rejects before the outer watchdog after 
     profileDir: '/tmp/profile',
     label: 'test gate',
     operationTimeoutMs: 25,
-    onRetainedLease: (error, lease) => retained.push({ error, lease }),
     ...deps,
   }, async () => {})), /test gate lifecycle timed out after 25ms/);
   assert.equal(deps.state.cleanupCalls, 1);
-  assert.equal(retained.length, 1);
-  assert.match(retained[0].error.message, /cleanup did not complete/);
   assert.equal(deps.state.child.signalCode, 'SIGTERM');
   assert.equal(deps.state.socket.readyState, 3);
 });
 
-test('failed candidate cleanup surfaces the retained lease to its owner', async () => {
+test('failed candidate cleanup is surfaced synchronously', async () => {
   const { withCandidateBoundBrowser } = await importHarness();
   const deps = dependencies();
-  const retained = [];
   deps.acquireBrowser = async () => ({
     executablePath: '/candidate/staged/chrome-headless-shell',
     cleanup: async () => { deps.state.cleanupCalls += 1; throw new Error('cleanup failed'); },
   });
   await assert.rejects(withCandidateBoundBrowser({
     profileDir: '/tmp/profile', label: 'test gate', operationTimeoutMs: 100,
-    onRetainedLease: (error, lease) => retained.push({ error, lease }), ...deps,
+    ...deps,
   }, async () => {}), /cleanup failed/);
   assert.equal(deps.state.cleanupCalls, 1);
-  assert.equal(retained.length, 1);
-  assert.match(retained[0].error.message, /cleanup did not complete/);
 });
 
-test('late acquisition retains auditable lease ownership without starting unsafe cleanup', async () => {
+test('timed out acquisition aborts and finishes owned cleanup before rejecting', async () => {
   const { withCandidateBoundBrowser } = await importHarness();
   const deps = dependencies();
-  const retained = [];
   let cleanupCalls = 0;
-  deps.acquireBrowser = () => new Promise((resolve) => setTimeout(() => resolve({
-    executablePath: '/candidate/staged/chrome-headless-shell',
-    cleanup: async () => { cleanupCalls += 1; await new Promise(() => {}); },
-  }), 30));
+  deps.acquireBrowser = ({ signal }) => new Promise((_, reject) => signal.addEventListener('abort', async () => {
+    cleanupCalls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    reject(signal.reason || new Error('aborted'));
+  }, { once: true }));
   await assert.rejects(withCandidateBoundBrowser({
     profileDir: '/tmp/profile', label: 'late gate', operationTimeoutMs: 20,
-    onRetainedLease: (error, lease) => retained.push({ error, lease }), ...deps,
+    ...deps,
   }, async () => {}), /late gate lifecycle timed out after 20ms/);
-  await outerWatchdog(new Promise((resolve) => {
-    const poll = () => retained.length ? resolve() : setTimeout(poll, 1);
-    poll();
-  }), 75);
-  assert.equal(cleanupCalls, 0);
-  assert.equal(retained.length, 1);
-  assert.match(retained[0].error.message, /late candidate browser lease retained/);
+  assert.equal(cleanupCalls, 1);
 });
 
 test('visual-library pre-CDP socket factory hang rejects before outer watchdog and cleans lifecycle', async () => {
@@ -491,52 +479,4 @@ test('silent socket shutdown cannot starve child reap or candidate cleanup', asy
   }, async () => {});
   assert.deepEqual(events, ['SIGTERM', 'terminate', 'cleanup']);
   assert.equal(deps.state.cleanupCalls, 1);
-});
-
-test('default late-lease owner drains acquisition that resolves during cleanup reserve', async () => {
-  const { withCandidateBoundBrowser, drainRetainedCandidateBrowserLeases } = await importHarness();
-  let cleanupCalls = 0;
-  const deps = dependencies();
-  deps.acquireBrowser = () => new Promise((resolve) => setTimeout(() => resolve({
-    executablePath: '/candidate/staged/chrome-headless-shell',
-    cleanup: async () => { cleanupCalls += 1; },
-  }), 45));
-  await assert.rejects(withCandidateBoundBrowser({
-    profileDir: '/tmp/profile', label: 'default late gate', operationTimeoutMs: 50, ...deps,
-  }, async () => {}), /default late gate lifecycle timed out after 50ms/);
-  await outerWatchdog(drainRetainedCandidateBrowserLeases(), 100);
-  assert.equal(cleanupCalls, 1);
-});
-
-test('retained lease cleanup is retried by later drains until it succeeds', async () => {
-  const { withCandidateBoundBrowser, drainRetainedCandidateBrowserLeases } = await importHarness();
-  const deps = dependencies();
-  let cleanupCalls = 0;
-  let releaseSecondAttempt;
-  let secondAttemptStarted;
-  const secondAttempt = new Promise((resolve) => { secondAttemptStarted = resolve; });
-  deps.acquireBrowser = async () => ({
-    executablePath: '/candidate/staged/chrome-headless-shell',
-    cleanup: async () => {
-      cleanupCalls += 1;
-      if (cleanupCalls === 1) throw new Error('first cleanup failure');
-      if (cleanupCalls === 2) {
-        secondAttemptStarted();
-        await new Promise((resolve) => { releaseSecondAttempt = resolve; });
-        throw new Error('second cleanup failure');
-      }
-    },
-  });
-  await assert.rejects(withCandidateBoundBrowser({
-    profileDir: '/tmp/profile', label: 'retry gate', operationTimeoutMs: 100, ...deps,
-  }, async () => {}), /first cleanup failure/);
-  await outerWatchdog(secondAttempt, 75);
-  const firstDrain = drainRetainedCandidateBrowserLeases();
-  releaseSecondAttempt();
-  await outerWatchdog(firstDrain, 75);
-  assert.equal(cleanupCalls, 2);
-  await outerWatchdog(drainRetainedCandidateBrowserLeases(), 75);
-  assert.equal(cleanupCalls, 3);
-  await outerWatchdog(drainRetainedCandidateBrowserLeases(), 75);
-  assert.equal(cleanupCalls, 3);
 });

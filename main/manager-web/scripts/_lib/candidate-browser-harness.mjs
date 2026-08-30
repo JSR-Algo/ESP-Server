@@ -6,38 +6,6 @@ import { acquirePinnedRobotPreviewChromium } from '../robot-preview-browser.mjs'
 
 const DEFAULT_OPERATION_TIMEOUT_MS = 60000;
 const DEFAULT_READINESS_TIMEOUT_MS = 10000;
-const retainedLeaseRecords = new Set();
-
-function cleanupRetainedLease(record) {
-  if (record.cleanup) return record.cleanup;
-  record.cleanup = Promise.resolve().then(async () => {
-    record.lease ||= await record.acquisition;
-    await record.lease?.cleanup();
-    retainedLeaseRecords.delete(record);
-  }).catch((cleanupError) => {
-    process.emitWarning(new Error(`${record.error.message}; cleanup failed`, { cause: cleanupError }));
-    throw cleanupError;
-  }).finally(() => {
-    record.cleanup = null;
-  });
-  return record.cleanup;
-}
-
-function retainAndDrainLease(error, lease, acquisition = null) {
-  const record = { error, lease, acquisition, cleanup: null };
-  retainedLeaseRecords.add(record);
-  process.emitWarning(error);
-  cleanupRetainedLease(record).catch(() => {});
-  return record;
-}
-
-function retainAndDrainLateAcquisition(error, acquisition) {
-  return retainAndDrainLease(error, null, acquisition);
-}
-
-export async function drainRetainedCandidateBrowserLeases() {
-  await Promise.allSettled([...retainedLeaseRecords].map(cleanupRetainedLease));
-}
 
 function delay(timeoutMs) {
   return new Promise((resolve) => setTimeout(resolve, timeoutMs));
@@ -118,7 +86,6 @@ export async function withCandidateBoundBrowser({
   readinessTimeoutMs = DEFAULT_READINESS_TIMEOUT_MS,
   readinessPollMs = 50,
   onMessage = () => {},
-  onRetainedLease = null,
 }, run) {
   let lease;
   let child;
@@ -136,7 +103,6 @@ export async function withCandidateBoundBrowser({
   const lifecycleTimeout = () => new Error(`${label} lifecycle timed out after ${operationTimeoutMs}ms`);
   const lifecycleFailure = new Promise((_, reject) => { rejectLifecycle = reject; });
   lifecycleFailure.catch(() => {});
-  const reportRetainedLease = onRetainedLease || retainAndDrainLease;
 
   const failLifecycle = (error) => {
     rejectLifecycle(error);
@@ -173,21 +139,22 @@ export async function withCandidateBoundBrowser({
   );
 
   try {
-    const acquisition = Promise.resolve().then(() => acquireBrowser());
+    const acquisitionController = new AbortController();
+    const acquisition = Promise.resolve().then(() => acquireBrowser({
+      signal: acquisitionController.signal,
+      deadline: lifecycleDeadline,
+    }));
     try {
-      lease = await lifecycleBounded(acquisition, `${label} candidate browser acquisition`);
+      lease = await lifecycleBounded(
+        acquisition, `${label} candidate browser acquisition`, operationTimeoutMs,
+        () => acquisitionController.abort(lifecycleTimeout())
+      );
     } catch (error) {
-      if (onRetainedLease) {
-        acquisition.then((lateLease) => {
-          if (lateLease) onRetainedLease(
-            new Error(`${label} late candidate browser lease retained after lifecycle deadline`), lateLease
-          );
-        }, () => {});
-      } else {
-        retainAndDrainLateAcquisition(
-          new Error(`${label} late candidate browser lease retained after lifecycle deadline`), acquisition
-        );
-      }
+      acquisitionController.abort(error);
+      await lifecycleBounded(acquisition, `${label} aborted candidate browser acquisition cleanup`, operationTimeoutMs,
+        () => {}, remainingMs).catch((acquisitionError) => {
+        if (/Candidate browser lease cleanup failed/.test(acquisitionError.message)) throw acquisitionError;
+      });
       throw error;
     }
     child = spawnBrowser(lease.executablePath, [
@@ -309,7 +276,6 @@ export async function withCandidateBoundBrowser({
           remainingMs,
         );
       } catch (error) {
-        reportRetainedLease(new Error(`${label} candidate browser lease cleanup did not complete`, { cause: error }), lease);
         throw error;
       }
     }
