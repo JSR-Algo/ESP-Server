@@ -21,6 +21,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 try:
     _manifest = importlib.import_module("scripts.course_mode_candidate_manifest")
@@ -342,6 +343,16 @@ LIVE_DB_LANE = _lane(
         ("COURSE_MODE_TEST_DATABASE_CONFIRMED", "1"),
     ),
 )
+
+LIVE_DB_URL_VARIABLES = (
+    "COURSE_MODE_V2_TEST_DATABASE_URL",
+    "COURSE_MODE_TEST_DATABASE_URL",
+    "DATABASE_URL",
+    "COURSE_MODE_ROLLBACK_TEST_DATABASE_URL",
+)
+POSTGRES_IDENTITY_QUERY_KEYS = {
+    "database", "dbname", "host", "hostaddr", "port", "service", "servicefile",
+}
 
 
 PHYSICAL_PREFLIGHT_LANE = _lane(
@@ -1271,6 +1282,44 @@ def _child_environment(candidate: dict, source: Mapping[str, str], lane: Lane) -
     return environment
 
 
+def _local_postgres_identity(value: object) -> tuple[str, int, str] | None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or any(character.isspace() or ord(character) < 32 for character in value)
+        or re.search(r"%(?![0-9A-Fa-f]{2})", value)
+    ):
+        return None
+    try:
+        parsed = urlsplit(value)
+        query = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+        port = parsed.port or 5432
+        host = parsed.hostname.lower() if parsed.hostname else None
+    except (UnicodeError, ValueError):
+        return None
+    if (
+        parsed.scheme not in {"postgres", "postgresql"}
+        or not parsed.netloc
+        or parsed.fragment
+        or host not in {"localhost", "127.0.0.1", "::1"}
+        or not 1 <= port <= 65535
+        or any(key.lower() in POSTGRES_IDENTITY_QUERY_KEYS for key, _ in query)
+    ):
+        return None
+    database = unquote(parsed.path.removeprefix("/"))
+    if not database or "/" in database or "\\" in database or "\x00" in database:
+        return None
+    return ("loopback", port, database)
+
+
+def _live_db_topology_ready(source: Mapping[str, str]) -> bool:
+    identities = tuple(_local_postgres_identity(source.get(name)) for name in LIVE_DB_URL_VARIABLES)
+    if any(identity is None for identity in identities):
+        return False
+    v2, curriculum, materializer, rollback = identities
+    return v2 == curriculum and materializer == rollback and curriculum != materializer
+
+
 def _assignment_candidate_environment(candidate: dict, lane: Lane) -> dict[str, str] | None:
     if lane.name not in {
         "admin-course-mode-assignment-new", "admin-course-mode-assignment-rollback",
@@ -1515,6 +1564,11 @@ def run_gate(
                     break
                 required_environment = _required_environment(lane)
                 if any(not source.get(name) for name in required_environment):
+                    report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
+                    report["verdict"] = "BLOCKED"
+                    report["failedLane"] = lane.name
+                    break
+                if lane.name == LIVE_DB_LANE.name and not _live_db_topology_ready(source):
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
