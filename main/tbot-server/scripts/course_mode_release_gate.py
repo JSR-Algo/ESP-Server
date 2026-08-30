@@ -1293,7 +1293,9 @@ def _local_postgres_identity(value: object) -> tuple[str, int, str] | None:
     try:
         parsed = urlsplit(value)
         query = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
-        port = parsed.port or 5432
+        endpoint = parsed.netloc.rsplit("@", 1)[-1]
+        parsed_port = parsed.port
+        port = 5432 if parsed_port is None else parsed_port
         host = parsed.hostname.lower() if parsed.hostname else None
     except (UnicodeError, ValueError):
         return None
@@ -1301,6 +1303,7 @@ def _local_postgres_identity(value: object) -> tuple[str, int, str] | None:
         parsed.scheme not in {"postgres", "postgresql"}
         or not parsed.netloc
         or parsed.fragment
+        or endpoint.endswith(":")
         or host not in {"localhost", "127.0.0.1", "::1"}
         or not 1 <= port <= 65535
         or any(key.lower() in POSTGRES_IDENTITY_QUERY_KEYS for key, _ in query)

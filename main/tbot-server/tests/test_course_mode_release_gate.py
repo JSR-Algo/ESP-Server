@@ -610,6 +610,9 @@ def test_live_db_blocks_when_a_database_group_does_not_share_one_identity(
         "postgresql://localhost:5432/course%ZZmode",
         "postgresql://localhost:5432",
         "postgresql://localhost:not-a-port/course_mode",
+        "postgresql://localhost:0/course_mode",
+        "postgresql://localhost:65536/course_mode",
+        "postgresql://localhost:/course_mode",
         "postgresql://localhost:5432/course_mode?host=db.internal",
         "postgresql://localhost:5432/course_mode?hostaddr=10.0.0.1",
         "postgresql://localhost:5432/course_mode?port=6432",
@@ -646,6 +649,12 @@ def test_live_db_accepts_exactly_two_distinct_loopback_database_identities(
 
     assert result["verdict"] == "PASS"
     assert marker.exists()
+
+
+def test_live_db_missing_port_defaults_to_postgres_port() -> None:
+    assert gate._local_postgres_identity("postgresql://operator@localhost/course_mode") == (
+        "loopback", 5432, "course_mode",
+    )
 
 
 def test_live_db_does_not_forward_ambient_production_database_url(candidate_file: Path) -> None:
