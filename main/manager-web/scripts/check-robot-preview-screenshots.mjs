@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { dirname, extname, join, normalize } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
+import { findPinnedRobotPreviewChromium } from './robot-preview-browser.mjs';
 
 const root = new URL('../', import.meta.url);
 const repo = dirname(fileURLToPath(import.meta.url));
@@ -78,9 +79,7 @@ async function runHarness({ forceSetupFailure = false, onTemp = () => {} } = {})
     const port = server.address().port;
     if (forceSetupFailure) throw new Error('forced setup failure after server acquisition');
 
-    const chromeCandidates = [process.env.CHROME_BIN, join(homedir(), 'Library/Caches/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-mac-arm64/chrome-headless-shell'), '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].filter(Boolean);
-    const chromeBin = chromeCandidates.find(existsSync);
-    assert.ok(chromeBin, 'Chromium is required for mounted component browser verification');
+    const chromeBin = findPinnedRobotPreviewChromium();
     chrome = spawn(chromeBin, ['--headless', '--disable-gpu', '--hide-scrollbars', '--force-device-scale-factor=1', '--remote-debugging-port=0', `--user-data-dir=${profileDir}`, 'about:blank'], { stdio: 'ignore' });
     const [debugPort] = (await waitForFile(join(profileDir, 'DevToolsActivePort'))).trim().split('\n');
     const target = await fetch(`http://127.0.0.1:${debugPort}/json/new?about:blank`, { method: 'PUT' }).then((response) => response.json());
