@@ -171,6 +171,30 @@ class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("client-secret-1", encoded)
         self.assertEqual(conn.google_live_evidence_scope, scope)
 
+    async def test_evidence_boundary_is_captured_before_prewarm_scope_adoption(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        adopted_at = []
+
+        async def prepare_scope():
+            adopted_at.append(helloHandle._utc_now_iso())
+            return "live-7"
+
+        conn.voice_provider = SimpleNamespace(prepare_evidence_scope=prepare_scope)
+        with patch.object(
+            helloHandle,
+            "_utc_now_iso",
+            side_effect=[
+                "2026-08-31T03:00:00+00:00",
+                "2026-08-31T03:00:01+00:00",
+            ],
+        ):
+            await handleHelloMessage(conn, {"evidence_journey_id": "bargein-1"})
+
+        scope = json.loads(conn.websocket.sent[0])["evidenceScope"]
+        self.assertEqual(scope["serverStartUtc"], "2026-08-31T03:00:00+00:00")
+        self.assertEqual(adopted_at, ["2026-08-31T03:00:01+00:00"])
+
     async def test_google_live_evidence_scope_fails_closed_without_live_identity(self):
         conn = _Conn()
         conn.config["voice_mode"] = {"type": "google_live"}

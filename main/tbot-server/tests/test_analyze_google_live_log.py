@@ -152,6 +152,7 @@ def _scoped_bargein_chain(
         f"live_connection_id={live_connection_id}"
     )
     markers = [
+        f"Google Live evidence_receive_loop_started {scope} generation=1",
         f"Google Live evidence_response_started {scope} response_id={old}",
         f"Google Live user_interrupt_started {scope} reason=vad "
         f"cancelled_response_id={old} next_response_id={new}",
@@ -164,6 +165,9 @@ def _scoped_bargein_chain(
         f"Google Live evidence_response_started {scope} response_id={new}",
         f"Google Live model_output_chunk_forwarded {scope} response_id={new}",
         f"Google Live evidence_response_ended {scope} response_id={new}",
+        f"Google Live evidence_receive_loop_stopped {scope} generation=1",
+        f"Google Live evidence_connection_close {scope} pending_tasks=0 "
+        "close_code=1000 reason=evidence_finalize",
     ]
     if include_stale:
         markers.insert(
@@ -203,7 +207,9 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             "2026-08-31 10:00:17 Google Live model_audio_end_ready_to_listen response_id=8",
             "2026-08-31 10:00:17 Google Live evidence_response_ended journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=8",
             "2026-08-31 10:00:18 Google Live evidence_receive_loop_stopped journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 generation=1",
+            "2026-08-31 10:00:19 Google Live evidence_connection_close journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 pending_tasks=0 close_code=1000 reason=evidence_finalize",
             journey_id="bargein-journey-1",
+            journeys="bargein",
             evidence_scope=EVIDENCE_SCOPE,
         )
 
@@ -939,7 +945,12 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         ):
             body.append(f"2026-08-31 10:00:{second:02d} {marker}")
         log_verdict = self._analyze(
-            _window_lines(*body, window_id="window-1", evidence_scope=EVIDENCE_SCOPE)
+            _window_lines(
+                *body,
+                window_id="window-1",
+                journeys="bargein",
+                evidence_scope=EVIDENCE_SCOPE,
+            )
         )
 
         self.assertEqual(log_verdict["status"], "PASS", log_verdict)
@@ -1031,6 +1042,100 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
 
         self.assertEqual(verdict["status"], "FAIL", verdict)
         self.assertIn("COVERAGE_MISSING", [item["code"] for item in verdict["failures"]])
+
+    def test_claimed_scoped_bargein_requires_receive_loop_coverage(self):
+        body = _scoped_bargein_chain(
+            journey_id="bargein-journey-1",
+            connection_id="conn-1",
+            live_connection_id="live-1",
+            old=7,
+            new=8,
+            include_stale=False,
+        )
+        body = [line for line in body if "evidence_receive_loop_" not in line]
+        body.append(
+            "Google Live evidence_connection_close journey_id=bargein-journey-1 "
+            "connection_id=conn-1 live_connection_id=live-1 pending_tasks=0 "
+            "close_code=1000 reason=evidence_finalize"
+        )
+
+        verdict = self._analyze(
+            _window_lines(
+                *(f"2026-08-31 10:00:{index:02d} {marker}" for index, marker in enumerate(body, 1)),
+                journey_id="bargein-journey-1",
+                journeys="bargein",
+                evidence_scope=EVIDENCE_SCOPE,
+            )
+        )
+
+        self.assertIn("COVERAGE_MISSING", [item["code"] for item in verdict["failures"]])
+
+    def test_exact_scoped_bargein_requires_recognized_unique_journey_claim(self):
+        body = _scoped_bargein_chain(
+            journey_id="bargein-journey-1",
+            connection_id="conn-1",
+            live_connection_id="live-1",
+            old=7,
+            new=8,
+            include_stale=False,
+        )
+        body.append(
+            "Google Live evidence_connection_close journey_id=bargein-journey-1 "
+            "connection_id=conn-1 live_connection_id=live-1 pending_tasks=0 "
+            "close_code=1000 reason=evidence_finalize"
+        )
+        cases = {
+            "missing": (None, "JOURNEY_CLAIM_MISSING"),
+            "unknown": ("unknown", "JOURNEY_CLAIM_INVALID"),
+            "duplicate": ("bargein,bargein", "JOURNEY_CLAIM_INVALID"),
+        }
+
+        for name, (journeys, expected) in cases.items():
+            with self.subTest(name=name):
+                verdict = self._analyze(
+                    _window_lines(
+                        *(f"2026-08-31 10:00:{index:02d} {marker}" for index, marker in enumerate(body, 1)),
+                        journey_id="bargein-journey-1",
+                        journeys=journeys,
+                        evidence_scope=EVIDENCE_SCOPE,
+                    )
+                )
+                self.assertIn(
+                    expected,
+                    [item["code"] for item in verdict["failures"]],
+                )
+
+    def test_duplicate_scoped_handoff_acquire_cannot_be_balanced_by_one_release(self):
+        scope = "journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1"
+        verdict = self._analyze(
+            _window_lines(
+                f"2026-08-31 10:00:01 Google Live evidence_lesson_handoff_acquired {scope} generation=1 holder=1 reason=lesson_start",
+                f"2026-08-31 10:00:02 Google Live evidence_lesson_handoff_acquired {scope} generation=1 holder=1 reason=duplicate",
+                f"2026-08-31 10:00:03 Google Live evidence_lesson_handoff_released {scope} generation=1 holder=1 outcome=lesson_started",
+                journey_id="bargein-journey-1",
+                evidence_scope=EVIDENCE_SCOPE,
+            )
+        )
+
+        self.assertIn(
+            "DUPLICATE_LESSON_HANDOFF_ACQUIRE",
+            [item["code"] for item in verdict["failures"]],
+        )
+
+    def test_scoped_handoff_release_without_acquire_fails(self):
+        scope = "journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1"
+        verdict = self._analyze(
+            _window_lines(
+                f"2026-08-31 10:00:01 Google Live evidence_lesson_handoff_released {scope} generation=1 holder=1 outcome=lesson_started",
+                journey_id="bargein-journey-1",
+                evidence_scope=EVIDENCE_SCOPE,
+            )
+        )
+
+        self.assertIn(
+            "HANDOFF_TERMINAL_WITHOUT_ACQUIRE",
+            [item["code"] for item in verdict["failures"]],
+        )
 
     def test_response_id_reuse_across_live_connections_passes_but_same_scope_duplicates_fail(self):
         cross_scope = self._analyze(
@@ -1184,6 +1289,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                 lines = _window_lines(
                     *(f"2026-08-31 10:00:{index:02d} {marker}" for index, marker in enumerate(chain, 1)),
                     journey_id="bargein-journey-1",
+                    journeys="bargein",
                     evidence_scope=EVIDENCE_SCOPE,
                 )
 
@@ -1215,6 +1321,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         lines = _window_lines(
             *(f"2026-08-31 10:00:{index:02d} {marker}" for index, marker in enumerate(interleaved, 1)),
             journey_id="bargein-journey-1",
+            journeys="bargein",
             evidence_scope=EVIDENCE_SCOPE,
         )
 
@@ -1239,6 +1346,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         lines = _window_lines(
             *(f"2026-08-31 10:00:{index:02d} {marker}" for index, marker in enumerate(target, 1)),
             journey_id="bargein-journey-1",
+            journeys="bargein",
             evidence_scope=EVIDENCE_SCOPE,
         )
 
@@ -1268,6 +1376,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         lines = _window_lines(
             *(f"2026-08-31 10:00:{index:02d} {marker}" for index, marker in enumerate(target, 1)),
             journey_id="bargein-journey-1",
+            journeys="bargein",
             evidence_scope=EVIDENCE_SCOPE,
         )
 
@@ -1314,6 +1423,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         lines = _window_lines(
             *(f"2026-08-31 10:00:{index:02d} {marker}" for index, marker in enumerate(target, 1)),
             journey_id="bargein-journey-1",
+            journeys="bargein",
             evidence_scope=EVIDENCE_SCOPE,
         )
 
@@ -1574,6 +1684,9 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
     def test_scoped_lesson_tracks_multiple_steps_independently(self):
         verdict = self._analyze(
             _window_lines(
+                "2026-08-31 10:00:00 Google Live evidence_receive_loop_started "
+                "journey_id=bargein-journey-1 connection_id=conn-1 "
+                "live_connection_id=live-1 generation=1",
                 "2026-08-31 10:00:01 Google Live firmware_ping "
                 "journey_id=bargein-journey-1 connection_id=conn-1 "
                 "live_connection_id=live-1 lesson_step=step-a",
@@ -1586,6 +1699,9 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                 "2026-08-31 10:00:04 Google Live lesson_step_progress "
                 "journey_id=bargein-journey-1 connection_id=conn-1 "
                 "live_connection_id=live-1 step_id=step-a",
+                "2026-08-31 10:00:05 Google Live evidence_receive_loop_stopped "
+                "journey_id=bargein-journey-1 connection_id=conn-1 "
+                "live_connection_id=live-1 generation=1",
                 journey_id="bargein-journey-1",
                 journeys="lesson",
                 evidence_scope=EVIDENCE_SCOPE,
@@ -1780,6 +1896,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
 
     def test_cli_correlates_task4_transport_with_exact_raw_log_window(self):
         body = [
+            "2026-08-31 10:00:00 Google Live evidence_receive_loop_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 generation=1",
             "2026-08-31 10:00:00 Google Live evidence_response_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=7",
             "2026-08-31 10:00:01 Google Live user_interrupt_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 reason=vad cancelled_response_id=7 next_response_id=8",
             "2026-08-31 10:00:02 Google Live tts_state_stop_sent response_id=7 reason=interrupt",
@@ -1797,6 +1914,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             "2026-08-31 10:00:09 Google Live model_output_chunk_forwarded journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=8",
             "2026-08-31 10:00:10 Google Live model_audio_end_ready_to_listen response_id=8",
             "2026-08-31 10:00:10 Google Live evidence_response_ended journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=8",
+            "2026-08-31 10:00:11 Google Live evidence_receive_loop_stopped journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 generation=1",
             "2026-08-31 10:00:11 Google Live evidence_connection_close journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 pending_tasks=0 close_code=1000 reason=evidence_finalize",
         ]
         body = [line.replace("2026-08-31 10:", "2026-08-31 18:") for line in body]

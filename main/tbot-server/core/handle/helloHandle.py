@@ -130,6 +130,7 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
 
     hello_ack = dict(conn.welcome_msg)
     if conn.google_live_evidence_journey_id is not None:
+        server_start_utc = _utc_now_iso()
         provider = getattr(conn, "voice_provider", None)
         prepare_scope = getattr(provider, "prepare_evidence_scope", None)
         live_connection_id = (
@@ -141,7 +142,7 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
                 "connectionId": str(conn.session_id),
                 "liveConnectionId": live_connection_id,
                 "peerIdentityHash": _evidence_peer_identity_hash(conn),
-                "serverStartUtc": _utc_now_iso(),
+                "serverStartUtc": server_start_utc,
             }
             conn.google_live_evidence_scope = scope
             hello_ack["evidenceScope"] = scope

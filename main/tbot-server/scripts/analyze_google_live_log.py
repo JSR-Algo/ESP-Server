@@ -1398,8 +1398,10 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     scoped_active_responses: dict[tuple[str, str], int] = {}
     scoped_lesson_pending_pings: dict[str, int] = {}
     scoped_receive_generations: set[int] = set()
+    scoped_receive_start_count = 0
+    scoped_receive_stop_count = 0
     scoped_timeout_generations: dict[int, list[int]] = defaultdict(list)
-    scoped_handoff_generations: dict[tuple[int, int], int] = {}
+    scoped_handoff_generations: dict[tuple[int, int], list[int]] = defaultdict(list)
 
     def scoped_marker_targets_anchor(match: re.Match[str], line_number: int) -> bool:
         anchor_scope = start_anchor.get("evidenceScope") if start_anchor else None
@@ -1493,6 +1495,9 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         )
                     else:
                         evidence_scope = scope_values
+                claimed_journey_list = list(
+                    filter(None, (start_match.group("journeys") or "").split(","))
+                )
                 start_anchor = {
                     "windowId": start_match.group("window_id"),
                     "timestamp": ts,
@@ -1500,9 +1505,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     "candidateIdentity": candidate_identity,
                     "journeyId": start_match.group("journey_id"),
                     "evidenceScope": evidence_scope,
-                    "claimedJourneys": set(
-                        filter(None, (start_match.group("journeys") or "").split(","))
-                    ),
+                    "claimedJourneys": set(claimed_journey_list),
+                    "claimedJourneyList": claimed_journey_list,
                 }
                 active = True
                 previous_ts = ts
@@ -2071,6 +2075,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     continue
                 generation = int(scoped_receive_loop.group("generation"))
                 if scoped_receive_loop.group("event") == "started":
+                    scoped_receive_start_count += 1
                     if scoped_receive_generations:
                         failures.append(
                             _failure(
@@ -2081,6 +2086,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         )
                     scoped_receive_generations.add(generation)
                 elif generation not in scoped_receive_generations:
+                    scoped_receive_stop_count += 1
                     failures.append(
                         _failure(
                             "RECEIVE_LOOP_STOP_WITHOUT_START",
@@ -2089,6 +2095,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         )
                     )
                 else:
+                    scoped_receive_stop_count += 1
                     scoped_receive_generations.remove(generation)
                 receive_loops_active = len(scoped_receive_generations)
                 max_receive_loops_active = max(
@@ -2151,7 +2158,16 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     continue
                 generation = int(scoped_handoff_acquired.group("generation"))
                 holder = int(scoped_handoff_acquired.group("holder"))
-                scoped_handoff_generations[(generation, holder)] = line_number
+                handoff_key = (generation, holder)
+                if scoped_handoff_generations[handoff_key]:
+                    failures.append(
+                        _failure(
+                            "DUPLICATE_LESSON_HANDOFF_ACQUIRE",
+                            line_number,
+                            str(handoff_key),
+                        )
+                    )
+                scoped_handoff_generations[handoff_key].append(line_number)
                 continue
             scoped_handoff_terminal = P_EVIDENCE_HANDOFF_TERMINAL.search(line)
             if scoped_handoff_terminal:
@@ -2162,7 +2178,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 generation = int(scoped_handoff_terminal.group("generation"))
                 holder = int(scoped_handoff_terminal.group("holder"))
                 handoff_key = (generation, holder)
-                if handoff_key not in scoped_handoff_generations:
+                pending_handoffs = scoped_handoff_generations.get(handoff_key)
+                if not pending_handoffs:
                     failures.append(
                         _failure(
                             "HANDOFF_TERMINAL_WITHOUT_ACQUIRE",
@@ -2171,7 +2188,9 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         )
                     )
                 else:
-                    scoped_handoff_generations.pop(handoff_key, None)
+                    pending_handoffs.pop(0)
+                    if not pending_handoffs:
+                        scoped_handoff_generations.pop(handoff_key, None)
                 if scoped_handoff_terminal.group("event") == "failed":
                     failures.append(
                         _failure(
@@ -2553,14 +2572,15 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     f"scoped receive timeout generation {generation} has no handled outcome",
                 )
             )
-    for handoff_key, handoff_line in scoped_handoff_generations.items():
-        failures.append(
-            _failure(
-                "UNRELEASED_LESSON_HANDOFF",
-                handoff_line,
-                f"scoped handoff {handoff_key} has no terminal outcome",
+    for handoff_key, handoff_lines in scoped_handoff_generations.items():
+        for handoff_line in handoff_lines:
+            failures.append(
+                _failure(
+                    "UNRELEASED_LESSON_HANDOFF",
+                    handoff_line,
+                    f"scoped handoff {handoff_key} has no terminal outcome",
+                )
             )
-        )
     for response_scope, response_id in scoped_active_responses.items():
         failures.append(
             _failure(
@@ -2706,6 +2726,49 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
         }
 
     claimed_journeys = start_anchor.get("claimedJourneys", set()) if start_anchor else set()
+    claimed_journey_list = (
+        start_anchor.get("claimedJourneyList", []) if start_anchor else []
+    )
+    exact_scope_bound = bool(
+        start_anchor and isinstance(start_anchor.get("evidenceScope"), Mapping)
+    )
+    recognized_journeys = {"bargein", "lesson", "reconnect"}
+    if exact_scope_bound:
+        if len(claimed_journey_list) != len(set(claimed_journey_list)) or not set(
+            claimed_journey_list
+        ).issubset(recognized_journeys):
+            failures.append(
+                _failure(
+                    "JOURNEY_CLAIM_INVALID",
+                    start_anchor["line"],
+                    ",".join(claimed_journey_list) or "empty",
+                )
+            )
+        if scoped_interrupts and "bargein" not in claimed_journeys:
+            failures.append(
+                _failure(
+                    "JOURNEY_CLAIM_MISSING",
+                    start_anchor["line"],
+                    "bargein",
+                )
+            )
+    if claimed_journeys and exact_scope_bound:
+        if scoped_receive_start_count == 0 or scoped_receive_stop_count == 0:
+            failures.append(
+                _failure(
+                    "COVERAGE_MISSING",
+                    start_anchor["line"] if start_anchor else 0,
+                    "receive_loop_lifecycle",
+                )
+            )
+        if max_receive_loops_active != 1 or receive_loops_active != 0:
+            failures.append(
+                _failure(
+                    "RECEIVE_LOOP_COVERAGE_INVALID",
+                    start_anchor["line"] if start_anchor else 0,
+                    f"max_active={max_receive_loops_active} balance={receive_loops_active}",
+                )
+            )
     if "bargein" in claimed_journeys:
         required_families = {
             "interrupt_started",
