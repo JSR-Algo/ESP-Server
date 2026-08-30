@@ -80,6 +80,65 @@ def _transport_observation(**overrides):
     return observation
 
 
+def _valid_log_verdict(**overrides):
+    verdict = {
+        "schemaVersion": "google-live-reliability.v1",
+        "name": "google_live_log_reliability",
+        "status": "PASS",
+        "candidateIdentity": CANDIDATE_IDENTITY,
+        "logWindow": _transport_observation()["logWindow"],
+        "receiveLoopBalance": 0,
+        "maxReceiveLoopsActive": 1,
+        "replayCountsByReopen": {},
+        "duplicateResponseIds": [],
+        "staleAudioAfterReplacement": 0,
+        "unrecoveredTimeouts": [],
+        "unreleasedLessonHandoffs": [],
+        "fatalHits": [],
+        "correlation": {
+            "status": "PASS",
+            "cancelledResponseId": 7,
+            "replacementResponseId": 8,
+        },
+        "correlations": [
+            {
+                "status": "PASS",
+                "journeyId": "bargein-journey-1",
+                "connectionId": "conn-1",
+                "liveConnectionId": "live-1",
+                "cancelledResponseId": 7,
+                "replacementResponseId": 8,
+            }
+        ],
+        "failures": [],
+    }
+    verdict.update(overrides)
+    return verdict
+
+
+def _scoped_bargein_chain(*, journey_id, connection_id, live_connection_id, old, new):
+    scope = (
+        f"journey_id={journey_id} connection_id={connection_id} "
+        f"live_connection_id={live_connection_id}"
+    )
+    return [
+        f"Google Live evidence_response_started {scope} response_id={old}",
+        f"Google Live user_interrupt_started {scope} reason=vad "
+        f"cancelled_response_id={old} next_response_id={new}",
+        f"Google Live interrupt_output_stopped {scope} "
+        f"cancelled_response_id={old} next_response_id={new}",
+        f"Google Live evidence_user_interrupted {scope} reason=vad "
+        f"cancelled_response_id={old} next_response_id={new}",
+        f"Google Live evidence_stale_model_drop {scope} response_id={old} "
+        f"current_response_id={new}",
+        f"Google Live evidence_interrupt_audio_replayed {scope} response_id={new}",
+        f"Google Live evidence_interrupt_input_finalized {scope} response_id={new}",
+        f"Google Live evidence_response_started {scope} response_id={new}",
+        f"Google Live model_output_chunk_forwarded {scope} response_id={new}",
+        f"Google Live evidence_response_ended {scope} response_id={new}",
+    ]
+
+
 class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
     def _analyze(self, lines):
         tmp, path = _write_log(lines)
@@ -512,6 +571,112 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                 self.assertEqual(combined["status"], "FAIL", combined)
                 self.assertIn(
                     "SERVER_LOG_JOURNEY_CORRELATION_COUNT",
+                    [item["code"] for item in combined["failures"]],
+                )
+
+    def test_transport_correlation_rejects_incompatible_log_report_contract(self):
+        cases = {
+            "wrong_schema": _valid_log_verdict(schemaVersion="other"),
+            "wrong_name": _valid_log_verdict(name="fabricated"),
+            "wrong_status": _valid_log_verdict(status="SKIPPED"),
+            "missing_failures": _valid_log_verdict(),
+            "malformed_correlations": _valid_log_verdict(correlations={}),
+            "boolean_receive_balance": _valid_log_verdict(receiveLoopBalance=False),
+            "boolean_stale_audio": _valid_log_verdict(
+                staleAudioAfterReplacement=False
+            ),
+            "fabricated_minimal": {
+                "status": "PASS",
+                "candidateIdentity": CANDIDATE_IDENTITY,
+                "logWindow": _transport_observation()["logWindow"],
+                "correlations": _valid_log_verdict()["correlations"],
+            },
+        }
+        cases["missing_failures"].pop("failures")
+
+        for name, log_verdict in cases.items():
+            with self.subTest(name=name):
+                combined = correlate_websocket_bargein_evidence(
+                    _transport_observation(),
+                    log_verdict,
+                    expected_candidate_identity=CANDIDATE_IDENTITY,
+                )
+                self.assertEqual(combined["status"], "FAIL", combined)
+                self.assertFalse(combined["aggregateReleaseEligible"])
+                self.assertIn(
+                    "SERVER_LOG_CONTRACT_MISMATCH",
+                    [item["code"] for item in combined["failures"]],
+                )
+
+    def test_transport_correlation_preserves_valid_multi_journey_log_report(self):
+        body = []
+        for second, marker in enumerate(
+            [
+                *_scoped_bargein_chain(
+                    journey_id="bargein-journey-1",
+                    connection_id="conn-1",
+                    live_connection_id="live-1",
+                    old=7,
+                    new=8,
+                ),
+                *_scoped_bargein_chain(
+                    journey_id="other-journey",
+                    connection_id="conn-2",
+                    live_connection_id="live-2",
+                    old=9,
+                    new=10,
+                ),
+            ],
+            start=1,
+        ):
+            body.append(f"2026-08-31 10:00:{second:02d} {marker}")
+        log_verdict = self._analyze(
+            _window_lines(*body, window_id="window-1")
+        )
+
+        self.assertEqual(log_verdict["status"], "PASS", log_verdict)
+        self.assertEqual(
+            log_verdict["correlation"],
+            {"status": "MULTIPLE", "observedInterrupts": 0},
+        )
+
+        combined = correlate_websocket_bargein_evidence(
+            _transport_observation(),
+            log_verdict,
+            expected_candidate_identity=CANDIDATE_IDENTITY,
+        )
+
+        self.assertEqual(combined["status"], "PASS", combined)
+        self.assertTrue(combined["aggregateReleaseEligible"])
+
+    def test_transport_correlation_rejects_fabricated_summary_for_multiple_entries(self):
+        other = {
+            **_valid_log_verdict()["correlations"][0],
+            "journeyId": "other-journey",
+            "connectionId": "conn-2",
+            "liveConnectionId": "live-2",
+            "cancelledResponseId": 9,
+            "replacementResponseId": 10,
+        }
+        correlations = [*_valid_log_verdict()["correlations"], other]
+        cases = {
+            "pass_with_multiple": _valid_log_verdict(correlations=correlations),
+            "impossible_count": _valid_log_verdict(
+                correlation={"status": "MULTIPLE", "observedInterrupts": 999},
+                correlations=correlations,
+            ),
+        }
+
+        for name, log_verdict in cases.items():
+            with self.subTest(name=name):
+                combined = correlate_websocket_bargein_evidence(
+                    _transport_observation(),
+                    log_verdict,
+                    expected_candidate_identity=CANDIDATE_IDENTITY,
+                )
+                self.assertEqual(combined["status"], "FAIL", combined)
+                self.assertIn(
+                    "SERVER_LOG_CONTRACT_MISMATCH",
                     [item["code"] for item in combined["failures"]],
                 )
 
@@ -1071,6 +1236,109 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         encoded = out_path.read_text(encoding="utf-8")
         self.assertIn("MALFORMED_BOUNDED_LOG_MARKER", encoded)
         self.assertNotIn(secret, encoded)
+
+    def test_cli_correlation_rejects_malformed_scoped_marker_families_redacted(self):
+        secret = "secret-scoped-marker-junk"
+        cases = {
+            "interrupt_started": (
+                "Google Live user_interrupt_started journey_id=j1 connection_id=c1 "
+                "live_connection_id=l1 reason=vad cancelled_response_id=7 next_response_id=8"
+            ),
+            "interrupt_stopped": (
+                "Google Live interrupt_output_stopped journey_id=j1 connection_id=c1 "
+                "live_connection_id=l1 cancelled_response_id=7 next_response_id=8"
+            ),
+            "forwarded": (
+                "Google Live model_output_chunk_forwarded journey_id=j1 connection_id=c1 "
+                "live_connection_id=l1 response_id=8"
+            ),
+            "response": (
+                "Google Live evidence_response_started journey_id=j1 connection_id=c1 "
+                "live_connection_id=l1 response_id=8"
+            ),
+            "reconnect": (
+                "Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 "
+                "attempt=1 reason=network"
+            ),
+            "close": (
+                "Google Live evidence_connection_close journey_id=j1 connection_id=c1 "
+                "live_connection_id=l1 pending_tasks=0"
+            ),
+            "lesson": (
+                "Google Live lesson_step_progress journey_id=j1 connection_id=c1 "
+                "live_connection_id=l1 step_id=step-1"
+            ),
+            "ping": (
+                "Google Live firmware_ping journey_id=j1 connection_id=c1 "
+                "live_connection_id=l1 lesson_step=step-1"
+            ),
+            "interrupt_started_partial": (
+                "Google Live user_interrupt_started journey_id=j1"
+            ),
+            "forwarded_partial": (
+                "Google Live model_output_chunk_forwarded journey_id=j1"
+            ),
+            "response_partial": "Google Live evidence_response_started journey_id=j1",
+            "reconnect_partial": "Google Live evidence_reconnect_started journey_id=j1",
+            "close_partial": "Google Live evidence_connection_close journey_id=j1",
+            "lesson_partial": "Google Live lesson_step_progress journey_id=j1",
+            "ping_partial": "Google Live firmware_ping journey_id=j1",
+            "forwarded_double_space": (
+                "Google Live model_output_chunk_forwarded  journey_id=j1 "
+                "connection_id=c1 live_connection_id=l1 response_id=8"
+            ),
+            "lesson_tab": (
+                "Google Live lesson_step_progress\tjourney_id=j1 connection_id=c1 "
+                "live_connection_id=l1 step_id=step-1"
+            ),
+            "ping_double_space": (
+                "Google Live firmware_ping  journey_id=j1 connection_id=c1 "
+                "live_connection_id=l1 lesson_step=step-1"
+            ),
+            "interrupt_bare": "Google Live user_interrupt_started",
+            "close_bare": "Google Live evidence_connection_close",
+        }
+
+        for name, marker in cases.items():
+            with self.subTest(name=name):
+                tmp, log_path = _write_log(
+                    [f"2026-08-31 10:00:05 {marker} {secret}"]
+                )
+                self.addCleanup(tmp.cleanup)
+                transport_path = Path(tmp.name) / "transport.json"
+                candidate_path = Path(tmp.name) / "candidate.json"
+                out_path = Path(tmp.name) / "combined.json"
+                transport_path.write_text(
+                    json.dumps(
+                        _transport_observation(
+                            logWindow={
+                                "windowId": "bargein-journey-1",
+                                "start": "2026-08-31T10:00:00",
+                                "end": "2026-08-31T10:00:59",
+                            }
+                        )
+                    ),
+                    encoding="utf-8",
+                )
+                candidate_path.write_text(
+                    json.dumps(CANDIDATE_IDENTITY), encoding="utf-8"
+                )
+                argv = [
+                    "analyze_google_live_log.py", "--log", str(log_path),
+                    "--correlate-transport", str(transport_path),
+                    "--expected-candidate-json", str(candidate_path),
+                    "--out-json", str(out_path),
+                ]
+                with patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        analyze_google_live_log.main()
+                encoded = out_path.read_text(encoding="utf-8")
+                report = json.loads(encoded)
+                self.assertIn(
+                    "MALFORMED_BOUNDED_LOG_MARKER",
+                    [item["code"] for item in report["failures"]],
+                )
+                self.assertNotIn(secret, encoded)
 
 
 class AnalyzeGoogleLiveLogTest(unittest.TestCase):

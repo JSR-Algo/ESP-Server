@@ -16,6 +16,7 @@ import re
 import statistics
 import sys
 import tempfile
+from collections.abc import Mapping
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -279,6 +280,16 @@ P_LESSON_STEP_PROGRESS = re.compile(
 )
 P_LESSON_STEP_END = re.compile(r"Google Live lesson_step_ended step_id=(?P<step_id>\S+)")
 P_FIRMWARE_LESSON_PING = re.compile(r"firmware_ping .*?lesson_step=(?P<step_id>\S+)")
+P_SCOPED_LESSON_STEP_PROGRESS = re.compile(
+    r"Google Live lesson_(?:step_progress|conversation_progress) "
+    r"journey_id=(?P<journey_id>\S+) connection_id=(?P<connection_id>\S+) "
+    r"live_connection_id=(?P<live_connection_id>\S+) step_id=(?P<step_id>\S+)"
+)
+P_SCOPED_FIRMWARE_LESSON_PING = re.compile(
+    r"Google Live firmware_ping journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) "
+    r"live_connection_id=(?P<live_connection_id>\S+) lesson_step=(?P<step_id>\S+)"
+)
 P_CLEAN_CONNECTION_CLOSE = re.compile(
     r"Client disconnected\b.*\bclose_code=(?:1000|1001)\b|Google Live clean_close\b"
 )
@@ -330,6 +341,28 @@ _RELIABILITY_MARKERS = (
     P_LESSON_STEP_END,
     P_FIRMWARE_LESSON_PING,
     P_CLEAN_CONNECTION_CLOSE,
+)
+
+_SCOPED_MARKER_FAMILIES = (
+    (re.compile(r"Google Live evidence_"), _SCOPED_EVIDENCE_PATTERNS),
+    (re.compile(r"Google Live user_interrupt_started\b"), (P_EVIDENCE_INTERRUPT_STARTED,)),
+    (re.compile(r"Google Live interrupt_output_stopped\b"), (P_EVIDENCE_INTERRUPT_STOPPED,)),
+    (
+        re.compile(r"Google Live model_output_chunk_forwarded\s+journey"),
+        (P_EVIDENCE_FORWARDED,),
+    ),
+    (
+        re.compile(r"Google Live lesson_step_progress\s+journey"),
+        (P_SCOPED_LESSON_STEP_PROGRESS,),
+    ),
+    (
+        re.compile(r"Google Live lesson_conversation_progress\s+journey"),
+        (P_SCOPED_LESSON_STEP_PROGRESS,),
+    ),
+    (
+        re.compile(r"Google Live firmware_ping\s+journey"),
+        (P_SCOPED_FIRMWARE_LESSON_PING,),
+    ),
 )
 
 _STATEFULLY_ALLOWED_PHYSICAL_MARKERS = frozenset(
@@ -2369,6 +2402,13 @@ def correlate_websocket_bargein_evidence(
 ) -> dict[str, Any]:
     """Upgrade Task 4's pending transport record only with exact bounded log proof."""
     failures: list[dict[str, Any]] = []
+    log_contract_failures = _validate_log_reliability_contract(
+        log_verdict,
+        expected_candidate_identity=expected_candidate_identity,
+        expected_log_window=transport_observation.get("logWindow"),
+    )
+    failures.extend(log_contract_failures)
+    safe_log_verdict = log_verdict if isinstance(log_verdict, Mapping) else {}
     expected_pending = "PENDING_BOUNDED_SERVER_LOG_VERIFICATION"
     required_transport = {
         "schemaVersion": SCHEMA_VERSION,
@@ -2421,20 +2461,25 @@ def correlate_websocket_bargein_evidence(
         failures.append({"code": "TRANSPORT_RESPONSE_ID_NOT_ALLOWED"})
     if transport_observation.get("candidateIdentity") != expected_candidate_identity:
         failures.append({"code": "CANDIDATE_IDENTITY_MISMATCH", "layer": "transport"})
-    if log_verdict.get("candidateIdentity") != expected_candidate_identity:
+    if safe_log_verdict.get("candidateIdentity") != expected_candidate_identity:
         failures.append({"code": "CANDIDATE_IDENTITY_MISMATCH", "layer": "server_log"})
-    if transport_observation.get("logWindow") != log_verdict.get("logWindow"):
+    if transport_observation.get("logWindow") != safe_log_verdict.get("logWindow"):
         failures.append({"code": "LOG_WINDOW_MISMATCH"})
     journey_id = transport_observation.get("journeyId")
     if not isinstance(journey_id, str) or not journey_id:
         failures.append({"code": "TRANSPORT_JOURNEY_ID_INVALID"})
         matching_correlations = []
     else:
-        matching_correlations = [
-            item
-            for item in log_verdict.get("correlations", [])
-            if item.get("journeyId") == journey_id
-        ]
+        correlations = safe_log_verdict.get("correlations", [])
+        matching_correlations = (
+            [
+                item
+                for item in correlations
+                if isinstance(item, Mapping) and item.get("journeyId") == journey_id
+            ]
+            if isinstance(correlations, list)
+            else []
+        )
     if len(matching_correlations) != 1:
         failures.append(
             {
@@ -2452,8 +2497,8 @@ def correlate_websocket_bargein_evidence(
     }
     log_layer = {
         "name": "google_live_log_reliability",
-        "status": log_verdict.get("status"),
-        "candidateIdentity": log_verdict.get("candidateIdentity"),
+        "status": "FAIL" if log_contract_failures else safe_log_verdict.get("status"),
+        "candidateIdentity": safe_log_verdict.get("candidateIdentity"),
     }
     verdict = reliability_verdict(
         expected_candidate_identity,
@@ -2473,7 +2518,7 @@ def correlate_websocket_bargein_evidence(
         "status": status,
         "candidateIdentity": expected_candidate_identity,
         "journeyId": journey_id,
-        "logWindow": log_verdict.get("logWindow"),
+        "logWindow": safe_log_verdict.get("logWindow"),
         "correlationSource": "server_log",
         "correlationStatus": "PASS" if status == "PASS" else "FAIL",
         "aggregateReleaseEligible": status == "PASS",
@@ -2493,6 +2538,134 @@ def correlate_websocket_bargein_evidence(
         "failures": failures,
     }
     return redact_mapping(report)
+
+
+def _validate_log_reliability_contract(
+    report: Any,
+    *,
+    expected_candidate_identity: dict[str, Any],
+    expected_log_window: Any,
+) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+
+    def mismatch(field: str) -> None:
+        failures.append({"code": "SERVER_LOG_CONTRACT_MISMATCH", "field": field})
+
+    if not isinstance(report, Mapping):
+        mismatch("report")
+        return failures
+
+    required_values = {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": "google_live_log_reliability",
+        "status": "PASS",
+        "candidateIdentity": expected_candidate_identity,
+        "logWindow": expected_log_window,
+        "failures": [],
+    }
+    for contract_field, expected in required_values.items():
+        if contract_field not in report or report.get(contract_field) != expected:
+            mismatch(contract_field)
+
+    if not _exact_zero_int(report.get("receiveLoopBalance")):
+        mismatch("receiveLoopBalance")
+    max_receive_loops = report.get("maxReceiveLoopsActive")
+    if (
+        isinstance(max_receive_loops, bool)
+        or not isinstance(max_receive_loops, int)
+        or max_receive_loops not in {0, 1}
+    ):
+        mismatch("maxReceiveLoopsActive")
+    if not _exact_zero_int(report.get("staleAudioAfterReplacement")):
+        mismatch("staleAudioAfterReplacement")
+
+    replay_counts = report.get("replayCountsByReopen")
+    if not isinstance(replay_counts, Mapping) or any(
+        not isinstance(key, str)
+        or isinstance(value, bool)
+        or not isinstance(value, int)
+        or value not in {0, 1}
+        for key, value in replay_counts.items()
+    ):
+        mismatch("replayCountsByReopen")
+
+    empty_list_fields = (
+        "duplicateResponseIds",
+        "unrecoveredTimeouts",
+        "unreleasedLessonHandoffs",
+        "fatalHits",
+    )
+    for contract_field in empty_list_fields:
+        if report.get(contract_field) != []:
+            mismatch(contract_field)
+    if not isinstance(report.get("correlations"), list):
+        mismatch("correlations")
+
+    correlations = report.get("correlations")
+    if isinstance(correlations, list):
+        for item in correlations:
+            if (
+                not isinstance(item, Mapping)
+                or item.get("status") != "PASS"
+                or not all(
+                    isinstance(item.get(contract_field), str)
+                    and bool(item.get(contract_field))
+                    for contract_field in (
+                        "journeyId",
+                        "connectionId",
+                        "liveConnectionId",
+                    )
+                )
+                or not _nonnegative_int(item.get("cancelledResponseId"))
+                or not _nonnegative_int(item.get("replacementResponseId"))
+            ):
+                mismatch("correlations")
+                break
+    correlation = report.get("correlation")
+    if not isinstance(correlation, Mapping):
+        mismatch("correlation")
+    elif correlation.get("status") == "PASS":
+        if (
+            not isinstance(correlations, list)
+            or len(correlations) != 1
+            or not _nonnegative_int(correlation.get("cancelledResponseId"))
+            or not _nonnegative_int(correlation.get("replacementResponseId"))
+        ):
+            mismatch("correlation")
+        else:
+            item = correlations[0]
+            if isinstance(item, Mapping) and any(
+                correlation.get(contract_field) != item.get(contract_field)
+                for contract_field in (
+                    "cancelledResponseId",
+                    "replacementResponseId",
+                )
+            ):
+                mismatch("correlation")
+    elif correlation.get("status") == "MULTIPLE":
+        observed = correlation.get("observedInterrupts")
+        if (
+            isinstance(observed, bool)
+            or not isinstance(observed, int)
+            or not isinstance(correlations, list)
+            or len(correlations) < 2
+            or observed not in {0, len(correlations)}
+        ):
+            mismatch("correlation")
+    elif correlation.get("status") == "NOT_OBSERVED":
+        if correlations != []:
+            mismatch("correlation")
+    else:
+        mismatch("correlation")
+    return failures
+
+
+def _nonnegative_int(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+
+def _exact_zero_int(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value == 0
 
 
 def _contains_response_id_key(value: Any) -> bool:
@@ -2518,6 +2691,18 @@ def _sanitize_reliability_cli_report(report: dict[str, Any]) -> dict[str, Any]:
         safe_sessions.append(safe_session)
     safe["per_session"] = safe_sessions
     return redact_mapping(safe)
+
+
+def _scoped_marker_validation(line: str) -> tuple[bool, bool]:
+    for hint, patterns in _SCOPED_MARKER_FAMILIES:
+        if hint.search(line) is None:
+            continue
+        valid = any(
+            (match := pattern.search(line)) is not None and match.end() == len(line)
+            for pattern in patterns
+        )
+        return True, valid
+    return False, False
 
 
 def _correlate_transport_cli(
@@ -2593,14 +2778,14 @@ def _correlate_transport_cli(
     with log_path.open("r", encoding="utf-8", errors="replace") as fh:
         for raw_line in fh:
             timestamp = parse_timestamp(raw_line)
-            scoped_evidence_line = "Google Live evidence_" in raw_line
             window_marker_line = "Google Live reliability_window_" in raw_line
             stripped_line = raw_line.rstrip("\r\n")
+            scoped_marker_line, scoped_marker_valid = _scoped_marker_validation(
+                stripped_line
+            )
             in_window = timestamp is not None and start <= timestamp <= end
-            malformed_scoped = in_window and scoped_evidence_line and not any(
-                (match := pattern.search(stripped_line)) is not None
-                and match.end() == len(stripped_line)
-                for pattern in _SCOPED_EVIDENCE_PATTERNS
+            malformed_scoped = (
+                in_window and scoped_marker_line and not scoped_marker_valid
             )
             malformed_window = in_window and window_marker_line and not (
                 P_RELIABILITY_WINDOW_START.search(stripped_line)
@@ -2612,7 +2797,7 @@ def _correlate_transport_cli(
                 or (
                     timestamp is None
                     and (
-                        scoped_evidence_line
+                        scoped_marker_line
                         or window_marker_line
                         or _is_reliability_line(raw_line)
                     )
