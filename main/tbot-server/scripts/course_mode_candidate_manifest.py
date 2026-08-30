@@ -82,7 +82,7 @@ FIRMWARE_KEYS = {
     "partitionBytes", "freeBytes", "evidenceManifestPath", "evidenceManifestSha256",
 }
 DATABASE_KEYS = {"engineImage", "engineImageId", "migrationHead", "migrationHeadSha256"}
-TOOLS_KEYS = {"nodeInstalls", "robotPreviewBrowser", "node", "espIdf"}
+TOOLS_KEYS = {"nodeInstalls", "robotPreviewBrowser", "node", "pythonTestRuntime", "espIdf"}
 NODE_KEYS = {"backend", "adminManagerWeb"}
 NODE_DESCRIPTOR_KEYS = {
     "version", "executable", "sha256", "packageRoot", "packageRootMode",
@@ -95,6 +95,14 @@ NODE_TREE_KEYS = {"schema", "sha256", "entryCount", "totalBytes"}
 NODE_TREE_SCHEMA = "sha256-path-mode-bytes-symlink-v1"
 NODE_PACKAGE_TREE_SCHEMA = "sha256-root-mode-path-mode-bytes-v1"
 SECURE_NODE_PACKAGE_ROOT_MODES = {0o700, 0o755}
+PYTHON_TEST_RUNTIME_KEYS = {
+    "version", "root", "executable", "pythonVersion", "pytestVersion", "treeDigest",
+}
+PYTHON_TEST_RUNTIME_TREE_KEYS = {
+    "schema", "sha256", "entryCount", "totalBytes", "rootMode",
+}
+PYTHON_TEST_RUNTIME_TREE_SCHEMA = "sha256-root-mode-path-mode-bytes-v1"
+SECURE_PYTHON_TEST_RUNTIME_ROOT_MODES = {0o555, 0o700, 0o755}
 FIRMWARE_MANIFEST_KEYS = {
     "status", "profile", "board", "target", "sourceCommit", "createdAt", "app", "elf",
     "partition", "reproducibility", "toolchain", "config", "tests", "safety",
@@ -623,6 +631,105 @@ def secure_node_package_tree_descriptor(root: Path) -> dict[str, Any] | None:
         "sha256": digest.hexdigest(),
         "rootMode": root_mode,
     }
+
+
+def secure_python_test_runtime_tree_descriptor(
+    root: Path,
+) -> tuple[dict[str, Any] | None, str | None]:
+    root_fd = None
+    try:
+        if not root.is_absolute() or str(root) != str(root.resolve(strict=True)) or root.is_symlink():
+            return None, "path"
+        metadata = root.lstat()
+        root_mode = stat.S_IMODE(metadata.st_mode)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or root_mode not in SECURE_PYTHON_TEST_RUNTIME_ROOT_MODES
+        ):
+            return None, "path"
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+        if _tree_metadata_identity(os.fstat(root_fd)) != _tree_metadata_identity(metadata):
+            return None, "changed"
+        descriptor, error = _secure_browser_bundle_descriptor_fd(root_fd, metadata)
+        if error is not None or descriptor is None:
+            return None, error or "tree"
+        if _tree_metadata_identity(root.lstat()) != _tree_metadata_identity(metadata):
+            return None, "changed"
+        digest = hashlib.sha256()
+        _digest_field(digest, PYTHON_TEST_RUNTIME_TREE_SCHEMA.encode("ascii"))
+        _digest_field(digest, str(root_mode).encode("ascii"))
+        _digest_field(digest, descriptor["sha256"].encode("ascii"))
+        return {
+            **descriptor,
+            "schema": PYTHON_TEST_RUNTIME_TREE_SCHEMA,
+            "sha256": digest.hexdigest(),
+            "rootMode": root_mode,
+        }, None
+    except RecursionError:
+        return None, "tree"
+    except (OSError, UnicodeEncodeError):
+        return None, "path"
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
+
+
+def _validate_python_test_runtime(
+    value: Any, reasons: set[str], *, verify_identity: bool,
+) -> None:
+    prefix = "tools.pythonTestRuntime"
+    if not isinstance(value, dict) or set(value) != PYTHON_TEST_RUNTIME_KEYS:
+        reasons.add(f"{prefix}.keys")
+        return
+    if type(value.get("version")) is not int or value["version"] != 1:
+        reasons.add(f"{prefix}.version")
+    root = value.get("root")
+    executable = value.get("executable")
+    python_version = value.get("pythonVersion")
+    pytest_version = value.get("pytestVersion")
+    tree = value.get("treeDigest")
+    if not isinstance(root, str) or not Path(root).is_absolute():
+        reasons.add(f"{prefix}.root")
+    if not _valid_relative_path(executable):
+        reasons.add(f"{prefix}.executable")
+    if not isinstance(python_version, str) or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", python_version) is None:
+        reasons.add(f"{prefix}.pythonVersion")
+    if not isinstance(pytest_version, str) or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", pytest_version) is None:
+        reasons.add(f"{prefix}.pytestVersion")
+    if not isinstance(tree, dict) or set(tree) != PYTHON_TEST_RUNTIME_TREE_KEYS:
+        reasons.add(f"{prefix}.treeDigest.keys")
+    elif (
+        tree.get("schema") != PYTHON_TEST_RUNTIME_TREE_SCHEMA
+        or not isinstance(tree.get("sha256"), str) or SHA256_RE.fullmatch(tree["sha256"]) is None
+        or type(tree.get("entryCount")) is not int or tree["entryCount"] <= 0
+        or type(tree.get("totalBytes")) is not int or tree["totalBytes"] <= 0
+        or type(tree.get("rootMode")) is not int
+        or tree["rootMode"] not in SECURE_PYTHON_TEST_RUNTIME_ROOT_MODES
+    ):
+        reasons.add(f"{prefix}.treeDigest")
+    if not verify_identity or any(reason.startswith(f"{prefix}.") for reason in reasons):
+        return
+    observed, error = secure_python_test_runtime_tree_descriptor(Path(root))
+    executable_path = Path(root) / executable
+    if (
+        error or observed != tree or not executable_path.is_file()
+        or executable_path.is_symlink() or not os.access(executable_path, os.X_OK)
+    ):
+        reasons.add(f"{prefix}.identity")
+        return
+    version_env = {**SECURE_ENV, "PYTHONNOUSERSITE": "1"}
+    commands = (
+        ([str(executable_path), "-I", "-s", "-c", "import platform; print(platform.python_version())"], python_version),
+        ([str(executable_path), "-I", "-s", "-m", "pytest", "--version"], f"pytest {pytest_version}"),
+        ([str(executable_path), "-I", "-s", "-c", "import pytest, pytest_asyncio"], ""),
+    )
+    for command, expected in commands:
+        result = run_bounded_command(
+            command, cwd=Path("/"), env=version_env, timeout_sec=10.0, max_output_bytes=4096,
+        )
+        if result.error or result.returncode != 0 or result.stdout.strip() != expected:
+            reasons.add(f"{prefix}.identity")
+            return
 
 
 def _validate_robot_preview_browser(value: Any, reasons: set[str], *, verify_identity: bool) -> None:
@@ -1232,6 +1339,9 @@ def validate_candidate(
             tools.get("robotPreviewBrowser"), reasons, verify_identity=verify_external_tools,
         )
         _validate_node_tools(tools.get("node"), reasons, verify_identity=verify_external_tools)
+        _validate_python_test_runtime(
+            tools.get("pythonTestRuntime"), reasons, verify_identity=verify_external_tools,
+        )
         _validate_esp_idf(
             tools.get("espIdf"), reasons, verify_identity=False,
         )

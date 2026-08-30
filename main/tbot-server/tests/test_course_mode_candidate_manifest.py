@@ -137,6 +137,24 @@ def candidate(repositories: dict[str, Path], tmp_path: Path, monkeypatch: pytest
                      "packageRootMode": package_tree["rootMode"],
                      "packageTreeSha256": package_tree["sha256"],
                      **package_tools}
+    python_root = tmp_path / "python-test-runtime"
+    python_executable = python_root / "bin/python3"
+    python_executable.parent.mkdir(parents=True)
+    python_executable.write_text(
+        f"#!{sys.executable}\nimport runpy,sys\n"
+        "if sys.argv[1:] == ['-I','-s','-c','import platform; print(platform.python_version())']:\n"
+        " print('3.11.9')\n"
+        "elif sys.argv[1:] == ['-I','-s','-m','pytest','--version']:\n"
+        " print('pytest 8.4.1')\n"
+        "elif sys.argv[1:] == ['-I','-s','-c','import pytest, pytest_asyncio']:\n"
+        " pass\n"
+        "else:\n"
+        " sys.argv=sys.argv[1:]; runpy.run_module('pytest', run_name='__main__')\n",
+        encoding="utf-8",
+    )
+    python_executable.chmod(0o755)
+    python_tree, python_error = manifest.secure_python_test_runtime_tree_descriptor(python_root)
+    assert python_error is None and python_tree is not None
     esp_idf = tmp_path / "esp-idf"
     (esp_idf / "tools/cmake").mkdir(parents=True)
     (esp_idf / "tools/cmake/version.cmake").write_text(
@@ -190,6 +208,11 @@ def candidate(repositories: dict[str, Path], tmp_path: Path, monkeypatch: pytest
             ).hexdigest(),
         },
         "tools": {
+            "pythonTestRuntime": {
+                "version": 1, "root": str(python_root), "executable": "bin/python3",
+                "pythonVersion": "3.11.9", "pytestVersion": "8.4.1",
+                "treeDigest": python_tree,
+            },
             "nodeInstalls": {},
             "robotPreviewBrowser": {
                 "version": 2,
@@ -215,6 +238,34 @@ NOW = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
 
 def test_candidate_accepts_exact_committed_repository_identity(candidate: dict) -> None:
     assert validate_candidate(candidate, now=NOW) == []
+
+
+@pytest.mark.parametrize("mutation", ["content", "mode", "symlink", "hardlink"])
+def test_candidate_rejects_python_test_runtime_tree_drift(candidate: dict, mutation: str) -> None:
+    descriptor = candidate["tools"]["pythonTestRuntime"]
+    root = Path(descriptor["root"])
+    executable = root / descriptor["executable"]
+    if mutation == "content":
+        executable.write_bytes(executable.read_bytes() + b"# drift\n")
+    elif mutation == "mode":
+        executable.chmod(0o700)
+    elif mutation == "symlink":
+        (root / "unsafe").symlink_to(executable)
+    else:
+        os.link(executable, root / "unsafe-hardlink")
+
+    assert "tools.pythonTestRuntime.identity" in validate_candidate(candidate, now=NOW)
+
+
+def test_python_test_runtime_descriptor_accepts_immutable_root(candidate: dict) -> None:
+    root = Path(candidate["tools"]["pythonTestRuntime"]["root"])
+    root.chmod(0o555)
+
+    descriptor, error = manifest.secure_python_test_runtime_tree_descriptor(root)
+
+    assert error is None
+    assert descriptor is not None
+    assert descriptor["rootMode"] == 0o555
 
 
 @pytest.mark.parametrize(

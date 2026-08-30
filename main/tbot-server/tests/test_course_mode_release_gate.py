@@ -396,6 +396,26 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                      "packageRootMode": package_tree["rootMode"],
                      "packageTreeSha256": package_tree["sha256"],
                      **package_tools}
+    python_root = tmp_path / "python-test-runtime"
+    python_executable = python_root / "bin/python3"
+    python_executable.parent.mkdir(parents=True)
+    python_executable.write_text(
+        f"#!{sys.executable}\nimport os,runpy,sys\n"
+        "if sys.argv[1:] == ['-I','-s','-c','import platform; print(platform.python_version())']:\n"
+        " print('3.11.9')\n"
+        "elif sys.argv[1:] == ['-I','-s','-m','pytest','--version']:\n"
+        " print('pytest 8.4.1')\n"
+        "elif sys.argv[1:] == ['-I','-s','-c','import pytest, pytest_asyncio']:\n"
+        " pass\n"
+        "elif sys.argv[1:] == ['-I','-s','-m','pytest','-q']:\n"
+        " assert os.environ.get('HOME') and os.environ['HOME'] != '/nonexistent'\n"
+        "else:\n"
+        " sys.argv=sys.argv[1:]; runpy.run_module('pytest', run_name='__main__')\n",
+        encoding="utf-8",
+    )
+    python_executable.chmod(0o755)
+    python_tree, python_error = gate._manifest.secure_python_test_runtime_tree_descriptor(python_root)
+    assert python_error is None and python_tree is not None
     esp_idf = tmp_path / "esp-idf"
     (esp_idf / "tools/cmake").mkdir(parents=True)
     (esp_idf / "tools/cmake/version.cmake").write_text(
@@ -454,6 +474,11 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             "sourceChecksum": hashlib.sha256(curriculum_path.read_bytes()).hexdigest(),
         },
         "tools": {
+            "pythonTestRuntime": {
+                "version": 1, "root": str(python_root), "executable": "bin/python3",
+                "pythonVersion": "3.11.9", "pytestVersion": "8.4.1",
+                "treeDigest": python_tree,
+            },
             "nodeInstalls": {},
             "robotPreviewBrowser": {
                 "version": 2,
@@ -501,6 +526,75 @@ def test_success_report_is_stable_and_machine_readable(candidate_file: Path) -> 
     assert type(result["lanes"][0]["durationMs"]) is int
     assert result["lanes"][0]["durationMs"] >= 0
     assert json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def test_pytest_lane_stages_and_resolves_candidate_python_runtime(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = gate.Lane(
+        name="python-runtime", repository="adminEsp", relative_cwd=".",
+        command=("python3", "-m", "pytest", "--version"), timeout_sec=5.0,
+    )
+
+    stage = gate.stage_execution_candidate(candidate, (lane,))
+    try:
+        staged = stage.candidate["tools"]["pythonTestRuntime"]
+        assert staged["root"].startswith(str(stage.root))
+        command = gate._resolve_candidate_command(lane.command, stage.candidate, lane)
+        assert command == (
+            str(Path(staged["root"]) / staged["executable"]),
+            "-I", "-s", "-m", "pytest", "--version",
+        )
+    finally:
+        assert stage.cleanup() is True
+
+
+def test_pytest_lane_runs_with_sanitized_writable_home(candidate_file: Path) -> None:
+    lane = gate.Lane(
+        name="python-runtime-home", repository="adminEsp", relative_cwd=".",
+        command=("python3", "-m", "pytest", "-q"), timeout_sec=5.0,
+    )
+
+    report = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert report["verdict"] == "PASS"
+
+
+@pytest.mark.parametrize("attack", ["symlink", "hardlink", "fifo"])
+def test_python_runtime_stage_rejects_tree_attack(candidate_file: Path, attack: str) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    descriptor = candidate["tools"]["pythonTestRuntime"]
+    root = Path(descriptor["root"])
+    executable = root / descriptor["executable"]
+    unsafe = root / "unsafe"
+    if attack == "symlink":
+        unsafe.symlink_to(executable)
+    elif attack == "hardlink":
+        os.link(executable, unsafe)
+    else:
+        os.mkfifo(unsafe)
+    lane = gate.Lane(
+        name="python-runtime-attack", repository="adminEsp", relative_cwd=".",
+        command=("python3", "-m", "pytest", "-q"), timeout_sec=5.0,
+    )
+
+    with pytest.raises(ValueError, match="Python test runtime source descriptor mismatch"):
+        gate.stage_execution_candidate(candidate, (lane,))
+
+
+def test_non_pytest_python_command_does_not_use_candidate_test_runtime(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = gate.Lane(
+        name="python-script", repository="adminEsp", relative_cwd=".",
+        command=("python3", "script.py"), timeout_sec=5.0,
+    )
+
+    resolved = gate._resolve_candidate_command(lane.command, candidate, lane)
+
+    assert resolved is not None
+    assert resolved[0] != str(
+        Path(candidate["tools"]["pythonTestRuntime"]["root"])
+        / candidate["tools"]["pythonTestRuntime"]["executable"]
+    )
 
 
 @pytest.mark.parametrize("artifact", ["app", "elf", "node", "migration"])

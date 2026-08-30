@@ -58,6 +58,7 @@ BASE_ENVIRONMENT = {
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_OPTIONAL_LOCKS": "0",
     "PAGER": "cat",
+    "PYTHONNOUSERSITE": "1",
 }
 MAX_LANE_OUTPUT_BYTES = 4 * 1024 * 1024
 MAX_REPORT_BYTES = 1024 * 1024
@@ -1018,6 +1019,23 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
                 )
             staged["repositories"][name]["path"] = str(destination)
         tools_root = root / "tools"
+        if any(_python_test_runtime_required(lane) for lane in lanes):
+            descriptor = candidate["tools"]["pythonTestRuntime"]
+            python_target = tools_root / "python-test-runtime"
+            tools_root.mkdir()
+            source_observed, source_error = (
+                _manifest.secure_python_test_runtime_tree_descriptor(Path(descriptor["root"]))
+            )
+            if source_error or source_observed != descriptor["treeDigest"]:
+                raise ValueError("Python test runtime source descriptor mismatch")
+            _copy_snapshot_tree(Path(descriptor["root"]), python_target, state)
+            observed, error = _manifest.secure_python_test_runtime_tree_descriptor(python_target)
+            if error or observed != descriptor["treeDigest"]:
+                raise ValueError("staged Python test runtime descriptor mismatch")
+            executable = python_target / descriptor["executable"]
+            if not executable.is_file() or executable.is_symlink() or not os.access(executable, os.X_OK):
+                raise ValueError("staged Python test runtime executable mismatch")
+            staged["tools"]["pythonTestRuntime"]["root"] = str(python_target)
         requirements = {
             requirement for lane in lanes
             if (requirement := _node_install_requirement(lane)) is not None and requirement[0]
@@ -1815,6 +1833,13 @@ def _node_install_requirement(lane: Lane) -> tuple[str, str] | None:
     return "", ""
 
 
+def _python_test_runtime_required(lane: Lane) -> bool:
+    return (
+        lane.command == (COURSE_MODE_SOFTWARE_TESTS,)
+        or lane.command[:3] == ("python3", "-m", "pytest")
+    )
+
+
 def node_install_authorized(
     lane: Lane, candidate: dict, cache: dict | None = None,
 ) -> bool:
@@ -2165,6 +2190,13 @@ def _resolve_command(command: tuple[str, ...]) -> tuple[str, ...] | None:
 def _resolve_candidate_command(
     command: tuple[str, ...], candidate: dict, lane: Lane,
 ) -> tuple[str, ...] | None:
+    if command[:3] == ("python3", "-m", "pytest"):
+        try:
+            descriptor = candidate["tools"]["pythonTestRuntime"]
+            executable = Path(descriptor["root"]) / descriptor["executable"]
+            return _resolve_command((str(executable), "-I", "-s", *command[1:]))
+        except (KeyError, TypeError, ValueError):
+            return None
     requirement = _node_install_requirement(lane)
     if requirement is not None and requirement[0]:
         try:
