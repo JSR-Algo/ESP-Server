@@ -142,13 +142,23 @@ def candidate(repositories: dict[str, Path], tmp_path: Path, monkeypatch: pytest
     python_executable.parent.mkdir(parents=True)
     python_executable.write_text(
         f"#!{sys.executable}\nimport json,pathlib,runpy,sys\n"
+        "def attack():\n"
+        " target=pathlib.Path(__file__).resolve().parents[1]; parent=target.parent\n"
+        " target_mode=target.stat().st_mode & 0o7777; parent_mode=parent.stat().st_mode & 0o7777\n"
+        " moved=target.with_name(target.name+'-probe-moved')\n"
+        " try: target.chmod(0o755); parent.chmod(0o755); target.rename(moved)\n"
+        " except PermissionError: assert target.stat().st_mode & 0o222 == 0\n"
+        " else:\n"
+        "  moved.rename(target); target.chmod(target_mode); parent.chmod(parent_mode)\n"
+        "  raise AssertionError('runtime probe escaped sandbox')\n"
         "if sys.argv[1:] == ['-I','-s','-c','import platform; print(platform.python_version())']:\n"
-        " print('3.11.9')\n"
-        "elif sys.argv[1:] == ['-I','-s','-m','pytest','--version']:\n"
-        " print('pytest 8.4.1')\n"
+        " attack(); print('3.11.9')\n"
+        "elif sys.argv[1:] == ['-I','-s','-m','pytest','-s','--version']:\n"
+        " attack(); print('pytest 8.4.1')\n"
         "elif sys.argv[1:] == ['-I','-s','-c','import pytest, pytest_asyncio']:\n"
-        " pass\n"
+        " attack()\n"
         "elif len(sys.argv) == 5 and sys.argv[1:4] == ['-I','-s','-c'] and 'importlib,json' in sys.argv[4]:\n"
+        " attack();\n"
         " root=pathlib.Path(__file__).resolve().parents[1]; paths=[str(root/'lib/python3.11')];\n"
         " print(json.dumps({'executable':str(root/'bin/python3.11'),'prefix':str(root),'basePrefix':str(root),"
         "'execPrefix':str(root),'baseExecPrefix':str(root),'stdlib':paths[0],'path':paths,'modules':paths}))\n"
@@ -277,6 +287,23 @@ def test_python_test_runtime_descriptor_accepts_immutable_root(candidate: dict) 
     assert error is None
     assert descriptor is not None
     assert descriptor["rootMode"] == 0o555
+
+
+def test_python_runtime_authority_probe_requires_write_denying_sandbox(
+    candidate: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptor = candidate["tools"]["pythonTestRuntime"]
+    monkeypatch.setattr(
+        manifest, "_sandboxed_python_runtime_probe_command", lambda command: command,
+    )
+
+    assert manifest.python_test_runtime_authorized(descriptor) is False
+
+    observed, error = manifest.secure_python_test_runtime_tree_descriptor(
+        Path(descriptor["root"]),
+    )
+    assert error is None
+    assert observed == descriptor["treeDigest"]
 
 
 def test_python_test_runtime_descriptor_rejects_writable_child(candidate: dict) -> None:

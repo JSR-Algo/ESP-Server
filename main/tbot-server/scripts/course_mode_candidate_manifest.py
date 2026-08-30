@@ -117,6 +117,11 @@ PYTHON_RUNTIME_AUTHORITY_PROBE = (
     "'modules':[os.path.realpath(importlib.import_module(m).__file__) for m in mods]},sort_keys=True))"
 )
 TRUSTED_OTOOL_EXECUTABLE = Path("/usr/bin/otool")
+TRUSTED_SANDBOX_EXECUTABLE = Path("/usr/bin/sandbox-exec")
+PYTHON_RUNTIME_PROBE_SANDBOX_PROFILE = """(version 1)
+(allow default)
+(deny file-write*)
+"""
 FIRMWARE_MANIFEST_KEYS = {
     "status", "profile", "board", "target", "sourceCommit", "createdAt", "app", "elf",
     "partition", "reproducibility", "toolchain", "config", "tests", "safety",
@@ -739,21 +744,33 @@ def _validate_python_test_runtime(
     ):
         reasons.add(f"{prefix}.identity")
         return
-    version_env = {**SECURE_ENV, "PYTHONNOUSERSITE": "1"}
+    version_env = {
+        **SECURE_ENV, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1",
+    }
     commands = (
         ([str(executable_path), "-I", "-s", "-c", "import platform; print(platform.python_version())"], python_version),
-        ([str(executable_path), "-I", "-s", "-m", "pytest", "--version"], f"pytest {pytest_version}"),
+        ([str(executable_path), "-I", "-s", "-m", "pytest", "-s", "--version"], f"pytest {pytest_version}"),
         ([str(executable_path), "-I", "-s", "-c", "import pytest, pytest_asyncio"], ""),
     )
     for command, expected in commands:
+        command = _sandboxed_python_runtime_probe_command(command)
+        if command is None:
+            reasons.add(f"{prefix}.identity")
+            return
         result = run_bounded_command(
             command, cwd=Path("/"), env=version_env, timeout_sec=10.0, max_output_bytes=4096,
         )
         if result.error or result.returncode != 0 or result.stdout.strip() != expected:
             reasons.add(f"{prefix}.identity")
             return
+    authority_command = _sandboxed_python_runtime_probe_command([
+        str(executable_path), "-I", "-s", "-c", PYTHON_RUNTIME_AUTHORITY_PROBE,
+    ])
+    if authority_command is None:
+        reasons.add(f"{prefix}.identity")
+        return
     authority = run_bounded_command(
-        [str(executable_path), "-I", "-s", "-c", PYTHON_RUNTIME_AUTHORITY_PROBE],
+        authority_command,
         cwd=Path("/"), env=version_env, timeout_sec=15.0, max_output_bytes=64 * 1024,
     )
     try:
@@ -778,6 +795,29 @@ def python_test_runtime_authorized(value: Any) -> bool:
     reasons: set[str] = set()
     _validate_python_test_runtime(value, reasons, verify_identity=True)
     return not reasons
+
+
+def _sandboxed_python_runtime_probe_command(command: list[str]) -> list[str] | None:
+    if sys.platform != "darwin":
+        return None
+    executable = _trusted_sandbox_executable()
+    if executable is None:
+        return None
+    return [str(executable), "-p", PYTHON_RUNTIME_PROBE_SANDBOX_PROFILE, *command]
+
+
+def _trusted_sandbox_executable() -> Path | None:
+    try:
+        metadata = TRUSTED_SANDBOX_EXECUTABLE.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+            or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or not os.access(TRUSTED_SANDBOX_EXECUTABLE, os.X_OK)
+        ):
+            return None
+    except OSError:
+        return None
+    return TRUSTED_SANDBOX_EXECUTABLE
 
 
 def _path_is_within(root: Path, path: Path) -> bool:

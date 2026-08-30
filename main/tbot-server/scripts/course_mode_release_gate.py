@@ -46,6 +46,13 @@ secure_browser_bundle_descriptor = _manifest.secure_browser_bundle_descriptor
 
 
 SECURE_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+PYTHON_LANE_SANDBOX_PROFILE = """(version 1)
+(allow default)
+(deny file-write* (subpath "/private/tmp"))
+(allow file-write*
+    (literal (param "LANE_ROOT"))
+    (subpath (param "LANE_ROOT")))
+"""
 BASE_ENVIRONMENT = {
     "PATH": SECURE_PATH,
     "HOME": "/nonexistent",
@@ -290,18 +297,28 @@ class ExecutionStage:
             lane_identity = _owned_tree_identity(lane_root)
             lane_descriptor = _open_snapshot_directory(lane_root)
             execution_root = lane_root / "candidate"
-            shutil.copytree(self.root, execution_root, symlinks=True)
             python_runtime = self.root / "tools/python-test-runtime"
-            excluded = (execution_root / "tools/python-test-runtime",) if python_runtime.is_dir() else ()
-            _make_tree_owner_writable(execution_root, excluded_roots=excluded)
+            def ignore_python_runtime(directory: str, _names: list[str]) -> set[str]:
+                return {"python-test-runtime"} if Path(directory) == self.root / "tools" else set()
+
+            shutil.copytree(
+                self.root, execution_root, symlinks=True,
+                ignore=ignore_python_runtime if python_runtime.is_dir() else None,
+            )
+            _make_tree_owner_writable(execution_root)
             source_prefix = str(self.root) + os.sep
             target_prefix = str(execution_root) + os.sep
+            python_prefix = str(python_runtime) + os.sep
 
             def rebase(value: object) -> object:
                 if isinstance(value, dict):
                     return {key: rebase(item) for key, item in value.items()}
                 if isinstance(value, list):
                     return [rebase(item) for item in value]
+                if isinstance(value, str) and (
+                    value == str(python_runtime) or value.startswith(python_prefix)
+                ):
+                    return value
                 if isinstance(value, str) and value.startswith(source_prefix):
                     return target_prefix + value[len(source_prefix):]
                 return value
@@ -317,13 +334,8 @@ class ExecutionStage:
                 "COURSE_MODE_LANE_REPORT_ROOT": str(runtime / "reports"),
             })
             rebased_candidate = rebase(self.candidate)
-            if excluded:
+            if python_runtime.is_dir():
                 descriptor = rebased_candidate["tools"]["pythonTestRuntime"]
-                observed, error = _manifest.secure_python_test_runtime_tree_descriptor(
-                    Path(descriptor["root"]),
-                )
-                if error or observed != descriptor["treeDigest"]:
-                    raise ValueError("lane Python test runtime descriptor mismatch")
                 if not _manifest.python_test_runtime_authorized(descriptor):
                     raise ValueError("lane Python test runtime authority mismatch")
             return LaneExecution(
@@ -396,14 +408,8 @@ def _make_tree_read_only(root: Path) -> None:
         directory_path.chmod(directory_path.stat().st_mode & 0o555)
 
 
-def _make_tree_owner_writable(
-    root: Path, *, excluded_roots: Sequence[Path] = (),
-) -> None:
-    excluded = {str(path) for path in excluded_roots}
+def _make_tree_owner_writable(root: Path) -> None:
     for directory, names, files in os.walk(root, topdown=True):
-        names[:] = [
-            name for name in names if str(Path(directory) / name) not in excluded
-        ]
         Path(directory).chmod(Path(directory).stat().st_mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
         for name in names:
             path = Path(directory) / name
@@ -2316,6 +2322,32 @@ def _resolve_candidate_command(
     return _resolve_command(command)
 
 
+def _sandboxed_python_lane_command(
+    command: tuple[str, ...], execution_stage: ExecutionStage, lane_execution: LaneExecution,
+) -> tuple[str, ...] | None:
+    if sys.platform != "darwin":
+        return None
+    executable = _manifest._trusted_sandbox_executable()
+    if executable is None:
+        return None
+    try:
+        stage_root = execution_stage.root
+        lane_root = lane_execution.root
+        if (
+            not stage_root.is_absolute() or not lane_root.is_absolute()
+            or stage_root.parent != Path("/private/tmp")
+            or lane_root.parent != Path("/private/tmp")
+            or "\0" in str(stage_root) or "\0" in str(lane_root)
+        ):
+            return None
+    except OSError:
+        return None
+    return (
+        str(executable), "-p", PYTHON_LANE_SANDBOX_PROFILE,
+        "-D", f"LANE_ROOT={lane_root}", *command,
+    )
+
+
 def _child_environment(candidate: dict, source: Mapping[str, str], lane: Lane) -> dict[str, str]:
     environment = dict(BASE_ENVIRONMENT)
     node_requirement = _node_install_requirement(lane)
@@ -2829,10 +2861,37 @@ def run_gate(
                 started = time.monotonic_ns()
                 junit_path: Path | None = None
                 if lane.reject_pytest_skips:
-                    descriptor, name = tempfile.mkstemp(prefix="course-mode-pytest-", suffix=".xml")
+                    report_root = Path(lane_execution.environment["COURSE_MODE_LANE_REPORT_ROOT"])
+                    descriptor, name = tempfile.mkstemp(
+                        prefix="course-mode-pytest-", suffix=".xml", dir=report_root,
+                    )
                     os.close(descriptor)
                     junit_path = Path(name).resolve()
                     command = (*command, f"--junitxml={junit_path}")
+                if _python_test_runtime_required(lane):
+                    runtime_descriptor = execution_candidate["tools"]["pythonTestRuntime"]
+                    observed, error = _manifest.secure_python_test_runtime_tree_descriptor(
+                        Path(runtime_descriptor["root"]),
+                    )
+                    sandboxed = _sandboxed_python_lane_command(
+                        command, execution_stage, lane_execution,
+                    )
+                    if (
+                        error or observed != runtime_descriptor["treeDigest"]
+                        or not _manifest.python_test_runtime_authorized(runtime_descriptor)
+                        or sandboxed is None
+                    ):
+                        report["lanes"].append({
+                            "name": lane.name, "exitCode": None, "durationMs": 0,
+                        })
+                        report["verdict"] = "BLOCKED"
+                        report["failedLane"] = lane.name
+                        if junit_path is not None:
+                            with contextlib.suppress(OSError):
+                                junit_path.unlink()
+                        _cleanup_gate_owned(report, lane_execution, execution_stage)
+                        break
+                    command = sandboxed
                 try:
                     child_environment = _child_environment(execution_candidate, lane_source, lane)
                     child_environment.update(lane_execution.environment)

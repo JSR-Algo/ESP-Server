@@ -400,19 +400,49 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     python_executable = python_root / "bin/python3.11"
     python_executable.parent.mkdir(parents=True)
     python_executable.write_text(
-        f"#!{sys.executable}\nimport json,os,pathlib,runpy,sys\n"
+        f"#!{sys.executable}\nimport json,os,pathlib,runpy,subprocess,sys\n"
+        "def attack():\n"
+        " target=pathlib.Path(__file__).resolve().parents[1]; parent=target.parent\n"
+        " target_mode=target.stat().st_mode & 0o7777; parent_mode=parent.stat().st_mode & 0o7777\n"
+        " moved=target.with_name(target.name+'-probe-moved')\n"
+        " try: target.chmod(0o755); parent.chmod(0o755); target.rename(moved)\n"
+        " except PermissionError: assert target.stat().st_mode & 0o222 == 0\n"
+        " else:\n"
+        "  moved.rename(target); target.chmod(target_mode); parent.chmod(parent_mode)\n"
+        "  raise AssertionError('runtime probe escaped sandbox')\n"
         "if sys.argv[1:] == ['-I','-s','-c','import platform; print(platform.python_version())']:\n"
-        " print('3.11.9')\n"
-        "elif sys.argv[1:] == ['-I','-s','-m','pytest','--version']:\n"
-        " print('pytest 8.4.1')\n"
+        " attack(); print('3.11.9')\n"
+        "elif sys.argv[1:] == ['-I','-s','-m','pytest','-s','--version']:\n"
+        " attack(); print('pytest 8.4.1')\n"
         "elif sys.argv[1:] == ['-I','-s','-c','import pytest, pytest_asyncio']:\n"
-        " pass\n"
+        " attack()\n"
         "elif len(sys.argv) == 5 and sys.argv[1:4] == ['-I','-s','-c'] and 'importlib,json' in sys.argv[4]:\n"
+        " attack();\n"
         " root=pathlib.Path(__file__).resolve().parents[1]; paths=[str(root/'lib/python3.11')];\n"
         " print(json.dumps({'executable':str(root/'bin/python3.11'),'prefix':str(root),'basePrefix':str(root),"
         "'execPrefix':str(root),'baseExecPrefix':str(root),'stdlib':paths[0],'path':paths,'modules':paths}))\n"
-        "elif sys.argv[1:] == ['-I','-s','-m','pytest','-q']:\n"
+        "elif sys.argv[1:6] == ['-I','-s','-m','pytest','-q']:\n"
         " assert os.environ.get('HOME') and os.environ['HOME'] != '/nonexistent'\n"
+        " runtime=pathlib.Path(__file__).resolve().parents[1]; stage=runtime.parents[1]\n"
+        " for target in (runtime,stage):\n"
+        "  target_mode=target.stat().st_mode & 0o7777; parent_mode=target.parent.stat().st_mode & 0o7777\n"
+        "  moved=target.with_name(target.name+'-moved')\n"
+        "  try:\n"
+        "   target.chmod(0o755)\n"
+        "   if target == runtime: target.parent.chmod(0o755)\n"
+        "   target.rename(moved)\n"
+        "  except PermissionError: assert target.stat().st_mode & 0o222 == 0\n"
+        "  else:\n"
+        "   moved.rename(target); target.chmod(target_mode); target.parent.chmod(parent_mode)\n"
+        "   raise AssertionError('sandbox allowed runtime replacement')\n"
+        " child=subprocess.run([sys.executable,'-c','import pathlib,sys; pathlib.Path(sys.argv[1]).chmod(0o755)',str(stage)])\n"
+        " assert child.returncode != 0\n"
+        " for name in ('HOME','TMPDIR','XDG_CACHE_HOME','COURSE_MODE_LANE_REPORT_ROOT'):\n"
+        "  path=pathlib.Path(os.environ[name]); path.mkdir(parents=True,exist_ok=True); (path/'write-ok').write_text('ok')\n"
+        " junit=next((value.split('=',1)[1] for value in sys.argv if value.startswith('--junitxml=')),None)\n"
+        " if junit:\n"
+        "  assert pathlib.Path(junit).parent == pathlib.Path(os.environ['COURSE_MODE_LANE_REPORT_ROOT'])\n"
+        "  pathlib.Path(junit).write_text('<testsuites tests=\"1\" skipped=\"0\"/>')\n"
         "else:\n"
         " sys.argv=sys.argv[1:]; runpy.run_module('pytest', run_name='__main__')\n",
         encoding="utf-8",
@@ -577,6 +607,111 @@ def test_pytest_lane_runs_with_sanitized_writable_home(candidate_file: Path) -> 
     report = gate.run_gate(candidate_file, "quick", lanes=(lane,))
 
     assert report["verdict"] == "PASS"
+
+
+def test_pytest_skip_report_is_written_inside_sandboxed_lane(candidate_file: Path) -> None:
+    lane = gate.Lane(
+        name="python-runtime-junit", repository="adminEsp", relative_cwd=".",
+        command=("python3", "-m", "pytest", "-q"), timeout_sec=5.0,
+        reject_pytest_skips=True,
+    )
+
+    report = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert report["verdict"] == "PASS"
+
+
+def test_python_runtime_command_uses_immutable_stage_base_not_lane_copy(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = gate.Lane(
+        name="python-stage-base", repository="adminEsp", relative_cwd=".",
+        command=("python3", "-m", "pytest", "-q"), timeout_sec=5.0,
+    )
+    stage = gate.stage_execution_candidate(candidate, (lane,))
+    lane_execution = stage.create_lane_execution()
+    try:
+        descriptor = lane_execution.candidate["tools"]["pythonTestRuntime"]
+        assert descriptor["root"].startswith(str(stage.root))
+        assert not descriptor["root"].startswith(str(lane_execution.root))
+        assert not (lane_execution.root / "candidate/tools/python-test-runtime").exists()
+    finally:
+        assert lane_execution.cleanup() is True
+        assert stage.cleanup() is True
+
+
+def test_python_runtime_lane_fails_closed_without_macos_sandbox(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = gate.Lane(
+        name="python-no-sandbox", repository="adminEsp", relative_cwd=".",
+        command=("python3", "-m", "pytest", "-q"), timeout_sec=5.0,
+    )
+    stage = gate.stage_execution_candidate(candidate, (lane,))
+    execution = stage.create_lane_execution()
+    try:
+        with monkeypatch.context() as platform_patch:
+            platform_patch.setattr(gate.sys, "platform", "linux")
+            assert gate._sandboxed_python_lane_command(
+                ("/runtime/python", "-m", "pytest"), stage, execution,
+            ) is None
+    finally:
+        assert execution.cleanup() is True
+        assert stage.cleanup() is True
+
+
+def test_python_runtime_lane_fails_closed_when_sandbox_executable_is_missing(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lane = gate.Lane(
+        name="python-missing-sandbox", repository="adminEsp", relative_cwd=".",
+        command=("python3", "-m", "pytest", "-q"), timeout_sec=5.0,
+    )
+    monkeypatch.setattr(
+        gate._manifest, "TRUSTED_SANDBOX_EXECUTABLE", Path("/missing/sandbox-exec"),
+    )
+
+    report = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert report["verdict"] == "BLOCKED"
+    assert report["failedLane"] == "candidate"
+    assert report["lanes"] == []
+
+
+def test_python_runtime_regression_detects_missing_process_sandbox(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lane = gate.Lane(
+        name="python-sandbox-regression", repository="adminEsp", relative_cwd=".",
+        command=("python3", "-m", "pytest", "-q"), timeout_sec=5.0,
+    )
+    monkeypatch.setattr(
+        gate, "_sandboxed_python_lane_command",
+        lambda command, _stage, _execution: command,
+    )
+
+    report = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert report["verdict"] == "FAIL"
+    assert report["failedLane"] == lane.name
+
+
+def test_python_runtime_authority_probe_regression_detects_missing_sandbox(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    descriptor = candidate["tools"]["pythonTestRuntime"]
+    monkeypatch.setattr(
+        gate._manifest, "_sandboxed_python_runtime_probe_command", lambda command: command,
+    )
+
+    assert gate._manifest.python_test_runtime_authorized(descriptor) is False
+
+    observed, error = gate._manifest.secure_python_test_runtime_tree_descriptor(
+        Path(descriptor["root"]),
+    )
+    assert error is None
+    assert observed == descriptor["treeDigest"]
 
 
 @pytest.mark.parametrize("attack", ["symlink", "hardlink", "fifo"])
