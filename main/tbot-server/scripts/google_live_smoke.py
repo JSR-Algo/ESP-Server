@@ -360,10 +360,34 @@ async def _load_manager_google_live_config(device_id, client_id):
 
 async def _run_smoke(config):
     client = GoogleLiveClient(config, _ConsoleLogger())
-    await client.connect()
-    print("SMOKE_CONNECT_OK")
-    await client.close()
+    await _run_smoke_client(
+        client,
+        on_connected=lambda: print("SMOKE_CONNECT_OK"),
+    )
     print("SMOKE_CLOSE_OK")
+
+
+async def _run_smoke_client(
+    client,
+    *,
+    cleanup_timeout_sec=2.0,
+    on_connected=None,
+):
+    primary_error = None
+    try:
+        await client.connect()
+        if on_connected is not None:
+            on_connected()
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        cleanup_errors = await _run_bounded_cleanups(
+            (getattr(client, "close", None),),
+            timeout_sec=cleanup_timeout_sec,
+        )
+        if primary_error is None and cleanup_errors:
+            raise _CleanupError("Google Live cleanup failed")
 
 
 async def _run_round_trip(config, audio_file, event_timeout_sec):
@@ -630,8 +654,12 @@ def main():
         print(json.dumps(result, sort_keys=True))
         return 0 if result["status"] == "PASS" else 1
 
-    asyncio.run(_run_smoke(config))
-    return 0
+    try:
+        asyncio.run(_run_smoke(config))
+        return 0
+    except Exception as error:
+        print(f"SMOKE_FAIL class={_classify_error(error)}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

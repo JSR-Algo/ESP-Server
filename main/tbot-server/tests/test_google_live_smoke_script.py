@@ -481,6 +481,78 @@ class GoogleLiveSmokeScriptTest(unittest.TestCase):
 
 
 class GoogleLiveSmokeRoundTripTest(unittest.IsolatedAsyncioTestCase):
+    async def test_connect_smoke_closes_after_success(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        client = _FakeClient()
+
+        await smoke._run_smoke_client(client, cleanup_timeout_sec=0.1)
+
+        self.assertEqual(client.connect_calls, 1)
+        self.assertEqual(client.close_calls, 1)
+
+    async def test_connect_smoke_closes_after_partial_connect_failure(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        client = _FakeClient(error=RuntimeError("Google Live connect timed out"))
+
+        with self.assertRaisesRegex(RuntimeError, "connect timed out"):
+            await smoke._run_smoke_client(client, cleanup_timeout_sec=0.1)
+
+        self.assertEqual(client.close_calls, 1)
+
+    async def test_connect_smoke_preserves_primary_when_cleanup_fails(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        client = _CleanupClient(
+            close_error=RuntimeError("cleanup secret"),
+        )
+        client.error = RuntimeError("Google Live connect timed out")
+
+        with self.assertRaisesRegex(RuntimeError, "connect timed out"):
+            await smoke._run_smoke_client(client, cleanup_timeout_sec=0.1)
+
+        self.assertEqual(client.close_calls, 1)
+
+    async def test_connect_smoke_hanging_close_is_bounded_and_cancelled(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        client = _CleanupClient(hang=True)
+
+        with self.assertRaises(smoke._CleanupError):
+            await asyncio.wait_for(
+                smoke._run_smoke_client(client, cleanup_timeout_sec=0.01),
+                timeout=0.2,
+            )
+
+        self.assertTrue(client.client_cleanup_cancelled)
+
+    async def test_connect_smoke_preserves_primary_when_close_hangs(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        client = _CleanupClient(hang=True)
+        client.error = RuntimeError("Google Live connect timed out")
+
+        with self.assertRaisesRegex(RuntimeError, "connect timed out"):
+            await asyncio.wait_for(
+                smoke._run_smoke_client(client, cleanup_timeout_sec=0.01),
+                timeout=0.2,
+            )
+
+        self.assertTrue(client.client_cleanup_cancelled)
+
+    def test_connect_only_cli_reports_safe_cleanup_failure(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+
+        async def fail_cleanup(_config):
+            raise smoke._CleanupError("cleanup token=do-not-leak")
+
+        with patch.dict("os.environ", {"GOOGLE_API_KEY": "key"}, clear=True), patch(
+            "sys.argv", ["google_live_smoke.py"]
+        ), patch.object(smoke, "_run_smoke", fail_cleanup), patch(
+            "sys.stderr"
+        ) as stderr:
+            self.assertEqual(smoke.main(), 1)
+
+        rendered = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("server_state_or_cleanup", rendered)
+        self.assertNotIn("do-not-leak", rendered)
+
     async def test_reported_identity_fingerprints_exact_client_config(self):
         smoke = importlib.import_module("scripts.google_live_smoke")
         reliability = importlib.import_module("scripts.google_live_reliability")
