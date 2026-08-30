@@ -555,6 +555,13 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(conn.activity_leases.has_voice_leases())
         release.set()
         self.assertTrue(await silent)
+        self.assertTrue(
+            any(
+                "Google Live reopen_ready reason=waiting_model_timeout" in str(args[0])
+                for level, args, _kwargs in conn.logger.messages
+                if level == "info" and args
+            )
+        )
         self.assertFalse(conn.activity_leases.has_voice_leases())
 
     async def test_activity_lease_eviction_first_hard_reconnect_discards_replay_buffer(self):

@@ -193,17 +193,115 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         self.assertEqual(verdict["unrecoveredTimeouts"], [])
         self.assertNotIn("UNRECOVERED_TIMEOUT", [item["code"] for item in verdict["failures"]])
 
-    def test_buffered_replay_is_owned_by_reconnect_before_success_marker(self):
+    def test_receive_loop_stop_does_not_recover_waiting_model_timeout(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live receive loop started",
+                "2026-08-31 10:00:02 Google Live waiting_model_timeout timeout_sec=5",
+                "2026-08-31 10:00:03 Google Live receive loop stopped",
+            )
+        )
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn(
+            "UNRECOVERED_TIMEOUT",
+            [item["code"] for item in verdict["failures"]],
+        )
+
+    def test_buffered_replay_requires_successful_reopen_marker(self):
         verdict = self._analyze(
             _window_lines(
                 "2026-08-31 10:00:01 reconnect_started reason=network attempt=1 state=RECONNECTING",
-                "2026-08-31 10:00:02 Google Live replayed_buffered_audio frames=2 bytes=20",
-                "2026-08-31 10:00:03 reconnect_succeeded attempt=1 live_connection_id=live-2",
+                "2026-08-31 10:00:02 reconnect_succeeded attempt=1 live_connection_id=live-2",
+                "2026-08-31 10:00:03 Google Live replayed_buffered_audio frames=2 bytes=20",
             )
         )
 
         self.assertEqual(verdict["status"], "PASS", verdict)
         self.assertEqual(verdict["replayCountsByReopen"], {"reopen-1": 1})
+
+    def test_buffered_replay_accepts_production_reopen_ready_before_success_summary(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 reconnect_started reason=network attempt=1 state=RECONNECTING",
+                "2026-08-31 10:00:02 Google Live reopen_ready reason=network attempt=1 live_connection_id=live-2",
+                "2026-08-31 10:00:03 Google Live replayed_buffered_audio frames=2 bytes=20",
+                "2026-08-31 10:00:04 reconnect_succeeded attempt=1 live_connection_id=live-2",
+            )
+        )
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+        self.assertEqual(verdict["replayCountsByReopen"], {"reopen-1": 1})
+
+    def test_buffered_replay_before_reconnect_failure_is_not_certified(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 reconnect_started reason=network attempt=1 state=RECONNECTING",
+                "2026-08-31 10:00:02 Google Live replayed_buffered_audio frames=2 bytes=20",
+                "2026-08-31 10:00:03 reconnect_failed attempt=1 error_class=network",
+            )
+        )
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn(
+            "BUFFER_REPLAY_WITHOUT_SUCCESSFUL_REOPEN",
+            [item["code"] for item in verdict["failures"]],
+        )
+
+    def test_reopen_failure_after_buffer_replay_fails(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 reconnect_started reason=network attempt=1 state=RECONNECTING",
+                "2026-08-31 10:00:02 Google Live reopen_ready reason=network attempt=1 live_connection_id=live-2",
+                "2026-08-31 10:00:03 Google Live replayed_buffered_audio frames=2 bytes=20",
+                "2026-08-31 10:00:04 reconnect_failed attempt=1 error_class=network",
+            )
+        )
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn(
+            "REOPEN_FAILED_AFTER_BUFFER_REPLAY",
+            [item["code"] for item in verdict["failures"]],
+        )
+
+    def test_non_retriable_classification_blocks_later_reconnect_with_other_reason(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live classify_error kind=auth retry=no",
+                "2026-08-31 10:00:02 reconnect_started reason=network attempt=1 state=RECONNECTING",
+            )
+        )
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn(
+            "NON_RETRIABLE_RECONNECT",
+            [item["code"] for item in verdict["failures"]],
+        )
+
+    def test_clean_connection_close_is_an_exact_timeout_terminal(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live waiting_model_timeout timeout_sec=5",
+                "2026-08-31 10:00:02 Client disconnected device_id=robot-1 close_code=1000 close_reason_sha256=- close_reason_length=0",
+            )
+        )
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+        self.assertEqual(verdict["unrecoveredTimeouts"], [])
+
+    def test_abnormal_connection_close_does_not_recover_timeout(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live waiting_model_timeout timeout_sec=5",
+                "2026-08-31 10:00:02 Client disconnected device_id=robot-1 close_code=1011 close_reason_sha256=abc close_reason_length=3",
+            )
+        )
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn(
+            "UNRECOVERED_TIMEOUT",
+            [item["code"] for item in verdict["failures"]],
+        )
 
     def test_correlation_markers_must_follow_the_causal_order(self):
         verdict = self._analyze(
@@ -233,6 +331,23 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         self.assertEqual(verdict["status"], "FAIL", verdict)
         self.assertIn(
             "OUT_OF_WINDOW_RELIABILITY_MARKER",
+            [item["code"] for item in verdict["failures"]],
+        )
+
+    def test_lesson_progress_before_ping_does_not_prove_post_ping_liveness(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live lesson_step_started step_id=step-1",
+                "2026-08-31 10:00:02 Google Live lesson_step_progress step_id=step-1",
+                "2026-08-31 10:00:03 firmware_ping lesson_step=step-1",
+                "2026-08-31 10:00:04 firmware_ping lesson_step=step-1",
+                "2026-08-31 10:00:05 Google Live lesson_step_ended step_id=step-1",
+            )
+        )
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn(
+            "LESSON_PING_WITHOUT_PROGRESS",
             [item["code"] for item in verdict["failures"]],
         )
 

@@ -267,6 +267,12 @@ class ReconnectAdmissionAccountingTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(reconnected)
         self.assertEqual(opened["count"], 1)
         self.assertEqual(records, ["device-1"])
+        self.assertTrue(
+            conn.logger.has_message(
+                "Google Live reopen_ready reason=stream_closed attempt=1",
+                level="info",
+            )
+        )
 
 
 class LiveOpenReceiveTaskRaceTest(unittest.IsolatedAsyncioTestCase):

@@ -3633,6 +3633,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     # re-opening Live, so reconnect storms count toward the device budget.
                     await self._record_reconnect_attempt()
                     await self._open_live_session()
+                    self.conn.logger.bind(tag="GoogleLive").info(
+                        "Google Live reopen_ready reason={} attempt={} live_connection_id={}",
+                        error_class,
+                        attempt_number,
+                        self._interaction.live_connection_id,
+                    )
                     await self._forward_pending_reconnect_audio()
                     self._reconnect_attempts = 0
                     self.conn.voice_provider = self
@@ -4433,6 +4439,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 await self._record_reconnect_attempt()
                 await self._close_live_resources()
                 await self._open_live_session_locked(restore_session_resumption=False)
+                self.conn.logger.bind(tag="GoogleLive").info(
+                    "Google Live reopen_ready reason=waiting_model_timeout attempt=1 "
+                    "live_connection_id={}",
+                    self._interaction.live_connection_id,
+                )
                 await self._forward_pending_reconnect_audio()
                 self._interaction.transition(InteractionState.LISTENING)
                 self._waiting_model_since = None

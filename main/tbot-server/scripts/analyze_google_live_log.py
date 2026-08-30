@@ -165,12 +165,16 @@ P_TIMEOUT_TERMINAL = re.compile(
     r"Google Live lesson_step_failed\b"
 )
 P_NON_RETRIABLE_CLASSIFICATION = re.compile(
-    r"Google Live classify_error kind=(?P<kind>auth|quota|invalid_config) retry=no"
+    r"Google Live classify_error kind=(?P<kind>\S+) retry=no"
 )
 P_RECONNECT_REASON = re.compile(
     r"reconnect_started reason=(?P<reason>\S+) attempt=(?P<attempt>\d+)"
 )
 P_SILENT_SESSION_REOPEN = re.compile(r"Google Live silent_session_reopen\b")
+P_REOPEN_READY = re.compile(
+    r"Google Live reopen_ready reason=(?P<reason>\S+) attempt=(?P<attempt>\d+) "
+    r"live_connection_id=(?P<live_connection_id>\S+)"
+)
 P_HANDOFF_ACQUIRED = re.compile(r"lesson_start_handoff_(?:acquired|coalesced)\b")
 P_HANDOFF_RELEASED = re.compile(r"lesson_start_handoff_released\b")
 P_PENDING_TASK_CLOSE = re.compile(
@@ -182,7 +186,9 @@ P_LESSON_STEP_PROGRESS = re.compile(
 )
 P_LESSON_STEP_END = re.compile(r"Google Live lesson_step_ended step_id=(?P<step_id>\S+)")
 P_FIRMWARE_LESSON_PING = re.compile(r"firmware_ping lesson_step=(?P<step_id>\S+)")
-P_CLEAN_CONNECTION_CLOSE = re.compile(r"Client disconnected\b|Google Live clean_close\b")
+P_CLEAN_CONNECTION_CLOSE = re.compile(
+    r"Client disconnected\b.*\bclose_code=(?:1000|1001)\b|Google Live clean_close\b"
+)
 
 _RELIABILITY_MARKERS = (
     P_RELIABILITY_WINDOW_START,
@@ -202,6 +208,7 @@ _RELIABILITY_MARKERS = (
     P_RECV_TIMEOUT,
     P_RECONNECT_STARTED,
     P_SILENT_SESSION_REOPEN,
+    P_REOPEN_READY,
     P_RECONNECT_SUCCEEDED,
     P_RECONNECT_FAILED,
     P_FALLBACK,
@@ -1180,7 +1187,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     current_reopen: str | None = None
     reopen_index = 0
     pending_timeouts: list[dict[str, int]] = []
-    non_retriable_errors: dict[str, int] = {}
+    non_retriable_error_line: int | None = None
     handoff_balance = 0
     handoff_lines: list[int] = []
     stale_audio_after_replacement = 0
@@ -1351,8 +1358,6 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                             "receive loop stop has no active owner",
                         )
                     )
-                if pending_timeouts:
-                    pending_timeouts.clear()
                 continue
 
             match = P_INTERRUPT.search(line)
@@ -1459,7 +1464,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
 
             reconnect_owner = P_RECONNECT_REASON.search(line)
-            if reconnect_owner or P_SILENT_SESSION_REOPEN.search(line):
+            reopen_ready = P_REOPEN_READY.search(line)
+            if reopen_ready:
                 reopen_index += 1
                 current_reopen = f"reopen-{reopen_index}"
                 replay_counts_by_reopen[current_reopen] = 0
@@ -1475,9 +1481,9 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 if current_reopen is None:
                     failures.append(
                         _failure(
-                            "BUFFER_REPLAY_WITHOUT_REOPEN",
+                            "BUFFER_REPLAY_WITHOUT_SUCCESSFUL_REOPEN",
                             line_number,
-                            "buffered audio replay has no successful reopen owner",
+                            "buffered audio replay has no successful reopen marker",
                         )
                     )
                 else:
@@ -1499,6 +1505,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
             if P_CLEAN_CONNECTION_CLOSE.search(line):
                 pending_timeouts.clear()
+                non_retriable_error_line = None
+                current_reopen = None
                 continue
             if (
                 P_RECONNECT_FAILED.search(line)
@@ -1507,18 +1515,31 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 or P_TIMEOUT_TERMINAL.search(line)
             ):
                 pending_timeouts.clear()
+                if P_RECONNECT_FAILED.search(line):
+                    if (
+                        current_reopen is not None
+                        and replay_counts_by_reopen.get(current_reopen, 0) > 0
+                    ):
+                        failures.append(
+                            _failure(
+                                "REOPEN_FAILED_AFTER_BUFFER_REPLAY",
+                                line_number,
+                                "reopen failed after buffered audio replay began",
+                            )
+                        )
+                    current_reopen = None
 
             classified = P_NON_RETRIABLE_CLASSIFICATION.search(line)
             if classified:
-                non_retriable_errors[classified.group("kind")] = line_number
+                non_retriable_error_line = line_number
                 continue
             reconnect = reconnect_owner
-            if reconnect and reconnect.group("reason") in non_retriable_errors:
+            if reconnect and non_retriable_error_line is not None:
                 failures.append(
                     _failure(
                         "NON_RETRIABLE_RECONNECT",
                         line_number,
-                        "auth/quota/config error was followed by reconnect",
+                        "non-retriable error was followed by reconnect",
                     )
                 )
                 continue
@@ -1556,10 +1577,15 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             if lesson_ping and active_lesson_step is not None:
                 if lesson_ping.group("step_id") == active_lesson_step["stepId"]:
                     active_lesson_step["pingLine"] = line_number
+                    active_lesson_step["progressAfterPing"] = False
                 continue
             lesson_progress = P_LESSON_STEP_PROGRESS.search(line)
             if lesson_progress and active_lesson_step is not None:
-                if lesson_progress.group("step_id") == active_lesson_step["stepId"]:
+                if (
+                    lesson_progress.group("step_id") == active_lesson_step["stepId"]
+                    and active_lesson_step["pingLine"] is not None
+                    and line_number > active_lesson_step["pingLine"]
+                ):
                     active_lesson_step["progressAfterPing"] = True
                 continue
             lesson_end = P_LESSON_STEP_END.search(line)
@@ -1608,6 +1634,18 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     "lesson handoff was not transferred or released",
                 )
             )
+    if (
+        active_lesson_step is not None
+        and active_lesson_step["pingLine"] is not None
+        and not active_lesson_step["progressAfterPing"]
+    ):
+        failures.append(
+            _failure(
+                "LESSON_PING_WITHOUT_PROGRESS",
+                active_lesson_step["pingLine"],
+                "firmware pings continued without subsequent lesson-step progress",
+            )
+        )
 
     duplicate_response_ids = sorted(
         response_id for response_id, count in response_starts.items() if count > 1
