@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import scripts.course_mode_candidate_manifest as manifest
+import scripts.course_mode_26week_simulation as simulation
 from core.lesson.course_mode_contract import CourseModeContract
 from core.lesson.course_orchestrator import CourseOrchestrator, SessionState
 from core.lesson.runtime import CourseModeRuntimeAdapter
@@ -48,7 +49,7 @@ def test_backend_source_must_be_explicit_and_committed(tmp_path, monkeypatch) ->
 
 
 def test_backend_source_can_be_bound_to_candidate_sha() -> None:
-    sha = subprocess.run(
+    sha = os.environ.get("COURSE_MODE_BACKEND_SHA") or subprocess.run(
         ["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=BACKEND_ROOT,
         check=True, capture_output=True, text=True,
     ).stdout.strip()
@@ -56,6 +57,176 @@ def test_backend_source_can_be_bound_to_candidate_sha() -> None:
     result = resolve_backend_root(BACKEND_ROOT, expected_sha=sha)
 
     assert result.error is None and result.path == BACKEND_ROOT.resolve()
+
+
+def _bind_gitless_snapshot(
+    monkeypatch: pytest.MonkeyPatch, stage: Path, root: Path, authority: Path, sha: str,
+) -> None:
+    monkeypatch.setattr(simulation, "COURSE_MODE_STAGE_PARENT", stage.parent)
+    monkeypatch.setenv("COURSE_MODE_BACKEND_SHA", sha)
+    monkeypatch.setenv("COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY", str(authority))
+    monkeypatch.setenv(
+        "COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY_SHA256",
+        hashlib.sha256(authority.read_bytes()).hexdigest(),
+    )
+    authority.chmod(0o444)
+    authority.parent.chmod(0o555)
+    root.chmod(0o555)
+    root.parent.chmod(0o555)
+    stage.chmod(0o555)
+
+
+def test_backend_source_accepts_candidate_bound_gitless_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage = tmp_path / "course-mode-stage-valid"
+    root = stage / "repositories/backend"
+    verifier = root / "scripts/verify-course-mode-curriculum.mjs"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text("", encoding="utf-8")
+    sha = "a" * 40
+    authority = stage / ".course-mode-authority/backend.json"
+    authority.parent.mkdir()
+    authority.write_text(
+        json.dumps({
+            "repository": "backend", "root": str(root.resolve()), "sha": sha, "version": 1,
+        }, sort_keys=True),
+        encoding="utf-8",
+    )
+    _bind_gitless_snapshot(monkeypatch, stage, root, authority, sha)
+
+    result = resolve_backend_root(root, expected_sha=sha)
+
+    assert result == type(result)(root.resolve(), None, sha)
+
+
+@pytest.mark.parametrize("mutation", ["authority", "sha", "root"])
+def test_backend_source_rejects_tampered_or_mismatched_gitless_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str,
+) -> None:
+    stage = tmp_path / "course-mode-stage-invalid"
+    root = stage / "repositories/backend"
+    verifier = root / "scripts/verify-course-mode-curriculum.mjs"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text("", encoding="utf-8")
+    sha = "a" * 40
+    authority = stage / ".course-mode-authority/backend.json"
+    authority.parent.mkdir()
+    authority.write_text(
+        json.dumps({
+            "repository": "backend", "root": str(root.resolve()), "sha": sha, "version": 1,
+        }, sort_keys=True),
+        encoding="utf-8",
+    )
+    _bind_gitless_snapshot(monkeypatch, stage, root, authority, sha)
+    expected_sha = "b" * 40 if mutation == "sha" else sha
+    requested = tmp_path / "other" if mutation == "root" else root
+    if mutation == "root":
+        other = requested / "scripts/verify-course-mode-curriculum.mjs"
+        other.parent.mkdir(parents=True)
+        other.write_text("", encoding="utf-8")
+    if mutation == "authority":
+        authority.chmod(0o644)
+        authority.write_text("{}", encoding="utf-8")
+        authority.chmod(0o444)
+
+    result = resolve_backend_root(requested, expected_sha=expected_sha)
+
+    assert result.error == "BACKEND_IDENTITY_MISMATCH"
+
+
+def test_backend_source_rejects_forged_writable_environment_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage = tmp_path / "course-mode-stage-forged"
+    root = stage / "repositories/backend"
+    verifier = root / "scripts/verify-course-mode-curriculum.mjs"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text("", encoding="utf-8")
+    sha = "a" * 40
+    authority = stage / ".course-mode-authority/backend.json"
+    authority.parent.mkdir()
+    authority.write_text(json.dumps({
+        "repository": "backend", "root": str(root.resolve()), "sha": sha, "version": 1,
+    }, sort_keys=True), encoding="utf-8")
+    monkeypatch.setenv("COURSE_MODE_BACKEND_SHA", sha)
+    monkeypatch.setenv("COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY", str(authority))
+    monkeypatch.setenv(
+        "COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY_SHA256",
+        hashlib.sha256(authority.read_bytes()).hexdigest(),
+    )
+
+    result = resolve_backend_root(root)
+
+    assert result.error == "BACKEND_IDENTITY_MISMATCH"
+
+
+@pytest.mark.parametrize("parent", ["authority", "repositories"])
+def test_backend_source_rejects_writable_snapshot_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, parent: str,
+) -> None:
+    stage = tmp_path / "course-mode-stage-writable-parent"
+    root = stage / "repositories/backend"
+    verifier = root / "scripts/verify-course-mode-curriculum.mjs"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text("", encoding="utf-8")
+    sha = "a" * 40
+    authority = stage / ".course-mode-authority/backend.json"
+    authority.parent.mkdir()
+    authority.write_text(json.dumps({
+        "repository": "backend", "root": str(root.resolve()), "sha": sha, "version": 1,
+    }, sort_keys=True), encoding="utf-8")
+    _bind_gitless_snapshot(monkeypatch, stage, root, authority, sha)
+    (authority.parent if parent == "authority" else root.parent).chmod(0o755)
+
+    result = resolve_backend_root(root)
+
+    assert result.error == "BACKEND_IDENTITY_MISMATCH"
+
+
+def test_backend_source_rejects_shallow_gitless_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "backend"
+    verifier = root / "scripts/verify-course-mode-curriculum.mjs"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text("", encoding="utf-8")
+    monkeypatch.setenv("COURSE_MODE_BACKEND_SHA", "a" * 40)
+    monkeypatch.setenv("COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY_SHA256", "0" * 64)
+
+    assert resolve_backend_root(root).error == "BACKEND_IDENTITY_MISMATCH"
+
+
+def test_backend_contract_load_rechecks_gitless_snapshot_after_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage = tmp_path / "course-mode-stage-postcheck"
+    root = stage / "repositories/backend"
+    verifier = root / "scripts/verify-course-mode-curriculum.mjs"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text("", encoding="utf-8")
+    sha = "a" * 40
+    authority = stage / ".course-mode-authority/backend.json"
+    authority.parent.mkdir()
+    authority.write_text(json.dumps({
+        "repository": "backend", "root": str(root.resolve()), "sha": sha, "version": 1,
+    }, sort_keys=True), encoding="utf-8")
+    _bind_gitless_snapshot(monkeypatch, stage, root, authority, sha)
+    code = (
+        "import json,pathlib,sys;"
+        "out=pathlib.Path(sys.argv[-1]);"
+        "out.write_text(json.dumps({'status':'pass','lessonCount':26,'contracts':[]}));"
+        f"authority=pathlib.Path({str(authority)!r});"
+        "authority.chmod(0o644);authority.write_text('{}')"
+    )
+
+    with pytest.raises(CourseModeSimulationError) as error:
+        load_backend_contracts(
+            root, expected_sha=sha, backend_command=[sys.executable, "-c", code],
+        )
+
+    assert error.value.code == "BACKEND_IDENTITY_MISMATCH"
 
 
 def test_backend_source_rejects_candidate_identity_mismatch() -> None:

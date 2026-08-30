@@ -1123,6 +1123,15 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
                     source, destination, relative, exception["sha256"], state,
                 )
             staged["repositories"][name]["path"] = str(destination)
+        authority_root = root / ".course-mode-authority"
+        authority_root.mkdir()
+        backend_authority = authority_root / "backend.json"
+        backend_authority.write_text(json.dumps({
+            "repository": "backend",
+            "root": staged["repositories"]["backend"]["path"],
+            "sha": staged["repositories"]["backend"]["sha"],
+            "version": 1,
+        }, sort_keys=True), encoding="utf-8")
         tools_root = root / "tools"
         if any(_python_test_runtime_required(lane) for lane in lanes):
             descriptor = candidate["tools"]["pythonTestRuntime"]
@@ -2895,6 +2904,16 @@ def run_gate(
                 try:
                     child_environment = _child_environment(execution_candidate, lane_source, lane)
                     child_environment.update(lane_execution.environment)
+                    if _python_test_runtime_required(lane):
+                        authority = execution_stage.root / ".course-mode-authority/backend.json"
+                        child_environment.update({
+                            "COURSE_MODE_BACKEND_ROOT": execution_stage.candidate["repositories"]["backend"]["path"],
+                            "COURSE_MODE_BACKEND_SHA": execution_stage.candidate["repositories"]["backend"]["sha"],
+                            "COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY": str(authority),
+                            "COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY_SHA256": hashlib.sha256(
+                                read_secure_regular(authority, 4096)
+                            ).hexdigest(),
+                        })
                     result = run_bounded_command(
                         list(command), cwd=resolved_cwd, timeout_sec=lane.timeout_sec,
                         max_output_bytes=max_output_bytes,

@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+import hashlib
 import json
 import math
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -85,6 +87,7 @@ PEDAGOGY_MARKERS = {
     "celebrationShowcase": "showcase_welcome",
 }
 REPRESENTATIVE_CROSS_PROCESS_WEEKS = (1, 2, 3, 7, 4, 26)
+COURSE_MODE_STAGE_PARENT = Path("/private/tmp")
 
 
 class CourseModeSimulationError(RuntimeError):
@@ -104,6 +107,7 @@ class BackendRootResolution:
 def resolve_backend_root(
     requested: Path | None, *, expected_sha: str | None = None,
 ) -> BackendRootResolution:
+    bound_expected_sha = expected_sha or os.environ.get("COURSE_MODE_BACKEND_SHA")
     configured = requested or (
         Path(value) if (value := os.environ.get("COURSE_MODE_BACKEND_ROOT")) else None
     )
@@ -122,8 +126,45 @@ def resolve_backend_root(
         head = _git(root, "rev-parse", "--verify", "HEAD^{commit}").strip()
         dirty = _git(root, "status", "--porcelain=v1", "--untracked-files=all")
     except (OSError, RuntimeError):
-        return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
-    if top_level != root or dirty or (expected_sha is not None and expected_sha != head):
+        authority = (
+            Path(value) if (value := os.environ.get("COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY")) else None
+        )
+        authority_sha256 = os.environ.get(
+            "COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY_SHA256"
+        )
+        if bound_expected_sha is None or authority is None or authority_sha256 is None:
+            return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
+        try:
+            authority_path = authority.resolve(strict=True)
+            repositories_root = root.parent
+            stage_root = repositories_root.parent
+            authority_root = stage_root / ".course-mode-authority"
+            if (
+                stage_root.parent != COURSE_MODE_STAGE_PARENT
+                or not stage_root.name.startswith("course-mode-stage-")
+                or root != stage_root / "repositories/backend"
+                or authority_path != authority_root / "backend.json"
+                or any(
+                    stat.S_IMODE(path.stat().st_mode) & 0o222
+                    for path in (
+                        stage_root, repositories_root, root, authority_root, authority_path,
+                    )
+                )
+            ):
+                return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
+            raw = read_secure_regular(authority_path, 4096)
+            observed_sha256 = hashlib.sha256(raw).hexdigest()
+            if observed_sha256 != authority_sha256:
+                return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
+            document = strict_json_loads(raw)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
+        if document != {
+            "repository": "backend", "root": str(root), "sha": bound_expected_sha, "version": 1,
+        }:
+            return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
+        return BackendRootResolution(root, None, bound_expected_sha)
+    if top_level != root or dirty or (bound_expected_sha is not None and bound_expected_sha != head):
         return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
     return BackendRootResolution(root, None, head)
 
