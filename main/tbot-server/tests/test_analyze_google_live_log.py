@@ -186,6 +186,38 @@ def _scoped_bargein_chain(
     return markers
 
 
+def _scoped_migrated_bargein_chain(*, replacement_live_id="live-2"):
+    old_scope = "journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1"
+    new_scope = (
+        "journey_id=bargein-journey-1 connection_id=conn-1 "
+        f"live_connection_id={replacement_live_id}"
+    )
+    ownership = (
+        "cancelled_live_connection_id=live-1 "
+        f"replacement_live_connection_id={replacement_live_id}"
+    )
+    return [
+        f"Google Live evidence_receive_loop_started {old_scope} generation=1",
+        f"Google Live evidence_response_started {old_scope} response_id=7",
+        f"Google Live user_interrupt_started {old_scope} cancelled_live_connection_id=live-1 replacement_live_connection_id=live-1 reason=vad cancelled_response_id=7 next_response_id=8",
+        f"Google Live interrupt_output_stopped {old_scope} cancelled_live_connection_id=live-1 replacement_live_connection_id=live-1 cancelled_response_id=7 next_response_id=8",
+        f"Google Live evidence_receive_loop_stopped {old_scope} generation=1",
+        "Google Live evidence_reconnect_started journey_id=bargein-journey-1 connection_id=conn-1 from_live_connection_id=live-1 attempt=1 reason=hard_interrupt",
+        f"Google Live evidence_reopen_ready journey_id=bargein-journey-1 connection_id=conn-1 attempt=1 from_live_connection_id=live-1 to_live_connection_id={replacement_live_id}",
+        f"Google Live evidence_reconnect_succeeded journey_id=bargein-journey-1 connection_id=conn-1 attempt=1 from_live_connection_id=live-1 to_live_connection_id={replacement_live_id}",
+        f"Google Live evidence_receive_loop_started {new_scope} generation=2",
+        f"Google Live evidence_user_interrupted {new_scope} {ownership} reason=vad cancelled_response_id=7 next_response_id=8",
+        f"Google Live evidence_stale_model_drop {old_scope} response_id=7 current_response_id=8",
+        f"Google Live evidence_interrupt_audio_replayed {new_scope} {ownership} response_id=8",
+        f"Google Live evidence_interrupt_input_finalized {new_scope} {ownership} response_id=8",
+        f"Google Live evidence_response_started {new_scope} response_id=8",
+        f"Google Live model_output_chunk_forwarded {new_scope} response_id=8",
+        f"Google Live evidence_response_ended {new_scope} response_id=8",
+        f"Google Live evidence_receive_loop_stopped {new_scope} generation=2",
+        f"Google Live evidence_connection_close {new_scope} pending_tasks=0 close_code=1000 reason=evidence_finalize",
+    ]
+
+
 class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
     def _analyze(self, lines):
         tmp, path = _write_log(lines)
@@ -974,6 +1006,157 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         )
 
         self.assertEqual(combined["status"], "PASS", combined)
+
+    def test_hard_reconnect_bargein_migrates_replacement_owner_and_correlates(self):
+        body = [
+            f"2026-08-31 10:00:{index:02d} {marker}"
+            for index, marker in enumerate(_scoped_migrated_bargein_chain(), 1)
+        ]
+        verdict = self._analyze(
+            _window_lines(
+                *body,
+                journey_id="bargein-journey-1",
+                journeys="bargein,reconnect",
+                evidence_scope=EVIDENCE_SCOPE,
+            )
+        )
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+        self.assertEqual(verdict["correlations"][0]["cancelledLiveConnectionId"], "live-1")
+        self.assertEqual(verdict["correlations"][0]["replacementLiveConnectionId"], "live-2")
+        self.assertEqual(verdict["correlations"][0]["liveConnectionId"], "live-2")
+        transition = {
+            "attempt": 1,
+            "fromLiveConnectionId": "live-1",
+            "toLiveConnectionId": "live-2",
+        }
+        combined = correlate_websocket_bargein_evidence(
+            _transport_observation(
+                finalLiveConnectionId="live-2",
+                liveConnectionTransitions=[transition],
+            ),
+            verdict,
+            expected_candidate_identity=CANDIDATE_IDENTITY,
+        )
+        self.assertEqual(combined["status"], "PASS", combined)
+
+    def test_hard_reconnect_bargein_rejects_post_transition_old_scope(self):
+        markers = _scoped_migrated_bargein_chain()
+        markers[9] = markers[9].replace("live_connection_id=live-2", "live_connection_id=live-1").replace(
+            "replacement_live_connection_id=live-2",
+            "replacement_live_connection_id=live-1",
+        )
+        verdict = self._analyze(
+            _window_lines(
+                *(f"2026-08-31 10:00:{index:02d} {marker}" for index, marker in enumerate(markers, 1)),
+                journey_id="bargein-journey-1",
+                journeys="bargein,reconnect",
+                evidence_scope=EVIDENCE_SCOPE,
+            )
+        )
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn(
+            "INTERRUPT_REPLACEMENT_OWNER_INVALID",
+            [item["code"] for item in verdict["failures"]],
+        )
+
+    def test_hard_reconnect_bargein_rejects_multiple_owner_migrations(self):
+        markers = _scoped_migrated_bargein_chain(replacement_live_id="live-3")
+        markers[6:6] = [
+            "Google Live evidence_reopen_ready journey_id=bargein-journey-1 connection_id=conn-1 attempt=1 from_live_connection_id=live-1 to_live_connection_id=live-2",
+            "Google Live evidence_reconnect_succeeded journey_id=bargein-journey-1 connection_id=conn-1 attempt=1 from_live_connection_id=live-1 to_live_connection_id=live-2",
+            "Google Live evidence_reconnect_started journey_id=bargein-journey-1 connection_id=conn-1 from_live_connection_id=live-2 attempt=2 reason=hard_interrupt",
+        ]
+        markers[9] = "Google Live evidence_reopen_ready journey_id=bargein-journey-1 connection_id=conn-1 attempt=2 from_live_connection_id=live-2 to_live_connection_id=live-3"
+        markers[10] = "Google Live evidence_reconnect_succeeded journey_id=bargein-journey-1 connection_id=conn-1 attempt=2 from_live_connection_id=live-2 to_live_connection_id=live-3"
+        verdict = self._analyze(
+            _window_lines(
+                *(f"2026-08-31 10:00:{index:02d} {marker}" for index, marker in enumerate(markers, 1)),
+                journey_id="bargein-journey-1",
+                journeys="bargein,reconnect",
+                evidence_scope=EVIDENCE_SCOPE,
+            )
+        )
+
+        self.assertIn(
+            "INTERRUPT_REPLACEMENT_OWNER_INVALID",
+            [item["code"] for item in verdict["failures"]],
+        )
+
+    def test_bargein_does_not_migrate_owner_through_unrelated_network_reconnect(self):
+        markers = _scoped_migrated_bargein_chain()
+        markers[5] = markers[5].replace("reason=hard_interrupt", "reason=network")
+        verdict = self._analyze(
+            _window_lines(
+                *(
+                    f"2026-08-31 10:00:{index:02d} {marker}"
+                    for index, marker in enumerate(markers, 1)
+                ),
+                journey_id="bargein-journey-1",
+                journeys="bargein,reconnect",
+                evidence_scope=EVIDENCE_SCOPE,
+            )
+        )
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn(
+            "SCOPED_BARGEIN_CORRELATION_INVALID",
+            [item["code"] for item in verdict["failures"]],
+        )
+        self.assertEqual(
+            verdict["correlations"][0]["replacementLiveConnectionId"], "live-1"
+        )
+
+    def test_hard_reconnect_bargein_does_not_commit_owner_when_reopen_fails(self):
+        markers = _scoped_migrated_bargein_chain()
+        markers[7] = (
+            "Google Live evidence_reconnect_failed journey_id=bargein-journey-1 "
+            "connection_id=conn-1 attempt=1 from_live_connection_id=live-1 "
+            "live_connection_id=live-2 error_class=network"
+        )
+        verdict = self._analyze(
+            _window_lines(
+                *(
+                    f"2026-08-31 10:00:{index:02d} {marker}"
+                    for index, marker in enumerate(markers, 1)
+                ),
+                journey_id="bargein-journey-1",
+                journeys="bargein,reconnect",
+                evidence_scope=EVIDENCE_SCOPE,
+            )
+        )
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn(
+            "REOPEN_READY_TERMINATED_FAILED",
+            [item["code"] for item in verdict["failures"]],
+        )
+        self.assertEqual(verdict["finalLiveConnectionId"], "live-1")
+        self.assertEqual(verdict["liveConnectionTransitions"], [])
+        self.assertEqual(
+            verdict["correlations"][0]["replacementLiveConnectionId"], "live-1"
+        )
+
+    def test_hard_reconnect_bargein_detects_old_audio_after_new_replacement(self):
+        markers = _scoped_migrated_bargein_chain()
+        markers.insert(
+            15,
+            "Google Live model_output_chunk_forwarded journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=7",
+        )
+        verdict = self._analyze(
+            _window_lines(
+                *(f"2026-08-31 10:00:{index:02d} {marker}" for index, marker in enumerate(markers, 1)),
+                journey_id="bargein-journey-1",
+                journeys="bargein,reconnect",
+                evidence_scope=EVIDENCE_SCOPE,
+            )
+        )
+
+        self.assertIn(
+            "STALE_AUDIO_AFTER_REPLACEMENT",
+            [item["code"] for item in verdict["failures"]],
+        )
 
     def test_transport_correlation_does_not_accept_same_journey_from_other_connection(self):
         log_verdict = _valid_log_verdict(

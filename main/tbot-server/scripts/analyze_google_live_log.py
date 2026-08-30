@@ -196,17 +196,23 @@ P_EVIDENCE_FORWARDED = re.compile(
 P_EVIDENCE_INTERRUPT_STARTED = re.compile(
     r"Google Live user_interrupt_started journey_id=(?P<journey_id>\S+) "
     r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"(?:cancelled_live_connection_id=(?P<cancelled_live_connection_id>\S+) "
+    r"replacement_live_connection_id=(?P<replacement_live_connection_id>\S+) )?"
     r"reason=(?P<reason>\S+) cancelled_response_id=(?P<cancelled>\d+) "
     r"next_response_id=(?P<next>\d+)"
 )
 P_EVIDENCE_INTERRUPT_STOPPED = re.compile(
     r"Google Live interrupt_output_stopped journey_id=(?P<journey_id>\S+) "
     r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"(?:cancelled_live_connection_id=(?P<cancelled_live_connection_id>\S+) "
+    r"replacement_live_connection_id=(?P<replacement_live_connection_id>\S+) )?"
     r"cancelled_response_id=(?P<cancelled>\d+) next_response_id=(?P<next>\d+)"
 )
 P_EVIDENCE_USER_INTERRUPTED = re.compile(
     r"Google Live evidence_user_interrupted journey_id=(?P<journey_id>\S+) "
     r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"(?:cancelled_live_connection_id=(?P<cancelled_live_connection_id>\S+) "
+    r"replacement_live_connection_id=(?P<replacement_live_connection_id>\S+) )?"
     r"reason=(?P<reason>\S+) cancelled_response_id=(?P<cancelled>\d+) "
     r"next_response_id=(?P<next>\d+)"
 )
@@ -224,11 +230,15 @@ P_EVIDENCE_STALE_DROP = re.compile(
 P_EVIDENCE_INTERRUPT_REPLAYED = re.compile(
     r"Google Live evidence_interrupt_audio_replayed journey_id=(?P<journey_id>\S+) "
     r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"(?:cancelled_live_connection_id=(?P<cancelled_live_connection_id>\S+) "
+    r"replacement_live_connection_id=(?P<replacement_live_connection_id>\S+) )?"
     r"response_id=(?P<response_id>\d+)"
 )
 P_EVIDENCE_INTERRUPT_FINALIZED = re.compile(
     r"Google Live evidence_interrupt_input_finalized journey_id=(?P<journey_id>\S+) "
     r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"(?:cancelled_live_connection_id=(?P<cancelled_live_connection_id>\S+) "
+    r"replacement_live_connection_id=(?P<replacement_live_connection_id>\S+) )?"
     r"response_id=(?P<response_id>\d+)"
 )
 P_CLIENT_DISCONNECTED = re.compile(
@@ -1412,6 +1422,14 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     scoped_live_connection_transitions: list[dict[str, Any]] = []
     scoped_last_transition_attempt = 0
 
+    def interrupt_owner_ids(match: re.Match[str]) -> tuple[str, str]:
+        live_id = match.group("live_connection_id")
+        groups = match.groupdict()
+        return (
+            groups.get("cancelled_live_connection_id") or live_id,
+            groups.get("replacement_live_connection_id") or live_id,
+        )
+
     def scoped_marker_targets_anchor(match: re.Match[str], line_number: int) -> bool:
         anchor_scope = start_anchor.get("evidenceScope") if start_anchor else None
         if not isinstance(anchor_scope, Mapping):
@@ -1425,6 +1443,25 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             live_connection_id is not None
             and live_connection_id != scoped_current_live_connection_id
         ):
+            failures.append(
+                _failure(
+                    "EVIDENCE_SCOPE_MISMATCH",
+                    line_number,
+                    "same journey marker does not match anchored connection scope",
+                )
+            )
+            return False
+        return True
+
+    def scoped_marker_targets_immutable_anchor(
+        match: re.Match[str], line_number: int
+    ) -> bool:
+        anchor_scope = start_anchor.get("evidenceScope") if start_anchor else None
+        if not isinstance(anchor_scope, Mapping):
+            return True
+        if match.group("journey_id") != anchor_scope.get("journeyId"):
+            return False
+        if match.group("connection_id") != anchor_scope.get("connectionId"):
             failures.append(
                 _failure(
                     "EVIDENCE_SCOPE_MISMATCH",
@@ -1715,7 +1752,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     if (
                         record["journeyId"] == scoped_start.group("journey_id")
                         and record["connectionId"] == scoped_start.group("connection_id")
-                        and record["liveConnectionId"] == scoped_start.group("live_connection_id")
+                        and record["replacementLiveConnectionId"] == scoped_start.group("live_connection_id")
                         and record["replacementResponseId"] == int(scoped_start.group("response_id"))
                     ):
                         record["orderInvalid"] |= record["phase"] != 4
@@ -1747,7 +1784,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     if (
                         record["journeyId"] == scoped_end.group("journey_id")
                         and record["connectionId"] == scoped_end.group("connection_id")
-                        and record["liveConnectionId"] == scoped_end.group("live_connection_id")
+                        and record["replacementLiveConnectionId"] == scoped_end.group("live_connection_id")
                         and record["replacementResponseId"] == int(scoped_end.group("response_id"))
                     ):
                         record["orderInvalid"] |= record["phase"] != 6
@@ -1755,12 +1792,22 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
             scoped_forwarded = P_EVIDENCE_FORWARDED.search(line)
             if scoped_forwarded:
-                if not scoped_marker_targets_anchor(scoped_forwarded, line_number):
+                forwarded_response_id = int(scoped_forwarded.group("response_id"))
+                forwarded_live_id = scoped_forwarded.group("live_connection_id")
+                cancelled_owner_match = any(
+                    record["journeyId"] == scoped_forwarded.group("journey_id")
+                    and record["connectionId"] == scoped_forwarded.group("connection_id")
+                    and record["cancelledLiveConnectionId"] == forwarded_live_id
+                    and record["cancelledResponseId"] == forwarded_response_id
+                    for record in scoped_interrupts
+                )
+                if not cancelled_owner_match and not scoped_marker_targets_anchor(
+                    scoped_forwarded, line_number
+                ):
                     continue
                 observed_marker_families[scoped_forwarded.group("journey_id")].add(
                     "forwarded"
                 )
-                forwarded_response_id = int(scoped_forwarded.group("response_id"))
                 response_scope = (
                     scoped_forwarded.group("connection_id"),
                     scoped_forwarded.group("live_connection_id"),
@@ -1777,7 +1824,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     if (
                         record["journeyId"] == scoped_forwarded.group("journey_id")
                         and record["connectionId"] == scoped_forwarded.group("connection_id")
-                        and record["liveConnectionId"] == scoped_forwarded.group("live_connection_id")
+                        and record["cancelledLiveConnectionId"] == forwarded_live_id
                         and record["phase"] >= 5
                         and forwarded_response_id == record["cancelledResponseId"]
                     ):
@@ -1793,7 +1840,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     if (
                         record["journeyId"] == scoped_forwarded.group("journey_id")
                         and record["connectionId"] == scoped_forwarded.group("connection_id")
-                        and record["liveConnectionId"] == scoped_forwarded.group("live_connection_id")
+                        and record["replacementLiveConnectionId"] == forwarded_live_id
                         and record["replacementResponseId"] == forwarded_response_id
                     ):
                         record["orderInvalid"] |= record["phase"] not in {5, 6}
@@ -1806,17 +1853,34 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 observed_marker_families[
                     scoped_interrupt_start.group("journey_id")
                 ].add("interrupt_started")
+                cancelled_owner, replacement_owner = interrupt_owner_ids(
+                    scoped_interrupt_start
+                )
                 scoped_interrupts.append(
                     {
                         "journeyId": scoped_interrupt_start.group("journey_id"),
                         "connectionId": scoped_interrupt_start.group("connection_id"),
-                        "liveConnectionId": scoped_interrupt_start.group("live_connection_id"),
+                        "liveConnectionId": replacement_owner,
+                        "cancelledLiveConnectionId": cancelled_owner,
+                        "replacementLiveConnectionId": replacement_owner,
+                        "ownerMigrationCount": 0,
                         "cancelledResponseId": int(scoped_interrupt_start.group("cancelled")),
                         "replacementResponseId": int(scoped_interrupt_start.group("next")),
                         "phase": 0,
                         "orderInvalid": False,
                     }
                 )
+                if (
+                    cancelled_owner != scoped_interrupt_start.group("live_connection_id")
+                    or replacement_owner != cancelled_owner
+                ):
+                    failures.append(
+                        _failure(
+                            "INTERRUPT_REPLACEMENT_OWNER_INVALID",
+                            line_number,
+                            str((cancelled_owner, replacement_owner)),
+                        )
+                    )
                 response_scope = (
                     scoped_interrupt_start.group("connection_id"),
                     scoped_interrupt_start.group("live_connection_id"),
@@ -1851,11 +1915,16 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 observed_marker_families[
                     scoped_interrupt_stop.group("journey_id")
                 ].add("interrupt_stopped")
+                cancelled_owner, replacement_owner = interrupt_owner_ids(
+                    scoped_interrupt_stop
+                )
                 for record in scoped_interrupts:
                     if (
                         record["journeyId"] == scoped_interrupt_stop.group("journey_id")
                         and record["connectionId"] == scoped_interrupt_stop.group("connection_id")
-                        and record["liveConnectionId"] == scoped_interrupt_stop.group("live_connection_id")
+                        and record["cancelledLiveConnectionId"] == cancelled_owner
+                        and record["replacementLiveConnectionId"] == replacement_owner
+                        and cancelled_owner == scoped_interrupt_stop.group("live_connection_id")
                         and record["cancelledResponseId"] == int(scoped_interrupt_stop.group("cancelled"))
                         and record["replacementResponseId"] == int(scoped_interrupt_stop.group("next"))
                     ):
@@ -1864,16 +1933,38 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
             scoped_interrupted = P_EVIDENCE_USER_INTERRUPTED.search(line)
             if scoped_interrupted:
-                if not scoped_marker_targets_anchor(scoped_interrupted, line_number):
+                if not scoped_marker_targets_immutable_anchor(
+                    scoped_interrupted, line_number
+                ):
                     continue
                 observed_marker_families[scoped_interrupted.group("journey_id")].add(
                     "interrupt_finalized"
                 )
+                cancelled_owner, replacement_owner = interrupt_owner_ids(
+                    scoped_interrupted
+                )
+                if (
+                    (
+                        scoped_current_live_connection_id is not None
+                        and replacement_owner != scoped_current_live_connection_id
+                    )
+                    or replacement_owner
+                    != scoped_interrupted.group("live_connection_id")
+                ):
+                    failures.append(
+                        _failure(
+                            "INTERRUPT_REPLACEMENT_OWNER_INVALID",
+                            line_number,
+                            str((cancelled_owner, replacement_owner)),
+                        )
+                    )
                 for record in scoped_interrupts:
                     if (
                         record["journeyId"] == scoped_interrupted.group("journey_id")
                         and record["connectionId"] == scoped_interrupted.group("connection_id")
-                        and record["liveConnectionId"] == scoped_interrupted.group("live_connection_id")
+                        and record["cancelledLiveConnectionId"] == cancelled_owner
+                        and record["replacementLiveConnectionId"] == replacement_owner
+                        and replacement_owner == scoped_interrupted.group("live_connection_id")
                         and record["cancelledResponseId"] == int(scoped_interrupted.group("cancelled"))
                         and record["replacementResponseId"] == int(scoped_interrupted.group("next"))
                     ):
@@ -1948,6 +2039,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     "ready": False,
                     "replayed": False,
                     "terminalCount": 0,
+                    "reason": scoped_reconnect_start.group("reason"),
                     "fromLiveConnectionId": scoped_reconnect_start.group(
                         "from_live_connection_id"
                     ),
@@ -2010,13 +2102,6 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         state["toLiveConnectionId"] = to_id
                         scoped_current_live_connection_id = to_id
                         scoped_last_transition_attempt = attempt
-                        scoped_live_connection_transitions.append(
-                            {
-                                "attempt": key[2],
-                                "fromLiveConnectionId": from_id,
-                                "toLiveConnectionId": to_id,
-                            }
-                        )
                 observed_marker_families[journey_id].add("reopen_ready")
                 continue
             scoped_buffer_replay = P_EVIDENCE_REPLAYED_BUFFERED.search(line)
@@ -2079,8 +2164,62 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         _failure("RECONNECT_SUCCESS_WITHOUT_READY", line_number, str(key))
                     )
                 if state is not None:
+                    outcome = scoped_reconnect_outcome.group("outcome")
                     if (
-                        scoped_reconnect_outcome.group("outcome") == "failed"
+                        outcome == "succeeded"
+                        and state.get("terminalCount") == 0
+                        and state.get("ready")
+                        and state.get("fromLiveConnectionId")
+                        == scoped_reconnect_outcome.group("from_live_connection_id")
+                        and state.get("toLiveConnectionId")
+                        == scoped_reconnect_outcome.group("to_live_connection_id")
+                    ):
+                        from_id = state.get("fromLiveConnectionId")
+                        to_id = state.get("toLiveConnectionId")
+                        scoped_live_connection_transitions.append(
+                            {
+                                "attempt": key[2],
+                                "fromLiveConnectionId": from_id,
+                                "toLiveConnectionId": to_id,
+                            }
+                        )
+                        for record in scoped_interrupts:
+                            if (
+                                record["journeyId"] == journey_id
+                                and record["connectionId"] == key[1]
+                                and record["phase"] == 1
+                                and record["replacementLiveConnectionId"] == from_id
+                                and state.get("reason") == "hard_interrupt"
+                            ):
+                                if record["ownerMigrationCount"] != 0:
+                                    failures.append(
+                                        _failure(
+                                            "INTERRUPT_REPLACEMENT_OWNER_INVALID",
+                                            line_number,
+                                            str(key),
+                                        )
+                                    )
+                                else:
+                                    record["ownerMigrationCount"] = 1
+                                    record["replacementLiveConnectionId"] = to_id
+                                    record["liveConnectionId"] = to_id
+                    elif outcome == "failed" and state.get("ready"):
+                        failures.append(
+                            _failure(
+                                "REOPEN_READY_TERMINATED_FAILED",
+                                line_number,
+                                str(key),
+                            )
+                        )
+                        if (
+                            scoped_current_live_connection_id
+                            == state.get("toLiveConnectionId")
+                        ):
+                            scoped_current_live_connection_id = state.get(
+                                "fromLiveConnectionId"
+                            )
+                    if (
+                        outcome == "failed"
                         and scoped_reconnect_outcome.group("from_live_connection_id")
                         != state.get("fromLiveConnectionId")
                     ):
@@ -2097,8 +2236,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                             )
                         )
                     if (
-                        scoped_reconnect_outcome.group("outcome") == "failed"
-                        and state.get("replayed")
+                        outcome == "failed" and state.get("replayed")
                     ):
                         failures.append(
                             _failure(
@@ -2111,18 +2249,32 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
             scoped_stale = P_EVIDENCE_STALE_DROP.search(line)
             if scoped_stale:
-                if not scoped_marker_targets_anchor(scoped_stale, line_number):
+                stale_owner_match = any(
+                    record["journeyId"] == scoped_stale.group("journey_id")
+                    and record["connectionId"] == scoped_stale.group("connection_id")
+                    and record["cancelledLiveConnectionId"]
+                    == scoped_stale.group("live_connection_id")
+                    and record["cancelledResponseId"]
+                    == int(scoped_stale.group("response_id"))
+                    for record in scoped_interrupts
+                )
+                if not stale_owner_match and not scoped_marker_targets_anchor(
+                    scoped_stale, line_number
+                ):
                     continue
                 continue
             scoped_replay = P_EVIDENCE_INTERRUPT_REPLAYED.search(line)
             if scoped_replay:
                 if not scoped_marker_targets_anchor(scoped_replay, line_number):
                     continue
+                cancelled_owner, replacement_owner = interrupt_owner_ids(scoped_replay)
                 for record in scoped_interrupts:
                     if (
                         record["journeyId"] == scoped_replay.group("journey_id")
                         and record["connectionId"] == scoped_replay.group("connection_id")
-                        and record["liveConnectionId"] == scoped_replay.group("live_connection_id")
+                        and record["cancelledLiveConnectionId"] == cancelled_owner
+                        and record["replacementLiveConnectionId"] == replacement_owner
+                        and replacement_owner == scoped_replay.group("live_connection_id")
                         and record["replacementResponseId"] == int(scoped_replay.group("response_id"))
                     ):
                         record["orderInvalid"] |= record["phase"] != 2
@@ -2132,11 +2284,16 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             if scoped_finalized:
                 if not scoped_marker_targets_anchor(scoped_finalized, line_number):
                     continue
+                cancelled_owner, replacement_owner = interrupt_owner_ids(
+                    scoped_finalized
+                )
                 for record in scoped_interrupts:
                     if (
                         record["journeyId"] == scoped_finalized.group("journey_id")
                         and record["connectionId"] == scoped_finalized.group("connection_id")
-                        and record["liveConnectionId"] == scoped_finalized.group("live_connection_id")
+                        and record["cancelledLiveConnectionId"] == cancelled_owner
+                        and record["replacementLiveConnectionId"] == replacement_owner
+                        and replacement_owner == scoped_finalized.group("live_connection_id")
                         and record["replacementResponseId"] == int(scoped_finalized.group("response_id"))
                     ):
                         record["orderInvalid"] |= record["phase"] != 3
@@ -2763,7 +2920,11 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
         reported_correlations = [
             {
                 "status": "PASS" if not item["orderInvalid"] and item["phase"] == 7 else "FAIL",
-                **{key: value for key, value in item.items() if key not in {"phase", "orderInvalid"}},
+                **{
+                    key: value
+                    for key, value in item.items()
+                    if key not in {"phase", "orderInvalid", "ownerMigrationCount"}
+                },
             }
             for item in scoped_interrupts
         ]

@@ -4093,7 +4093,8 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             hard_reconnects.append(reason)
 
         provider._last_interrupt_at = 0
-        provider._receive_task = object()
+        receive_hold = asyncio.Event()
+        provider._receive_task = asyncio.create_task(receive_hold.wait())
         provider._should_hard_reconnect_on_interrupt = lambda: True
         provider._hard_reconnect_after_interrupt = _hard_reconnect
         await provider._begin_user_interrupt("audio_input")
@@ -4801,8 +4802,10 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
 
         first = provider._begin_evidence_reconnect()
         first_transition = provider._accept_evidence_reconnect_ready("live-2")
+        provider._commit_evidence_reconnect(first_transition)
         second = provider._begin_evidence_reconnect()
         second_transition = provider._accept_evidence_reconnect_ready("live-3")
+        provider._commit_evidence_reconnect(second_transition)
 
         self.assertEqual(first, {"attempt": 1, "fromLiveConnectionId": "live-1"})
         self.assertEqual(
@@ -4835,6 +4838,21 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         failed = provider._fail_evidence_reconnect()
 
         self.assertEqual(failed, attempt)
+        self.assertEqual(provider._evidence_scope()[2], "live-1")
+        self.assertEqual(provider._evidence_live_connection_transitions, [])
+
+    async def test_failed_evidence_reconnect_after_ready_rolls_back_live_owner(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+
+        provider._begin_evidence_reconnect()
+        ready = provider._accept_evidence_reconnect_ready("live-2")
+        failed = provider._fail_evidence_reconnect()
+
+        self.assertEqual(failed, ready)
         self.assertEqual(provider._evidence_scope()[2], "live-1")
         self.assertEqual(provider._evidence_live_connection_transitions, [])
 
@@ -4998,6 +5016,52 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finalized["liveConnectionTransitions"], [])
         self.assertEqual(provider._evidence_scope()[2], "live-1")
         provider._open_live_session.assert_not_awaited()
+
+    async def test_hard_interrupt_recomputes_replacement_evidence_owner(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        conn.config["google_live"]["hard_reconnect_on_interrupt"] = True
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        receive_hold = asyncio.Event()
+        provider._receive_task = asyncio.create_task(receive_hold.wait())
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._close_live_resources = AsyncMock()
+        provider._record_reconnect_attempt = AsyncMock()
+        provider._schedule_forced_interrupt_input_flush = lambda _reason: None
+
+        async def open_new_owner():
+            provider._interaction.start_live_connection("live-2")
+
+        provider._open_live_session = AsyncMock(side_effect=open_new_owner)
+
+        await provider._begin_user_interrupt("audio_input")
+
+        evidence_messages = [
+            args
+            for level, args, _kwargs in conn.logger.messages
+            if level == "info" and args and "journey_id" in str(args[0])
+        ]
+        self.assertTrue(
+            any(
+                "user_interrupt_started" in args[0]
+                and args[4:6] == ("live-1", "live-1")
+                for args in evidence_messages
+            )
+        )
+        self.assertTrue(
+            any(
+                "evidence_user_interrupted" in args[0]
+                and args[4:6] == ("live-1", "live-2")
+                for args in evidence_messages
+            )
+        )
+        self.assertEqual(provider._evidence_scope()[2], "live-2")
+        provider._receive_task.cancel()
+        await asyncio.gather(provider._receive_task, return_exceptions=True)
+        provider._receive_task = None
 
     async def test_evidence_finalize_survives_caller_timeout_and_close_reuses_cleanup(self):
         conn = _Conn()

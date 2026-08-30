@@ -26,6 +26,8 @@ During a validated evidence journey only, every forwarded model audio chunk emit
 
 The analyzer considers a barge-in healthy without a stale-drop marker. It fails if any chunk owned by the cancelled response is forwarded after the first replacement-response chunk, including late chunks after replacement has already begun.
 
+If a hard reconnect occurs inside an interrupt, the interrupt keeps two explicit owners. `cancelledLiveConnectionId` remains the owner of the cancelled output and stale-drop checks. `replacementLiveConnectionId` starts equal to it and may migrate exactly once through a `reason=hard_interrupt` reconnect whose ready transition receives a matching successful terminal outcome before `evidence_user_interrupted`; replay, input finalization, and replacement response markers then use the new owner. A ready transition remains provisional and rolls back on failure. Correlation is released only against the committed replacement/final owner.
+
 ## Finalization
 
 After the replacement response finishes, Task 4 sends `evidence_finalize` with the exact hello scope. The connection validates the scope and invokes the provider's idempotent evidence cleanup path. The provider closes Live-owned resources, logs the scoped cleanup marker and pending-task count against the final accepted Live owner, and returns `initialLiveConnectionId`, `finalLiveConnectionId`, and the exact ordered transition ledger. Only after cleanup and log emission does the server send `evidence_finalized` with the unchanged hello scope, finalized Live ownership fields, and timezone-aware UTC `serverEndUtc`.
