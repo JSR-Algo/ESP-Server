@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from typing import Dict, Any
 
@@ -6,6 +7,7 @@ from core.handle.textMessageHandler import TextMessageHandler
 from core.handle.textMessageType import TextMessageType
 
 TAG = __name__
+SAFE_EVIDENCE_STEP_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 class PingMessageHandler(TextMessageHandler):
@@ -35,7 +37,12 @@ class PingMessageHandler(TextMessageHandler):
             journey_id = getattr(conn, "google_live_evidence_journey_id", None)
             lesson_runtime = getattr(conn, "lesson_runtime", None)
             step_id = getattr(lesson_runtime, "_step_id", None)
-            if isinstance(journey_id, str) and journey_id and step_id:
+            if (
+                isinstance(journey_id, str)
+                and journey_id
+                and isinstance(step_id, str)
+                and SAFE_EVIDENCE_STEP_RE.fullmatch(step_id)
+            ):
                 marker_key = (journey_id, str(step_id))
                 if getattr(conn, "_google_live_evidence_ping_marker", None) != marker_key:
                     conn._google_live_evidence_ping_marker = marker_key

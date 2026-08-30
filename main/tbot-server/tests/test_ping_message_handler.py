@@ -74,3 +74,17 @@ async def test_evidence_firmware_ping_is_logged_only_once_per_lesson_step():
     assert len(markers) == 2
     assert markers[0][1:] == ("lesson-journey-1", "conn-1", "live-1", "step-1")
     assert markers[1][1:] == ("lesson-journey-1", "conn-1", "live-1", "step-2")
+
+
+@pytest.mark.asyncio
+async def test_evidence_firmware_ping_rejects_unsafe_step_id():
+    conn = _Connection({})
+    conn.google_live_evidence_journey_id = "lesson-journey-1"
+    conn.lesson_runtime = type("Runtime", (), {"_step_id": "unsafe step token"})()
+
+    await PingMessageHandler().handle(conn, {"type": "ping"})
+
+    assert not any(
+        args and "Google Live firmware_ping journey_id=" in str(args[0])
+        for args in conn.logger.infos
+    )

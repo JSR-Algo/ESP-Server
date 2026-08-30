@@ -197,7 +197,8 @@ P_EVIDENCE_USER_INTERRUPTED = re.compile(
 P_EVIDENCE_CONNECTION_CLOSE = re.compile(
     r"Google Live evidence_connection_close journey_id=(?P<journey_id>\S+) "
     r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
-    r"pending_tasks=(?P<pending_tasks>\d+)"
+    r"pending_tasks=(?P<pending_tasks>\d+) close_code=(?P<close_code>\d+) "
+    r"reason=(?P<reason>\S+)"
 )
 P_EVIDENCE_STALE_DROP = re.compile(
     r"Google Live evidence_stale_model_drop journey_id=(?P<journey_id>\S+) "
@@ -219,7 +220,8 @@ P_CLIENT_DISCONNECTED = re.compile(
 )
 P_EVIDENCE_RECONNECT_STARTED = re.compile(
     r"Google Live evidence_reconnect_started journey_id=(?P<journey_id>\S+) "
-    r"connection_id=(?P<connection_id>\S+) attempt=(?P<attempt>\d+) reason=(?P<reason>\S+)"
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"attempt=(?P<attempt>\d+) reason=(?P<reason>\S+)"
 )
 P_EVIDENCE_REOPEN_READY = re.compile(
     r"Google Live evidence_reopen_ready journey_id=(?P<journey_id>\S+) "
@@ -234,7 +236,8 @@ P_EVIDENCE_REPLAYED_BUFFERED = re.compile(
 P_EVIDENCE_RECONNECT_OUTCOME = re.compile(
     r"Google Live evidence_reconnect_(?P<outcome>succeeded|failed) "
     r"journey_id=(?P<journey_id>\S+) connection_id=(?P<connection_id>\S+) "
-    r"attempt=(?P<attempt>\d+)(?: live_connection_id=(?P<live_connection_id>\S+)| error_class=(?P<error_class>\S+))"
+    r"live_connection_id=(?P<live_connection_id>\S+) attempt=(?P<attempt>\d+)"
+    r"(?: error_class=(?P<error_class>\S+))?"
 )
 _SCOPED_EVIDENCE_PATTERNS = (
     P_EVIDENCE_RESPONSE_START,
@@ -1357,6 +1360,30 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     scoped_interrupts: list[dict[str, Any]] = []
     scoped_reconnects: dict[tuple[str, str, int], dict[str, Any]] = {}
     scoped_active_responses: dict[tuple[str, str], int] = {}
+    scoped_lesson_pending_pings: dict[str, int] = {}
+
+    def scoped_marker_targets_anchor(match: re.Match[str], line_number: int) -> bool:
+        anchor_scope = start_anchor.get("evidenceScope") if start_anchor else None
+        if not isinstance(anchor_scope, Mapping):
+            return True
+        groups = match.groupdict()
+        if groups.get("journey_id") != anchor_scope.get("journeyId"):
+            return False
+        connection_id = groups.get("connection_id")
+        live_connection_id = groups.get("live_connection_id")
+        if connection_id != anchor_scope.get("connectionId") or (
+            live_connection_id is not None
+            and live_connection_id != anchor_scope.get("liveConnectionId")
+        ):
+            failures.append(
+                _failure(
+                    "EVIDENCE_SCOPE_MISMATCH",
+                    line_number,
+                    "same journey marker does not match anchored connection scope",
+                )
+            )
+            return False
+        return True
 
     with log_path.open("r", encoding="utf-8", errors="replace") as fh:
         for line_number, raw_line in enumerate(fh, 1):
@@ -1540,6 +1567,34 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 )
             previous_ts = ts
 
+            anchor_scope = start_anchor.get("evidenceScope") if start_anchor else None
+            if isinstance(anchor_scope, Mapping) and (
+                "Google Live evidence_reconnect_started" in line
+                or "Google Live evidence_reconnect_succeeded" in line
+                or "Google Live evidence_reconnect_failed" in line
+            ):
+                reconnect_marker_valid = any(
+                    pattern.search(line)
+                    for pattern in (
+                        P_EVIDENCE_RECONNECT_STARTED,
+                        P_EVIDENCE_RECONNECT_OUTCOME,
+                    )
+                )
+                marker_journey = re.search(r"\bjourney_id=(\S+)", line)
+                if (
+                    not reconnect_marker_valid
+                    and marker_journey is not None
+                    and marker_journey.group(1) == anchor_scope.get("journeyId")
+                ):
+                    failures.append(
+                        _failure(
+                            "MALFORMED_RELIABILITY_LOG_LINE",
+                            line_number,
+                            "target reconnect marker is missing exact scope fields",
+                        )
+                    )
+                    continue
+
             for label, pattern in _FORBIDDEN_LOG_MARKERS:
                 if pattern.search(line):
                     if label not in fatal_hits:
@@ -1548,8 +1603,16 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         _failure("FORBIDDEN_LOG_MARKER", line_number, label)
                     )
 
+            exact_scope_active = isinstance(
+                start_anchor.get("evidenceScope") if start_anchor else None,
+                Mapping,
+            )
             disconnected = P_CLIENT_DISCONNECTED.search(line)
-            if disconnected and disconnected.group("close_code") not in {"1000", "1001"}:
+            if (
+                not exact_scope_active
+                and disconnected
+                and disconnected.group("close_code") not in {"1000", "1001"}
+            ):
                 failures.append(
                     _failure(
                         "ABNORMAL_CONNECTION_CLOSE",
@@ -1560,6 +1623,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
 
             scoped_start = P_EVIDENCE_RESPONSE_START.search(line)
             if scoped_start:
+                if not scoped_marker_targets_anchor(scoped_start, line_number):
+                    continue
                 observed_marker_families[scoped_start.group("journey_id")].add(
                     "response_started"
                 )
@@ -1595,6 +1660,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
             scoped_end = P_EVIDENCE_RESPONSE_END.search(line)
             if scoped_end:
+                if not scoped_marker_targets_anchor(scoped_end, line_number):
+                    continue
                 observed_marker_families[scoped_end.group("journey_id")].add(
                     "response_ended"
                 )
@@ -1625,6 +1692,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
             scoped_forwarded = P_EVIDENCE_FORWARDED.search(line)
             if scoped_forwarded:
+                if not scoped_marker_targets_anchor(scoped_forwarded, line_number):
+                    continue
                 observed_marker_families[scoped_forwarded.group("journey_id")].add(
                     "forwarded"
                 )
@@ -1664,11 +1733,13 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         and record["liveConnectionId"] == scoped_forwarded.group("live_connection_id")
                         and record["replacementResponseId"] == forwarded_response_id
                     ):
-                        record["orderInvalid"] |= record["phase"] != 5
+                        record["orderInvalid"] |= record["phase"] not in {5, 6}
                         record["phase"] = 6
                 continue
             scoped_interrupt_start = P_EVIDENCE_INTERRUPT_STARTED.search(line)
             if scoped_interrupt_start:
+                if not scoped_marker_targets_anchor(scoped_interrupt_start, line_number):
+                    continue
                 observed_marker_families[
                     scoped_interrupt_start.group("journey_id")
                 ].add("interrupt_started")
@@ -1712,6 +1783,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
             scoped_interrupt_stop = P_EVIDENCE_INTERRUPT_STOPPED.search(line)
             if scoped_interrupt_stop:
+                if not scoped_marker_targets_anchor(scoped_interrupt_stop, line_number):
+                    continue
                 observed_marker_families[
                     scoped_interrupt_stop.group("journey_id")
                 ].add("interrupt_stopped")
@@ -1728,6 +1801,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
             scoped_interrupted = P_EVIDENCE_USER_INTERRUPTED.search(line)
             if scoped_interrupted:
+                if not scoped_marker_targets_anchor(scoped_interrupted, line_number):
+                    continue
                 observed_marker_families[scoped_interrupted.group("journey_id")].add(
                     "interrupt_finalized"
                 )
@@ -1752,7 +1827,11 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     and scoped_close.group("live_connection_id")
                     == anchor_scope.get("liveConnectionId")
                 )
-                if cleanup_scope_matches:
+                cleanup_semantics_valid = (
+                    scoped_close.group("close_code") == "1000"
+                    and scoped_close.group("reason") == "evidence_finalize"
+                )
+                if cleanup_scope_matches and cleanup_semantics_valid:
                     observed_marker_families[scoped_close.group("journey_id")].add(
                         "cleanup"
                     )
@@ -1779,9 +1858,19 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                             "scoped connection closed with provider-owned work pending",
                         )
                     )
+                if cleanup_scope_matches and not cleanup_semantics_valid:
+                    failures.append(
+                        _failure(
+                            "EVIDENCE_CLEANUP_SEMANTICS_INVALID",
+                            line_number,
+                            "cleanup must be close_code=1000 reason=evidence_finalize",
+                        )
+                    )
                 continue
             scoped_reconnect_start = P_EVIDENCE_RECONNECT_STARTED.search(line)
             if scoped_reconnect_start:
+                if not scoped_marker_targets_anchor(scoped_reconnect_start, line_number):
+                    continue
                 journey_id = scoped_reconnect_start.group("journey_id")
                 key = (
                     journey_id,
@@ -1801,6 +1890,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
             scoped_reopen_ready = P_EVIDENCE_REOPEN_READY.search(line)
             if scoped_reopen_ready:
+                if not scoped_marker_targets_anchor(scoped_reopen_ready, line_number):
+                    continue
                 journey_id = scoped_reopen_ready.group("journey_id")
                 key = (
                     journey_id,
@@ -1825,6 +1916,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
             scoped_buffer_replay = P_EVIDENCE_REPLAYED_BUFFERED.search(line)
             if scoped_buffer_replay:
+                if not scoped_marker_targets_anchor(scoped_buffer_replay, line_number):
+                    continue
                 journey_id = scoped_buffer_replay.group("journey_id")
                 key = (
                     journey_id,
@@ -1855,6 +1948,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
             scoped_reconnect_outcome = P_EVIDENCE_RECONNECT_OUTCOME.search(line)
             if scoped_reconnect_outcome:
+                if not scoped_marker_targets_anchor(scoped_reconnect_outcome, line_number):
+                    continue
                 journey_id = scoped_reconnect_outcome.group("journey_id")
                 key = (
                     journey_id,
@@ -1899,9 +1994,13 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
             scoped_stale = P_EVIDENCE_STALE_DROP.search(line)
             if scoped_stale:
+                if not scoped_marker_targets_anchor(scoped_stale, line_number):
+                    continue
                 continue
             scoped_replay = P_EVIDENCE_INTERRUPT_REPLAYED.search(line)
             if scoped_replay:
+                if not scoped_marker_targets_anchor(scoped_replay, line_number):
+                    continue
                 for record in scoped_interrupts:
                     if (
                         record["journeyId"] == scoped_replay.group("journey_id")
@@ -1914,6 +2013,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
             scoped_finalized = P_EVIDENCE_INTERRUPT_FINALIZED.search(line)
             if scoped_finalized:
+                if not scoped_marker_targets_anchor(scoped_finalized, line_number):
+                    continue
                 for record in scoped_interrupts:
                     if (
                         record["journeyId"] == scoped_finalized.group("journey_id")
@@ -1923,6 +2024,21 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     ):
                         record["orderInvalid"] |= record["phase"] != 3
                         record["phase"] = 4
+                continue
+
+            if exact_scope_active and (
+                P_INTERRUPT.search(line)
+                or P_RESPONSE_AUDIO_START.search(line)
+                or P_RESPONSE_AUDIO_END.search(line)
+                or P_RESPONSE_AUDIO_FORWARDED.search(line)
+                or P_RECONNECT_REASON.search(line)
+                or P_REOPEN_READY.search(line)
+                or P_RECONNECT_SUCCEEDED.search(line)
+                or P_RECONNECT_FAILED.search(line)
+                or P_REPLAYED_BUFFERED_AUDIO.search(line)
+                or P_PENDING_TASK_CLOSE.search(line)
+                or P_CLEAN_CONNECTION_CLOSE.search(line)
+            ):
                 continue
 
             if P_RECV_START.search(line):
@@ -2181,6 +2297,30 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
 
             lesson_start = P_LESSON_STEP_START.search(line)
+            scoped_lesson_ping = P_SCOPED_FIRMWARE_LESSON_PING.search(line)
+            if scoped_lesson_ping:
+                if not scoped_marker_targets_anchor(scoped_lesson_ping, line_number):
+                    continue
+                observed_marker_families[
+                    scoped_lesson_ping.group("journey_id")
+                ].add("lesson_ping")
+                scoped_lesson_pending_pings[
+                    scoped_lesson_ping.group("step_id")
+                ] = line_number
+            scoped_lesson_progress = P_SCOPED_LESSON_STEP_PROGRESS.search(line)
+            if scoped_lesson_progress:
+                if not scoped_marker_targets_anchor(
+                    scoped_lesson_progress, line_number
+                ):
+                    continue
+                step_id = scoped_lesson_progress.group("step_id")
+                if step_id in scoped_lesson_pending_pings:
+                    observed_marker_families[
+                        scoped_lesson_progress.group("journey_id")
+                    ].add("lesson_progress")
+                    scoped_lesson_pending_pings.pop(step_id, None)
+            if exact_scope_active and lesson_start:
+                continue
             if lesson_start:
                 active_lesson_step = {
                     "stepId": lesson_start.group("step_id"),
@@ -2190,22 +2330,12 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
             lesson_ping = P_FIRMWARE_LESSON_PING.search(line)
             if lesson_ping and active_lesson_step is not None:
-                journey_match = re.search(r"journey_id=(\S+)", line)
-                if journey_match:
-                    observed_marker_families[journey_match.group(1)].add(
-                        "lesson_ping"
-                    )
                 if lesson_ping.group("step_id") == active_lesson_step["stepId"]:
                     active_lesson_step["pingLine"] = line_number
                     active_lesson_step["progressAfterPing"] = False
                 continue
             lesson_progress = P_LESSON_STEP_PROGRESS.search(line)
             if lesson_progress and active_lesson_step is not None:
-                journey_match = re.search(r"journey_id=(\S+)", line)
-                if journey_match:
-                    observed_marker_families[journey_match.group(1)].add(
-                        "lesson_progress"
-                    )
                 if (
                     lesson_progress.group("step_id") == active_lesson_step["stepId"]
                     and active_lesson_step["pingLine"] is not None
@@ -2214,6 +2344,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     active_lesson_step["progressAfterPing"] = True
                 continue
             lesson_end = P_LESSON_STEP_END.search(line)
+            if exact_scope_active and lesson_end:
+                continue
             if lesson_end and active_lesson_step is not None:
                 if (
                     lesson_end.group("step_id") == active_lesson_step["stepId"]
@@ -2286,6 +2418,14 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 "LESSON_PING_WITHOUT_PROGRESS",
                 active_lesson_step["pingLine"],
                 "firmware pings continued without subsequent lesson-step progress",
+            )
+        )
+    for step_id, ping_line in scoped_lesson_pending_pings.items():
+        failures.append(
+            _failure(
+                "LESSON_PING_WITHOUT_PROGRESS",
+                ping_line,
+                f"scoped lesson step {step_id} has no later matching progress",
             )
         )
 
