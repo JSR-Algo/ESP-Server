@@ -1,8 +1,410 @@
+import contextlib
+import io
+import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from scripts.analyze_google_live_log import analyze, summarize_pains
+from scripts import analyze_google_live_log
+from scripts.analyze_google_live_log import (
+    analyze,
+    analyze_reliability_window,
+    correlate_websocket_bargein_evidence,
+    summarize_pains,
+)
+
+CANDIDATE_IDENTITY = {
+    "gitSha": "candidate-sha",
+    "imageDigest": f"sha256:{'a' * 64}",
+    "firmwareIdentity": "firmware-v1",
+    "fixtureSha256": "b" * 64,
+    "configFingerprint": f"sha256:{'c' * 64}",
+}
+
+
+def _window_lines(*body, candidate_identity=CANDIDATE_IDENTITY, window_id="window-1"):
+    identity = json.dumps(candidate_identity, sort_keys=True, separators=(",", ":"))
+    return [
+        "2026-08-31 10:00:00 Google Live reliability_window_start "
+        f"window_id={window_id} candidate_identity={identity}",
+        *body,
+        "2026-08-31 10:00:59 Google Live reliability_window_end "
+        f"window_id={window_id}",
+    ]
+
+
+def _write_log(lines):
+    tmp = tempfile.TemporaryDirectory()
+    path = Path(tmp.name) / "server.log"
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return tmp, path
+
+
+def _transport_observation(**overrides):
+    observation = {
+        "schemaVersion": "google-live-reliability.v1",
+        "name": "websocket_audio_bargein_transport",
+        "status": "SKIPPED",
+        "pendingCode": "PENDING_BOUNDED_SERVER_LOG_VERIFICATION",
+        "correlationSource": "server_log",
+        "correlationStatus": "PENDING_BOUNDED_SERVER_LOG_VERIFICATION",
+        "aggregateReleaseEligible": False,
+        "interruptStopMarkerObserved": True,
+        "replacementResponseStarted": True,
+        "replacementResponseStopped": True,
+        "replacementBinaryChunks": 2,
+        "maxServerOutputGapMs": 60.0,
+        "bargeinStopMs": 210.0,
+        "candidateIdentity": CANDIDATE_IDENTITY,
+        "logWindow": {
+            "windowId": "window-1",
+            "start": "2026-08-31T10:00:00",
+            "end": "2026-08-31T10:00:59",
+        },
+    }
+    observation.update(overrides)
+    return observation
+
+
+class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
+    def _analyze(self, lines):
+        tmp, path = _write_log(lines)
+        self.addCleanup(tmp.cleanup)
+        return analyze_reliability_window(path)
+
+    def test_balanced_window_passes_and_proves_correlated_bargein_lifecycle(self):
+        lines = _window_lines(
+            "2026-08-31 10:00:01 Google Live receive loop started",
+            "2026-08-31 10:00:05 Google Live model_audio_start_hold_input response_id=7",
+            "2026-08-31 10:00:10 Google Live user_interrupted reason=vad cancelled_response_id=7 next_response_id=8",
+            "2026-08-31 10:00:11 Google Live tts_state_stop_sent response_id=7 reason=interrupt",
+            "2026-08-31 10:00:12 Google Live stale_model_event_dropped type=audio reason=blocked_until_user_turn response_id=7 current_response_id=8",
+            "2026-08-31 10:00:13 Google Live replayed_interrupt_audio reason=model_output_unblocked frames=2 bytes=3840 response_id=8",
+            "2026-08-31 10:00:14 Google Live interrupt_input_finalized reason=speech_tail elapsed_ms=420 response_id=8 frames=4 bytes=7680 peak_rms=2600",
+            "2026-08-31 10:00:15 Google Live model_audio_start_hold_input response_id=8",
+            "2026-08-31 10:00:16 Google Live model_output_chunk_forwarded response_id=8 bytes=1920",
+            "2026-08-31 10:00:17 Google Live model_audio_end_ready_to_listen response_id=8",
+            "2026-08-31 10:00:18 Google Live receive loop stopped",
+        )
+
+        verdict = self._analyze(lines)
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+        self.assertEqual(verdict["schemaVersion"], "google-live-reliability.v1")
+        self.assertEqual(verdict["candidateIdentity"], CANDIDATE_IDENTITY)
+        self.assertEqual(verdict["receiveLoopBalance"], 0)
+        self.assertEqual(verdict["maxReceiveLoopsActive"], 1)
+        self.assertEqual(verdict["duplicateResponseIds"], [])
+        self.assertEqual(verdict["staleAudioAfterReplacement"], 0)
+        self.assertEqual(verdict["fatalHits"], [])
+        self.assertEqual(verdict["correlation"]["status"], "PASS")
+        self.assertEqual(verdict["correlation"]["cancelledResponseId"], 7)
+        self.assertEqual(verdict["correlation"]["replacementResponseId"], 8)
+        self.assertNotIn("bytes=", json.dumps(verdict))
+
+        combined = correlate_websocket_bargein_evidence(
+            _transport_observation(),
+            verdict,
+            expected_candidate_identity=CANDIDATE_IDENTITY,
+        )
+        self.assertEqual(combined["status"], "PASS", combined)
+        self.assertTrue(combined["aggregateReleaseEligible"])
+        self.assertEqual(combined["correlationStatus"], "PASS")
+        self.assertEqual(combined["candidateIdentity"], CANDIDATE_IDENTITY)
+
+    def test_lifecycle_failures_are_fail_closed(self):
+        cases = {
+            "two_receive_starts": (
+                [
+                    "2026-08-31 10:00:01 Google Live receive loop started",
+                    "2026-08-31 10:00:02 Google Live receive loop started",
+                ],
+                "RECEIVE_LOOP_OVERLAP",
+            ),
+            "duplicate_replay_for_reopen": (
+                [
+                    "2026-08-31 10:00:01 reconnect_succeeded attempt=1 live_connection_id=live-2",
+                    "2026-08-31 10:00:02 Google Live replayed_buffered_audio frames=2 bytes=20",
+                    "2026-08-31 10:00:03 Google Live replayed_buffered_audio frames=1 bytes=10",
+                ],
+                "DUPLICATE_BUFFER_REPLAY",
+            ),
+            "unrecovered_timeout": (
+                [
+                    "2026-08-31 10:00:01 Google Live waiting_model_timeout timeout_sec=5",
+                    "2026-08-31 10:00:02 unrelated marker",
+                ],
+                "UNRECOVERED_TIMEOUT",
+            ),
+            "old_audio_after_replacement": (
+                [
+                    "2026-08-31 10:00:01 Google Live user_interrupted reason=vad cancelled_response_id=3 next_response_id=4",
+                    "2026-08-31 10:00:02 Google Live model_audio_start_hold_input response_id=4",
+                    "2026-08-31 10:00:03 Google Live model_output_chunk_forwarded response_id=3 bytes=1920",
+                ],
+                "STALE_AUDIO_AFTER_REPLACEMENT",
+            ),
+            "non_retriable_reconnect": (
+                [
+                    "2026-08-31 10:00:01 Google Live classify_error kind=auth retry=no",
+                    "2026-08-31 10:00:02 reconnect_started reason=auth attempt=1 state=RECONNECTING",
+                ],
+                "NON_RETRIABLE_RECONNECT",
+            ),
+            "unreleased_handoff": (
+                [
+                    "2026-08-31 10:00:01 lesson_start_handoff_acquired lease=(1, 1) reason=lesson_start_intent",
+                ],
+                "UNRELEASED_LESSON_HANDOFF",
+            ),
+            "pending_task_at_close": (
+                [
+                    "2026-08-31 10:00:01 Google Live connection_close pending_tasks=flush,timeout,replay",
+                ],
+                "PENDING_TASK_AT_CLOSE",
+            ),
+            "lesson_ping_without_progress": (
+                [
+                    "2026-08-31 10:00:01 Google Live lesson_step_started step_id=step-1",
+                    "2026-08-31 10:00:02 firmware_ping lesson_step=step-1",
+                    "2026-08-31 10:00:03 firmware_ping lesson_step=step-1",
+                    "2026-08-31 10:00:04 Google Live lesson_step_ended step_id=step-1",
+                ],
+                "LESSON_PING_WITHOUT_PROGRESS",
+            ),
+        }
+
+        for name, (body, expected_code) in cases.items():
+            with self.subTest(name=name):
+                verdict = self._analyze(_window_lines(*body))
+                self.assertEqual(verdict["status"], "FAIL", verdict)
+                self.assertIn(expected_code, [item["code"] for item in verdict["failures"]])
+
+    def test_timeout_is_allowed_only_with_ordered_terminal_recovery(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live waiting_model_timeout timeout_sec=5",
+                "2026-08-31 10:00:02 reconnect_succeeded attempt=1 live_connection_id=live-2",
+            )
+        )
+
+        self.assertEqual(verdict["unrecoveredTimeouts"], [])
+        self.assertNotIn("UNRECOVERED_TIMEOUT", [item["code"] for item in verdict["failures"]])
+
+    def test_buffered_replay_is_owned_by_reconnect_before_success_marker(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 reconnect_started reason=network attempt=1 state=RECONNECTING",
+                "2026-08-31 10:00:02 Google Live replayed_buffered_audio frames=2 bytes=20",
+                "2026-08-31 10:00:03 reconnect_succeeded attempt=1 live_connection_id=live-2",
+            )
+        )
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+        self.assertEqual(verdict["replayCountsByReopen"], {"reopen-1": 1})
+
+    def test_correlation_markers_must_follow_the_causal_order(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live user_interrupted reason=vad cancelled_response_id=7 next_response_id=8",
+                "2026-08-31 10:00:02 Google Live model_audio_start_hold_input response_id=8",
+                "2026-08-31 10:00:03 Google Live tts_state_stop_sent response_id=7 reason=interrupt",
+                "2026-08-31 10:00:04 Google Live stale_model_event_dropped type=audio reason=blocked response_id=7 current_response_id=8",
+                "2026-08-31 10:00:05 Google Live replayed_interrupt_audio reason=model_output_unblocked frames=1 bytes=10 response_id=8",
+                "2026-08-31 10:00:06 Google Live interrupt_input_finalized reason=speech_tail elapsed_ms=100 response_id=8 frames=1 bytes=10 peak_rms=1000",
+                "2026-08-31 10:00:07 Google Live model_audio_end_ready_to_listen response_id=8",
+            )
+        )
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn(
+            "BARGEIN_CORRELATION_ORDER_INVALID",
+            [item["code"] for item in verdict["failures"]],
+        )
+
+    def test_reliability_marker_outside_closed_window_fails(self):
+        verdict = self._analyze(
+            _window_lines()
+            + ["2026-08-31 10:01:00 Google Live receive loop started"]
+        )
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn(
+            "OUT_OF_WINDOW_RELIABILITY_MARKER",
+            [item["code"] for item in verdict["failures"]],
+        )
+
+    def test_window_anchors_and_candidate_identity_must_be_unique_and_well_formed(self):
+        cases = {
+            "missing_start": _window_lines()[1:],
+            "duplicate_start": [*_window_lines()[:1], *_window_lines()],
+            "wrong_end_id": _window_lines()[:-1]
+            + ["2026-08-31 10:00:59 Google Live reliability_window_end window_id=other"],
+            "timestamp_regression": _window_lines(
+                "2026-08-31 10:00:20 Google Live receive loop started",
+                "2026-08-31 10:00:19 Google Live receive loop stopped",
+            ),
+            "malformed_relevant_line": _window_lines(
+                "not-a-timestamp Google Live receive loop started"
+            ),
+        }
+
+        for name, lines in cases.items():
+            with self.subTest(name=name):
+                verdict = self._analyze(lines)
+                self.assertEqual(verdict["status"], "FAIL", verdict)
+                self.assertTrue(verdict["failures"])
+
+    def test_candidate_identity_anchor_accepts_json_string_spaces(self):
+        identity = {**CANDIDATE_IDENTITY, "firmwareIdentity": "firmware build 1"}
+
+        verdict = self._analyze(_window_lines(candidate_identity=identity))
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+        self.assertEqual(verdict["candidateIdentity"], identity)
+
+    def test_combined_evidence_rejects_missing_ambiguous_out_of_window_or_mismatched_inputs(self):
+        valid = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live user_interrupted reason=vad cancelled_response_id=7 next_response_id=8",
+                "2026-08-31 10:00:02 Google Live tts_state_stop_sent response_id=7 reason=interrupt",
+                "2026-08-31 10:00:03 Google Live stale_model_event_dropped type=audio reason=blocked response_id=7 current_response_id=8",
+                "2026-08-31 10:00:04 Google Live replayed_interrupt_audio reason=model_output_unblocked frames=1 bytes=10 response_id=8",
+                "2026-08-31 10:00:05 Google Live interrupt_input_finalized reason=speech_tail elapsed_ms=100 response_id=8 frames=1 bytes=10 peak_rms=1000",
+                "2026-08-31 10:00:06 Google Live model_audio_start_hold_input response_id=8",
+                "2026-08-31 10:00:07 Google Live model_audio_end_ready_to_listen response_id=8",
+            )
+        )
+        cases = {
+            "missing_identity": _transport_observation(candidateIdentity=None),
+            "wrong_identity": _transport_observation(
+                candidateIdentity={**CANDIDATE_IDENTITY, "gitSha": "other"}
+            ),
+            "wrong_window": _transport_observation(
+                logWindow={
+                    "windowId": "other",
+                    "start": "2026-08-31T10:00:00",
+                    "end": "2026-08-31T10:00:59",
+                }
+            ),
+            "already_passed_transport": _transport_observation(status="PASS"),
+            "invented_response_ids": _transport_observation(responseId="made-up"),
+            "malformed_latency": _transport_observation(bargeinStopMs=float("nan")),
+            "malformed_chunk_count": _transport_observation(
+                replacementBinaryChunks=True
+            ),
+            "latency_over_budget": _transport_observation(bargeinStopMs=501.0),
+            "output_gap_over_budget": _transport_observation(
+                maxServerOutputGapMs=251.0
+            ),
+        }
+
+        for name, observation in cases.items():
+            with self.subTest(name=name):
+                combined = correlate_websocket_bargein_evidence(
+                    observation,
+                    valid,
+                    expected_candidate_identity=CANDIDATE_IDENTITY,
+                )
+                self.assertEqual(combined["status"], "FAIL", combined)
+                self.assertFalse(combined["aggregateReleaseEligible"])
+
+    def test_multiple_complete_interrupt_chains_are_ambiguous(self):
+        chain = [
+            "Google Live user_interrupted reason=vad cancelled_response_id={old} next_response_id={new}",
+            "Google Live tts_state_stop_sent response_id={old} reason=interrupt",
+            "Google Live stale_model_event_dropped type=audio reason=blocked response_id={old} current_response_id={new}",
+            "Google Live replayed_interrupt_audio reason=model_output_unblocked frames=1 bytes=10 response_id={new}",
+            "Google Live interrupt_input_finalized reason=speech_tail elapsed_ms=100 response_id={new} frames=1 bytes=10 peak_rms=1000",
+            "Google Live model_audio_start_hold_input response_id={new}",
+            "Google Live model_audio_end_ready_to_listen response_id={new}",
+        ]
+        body = []
+        second = 1
+        for old, new in ((1, 2), (2, 3)):
+            for marker in chain:
+                body.append(
+                    f"2026-08-31 10:00:{second:02d} "
+                    + marker.format(old=old, new=new)
+                )
+                second += 1
+
+        verdict = self._analyze(_window_lines(*body))
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertEqual(verdict["correlation"]["status"], "AMBIGUOUS")
+        self.assertIn(
+            "AMBIGUOUS_BARGEIN_CORRELATION",
+            [item["code"] for item in verdict["failures"]],
+        )
+
+    def test_reports_never_copy_credentials_transcripts_raw_audio_or_exception_text(self):
+        secret = "super-secret-google-key"
+        verdict = self._analyze(
+            _window_lines(
+                f"2026-08-31 10:00:01 Authorization: Bearer {secret}",
+                f"2026-08-31 10:00:02 transcript source=user text={secret}",
+                f"2026-08-31 10:00:03 raw_audio={secret}",
+                f"2026-08-31 10:00:04 Traceback RuntimeError({secret})",
+            )
+        )
+
+        encoded = json.dumps(verdict)
+        self.assertNotIn(secret, encoded)
+        self.assertNotIn("Bearer", encoded)
+        self.assertNotIn("raw_audio", encoded)
+        self.assertIn("Traceback", verdict["fatalHits"])
+
+    def test_cli_check_reliability_embeds_json_and_exits_nonzero_on_failure(self):
+        tmp, path = _write_log(
+            _window_lines("2026-08-31 10:00:01 Google Live receive loop started")
+        )
+        self.addCleanup(tmp.cleanup)
+        out = Path(tmp.name) / "report.json"
+        stdout = io.StringIO()
+        argv = [
+            "analyze_google_live_log.py",
+            "--log",
+            str(path),
+            "--out-json",
+            str(out),
+            "--check-reliability",
+        ]
+
+        with patch.object(sys, "argv", argv), contextlib.redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as raised:
+                analyze_google_live_log.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        report = json.loads(out.read_text(encoding="utf-8"))
+        self.assertEqual(report["reliability"]["status"], "FAIL")
+
+    def test_cli_reliability_json_does_not_leak_legacy_exception_detail(self):
+        secret = "private-token-in-exception"
+        tmp, path = _write_log(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live receive loop started",
+                f"2026-08-31 10:00:02 Audio send loop exception {secret}",
+                "2026-08-31 10:00:03 Google Live receive loop stopped",
+            )
+        )
+        self.addCleanup(tmp.cleanup)
+        out = Path(tmp.name) / "report.json"
+        argv = [
+            "analyze_google_live_log.py",
+            "--log",
+            str(path),
+            "--out-json",
+            str(out),
+            "--check-reliability",
+        ]
+
+        with patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()):
+            analyze_google_live_log.main()
+
+        self.assertNotIn(secret, out.read_text(encoding="utf-8"))
 
 
 class AnalyzeGoogleLiveLogTest(unittest.TestCase):

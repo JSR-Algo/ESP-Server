@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import statistics
 import sys
@@ -18,7 +19,20 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+from scripts.google_live_reliability import (
+    GOOGLE_LIVE_LIMITS,
+    SCHEMA_VERSION,
+    redact_mapping,
+    reliability_verdict,
+)
+from scripts.physical_smoke_audit import (
+    FATAL_PATTERNS as PHYSICAL_FATAL_PATTERNS,
+)
+from scripts.physical_smoke_audit import (
+    FATAL_REGEX_PATTERNS as PHYSICAL_FATAL_REGEX_PATTERNS,
+)
 
 TS_RE = re.compile(r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 
@@ -120,6 +134,109 @@ P_MODEL_OUTPUT_CHUNK_DROPPED = re.compile(
 P_MODEL_OUTPUT_UNBLOCK_TRIGGER = re.compile(
     r"model_output_unblock_trigger source=(?P<source>\S+)"
 )
+
+P_RELIABILITY_WINDOW_START = re.compile(
+    r"Google Live reliability_window_start window_id=(?P<window_id>[A-Za-z0-9._:-]+) "
+    r"candidate_identity=(?P<candidate_identity>\{.*\})$"
+)
+P_RELIABILITY_WINDOW_END = re.compile(
+    r"Google Live reliability_window_end window_id=(?P<window_id>[A-Za-z0-9._:-]+)$"
+)
+P_RESPONSE_AUDIO_START = re.compile(
+    r"Google Live model_audio_start_hold_input response_id=(?P<response_id>\d+)"
+)
+P_RESPONSE_AUDIO_END = re.compile(
+    r"Google Live model_audio_end_ready_to_listen response_id=(?P<response_id>\d+)"
+)
+P_RESPONSE_AUDIO_FORWARDED = re.compile(
+    r"Google Live model_output_chunk_forwarded response_id=(?P<response_id>\d+)\b"
+)
+P_STALE_MODEL_DROP_IDS = re.compile(
+    r"Google Live stale_model_event_dropped type=(?P<type>\w+) reason=(?P<reason>\w+) "
+    r"response_id=(?P<response_id>\d+) current_response_id=(?P<current_response_id>\d+)"
+)
+P_REPLAYED_BUFFERED_AUDIO = re.compile(
+    r"Google Live replayed_buffered_audio frames=(?P<frames>\d+) bytes=(?P<bytes>\d+)"
+)
+P_WAITING_MODEL_TIMEOUT = re.compile(r"Google Live waiting_model_timeout\b")
+P_TIMEOUT_TERMINAL = re.compile(
+    r"Google Live waiting_model_timeout released_without_audio\b|"
+    r"Google Live silent_session_reopen_suppressed\b|"
+    r"Google Live lesson_step_failed\b"
+)
+P_NON_RETRIABLE_CLASSIFICATION = re.compile(
+    r"Google Live classify_error kind=(?P<kind>auth|quota|invalid_config) retry=no"
+)
+P_RECONNECT_REASON = re.compile(
+    r"reconnect_started reason=(?P<reason>\S+) attempt=(?P<attempt>\d+)"
+)
+P_SILENT_SESSION_REOPEN = re.compile(r"Google Live silent_session_reopen\b")
+P_HANDOFF_ACQUIRED = re.compile(r"lesson_start_handoff_(?:acquired|coalesced)\b")
+P_HANDOFF_RELEASED = re.compile(r"lesson_start_handoff_released\b")
+P_PENDING_TASK_CLOSE = re.compile(
+    r"Google Live connection_close pending_tasks=(?P<tasks>\S+)"
+)
+P_LESSON_STEP_START = re.compile(r"Google Live lesson_step_started step_id=(?P<step_id>\S+)")
+P_LESSON_STEP_PROGRESS = re.compile(
+    r"Google Live lesson_(?:step_progress|conversation_progress) step_id=(?P<step_id>\S+)"
+)
+P_LESSON_STEP_END = re.compile(r"Google Live lesson_step_ended step_id=(?P<step_id>\S+)")
+P_FIRMWARE_LESSON_PING = re.compile(r"firmware_ping lesson_step=(?P<step_id>\S+)")
+P_CLEAN_CONNECTION_CLOSE = re.compile(r"Client disconnected\b|Google Live clean_close\b")
+
+_RELIABILITY_MARKERS = (
+    P_RELIABILITY_WINDOW_START,
+    P_RELIABILITY_WINDOW_END,
+    P_RECV_START,
+    P_RECV_STOP,
+    P_RESPONSE_AUDIO_START,
+    P_RESPONSE_AUDIO_END,
+    P_RESPONSE_AUDIO_FORWARDED,
+    P_INTERRUPT,
+    P_TTS_STOP_SENT,
+    P_STALE_MODEL_DROP_IDS,
+    P_REPLAYED_INTERRUPT_AUDIO,
+    P_INTERRUPT_INPUT_FINALIZED,
+    P_REPLAYED_BUFFERED_AUDIO,
+    P_WAITING_MODEL_TIMEOUT,
+    P_RECV_TIMEOUT,
+    P_RECONNECT_STARTED,
+    P_SILENT_SESSION_REOPEN,
+    P_RECONNECT_SUCCEEDED,
+    P_RECONNECT_FAILED,
+    P_FALLBACK,
+    P_FALLBACK_DISABLED,
+    P_NON_RETRIABLE_CLASSIFICATION,
+    P_HANDOFF_ACQUIRED,
+    P_HANDOFF_RELEASED,
+    P_PENDING_TASK_CLOSE,
+    P_LESSON_STEP_START,
+    P_LESSON_STEP_PROGRESS,
+    P_LESSON_STEP_END,
+    P_FIRMWARE_LESSON_PING,
+    P_CLEAN_CONNECTION_CLOSE,
+)
+
+_STATEFULLY_ALLOWED_PHYSICAL_MARKERS = frozenset(
+    {
+        "Client disconnected",
+        "Google Live receive timed out",
+        "Google Live waiting_model_timeout",
+        "Google Live reconnect attempt",
+        "reconnect_started",
+        "interrupt_started reason=loud_input",
+        "Google Live user_interrupted reason=loud_input",
+        "audio_decision decision=suppress_echo reason=robot_speaking",
+        "audio_decision decision=hold_interrupt_audio reason=blocked_output",
+        "Google Live echo_bypass",
+        "Google Live echo_suppressed reason=robot_speaking",
+    }
+)
+_FORBIDDEN_LOG_MARKERS = tuple(
+    (pattern, re.compile(re.escape(pattern)))
+    for pattern in PHYSICAL_FATAL_PATTERNS
+    if pattern not in _STATEFULLY_ALLOWED_PHYSICAL_MARKERS
+) + tuple(PHYSICAL_FATAL_REGEX_PATTERNS)
 
 # ---------------------------------------------------------------------------
 # Latency-span extraction for PR5 §5.1 --check-chain
@@ -1015,6 +1132,724 @@ def summarize_pains(log_path: Path) -> dict:
     }
 
 
+def _failure(code: str, line: int, detail: str) -> dict[str, Any]:
+    return {"code": code, "line": line, "detail": detail}
+
+
+def _candidate_identity_valid(identity: Any) -> bool:
+    if not isinstance(identity, dict):
+        return False
+    required = {
+        "gitSha",
+        "imageDigest",
+        "firmwareIdentity",
+        "fixtureSha256",
+        "configFingerprint",
+    }
+    if set(identity) != required:
+        return False
+    if any(not isinstance(identity[key], str) or not identity[key] for key in required):
+        return False
+    return bool(
+        re.fullmatch(r"sha256:[0-9a-fA-F]{64}", identity["imageDigest"])
+        and re.fullmatch(r"[0-9a-fA-F]{64}", identity["fixtureSha256"])
+        and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", identity["configFingerprint"])
+    )
+
+
+def _is_reliability_line(line: str) -> bool:
+    return (
+        "Google Live reliability_window_" in line
+        or any(pattern.search(line) for pattern in _RELIABILITY_MARKERS)
+        or any(pattern.search(line) for _label, pattern in _FORBIDDEN_LOG_MARKERS)
+    )
+
+
+def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
+    """Verify one explicitly anchored Google Live evidence window in linear time."""
+    failures: list[dict[str, Any]] = []
+    fatal_hits: list[str] = []
+    start_anchor: dict[str, Any] | None = None
+    end_anchor: dict[str, Any] | None = None
+    active = False
+    previous_ts: datetime | None = None
+    receive_loops_active = 0
+    max_receive_loops_active = 0
+    response_starts: dict[int, int] = defaultdict(int)
+    replay_counts_by_reopen: dict[str, int] = {}
+    current_reopen: str | None = None
+    reopen_index = 0
+    pending_timeouts: list[dict[str, int]] = []
+    non_retriable_errors: dict[str, int] = {}
+    handoff_balance = 0
+    handoff_lines: list[int] = []
+    stale_audio_after_replacement = 0
+    interrupt_records: list[dict[str, Any]] = []
+    active_lesson_step: dict[str, Any] | None = None
+
+    with log_path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line_number, raw_line in enumerate(fh, 1):
+            line = raw_line.rstrip("\n")
+            start_match = P_RELIABILITY_WINDOW_START.search(line)
+            end_match = P_RELIABILITY_WINDOW_END.search(line)
+
+            if start_match:
+                if start_anchor is not None:
+                    failures.append(
+                        _failure(
+                            "DUPLICATE_WINDOW_START",
+                            line_number,
+                            "bounded window has more than one start anchor",
+                        )
+                    )
+                    continue
+                ts = parse_timestamp(line)
+                if ts is None:
+                    failures.append(
+                        _failure(
+                            "MALFORMED_WINDOW_START",
+                            line_number,
+                            "start anchor timestamp is invalid",
+                        )
+                    )
+                    continue
+                try:
+                    candidate_identity = json.loads(start_match.group("candidate_identity"))
+                except json.JSONDecodeError:
+                    candidate_identity = None
+                if not _candidate_identity_valid(candidate_identity):
+                    failures.append(
+                        _failure(
+                            "MALFORMED_CANDIDATE_IDENTITY",
+                            line_number,
+                            "start anchor candidate identity is invalid",
+                        )
+                    )
+                start_anchor = {
+                    "windowId": start_match.group("window_id"),
+                    "timestamp": ts,
+                    "line": line_number,
+                    "candidateIdentity": candidate_identity,
+                }
+                active = True
+                previous_ts = ts
+                continue
+
+            if end_match:
+                if start_anchor is None:
+                    failures.append(
+                        _failure(
+                            "WINDOW_START_MISSING",
+                            line_number,
+                            "end anchor appeared before a start anchor",
+                        )
+                    )
+                    continue
+                if end_anchor is not None:
+                    failures.append(
+                        _failure(
+                            "DUPLICATE_WINDOW_END",
+                            line_number,
+                            "bounded window has more than one end anchor",
+                        )
+                    )
+                    continue
+                ts = parse_timestamp(line)
+                if ts is None:
+                    failures.append(
+                        _failure(
+                            "MALFORMED_WINDOW_END",
+                            line_number,
+                            "end anchor timestamp is invalid",
+                        )
+                    )
+                    continue
+                if end_match.group("window_id") != start_anchor["windowId"]:
+                    failures.append(
+                        _failure(
+                            "WINDOW_ID_MISMATCH",
+                            line_number,
+                            "start and end anchors identify different windows",
+                        )
+                    )
+                if previous_ts is not None and ts < previous_ts:
+                    failures.append(
+                        _failure(
+                            "LOG_TIMESTAMP_REGRESSION",
+                            line_number,
+                            "end anchor precedes an earlier in-window event",
+                        )
+                    )
+                end_anchor = {
+                    "windowId": end_match.group("window_id"),
+                    "timestamp": ts,
+                    "line": line_number,
+                }
+                active = False
+                continue
+
+            if not active:
+                if _is_reliability_line(line):
+                    failures.append(
+                        _failure(
+                            "OUT_OF_WINDOW_RELIABILITY_MARKER",
+                            line_number,
+                            "reliability marker is outside the explicit anchors",
+                        )
+                    )
+                continue
+            ts = parse_timestamp(line)
+            if ts is None:
+                if _is_reliability_line(line):
+                    failures.append(
+                        _failure(
+                            "MALFORMED_RELIABILITY_LOG_LINE",
+                            line_number,
+                            "reliability marker has no valid timestamp",
+                        )
+                    )
+                continue
+            if previous_ts is not None and ts < previous_ts:
+                failures.append(
+                    _failure(
+                        "LOG_TIMESTAMP_REGRESSION",
+                        line_number,
+                        "in-window timestamps are not monotonic",
+                    )
+                )
+            previous_ts = ts
+
+            for label, pattern in _FORBIDDEN_LOG_MARKERS:
+                if pattern.search(line):
+                    if label not in fatal_hits:
+                        fatal_hits.append(label)
+                    failures.append(
+                        _failure("FORBIDDEN_LOG_MARKER", line_number, label)
+                    )
+
+            if P_RECV_START.search(line):
+                receive_loops_active += 1
+                max_receive_loops_active = max(
+                    max_receive_loops_active, receive_loops_active
+                )
+                if receive_loops_active > 1:
+                    failures.append(
+                        _failure(
+                            "RECEIVE_LOOP_OVERLAP",
+                            line_number,
+                            "more than one receive loop is active",
+                        )
+                    )
+                continue
+            if P_RECV_STOP.search(line):
+                receive_loops_active -= 1
+                if receive_loops_active < 0:
+                    failures.append(
+                        _failure(
+                            "RECEIVE_LOOP_STOP_WITHOUT_START",
+                            line_number,
+                            "receive loop stop has no active owner",
+                        )
+                    )
+                if pending_timeouts:
+                    pending_timeouts.clear()
+                continue
+
+            match = P_INTERRUPT.search(line)
+            if match:
+                interrupt_records.append(
+                    {
+                        "line": line_number,
+                        "cancelledResponseId": int(match.group("cancelled")),
+                        "replacementResponseId": int(match.group("next")),
+                        "oldResponseStopped": False,
+                        "staleSuppressed": False,
+                        "interruptAudioReplayed": False,
+                        "interruptInputFinalized": False,
+                        "replacementStarted": False,
+                        "replacementStopped": False,
+                        "phase": 0,
+                        "orderInvalid": False,
+                    }
+                )
+                continue
+
+            start = P_RESPONSE_AUDIO_START.search(line)
+            if start:
+                response_id = int(start.group("response_id"))
+                response_starts[response_id] += 1
+                for record in interrupt_records:
+                    if response_id == record["replacementResponseId"]:
+                        if record["phase"] != 4:
+                            record["orderInvalid"] = True
+                        record["replacementStarted"] = True
+                        record["phase"] = max(record["phase"], 5)
+                continue
+            end = P_RESPONSE_AUDIO_END.search(line)
+            if end:
+                response_id = int(end.group("response_id"))
+                for record in interrupt_records:
+                    if response_id == record["replacementResponseId"]:
+                        if record["phase"] != 5:
+                            record["orderInvalid"] = True
+                        record["replacementStopped"] = True
+                        record["phase"] = max(record["phase"], 6)
+                continue
+            forwarded = P_RESPONSE_AUDIO_FORWARDED.search(line)
+            if forwarded:
+                response_id = int(forwarded.group("response_id"))
+                for record in interrupt_records:
+                    if (
+                        record["replacementStarted"]
+                        and response_id == record["cancelledResponseId"]
+                    ):
+                        stale_audio_after_replacement += 1
+                        failures.append(
+                            _failure(
+                                "STALE_AUDIO_AFTER_REPLACEMENT",
+                                line_number,
+                                "cancelled response emitted audio after replacement start",
+                            )
+                        )
+                continue
+
+            if P_TTS_STOP_SENT.search(line) and "reason=interrupt" in line:
+                response_match = re.search(r"response_id=(\d+)", line)
+                for record in interrupt_records:
+                    if response_match is None or int(response_match.group(1)) == record["cancelledResponseId"]:
+                        if record["phase"] != 0:
+                            record["orderInvalid"] = True
+                        record["oldResponseStopped"] = True
+                        record["phase"] = max(record["phase"], 1)
+                        break
+                continue
+            stale = P_STALE_MODEL_DROP_IDS.search(line)
+            if stale:
+                old_id = int(stale.group("response_id"))
+                current_id = int(stale.group("current_response_id"))
+                for record in interrupt_records:
+                    if (
+                        old_id == record["cancelledResponseId"]
+                        and current_id == record["replacementResponseId"]
+                    ):
+                        if record["phase"] != 1:
+                            record["orderInvalid"] = True
+                        record["staleSuppressed"] = True
+                        record["phase"] = max(record["phase"], 2)
+                continue
+            replay = P_REPLAYED_INTERRUPT_AUDIO.search(line)
+            if replay:
+                response_id = int(replay.group("response_id"))
+                for record in interrupt_records:
+                    if response_id == record["replacementResponseId"]:
+                        if record["phase"] != 2:
+                            record["orderInvalid"] = True
+                        record["interruptAudioReplayed"] = True
+                        record["phase"] = max(record["phase"], 3)
+                continue
+            finalized = P_INTERRUPT_INPUT_FINALIZED.search(line)
+            if finalized:
+                response_id = int(finalized.group("response_id"))
+                for record in interrupt_records:
+                    if response_id == record["replacementResponseId"]:
+                        if record["phase"] != 3:
+                            record["orderInvalid"] = True
+                        record["interruptInputFinalized"] = True
+                        record["phase"] = max(record["phase"], 4)
+                continue
+
+            reconnect_owner = P_RECONNECT_REASON.search(line)
+            if reconnect_owner or P_SILENT_SESSION_REOPEN.search(line):
+                reopen_index += 1
+                current_reopen = f"reopen-{reopen_index}"
+                replay_counts_by_reopen[current_reopen] = 0
+            if P_RECONNECT_SUCCEEDED.search(line):
+                if current_reopen is None:
+                    reopen_index += 1
+                    current_reopen = f"reopen-{reopen_index}"
+                    replay_counts_by_reopen[current_reopen] = 0
+                pending_timeouts.clear()
+                continue
+            buffered_replay = P_REPLAYED_BUFFERED_AUDIO.search(line)
+            if buffered_replay:
+                if current_reopen is None:
+                    failures.append(
+                        _failure(
+                            "BUFFER_REPLAY_WITHOUT_REOPEN",
+                            line_number,
+                            "buffered audio replay has no successful reopen owner",
+                        )
+                    )
+                else:
+                    replay_counts_by_reopen[current_reopen] += 1
+                    if replay_counts_by_reopen[current_reopen] > 1:
+                        failures.append(
+                            _failure(
+                                "DUPLICATE_BUFFER_REPLAY",
+                                line_number,
+                                "one reopen replayed buffered audio more than once",
+                            )
+                        )
+                continue
+
+            if P_WAITING_MODEL_TIMEOUT.search(line) or P_RECV_TIMEOUT.search(line):
+                pending_timeouts.append({"line": line_number})
+                if P_TIMEOUT_TERMINAL.search(line):
+                    pending_timeouts.clear()
+                continue
+            if P_CLEAN_CONNECTION_CLOSE.search(line):
+                pending_timeouts.clear()
+                continue
+            if (
+                P_RECONNECT_FAILED.search(line)
+                or P_FALLBACK.search(line)
+                or P_FALLBACK_DISABLED.search(line)
+                or P_TIMEOUT_TERMINAL.search(line)
+            ):
+                pending_timeouts.clear()
+
+            classified = P_NON_RETRIABLE_CLASSIFICATION.search(line)
+            if classified:
+                non_retriable_errors[classified.group("kind")] = line_number
+                continue
+            reconnect = reconnect_owner
+            if reconnect and reconnect.group("reason") in non_retriable_errors:
+                failures.append(
+                    _failure(
+                        "NON_RETRIABLE_RECONNECT",
+                        line_number,
+                        "auth/quota/config error was followed by reconnect",
+                    )
+                )
+                continue
+
+            if P_HANDOFF_ACQUIRED.search(line):
+                handoff_balance += 1
+                handoff_lines.append(line_number)
+                continue
+            if P_HANDOFF_RELEASED.search(line):
+                handoff_balance = 0
+                handoff_lines.clear()
+                continue
+            pending_close = P_PENDING_TASK_CLOSE.search(line)
+            if pending_close:
+                tasks = pending_close.group("tasks").strip().lower()
+                if tasks not in {"none", "[]", "0"}:
+                    failures.append(
+                        _failure(
+                            "PENDING_TASK_AT_CLOSE",
+                            line_number,
+                            "connection closed with provider-owned work pending",
+                        )
+                    )
+                continue
+
+            lesson_start = P_LESSON_STEP_START.search(line)
+            if lesson_start:
+                active_lesson_step = {
+                    "stepId": lesson_start.group("step_id"),
+                    "pingLine": None,
+                    "progressAfterPing": False,
+                }
+                continue
+            lesson_ping = P_FIRMWARE_LESSON_PING.search(line)
+            if lesson_ping and active_lesson_step is not None:
+                if lesson_ping.group("step_id") == active_lesson_step["stepId"]:
+                    active_lesson_step["pingLine"] = line_number
+                continue
+            lesson_progress = P_LESSON_STEP_PROGRESS.search(line)
+            if lesson_progress and active_lesson_step is not None:
+                if lesson_progress.group("step_id") == active_lesson_step["stepId"]:
+                    active_lesson_step["progressAfterPing"] = True
+                continue
+            lesson_end = P_LESSON_STEP_END.search(line)
+            if lesson_end and active_lesson_step is not None:
+                if (
+                    lesson_end.group("step_id") == active_lesson_step["stepId"]
+                    and active_lesson_step["pingLine"] is not None
+                    and not active_lesson_step["progressAfterPing"]
+                ):
+                    failures.append(
+                        _failure(
+                            "LESSON_PING_WITHOUT_PROGRESS",
+                            active_lesson_step["pingLine"],
+                            "firmware pings continued without lesson-step progress",
+                        )
+                    )
+                active_lesson_step = None
+
+    if start_anchor is None:
+        failures.append(_failure("WINDOW_START_MISSING", 0, "start anchor is required"))
+    if end_anchor is None:
+        failures.append(_failure("WINDOW_END_MISSING", 0, "end anchor is required"))
+    if receive_loops_active != 0:
+        failures.append(
+            _failure(
+                "RECEIVE_LOOP_IMBALANCE",
+                end_anchor["line"] if end_anchor else 0,
+                "receive loop starts and stops are not balanced",
+            )
+        )
+    if pending_timeouts:
+        for timeout in pending_timeouts:
+            failures.append(
+                _failure(
+                    "UNRECOVERED_TIMEOUT",
+                    timeout["line"],
+                    "waiting-model timeout has no bounded terminal outcome",
+                )
+            )
+    if handoff_balance:
+        for line_number in handoff_lines:
+            failures.append(
+                _failure(
+                    "UNRELEASED_LESSON_HANDOFF",
+                    line_number,
+                    "lesson handoff was not transferred or released",
+                )
+            )
+
+    duplicate_response_ids = sorted(
+        response_id for response_id, count in response_starts.items() if count > 1
+    )
+    for response_id in duplicate_response_ids:
+        failures.append(
+            _failure(
+                "DUPLICATE_RESPONSE_ID",
+                0,
+                f"response {response_id} started more than once",
+            )
+        )
+
+    required_correlation_fields = (
+        "oldResponseStopped",
+        "staleSuppressed",
+        "interruptAudioReplayed",
+        "interruptInputFinalized",
+        "replacementStarted",
+        "replacementStopped",
+    )
+    correlation_failures = []
+    for record in interrupt_records:
+        if record["orderInvalid"]:
+            failures.append(
+                _failure(
+                    "BARGEIN_CORRELATION_ORDER_INVALID",
+                    record["line"],
+                    "barge-in evidence markers are not in causal order",
+                )
+            )
+        missing = [field for field in required_correlation_fields if not record[field]]
+        if missing:
+            correlation_failures.append(
+                {
+                    "line": record["line"],
+                    "missing": missing,
+                }
+            )
+    if correlation_failures:
+        for item in correlation_failures:
+            failures.append(
+                _failure(
+                    "BARGEIN_CORRELATION_INCOMPLETE",
+                    item["line"],
+                    ",".join(item["missing"]),
+                )
+            )
+    if len(interrupt_records) > 1 and not correlation_failures:
+        failures.append(
+            _failure(
+                "AMBIGUOUS_BARGEIN_CORRELATION",
+                interrupt_records[1]["line"],
+                "bounded window contains more than one complete interrupt chain",
+            )
+        )
+
+    if (
+        len(interrupt_records) == 1
+        and not correlation_failures
+        and not interrupt_records[0]["orderInvalid"]
+    ):
+        record = interrupt_records[0]
+        correlation = {
+            "status": "PASS",
+            "cancelledResponseId": record["cancelledResponseId"],
+            "replacementResponseId": record["replacementResponseId"],
+        }
+    elif not interrupt_records:
+        correlation = {"status": "NOT_OBSERVED"}
+    else:
+        correlation = {
+            "status": "FAIL" if correlation_failures else "AMBIGUOUS",
+            "observedInterrupts": len(interrupt_records),
+        }
+
+    candidate_identity = (
+        start_anchor.get("candidateIdentity") if start_anchor is not None else None
+    )
+    log_window = None
+    if start_anchor is not None and end_anchor is not None:
+        log_window = {
+            "windowId": start_anchor["windowId"],
+            "start": start_anchor["timestamp"].isoformat(),
+            "end": end_anchor["timestamp"].isoformat(),
+        }
+    report = {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": "google_live_log_reliability",
+        "status": "PASS" if not failures else "FAIL",
+        "candidateIdentity": candidate_identity,
+        "logWindow": log_window,
+        "receiveLoopBalance": receive_loops_active,
+        "maxReceiveLoopsActive": max_receive_loops_active,
+        "replayCountsByReopen": replay_counts_by_reopen,
+        "duplicateResponseIds": duplicate_response_ids,
+        "staleAudioAfterReplacement": stale_audio_after_replacement,
+        "unrecoveredTimeouts": [item["line"] for item in pending_timeouts],
+        "unreleasedLessonHandoffs": handoff_lines,
+        "fatalHits": fatal_hits,
+        "correlation": correlation,
+        "failures": failures,
+    }
+    return redact_mapping(report)
+
+
+def correlate_websocket_bargein_evidence(
+    transport_observation: dict[str, Any],
+    log_verdict: dict[str, Any],
+    *,
+    expected_candidate_identity: dict[str, Any],
+) -> dict[str, Any]:
+    """Upgrade Task 4's pending transport record only with exact bounded log proof."""
+    failures: list[dict[str, Any]] = []
+    expected_pending = "PENDING_BOUNDED_SERVER_LOG_VERIFICATION"
+    required_transport = {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": "websocket_audio_bargein_transport",
+        "status": "SKIPPED",
+        "pendingCode": expected_pending,
+        "correlationSource": "server_log",
+        "correlationStatus": expected_pending,
+        "aggregateReleaseEligible": False,
+        "interruptStopMarkerObserved": True,
+        "replacementResponseStarted": True,
+        "replacementResponseStopped": True,
+    }
+    for contract_field, expected in required_transport.items():
+        if transport_observation.get(contract_field) != expected:
+            failures.append(
+                {"code": "TRANSPORT_CONTRACT_MISMATCH", "field": contract_field}
+            )
+    replacement_chunks = transport_observation.get("replacementBinaryChunks")
+    if (
+        isinstance(replacement_chunks, bool)
+        or not isinstance(replacement_chunks, int)
+        or replacement_chunks < 1
+    ):
+        failures.append({"code": "TRANSPORT_REPLACEMENT_AUDIO_MISSING"})
+        replacement_chunks = 0
+    bargein_stop_ms = transport_observation.get("bargeinStopMs")
+    if (
+        isinstance(bargein_stop_ms, bool)
+        or not isinstance(bargein_stop_ms, (int, float))
+        or not math.isfinite(bargein_stop_ms)
+        or bargein_stop_ms < 0
+    ):
+        failures.append({"code": "TRANSPORT_LATENCY_INVALID"})
+        bargein_stop_ms = None
+    elif bargein_stop_ms > GOOGLE_LIVE_LIMITS["physicalBargeinP95Ms"]:
+        failures.append({"code": "BARGEIN_STOP_LATENCY_EXCEEDED"})
+    max_output_gap_ms = transport_observation.get("maxServerOutputGapMs")
+    if (
+        isinstance(max_output_gap_ms, bool)
+        or not isinstance(max_output_gap_ms, (int, float))
+        or not math.isfinite(max_output_gap_ms)
+        or max_output_gap_ms < 0
+    ):
+        failures.append({"code": "TRANSPORT_OUTPUT_GAP_INVALID"})
+        max_output_gap_ms = None
+    elif max_output_gap_ms > GOOGLE_LIVE_LIMITS["serverOutputGapMaxMs"]:
+        failures.append({"code": "SERVER_OUTPUT_GAP_EXCEEDED"})
+    if _contains_response_id_key(transport_observation):
+        failures.append({"code": "TRANSPORT_RESPONSE_ID_NOT_ALLOWED"})
+    if transport_observation.get("candidateIdentity") != expected_candidate_identity:
+        failures.append({"code": "CANDIDATE_IDENTITY_MISMATCH", "layer": "transport"})
+    if log_verdict.get("candidateIdentity") != expected_candidate_identity:
+        failures.append({"code": "CANDIDATE_IDENTITY_MISMATCH", "layer": "server_log"})
+    if transport_observation.get("logWindow") != log_verdict.get("logWindow"):
+        failures.append({"code": "LOG_WINDOW_MISMATCH"})
+    if log_verdict.get("correlation", {}).get("status") != "PASS":
+        failures.append({"code": "SERVER_LOG_CORRELATION_NOT_PASS"})
+
+    transport_layer = {
+        "name": "websocket_audio_bargein_transport",
+        "status": "PASS" if not failures else "FAIL",
+        "candidateIdentity": transport_observation.get("candidateIdentity"),
+    }
+    log_layer = {
+        "name": "google_live_log_reliability",
+        "status": log_verdict.get("status"),
+        "candidateIdentity": log_verdict.get("candidateIdentity"),
+    }
+    verdict = reliability_verdict(
+        expected_candidate_identity,
+        [transport_layer, log_layer],
+    )
+    failures.extend(verdict["failures"])
+    status = "PASS" if not failures else "FAIL"
+    correlation = log_verdict.get("correlation", {})
+    report = {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": "websocket_audio_bargein_correlated",
+        "status": status,
+        "candidateIdentity": expected_candidate_identity,
+        "logWindow": log_verdict.get("logWindow"),
+        "correlationSource": "server_log",
+        "correlationStatus": "PASS" if status == "PASS" else "FAIL",
+        "aggregateReleaseEligible": status == "PASS",
+        "oldResponseStopped": status == "PASS",
+        "replacementResponseStarted": bool(
+            transport_observation.get("replacementResponseStarted")
+        ),
+        "replacementResponseStopped": bool(
+            transport_observation.get("replacementResponseStopped")
+        ),
+        "replacementBinaryChunks": replacement_chunks,
+        "bargeinStopMs": bargein_stop_ms,
+        "maxServerOutputGapMs": max_output_gap_ms,
+        "cancelledResponseId": correlation.get("cancelledResponseId"),
+        "replacementResponseId": correlation.get("replacementResponseId"),
+        "layers": verdict["layers"],
+        "failures": failures,
+    }
+    return redact_mapping(report)
+
+
+def _contains_response_id_key(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized = re.sub(r"[^a-zA-Z0-9]", "", str(key)).lower()
+            if "responseid" in normalized or _contains_response_id_key(item):
+                return True
+    elif isinstance(value, list):
+        return any(_contains_response_id_key(item) for item in value)
+    return False
+
+
+def _sanitize_reliability_cli_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Remove legacy analyzer fields that can contain raw exception text."""
+    safe = dict(report)
+    safe_sessions = []
+    for session in report.get("per_session", []):
+        safe_session = dict(session)
+        safe_session.pop("drop_event", None)
+        safe_session.pop("fallback_reason", None)
+        safe_session.pop("fallback_disabled_reason", None)
+        safe_sessions.append(safe_session)
+    safe["per_session"] = safe_sessions
+    return redact_mapping(safe)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--log", required=True, type=Path, help="Path to server.log")
@@ -1042,6 +1877,14 @@ def main():
             "P3 response-overlap, P4 function-calls, P5 music-ducking."
         ),
     )
+    parser.add_argument(
+        "--check-reliability",
+        action="store_true",
+        help=(
+            "Verify the explicitly anchored Google Live reliability window, "
+            "embed the result in JSON output, and exit non-zero on failure."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.log.exists():
@@ -1065,6 +1908,11 @@ def main():
         return
 
     report = analyze(args.log)
+    reliability = None
+    if getattr(args, "check_reliability", False):
+        report = _sanitize_reliability_cli_report(report)
+        reliability = analyze_reliability_window(args.log)
+        report["reliability"] = reliability
     if args.out_json:
         args.out_json.parent.mkdir(parents=True, exist_ok=True)
         args.out_json.write_text(json.dumps(report, indent=2, default=str))
@@ -1075,6 +1923,8 @@ def main():
         print(f"Wrote markdown report: {args.out_md}")
     if not args.out_json and not args.out_md:
         print(json.dumps(report, indent=2, default=str))
+    if reliability is not None and reliability["status"] != "PASS":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
