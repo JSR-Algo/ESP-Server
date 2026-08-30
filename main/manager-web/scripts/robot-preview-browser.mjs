@@ -1,4 +1,4 @@
-import { constants } from 'node:fs';
+import { chmodSync, constants, mkdtempSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath } from 'node:fs/promises';
@@ -411,7 +411,7 @@ async function terminateOwnedWorker(child, deadline, timeoutMs) {
   return waitForProcessExit(child, remainingMs());
 }
 
-export async function startPinnedRobotPreviewChromiumAcquisition({
+export function startPinnedRobotPreviewChromiumAcquisition({
   environment = process.env,
   metadataPath = METADATA_PATH,
   platform = process.platform,
@@ -433,9 +433,22 @@ export async function startPinnedRobotPreviewChromiumAcquisition({
   cleanupReapTimeoutMs = 1000,
   cleanupRetryLimit = 3,
 } = {}) {
-  const leaseRoot = await mkdtemp(join(stagingParent, 'tbot-robot-preview-browser-'));
-  await chmod(leaseRoot, 0o700);
   const owner = 'acquirePinnedRobotPreviewChromium';
+  const leaseRoot = mkdtempSync(join(stagingParent, 'tbot-robot-preview-browser-'));
+  try {
+    chmodSync(leaseRoot, 0o700);
+  } catch (error) {
+    try {
+      rmSync(leaseRoot, { recursive: true, force: true });
+    } catch (cleanupError) {
+      throw acquisitionOwnership(
+        new Error(`${error.message}; synchronous lease cleanup failed: ${cleanupError.message}`, { cause: cleanupError }),
+        leaseRoot,
+        null,
+      );
+    }
+    throw acquisitionOwnership(error, leaseRoot, null);
+  }
   let worker;
   let settled = false;
   let workerSpawnFailed = false;
@@ -569,7 +582,6 @@ export async function startPinnedRobotPreviewChromiumAcquisition({
   completion.catch(() => {});
   const cancel = (reason = new Error('Candidate browser acquisition cancelled')) => {
     fail(reason);
-    return completion;
   };
   return {
     retainedLeasePath: leaseRoot,
@@ -582,7 +594,7 @@ export async function startPinnedRobotPreviewChromiumAcquisition({
 }
 
 export async function acquirePinnedRobotPreviewChromium(options = {}) {
-  const acquisition = await startPinnedRobotPreviewChromiumAcquisition(options);
+  const acquisition = startPinnedRobotPreviewChromiumAcquisition(options);
   return acquisition.completion;
 }
 

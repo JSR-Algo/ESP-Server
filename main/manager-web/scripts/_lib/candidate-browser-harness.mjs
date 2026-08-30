@@ -54,16 +54,43 @@ async function stopChild(child, remainingMs, label) {
 
 async function closeSocket(socket, timeoutMs = 500) {
   if (!socket || socket.readyState === 3) return;
+  const deadline = Date.now() + Math.max(0, timeoutMs);
   const ignoreClosingError = () => {};
   socket.on('error', ignoreClosingError);
   try {
     const closed = await waitForEventOrTimeout(
-      socket, 'close', Math.max(0, timeoutMs), () => socket.close(), () => socket.readyState === 3
+      socket, 'close', Math.max(0, Math.floor(timeoutMs / 2)), () => socket.close(), () => socket.readyState === 3
     );
-    if (!closed) socket.terminate();
+    if (!closed) {
+      socket.terminate();
+      const terminated = socket.readyState === 3 || await waitForEventOrTimeout(
+        socket, 'close', Math.max(0, deadline - Date.now()), () => {}, () => socket.readyState === 3
+      );
+      if (!terminated) throw new Error('DevTools socket was not reaped before the lifecycle deadline');
+    }
   } finally {
     socket.off('error', ignoreClosingError);
   }
+}
+
+function ownDevToolsSocket(socket) {
+  let started = false;
+  let resolveCompletion;
+  let rejectCompletion;
+  const completion = new Promise((resolve, reject) => {
+    resolveCompletion = resolve;
+    rejectCompletion = reject;
+  });
+  completion.catch(() => {});
+  return {
+    socket,
+    completion,
+    cancel(timeoutMs) {
+      if (started) return;
+      started = true;
+      closeSocket(socket, timeoutMs).then(resolveCompletion, rejectCompletion);
+    },
+  };
 }
 
 async function defaultWaitForDevToolsPort(path, timeoutMs, signal) {
@@ -85,7 +112,9 @@ export async function withCandidateBoundBrowser({
   fetchDevToolsTarget = (debugPort, signal) => fetch(
     `http://127.0.0.1:${debugPort}/json/new?about:blank`, { method: 'PUT', signal }
   ).then((response) => response.json()),
-  createDevToolsSocket = (url) => new WebSocket(url),
+  startDevToolsSocket = (url) => {
+    return ownDevToolsSocket(new WebSocket(url));
+  },
   operationTimeoutMs = DEFAULT_OPERATION_TIMEOUT_MS,
   readinessTimeoutMs = DEFAULT_READINESS_TIMEOUT_MS,
   readinessPollMs = 50,
@@ -93,8 +122,10 @@ export async function withCandidateBoundBrowser({
 }, run) {
   let lease;
   let acquisition;
+  let acquisitionOwned = false;
   let child;
   let socket;
+  let socketHandle;
   const pending = new Map();
   let commandId = 0;
   let rejectLifecycle;
@@ -161,17 +192,26 @@ export async function withCandidateBoundBrowser({
   try {
     try {
       try {
-        acquisition = await lifecycleBounded(
-          startBrowserAcquisition({ deadline: runtimeDeadline, cleanupDeadline: lifecycleDeadline }),
-          `${label} candidate browser acquisition worker start`,
-        );
+        acquisition = startBrowserAcquisition({ deadline: runtimeDeadline, cleanupDeadline: lifecycleDeadline });
+        if (!acquisition || typeof acquisition !== 'object' || typeof acquisition.then === 'function'
+          || typeof acquisition.cancel !== 'function' || typeof acquisition.completion?.then !== 'function') {
+          throw new Error(`${label} candidate browser acquisition starter must synchronously return an owned handle`);
+        }
+        acquisitionOwned = true;
         lease = await lifecycleBounded(
           acquisition.completion, `${label} candidate browser acquisition`, operationTimeoutMs
         );
       } catch (error) {
-        if (acquisition) {
+        if (acquisitionOwned) {
           try {
-            await acquisition.cancel(error);
+            const cancellation = acquisition.cancel(error);
+            if (typeof cancellation?.then === 'function') {
+              throw new Error(`${label} candidate browser acquisition cancel must synchronously start owned cleanup`);
+            }
+            await lifecycleBounded(
+              acquisition.completion, `${label} candidate browser acquisition cancellation`,
+              operationTimeoutMs, () => {}, remainingMs,
+            );
           } catch (acquisitionError) {
             throw acquisitionError;
           }
@@ -206,13 +246,15 @@ export async function withCandidateBoundBrowser({
     } finally {
       fetchController.abort();
     }
-    const socketCreation = Promise.resolve(createDevToolsSocket(target.webSocketDebuggerUrl));
-    try {
-      socket = await bounded(socketCreation, `${label} DevTools socket creation`);
-    } catch (error) {
-      socketCreation.then((createdSocket) => closeSocket(createdSocket, remainingMs()).catch(() => {}), () => {});
-      throw error;
+    const startedSocket = startDevToolsSocket(target.webSocketDebuggerUrl);
+    socket = startedSocket?.socket;
+    if (!startedSocket || typeof startedSocket !== 'object' || typeof startedSocket.then === 'function'
+      || !socket || typeof startedSocket.cancel !== 'function'
+      || typeof startedSocket.completion?.then !== 'function') {
+      if (socket) socketHandle = ownDevToolsSocket(socket);
+      throw new Error(`${label} DevTools socket starter must synchronously return an owned handle`);
     }
+    socketHandle = startedSocket;
     socket.on('error', (error) => failLifecycle(new Error(`${label} DevTools socket failed: ${error.message}`)));
     socket.on('close', () => failLifecycle(new Error(`${label} DevTools socket closed`)));
     socket.on('message', (raw) => {
@@ -281,6 +323,24 @@ export async function withCandidateBoundBrowser({
       throw addOwnership(error);
     }
   } finally {
+    const socketDeadline = Date.now() + Math.min(socketCloseReserveMs, remainingMs());
+    let socketReapError;
+    if (socketHandle) {
+      try {
+        const cancelTimeoutMs = Math.max(0, Math.min(remainingMs(), socketDeadline - Date.now()));
+        const cancellation = socketHandle.cancel(cancelTimeoutMs);
+        if (typeof cancellation?.then === 'function') {
+          throw new Error(`${label} DevTools socket cancel must synchronously start owned cleanup`);
+        }
+        await lifecycleBounded(
+          socketHandle.completion,
+          `${label} DevTools socket cleanup`, operationTimeoutMs, () => {},
+          () => Math.max(0, Math.min(remainingMs(), socketDeadline - Date.now())),
+        );
+      } catch (error) {
+        socketReapError = addOwnership(error);
+      }
+    }
     const childDeadline = Date.now() + Math.min(childReapReserveMs, remainingMs());
     let childReapError;
     try {
@@ -294,8 +354,8 @@ export async function withCandidateBoundBrowser({
         error.childPid ||= child?.pid;
       }
     }
-    await closeSocket(socket, Math.min(socketCloseReserveMs, remainingMs())).catch(() => {});
     if (childReapError) throw childReapError;
+    if (socketReapError) throw socketReapError;
     if (lease) {
       try {
         await lifecycleBounded(

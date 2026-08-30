@@ -333,15 +333,17 @@ test('owned acquisition exposes lease identity and worker handle before staging 
   const value = await fixture();
   const child = fakeAcquisitionWorker();
   try {
-    const acquisition = await startPinnedRobotPreviewChromiumAcquisition({
+    const acquisition = startPinnedRobotPreviewChromiumAcquisition({
       ...value, stagingParent: value.base, deadline: Date.now() + 100,
       spawnAcquisitionWorker: () => child,
     });
+    assert.equal(typeof acquisition?.then, 'undefined');
     assert.match(acquisition.retainedLeasePath, /tbot-robot-preview-browser-/);
     assert.equal(acquisition.leaseOwner, 'acquirePinnedRobotPreviewChromium');
     assert.equal(acquisition.worker, child);
     assert.equal(acquisition.workerPid, 4343);
-    await assert.rejects(acquisition.cancel(new Error('test cancellation')), (error) => {
+    acquisition.cancel(new Error('test cancellation'));
+    await assert.rejects(acquisition.completion, (error) => {
       assert.equal(error.retainedLeasePath, acquisition.retainedLeasePath);
       assert.equal(error.leaseOwner, acquisition.leaseOwner);
       assert.equal(error.workerPid, 4343);
