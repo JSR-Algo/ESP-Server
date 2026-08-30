@@ -1351,14 +1351,8 @@ def _local_postgres_identity(value: object) -> tuple[str, int, str] | None:
         literal_host = urlsplit(value).hostname.lower()
     except (AttributeError, UnicodeError, ValueError):
         return None
-    if literal_host not in {"localhost", "127.0.0.1", "::1"}:
+    if literal_host not in {"127.0.0.1", "::1"}:
         return None
-    if literal_host == "localhost":
-        addresses = _resolved_postgres_addresses(literal_host, identity[1])
-        if addresses is None or not all(
-            ipaddress.ip_address(address).is_loopback for address in addresses
-        ):
-            return None
     return ("loopback", identity[1], identity[2])
 
 

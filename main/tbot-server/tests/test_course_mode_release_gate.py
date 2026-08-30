@@ -672,62 +672,33 @@ def test_postgres_url_without_query_does_not_call_strict_query_parser(
     )
 
 
-def test_localhost_target_requires_all_resolved_addresses_to_be_loopback(
+def test_localhost_target_is_blocked_without_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gate.threading,
+        "Thread",
+        lambda *args, **kwargs: pytest.fail("target localhost must be rejected without resolution"),
+    )
+
+    assert gate._local_postgres_identity("postgresql://localhost:5432/course_mode") is None
+
+
+def test_numeric_loopback_targets_do_not_call_resolver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         gate.socket,
         "getaddrinfo",
-        lambda *args, **kwargs: [
-            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 5432)),
-            (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("::1", 5432, 0, 0)),
-        ],
+        lambda *args, **kwargs: pytest.fail("numeric target URLs must not resolve hostnames"),
     )
 
-    assert gate._local_postgres_identity("postgresql://localhost:5432/course_mode") == (
+    assert gate._local_postgres_identity("postgresql://127.0.0.1:5432/course_mode") == (
         "loopback", 5432, "course_mode",
     )
-
-
-def test_localhost_target_blocks_mixed_loopback_and_remote_resolution(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        gate.socket,
-        "getaddrinfo",
-        lambda *args, **kwargs: [
-            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 5432)),
-            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("203.0.113.10", 5432)),
-        ],
+    assert gate._local_postgres_identity("postgresql://[::1]:5432/course_mode") == (
+        "loopback", 5432, "course_mode",
     )
-
-    assert gate._local_postgres_identity("postgresql://localhost:5432/course_mode") is None
-
-
-def test_localhost_target_blocks_unresolved_and_timed_out_resolution(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fail_resolution(*args, **kwargs):
-        raise socket.gaierror(socket.EAI_NONAME, "not known")
-
-    monkeypatch.setattr(gate.socket, "getaddrinfo", fail_resolution)
-    assert gate._local_postgres_identity("postgresql://localhost:5432/course_mode") is None
-
-    class NeverFinishes:
-        def __init__(self, *, target, daemon):
-            assert callable(target) and daemon is True
-
-        def start(self) -> None:
-            pass
-
-        def join(self, timeout: float) -> None:
-            assert timeout == 2.0
-
-        def is_alive(self) -> bool:
-            return True
-
-    monkeypatch.setattr(gate.threading, "Thread", NeverFinishes)
-    assert gate._local_postgres_identity("postgresql://localhost:5432/course_mode") is None
 
 
 def test_loopback_target_aliases_share_one_database_identity(
@@ -736,15 +707,12 @@ def test_loopback_target_aliases_share_one_database_identity(
     monkeypatch.setattr(
         gate.socket,
         "getaddrinfo",
-        lambda *args, **kwargs: [
-            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 5432)),
-        ],
+        lambda *args, **kwargs: pytest.fail("numeric target URLs must not resolve hostnames"),
     )
 
     identities = {
         gate._local_postgres_identity(url)
         for url in (
-            "postgresql://user@localhost:5432/course_mode",
             "postgresql://other@127.0.0.1:5432/course_mode",
             "postgresql://third@[::1]:5432/course_mode",
         )
@@ -998,6 +966,27 @@ def test_live_db_target_urls_reject_resolver_aliases(
     monkeypatch.setattr(
         gate, "run_bounded_command",
         lambda *args, **kwargs: pytest.fail("target DB resolver aliases must not run"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
+
+
+def test_live_db_gate_blocks_localhost_target_before_command(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _live_db_source(
+        database_a="postgresql://operator@localhost:55431/course_mode_a",
+    )
+    monkeypatch.setattr(
+        gate.threading,
+        "Thread",
+        lambda *args, **kwargs: pytest.fail("target localhost must not resolve"),
+    )
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("localhost target must block before command"),
     )
 
     result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
