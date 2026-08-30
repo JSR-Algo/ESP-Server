@@ -1125,6 +1125,56 @@ class ConnectionHandler:
             return False
         return isinstance(payload, dict) and payload.get("type") == "evidence_finalize"
 
+    @staticmethod
+    def _validated_evidence_transition_result(scope, result):
+        if not isinstance(scope, dict) or not isinstance(result, dict):
+            return None
+        initial_id = scope.get("initialLiveConnectionId") or scope.get(
+            "liveConnectionId"
+        )
+        immutable_matches = (
+            result.get("journeyId") == scope.get("journeyId")
+            and result.get("connectionId") == scope.get("connectionId")
+            and result.get("peerIdentityHash") == scope.get("peerIdentityHash")
+            and result.get("initialLiveConnectionId") == initial_id
+        )
+        transitions = result.get("liveConnectionTransitions")
+        if not immutable_matches or not isinstance(transitions, list):
+            return None
+        current_id = initial_id
+        previous_attempt = 0
+        normalized = []
+        for transition in transitions:
+            if not isinstance(transition, dict):
+                return None
+            attempt = transition.get("attempt")
+            from_id = transition.get("fromLiveConnectionId")
+            to_id = transition.get("toLiveConnectionId")
+            if (
+                type(attempt) is not int
+                or attempt <= previous_attempt
+                or from_id != current_id
+                or not isinstance(to_id, str)
+                or not to_id
+                or to_id == from_id
+            ):
+                return None
+            normalized.append(
+                {
+                    "attempt": attempt,
+                    "fromLiveConnectionId": from_id,
+                    "toLiveConnectionId": to_id,
+                }
+            )
+            current_id = to_id
+            previous_attempt = attempt
+        if result.get("finalLiveConnectionId") != current_id:
+            return None
+        return {
+            "finalLiveConnectionId": current_id,
+            "liveConnectionTransitions": normalized,
+        }
+
     async def _handle_evidence_finalize_message(self, message):
         try:
             payload = json.loads(message)
@@ -1134,6 +1184,7 @@ class ConnectionHandler:
         received_scope = payload.get("evidenceScope") if isinstance(payload, dict) else None
         failure_code = None
         result = None
+        validated_transition_result = None
         if not isinstance(scope, dict) or received_scope != scope:
             failure_code = "EVIDENCE_SCOPE_MISMATCH"
         else:
@@ -1168,11 +1219,14 @@ class ConnectionHandler:
                     failure_code = "EVIDENCE_FINALIZE_TIMEOUT"
                 except Exception:
                     failure_code = "EVIDENCE_FINALIZE_FAILED"
+                validated_transition_result = self._validated_evidence_transition_result(
+                    scope, result
+                )
                 if failure_code is None and (
                     not isinstance(result, dict)
                     or result.get("status") != "PASS"
-                    or result.get("liveConnectionId") != scope.get("liveConnectionId")
                     or result.get("pendingTasks") != 0
+                    or validated_transition_result is None
                 ):
                     failure_code = "EVIDENCE_CLEANUP_INCOMPLETE"
         ack = {
@@ -1184,6 +1238,7 @@ class ConnectionHandler:
         if isinstance(scope, dict):
             ack["evidenceScope"] = scope
         if not failure_code:
+            ack.update(validated_transition_result)
             ack["serverEndUtc"] = _utc_now_iso()
         await self.websocket.send(json.dumps(ack))
 

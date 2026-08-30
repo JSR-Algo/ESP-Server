@@ -162,7 +162,78 @@ class GoogleLiveProvider(VoiceSessionProvider):
         return (
             journey_id,
             str(getattr(self.conn, "session_id", "unknown")),
-            str(self._interaction.live_connection_id or "none"),
+            str(
+                self._evidence_current_live_connection_id
+                or self._interaction.live_connection_id
+                or "none"
+            ),
+        )
+
+    def _ensure_evidence_live_identity(self):
+        live_connection_id = str(self._interaction.live_connection_id or "none")
+        if self._evidence_initial_live_connection_id is None:
+            self._evidence_initial_live_connection_id = live_connection_id
+            self._evidence_current_live_connection_id = live_connection_id
+        return self._evidence_current_live_connection_id
+
+    def _begin_evidence_reconnect(self):
+        if self._evidence_scope() is None:
+            return None
+        self._ensure_evidence_live_identity()
+        self._evidence_reconnect_attempt_serial += 1
+        pending = {
+            "attempt": self._evidence_reconnect_attempt_serial,
+            "fromLiveConnectionId": self._evidence_current_live_connection_id,
+        }
+        self._evidence_pending_reconnect = pending
+        self.conn.google_live_evidence_reconnect_attempt = pending["attempt"]
+        return dict(pending)
+
+    def _accept_evidence_reconnect_ready(self, to_live_connection_id):
+        pending = self._evidence_pending_reconnect
+        if pending is None:
+            return None
+        transition = {
+            **pending,
+            "toLiveConnectionId": str(to_live_connection_id),
+        }
+        if transition["fromLiveConnectionId"] == transition["toLiveConnectionId"]:
+            return None
+        self._evidence_live_connection_transitions.append(transition)
+        self._evidence_current_live_connection_id = transition["toLiveConnectionId"]
+        self._evidence_pending_reconnect = None
+        self._bind_client_evidence_scope(self._client, self._session_generation)
+        return dict(transition)
+
+    def _fail_evidence_reconnect(self):
+        pending = self._evidence_pending_reconnect
+        self._evidence_pending_reconnect = None
+        return dict(pending) if pending is not None else None
+
+    def _log_evidence_reconnect_failed(self, state, error_class):
+        evidence_scope = self._evidence_scope()
+        if evidence_scope is None or state is None:
+            return
+        self.conn.logger.bind(tag="GoogleLive").info(
+            "Google Live evidence_reconnect_failed journey_id={} "
+            "connection_id={} attempt={} from_live_connection_id={} "
+            "live_connection_id={} error_class={}",
+            evidence_scope[0],
+            evidence_scope[1],
+            state["attempt"],
+            state["fromLiveConnectionId"],
+            self._evidence_current_live_connection_id,
+            error_class,
+        )
+
+    def _evidence_transition_for_attempt(self, attempt):
+        return next(
+            (
+                dict(item)
+                for item in reversed(self._evidence_live_connection_transitions)
+                if item["attempt"] == attempt
+            ),
+            None,
         )
 
     def _mark_lesson_asset_audio_activity(self):
@@ -280,6 +351,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._lesson_instruction_generation = None
         self._lesson_context_signature = None
         self._evidence_finalize_result = None
+        self._evidence_initial_live_connection_id = None
+        self._evidence_current_live_connection_id = None
+        self._evidence_live_connection_transitions = []
+        self._evidence_pending_reconnect = None
+        self._evidence_reconnect_attempt_serial = 0
 
     async def start_session(self):
         async with self._get_lifecycle_lock():
@@ -845,7 +921,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         evidence_scope = self._evidence_scope()
         if evidence_scope is None:
             return {"status": "FAIL", "failureCode": "EVIDENCE_SCOPE_MISSING"}
-        live_connection_id = evidence_scope[2]
+        self._ensure_evidence_live_identity()
         self._closing = True
         self._lifecycle_generation += 1
         async with self._get_lifecycle_lock():
@@ -864,7 +940,18 @@ class GoogleLiveProvider(VoiceSessionProvider):
             )
             self._evidence_finalize_result = {
                 "status": "PASS" if pending_tasks == 0 else "FAIL",
-                "liveConnectionId": live_connection_id,
+                "journeyId": evidence_scope[0],
+                "connectionId": evidence_scope[1],
+                "peerIdentityHash": str(
+                    (getattr(self.conn, "google_live_evidence_scope", None) or {}).get(
+                        "peerIdentityHash", ""
+                    )
+                ),
+                "initialLiveConnectionId": self._evidence_initial_live_connection_id,
+                "finalLiveConnectionId": self._evidence_current_live_connection_id,
+                "liveConnectionTransitions": [
+                    dict(item) for item in self._evidence_live_connection_transitions
+                ],
                 "pendingTasks": pending_tasks,
             }
             return dict(self._evidence_finalize_result)
@@ -964,6 +1051,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             or str(live_connection_id) != str(conn_live_connection_id)
         ):
             return None
+        self._ensure_evidence_live_identity()
         self._bind_client_evidence_scope(self._client, self._session_generation)
         return str(live_connection_id)
 
@@ -971,7 +1059,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
         evidence_scope_getter = getattr(client, "set_evidence_scope_getter", None)
         if not callable(evidence_scope_getter):
             return
-        evidence_scope = self._evidence_scope()
+        evidence_scope = (
+            None if self._evidence_pending_reconnect is not None else self._evidence_scope()
+        )
         client_evidence_scope = (
             (*evidence_scope, generation) if evidence_scope is not None else None
         )
@@ -3711,6 +3801,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
 
         self._reconnecting = True
         self._interaction.transition(InteractionState.RECONNECTING)
+        evidence_transition = None
         try:
             await self._close_live_resources()
             while self._reconnect_attempts < reconnect_config["max_retries"]:
@@ -3729,19 +3820,34 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     self._interaction.state.value,
                 )
                 evidence_scope = self._evidence_scope()
-                attempt_evidence_scope = evidence_scope
-                if evidence_scope is not None:
-                    self.conn.google_live_evidence_reconnect_attempt = attempt_number
+                evidence_attempt = self._begin_evidence_reconnect()
+                evidence_transition = None
+                if evidence_scope is not None and evidence_attempt is not None:
                     self.conn.logger.bind(tag="GoogleLive").info(
                         "Google Live evidence_reconnect_started journey_id={} "
-                        "connection_id={} live_connection_id={} attempt={} reason={}",
-                        *evidence_scope,
-                        attempt_number,
+                        "connection_id={} from_live_connection_id={} attempt={} reason={}",
+                        evidence_scope[0],
+                        evidence_scope[1],
+                        evidence_attempt["fromLiveConnectionId"],
+                        evidence_attempt["attempt"],
                         error_class,
                     )
                 if backoff_ms > 0:
                     await asyncio.sleep(backoff_ms / 1000.0)
                 if self._closing:
+                    failed_attempt = self._fail_evidence_reconnect()
+                    if evidence_scope is not None and failed_attempt is not None:
+                        self.conn.logger.bind(tag="GoogleLive").info(
+                            "Google Live evidence_reconnect_failed journey_id={} "
+                            "connection_id={} attempt={} from_live_connection_id={} "
+                            "live_connection_id={} error_class={}",
+                            evidence_scope[0],
+                            evidence_scope[1],
+                            failed_attempt["attempt"],
+                            failed_attempt["fromLiveConnectionId"],
+                            self._evidence_current_live_connection_id,
+                            "closing",
+                        )
                     return False
                 try:
                     # Account each reconnect against the live-admission gate BEFORE
@@ -3754,15 +3860,21 @@ class GoogleLiveProvider(VoiceSessionProvider):
                         attempt_number,
                         self._interaction.live_connection_id,
                     )
+                    if evidence_attempt is not None:
+                        evidence_transition = self._accept_evidence_reconnect_ready(
+                            self._interaction.live_connection_id
+                        )
                     evidence_scope = self._evidence_scope()
-                    if evidence_scope is not None:
+                    if evidence_scope is not None and evidence_transition is not None:
                         self.conn.logger.bind(tag="GoogleLive").info(
                             "Google Live evidence_reopen_ready journey_id={} "
-                            "connection_id={} attempt={} live_connection_id={}",
+                            "connection_id={} attempt={} from_live_connection_id={} "
+                            "to_live_connection_id={}",
                             evidence_scope[0],
                             evidence_scope[1],
-                            attempt_number,
-                            evidence_scope[2],
+                            evidence_transition["attempt"],
+                            evidence_transition["fromLiveConnectionId"],
+                            evidence_transition["toLiveConnectionId"],
                         )
                     await self._forward_pending_reconnect_audio()
                     self._reconnect_attempts = 0
@@ -3776,12 +3888,16 @@ class GoogleLiveProvider(VoiceSessionProvider):
                         attempt_number,
                         self._interaction.live_connection_id,
                     )
-                    if evidence_scope is not None:
+                    if evidence_scope is not None and evidence_transition is not None:
                         self.conn.logger.bind(tag="GoogleLive").info(
                             "Google Live evidence_reconnect_succeeded journey_id={} "
-                            "connection_id={} live_connection_id={} attempt={}",
-                            *evidence_scope,
-                            attempt_number,
+                            "connection_id={} attempt={} from_live_connection_id={} "
+                            "to_live_connection_id={}",
+                            evidence_scope[0],
+                            evidence_scope[1],
+                            evidence_transition["attempt"],
+                            evidence_transition["fromLiveConnectionId"],
+                            evidence_transition["toLiveConnectionId"],
                         )
                     return True
                 except Exception as reconnect_exc:
@@ -3797,15 +3913,29 @@ class GoogleLiveProvider(VoiceSessionProvider):
                         attempt_number,
                         reconnect_error_class,
                     )
-                    if attempt_evidence_scope is not None:
+                    failed_attempt = self._fail_evidence_reconnect()
+                    if evidence_scope is not None and (
+                        failed_attempt is not None or evidence_transition is not None
+                    ):
+                        failed_state = failed_attempt or evidence_transition
                         self.conn.logger.bind(tag="GoogleLive").info(
                             "Google Live evidence_reconnect_failed journey_id={} "
-                            "connection_id={} live_connection_id={} attempt={} error_class={}",
-                            *attempt_evidence_scope,
-                            attempt_number,
+                            "connection_id={} attempt={} from_live_connection_id={} "
+                            "live_connection_id={} error_class={}",
+                            evidence_scope[0],
+                            evidence_scope[1],
+                            failed_state["attempt"],
+                            failed_state["fromLiveConnectionId"],
+                            self._evidence_current_live_connection_id,
                             reconnect_error_class,
                         )
             return False
+        except asyncio.CancelledError:
+            failed_attempt = self._fail_evidence_reconnect()
+            self._log_evidence_reconnect_failed(
+                failed_attempt or evidence_transition, "cancelled"
+            )
+            raise
         finally:
             self._reconnecting = False
 
@@ -3856,14 +3986,18 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self.conn, "google_live_evidence_reconnect_attempt", None
             )
             if isinstance(journey_id, str) and journey_id and attempt is not None:
-                self.conn.logger.bind(tag="GoogleLive").info(
-                    "Google Live evidence_replayed_buffered_audio journey_id={} "
-                    "connection_id={} attempt={} live_connection_id={}",
-                    journey_id,
-                    str(getattr(self.conn, "session_id", "unknown")),
-                    attempt,
-                    str(self._interaction.live_connection_id or "none"),
-                )
+                transition = self._evidence_transition_for_attempt(attempt)
+                if transition is not None:
+                    self.conn.logger.bind(tag="GoogleLive").info(
+                        "Google Live evidence_replayed_buffered_audio journey_id={} "
+                        "connection_id={} attempt={} from_live_connection_id={} "
+                        "to_live_connection_id={}",
+                        journey_id,
+                        str(getattr(self.conn, "session_id", "unknown")),
+                        attempt,
+                        transition["fromLiveConnectionId"],
+                        transition["toLiveConnectionId"],
+                    )
         self._schedule_input_flush()
 
     def _get_interrupt_replay_buffer_capacity(self):
@@ -4600,13 +4734,17 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._interaction.transition(InteractionState.RECONNECTING)
             try:
                 evidence_scope = self._evidence_scope()
-                if evidence_scope is not None:
-                    self.conn.google_live_evidence_reconnect_attempt = 1
+                evidence_attempt = self._begin_evidence_reconnect()
+                evidence_transition = None
+                if evidence_scope is not None and evidence_attempt is not None:
                     self.conn.logger.bind(tag="GoogleLive").info(
                         "Google Live evidence_reconnect_started journey_id={} "
-                        "connection_id={} live_connection_id={} attempt=1 "
+                        "connection_id={} from_live_connection_id={} attempt={} "
                         "reason=waiting_model_timeout",
-                        *evidence_scope,
+                        evidence_scope[0],
+                        evidence_scope[1],
+                        evidence_attempt["fromLiveConnectionId"],
+                        evidence_attempt["attempt"],
                     )
                 await self._record_reconnect_attempt()
                 await self._close_live_resources()
@@ -4616,26 +4754,61 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     "live_connection_id={}",
                     self._interaction.live_connection_id,
                 )
+                if evidence_attempt is not None:
+                    evidence_transition = self._accept_evidence_reconnect_ready(
+                        self._interaction.live_connection_id
+                    )
                 evidence_scope = self._evidence_scope()
-                if evidence_scope is not None:
+                if evidence_scope is not None and evidence_transition is not None:
                     self.conn.logger.bind(tag="GoogleLive").info(
                         "Google Live evidence_reopen_ready journey_id={} "
-                        "connection_id={} attempt=1 live_connection_id={}",
+                        "connection_id={} attempt={} from_live_connection_id={} "
+                        "to_live_connection_id={}",
                         evidence_scope[0],
                         evidence_scope[1],
-                        evidence_scope[2],
+                        evidence_transition["attempt"],
+                        evidence_transition["fromLiveConnectionId"],
+                        evidence_transition["toLiveConnectionId"],
                     )
                 await self._forward_pending_reconnect_audio()
-                if evidence_scope is not None:
+                if evidence_scope is not None and evidence_transition is not None:
                     self.conn.logger.bind(tag="GoogleLive").info(
                         "Google Live evidence_reconnect_succeeded journey_id={} "
-                        "connection_id={} live_connection_id={} attempt=1",
-                        *evidence_scope,
+                        "connection_id={} attempt={} from_live_connection_id={} "
+                        "to_live_connection_id={}",
+                        evidence_scope[0],
+                        evidence_scope[1],
+                        evidence_transition["attempt"],
+                        evidence_transition["fromLiveConnectionId"],
+                        evidence_transition["toLiveConnectionId"],
                     )
                 self._interaction.transition(InteractionState.LISTENING)
                 self._waiting_model_since = None
                 self.conn.client_abort = False
                 return True
+            except asyncio.CancelledError:
+                failed_attempt = self._fail_evidence_reconnect()
+                self._log_evidence_reconnect_failed(
+                    failed_attempt or evidence_transition, "cancelled"
+                )
+                raise
+            except Exception as exc:
+                failed_attempt = self._fail_evidence_reconnect()
+                failed_state = failed_attempt or evidence_transition
+                evidence_scope = self._evidence_scope()
+                if evidence_scope is not None and failed_state is not None:
+                    self.conn.logger.bind(tag="GoogleLive").info(
+                        "Google Live evidence_reconnect_failed journey_id={} "
+                        "connection_id={} attempt={} from_live_connection_id={} "
+                        "live_connection_id={} error_class={}",
+                        evidence_scope[0],
+                        evidence_scope[1],
+                        failed_state["attempt"],
+                        failed_state["fromLiveConnectionId"],
+                        self._evidence_current_live_connection_id,
+                        self._classify_error(exc),
+                    )
+                raise
             finally:
                 self._reconnecting = False
 
@@ -7033,6 +7206,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
 
             self._reconnecting = True
             self._interaction.transition(InteractionState.RECONNECTING)
+            evidence_scope = None
+            evidence_attempt = None
+            evidence_transition = None
             try:
                 await self._close_live_resources()
                 if not lifecycle_current():
@@ -7041,10 +7217,40 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 if not lifecycle_current():
                     await self._close_live_resources()
                     return False
+                evidence_scope = self._evidence_scope()
+                evidence_attempt = self._begin_evidence_reconnect()
+                if evidence_scope is not None and evidence_attempt is not None:
+                    self.conn.logger.bind(tag="GoogleLive").info(
+                        "Google Live evidence_reconnect_started journey_id={} "
+                        "connection_id={} from_live_connection_id={} attempt={} "
+                        "reason=lesson_reconnect",
+                        evidence_scope[0],
+                        evidence_scope[1],
+                        evidence_attempt["fromLiveConnectionId"],
+                        evidence_attempt["attempt"],
+                    )
                 await self._open_live_session()
                 if not lifecycle_current():
+                    failed_attempt = self._fail_evidence_reconnect()
+                    self._log_evidence_reconnect_failed(failed_attempt, "closing")
                     await self._close_live_resources()
                     return False
+                if evidence_attempt is not None:
+                    evidence_transition = self._accept_evidence_reconnect_ready(
+                        self._interaction.live_connection_id
+                    )
+                evidence_scope = self._evidence_scope()
+                if evidence_scope is not None and evidence_transition is not None:
+                    self.conn.logger.bind(tag="GoogleLive").info(
+                        "Google Live evidence_reopen_ready journey_id={} "
+                        "connection_id={} attempt={} from_live_connection_id={} "
+                        "to_live_connection_id={}",
+                        evidence_scope[0],
+                        evidence_scope[1],
+                        evidence_transition["attempt"],
+                        evidence_transition["fromLiveConnectionId"],
+                        evidence_transition["toLiveConnectionId"],
+                    )
                 self.conn.voice_provider = self
                 self.conn.logger.bind(tag="GoogleLive").info(
                     with_lesson_log_context(
@@ -7053,12 +7259,42 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     ),
                     reason,
                 )
+                if evidence_scope is not None and evidence_transition is not None:
+                    self.conn.logger.bind(tag="GoogleLive").info(
+                        "Google Live evidence_reconnect_succeeded journey_id={} "
+                        "connection_id={} attempt={} from_live_connection_id={} "
+                        "to_live_connection_id={}",
+                        evidence_scope[0],
+                        evidence_scope[1],
+                        evidence_transition["attempt"],
+                        evidence_transition["fromLiveConnectionId"],
+                        evidence_transition["toLiveConnectionId"],
+                    )
                 return True
             except asyncio.CancelledError:
+                failed_attempt = self._fail_evidence_reconnect()
+                self._log_evidence_reconnect_failed(
+                    failed_attempt or evidence_transition, "cancelled"
+                )
                 await self._close_live_resources()
                 raise
             except Exception as exc:
                 await self._close_live_resources()
+                failed_attempt = self._fail_evidence_reconnect()
+                failed_state = failed_attempt or evidence_transition
+                evidence_scope = self._evidence_scope()
+                if evidence_scope is not None and failed_state is not None:
+                    self.conn.logger.bind(tag="GoogleLive").info(
+                        "Google Live evidence_reconnect_failed journey_id={} "
+                        "connection_id={} attempt={} from_live_connection_id={} "
+                        "live_connection_id={} error_class={}",
+                        evidence_scope[0],
+                        evidence_scope[1],
+                        failed_state["attempt"],
+                        failed_state["fromLiveConnectionId"],
+                        self._evidence_current_live_connection_id,
+                        self._classify_error(exc),
+                    )
                 self.conn.logger.bind(tag="GoogleLive").warning(
                     with_lesson_log_context(
                         "lesson_live_reconnect diagnostic=FAILED reason={} attempts=1 error_class={}",
@@ -7092,26 +7328,113 @@ class GoogleLiveProvider(VoiceSessionProvider):
     async def _hard_reconnect_after_interrupt_with_lease(
         self, reason, *, restore_session_resumption=True
     ):
+        async with self._get_lifecycle_lock():
+            return await self._hard_reconnect_after_interrupt_locked(
+                reason,
+                restore_session_resumption=restore_session_resumption,
+            )
+
+    async def _hard_reconnect_after_interrupt_locked(
+        self, reason, *, restore_session_resumption=True
+    ):
         if self._closing or self._fallback_provider is not None or self._reconnecting:
             return False
+        lifecycle_generation = self._lifecycle_generation
+
+        def lifecycle_current():
+            return bool(
+                not self._closing
+                and self._lifecycle_generation == lifecycle_generation
+            )
+
         self._pending_reconnect_audio.clear()
         self._reconnecting = True
+        evidence_scope = self._evidence_scope()
+        evidence_attempt = self._begin_evidence_reconnect()
+        evidence_transition = None
+        if evidence_scope is not None and evidence_attempt is not None:
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live evidence_reconnect_started journey_id={} "
+                "connection_id={} from_live_connection_id={} attempt={} "
+                "reason=hard_interrupt",
+                evidence_scope[0],
+                evidence_scope[1],
+                evidence_attempt["fromLiveConnectionId"],
+                evidence_attempt["attempt"],
+            )
         try:
             await self._close_live_resources()
+            if not lifecycle_current():
+                failed_attempt = self._fail_evidence_reconnect()
+                self._log_evidence_reconnect_failed(failed_attempt, "closing")
+                return False
             if restore_session_resumption:
                 await self._open_live_session()
             else:
                 self.conn.google_live_session_resumption_handle = None
                 async with self._get_live_open_lock():
                     await self._open_live_session_locked(restore_session_resumption=False)
+            if not lifecycle_current():
+                failed_attempt = self._fail_evidence_reconnect()
+                self._log_evidence_reconnect_failed(failed_attempt, "closing")
+                await self._close_live_resources()
+                return False
+            if evidence_attempt is not None:
+                evidence_transition = self._accept_evidence_reconnect_ready(
+                    self._interaction.live_connection_id
+                )
+            evidence_scope = self._evidence_scope()
+            if evidence_scope is not None and evidence_transition is not None:
+                self.conn.logger.bind(tag="GoogleLive").info(
+                    "Google Live evidence_reopen_ready journey_id={} "
+                    "connection_id={} attempt={} from_live_connection_id={} "
+                    "to_live_connection_id={}",
+                    evidence_scope[0],
+                    evidence_scope[1],
+                    evidence_transition["attempt"],
+                    evidence_transition["fromLiveConnectionId"],
+                    evidence_transition["toLiveConnectionId"],
+                )
             self.conn.voice_provider = self
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live hard_reconnected_after_interrupt reason={} response_id={}",
                 reason,
                 self._response_generation,
             )
+            if evidence_scope is not None and evidence_transition is not None:
+                self.conn.logger.bind(tag="GoogleLive").info(
+                    "Google Live evidence_reconnect_succeeded journey_id={} "
+                    "connection_id={} attempt={} from_live_connection_id={} "
+                    "to_live_connection_id={}",
+                    evidence_scope[0],
+                    evidence_scope[1],
+                    evidence_transition["attempt"],
+                    evidence_transition["fromLiveConnectionId"],
+                    evidence_transition["toLiveConnectionId"],
+                )
             return True
+        except asyncio.CancelledError:
+            failed_attempt = self._fail_evidence_reconnect()
+            self._log_evidence_reconnect_failed(
+                failed_attempt or evidence_transition, "cancelled"
+            )
+            raise
         except Exception as exc:
+            failed_attempt = self._fail_evidence_reconnect()
+            failed_state = failed_attempt or evidence_transition
+            evidence_scope = self._evidence_scope()
+            if evidence_scope is not None and failed_state is not None:
+                self.conn.logger.bind(tag="GoogleLive").info(
+                    "Google Live evidence_reconnect_failed journey_id={} "
+                    "connection_id={} attempt={} from_live_connection_id={} "
+                    "live_connection_id={} error_class={}",
+                    evidence_scope[0],
+                    evidence_scope[1],
+                    failed_state["attempt"],
+                    failed_state["fromLiveConnectionId"],
+                    self._evidence_current_live_connection_id,
+                    self._classify_error(exc),
+                )
             await self._handle_runtime_failure(exc)
             return False
         finally:

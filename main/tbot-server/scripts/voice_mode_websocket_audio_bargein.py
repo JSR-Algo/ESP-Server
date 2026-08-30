@@ -75,7 +75,39 @@ def _validated_hello_scope(ack, *, journey_id, expected_peer_hash):
         return None
     if _parse_server_utc(scope.get("serverStartUtc")) is None:
         return None
+    if scope.get("initialLiveConnectionId") != scope.get("liveConnectionId"):
+        return None
     return dict(scope)
+
+
+def _validated_finalized_transition_chain(finalized, evidence_scope):
+    transitions = finalized.get("liveConnectionTransitions")
+    current_id = evidence_scope.get("initialLiveConnectionId")
+    if not isinstance(transitions, list) or not isinstance(current_id, str):
+        return None
+    normalized = []
+    previous_attempt = 0
+    for transition in transitions:
+        if not isinstance(transition, dict):
+            return None
+        attempt = transition.get("attempt")
+        from_id = transition.get("fromLiveConnectionId")
+        to_id = transition.get("toLiveConnectionId")
+        if (
+            type(attempt) is not int
+            or attempt <= previous_attempt
+            or from_id != current_id
+            or not isinstance(to_id, str)
+            or not to_id
+            or to_id == from_id
+        ):
+            return None
+        normalized.append(dict(transition))
+        current_id = to_id
+        previous_attempt = attempt
+    if finalized.get("finalLiveConnectionId") != current_id:
+        return None
+    return normalized
 
 
 def _detect_message(text):
@@ -332,6 +364,9 @@ async def run_smoke(
         "journeyId": journey_id,
         "candidateIdentity": candidate_identity,
         "evidenceScope": None,
+        "initialLiveConnectionId": None,
+        "finalLiveConnectionId": None,
+        "liveConnectionTransitions": [],
         "logWindow": {
             "windowId": journey_id,
             "start": None,
@@ -370,6 +405,9 @@ async def run_smoke(
             summary["evidenceScope"] = evidence_scope
             summary["serverConnectionId"] = evidence_scope["connectionId"]
             summary["liveConnectionId"] = evidence_scope["liveConnectionId"]
+            summary["initialLiveConnectionId"] = evidence_scope[
+                "initialLiveConnectionId"
+            ]
             summary["peerIdentityHash"] = evidence_scope["peerIdentityHash"]
             summary["logWindow"]["start"] = evidence_scope["serverStartUtc"]
 
@@ -481,9 +519,13 @@ async def run_smoke(
             server_end = finalized.get("serverEndUtc")
             end_utc = _parse_server_utc(server_end)
             start_utc = _parse_server_utc(evidence_scope["serverStartUtc"])
+            finalized_transitions = _validated_finalized_transition_chain(
+                finalized, evidence_scope
+            )
             if (
                 finalized.get("status") != "PASS"
                 or finalized.get("evidenceScope") != evidence_scope
+                or finalized_transitions is None
                 or end_utc is None
                 or start_utc is None
                 or end_utc < start_utc
@@ -492,6 +534,8 @@ async def run_smoke(
                     "failureCode", "EVIDENCE_FINALIZE_INVALID"
                 )
                 return summary
+            summary["finalLiveConnectionId"] = finalized["finalLiveConnectionId"]
+            summary["liveConnectionTransitions"] = finalized_transitions
             summary["logWindow"]["end"] = server_end
 
             summary["status"] = "SKIPPED"

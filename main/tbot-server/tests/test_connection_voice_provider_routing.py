@@ -1059,6 +1059,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             "journeyId": "bargein-1",
             "connectionId": "server-conn-1",
             "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
             "peerIdentityHash": "sha256:" + "a" * 64,
             "serverStartUtc": "2026-08-31T03:00:00+00:00",
         }
@@ -1069,7 +1070,18 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
                 cleanup_complete.set()
                 return {
                     "status": "PASS",
-                    "liveConnectionId": "live-7",
+                    "journeyId": "bargein-1",
+                    "connectionId": "server-conn-1",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "initialLiveConnectionId": "live-7",
+                    "finalLiveConnectionId": "live-8",
+                    "liveConnectionTransitions": [
+                        {
+                            "attempt": 1,
+                            "fromLiveConnectionId": "live-7",
+                            "toLiveConnectionId": "live-8",
+                        }
+                    ],
                     "pendingTasks": 0,
                 }
 
@@ -1093,6 +1105,8 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ack["type"], "evidence_finalized")
         self.assertEqual(ack["status"], "PASS")
         self.assertEqual(ack["evidenceScope"], handler.google_live_evidence_scope)
+        self.assertEqual(ack["finalLiveConnectionId"], "live-8")
+        self.assertEqual(len(ack["liveConnectionTransitions"]), 1)
         self.assertEqual(ack["serverEndUtc"], "2026-08-31T03:00:10+00:00")
 
     async def test_evidence_finalize_rejects_scope_mismatch_without_cleanup(self):
@@ -1103,6 +1117,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             "journeyId": "bargein-1",
             "connectionId": "server-conn-1",
             "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
             "peerIdentityHash": "sha256:" + "a" * 64,
             "serverStartUtc": "2026-08-31T03:00:00+00:00",
         }
@@ -1135,6 +1150,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             "journeyId": "bargein-1",
             "connectionId": "server-conn-1",
             "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
             "peerIdentityHash": "sha256:" + "a" * 64,
             "serverStartUtc": "2026-08-31T03:00:00+00:00",
         }
@@ -1204,6 +1220,42 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(ack["failureCode"], "EVIDENCE_CLEANUP_INCOMPLETE")
                 self.assertEqual(
                     ack["evidenceScope"], handler.google_live_evidence_scope
+                )
+
+    def test_evidence_transition_chain_rejects_missing_extra_reordered_or_fabricated(self):
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-1",
+            "initialLiveConnectionId": "live-1",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+        }
+        base = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "initialLiveConnectionId": "live-1",
+            "finalLiveConnectionId": "live-3",
+            "liveConnectionTransitions": [
+                {"attempt": 1, "fromLiveConnectionId": "live-1", "toLiveConnectionId": "live-2"},
+                {"attempt": 2, "fromLiveConnectionId": "live-2", "toLiveConnectionId": "live-3"},
+            ],
+        }
+
+        self.assertIsNotNone(
+            ConnectionHandler._validated_evidence_transition_result(scope, base)
+        )
+        invalid = [
+            {**base, "liveConnectionTransitions": []},
+            {**base, "liveConnectionTransitions": list(reversed(base["liveConnectionTransitions"]))},
+            {**base, "liveConnectionTransitions": [*base["liveConnectionTransitions"], {"attempt": 3, "fromLiveConnectionId": "live-3", "toLiveConnectionId": "live-4"}]},
+            {**base, "liveConnectionTransitions": [{"attempt": 1, "fromLiveConnectionId": "live-x", "toLiveConnectionId": "live-3"}]},
+            {**base, "finalLiveConnectionId": "live-2", "liveConnectionTransitions": [{"attempt": True, "fromLiveConnectionId": "live-1", "toLiveConnectionId": "live-2"}]},
+        ]
+        for result in invalid:
+            with self.subTest(result=result):
+                self.assertIsNone(
+                    ConnectionHandler._validated_evidence_transition_result(scope, result)
                 )
 
     async def test_mcp_message_routes_before_manager_bind_ready(self):

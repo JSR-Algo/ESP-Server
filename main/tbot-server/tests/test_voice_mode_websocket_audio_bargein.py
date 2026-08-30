@@ -19,6 +19,7 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
             "journeyId": "bargein-journey-1",
             "connectionId": "server-connection-1",
             "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
             "peerIdentityHash": f"sha256:{peer_hash}",
             "serverStartUtc": "2026-08-31T03:00:00+00:00",
         }
@@ -134,6 +135,69 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "journey_id"):
             audio_bargein._evidence_context(self._args(journey_id="hành-trình"))
 
+    def test_finalized_transition_chain_accepts_exact_ordered_reconnects(self):
+        audio_bargein = importlib.import_module(
+            "scripts.voice_mode_websocket_audio_bargein"
+        )
+        finalized = {
+            "finalLiveConnectionId": "live-9",
+            "liveConnectionTransitions": [
+                {
+                    "attempt": 1,
+                    "fromLiveConnectionId": "live-7",
+                    "toLiveConnectionId": "live-8",
+                },
+                {
+                    "attempt": 2,
+                    "fromLiveConnectionId": "live-8",
+                    "toLiveConnectionId": "live-9",
+                },
+            ],
+        }
+
+        self.assertEqual(
+            audio_bargein._validated_finalized_transition_chain(
+                finalized, self._evidence_scope()
+            ),
+            finalized["liveConnectionTransitions"],
+        )
+
+    def test_finalized_transition_chain_rejects_fabricated_or_reordered_ledger(self):
+        audio_bargein = importlib.import_module(
+            "scripts.voice_mode_websocket_audio_bargein"
+        )
+        valid = [
+            {
+                "attempt": 1,
+                "fromLiveConnectionId": "live-7",
+                "toLiveConnectionId": "live-8",
+            },
+            {
+                "attempt": 2,
+                "fromLiveConnectionId": "live-8",
+                "toLiveConnectionId": "live-9",
+            },
+        ]
+        invalid = (
+            list(reversed(valid)),
+            [{**valid[0], "fromLiveConnectionId": "live-x"}],
+            [valid[0], {**valid[1], "attempt": 1}],
+            ([{**valid[0], "attempt": True}], "live-8"),
+        )
+
+        for item in invalid:
+            transitions, final_id = item if isinstance(item, tuple) else (item, "live-9")
+            with self.subTest(transitions=transitions):
+                self.assertIsNone(
+                    audio_bargein._validated_finalized_transition_chain(
+                        {
+                            "finalLiveConnectionId": final_id,
+                            "liveConnectionTransitions": transitions,
+                        },
+                        self._evidence_scope(),
+                    )
+                )
+
     @staticmethod
     def _args(**overrides):
         values = {
@@ -191,6 +255,8 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
                         "type": "evidence_finalized",
                         "status": "PASS",
                         "evidenceScope": scope,
+                        "finalLiveConnectionId": scope["initialLiveConnectionId"],
+                        "liveConnectionTransitions": [],
                         "serverEndUtc": "2026-08-31T03:00:10+00:00",
                     }
                 )
@@ -691,6 +757,8 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
                             "type": "evidence_finalized",
                             "status": "PASS",
                             "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope(),
+                            "finalLiveConnectionId": "live-7",
+                            "liveConnectionTransitions": [],
                             "serverEndUtc": "2026-08-31T03:00:10+00:00",
                         }
                     ),
@@ -749,6 +817,51 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         )
         self.assertFalse(record["aggregateReleaseEligible"])
 
+    def test_run_smoke_records_validated_live_connection_transitions(self):
+        audio_bargein = importlib.import_module(
+            "scripts.voice_mode_websocket_audio_bargein"
+        )
+        scope = self._evidence_scope()
+        transition = {
+            "attempt": 1,
+            "fromLiveConnectionId": "live-7",
+            "toLiveConnectionId": "live-8",
+        }
+        messages = [
+            json.dumps({"type": "hello", "evidenceScope": scope}),
+            json.dumps({"type": "tts", "state": "start"}),
+            json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}),
+            json.dumps({"type": "tts", "state": "start"}),
+            b"replacement-audio",
+            json.dumps({"type": "tts", "state": "stop"}),
+            json.dumps(
+                {
+                    "type": "evidence_finalized",
+                    "status": "PASS",
+                    "evidenceScope": scope,
+                    "finalLiveConnectionId": "live-8",
+                    "liveConnectionTransitions": [transition],
+                    "serverEndUtc": "2026-08-31T03:00:10+00:00",
+                }
+            ),
+        ]
+
+        async def _sleep(_seconds):
+            return None
+
+        with patch.object(
+            audio_bargein.websockets,
+            "connect",
+            self._connect_for(messages),
+        ), patch.object(
+            audio_bargein, "_opus_packets", return_value=[b"interrupt-opus"]
+        ), patch.object(audio_bargein.asyncio, "sleep", _sleep):
+            record = asyncio.run(audio_bargein.run_smoke(self._args()))
+
+        self.assertEqual(record["initialLiveConnectionId"], "live-7")
+        self.assertEqual(record["finalLiveConnectionId"], "live-8")
+        self.assertEqual(record["liveConnectionTransitions"], [transition])
+
     def test_readable_tagged_stop_with_zero_queue_count_never_passes_release(self):
         audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
 
@@ -766,6 +879,8 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
                             "type": "evidence_finalized",
                             "status": "PASS",
                             "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope(),
+                            "finalLiveConnectionId": "live-7",
+                            "liveConnectionTransitions": [],
                             "serverEndUtc": "2026-08-31T03:00:10+00:00",
                         }
                     ),
@@ -912,6 +1027,8 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
                             "type": "evidence_finalized",
                             "status": "PASS",
                             "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope(),
+                            "finalLiveConnectionId": "live-7",
+                            "liveConnectionTransitions": [],
                             "serverEndUtc": "2026-08-31T03:00:10+00:00",
                         }
                     ),
@@ -985,6 +1102,8 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
                             "type": "evidence_finalized",
                             "status": "PASS",
                             "evidenceScope": VoiceModeWebsocketAudioBargeinTest._evidence_scope(),
+                            "finalLiveConnectionId": "live-7",
+                            "liveConnectionTransitions": [],
                             "serverEndUtc": "2026-08-31T03:00:10+00:00",
                         }
                     ),

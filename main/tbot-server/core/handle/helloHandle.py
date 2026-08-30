@@ -141,6 +141,7 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
                 "journeyId": conn.google_live_evidence_journey_id,
                 "connectionId": str(conn.session_id),
                 "liveConnectionId": live_connection_id,
+                "initialLiveConnectionId": live_connection_id,
                 "peerIdentityHash": _evidence_peer_identity_hash(conn),
                 "serverStartUtc": server_start_utc,
             }

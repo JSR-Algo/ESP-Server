@@ -160,6 +160,7 @@ P_RELIABILITY_WINDOW_START = re.compile(
     r"(?:journeys=(?P<journeys>[A-Za-z0-9._:,-]+) )?"
     r"(?:connection_id=(?P<connection_id>[A-Za-z0-9._:-]+) )?"
     r"(?:live_connection_id=(?P<live_connection_id>[A-Za-z0-9._:-]+) )?"
+    r"(?:initial_live_connection_id=(?P<initial_live_connection_id>[A-Za-z0-9._:-]+) )?"
     r"(?:peer_identity_hash=(?P<peer_identity_hash>sha256:[0-9a-f]{64}) )?"
     r"(?:server_start_utc=(?P<server_start_utc>\S+) )?"
     r"candidate_identity=(?P<candidate_identity>\{.*\})$"
@@ -235,23 +236,27 @@ P_CLIENT_DISCONNECTED = re.compile(
 )
 P_EVIDENCE_RECONNECT_STARTED = re.compile(
     r"Google Live evidence_reconnect_started journey_id=(?P<journey_id>\S+) "
-    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) from_live_connection_id=(?P<from_live_connection_id>\S+) "
     r"attempt=(?P<attempt>\d+) reason=(?P<reason>\S+)"
 )
 P_EVIDENCE_REOPEN_READY = re.compile(
     r"Google Live evidence_reopen_ready journey_id=(?P<journey_id>\S+) "
     r"connection_id=(?P<connection_id>\S+) attempt=(?P<attempt>\d+) "
-    r"live_connection_id=(?P<live_connection_id>\S+)"
+    r"from_live_connection_id=(?P<from_live_connection_id>\S+) "
+    r"to_live_connection_id=(?P<to_live_connection_id>\S+)"
 )
 P_EVIDENCE_REPLAYED_BUFFERED = re.compile(
     r"Google Live evidence_replayed_buffered_audio journey_id=(?P<journey_id>\S+) "
     r"connection_id=(?P<connection_id>\S+) attempt=(?P<attempt>\d+) "
-    r"live_connection_id=(?P<live_connection_id>\S+)"
+    r"from_live_connection_id=(?P<from_live_connection_id>\S+) "
+    r"to_live_connection_id=(?P<to_live_connection_id>\S+)"
 )
 P_EVIDENCE_RECONNECT_OUTCOME = re.compile(
     r"Google Live evidence_reconnect_(?P<outcome>succeeded|failed) "
     r"journey_id=(?P<journey_id>\S+) connection_id=(?P<connection_id>\S+) "
-    r"live_connection_id=(?P<live_connection_id>\S+) attempt=(?P<attempt>\d+)"
+    r"attempt=(?P<attempt>\d+) from_live_connection_id=(?P<from_live_connection_id>\S+) "
+    r"(?:(?:to_live_connection_id=(?P<to_live_connection_id>\S+))|"
+    r"(?:live_connection_id=(?P<live_connection_id>\S+)))"
     r"(?: error_class=(?P<error_class>\S+))?"
 )
 P_EVIDENCE_HANDOFF_ACQUIRED = re.compile(
@@ -1402,6 +1407,10 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     scoped_receive_stop_count = 0
     scoped_timeout_generations: dict[int, list[int]] = defaultdict(list)
     scoped_handoff_generations: dict[tuple[int, int], list[int]] = defaultdict(list)
+    scoped_initial_live_connection_id = None
+    scoped_current_live_connection_id = None
+    scoped_live_connection_transitions: list[dict[str, Any]] = []
+    scoped_last_transition_attempt = 0
 
     def scoped_marker_targets_anchor(match: re.Match[str], line_number: int) -> bool:
         anchor_scope = start_anchor.get("evidenceScope") if start_anchor else None
@@ -1414,7 +1423,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
         live_connection_id = groups.get("live_connection_id")
         if connection_id != anchor_scope.get("connectionId") or (
             live_connection_id is not None
-            and live_connection_id != anchor_scope.get("liveConnectionId")
+            and live_connection_id != scoped_current_live_connection_id
         ):
             failures.append(
                 _failure(
@@ -1468,15 +1477,19 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     "journeyId": start_match.group("journey_id"),
                     "connectionId": start_match.group("connection_id"),
                     "liveConnectionId": start_match.group("live_connection_id"),
+                    "initialLiveConnectionId": start_match.group(
+                        "initial_live_connection_id"
+                    ),
                     "peerIdentityHash": start_match.group("peer_identity_hash"),
                     "serverStartUtc": start_match.group("server_start_utc"),
                 }
                 evidence_scope = None
                 scoped_anchor_present = any(
                     scope_values[field] is not None
-                    for field in (
-                        "connectionId",
-                        "liveConnectionId",
+                        for field in (
+                            "connectionId",
+                            "liveConnectionId",
+                            "initialLiveConnectionId",
                         "peerIdentityHash",
                         "serverStartUtc",
                     )
@@ -1495,6 +1508,13 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         )
                     else:
                         evidence_scope = scope_values
+                        scoped_initial_live_connection_id = (
+                            scope_values.get("initialLiveConnectionId")
+                            or scope_values.get("liveConnectionId")
+                        )
+                        scoped_current_live_connection_id = (
+                            scoped_initial_live_connection_id
+                        )
                 claimed_journey_list = list(
                     filter(None, (start_match.group("journeys") or "").split(","))
                 )
@@ -1868,7 +1888,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     and scoped_close.group("connection_id")
                     == anchor_scope.get("connectionId")
                     and scoped_close.group("live_connection_id")
-                    == anchor_scope.get("liveConnectionId")
+                    == scoped_current_live_connection_id
                 )
                 cleanup_semantics_valid = (
                     scoped_close.group("close_code") == "1000"
@@ -1928,18 +1948,36 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     "ready": False,
                     "replayed": False,
                     "terminalCount": 0,
+                    "fromLiveConnectionId": scoped_reconnect_start.group(
+                        "from_live_connection_id"
+                    ),
                 }
+                if scoped_current_live_connection_id is None:
+                    scoped_initial_live_connection_id = (
+                        scoped_reconnect_start.group("from_live_connection_id")
+                    )
+                    scoped_current_live_connection_id = (
+                        scoped_initial_live_connection_id
+                    )
+                if (
+                    scoped_reconnect_start.group("from_live_connection_id")
+                    != scoped_current_live_connection_id
+                ):
+                    failures.append(
+                        _failure("RECONNECT_FROM_ID_MISMATCH", line_number, str(key))
+                    )
                 observed_marker_families[journey_id].add("reconnect_started")
                 continue
             scoped_reopen_ready = P_EVIDENCE_REOPEN_READY.search(line)
             if scoped_reopen_ready:
+                attempt = int(scoped_reopen_ready.group("attempt"))
                 if not scoped_marker_targets_anchor(scoped_reopen_ready, line_number):
                     continue
                 journey_id = scoped_reopen_ready.group("journey_id")
                 key = (
                     journey_id,
                     scoped_reopen_ready.group("connection_id"),
-                    int(scoped_reopen_ready.group("attempt")),
+                    attempt,
                 )
                 state = scoped_reconnects.get(key)
                 if state is None:
@@ -1951,10 +1989,34 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         _failure("RECONNECT_MARKER_AFTER_TERMINAL", line_number, str(key))
                     )
                 else:
-                    state["ready"] = True
-                    state["liveConnectionId"] = scoped_reopen_ready.group(
-                        "live_connection_id"
-                    )
+                    from_id = scoped_reopen_ready.group("from_live_connection_id")
+                    to_id = scoped_reopen_ready.group("to_live_connection_id")
+                    if (
+                        state.get("ready")
+                        or attempt <= scoped_last_transition_attempt
+                        or from_id != state.get("fromLiveConnectionId")
+                        or from_id != scoped_current_live_connection_id
+                        or to_id == from_id
+                    ):
+                        code = (
+                            "RECONNECT_ATTEMPT_ORDER_INVALID"
+                            if not state.get("ready")
+                            and attempt <= scoped_last_transition_attempt
+                            else "REOPEN_READY_TRANSITION_INVALID"
+                        )
+                        failures.append(_failure(code, line_number, str(key)))
+                    else:
+                        state["ready"] = True
+                        state["toLiveConnectionId"] = to_id
+                        scoped_current_live_connection_id = to_id
+                        scoped_last_transition_attempt = attempt
+                        scoped_live_connection_transitions.append(
+                            {
+                                "attempt": key[2],
+                                "fromLiveConnectionId": from_id,
+                                "toLiveConnectionId": to_id,
+                            }
+                        )
                 observed_marker_families[journey_id].add("reopen_ready")
                 continue
             scoped_buffer_replay = P_EVIDENCE_REPLAYED_BUFFERED.search(line)
@@ -1971,8 +2033,10 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 if (
                     state is None
                     or not state.get("ready")
-                    or state.get("liveConnectionId")
-                    != scoped_buffer_replay.group("live_connection_id")
+                    or state.get("fromLiveConnectionId")
+                    != scoped_buffer_replay.group("from_live_connection_id")
+                    or state.get("toLiveConnectionId")
+                    != scoped_buffer_replay.group("to_live_connection_id")
                 ):
                     failures.append(
                         _failure(
@@ -2006,13 +2070,23 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     )
                 elif scoped_reconnect_outcome.group("outcome") == "succeeded" and (
                     not state.get("ready")
-                    or state.get("liveConnectionId")
-                    != scoped_reconnect_outcome.group("live_connection_id")
+                    or state.get("fromLiveConnectionId")
+                    != scoped_reconnect_outcome.group("from_live_connection_id")
+                    or state.get("toLiveConnectionId")
+                    != scoped_reconnect_outcome.group("to_live_connection_id")
                 ):
                     failures.append(
                         _failure("RECONNECT_SUCCESS_WITHOUT_READY", line_number, str(key))
                     )
                 if state is not None:
+                    if (
+                        scoped_reconnect_outcome.group("outcome") == "failed"
+                        and scoped_reconnect_outcome.group("from_live_connection_id")
+                        != state.get("fromLiveConnectionId")
+                    ):
+                        failures.append(
+                            _failure("RECONNECT_FAILURE_SCOPE_INVALID", line_number, str(key))
+                        )
                     state["terminalCount"] += 1
                     if state["terminalCount"] > 1:
                         failures.append(
@@ -2842,6 +2916,9 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
         "status": "PASS" if not failures else "FAIL",
         "candidateIdentity": candidate_identity,
         "evidenceScope": start_anchor.get("evidenceScope") if start_anchor else None,
+        "initialLiveConnectionId": scoped_initial_live_connection_id,
+        "finalLiveConnectionId": scoped_current_live_connection_id,
+        "liveConnectionTransitions": scoped_live_connection_transitions,
         "logWindow": log_window,
         "receiveLoopBalance": receive_loops_active,
         "maxReceiveLoopsActive": max_receive_loops_active,
@@ -2944,6 +3021,9 @@ def correlate_websocket_bargein_evidence(
         "journeyId": journey_id,
         "connectionId": transport_observation.get("serverConnectionId"),
         "liveConnectionId": transport_observation.get("liveConnectionId"),
+        "initialLiveConnectionId": transport_observation.get(
+            "initialLiveConnectionId"
+        ),
         "peerIdentityHash": transport_observation.get("peerIdentityHash"),
     }
     for scope_field, expected in expected_scope_fields.items():
@@ -2970,6 +3050,17 @@ def correlate_websocket_bargein_evidence(
         failures.append({"code": "TRANSPORT_EVIDENCE_WINDOW_MISMATCH"})
     if safe_log_verdict.get("evidenceScope") != dict(evidence_scope):
         failures.append({"code": "SERVER_LOG_EVIDENCE_SCOPE_MISMATCH"})
+    for transition_field in (
+        "initialLiveConnectionId",
+        "finalLiveConnectionId",
+        "liveConnectionTransitions",
+    ):
+        if transport_observation.get(transition_field) != safe_log_verdict.get(
+            transition_field
+        ):
+            failures.append(
+                {"code": "LIVE_CONNECTION_TRANSITION_MISMATCH", "field": transition_field}
+            )
     if not isinstance(journey_id, str) or not journey_id:
         failures.append({"code": "TRANSPORT_JOURNEY_ID_INVALID"})
         matching_correlations = []
@@ -3026,6 +3117,13 @@ def correlate_websocket_bargein_evidence(
         "candidateIdentity": expected_candidate_identity,
         "journeyId": journey_id,
         "evidenceScope": dict(evidence_scope),
+        "initialLiveConnectionId": transport_observation.get(
+            "initialLiveConnectionId"
+        ),
+        "finalLiveConnectionId": transport_observation.get("finalLiveConnectionId"),
+        "liveConnectionTransitions": transport_observation.get(
+            "liveConnectionTransitions"
+        ),
         "logWindow": safe_log_verdict.get("logWindow"),
         "correlationSource": "server_log",
         "correlationStatus": "PASS" if status == "PASS" else "FAIL",
@@ -3271,6 +3369,7 @@ def _correlate_transport_cli(
         "journeyId": journey_id,
         "connectionId": transport.get("serverConnectionId"),
         "liveConnectionId": transport.get("liveConnectionId"),
+        "initialLiveConnectionId": transport.get("initialLiveConnectionId"),
         "peerIdentityHash": transport.get("peerIdentityHash"),
         "serverStartUtc": (log_window or {}).get("start") if isinstance(log_window, Mapping) else None,
     }
@@ -3395,6 +3494,7 @@ def _correlate_transport_cli(
         f"window_id={journey_id} journey_id={journey_id} journeys=bargein "
         f"connection_id={evidence_scope['connectionId']} "
         f"live_connection_id={evidence_scope['liveConnectionId']} "
+        f"initial_live_connection_id={evidence_scope['initialLiveConnectionId']} "
         f"peer_identity_hash={evidence_scope['peerIdentityHash']} "
         f"server_start_utc={log_window['start']} "
         f"candidate_identity={identity}",
