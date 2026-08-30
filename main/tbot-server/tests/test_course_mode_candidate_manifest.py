@@ -119,6 +119,56 @@ def test_candidate_browser_rejects_symlink(candidate: dict, tmp_path: Path) -> N
     assert validate_candidate(candidate, now=NOW) == ["tools.robotPreviewBrowser.identity"]
 
 
+def test_browser_bundle_descriptor_rejects_over_depth_tree(tmp_path: Path) -> None:
+    root = tmp_path / "browser"
+    root.mkdir()
+    directory = root
+    for index in range(manifest.MAX_BROWSER_BUNDLE_DEPTH + 1):
+        directory /= f"d{index}"
+        directory.mkdir()
+
+    assert manifest.secure_browser_bundle_descriptor(root) == (None, "tree")
+
+
+def test_browser_bundle_descriptor_rejects_surrogateescaped_filename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "browser"
+    root.mkdir()
+    metadata = root.lstat()
+
+    class InvalidByteEntry:
+        name = "invalid-\udcff"
+        path = str(root / name)
+
+        @staticmethod
+        def stat(*, follow_symlinks: bool):
+            assert follow_symlinks is False
+            return metadata
+
+    original_scandir = os.scandir
+    monkeypatch.setattr(
+        manifest.os, "scandir",
+        lambda directory: [InvalidByteEntry()] if Path(directory) == root else original_scandir(directory),
+    )
+
+    assert manifest.secure_browser_bundle_descriptor(root) == (None, "path")
+
+
+def test_browser_bundle_descriptor_fails_closed_on_recursion_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "browser"
+    root.mkdir()
+
+    def raise_recursion_error(_directory: Path) -> None:
+        raise RecursionError
+
+    monkeypatch.setattr(manifest.os, "scandir", raise_recursion_error)
+
+    assert manifest.secure_browser_bundle_descriptor(root) == (None, "tree")
+
+
 def test_candidate_browser_descriptor_has_exact_schema(candidate: dict) -> None:
     candidate["tools"]["robotPreviewBrowser"]["fallback"] = "/Applications/Google Chrome.app"
 

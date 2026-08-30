@@ -54,6 +54,12 @@ function digestField(hash, value) {
   hash.update(length).update(bytes);
 }
 
+export function decodeBrowserEntryName(bytes) {
+  const name = bytes.toString('utf8');
+  if (!Buffer.from(name, 'utf8').equals(bytes)) throw new Error('browser bundle contains an unsafe filename');
+  return name;
+}
+
 async function stageVerifiedBundle(sourceRoot, stagingRoot) {
   // Mode 0700 isolates other users; the same UID and root remain trusted during this local gate.
   const hash = createHash('sha256');
@@ -61,11 +67,12 @@ async function stageVerifiedBundle(sourceRoot, stagingRoot) {
   const manifest = [];
 
   async function visit(sourceDirectory, destinationDirectory) {
-    const entries = await readdir(sourceDirectory, { withFileTypes: true });
-    entries.sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
+    const entries = await readdir(sourceDirectory, { withFileTypes: true, encoding: 'buffer' });
+    entries.sort((left, right) => left.name.compare(right.name));
     for (const entry of entries) {
-      const source = join(sourceDirectory, entry.name);
-      const destination = join(destinationDirectory, entry.name);
+      const name = decodeBrowserEntryName(entry.name);
+      const source = join(sourceDirectory, name);
+      const destination = join(destinationDirectory, name);
       const relativePath = relative(sourceRoot, source).split(sep).join('/');
       const before = await lstat(source, { bigint: true });
       state.entryCount += 1;
@@ -79,7 +86,6 @@ async function stageVerifiedBundle(sourceRoot, stagingRoot) {
         const after = await lstat(source, { bigint: true });
         const identity = (stat) => [stat.dev, stat.ino, stat.mode, stat.nlink, stat.mtimeNs, stat.ctimeNs].join(':');
         if (!after.isDirectory() || identity(before) !== identity(after)) throw new Error('browser bundle directory changed while staging');
-        await chmod(destination, mode & 0o700);
         continue;
       }
       if (!before.isFile() || before.nlink !== 1n) throw new Error('browser bundle contains an unsafe entry');
@@ -216,6 +222,7 @@ export async function acquirePinnedRobotPreviewChromium({
   platform = process.platform,
   arch = process.arch,
   stagingParent = tmpdir(),
+  beforeSeal = async () => {},
   afterStage = async () => {}
 } = {}) {
   const descriptor = descriptorFromEnvironment(environment);
@@ -239,6 +246,7 @@ export async function acquirePinnedRobotPreviewChromium({
   try {
     const observed = await stageVerifiedBundle(descriptor.root, leaseRoot);
     if (JSON.stringify(observed.treeDigest) !== JSON.stringify(descriptor.treeDigest)) throw new Error('Candidate browser bundle identity does not match staged content');
+    await beforeSeal({ sourceRoot: descriptor.root, stagedRoot: leaseRoot });
     await sealBundle(leaseRoot, observed.manifest);
     await afterStage({ sourceRoot: descriptor.root, stagedRoot: leaseRoot });
     await verifySealedBundle(leaseRoot, observed.manifest);

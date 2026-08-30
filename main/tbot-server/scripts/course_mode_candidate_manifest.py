@@ -45,6 +45,7 @@ CONTRACT_IDENTITY = "courseCompanion.v2.contract.v1"
 MAX_CANDIDATE_BYTES = 1024 * 1024
 MAX_DIRTY_FILE_BYTES = 4 * 1024 * 1024
 MAX_BROWSER_EXECUTABLE_BYTES = 512 * 1024 * 1024
+MAX_BROWSER_BUNDLE_DEPTH = 128
 MAX_GIT_OUTPUT_BYTES = 1024 * 1024
 GIT_TIMEOUT_SEC = 10.0
 _GIT_CANDIDATES = (
@@ -368,7 +369,9 @@ def secure_browser_bundle_descriptor(root: Path) -> tuple[dict[str, Any] | None,
         digest = hashlib.sha256()
         state = {"entryCount": 0, "totalBytes": 0}
 
-        def visit(directory: Path, relative_parent: Path) -> bool:
+        def visit(directory: Path, relative_parent: Path, depth: int) -> bool:
+            if depth > MAX_BROWSER_BUNDLE_DEPTH:
+                return False
             for entry in sorted(os.scandir(directory), key=lambda item: item.name):
                 relative = relative_parent / entry.name
                 metadata = entry.stat(follow_symlinks=False)
@@ -380,7 +383,7 @@ def secure_browser_bundle_descriptor(root: Path) -> tuple[dict[str, Any] | None,
                     _digest_field(digest, b"directory")
                     _digest_field(digest, relative.as_posix().encode())
                     _digest_field(digest, str(mode).encode())
-                    if not visit(Path(entry.path), relative):
+                    if not visit(Path(entry.path), relative, depth + 1):
                         return False
                     after = os.stat(entry.path, follow_symlinks=False)
                     if (
@@ -434,7 +437,7 @@ def secure_browser_bundle_descriptor(root: Path) -> tuple[dict[str, Any] | None,
                     return False
             return True
 
-        if not visit(root, Path()):
+        if not visit(root, Path(), 0):
             return None, "tree"
         root_after = root.lstat()
         if (root_before.st_dev, root_before.st_ino, root_before.st_mtime_ns) != (
@@ -445,7 +448,9 @@ def secure_browser_bundle_descriptor(root: Path) -> tuple[dict[str, Any] | None,
             "schema": BROWSER_TREE_SCHEMA, "sha256": digest.hexdigest(),
             "entryCount": state["entryCount"], "totalBytes": state["totalBytes"],
         }, None
-    except OSError:
+    except RecursionError:
+        return None, "tree"
+    except (OSError, UnicodeEncodeError):
         return None, "path"
 
 
