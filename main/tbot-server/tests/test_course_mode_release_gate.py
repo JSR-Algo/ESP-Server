@@ -358,12 +358,15 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         executable = tmp_path / f"node-{key}"
         executable.write_text(f"#!/bin/sh\nif [ \"$1\" = --version ]; then echo {version}; else exec python3 \"$@\"; fi\n", encoding="utf-8")
         executable.chmod(0o755)
+        package_tools = {}
+        for tool in ("npm", "npx"):
+            entrypoint = tmp_path / f"{key}-{tool}.js"
+            entrypoint.write_text("raise SystemExit(0)\n", encoding="utf-8")
+            package_tools[tool] = {"entrypoint": str(entrypoint),
+                                   "sha256": hashlib.sha256(entrypoint.read_bytes()).hexdigest()}
         node[key] = {"version": version, "executable": str(executable),
-                     "sha256": hashlib.sha256(executable.read_bytes()).hexdigest()}
-    for tool in ("npm", "npx"):
-        executable = tmp_path / tool
-        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        executable.chmod(0o755)
+                     "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+                     **package_tools}
     migration = Path(repositories["backend"]["path"]) / "src/database/migrations/127_shared_visual_layered_cinematic_compatibility.sql"
     candidate = {
         "candidateId": "course-mode-2099-01-01.1",
@@ -415,7 +418,7 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                 "root": str(browser.parent),
                 "executable": browser.name,
                 "treeDigest": tree,
-            }, "node": node, "espIdf": "v5.5.4",
+            }, "node": node, "espIdf": {"version": "v5.5.4", "commit": "a" * 40},
         },
         "evidenceRoot": str(evidence_root),
     }
@@ -490,6 +493,21 @@ def test_node_lane_executes_candidate_descriptor_not_ambient_path(
     result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
 
     assert result["verdict"] == "PASS"
+
+
+def test_replaced_candidate_npm_entrypoint_is_blocked_before_execution(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "backend", ".", "backend")
+    entrypoint = Path(candidate["tools"]["node"]["backend"]["npm"]["entrypoint"])
+    marker = entrypoint.parent / "must-not-execute"
+    entrypoint.write_text(f"from pathlib import Path\nPath({str(marker)!r}).write_text('bad')\n")
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    lane = gate.Lane("backend-npm", "backend", ".", ("npm", "test"), 5.0)
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "BLOCKED"
+    assert not marker.exists()
 
 
 def test_admin_browser_environment_is_only_candidate_bound_descriptor(candidate_file: Path) -> None:

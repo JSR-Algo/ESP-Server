@@ -108,8 +108,15 @@ def candidate(repositories: dict[str, Path], tmp_path: Path, monkeypatch: pytest
         executable = tmp_path / f"node-{key}"
         executable.write_text(f"#!/bin/sh\necho {version}\n", encoding="utf-8")
         executable.chmod(0o755)
+        package_tools = {}
+        for tool in ("npm", "npx"):
+            entrypoint = tmp_path / f"{key}-{tool}.sh"
+            entrypoint.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            package_tools[tool] = {"entrypoint": str(entrypoint),
+                                   "sha256": hashlib.sha256(entrypoint.read_bytes()).hexdigest()}
         node[key] = {"version": version, "executable": str(executable),
-                     "sha256": hashlib.sha256(executable.read_bytes()).hexdigest()}
+                     "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+                     **package_tools}
     migration = repositories["backend"] / "src/database/migrations/127_shared_visual_layered_cinematic_compatibility.sql"
     return {
         "candidateId": "course-mode-2026-08-29.1",
@@ -156,7 +163,7 @@ def candidate(repositories: dict[str, Path], tmp_path: Path, monkeypatch: pytest
                 "root": str(browser.parent),
                 "executable": browser.name,
                 "treeDigest": tree,
-            }, "node": node, "espIdf": "v5.5.4",
+            }, "node": node, "espIdf": {"version": "v5.5.4", "commit": "a" * 40},
         },
         "evidenceRoot": str(tmp_path / "evidence"),
     }
@@ -177,7 +184,7 @@ def test_candidate_accepts_exact_committed_repository_identity(candidate: dict) 
         ("firmware", "elfSha256", "f" * 64, "firmware.elfSha256"),
         ("database", "engineImageId", "sha256:" + "f" * 64, "database.engineImageId"),
         ("database", "migrationHeadSha256", "f" * 64, "database.migrationHeadSha256"),
-        ("tools", "espIdf", "v0.0.0", "tools.espIdf"),
+        ("tools", "espIdf", {"version": "v0.0.0", "commit": "a" * 40}, "tools.espIdf.version"),
     ],
 )
 def test_candidate_rejects_mutated_artifact_identity(
@@ -205,6 +212,60 @@ def test_candidate_node_runtime_descriptor_is_exact_and_runtime_bound(
     }[field]
 
     assert f"tools.node.{key}.{field}" in validate_candidate(candidate, now=NOW)
+
+
+def test_candidate_rejects_mutated_node_package_manager_entrypoint(candidate: dict) -> None:
+    entrypoint = Path(candidate["tools"]["node"]["backend"]["npm"]["entrypoint"])
+    entrypoint.write_text("#!/bin/sh\nexit 91\n", encoding="utf-8")
+
+    assert "tools.node.backend.npm.sha256" in validate_candidate(candidate, now=NOW)
+
+
+def test_candidate_requires_latest_committed_and_runtime_up_migration(candidate: dict) -> None:
+    backend = Path(candidate["repositories"]["backend"]["path"])
+    older = backend / "src/database/migrations/126_older.sql"
+    older.write_text("SELECT 126;\n", encoding="utf-8")
+    _git(backend, "add", str(older.relative_to(backend)))
+    _git(backend, "commit", "-m", "older migration")
+    candidate["repositories"]["backend"] = _repository(backend)
+    candidate["database"]["migrationHead"] = older.name
+    candidate["database"]["migrationHeadSha256"] = hashlib.sha256(older.read_bytes()).hexdigest()
+
+    assert "database.migrationHead" in validate_candidate(candidate, now=NOW)
+
+    canonical = backend / "src/database/migrations/127_shared_visual_layered_cinematic_compatibility.sql"
+    candidate["database"]["migrationHead"] = canonical.name
+    candidate["database"]["migrationHeadSha256"] = hashlib.sha256(canonical.read_bytes()).hexdigest()
+    later = backend / "src/database/migrations/128_later.sql"
+    later.write_text("SELECT 128;\n", encoding="utf-8")
+    candidate["repositories"]["backend"]["dirtyExceptions"] = [{
+        "path": str(later.relative_to(backend)),
+        "sha256": hashlib.sha256(later.read_bytes()).hexdigest(),
+    }]
+    assert "database.migrationHead" in validate_candidate(candidate, now=NOW)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda evidence: evidence.update(status="FAIL"),
+        lambda evidence: evidence.update(profile="debug"),
+        lambda evidence: evidence["reproducibility"].update(appByteIdentical=False),
+        lambda evidence: evidence["reproducibility"].update(independentCleanBuilds=1),
+        lambda evidence: evidence["config"].update(productionArtifactAudit="FAIL"),
+        lambda evidence: evidence["safety"].update(flashed=True),
+        lambda evidence: evidence["toolchain"].update(espIdfCommit="invalid"),
+    ],
+)
+def test_candidate_requires_production_firmware_evidence_semantics(candidate: dict, mutate) -> None:
+    path = Path(candidate["firmware"]["evidenceManifestPath"])
+    evidence = json.loads(path.read_text(encoding="utf-8"))
+    mutate(evidence)
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+    candidate["firmware"]["evidenceManifestSha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    reasons = validate_candidate(candidate, now=NOW)
+    assert any(reason in reasons for reason in ("firmware.evidenceManifestPath", "tools.espIdf.commit"))
 
 
 def test_candidate_rejects_symlink_and_hardlink_firmware_artifacts(

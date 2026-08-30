@@ -1325,8 +1325,8 @@ def _resolve_candidate_command(
             if command[0] == "node":
                 return _resolve_command((str(node), *command[1:]))
             if command[0] in {"npm", "npx"}:
-                candidate_tool = node.parent / command[0]
-                return _resolve_command((str(candidate_tool), *command[1:]))
+                entrypoint = candidate["tools"]["node"][requirement[0]][command[0]]["entrypoint"]
+                return _resolve_command((str(node), entrypoint, *command[1:]))
         except (KeyError, TypeError, ValueError):
             return None
     return _resolve_command(command)

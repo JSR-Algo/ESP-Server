@@ -82,7 +82,9 @@ FIRMWARE_KEYS = {
 DATABASE_KEYS = {"engineImage", "engineImageId", "migrationHead", "migrationHeadSha256"}
 TOOLS_KEYS = {"nodeInstalls", "robotPreviewBrowser", "node", "espIdf"}
 NODE_KEYS = {"backend", "adminManagerWeb"}
-NODE_DESCRIPTOR_KEYS = {"version", "executable", "sha256"}
+NODE_DESCRIPTOR_KEYS = {"version", "executable", "sha256", "npm", "npx"}
+NODE_ENTRYPOINT_KEYS = {"entrypoint", "sha256"}
+ESP_IDF_KEYS = {"version", "commit"}
 NODE_INSTALL_KEYS = {"version", "root", "packageLockSha256", "treeDigest"}
 NODE_TREE_KEYS = {"schema", "sha256", "entryCount", "totalBytes"}
 NODE_TREE_SCHEMA = "sha256-path-mode-bytes-symlink-v1"
@@ -804,8 +806,33 @@ def _validate_firmware(
         reasons.add("firmware.partitionBytes")
     if partition.get("freeBytes") != value["freeBytes"]:
         reasons.add("firmware.freeBytes")
-    if evidence["toolchain"].get("espIdf") != tools.get("espIdf"):
-        reasons.add("tools.espIdf")
+    esp_idf = tools.get("espIdf")
+    toolchain = evidence["toolchain"]
+    if not isinstance(esp_idf, dict) or toolchain.get("espIdf") != esp_idf.get("version"):
+        reasons.add("tools.espIdf.version")
+    if (
+        not isinstance(toolchain.get("espIdfCommit"), str)
+        or SHA_RE.fullmatch(toolchain["espIdfCommit"]) is None
+        or not isinstance(esp_idf, dict)
+        or toolchain["espIdfCommit"] != esp_idf.get("commit")
+    ):
+        reasons.add("tools.espIdf.commit")
+    reproducibility = evidence["reproducibility"]
+    config = evidence["config"]
+    safety = evidence["safety"]
+    if (
+        evidence.get("status") != "PASS" or evidence.get("profile") != "production"
+        or reproducibility.get("appByteIdentical") is not True
+        or reproducibility.get("elfByteIdentical") is not True
+        or type(reproducibility.get("independentCleanBuilds")) is not int
+        or reproducibility["independentCleanBuilds"] < 2
+        or reproducibility.get("ccacheEnabled") is not False
+        or config.get("appReproducibleBuild") is not True
+        or config.get("productionConfigAudit") != "PASS"
+        or config.get("productionArtifactAudit") != "PASS"
+        or any(safety.get(field) is not False for field in safety)
+    ):
+        reasons.add("firmware.evidenceManifestPath")
 
 
 def _validate_database(
@@ -834,6 +861,22 @@ def _validate_database(
         reasons.add("database.migrationHead")
         return
     relative = f"src/database/migrations/{head}"
+    try:
+        committed_names = _git(
+            backend_root, "ls-tree", "--name-only", f"{backend['sha']}:src/database/migrations",
+        ).splitlines()
+        runtime_names = sorted(entry.name for entry in os.scandir(backend_root / "src/database/migrations"))
+    except (KeyError, OSError, RuntimeError, TypeError):
+        committed_names = []
+        runtime_names = []
+    committed_up = sorted(
+        name for name in committed_names if name.endswith(".sql") and not name.endswith(".down.sql")
+    )
+    runtime_up = sorted(
+        name for name in runtime_names if name.endswith(".sql") and not name.endswith(".down.sql")
+    )
+    if not committed_up or not runtime_up or head != committed_up[-1] or head != runtime_up[-1]:
+        reasons.add("database.migrationHead")
     runtime, error = secure_regular_descriptor(backend_root / relative, MAX_DIRTY_FILE_BYTES)
     try:
         committed = _git(backend_root, "show", f"{backend['sha']}:{relative}").encode("utf-8")
@@ -863,6 +906,21 @@ def _validate_node_tools(value: Any, reasons: set[str], *, verify_identity: bool
             reasons.add(f"{prefix}.executable")
         if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
             reasons.add(f"{prefix}.sha256")
+        entrypoints: list[tuple[str, str, str]] = []
+        for tool in ("npm", "npx"):
+            tool_descriptor = descriptor.get(tool)
+            tool_prefix = f"{prefix}.{tool}"
+            if not isinstance(tool_descriptor, dict) or set(tool_descriptor) != NODE_ENTRYPOINT_KEYS:
+                reasons.add(f"{tool_prefix}.keys")
+                continue
+            entrypoint = tool_descriptor.get("entrypoint")
+            expected = tool_descriptor.get("sha256")
+            if not isinstance(entrypoint, str) or not Path(entrypoint).is_absolute():
+                reasons.add(f"{tool_prefix}.entrypoint")
+            if not isinstance(expected, str) or SHA256_RE.fullmatch(expected) is None:
+                reasons.add(f"{tool_prefix}.sha256")
+            if isinstance(entrypoint, str) and isinstance(expected, str):
+                entrypoints.append((tool_prefix, entrypoint, expected))
         if not verify_identity or any(reason.startswith(prefix) for reason in reasons):
             continue
         observed, error = secure_executable_descriptor(Path(executable))
@@ -877,6 +935,16 @@ def _validate_node_tools(value: Any, reasons: set[str], *, verify_identity: bool
         )
         if result.error or result.returncode != 0 or result.stdout.strip() != version:
             reasons.add(f"{prefix}.version")
+        for tool_prefix, entrypoint, expected in entrypoints:
+            observed_entrypoint, entrypoint_error = secure_regular_descriptor(
+                Path(entrypoint), MAX_DIRTY_FILE_BYTES,
+            )
+            if entrypoint_error or observed_entrypoint is None:
+                reasons.add(f"{tool_prefix}.entrypoint")
+            elif observed_entrypoint["sha256"] != expected:
+                reasons.add(f"{tool_prefix}.sha256")
+
+
 def validate_candidate(
     candidate: Any, *, now: datetime | None = None, verify_external_tools: bool = True,
 ) -> list[str]:
@@ -907,8 +975,16 @@ def validate_candidate(
             tools.get("robotPreviewBrowser"), reasons, verify_identity=verify_external_tools,
         )
         _validate_node_tools(tools.get("node"), reasons, verify_identity=verify_external_tools)
-        if not isinstance(tools.get("espIdf"), str) or re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tools["espIdf"]) is None:
-            reasons.add("tools.espIdf")
+        esp_idf = tools.get("espIdf")
+        if not isinstance(esp_idf, dict) or set(esp_idf) != ESP_IDF_KEYS:
+            reasons.add("tools.espIdf.keys")
+        else:
+            if not isinstance(esp_idf.get("version"), str) or re.fullmatch(
+                r"v[0-9]+\.[0-9]+\.[0-9]+", esp_idf["version"],
+            ) is None:
+                reasons.add("tools.espIdf.version")
+            if not isinstance(esp_idf.get("commit"), str) or SHA_RE.fullmatch(esp_idf["commit"]) is None:
+                reasons.add("tools.espIdf.commit")
         installs = tools.get("nodeInstalls")
         if not isinstance(installs, dict) or not set(installs).issubset(NODE_KEYS):
             reasons.add("tools.nodeInstalls.keys")
