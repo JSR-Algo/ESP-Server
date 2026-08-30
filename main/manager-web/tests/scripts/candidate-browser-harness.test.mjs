@@ -143,6 +143,16 @@ test('stalled candidate browser acquisition rejects before the outer watchdog', 
   assert.equal(deps.state.cleanupCalls, 0);
 });
 
+test('acquisition that ignores abort cannot outlive the harness deadline', async () => {
+  const { withCandidateBoundBrowser } = await importHarness();
+  const deps = dependencies();
+  deps.acquireBrowser = () => new Promise(() => {});
+  await assert.rejects(outerWatchdog(withCandidateBoundBrowser({
+    profileDir: '/tmp/profile', label: 'uncooperative acquisition', operationTimeoutMs: 20, ...deps,
+  }, async () => assert.fail('callback must not run')), 75), /uncooperative acquisition lifecycle timed out after 20ms/);
+  assert.deepEqual(deps.state.spawned, []);
+});
+
 test('hostile ambient browser variables cannot redirect the staged candidate executable', async () => {
   const { withCandidateBoundBrowser } = await importHarness();
   const deps = dependencies();
@@ -404,6 +414,7 @@ test('stubborn child retains the lease when it cannot be reaped before the lifec
   const { withCandidateBoundBrowser } = await importHarness();
   const deps = dependencies({ spawnBrowser: () => {
     const child = new EventEmitter();
+    child.pid = 5151;
     child.exitCode = null;
     child.signalCode = null;
     child.kill = () => true;
@@ -412,7 +423,13 @@ test('stubborn child retains the lease when it cannot be reaped before the lifec
   } });
   await assert.rejects(outerWatchdog(withCandidateBoundBrowser({
     profileDir: '/tmp/profile', label: 'stubborn gate', operationTimeoutMs: 25, ...deps,
-  }, async () => { throw new Error('trigger cleanup'); }), 75), /lease retained.*child.*not reaped/i);
+  }, async () => { throw new Error('trigger cleanup'); }), 75), (error) => {
+    assert.match(error.message, /lease retained.*child.*not reaped/i);
+    assert.equal(error.retainedLeasePath, '/candidate/staged');
+    assert.equal(error.leaseOwner, 'stubborn gate');
+    assert.equal(error.workerPid, 5151);
+    return true;
+  });
   assert.equal(deps.state.cleanupCalls, 0);
   assert.equal(deps.state.socket.readyState, 3);
 });

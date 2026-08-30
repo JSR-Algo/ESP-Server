@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { acquirePinnedRobotPreviewChromium } from '../robot-preview-browser.mjs';
 
@@ -42,7 +42,10 @@ async function stopChild(child, remainingMs, label) {
   if (!await waitForChildExit(child, termBudgetMs)) {
     child.kill('SIGKILL');
     if (!await waitForChildExit(child, Math.max(0, remainingMs()))) {
-      throw new Error(`${label} lease retained because Chromium child was not reaped before the lifecycle deadline`);
+      const error = new Error(`${label} lease retained because Chromium child was not reaped before the lifecycle deadline`);
+      error.leaseOwner = label;
+      error.workerPid = child.pid;
+      throw error;
     }
   }
   return true;
@@ -142,7 +145,8 @@ export async function withCandidateBoundBrowser({
     const acquisitionController = new AbortController();
     const acquisition = Promise.resolve().then(() => acquireBrowser({
       signal: acquisitionController.signal,
-      deadline: lifecycleDeadline,
+      deadline: runtimeDeadline,
+      cleanupDeadline: lifecycleDeadline,
     }));
     try {
       lease = await lifecycleBounded(
@@ -151,10 +155,17 @@ export async function withCandidateBoundBrowser({
       );
     } catch (error) {
       acquisitionController.abort(error);
-      try {
-        await acquisition;
-      } catch (acquisitionError) {
-        if (acquisitionError.retainedLeasePath) throw acquisitionError;
+      const terminalRemainingMs = remainingMs();
+      if (terminalRemainingMs > 0) {
+        try {
+          await lifecycleBounded(acquisition, `${label} candidate browser acquisition termination`, terminalRemainingMs, () => {}, remainingMs);
+        } catch (acquisitionError) {
+          if (acquisitionError?.retainedLeasePath) throw acquisitionError;
+        }
+      } else {
+        acquisition.catch((acquisitionError) => {
+          if (acquisitionError?.retainedLeasePath) process.emitWarning(acquisitionError);
+        });
       }
       throw error;
     }
@@ -264,6 +275,10 @@ export async function withCandidateBoundBrowser({
       await stopChild(child, () => Math.max(0, Math.min(remainingMs(), childDeadline - Date.now())), label);
     } catch (error) {
       childReapError = error;
+      if (lease) {
+        error.retainedLeasePath = lease.leasePath || dirname(lease.executablePath);
+        error.leaseOwner ||= lease.leaseOwner || label;
+      }
     }
     await closeSocket(socket, Math.min(socketCloseReserveMs, remainingMs())).catch(() => {});
     if (childReapError) throw childReapError;
@@ -277,6 +292,8 @@ export async function withCandidateBoundBrowser({
           remainingMs,
         );
       } catch (error) {
+        error.retainedLeasePath ||= lease.leasePath || dirname(lease.executablePath);
+        error.leaseOwner ||= lease.leaseOwner || label;
         throw error;
       }
     }

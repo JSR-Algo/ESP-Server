@@ -59,7 +59,7 @@ async function fixture({ platform = 'darwin', arch = 'arm64', nestedDirectoryMod
   await writeFile(metadata, JSON.stringify({ browsers: [{ name: 'chromium-headless-shell', revision: '1223' }] }));
   const tree = await treeDigest(root);
   return {
-    base, root, executable, metadata, platform, arch,
+    base, root, executable, metadataPath: metadata, platform, arch,
     environment: {
       TBOT_ROBOT_PREVIEW_BROWSER_ROOT: root,
       TBOT_ROBOT_PREVIEW_BROWSER_EXECUTABLE: executable,
@@ -307,6 +307,68 @@ function fakeCleanupWorker({ reapAfterKill }) {
   return child;
 }
 
+function fakeAcquisitionWorker({ pid = 4343, spawnError, reapAfterKill = true } = {}) {
+  const child = new EventEmitter();
+  child.pid = pid;
+  child.exitCode = null;
+  child.signalCode = null;
+  child.connected = true;
+  child.send = () => true;
+  child.kill = (signal) => {
+    if (reapAfterKill && signal === 'SIGKILL') queueMicrotask(() => {
+      child.signalCode = signal;
+      child.emit('exit', null, signal);
+    });
+    return true;
+  };
+  if (spawnError) queueMicrotask(() => child.emit('error', Object.assign(new Error(spawnError), { code: spawnError })));
+  return child;
+}
+
+test('hung acquisition worker is killed and reaped before its retained lease is reported', async () => {
+  const value = await fixture();
+  const child = fakeAcquisitionWorker();
+  try {
+    await assert.rejects(acquirePinnedRobotPreviewChromium({
+      ...value, stagingParent: value.base, deadline: Date.now() + 20,
+      acquisitionWorkerReapTimeoutMs: 20,
+      spawnAcquisitionWorker: () => child,
+      removeLease: async () => { throw new Error('cleanup remains owned'); },
+      cleanupRetryLimit: 1,
+    }), (error) => {
+      assert.equal(child.signalCode, 'SIGKILL');
+      assert.match(error.retainedLeasePath, /tbot-robot-preview-browser-/);
+      assert.equal(error.leaseOwner, 'acquirePinnedRobotPreviewChromium');
+      assert.equal(error.workerPid, 4343);
+      return true;
+    });
+  } finally {
+    await rm(value.base, { recursive: true, force: true });
+  }
+});
+
+for (const code of ['EAGAIN', 'ENOENT']) {
+  test(`asynchronous acquisition worker spawn ${code} never crashes and retains auditable cleanup ownership`, async () => {
+    const value = await fixture();
+    try {
+      await assert.rejects(acquirePinnedRobotPreviewChromium({
+        ...value, stagingParent: value.base, deadline: Date.now() + 100,
+        spawnAcquisitionWorker: () => fakeAcquisitionWorker({ pid: null, spawnError: code }),
+        removeLease: async () => { throw new Error('cleanup remains owned'); },
+        cleanupRetryLimit: 1,
+      }), (error) => {
+        assert.match(error.message, new RegExp(code));
+        assert.match(error.retainedLeasePath, /tbot-robot-preview-browser-/);
+        assert.equal(error.leaseOwner, 'acquirePinnedRobotPreviewChromium');
+        assert.equal(error.workerPid, undefined);
+        return true;
+      });
+    } finally {
+      await rm(value.base, { recursive: true, force: true });
+    }
+  });
+}
+
 test('unreaped cleanup worker exposes pid and retained lease ownership synchronously', async () => {
   const value = await fixture();
   value.environment.TBOT_ROBOT_PREVIEW_BROWSER_TREE_SHA256 = '0'.repeat(64);
@@ -317,6 +379,7 @@ test('unreaped cleanup worker exposes pid and retained lease ownership synchrono
       spawnCleanupWorker: () => fakeCleanupWorker({ reapAfterKill: false }),
     }), (error) => {
       assert.equal(error.cleanupWorkerPid, 4242);
+      assert.equal(error.workerPid, 4242);
       assert.equal(error.leaseOwner, 'acquirePinnedRobotPreviewChromium');
       assert.match(error.retainedLeasePath, /tbot-robot-preview-browser-/);
       return true;
@@ -337,6 +400,8 @@ test('SIGKILL cleanup worker is reaped before timeout error returns', async () =
       spawnCleanupWorker: () => child,
     }), (error) => {
       assert.equal(error.cleanupWorkerPid, undefined);
+      assert.equal(error.leaseOwner, 'acquirePinnedRobotPreviewChromium');
+      assert.match(error.retainedLeasePath, /tbot-robot-preview-browser-/);
       assert.equal(child.signalCode, 'SIGKILL');
       return true;
     });
