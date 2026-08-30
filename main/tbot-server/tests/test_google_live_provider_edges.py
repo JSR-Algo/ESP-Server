@@ -4856,6 +4856,229 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider._evidence_scope()[2], "live-1")
         self.assertEqual(provider._evidence_live_connection_transitions, [])
 
+    async def test_normal_reconnect_commits_only_after_pending_audio_forward(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        conn.config["google_live"]["reconnect"] = {
+            "enabled": True,
+            "max_retries": 1,
+            "backoff_ms": 0,
+            "backoff_multiplier": 1,
+        }
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._close_live_resources = AsyncMock()
+        provider._record_reconnect_attempt = AsyncMock()
+
+        async def open_owner():
+            provider._interaction.start_live_connection("live-2")
+
+        provider._open_live_session = AsyncMock(side_effect=open_owner)
+        provider._forward_pending_reconnect_audio = AsyncMock(
+            side_effect=RuntimeError("forward failed")
+        )
+
+        self.assertFalse(await provider._try_reconnect_with_lease(RuntimeError("network")))
+        self.assertEqual(provider._evidence_scope()[2], "live-1")
+        self.assertEqual(provider._evidence_live_connection_transitions, [])
+
+        provider._reconnect_attempts = 0
+        provider._forward_pending_reconnect_audio = AsyncMock()
+
+        async def open_retry_owner():
+            provider._interaction.start_live_connection("live-3")
+
+        provider._open_live_session = AsyncMock(side_effect=open_retry_owner)
+        self.assertTrue(await provider._try_reconnect_with_lease(RuntimeError("network")))
+        self.assertEqual(provider._evidence_scope()[2], "live-3")
+        self.assertEqual(
+            provider._evidence_live_connection_transitions,
+            [
+                {
+                    "attempt": 2,
+                    "fromLiveConnectionId": "live-1",
+                    "toLiveConnectionId": "live-3",
+                }
+            ],
+        )
+
+    async def test_silent_reconnect_commits_only_after_pending_audio_forward(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._consecutive_waiting_model_timeouts = (
+            provider._SILENT_LIVE_REOPEN_TIMEOUTS
+        )
+        provider._record_reconnect_attempt = AsyncMock()
+        provider._close_live_resources = AsyncMock()
+
+        async def open_owner(*_args, **_kwargs):
+            provider._interaction.start_live_connection("live-2")
+
+        provider._open_live_session_locked = AsyncMock(side_effect=open_owner)
+        provider._forward_pending_reconnect_audio = AsyncMock(
+            side_effect=RuntimeError("forward failed")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "forward failed"):
+            await provider._reopen_silent_live_session_after_timeouts_with_lease(1.0)
+
+        self.assertEqual(provider._evidence_scope()[2], "live-1")
+        self.assertEqual(provider._evidence_live_connection_transitions, [])
+
+    async def test_lesson_and_hard_reconnect_commit_after_success_hooks(self):
+        for path, trigger in (
+            ("lesson", "lesson_live_reconnect diagnostic=SUCCEEDED"),
+            ("hard", "hard_reconnected_after_interrupt"),
+        ):
+            with self.subTest(path=path):
+                conn = _Conn()
+                conn.google_live_evidence_journey_id = "journey-1"
+                provider = self.make_provider(conn)
+                provider._client = _Client()
+                provider._bridge = _Bridge()
+                provider._interaction.start_live_connection("live-1")
+                provider._ensure_evidence_live_identity()
+                provider._close_live_resources = AsyncMock()
+                provider._record_reconnect_attempt = AsyncMock()
+
+                async def open_owner(*_args, **_kwargs):
+                    provider._interaction.start_live_connection("live-2")
+
+                provider._open_live_session = AsyncMock(side_effect=open_owner)
+                original_info = conn.logger.info
+                raised = False
+
+                def fail_success_hook(*args, **kwargs):
+                    nonlocal raised
+                    if not raised and args and trigger in str(args[0]):
+                        raised = True
+                        raise RuntimeError("success hook failed")
+                    original_info(*args, **kwargs)
+
+                conn.logger.info = fail_success_hook
+                provider._handle_runtime_failure = AsyncMock()
+
+                if path == "lesson":
+                    self.assertFalse(await provider._attempt_lesson_reconnect_once("retry"))
+                else:
+                    self.assertFalse(
+                        await provider._hard_reconnect_after_interrupt_with_lease(
+                            "interrupt"
+                        )
+                    )
+
+                self.assertEqual(provider._evidence_scope()[2], "live-1")
+                self.assertEqual(provider._evidence_live_connection_transitions, [])
+
+    async def test_normal_reconnect_rolls_back_before_failed_cleanup(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        conn.config["google_live"]["reconnect"] = {
+            "enabled": True,
+            "max_retries": 1,
+            "backoff_ms": 0,
+            "backoff_multiplier": 1,
+        }
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._record_reconnect_attempt = AsyncMock()
+
+        async def open_owner():
+            provider._interaction.start_live_connection("live-2")
+
+        provider._open_live_session = AsyncMock(side_effect=open_owner)
+        provider._forward_pending_reconnect_audio = AsyncMock(
+            side_effect=RuntimeError("forward failed")
+        )
+        cleanup_calls = 0
+
+        async def fail_second_cleanup():
+            nonlocal cleanup_calls
+            cleanup_calls += 1
+            if cleanup_calls == 2:
+                raise RuntimeError("cleanup failed")
+
+        provider._close_live_resources = AsyncMock(side_effect=fail_second_cleanup)
+
+        self.assertFalse(await provider._try_reconnect_with_lease(RuntimeError("network")))
+        self.assertEqual(provider._evidence_scope()[2], "live-1")
+        self.assertEqual(provider._evidence_live_connection_transitions, [])
+
+    async def test_commit_binding_failure_rolls_back_without_publishing_transition(self):
+        class FailingEvidenceClient(_Client):
+            def set_evidence_scope_getter(self, _getter):
+                raise RuntimeError("bind failed")
+
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        provider = self.make_provider(conn)
+        provider._client = FailingEvidenceClient()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._close_live_resources = AsyncMock()
+        provider._record_reconnect_attempt = AsyncMock()
+
+        async def open_owner():
+            provider._interaction.start_live_connection("live-2")
+
+        provider._open_live_session = AsyncMock(side_effect=open_owner)
+        self.assertFalse(
+            await provider._hard_reconnect_after_interrupt_with_lease("interrupt")
+        )
+        self.assertEqual(provider._evidence_scope()[2], "live-1")
+        self.assertEqual(provider._evidence_live_connection_transitions, [])
+
+    async def test_terminal_evidence_marker_failure_does_not_fail_committed_reconnect(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._close_live_resources = AsyncMock()
+        provider._record_reconnect_attempt = AsyncMock()
+
+        async def open_owner():
+            provider._interaction.start_live_connection("live-2")
+
+        provider._open_live_session = AsyncMock(side_effect=open_owner)
+        original_info = conn.logger.info
+
+        def fail_terminal_marker(*args, **kwargs):
+            if args and "evidence_reconnect_succeeded" in str(args[0]):
+                raise RuntimeError("terminal marker failed")
+            original_info(*args, **kwargs)
+
+        conn.logger.info = fail_terminal_marker
+
+        self.assertTrue(
+            await provider._hard_reconnect_after_interrupt_with_lease("interrupt")
+        )
+        self.assertEqual(provider._evidence_scope()[2], "live-2")
+        self.assertEqual(
+            provider._evidence_live_connection_transitions,
+            [
+                {
+                    "attempt": 1,
+                    "fromLiveConnectionId": "live-1",
+                    "toLiveConnectionId": "live-2",
+                }
+            ],
+        )
+
     async def test_failed_silent_evidence_reopen_emits_terminal_old_id_marker(self):
         conn = _Conn()
         conn.google_live_evidence_journey_id = "journey-1"

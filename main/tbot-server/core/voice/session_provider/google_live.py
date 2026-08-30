@@ -207,9 +207,23 @@ class GoogleLiveProvider(VoiceSessionProvider):
         pending = self._evidence_pending_reconnect
         if pending is None or transition is None or pending != transition:
             return None
+        journey_id = getattr(self.conn, "google_live_evidence_journey_id", None)
+        if not isinstance(journey_id, str) or not journey_id:
+            return None
+        committed_scope = (
+            journey_id,
+            str(getattr(self.conn, "session_id", "unknown")),
+            str(pending["toLiveConnectionId"]),
+        )
+        self._bind_client_evidence_scope(
+            self._client,
+            self._session_generation,
+            evidence_scope_override=committed_scope,
+            raise_on_error=True,
+        )
         self._evidence_live_connection_transitions.append(dict(pending))
+        self._evidence_current_live_connection_id = pending["toLiveConnectionId"]
         self._evidence_pending_reconnect = None
-        self._bind_client_evidence_scope(self._client, self._session_generation)
         return dict(pending)
 
     def _fail_evidence_reconnect(self):
@@ -219,7 +233,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 "fromLiveConnectionId"
             ]
         self._evidence_pending_reconnect = None
-        self._bind_client_evidence_scope(self._client, self._session_generation)
+        try:
+            self._bind_client_evidence_scope(self._client, self._session_generation)
+        except Exception:
+            pass
         return dict(pending) if pending is not None else None
 
     def _log_evidence_reconnect_failed(self, state, error_class):
@@ -237,6 +254,23 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._evidence_current_live_connection_id,
             error_class,
         )
+
+    def _log_evidence_reconnect_succeeded(self, evidence_scope, transition):
+        if evidence_scope is None or transition is None:
+            return
+        try:
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live evidence_reconnect_succeeded journey_id={} "
+                "connection_id={} attempt={} from_live_connection_id={} "
+                "to_live_connection_id={}",
+                evidence_scope[0],
+                evidence_scope[1],
+                transition["attempt"],
+                transition["fromLiveConnectionId"],
+                transition["toLiveConnectionId"],
+            )
+        except Exception:
+            pass
 
     def _evidence_transition_for_attempt(self, attempt):
         return next(
@@ -1069,17 +1103,32 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._bind_client_evidence_scope(self._client, self._session_generation)
         return str(live_connection_id)
 
-    def _bind_client_evidence_scope(self, client, generation):
+    def _bind_client_evidence_scope(
+        self,
+        client,
+        generation,
+        *,
+        evidence_scope_override=None,
+        raise_on_error=True,
+    ):
         evidence_scope_getter = getattr(client, "set_evidence_scope_getter", None)
         if not callable(evidence_scope_getter):
             return
-        evidence_scope = (
-            None if self._evidence_pending_reconnect is not None else self._evidence_scope()
-        )
+        evidence_scope = evidence_scope_override
+        if evidence_scope is None:
+            evidence_scope = (
+                None
+                if self._evidence_pending_reconnect is not None
+                else self._evidence_scope()
+            )
         client_evidence_scope = (
             (*evidence_scope, generation) if evidence_scope is not None else None
         )
-        evidence_scope_getter(lambda: client_evidence_scope)
+        try:
+            evidence_scope_getter(lambda: client_evidence_scope)
+        except Exception:
+            if raise_on_error:
+                raise
 
     async def _ensure_live_open_for_audio(self, *, preserve_live_prewarm=False):
         if normalize_session_mode(getattr(self.conn, "session_mode", SessionMode.DORMANT)) == SessionMode.LESSON:
@@ -3879,12 +3928,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                             self._interaction.live_connection_id
                         )
                     evidence_scope = self._evidence_scope()
-                    committed_transition = self._commit_evidence_reconnect(
-                        evidence_transition
-                    )
-                    if evidence_transition is not None and committed_transition is None:
-                        raise RuntimeError("evidence reconnect commit mismatch")
-                    if evidence_scope is not None and committed_transition is not None:
+                    if evidence_scope is not None and evidence_transition is not None:
                         self.conn.logger.bind(tag="GoogleLive").info(
                             "Google Live evidence_reopen_ready journey_id={} "
                             "connection_id={} attempt={} from_live_connection_id={} "
@@ -3907,20 +3951,21 @@ class GoogleLiveProvider(VoiceSessionProvider):
                         attempt_number,
                         self._interaction.live_connection_id,
                     )
-                    if evidence_scope is not None and evidence_transition is not None:
-                        self.conn.logger.bind(tag="GoogleLive").info(
-                            "Google Live evidence_reconnect_succeeded journey_id={} "
-                            "connection_id={} attempt={} from_live_connection_id={} "
-                            "to_live_connection_id={}",
-                            evidence_scope[0],
-                            evidence_scope[1],
-                            committed_transition["attempt"],
-                            committed_transition["fromLiveConnectionId"],
-                            committed_transition["toLiveConnectionId"],
-                        )
+                    committed_transition = self._commit_evidence_reconnect(
+                        evidence_transition
+                    )
+                    if evidence_transition is not None and committed_transition is None:
+                        raise RuntimeError("evidence reconnect commit mismatch")
+                    self._log_evidence_reconnect_succeeded(
+                        evidence_scope, committed_transition
+                    )
                     return True
                 except Exception as reconnect_exc:
-                    await self._close_live_resources()
+                    failed_attempt = self._fail_evidence_reconnect()
+                    try:
+                        await self._close_live_resources()
+                    except Exception:
+                        pass
                     reconnect_error_class = self._classify_error(reconnect_exc)
                     self.conn.logger.bind(tag="GoogleLive").warning(
                         "Google Live reconnect attempt {} failed: {}",
@@ -3932,7 +3977,6 @@ class GoogleLiveProvider(VoiceSessionProvider):
                         attempt_number,
                         reconnect_error_class,
                     )
-                    failed_attempt = self._fail_evidence_reconnect()
                     if evidence_scope is not None and (
                         failed_attempt is not None or evidence_transition is not None
                     ):
@@ -4782,12 +4826,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                         self._interaction.live_connection_id
                     )
                 evidence_scope = self._evidence_scope()
-                committed_transition = self._commit_evidence_reconnect(
-                    evidence_transition
-                )
-                if evidence_transition is not None and committed_transition is None:
-                    raise RuntimeError("evidence reconnect commit mismatch")
-                if evidence_scope is not None and committed_transition is not None:
+                if evidence_scope is not None and evidence_transition is not None:
                     self.conn.logger.bind(tag="GoogleLive").info(
                         "Google Live evidence_reopen_ready journey_id={} "
                         "connection_id={} attempt={} from_live_connection_id={} "
@@ -4799,20 +4838,17 @@ class GoogleLiveProvider(VoiceSessionProvider):
                         evidence_transition["toLiveConnectionId"],
                     )
                 await self._forward_pending_reconnect_audio()
-                if evidence_scope is not None and evidence_transition is not None:
-                    self.conn.logger.bind(tag="GoogleLive").info(
-                        "Google Live evidence_reconnect_succeeded journey_id={} "
-                        "connection_id={} attempt={} from_live_connection_id={} "
-                        "to_live_connection_id={}",
-                        evidence_scope[0],
-                        evidence_scope[1],
-                        committed_transition["attempt"],
-                        committed_transition["fromLiveConnectionId"],
-                        committed_transition["toLiveConnectionId"],
-                    )
                 self._interaction.transition(InteractionState.LISTENING)
                 self._waiting_model_since = None
                 self.conn.client_abort = False
+                committed_transition = self._commit_evidence_reconnect(
+                    evidence_transition
+                )
+                if evidence_transition is not None and committed_transition is None:
+                    raise RuntimeError("evidence reconnect commit mismatch")
+                self._log_evidence_reconnect_succeeded(
+                    evidence_scope, committed_transition
+                )
                 return True
             except asyncio.CancelledError:
                 failed_attempt = self._fail_evidence_reconnect()
@@ -7289,12 +7325,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                         self._interaction.live_connection_id
                     )
                 evidence_scope = self._evidence_scope()
-                committed_transition = self._commit_evidence_reconnect(
-                    evidence_transition
-                )
-                if evidence_transition is not None and committed_transition is None:
-                    raise RuntimeError("evidence reconnect commit mismatch")
-                if evidence_scope is not None and committed_transition is not None:
+                if evidence_scope is not None and evidence_transition is not None:
                     self.conn.logger.bind(tag="GoogleLive").info(
                         "Google Live evidence_reopen_ready journey_id={} "
                         "connection_id={} attempt={} from_live_connection_id={} "
@@ -7313,17 +7344,14 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     ),
                     reason,
                 )
-                if evidence_scope is not None and evidence_transition is not None:
-                    self.conn.logger.bind(tag="GoogleLive").info(
-                        "Google Live evidence_reconnect_succeeded journey_id={} "
-                        "connection_id={} attempt={} from_live_connection_id={} "
-                        "to_live_connection_id={}",
-                        evidence_scope[0],
-                        evidence_scope[1],
-                        committed_transition["attempt"],
-                        committed_transition["fromLiveConnectionId"],
-                        committed_transition["toLiveConnectionId"],
-                    )
+                committed_transition = self._commit_evidence_reconnect(
+                    evidence_transition
+                )
+                if evidence_transition is not None and committed_transition is None:
+                    raise RuntimeError("evidence reconnect commit mismatch")
+                self._log_evidence_reconnect_succeeded(
+                    evidence_scope, committed_transition
+                )
                 return True
             except asyncio.CancelledError:
                 failed_attempt = self._fail_evidence_reconnect()
@@ -7333,8 +7361,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 await self._close_live_resources()
                 raise
             except Exception as exc:
-                await self._close_live_resources()
                 failed_attempt = self._fail_evidence_reconnect()
+                try:
+                    await self._close_live_resources()
+                except Exception:
+                    pass
                 failed_state = failed_attempt or evidence_transition
                 evidence_scope = self._evidence_scope()
                 if evidence_scope is not None and failed_state is not None:
@@ -7438,10 +7469,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     self._interaction.live_connection_id
                 )
             evidence_scope = self._evidence_scope()
-            committed_transition = self._commit_evidence_reconnect(evidence_transition)
-            if evidence_transition is not None and committed_transition is None:
-                raise RuntimeError("evidence reconnect commit mismatch")
-            if evidence_scope is not None and committed_transition is not None:
+            if evidence_scope is not None and evidence_transition is not None:
                 self.conn.logger.bind(tag="GoogleLive").info(
                     "Google Live evidence_reopen_ready journey_id={} "
                     "connection_id={} attempt={} from_live_connection_id={} "
@@ -7458,17 +7486,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 reason,
                 self._response_generation,
             )
-            if evidence_scope is not None and evidence_transition is not None:
-                self.conn.logger.bind(tag="GoogleLive").info(
-                    "Google Live evidence_reconnect_succeeded journey_id={} "
-                    "connection_id={} attempt={} from_live_connection_id={} "
-                    "to_live_connection_id={}",
-                    evidence_scope[0],
-                    evidence_scope[1],
-                    committed_transition["attempt"],
-                    committed_transition["fromLiveConnectionId"],
-                    committed_transition["toLiveConnectionId"],
-                )
+            committed_transition = self._commit_evidence_reconnect(evidence_transition)
+            if evidence_transition is not None and committed_transition is None:
+                raise RuntimeError("evidence reconnect commit mismatch")
+            self._log_evidence_reconnect_succeeded(
+                evidence_scope, committed_transition
+            )
             return True
         except asyncio.CancelledError:
             failed_attempt = self._fail_evidence_reconnect()
