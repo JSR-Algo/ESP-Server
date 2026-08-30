@@ -3061,6 +3061,13 @@ def correlate_websocket_bargein_evidence(
             failures.append(
                 {"code": "LIVE_CONNECTION_TRANSITION_MISMATCH", "field": transition_field}
             )
+    final_live_connection_id = _validated_live_connection_transition_chain(
+        transport_observation.get("initialLiveConnectionId"),
+        transport_observation.get("finalLiveConnectionId"),
+        transport_observation.get("liveConnectionTransitions"),
+    )
+    if final_live_connection_id is None:
+        failures.append({"code": "LIVE_CONNECTION_TRANSITION_INVALID"})
     if not isinstance(journey_id, str) or not journey_id:
         failures.append({"code": "TRANSPORT_JOURNEY_ID_INVALID"})
         matching_correlations = []
@@ -3073,7 +3080,7 @@ def correlate_websocket_bargein_evidence(
                 if isinstance(item, Mapping)
                 and item.get("journeyId") == journey_id
                 and item.get("connectionId") == evidence_scope.get("connectionId")
-                and item.get("liveConnectionId") == evidence_scope.get("liveConnectionId")
+                and item.get("liveConnectionId") == final_live_connection_id
             ]
             if isinstance(correlations, list)
             else []
@@ -3144,6 +3151,31 @@ def correlate_websocket_bargein_evidence(
         "failures": failures,
     }
     return redact_mapping(report)
+
+
+def _validated_live_connection_transition_chain(initial_id, final_id, transitions):
+    if not isinstance(initial_id, str) or not initial_id or not isinstance(transitions, list):
+        return None
+    current_id = initial_id
+    previous_attempt = 0
+    for transition in transitions:
+        if not isinstance(transition, Mapping):
+            return None
+        attempt = transition.get("attempt")
+        from_id = transition.get("fromLiveConnectionId")
+        to_id = transition.get("toLiveConnectionId")
+        if (
+            type(attempt) is not int
+            or attempt <= previous_attempt
+            or from_id != current_id
+            or not isinstance(to_id, str)
+            or not to_id
+            or to_id == from_id
+        ):
+            return None
+        previous_attempt = attempt
+        current_id = to_id
+    return current_id if final_id == current_id else None
 
 
 def _validate_log_reliability_contract(

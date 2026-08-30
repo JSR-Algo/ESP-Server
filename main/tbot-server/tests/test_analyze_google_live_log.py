@@ -878,6 +878,103 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                     [item["code"] for item in combined["failures"]],
                 )
 
+    def test_transport_correlation_selects_bargein_on_final_live_owner(self):
+        transition = {
+            "attempt": 1,
+            "fromLiveConnectionId": "live-1",
+            "toLiveConnectionId": "live-2",
+        }
+        final_correlation = {
+            **_valid_log_verdict()["correlations"][0],
+            "liveConnectionId": "live-2",
+        }
+        transport = _transport_observation(
+            finalLiveConnectionId="live-2",
+            liveConnectionTransitions=[transition],
+        )
+        log_verdict = _valid_log_verdict(
+            finalLiveConnectionId="live-2",
+            liveConnectionTransitions=[transition],
+            correlations=[final_correlation],
+        )
+
+        combined = correlate_websocket_bargein_evidence(
+            transport,
+            log_verdict,
+            expected_candidate_identity=CANDIDATE_IDENTITY,
+        )
+
+        self.assertEqual(combined["status"], "PASS", combined)
+
+    def test_transport_correlation_rejects_bargein_on_old_owner_after_transition(self):
+        transition = {
+            "attempt": 1,
+            "fromLiveConnectionId": "live-1",
+            "toLiveConnectionId": "live-2",
+        }
+        combined = correlate_websocket_bargein_evidence(
+            _transport_observation(
+                finalLiveConnectionId="live-2",
+                liveConnectionTransitions=[transition],
+            ),
+            _valid_log_verdict(
+                finalLiveConnectionId="live-2",
+                liveConnectionTransitions=[transition],
+            ),
+            expected_candidate_identity=CANDIDATE_IDENTITY,
+        )
+
+        self.assertEqual(combined["status"], "FAIL", combined)
+        self.assertIn(
+            "SERVER_LOG_SCOPE_CORRELATION_COUNT",
+            [item["code"] for item in combined["failures"]],
+        )
+
+    def test_transport_correlation_rejects_fabricated_final_without_ledger(self):
+        combined = correlate_websocket_bargein_evidence(
+            _transport_observation(finalLiveConnectionId="live-2"),
+            _valid_log_verdict(finalLiveConnectionId="live-2"),
+            expected_candidate_identity=CANDIDATE_IDENTITY,
+        )
+
+        self.assertEqual(combined["status"], "FAIL", combined)
+        self.assertIn(
+            "LIVE_CONNECTION_TRANSITION_INVALID",
+            [item["code"] for item in combined["failures"]],
+        )
+
+    def test_transport_correlation_selects_final_owner_after_two_transitions(self):
+        transitions = [
+            {
+                "attempt": 1,
+                "fromLiveConnectionId": "live-1",
+                "toLiveConnectionId": "live-2",
+            },
+            {
+                "attempt": 2,
+                "fromLiveConnectionId": "live-2",
+                "toLiveConnectionId": "live-3",
+            },
+        ]
+        final_correlation = {
+            **_valid_log_verdict()["correlations"][0],
+            "liveConnectionId": "live-3",
+        }
+        combined = correlate_websocket_bargein_evidence(
+            _transport_observation(
+                finalLiveConnectionId="live-3",
+                liveConnectionTransitions=transitions,
+            ),
+            _valid_log_verdict(
+                finalLiveConnectionId="live-3",
+                liveConnectionTransitions=transitions,
+                correlations=[final_correlation],
+            ),
+            expected_candidate_identity=CANDIDATE_IDENTITY,
+        )
+
+        self.assertEqual(combined["status"], "PASS", combined)
+
     def test_transport_correlation_does_not_accept_same_journey_from_other_connection(self):
         log_verdict = _valid_log_verdict(
             correlations=[
