@@ -5,6 +5,7 @@ import hashlib
 import importlib
 import json
 import os
+import socket
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -498,6 +499,510 @@ def test_live_db_blocks_if_rollback_database_variable_is_missing(
     assert result["verdict"] == "BLOCKED"
     assert result["failedLane"] == "live-postgres"
     assert result["lanes"] == [{"name": "live-postgres", "exitCode": None, "durationMs": 0}]
+
+
+def _live_db_test_lane(code: str) -> gate.Lane:
+    return gate.Lane(
+        name=gate.LIVE_DB_LANE.name,
+        repository="adminEsp",
+        relative_cwd=".",
+        command=(sys.executable, "-c", code),
+        timeout_sec=5.0,
+        required_environment=gate.LIVE_DB_LANE.required_environment,
+        fixed_environment=gate.LIVE_DB_LANE.fixed_environment,
+    )
+
+
+def _live_db_source(
+    database_a: str = "postgresql://operator@127.0.0.1:55431/course_mode_a",
+    database_b: str = "postgresql://operator@[::1]:55432/course_mode_b?sslmode=disable",
+) -> dict[str, str]:
+    return {
+        "COURSE_MODE_V2_TEST_DATABASE_URL": database_a,
+        "COURSE_MODE_TEST_DATABASE_URL": database_a,
+        "DATABASE_URL": database_b,
+        "COURSE_MODE_ROLLBACK_TEST_DATABASE_URL": database_b,
+    }
+
+
+def _run_live_db_topology_gate(
+    candidate_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source: dict[str, str],
+    code: str = "raise SystemExit(0)",
+) -> dict:
+    monkeypatch.setattr(gate, "release_state_matches", lambda *args, **kwargs: True)
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    return gate.run_gate(
+        candidate_file,
+        "live-db",
+        lanes=(_live_db_test_lane(code),),
+        source_environment=source,
+        runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+    )
+
+
+def test_live_db_blocks_when_both_database_groups_have_the_same_identity(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _live_db_source(
+        database_a="postgresql://operator@127.0.0.1:55431/course_mode",
+        database_b="postgresql://operator@127.0.0.1:55431/course_mode",
+    )
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("live DB command must not run for one-DB topology"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "live-postgres"
+
+
+def test_live_db_identity_ignores_username_differences(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _live_db_source(
+        database_a="postgresql://migration@127.0.0.1:5432/course_mode",
+        database_b="postgresql://rollback@127.0.0.1/course_mode",
+    )
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("username must not create a distinct DB identity"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("COURSE_MODE_V2_TEST_DATABASE_URL", "postgresql://localhost:55439/wrong_v2"),
+        ("COURSE_MODE_ROLLBACK_TEST_DATABASE_URL", "postgresql://localhost:55439/wrong_rollback"),
+    ],
+)
+def test_live_db_blocks_when_a_database_group_does_not_share_one_identity(
+    candidate_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    variable: str,
+    value: str,
+) -> None:
+    source = _live_db_source()
+    source[variable] = value
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("live DB command must not run for a split DB group"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql://db.internal:5432/course_mode",
+        "not-a-postgresql-url",
+        "mysql://localhost:5432/course_mode",
+        "postgresql://localhost:5432/course%ZZmode",
+        "postgresql://localhost:5432",
+        "postgresql://localhost:not-a-port/course_mode",
+        "postgresql://localhost:0/course_mode",
+        "postgresql://localhost:65536/course_mode",
+        "postgresql://localhost:/course_mode",
+        "postgresql://localhost:5432/course_mode?host=db.internal",
+        "postgresql://localhost:5432/course_mode?hostaddr=10.0.0.1",
+        "postgresql://localhost:5432/course_mode?port=6432",
+        "postgresql://localhost:5432/course_mode?dbname=other",
+    ],
+)
+def test_live_db_blocks_non_loopback_malformed_and_identity_override_urls(
+    candidate_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    database_url: str,
+) -> None:
+    source = _live_db_source(database_a=database_url)
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("live DB command must not run for an unsafe URL"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["lanes"] == [{"name": "live-postgres", "exitCode": None, "durationMs": 0}]
+
+
+def test_live_db_accepts_exactly_two_distinct_loopback_database_identities(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    marker = tmp_path / "live-db-ran"
+    result = _run_live_db_topology_gate(
+        candidate_file,
+        monkeypatch,
+        _live_db_source(),
+        f"from pathlib import Path;Path({str(marker)!r}).touch()",
+    )
+
+    assert result["verdict"] == "PASS"
+    assert marker.exists()
+
+
+def test_live_db_missing_port_defaults_to_postgres_port() -> None:
+    assert gate._local_postgres_identity("postgresql://operator@127.0.0.1/course_mode") == (
+        "loopback", 5432, "course_mode",
+    )
+
+
+def test_postgres_url_without_query_does_not_call_strict_query_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gate,
+        "parse_qsl",
+        lambda *args, **kwargs: pytest.fail("empty query must not reach parse_qsl"),
+    )
+
+    assert gate._postgres_identity("postgresql://127.0.0.1:5432/course_mode") == (
+        "127.0.0.1", 5432, "course_mode",
+    )
+
+
+def test_localhost_target_is_blocked_without_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gate.threading,
+        "Thread",
+        lambda *args, **kwargs: pytest.fail("target localhost must be rejected without resolution"),
+    )
+
+    assert gate._local_postgres_identity("postgresql://localhost:5432/course_mode") is None
+
+
+def test_numeric_loopback_targets_do_not_call_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gate.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: pytest.fail("numeric target URLs must not resolve hostnames"),
+    )
+
+    assert gate._local_postgres_identity("postgresql://127.0.0.1:5432/course_mode") == (
+        "loopback", 5432, "course_mode",
+    )
+    assert gate._local_postgres_identity("postgresql://[::1]:5432/course_mode") == (
+        "loopback", 5432, "course_mode",
+    )
+
+
+def test_loopback_target_aliases_share_one_database_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gate.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: pytest.fail("numeric target URLs must not resolve hostnames"),
+    )
+
+    identities = {
+        gate._local_postgres_identity(url)
+        for url in (
+            "postgresql://other@127.0.0.1:5432/course_mode",
+            "postgresql://third@[::1]:5432/course_mode",
+        )
+    }
+
+    assert identities == {("loopback", 5432, "course_mode")}
+
+
+def test_live_db_uses_one_validated_snapshot_of_mutable_source_environment(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MutatesAfterFirstRead(dict):
+        def __init__(self, values):
+            super().__init__(values)
+            self.reads = {}
+
+        def get(self, key, default=None):
+            self.reads[key] = self.reads.get(key, 0) + 1
+            if self.reads[key] > 1:
+                return "postgresql://prod.invalid/changed"
+            return super().get(key, default)
+
+    source = MutatesAfterFirstRead(_live_db_source())
+    result = _run_live_db_topology_gate(
+        candidate_file,
+        monkeypatch,
+        source,
+        "import os;assert os.environ['DATABASE_URL'].endswith('/course_mode_b?sslmode=disable')",
+    )
+
+    assert result["verdict"] == "PASS"
+    assert all(source.reads[name] == 1 for name in gate.LIVE_DB_URL_VARIABLES)
+
+
+@pytest.mark.parametrize(
+    "production_url",
+    [
+        "postgresql://different-user@localhost:55431/course_mode_a",
+        "postgresql://different-user@candidate.localhost:55431/course_mode_a",
+        "postgres://different-user@[::1]:55432/course_mode_b",
+    ],
+)
+def test_live_db_blocks_when_production_alias_matches_either_test_database(
+    candidate_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    production_url: str,
+) -> None:
+    source = {**_live_db_source(), "PRODUCTION_DATABASE_URL": production_url}
+    monkeypatch.setattr(
+        gate.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 0)),
+        ],
+    )
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("live DB command must not run for a production alias"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["lanes"] == [{"name": "live-postgres", "exitCode": None, "durationMs": 0}]
+
+
+@pytest.mark.parametrize(
+    "production_url",
+    [
+        "not-a-postgres-url",
+        "postgresql://prod.internal:5432/production?host=localhost",
+    ],
+)
+def test_live_db_blocks_malformed_production_database_url(
+    candidate_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    production_url: str,
+) -> None:
+    source = {**_live_db_source(), "PRODUCTION_DATABASE_URL": production_url}
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("live DB command must not run for malformed production URL"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
+
+
+def test_live_db_valid_distinct_production_url_is_not_forwarded_to_child(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = {
+        **_live_db_source(),
+        "PRODUCTION_DATABASE_URL": "postgresql://prod.internal:5432/production",
+    }
+    monkeypatch.setattr(
+        gate.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("203.0.113.10", 5432)),
+        ],
+    )
+
+    result = _run_live_db_topology_gate(
+        candidate_file,
+        monkeypatch,
+        source,
+        "import os;assert 'PRODUCTION_DATABASE_URL' not in os.environ",
+    )
+
+    assert result["verdict"] == "PASS"
+
+
+@pytest.mark.parametrize(
+    "production_host", ["localhost.localdomain", "0x7f000001", "2130706433"],
+)
+def test_live_db_blocks_production_resolver_aliases_to_loopback(
+    candidate_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    production_host: str,
+) -> None:
+    source = {
+        **_live_db_source(),
+        "PRODUCTION_DATABASE_URL": f"postgresql://prod@{production_host}:55431/course_mode_a",
+    }
+    monkeypatch.setattr(
+        gate.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 55431)),
+        ],
+    )
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("resolver alias must block before command"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
+
+
+def test_live_db_blocks_ipv4_mapped_ipv6_production_alias(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = {
+        **_live_db_source(),
+        "PRODUCTION_DATABASE_URL": "postgresql://prod@mapped.invalid:55431/course_mode_a",
+    }
+    monkeypatch.setattr(
+        gate.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("::ffff:127.0.0.1", 55431, 0, 0)),
+        ],
+    )
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("mapped loopback alias must block before command"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
+
+
+def test_live_db_allows_distinct_remote_resolved_production_hostname(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = {
+        **_live_db_source(),
+        "PRODUCTION_DATABASE_URL": "postgresql://prod@production.invalid:55431/course_mode_a",
+    }
+    monkeypatch.setattr(
+        gate.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("203.0.113.10", 55431)),
+        ],
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "PASS"
+
+
+def test_live_db_blocks_unresolved_production_hostname(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = {
+        **_live_db_source(),
+        "PRODUCTION_DATABASE_URL": "postgresql://prod@unresolved.invalid:55431/course_mode_a",
+    }
+
+    def fail_resolution(*args, **kwargs):
+        raise socket.gaierror(socket.EAI_NONAME, "not known")
+
+    monkeypatch.setattr(gate.socket, "getaddrinfo", fail_resolution)
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("unresolved production host must block before command"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
+
+
+def test_live_db_blocks_production_resolution_timeout(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = {
+        **_live_db_source(),
+        "PRODUCTION_DATABASE_URL": "postgresql://prod@slow.invalid:55431/course_mode_a",
+    }
+
+    class NeverFinishes:
+        def __init__(self, *, target, daemon):
+            assert callable(target) and daemon is True
+
+        def start(self) -> None:
+            pass
+
+        def join(self, timeout: float) -> None:
+            assert timeout == 2.0
+
+        def is_alive(self) -> bool:
+            return True
+
+    monkeypatch.setattr(gate.threading, "Thread", NeverFinishes)
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("resolver timeout must block before command"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
+
+
+@pytest.mark.parametrize("target_host", ["localhost.localdomain", "0x7f000001"])
+def test_live_db_target_urls_reject_resolver_aliases(
+    candidate_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_host: str,
+) -> None:
+    source = _live_db_source(
+        database_a=f"postgresql://operator@{target_host}:55431/course_mode_a",
+    )
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("target DB resolver aliases must not run"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
+
+
+def test_live_db_gate_blocks_localhost_target_before_command(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _live_db_source(
+        database_a="postgresql://operator@localhost:55431/course_mode_a",
+    )
+    monkeypatch.setattr(
+        gate.threading,
+        "Thread",
+        lambda *args, **kwargs: pytest.fail("target localhost must not resolve"),
+    )
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *args, **kwargs: pytest.fail("localhost target must block before command"),
+    )
+
+    result = _run_live_db_topology_gate(candidate_file, monkeypatch, source)
+
+    assert result["verdict"] == "BLOCKED"
+
+
+def test_live_db_does_not_forward_ambient_production_database_url(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    environment = gate._child_environment(
+        candidate,
+        {**_live_db_source(), "PRODUCTION_DATABASE_URL": "postgresql://prod.internal/prod"},
+        gate.LIVE_DB_LANE,
+    )
+
+    assert "PRODUCTION_DATABASE_URL" not in environment
 
 
 def test_timeout_and_output_limits_fail_closed(candidate_file: Path) -> None:

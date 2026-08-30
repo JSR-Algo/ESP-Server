@@ -7,20 +7,25 @@ import argparse
 import contextlib
 import hashlib
 import importlib
+import ipaddress
 import json
 import math
 import os
 import posixpath
+import queue
 import re
 import secrets
 import shutil
+import socket
 import stat
 import tempfile
+import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 try:
     _manifest = importlib.import_module("scripts.course_mode_candidate_manifest")
@@ -342,6 +347,16 @@ LIVE_DB_LANE = _lane(
         ("COURSE_MODE_TEST_DATABASE_CONFIRMED", "1"),
     ),
 )
+
+LIVE_DB_URL_VARIABLES = (
+    "COURSE_MODE_V2_TEST_DATABASE_URL",
+    "COURSE_MODE_TEST_DATABASE_URL",
+    "DATABASE_URL",
+    "COURSE_MODE_ROLLBACK_TEST_DATABASE_URL",
+)
+POSTGRES_IDENTITY_QUERY_KEYS = {
+    "database", "dbname", "host", "hostaddr", "port", "service", "servicefile",
+}
 
 
 PHYSICAL_PREFLIGHT_LANE = _lane(
@@ -1271,6 +1286,146 @@ def _child_environment(candidate: dict, source: Mapping[str, str], lane: Lane) -
     return environment
 
 
+def _postgres_host_identity(host: str | None) -> str | None:
+    if not host:
+        return None
+    normalized = host.lower().removesuffix(".")
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        if re.fullmatch(r"[0-9.]+", normalized):
+            return None
+        labels = normalized.split(".")
+        if len(normalized) > 253 or any(
+            re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) is None
+            for label in labels
+        ):
+            return None
+        return normalized
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.compressed
+
+
+def _postgres_identity(value: object) -> tuple[str, int, str] | None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or any(character.isspace() or ord(character) < 32 for character in value)
+        or re.search(r"%(?![0-9A-Fa-f]{2})", value)
+    ):
+        return None
+    try:
+        parsed = urlsplit(value)
+        query = (
+            parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+            if parsed.query else []
+        )
+        endpoint = parsed.netloc.rsplit("@", 1)[-1]
+        parsed_port = parsed.port
+        port = 5432 if parsed_port is None else parsed_port
+        host = _postgres_host_identity(parsed.hostname)
+    except (UnicodeError, ValueError):
+        return None
+    if (
+        parsed.scheme not in {"postgres", "postgresql"}
+        or not parsed.netloc
+        or parsed.fragment
+        or endpoint.endswith(":")
+        or host is None
+        or not 1 <= port <= 65535
+        or any(key.lower() in POSTGRES_IDENTITY_QUERY_KEYS for key, _ in query)
+    ):
+        return None
+    database = unquote(parsed.path.removeprefix("/"))
+    if not database or "/" in database or "\\" in database or "\x00" in database:
+        return None
+    return (host, port, database)
+
+
+def _local_postgres_identity(value: object) -> tuple[str, int, str] | None:
+    identity = _postgres_identity(value)
+    if identity is None:
+        return None
+    try:
+        literal_host = urlsplit(value).hostname.lower()
+    except (AttributeError, UnicodeError, ValueError):
+        return None
+    if literal_host not in {"127.0.0.1", "::1"}:
+        return None
+    return ("loopback", identity[1], identity[2])
+
+
+def _resolved_postgres_addresses(host: str, port: int) -> frozenset[str] | None:
+    results: queue.SimpleQueue[object] = queue.SimpleQueue()
+
+    def resolve() -> None:
+        try:
+            results.put(socket.getaddrinfo(
+                host, port, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM,
+                proto=socket.IPPROTO_TCP,
+            ))
+        except (OSError, UnicodeError, ValueError):
+            results.put(None)
+
+    worker = threading.Thread(target=resolve, daemon=True)
+    worker.start()
+    worker.join(2.0)
+    if worker.is_alive() or results.empty():
+        return None
+    raw = results.get()
+    if not isinstance(raw, list) or not raw or len(raw) > 32:
+        return None
+    addresses = set()
+    try:
+        for family, _, _, _, sockaddr in raw:
+            if family not in {socket.AF_INET, socket.AF_INET6} or not isinstance(sockaddr, tuple):
+                return None
+            address = ipaddress.ip_address(sockaddr[0])
+            if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+                address = address.ipv4_mapped
+            addresses.add(address.compressed)
+    except (IndexError, TypeError, ValueError):
+        return None
+    return frozenset(addresses) if addresses else None
+
+
+def _live_db_topology_ready(source: Mapping[str, str]) -> bool:
+    identities = tuple(_local_postgres_identity(source.get(name)) for name in LIVE_DB_URL_VARIABLES)
+    if any(identity is None for identity in identities):
+        return False
+    v2, curriculum, materializer, rollback = identities
+    if not (v2 == curriculum and materializer == rollback and curriculum != materializer):
+        return False
+    if "PRODUCTION_DATABASE_URL" not in source:
+        return True
+    production = _postgres_identity(source.get("PRODUCTION_DATABASE_URL"))
+    if production is None:
+        return False
+    host, port, database = production
+    addresses = _resolved_postgres_addresses(host, port)
+    if addresses is None:
+        return False
+    production_is_loopback = any(ipaddress.ip_address(address).is_loopback for address in addresses)
+    aliases_test_database = production_is_loopback and any(
+        (port, database) == identity[1:] for identity in (curriculum, materializer)
+    )
+    return not aliases_test_database
+
+
+def _live_db_source_snapshot(source: Mapping[str, str]) -> dict[str, str] | None:
+    missing = object()
+    snapshot = {}
+    try:
+        for name in (*LIVE_DB_URL_VARIABLES, "PRODUCTION_DATABASE_URL"):
+            value = source.get(name, missing)
+            if value is not missing:
+                snapshot[name] = value
+    except (AttributeError, KeyError, RuntimeError, TypeError):
+        return None
+    return snapshot
+
+
 def _assignment_candidate_environment(candidate: dict, lane: Lane) -> dict[str, str] | None:
     if lane.name not in {
         "admin-course-mode-assignment-new", "admin-course-mode-assignment-rollback",
@@ -1505,6 +1660,17 @@ def run_gate(
             }
             source = source_environment if source_environment is not None else os.environ
             for lane in selected:
+                lane_source = source
+                if lane.name == LIVE_DB_LANE.name:
+                    live_db_source = _live_db_source_snapshot(source)
+                    if live_db_source is None:
+                        report["lanes"].append({
+                            "name": lane.name, "exitCode": None, "durationMs": 0,
+                        })
+                        report["verdict"] = "BLOCKED"
+                        report["failedLane"] = lane.name
+                        break
+                    lane_source = live_db_source
                 if not release_state_matches(
                     candidate_path, candidate, selected, runtime_root, require_runtime,
                     node_lanes=(lane,),
@@ -1514,7 +1680,12 @@ def run_gate(
                     report["failedLane"] = lane.name
                     break
                 required_environment = _required_environment(lane)
-                if any(not source.get(name) for name in required_environment):
+                if any(not lane_source.get(name) for name in required_environment):
+                    report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
+                    report["verdict"] = "BLOCKED"
+                    report["failedLane"] = lane.name
+                    break
+                if lane.name == LIVE_DB_LANE.name and not _live_db_topology_ready(lane_source):
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
@@ -1574,7 +1745,7 @@ def run_gate(
                     result = run_bounded_command(
                         list(command), cwd=resolved_cwd, timeout_sec=lane.timeout_sec,
                         max_output_bytes=max_output_bytes,
-                        env=_child_environment(candidate, source, lane),
+                        env=_child_environment(candidate, lane_source, lane),
                     )
                     skip_state = pytest_report_has_skips(junit_path) if junit_path else False
                 finally:
