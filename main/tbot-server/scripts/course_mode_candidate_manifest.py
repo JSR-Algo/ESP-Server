@@ -84,7 +84,9 @@ FIRMWARE_KEYS = {
 DATABASE_KEYS = {"engineImage", "engineImageId", "migrationHead", "migrationHeadSha256"}
 TOOLS_KEYS = {"nodeInstalls", "robotPreviewBrowser", "node", "espIdf"}
 NODE_KEYS = {"backend", "adminManagerWeb"}
-NODE_DESCRIPTOR_KEYS = {"version", "executable", "sha256", "npm", "npx"}
+NODE_DESCRIPTOR_KEYS = {
+    "version", "executable", "sha256", "packageRoot", "packageTreeSha256", "npm", "npx",
+}
 NODE_ENTRYPOINT_KEYS = {"entrypoint", "sha256"}
 ESP_IDF_KEYS = {"version", "commit", "root", "versionFile", "versionFileSha256"}
 NODE_INSTALL_KEYS = {"version", "root", "packageLockSha256", "treeDigest"}
@@ -559,6 +561,11 @@ def secure_browser_bundle_descriptor(root: Path) -> tuple[dict[str, Any] | None,
         return None, "path"
 
 
+def secure_node_package_tree_descriptor(root: Path) -> dict[str, Any] | None:
+    descriptor, error = secure_browser_bundle_descriptor(root)
+    return descriptor if error is None else None
+
+
 def _validate_robot_preview_browser(value: Any, reasons: set[str], *, verify_identity: bool) -> None:
     prefix = "tools.robotPreviewBrowser"
     if not isinstance(value, dict) or set(value) != BROWSER_DESCRIPTOR_KEYS:
@@ -952,6 +959,8 @@ def _validate_node_tools(value: Any, reasons: set[str], *, verify_identity: bool
         version = descriptor.get("version")
         executable = descriptor.get("executable")
         digest = descriptor.get("sha256")
+        package_root = descriptor.get("packageRoot")
+        package_tree_sha256 = descriptor.get("packageTreeSha256")
         if not isinstance(version, str) or re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", version) is None:
             reasons.add(f"{prefix}.version")
         if not isinstance(executable, str) or not Path(executable).is_absolute():
@@ -960,6 +969,20 @@ def _validate_node_tools(value: Any, reasons: set[str], *, verify_identity: bool
             reasons.add(f"{prefix}.executable")
         if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
             reasons.add(f"{prefix}.sha256")
+        expected_package_root = (
+            Path(executable).parent.parent / "lib/node_modules/npm"
+            if isinstance(executable, str) and Path(executable).is_absolute() else None
+        )
+        if (
+            not isinstance(package_root, str) or not Path(package_root).is_absolute()
+            or expected_package_root is None or Path(package_root) != expected_package_root
+        ):
+            reasons.add(f"{prefix}.packageRoot")
+        if (
+            not isinstance(package_tree_sha256, str)
+            or SHA256_RE.fullmatch(package_tree_sha256) is None
+        ):
+            reasons.add(f"{prefix}.packageTreeSha256")
         entrypoints: list[tuple[str, str, str]] = []
         for tool in ("npm", "npx"):
             tool_descriptor = descriptor.get(tool)
@@ -972,10 +995,7 @@ def _validate_node_tools(value: Any, reasons: set[str], *, verify_identity: bool
             if not isinstance(entrypoint, str) or not Path(entrypoint).is_absolute():
                 reasons.add(f"{tool_prefix}.entrypoint")
             elif isinstance(executable, str) and Path(executable).is_absolute():
-                expected_entrypoint = (
-                    Path(executable).parent.parent
-                    / f"lib/node_modules/npm/bin/{tool}-cli.js"
-                )
+                expected_entrypoint = expected_package_root / f"bin/{tool}-cli.js"
                 if Path(entrypoint) != expected_entrypoint:
                     reasons.add(f"{tool_prefix}.entrypoint")
             if not isinstance(expected, str) or SHA256_RE.fullmatch(expected) is None:
@@ -990,6 +1010,12 @@ def _validate_node_tools(value: Any, reasons: set[str], *, verify_identity: bool
             continue
         if observed["sha256"] != digest:
             reasons.add(f"{prefix}.sha256")
+        package_tree = (
+            secure_node_package_tree_descriptor(Path(package_root))
+            if isinstance(package_root, str) else None
+        )
+        if package_tree is None or package_tree["sha256"] != package_tree_sha256:
+            reasons.add(f"{prefix}.packageTreeSha256")
         result = run_bounded_command(
             [executable, "--version"], cwd=Path("/"), env=SECURE_ENV,
             timeout_sec=5.0, max_output_bytes=4096,
@@ -1071,6 +1097,12 @@ def upgrade_candidate_schema(
             "version": candidate["tools"]["node"][key],
             "executable": str(executable), "sha256": observed["sha256"],
         }
+        package_root = executable.parent.parent / "lib/node_modules/npm"
+        package_tree = secure_node_package_tree_descriptor(package_root)
+        if package_tree is None:
+            raise ValueError("candidate schema upgrade failed")
+        descriptor["packageRoot"] = str(package_root)
+        descriptor["packageTreeSha256"] = package_tree["sha256"]
         for tool in ("npm", "npx"):
             entrypoint = executable.parent.parent / f"lib/node_modules/npm/bin/{tool}-cli.js"
             entrypoint_observed, entrypoint_error = secure_regular_descriptor(

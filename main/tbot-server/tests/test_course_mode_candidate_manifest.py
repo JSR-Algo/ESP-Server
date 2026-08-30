@@ -127,8 +127,13 @@ def candidate(repositories: dict[str, Path], tmp_path: Path, monkeypatch: pytest
             entrypoint.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             package_tools[tool] = {"entrypoint": str(entrypoint),
                                    "sha256": hashlib.sha256(entrypoint.read_bytes()).hexdigest()}
+        package_root = prefix / "lib/node_modules/npm"
+        package_tree = manifest.secure_node_package_tree_descriptor(package_root)
+        assert package_tree is not None
         node[key] = {"version": version, "executable": str(executable),
                      "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+                     "packageRoot": str(package_root),
+                     "packageTreeSha256": package_tree["sha256"],
                      **package_tools}
     esp_idf = tmp_path / "esp-idf"
     (esp_idf / "tools/cmake").mkdir(parents=True)
@@ -253,6 +258,48 @@ def test_candidate_rejects_mutated_node_package_manager_entrypoint(candidate: di
     entrypoint.write_text("#!/bin/sh\nexit 91\n", encoding="utf-8")
 
     assert "tools.node.backend.npm.sha256" in validate_candidate(candidate, now=NOW)
+
+
+def test_candidate_rejects_mutated_node_package_dependency(candidate: dict) -> None:
+    descriptor = candidate["tools"]["node"]["backend"]
+    dependency = Path(descriptor["packageRoot"]) / "lib/runtime.js"
+    dependency.parent.mkdir(parents=True, exist_ok=True)
+    package_tree = manifest.secure_node_package_tree_descriptor(Path(descriptor["packageRoot"]))
+    assert package_tree is not None
+    descriptor["packageTreeSha256"] = package_tree["sha256"]
+    dependency.write_text("module.exports = 'changed';\n", encoding="utf-8")
+
+    assert "tools.node.backend.packageTreeSha256" in validate_candidate(candidate, now=NOW)
+
+
+def test_candidate_rejects_node_package_root_outside_canonical_install(
+    candidate: dict, tmp_path: Path,
+) -> None:
+    descriptor = candidate["tools"]["node"]["backend"]
+    package_root = tmp_path / "npm"
+    package_root.mkdir()
+    (package_root / "package.json").write_text("{}\n", encoding="utf-8")
+    package_tree = manifest.secure_node_package_tree_descriptor(package_root)
+    assert package_tree is not None
+    descriptor["packageRoot"] = str(package_root)
+    descriptor["packageTreeSha256"] = package_tree["sha256"]
+
+    assert "tools.node.backend.packageRoot" in validate_candidate(candidate, now=NOW)
+
+
+@pytest.mark.parametrize("unsafe", ["symlink", "fifo"])
+def test_node_package_tree_descriptor_rejects_unmodeled_entry_types(
+    tmp_path: Path, unsafe: str,
+) -> None:
+    root = tmp_path / "npm"
+    root.mkdir()
+    (root / "package.json").write_text("{}\n", encoding="utf-8")
+    if unsafe == "symlink":
+        (root / "unsafe").symlink_to("package.json")
+    else:
+        os.mkfifo(root / "unsafe")
+
+    assert manifest.secure_node_package_tree_descriptor(root) is None
 
 
 def test_candidate_rejects_hashed_node_entrypoint_outside_canonical_install(candidate: dict, tmp_path: Path) -> None:

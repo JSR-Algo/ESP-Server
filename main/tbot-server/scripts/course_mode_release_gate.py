@@ -20,7 +20,6 @@ import socket
 import stat
 import subprocess
 import sys
-import tarfile
 import tempfile
 import threading
 import time
@@ -257,6 +256,52 @@ class ExecutionStage:
     def __del__(self) -> None:
         self.cleanup()
 
+    def create_lane_execution(self) -> LaneExecution:
+        lane_root = Path(tempfile.mkdtemp(prefix="course-mode-lane-", dir=self.root.parent))
+        try:
+            execution_root = lane_root / "candidate"
+            shutil.copytree(self.root, execution_root, symlinks=True)
+            _make_tree_owner_writable(execution_root)
+            source_prefix = str(self.root) + os.sep
+            target_prefix = str(execution_root) + os.sep
+
+            def rebase(value: object) -> object:
+                if isinstance(value, dict):
+                    return {key: rebase(item) for key, item in value.items()}
+                if isinstance(value, list):
+                    return [rebase(item) for item in value]
+                if isinstance(value, str) and value.startswith(source_prefix):
+                    return target_prefix + value[len(source_prefix):]
+                return value
+
+            runtime = lane_root / "runtime"
+            environment = {}
+            for name in ("home", "tmp", "cache", "reports"):
+                (runtime / name).mkdir(parents=True)
+            environment.update({
+                "HOME": str(runtime / "home"),
+                "TMPDIR": str(runtime / "tmp"),
+                "XDG_CACHE_HOME": str(runtime / "cache"),
+                "COURSE_MODE_LANE_REPORT_ROOT": str(runtime / "reports"),
+            })
+            return LaneExecution(lane_root, rebase(self.candidate), environment)
+        except Exception:
+            shutil.rmtree(lane_root, ignore_errors=True)
+            raise
+
+
+@dataclass
+class LaneExecution:
+    root: Path
+    candidate: dict
+    environment: dict[str, str]
+
+    def cleanup(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def __del__(self) -> None:
+        self.cleanup()
+
 
 def _make_tree_read_only(root: Path) -> None:
     for directory, names, files in os.walk(root, topdown=False):
@@ -269,6 +314,19 @@ def _make_tree_read_only(root: Path) -> None:
             if not path.is_symlink():
                 path.chmod(0o555)
         Path(directory).chmod(0o555)
+
+
+def _make_tree_owner_writable(root: Path) -> None:
+    for directory, names, files in os.walk(root):
+        Path(directory).chmod(Path(directory).stat().st_mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        for name in names:
+            path = Path(directory) / name
+            if not path.is_symlink():
+                path.chmod(path.stat().st_mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        for name in files:
+            path = Path(directory) / name
+            if not path.is_symlink():
+                path.chmod(path.stat().st_mode | stat.S_IRUSR | stat.S_IWUSR)
 
 
 def _snapshot_identity(metadata: os.stat_result) -> tuple[int, ...]:
@@ -527,103 +585,108 @@ def _copy_snapshot_file(
 
 
 def _archive_repository(source: Path, sha: str, destination: Path, state: dict[str, int]) -> None:
-    archive_fd, archive_name = tempfile.mkstemp(
-        prefix="course-mode-repository-", suffix=".tar", dir=destination.parent.parent,
-    )
-    os.close(archive_fd)
-    archive = Path(archive_name)
+    base = [
+        str(_manifest.TRUSTED_GIT_EXECUTABLE), "--no-replace-objects", "--no-optional-locks",
+        "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+        "-c", "credential.helper=",
+    ]
     try:
-        command = [
-            str(_manifest.TRUSTED_GIT_EXECUTABLE), "--no-optional-locks",
-            "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-            "-c", "credential.helper=", "archive", "--format=tar", "--output", str(archive), sha,
-        ]
-        result = subprocess.run(
-            command, cwd=source, env=_manifest.SECURE_ENV, stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60, check=False,
+        resolved = subprocess.run(
+            [*base, "rev-parse", "--verify", f"{sha}^{{commit}}"], cwd=source,
+            env=_manifest.SECURE_ENV, stdin=subprocess.DEVNULL, capture_output=True,
+            timeout=60, check=False,
         )
-        if result.returncode != 0:
+        if resolved.returncode != 0 or resolved.stdout.strip().decode("ascii") != sha:
             raise ValueError("candidate archive failed")
-        if archive.stat().st_size > MAX_SNAPSHOT_BYTES:
-            raise ValueError("snapshot byte limit exceeded")
+        listing = subprocess.run(
+            [*base, "ls-tree", "-r", "-z", "-t", "--full-tree", sha], cwd=source,
+            env=_manifest.SECURE_ENV, stdin=subprocess.DEVNULL, capture_output=True,
+            timeout=60, check=False,
+        )
+        if listing.returncode != 0:
+            raise ValueError("candidate archive failed")
+        entries: list[tuple[str, str, str, Path]] = []
+        for raw in listing.stdout.split(b"\0"):
+            if not raw:
+                continue
+            header, separator, path_bytes = raw.partition(b"\t")
+            fields = header.split(b" ")
+            if not separator or len(fields) != 3:
+                raise ValueError("candidate archive failed")
+            mode, object_type, object_id = (field.decode("ascii") for field in fields)
+            path_text = path_bytes.decode("utf-8")
+            relative = Path(path_text)
+            if (
+                not path_text or relative.is_absolute() or ".." in relative.parts
+                or relative.as_posix() != path_text
+            ):
+                raise ValueError("unsafe candidate archive path")
+            if len(relative.parts) > MAX_SNAPSHOT_DEPTH:
+                raise ValueError("snapshot depth limit exceeded")
+            if object_type not in {"tree", "blob"}:
+                raise ValueError("unsupported candidate archive entry")
+            entries.append((mode, object_type, object_id, relative))
+        if len(entries) + state["entries"] > MAX_SNAPSHOT_ENTRIES:
+            raise ValueError("snapshot entry limit exceeded")
         destination.mkdir()
-        destination_fd = _open_snapshot_directory(destination)
+        batch = subprocess.Popen(
+            [*base, "cat-file", "--batch"], cwd=source, env=_manifest.SECURE_ENV,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
         try:
-            with tarfile.open(archive, mode="r:") as bundle:
-                for member in bundle:
-                    relative = Path(member.name)
-                    if (
-                        not member.name or relative.is_absolute() or ".." in relative.parts
-                        or relative.as_posix() != member.name.rstrip("/")
-                    ):
-                        raise ValueError("unsafe candidate archive path")
-                    depth = len(relative.parts)
-                    if depth > MAX_SNAPSHOT_DEPTH:
-                        raise ValueError("snapshot depth limit exceeded")
-                    state["entries"] += 1
-                    if state["entries"] > MAX_SNAPSHOT_ENTRIES:
-                        raise ValueError("snapshot entry limit exceeded")
-                    parent_fd = _open_snapshot_relative_directory(
-                        destination_fd, relative.parts[:-1], create=True,
-                    )
+            assert batch.stdin is not None and batch.stdout is not None
+            for mode, object_type, object_id, relative in entries:
+                state["entries"] += 1
+                target = destination / relative
+                if object_type == "tree":
+                    if mode != "040000":
+                        raise ValueError("unsupported candidate archive entry")
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                batch.stdin.write(object_id.encode("ascii") + b"\n")
+                batch.stdin.flush()
+                header = batch.stdout.readline().rstrip(b"\n").split(b" ")
+                if len(header) != 3 or header[0].decode("ascii") != object_id or header[1] != b"blob":
+                    raise ValueError("candidate archive failed")
+                size = int(header[2])
+                state["bytes"] += size
+                if state["bytes"] > MAX_SNAPSHOT_BYTES:
+                    raise ValueError("snapshot byte limit exceeded")
+                content = batch.stdout.read(size)
+                if len(content) != size or batch.stdout.read(1) != b"\n":
+                    raise ValueError("candidate archive truncated")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if mode == "120000":
+                    link = content.decode("utf-8")
+                    if not _lexical_symlink_within_root(relative.parent, link):
+                        raise ValueError("unsafe symlink in candidate archive")
+                    os.symlink(link, target)
+                elif mode in {"100644", "100755"}:
+                    output_fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
                     try:
-                        if member.isdir():
-                            with contextlib.suppress(FileExistsError):
-                                os.mkdir(relative.name, member.mode, dir_fd=parent_fd)
-                            child_fd = os.open(
-                                relative.name,
-                                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                                dir_fd=parent_fd,
-                            )
-                            os.close(child_fd)
-                        elif member.isreg():
-                            state["bytes"] += member.size
-                            if state["bytes"] > MAX_SNAPSHOT_BYTES:
-                                raise ValueError("snapshot byte limit exceeded")
-                            source_file = bundle.extractfile(member)
-                            if source_file is None:
-                                raise ValueError("candidate archive file missing")
-                            output_fd = os.open(
-                                relative.name,
-                                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                                0o600,
-                                dir_fd=parent_fd,
-                            )
-                            try:
-                                remaining = member.size
-                                while remaining:
-                                    chunk = source_file.read(min(1024 * 1024, remaining))
-                                    if not chunk:
-                                        raise ValueError("candidate archive truncated")
-                                    view = memoryview(chunk)
-                                    while view:
-                                        written = os.write(output_fd, view)
-                                        view = view[written:]
-                                    remaining -= len(chunk)
-                                if source_file.read(1):
-                                    raise ValueError("candidate archive grew")
-                                os.fchmod(output_fd, member.mode)
-                            finally:
-                                os.close(output_fd)
-                                source_file.close()
-                        elif member.issym():
-                            if not _lexical_symlink_within_root(relative.parent, member.linkname):
-                                raise ValueError("unsafe symlink in candidate archive")
-                            state["bytes"] += len(os.fsencode(member.linkname))
-                            if state["bytes"] > MAX_SNAPSHOT_BYTES:
-                                raise ValueError("snapshot byte limit exceeded")
-                            os.symlink(member.linkname, relative.name, dir_fd=parent_fd)
-                        else:
-                            raise ValueError("unsupported candidate archive entry")
+                        view = memoryview(content)
+                        while view:
+                            written = os.write(output_fd, view)
+                            view = view[written:]
+                        os.fchmod(output_fd, 0o755 if mode == "100755" else 0o644)
                     finally:
-                        os.close(parent_fd)
+                        os.close(output_fd)
+                else:
+                    raise ValueError("unsupported candidate archive entry")
         finally:
-            os.close(destination_fd)
-    except (OSError, subprocess.SubprocessError, tarfile.TarError) as error:
+            if batch.stdin is not None:
+                batch.stdin.close()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                batch.wait(timeout=10)
+            if batch.poll() is None:
+                batch.kill()
+                batch.wait()
+            if batch.returncode != 0:
+                raise ValueError("candidate archive failed")
+    except ValueError:
+        raise
+    except (OSError, subprocess.SubprocessError, UnicodeError) as error:
         raise ValueError("candidate archive failed") from error
-    finally:
-        with contextlib.suppress(OSError):
-            archive.unlink()
 
 
 def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> ExecutionStage:
@@ -645,7 +708,14 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
                 )
             staged["repositories"][name]["path"] = str(destination)
         tools_root = root / "tools"
+        requirements = {
+            requirement for lane in lanes
+            if (requirement := _node_install_requirement(lane)) is not None and requirement[0]
+        }
+        required_node_tools = {key for key, _ in requirements}
         for key, descriptor in candidate["tools"]["node"].items():
+            if key not in required_node_tools:
+                continue
             prefix = tools_root / key
             node = prefix / "bin/node"
             node.parent.mkdir(parents=True)
@@ -655,18 +725,21 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
             )
             staged_descriptor = staged["tools"]["node"][key]
             staged_descriptor["executable"] = str(node)
+            package_root = prefix / "lib/node_modules/npm"
+            package_root.parent.mkdir(parents=True, exist_ok=True)
+            _copy_snapshot_tree(Path(descriptor["packageRoot"]), package_root, state)
+            observed_package = _manifest.secure_node_package_tree_descriptor(package_root)
+            if (
+                observed_package is None
+                or observed_package["sha256"] != descriptor["packageTreeSha256"]
+            ):
+                raise ValueError("staged npm package descriptor mismatch")
+            staged_descriptor["packageRoot"] = str(package_root)
             for tool in ("npm", "npx"):
                 entrypoint = prefix / f"lib/node_modules/npm/bin/{tool}-cli.js"
-                entrypoint.parent.mkdir(parents=True, exist_ok=True)
-                _copy_snapshot_file(
-                    Path(descriptor[tool]["entrypoint"]), entrypoint, state,
-                    expected_sha256=descriptor[tool]["sha256"],
-                )
+                if _secure_file_sha256(entrypoint, MAX_PACKAGE_LOCK_BYTES) != descriptor[tool]["sha256"]:
+                    raise ValueError("staged npm entrypoint descriptor mismatch")
                 staged_descriptor[tool]["entrypoint"] = str(entrypoint)
-        requirements = {
-            requirement for lane in lanes
-            if (requirement := _node_install_requirement(lane)) is not None and requirement[0]
-        }
         for key, relative_cwd in requirements:
             metadata = candidate["tools"]["nodeInstalls"][key]
             install_source = Path(metadata["root"])
@@ -2213,6 +2286,7 @@ def run_gate(
             source = source_environment if source_environment is not None else os.environ
             for lane in selected if report["verdict"] == "PASS" else ():
                 execution_stage = None
+                lane_execution = None
                 lane_source = source
                 if lane.name == LIVE_DB_LANE.name:
                     live_db_source = _live_db_source_snapshot(source)
@@ -2258,8 +2332,11 @@ def run_gate(
                 lane_command = _command_for_lane(lane, candidate)
                 try:
                     execution_stage = stage_execution_candidate(candidate, (lane,))
-                    execution_candidate = execution_stage.candidate
+                    lane_execution = execution_stage.create_lane_execution()
+                    execution_candidate = lane_execution.candidate
                 except (OSError, RuntimeError, TypeError, ValueError):
+                    if execution_stage is not None:
+                        execution_stage.cleanup()
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = "snapshot"
                     break
@@ -2268,6 +2345,7 @@ def run_gate(
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
+                    lane_execution.cleanup()
                     execution_stage.cleanup()
                     break
                 root = Path(execution_candidate["repositories"][lane.repository]["path"])
@@ -2279,6 +2357,7 @@ def run_gate(
                 except OSError:
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
+                    lane_execution.cleanup()
                     execution_stage.cleanup()
                     break
                 started = time.monotonic_ns()
@@ -2289,13 +2368,16 @@ def run_gate(
                     junit_path = Path(name).resolve()
                     command = (*command, f"--junitxml={junit_path}")
                 try:
+                    child_environment = _child_environment(execution_candidate, lane_source, lane)
+                    child_environment.update(lane_execution.environment)
                     result = run_bounded_command(
                         list(command), cwd=resolved_cwd, timeout_sec=lane.timeout_sec,
                         max_output_bytes=max_output_bytes,
-                        env=_child_environment(execution_candidate, lane_source, lane),
+                        env=child_environment,
                     )
                     skip_state = pytest_report_has_skips(junit_path) if junit_path else False
                 except BaseException:
+                    lane_execution.cleanup()
                     execution_stage.cleanup()
                     raise
                 finally:
@@ -2307,6 +2389,7 @@ def run_gate(
                 report["lanes"].append({
                     "name": lane.name, "exitCode": exit_code, "durationMs": duration_ms,
                 })
+                lane_execution.cleanup()
                 execution_stage.cleanup()
                 if not _candidate_metadata_matches(candidate_path, candidate):
                     report["verdict"] = "BLOCKED"

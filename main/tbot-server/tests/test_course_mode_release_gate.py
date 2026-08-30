@@ -5,7 +5,9 @@ import hashlib
 import importlib
 import json
 import os
+import shutil
 import socket
+import stat
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -384,8 +386,13 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             entrypoint.write_text("raise SystemExit(0)\n", encoding="utf-8")
             package_tools[tool] = {"entrypoint": str(entrypoint),
                                    "sha256": hashlib.sha256(entrypoint.read_bytes()).hexdigest()}
+        package_root = prefix / "lib/node_modules/npm"
+        package_tree = gate._manifest.secure_node_package_tree_descriptor(package_root)
+        assert package_tree is not None
         node[key] = {"version": version, "executable": str(executable),
                      "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+                     "packageRoot": str(package_root),
+                     "packageTreeSha256": package_tree["sha256"],
                      **package_tools}
     esp_idf = tmp_path / "esp-idf"
     (esp_idf / "tools/cmake").mkdir(parents=True)
@@ -549,6 +556,100 @@ def test_replaced_candidate_npm_entrypoint_is_blocked_before_execution(candidate
 
     assert result["verdict"] == "BLOCKED"
     assert not marker.exists()
+
+
+@pytest.mark.parametrize("tool", ["npm", "npx"])
+def test_staged_package_manager_keeps_complete_descriptor_bound_package_tree(
+    candidate_file: Path, tool: str,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "backend", ".", "backend")
+    descriptor = candidate["tools"]["node"]["backend"]
+    package_root = Path(descriptor["npm"]["entrypoint"]).parent.parent
+    library = package_root / "lib/cli.py"
+    library.parent.mkdir(parents=True, exist_ok=True)
+    library.write_text("print('fixture-npm-1.0.0')\n", encoding="utf-8")
+    for manager in ("npm", "npx"):
+        entrypoint = Path(descriptor[manager]["entrypoint"])
+        entrypoint.write_text(
+            "from pathlib import Path\n"
+            "exec((Path(__file__).parent.parent / 'lib/cli.py').read_text())\n",
+            encoding="utf-8",
+        )
+        descriptor[manager]["sha256"] = hashlib.sha256(entrypoint.read_bytes()).hexdigest()
+    package_tree = gate._manifest.secure_node_package_tree_descriptor(package_root)
+    assert package_tree is not None
+    descriptor["packageRoot"] = str(package_root)
+    descriptor["packageTreeSha256"] = package_tree["sha256"]
+
+    stage = gate.stage_execution_candidate(
+        candidate, (gate.Lane(f"backend-{tool}", "backend", ".", (tool, "--version"), 5.0),),
+    )
+    try:
+        staged = stage.candidate["tools"]["node"]["backend"]
+        assert str(package_root) not in json.dumps(staged)
+        result = subprocess.run(
+            [staged["executable"], staged[tool]["entrypoint"], "--version"],
+            cwd=stage.candidate["repositories"]["backend"]["path"],
+            env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"},
+            text=True, capture_output=True, check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "fixture-npm-1.0.0"
+    finally:
+        stage.cleanup()
+
+
+def test_real_staged_npm_and_npx_run_without_original_tool_paths(candidate_file: Path) -> None:
+    node_path = shutil.which("node")
+    assert node_path is not None
+    node = Path(node_path).resolve()
+    package_root = node.parent.parent / "lib/node_modules/npm"
+    assert package_root.is_dir()
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "backend", ".", "backend")
+    package_tree = gate._manifest.secure_node_package_tree_descriptor(package_root)
+    assert package_tree is not None
+    version = subprocess.run(
+        [node, "--version"], text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    descriptor = {
+        "version": version,
+        "executable": str(node),
+        "sha256": hashlib.sha256(node.read_bytes()).hexdigest(),
+        "packageRoot": str(package_root),
+        "packageTreeSha256": package_tree["sha256"],
+    }
+    for tool in ("npm", "npx"):
+        entrypoint = package_root / f"bin/{tool}-cli.js"
+        descriptor[tool] = {
+            "entrypoint": str(entrypoint),
+            "sha256": hashlib.sha256(entrypoint.read_bytes()).hexdigest(),
+        }
+    candidate["tools"]["node"]["backend"] = descriptor
+    lanes = tuple(
+        gate.Lane(f"real-{tool}", "backend", ".", (tool, "--version"), 10.0)
+        for tool in ("npm", "npx")
+    )
+
+    stage = gate.stage_execution_candidate(candidate, lanes)
+    try:
+        staged = stage.candidate["tools"]["node"]["backend"]
+        serialized = json.dumps(staged)
+        assert str(node) not in serialized
+        assert str(package_root) not in serialized
+        for tool in ("npm", "npx"):
+            result = subprocess.run(
+                [staged["executable"], staged[tool]["entrypoint"], "--version"],
+                cwd=stage.candidate["repositories"]["backend"]["path"],
+                env={"PATH": str(Path(staged["executable"]).parent) + ":/usr/bin:/bin"},
+                text=True, capture_output=True, check=False,
+            )
+            assert result.returncode == 0, result.stderr
+            assert result.stdout.strip()
+            assert str(package_root) not in result.stdout + result.stderr
+    finally:
+        stage.cleanup()
 
 
 def test_lane_executes_private_snapshot_after_original_source_is_replaced(
@@ -787,10 +888,57 @@ def test_repository_mutation_after_validation_never_reaches_lane(
     assert not marker.exists()
 
 
+def test_snapshot_reads_literal_commit_when_replace_ref_targets_other_bytes(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    repository = candidate["repositories"]["adminEsp"]
+    root = Path(repository["path"])
+    original = repository["sha"]
+    (root / "tracked.txt").write_text("replacement", encoding="utf-8")
+    _git(root, "add", "tracked.txt")
+    _git(root, "commit", "-m", "replacement object")
+    replacement = _git(root, "rev-parse", "HEAD")
+    _git(root, "reset", "--hard", original)
+    _git(root, "replace", original, replacement)
+
+    stage = gate.stage_execution_candidate(candidate, ())
+    try:
+        staged = Path(stage.candidate["repositories"]["adminEsp"]["path"])
+        assert (staged / "tracked.txt").read_text(encoding="utf-8") == "adminEsp"
+    finally:
+        stage.cleanup()
+
+
+def test_snapshot_ignores_export_attributes_and_preserves_literal_blob_bytes(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    repository = candidate["repositories"]["adminEsp"]
+    root = Path(repository["path"])
+    (root / ".gitattributes").write_text(
+        "kept.txt export-ignore\nsubstituted.txt export-subst\n", encoding="utf-8",
+    )
+    (root / "kept.txt").write_text("must remain\n", encoding="utf-8")
+    literal = "$Format:%H$\n"
+    (root / "substituted.txt").write_text(literal, encoding="utf-8")
+    _git(root, "add", ".gitattributes", "kept.txt", "substituted.txt")
+    _git(root, "commit", "-m", "export attributes")
+    repository.update(_repository(root))
+    _refresh_image_reference(candidate, "adminEsp")
+
+    stage = gate.stage_execution_candidate(candidate, ())
+    try:
+        staged = Path(stage.candidate["repositories"]["adminEsp"]["path"])
+        assert (staged / "kept.txt").read_text(encoding="utf-8") == "must remain\n"
+        assert (staged / "substituted.txt").read_text(encoding="utf-8") == literal
+    finally:
+        stage.cleanup()
+
+
 def test_each_lane_gets_a_fresh_verified_repository_snapshot(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(gate, "_make_tree_read_only", lambda _root: None)
     lanes = (
         _lane("poison-first-snapshot", "from pathlib import Path;Path('tracked.txt').write_text('poisoned')"),
         _lane("verify-fresh-second-snapshot", "from pathlib import Path;assert Path('tracked.txt').read_text() == 'adminEsp'"),
@@ -800,6 +948,47 @@ def test_each_lane_gets_a_fresh_verified_repository_snapshot(
 
     assert result["verdict"] == "PASS", result
     assert [item["exitCode"] for item in result["lanes"]] == [0, 0]
+
+
+def test_lane_workspace_is_writable_for_real_build_outputs_and_is_destroyed(
+    candidate_file: Path, tmp_path: Path,
+) -> None:
+    observed_roots: list[Path] = []
+    code = (
+        "from pathlib import Path;"
+        "Path('dist/nested').mkdir(parents=True);"
+        "Path('dist/nested/artifact.js').write_text('built');"
+        "Path('.course-cache').mkdir();"
+        "Path('.course-cache/result.json').write_text('{}')"
+    )
+    original = gate.LaneExecution.cleanup
+
+    def record_cleanup(self):
+        observed_roots.append(self.root)
+        original(self)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(gate.LaneExecution, "cleanup", record_cleanup)
+        result = gate.run_gate(candidate_file, "quick", lanes=(_lane("real-write", code),))
+
+    assert result["verdict"] == "PASS", result
+    assert observed_roots and all(not root.exists() for root in observed_roots)
+
+
+def test_writable_lane_copy_cannot_mutate_immutable_verified_base(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    stage = gate.stage_execution_candidate(candidate, ())
+    execution = stage.create_lane_execution()
+    try:
+        base_file = Path(stage.candidate["repositories"]["adminEsp"]["path"]) / "tracked.txt"
+        lane_file = Path(execution.candidate["repositories"]["adminEsp"]["path"]) / "tracked.txt"
+        assert stat.S_IMODE(base_file.stat().st_mode) & 0o222 == 0
+        assert stat.S_IMODE(lane_file.stat().st_mode) & stat.S_IWUSR
+        lane_file.write_text("lane mutation", encoding="utf-8")
+        assert base_file.read_text(encoding="utf-8") == "adminEsp"
+    finally:
+        execution.cleanup()
+        stage.cleanup()
 
 
 def test_snapshot_directory_open_rejects_symlink_parent(tmp_path: Path) -> None:
@@ -1624,11 +1813,15 @@ def test_child_environment_is_sanitized_and_path_shadow_is_ignored(
     (shadow / "python3").write_text("#!/bin/sh\nexit 91\n", encoding="utf-8")
     (shadow / "python3").chmod(0o755)
     code = (
-        "import os;"
-        "assert os.environ['HOME']=='/nonexistent';"
-        "assert os.environ['PATH']==%r;"
+        "import os;from pathlib import Path;"
+        f"assert os.environ['HOME']!={str(tmp_path)!r};"
+        "assert Path(os.environ['HOME']).is_dir();"
+        "assert os.access(os.environ['HOME'], os.W_OK);"
+        "assert Path(os.environ['TMPDIR']).is_dir();"
+        "assert Path(os.environ['XDG_CACHE_HOME']).is_dir();"
+        f"assert os.environ['PATH']=={gate.SECURE_PATH!r};"
         "assert 'TOP_SECRET' not in os.environ"
-    ) % gate.SECURE_PATH
+    )
 
     result = gate.run_gate(
         candidate_file,
