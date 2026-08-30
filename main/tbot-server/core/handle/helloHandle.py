@@ -3,6 +3,7 @@ import json
 import uuid
 import random
 import asyncio
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -16,6 +17,7 @@ from core.utils.util import remove_punctuation_and_length, opus_datas_to_wav_byt
 from core.providers.tools.device_mcp import MCPClient, send_mcp_initialize_message
 
 TAG = __name__
+SAFE_EVIDENCE_JOURNEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 
 WAKEUP_CONFIG = {
     "refresh_time": 10,
@@ -72,6 +74,14 @@ def _google_live_output_sample_rate(conn: "ConnectionHandler"):
 async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
     """Handle hello message"""
     send_mcp_initialize = False
+    evidence_journey_id = msg_json.get("evidence_journey_id")
+    conn.google_live_evidence_journey_id = (
+        evidence_journey_id
+        if _is_google_live_connection(conn)
+        and isinstance(evidence_journey_id, str)
+        and SAFE_EVIDENCE_JOURNEY_RE.fullmatch(evidence_journey_id)
+        else None
+    )
     audio_params = msg_json.get("audio_params")
     if audio_params:
         format = audio_params.get("format")

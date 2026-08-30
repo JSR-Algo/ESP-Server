@@ -32,6 +32,21 @@ class PingMessageHandler(TextMessageHandler):
         try:
             conn.logger.debug(f"Received PING message, send PONG response")
             conn.last_activity_time = time.time() * 1000
+            journey_id = getattr(conn, "google_live_evidence_journey_id", None)
+            lesson_runtime = getattr(conn, "lesson_runtime", None)
+            step_id = getattr(lesson_runtime, "_step_id", None)
+            if isinstance(journey_id, str) and journey_id and step_id:
+                marker_key = (journey_id, str(step_id))
+                if getattr(conn, "_google_live_evidence_ping_marker", None) != marker_key:
+                    conn._google_live_evidence_ping_marker = marker_key
+                    conn.logger.info(
+                        "Google Live firmware_ping journey_id={} connection_id={} "
+                        "live_connection_id={} lesson_step={}",
+                        journey_id,
+                        str(getattr(conn, "session_id", "unknown")),
+                        str(getattr(conn, "google_live_live_connection_id", "none")),
+                        str(step_id),
+                    )
             # ConstructPONGResponseMessage
             pong_message = {
                 "type": "pong",

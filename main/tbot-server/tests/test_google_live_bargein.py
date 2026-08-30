@@ -128,6 +128,54 @@ class _Controller:
 
 
 class InterruptDebounceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_evidence_interrupt_markers_preserve_stop_before_final_order(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "bargein-journey-1"
+        client = _Client()
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        await provider.start_session()
+
+        await provider._begin_user_interrupt("audio_input")
+        await provider.close()
+
+        records = [args for _level, args, _kwargs in conn.logger.messages if args]
+        messages = [str(args[0]) for args in records]
+        started = next(
+            index for index, message in enumerate(messages)
+            if "Google Live user_interrupt_started journey_id=" in message
+        )
+        stopped = next(
+            index for index, message in enumerate(messages)
+            if "Google Live interrupt_output_stopped journey_id=" in message
+        )
+        finalized = next(
+            index for index, message in enumerate(messages)
+            if "Google Live user_interrupted reason=" in message
+        )
+
+        self.assertLess(started, stopped)
+        self.assertLess(stopped, finalized)
+        self.assertEqual(records[started][1:4], ("bargein-journey-1", "s-1", "1"))
+        self.assertEqual(records[started][-2:], (0, 1))
+        self.assertEqual(records[stopped][1:4], ("bargein-journey-1", "s-1", "1"))
+        self.assertEqual(records[stopped][-2:], (0, 1))
+
+    async def test_evidence_markers_are_absent_without_active_journey(self):
+        conn = _Conn()
+        client = _Client()
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        await provider.start_session()
+
+        await provider._begin_user_interrupt("audio_input")
+        await provider.close()
+
+        messages = " ".join(
+            str(args[0]) for _level, args, _kwargs in conn.logger.messages if args
+        )
+        self.assertNotIn("Google Live user_interrupt_started journey_id=", messages)
+        self.assertNotIn("Google Live interrupt_output_stopped journey_id=", messages)
+        self.assertNotIn("Google Live evidence_connection_close journey_id=", messages)
+
     async def test_clean_user_turn_records_latency_start_timestamp(self):
         conn = _Conn()
         provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())

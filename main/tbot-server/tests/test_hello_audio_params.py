@@ -42,6 +42,7 @@ class _Conn:
         self.mcp_client = None
         self.mcp_scheduled = []
         self.mcp_sent_counts_at_schedule = []
+        self.google_live_evidence_journey_id = None
         self.config = {
             "voice_mode": {"type": "classic_pipeline"},
             "google_live": {"output_sample_rate": 24000},
@@ -134,6 +135,24 @@ class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conn.sample_rate, 24000)
         self.assertIsNone(conn.features)
         self.assertEqual(json.loads(conn.websocket.sent[0])["session_id"], "session-1")
+
+    async def test_google_live_hello_activates_only_safe_evidence_journey_label(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+
+        await handleHelloMessage(conn, {"evidence_journey_id": "bargein.run-1:test"})
+
+        self.assertEqual(conn.google_live_evidence_journey_id, "bargein.run-1:test")
+
+    async def test_google_live_hello_rejects_unsafe_evidence_journey_without_logging_value(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        unsafe = "secret journey value"
+
+        await handleHelloMessage(conn, {"evidence_journey_id": unsafe})
+
+        self.assertIsNone(conn.google_live_evidence_journey_id)
+        self.assertNotIn(unsafe, " ".join(conn.logger.debugs + conn.logger.infos))
 
 class GoogleLiveAudioBridgeSampleRateTest(unittest.TestCase):
     def test_input_frame_size_uses_client_input_sample_rate_not_output_rate(self):

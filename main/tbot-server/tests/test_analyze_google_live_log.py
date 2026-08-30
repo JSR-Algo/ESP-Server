@@ -24,11 +24,22 @@ CANDIDATE_IDENTITY = {
 }
 
 
-def _window_lines(*body, candidate_identity=CANDIDATE_IDENTITY, window_id="window-1"):
+def _window_lines(
+    *body,
+    candidate_identity=CANDIDATE_IDENTITY,
+    window_id="window-1",
+    journey_id=None,
+    journeys=None,
+):
     identity = json.dumps(candidate_identity, sort_keys=True, separators=(",", ":"))
+    evidence = ""
+    if journey_id is not None:
+        evidence += f"journey_id={journey_id} "
+    if journeys is not None:
+        evidence += f"journeys={journeys} "
     return [
         "2026-08-31 10:00:00 Google Live reliability_window_start "
-        f"window_id={window_id} candidate_identity={identity}",
+        f"window_id={window_id} {evidence}candidate_identity={identity}",
         *body,
         "2026-08-31 10:00:59 Google Live reliability_window_end "
         f"window_id={window_id}",
@@ -63,6 +74,7 @@ def _transport_observation(**overrides):
             "start": "2026-08-31T10:00:00",
             "end": "2026-08-31T10:00:59",
         },
+        "journeyId": "bargein-journey-1",
     }
     observation.update(overrides)
     return observation
@@ -78,15 +90,25 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         lines = _window_lines(
             "2026-08-31 10:00:01 Google Live receive loop started",
             "2026-08-31 10:00:05 Google Live model_audio_start_hold_input response_id=7",
-            "2026-08-31 10:00:10 Google Live user_interrupted reason=vad cancelled_response_id=7 next_response_id=8",
-            "2026-08-31 10:00:11 Google Live tts_state_stop_sent response_id=7 reason=interrupt",
+            "2026-08-31 10:00:09 Google Live user_interrupt_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 reason=vad cancelled_response_id=7 next_response_id=8",
+            "2026-08-31 10:00:10 Google Live tts_state_stop_sent response_id=7 reason=interrupt",
+            "2026-08-31 10:00:10 Google Live interrupt_output_stopped journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 cancelled_response_id=7 next_response_id=8",
+            "2026-08-31 10:00:11 Google Live user_interrupted reason=vad cancelled_response_id=7 next_response_id=8",
+            "2026-08-31 10:00:11 Google Live evidence_user_interrupted journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 reason=vad cancelled_response_id=7 next_response_id=8",
             "2026-08-31 10:00:12 Google Live stale_model_event_dropped type=audio reason=blocked_until_user_turn response_id=7 current_response_id=8",
+            "2026-08-31 10:00:12 Google Live evidence_stale_model_drop journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=7 current_response_id=8",
             "2026-08-31 10:00:13 Google Live replayed_interrupt_audio reason=model_output_unblocked frames=2 bytes=3840 response_id=8",
+            "2026-08-31 10:00:13 Google Live evidence_interrupt_audio_replayed journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=8",
             "2026-08-31 10:00:14 Google Live interrupt_input_finalized reason=speech_tail elapsed_ms=420 response_id=8 frames=4 bytes=7680 peak_rms=2600",
+            "2026-08-31 10:00:14 Google Live evidence_interrupt_input_finalized journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=8",
             "2026-08-31 10:00:15 Google Live model_audio_start_hold_input response_id=8",
+            "2026-08-31 10:00:15 Google Live evidence_response_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=8",
             "2026-08-31 10:00:16 Google Live model_output_chunk_forwarded response_id=8 bytes=1920",
+            "2026-08-31 10:00:16 Google Live model_output_chunk_forwarded journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=8",
             "2026-08-31 10:00:17 Google Live model_audio_end_ready_to_listen response_id=8",
+            "2026-08-31 10:00:17 Google Live evidence_response_ended journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=8",
             "2026-08-31 10:00:18 Google Live receive loop stopped",
+            journey_id="bargein-journey-1",
         )
 
         verdict = self._analyze(lines)
@@ -218,7 +240,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         )
 
         self.assertEqual(verdict["status"], "PASS", verdict)
-        self.assertEqual(verdict["replayCountsByReopen"], {"reopen-1": 1})
+        self.assertEqual(verdict["replayCountsByReopen"], {"attempt-1": 1})
 
     def test_buffered_replay_accepts_production_reopen_ready_before_success_summary(self):
         verdict = self._analyze(
@@ -231,7 +253,41 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         )
 
         self.assertEqual(verdict["status"], "PASS", verdict)
-        self.assertEqual(verdict["replayCountsByReopen"], {"reopen-1": 1})
+        self.assertEqual(verdict["replayCountsByReopen"], {"attempt-1": 1})
+
+    def test_replay_from_prior_attempt_cannot_satisfy_new_reconnect_attempt(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 reconnect_started reason=network attempt=1 state=RECONNECTING",
+                "2026-08-31 10:00:02 Google Live reopen_ready reason=network attempt=1 live_connection_id=live-1",
+                "2026-08-31 10:00:03 reconnect_succeeded attempt=1 live_connection_id=live-1",
+                "2026-08-31 10:00:04 reconnect_started reason=network attempt=2 state=RECONNECTING",
+                "2026-08-31 10:00:05 Google Live replayed_buffered_audio frames=2 bytes=20",
+            )
+        )
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn(
+            "BUFFER_REPLAY_WITHOUT_SUCCESSFUL_REOPEN",
+            [item["code"] for item in verdict["failures"]],
+        )
+
+    def test_reconnect_attempts_own_their_replay_independently(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 reconnect_started reason=network attempt=1 state=RECONNECTING",
+                "2026-08-31 10:00:02 Google Live reopen_ready reason=network attempt=1 live_connection_id=live-1",
+                "2026-08-31 10:00:03 Google Live replayed_buffered_audio frames=1 bytes=10",
+                "2026-08-31 10:00:04 reconnect_succeeded attempt=1 live_connection_id=live-1",
+                "2026-08-31 10:00:05 reconnect_started reason=network attempt=2 state=RECONNECTING",
+                "2026-08-31 10:00:06 Google Live reopen_ready reason=network attempt=2 live_connection_id=live-2",
+                "2026-08-31 10:00:07 Google Live replayed_buffered_audio frames=1 bytes=10",
+                "2026-08-31 10:00:08 reconnect_succeeded attempt=2 live_connection_id=live-2",
+            )
+        )
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+        self.assertEqual(verdict["replayCountsByReopen"], {"attempt-1": 1, "attempt-2": 1})
 
     def test_buffered_replay_before_reconnect_failure_is_not_certified(self):
         verdict = self._analyze(
@@ -426,7 +482,39 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                 self.assertEqual(combined["status"], "FAIL", combined)
                 self.assertFalse(combined["aggregateReleaseEligible"])
 
-    def test_multiple_complete_interrupt_chains_are_ambiguous(self):
+    def test_transport_correlation_requires_exactly_one_matching_journey(self):
+        base_log = {
+            "schemaVersion": "google-live-reliability.v1",
+            "name": "google_live_log_reliability",
+            "status": "PASS",
+            "candidateIdentity": CANDIDATE_IDENTITY,
+            "logWindow": _transport_observation()["logWindow"],
+            "correlations": [],
+            "failures": [],
+        }
+        match = {
+            "status": "PASS",
+            "journeyId": "bargein-journey-1",
+            "connectionId": "conn-1",
+            "liveConnectionId": "live-1",
+            "cancelledResponseId": 7,
+            "replacementResponseId": 8,
+        }
+
+        for correlations in ([], [match, {**match, "liveConnectionId": "live-2"}]):
+            with self.subTest(count=len(correlations)):
+                combined = correlate_websocket_bargein_evidence(
+                    _transport_observation(),
+                    {**base_log, "correlations": correlations},
+                    expected_candidate_identity=CANDIDATE_IDENTITY,
+                )
+                self.assertEqual(combined["status"], "FAIL", combined)
+                self.assertIn(
+                    "SERVER_LOG_JOURNEY_CORRELATION_COUNT",
+                    [item["code"] for item in combined["failures"]],
+                )
+
+    def test_multiple_complete_interrupt_chains_pass_overall_analyzer(self):
         chain = [
             "Google Live user_interrupted reason=vad cancelled_response_id={old} next_response_id={new}",
             "Google Live tts_state_stop_sent response_id={old} reason=interrupt",
@@ -448,11 +536,130 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
 
         verdict = self._analyze(_window_lines(*body))
 
+        self.assertEqual(verdict["status"], "PASS", verdict)
+        self.assertEqual(len(verdict["correlations"]), 2)
+
+    def test_claimed_bargein_without_scoped_forward_and_cleanup_is_coverage_missing(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live user_interrupt_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 reason=vad cancelled_response_id=7 next_response_id=8",
+                "2026-08-31 10:00:02 Google Live interrupt_output_stopped journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 cancelled_response_id=7 next_response_id=8",
+                "2026-08-31 10:00:03 Google Live evidence_user_interrupted journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 reason=vad cancelled_response_id=7 next_response_id=8",
+                journey_id="bargein-journey-1",
+                journeys="bargein",
+            )
+        )
+
         self.assertEqual(verdict["status"], "FAIL", verdict)
-        self.assertEqual(verdict["correlation"]["status"], "AMBIGUOUS")
+        self.assertIn("COVERAGE_MISSING", [item["code"] for item in verdict["failures"]])
+
+    def test_response_id_reuse_across_live_connections_passes_but_same_scope_duplicates_fail(self):
+        cross_scope = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live evidence_response_started journey_id=j1 connection_id=c1 live_connection_id=l1 response_id=1",
+                "2026-08-31 10:00:02 Google Live evidence_response_ended journey_id=j1 connection_id=c1 live_connection_id=l1 response_id=1",
+                "2026-08-31 10:00:03 Google Live evidence_response_started journey_id=j1 connection_id=c1 live_connection_id=l2 response_id=1",
+                "2026-08-31 10:00:04 Google Live evidence_response_ended journey_id=j1 connection_id=c1 live_connection_id=l2 response_id=1",
+            )
+        )
+        duplicate = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live evidence_response_started journey_id=j1 connection_id=c1 live_connection_id=l1 response_id=1",
+                "2026-08-31 10:00:02 Google Live evidence_response_started journey_id=j1 connection_id=c1 live_connection_id=l1 response_id=1",
+            )
+        )
+
+        self.assertEqual(cross_scope["status"], "PASS", cross_scope)
+        self.assertEqual(duplicate["status"], "FAIL", duplicate)
+        self.assertIn("DUPLICATE_RESPONSE_ID", [item["code"] for item in duplicate["failures"]])
+
+    def test_abnormal_connection_close_fails_without_timeout(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Client disconnected device_id=robot-1 close_code=1011 close_reason_sha256=abc close_reason_length=3"
+            )
+        )
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn("ABNORMAL_CONNECTION_CLOSE", [item["code"] for item in verdict["failures"]])
+
+    def test_scoped_pending_tasks_at_close_fail(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live evidence_connection_close journey_id=j1 connection_id=c1 live_connection_id=l1 pending_tasks=5"
+            )
+        )
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn("PENDING_TASK_AT_CLOSE", [item["code"] for item in verdict["failures"]])
+
+    def test_claimed_lesson_and_reconnect_require_non_vacuous_coverage(self):
+        for journey in ("lesson", "reconnect"):
+            with self.subTest(journey=journey):
+                verdict = self._analyze(
+                    _window_lines(
+                        journey_id=f"{journey}-journey-1",
+                        journeys=journey,
+                    )
+                )
+                self.assertEqual(verdict["status"], "FAIL", verdict)
+                self.assertIn(
+                    "COVERAGE_MISSING",
+                    [item["code"] for item in verdict["failures"]],
+                )
+
+    def test_scoped_chain_cannot_mix_connections_with_same_response_ids(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live user_interrupt_started journey_id=j1 connection_id=c1 live_connection_id=l1 reason=vad cancelled_response_id=7 next_response_id=8",
+                "2026-08-31 10:00:02 Google Live interrupt_output_stopped journey_id=j1 connection_id=c1 live_connection_id=l1 cancelled_response_id=7 next_response_id=8",
+                "2026-08-31 10:00:03 Google Live evidence_user_interrupted journey_id=j1 connection_id=c1 live_connection_id=l1 reason=vad cancelled_response_id=7 next_response_id=8",
+                "2026-08-31 10:00:04 Google Live evidence_stale_model_drop journey_id=j1 connection_id=c2 live_connection_id=l2 response_id=7 current_response_id=8",
+                "2026-08-31 10:00:05 Google Live evidence_interrupt_audio_replayed journey_id=j1 connection_id=c2 live_connection_id=l2 response_id=8",
+                "2026-08-31 10:00:06 Google Live evidence_interrupt_input_finalized journey_id=j1 connection_id=c2 live_connection_id=l2 response_id=8",
+                "2026-08-31 10:00:07 Google Live evidence_response_started journey_id=j1 connection_id=c2 live_connection_id=l2 response_id=8",
+                "2026-08-31 10:00:08 Google Live model_output_chunk_forwarded journey_id=j1 connection_id=c2 live_connection_id=l2 response_id=8",
+                "2026-08-31 10:00:09 Google Live evidence_response_ended journey_id=j1 connection_id=c2 live_connection_id=l2 response_id=8",
+                journey_id="j1",
+            )
+        )
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
         self.assertIn(
-            "AMBIGUOUS_BARGEIN_CORRELATION",
+            "SCOPED_BARGEIN_CORRELATION_INVALID",
             [item["code"] for item in verdict["failures"]],
+        )
+
+    def test_scoped_reconnect_attempts_are_owned_by_connection(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 attempt=1 reason=network",
+                "2026-08-31 10:00:02 Google Live evidence_reconnect_started journey_id=j1 connection_id=c2 attempt=1 reason=network",
+                "2026-08-31 10:00:03 Google Live evidence_reopen_ready journey_id=j1 connection_id=c1 attempt=1 live_connection_id=l1",
+                "2026-08-31 10:00:04 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=1 live_connection_id=l1",
+                "2026-08-31 10:00:05 Google Live evidence_reconnect_succeeded journey_id=j1 connection_id=c1 attempt=1 live_connection_id=l1",
+                "2026-08-31 10:00:06 Google Live evidence_reopen_ready journey_id=j1 connection_id=c2 attempt=1 live_connection_id=l2",
+                "2026-08-31 10:00:07 Google Live evidence_reconnect_succeeded journey_id=j1 connection_id=c2 attempt=1 live_connection_id=l2",
+                journey_id="j1",
+                journeys="reconnect",
+            )
+        )
+        wrong_owner = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 attempt=1 reason=network",
+                "2026-08-31 10:00:02 Google Live evidence_reopen_ready journey_id=j1 connection_id=c1 attempt=1 live_connection_id=l1",
+                "2026-08-31 10:00:03 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c2 attempt=1 live_connection_id=l1",
+                "2026-08-31 10:00:04 Google Live evidence_reconnect_succeeded journey_id=j1 connection_id=c1 attempt=1 live_connection_id=l1",
+                journey_id="j1",
+                journeys="reconnect",
+            )
+        )
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+        self.assertEqual(wrong_owner["status"], "FAIL", wrong_owner)
+        self.assertIn(
+            "BUFFER_REPLAY_WITHOUT_SUCCESSFUL_REOPEN",
+            [item["code"] for item in wrong_owner["failures"]],
         )
 
     def test_reports_never_copy_credentials_transcripts_raw_audio_or_exception_text(self):
@@ -520,6 +727,86 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             analyze_google_live_log.main()
 
         self.assertNotIn(secret, out.read_text(encoding="utf-8"))
+
+    def test_cli_correlates_task4_transport_with_exact_raw_log_window(self):
+        body = [
+            "2026-08-31 10:00:01 Google Live user_interrupt_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 reason=vad cancelled_response_id=7 next_response_id=8",
+            "2026-08-31 10:00:02 Google Live tts_state_stop_sent response_id=7 reason=interrupt",
+            "2026-08-31 10:00:02 Google Live interrupt_output_stopped journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 cancelled_response_id=7 next_response_id=8",
+            "2026-08-31 10:00:03 Google Live user_interrupted reason=vad cancelled_response_id=7 next_response_id=8",
+            "2026-08-31 10:00:03 Google Live evidence_user_interrupted journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 reason=vad cancelled_response_id=7 next_response_id=8",
+            "2026-08-31 10:00:04 Google Live stale_model_event_dropped type=audio reason=blocked response_id=7 current_response_id=8",
+            "2026-08-31 10:00:04 Google Live evidence_stale_model_drop journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=7 current_response_id=8",
+            "2026-08-31 10:00:05 Google Live replayed_interrupt_audio reason=model_output_unblocked frames=1 bytes=10 response_id=8",
+            "2026-08-31 10:00:05 Google Live evidence_interrupt_audio_replayed journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=8",
+            "2026-08-31 10:00:06 Google Live interrupt_input_finalized reason=speech_tail elapsed_ms=100 response_id=8 frames=1 bytes=10 peak_rms=1000",
+            "2026-08-31 10:00:06 Google Live evidence_interrupt_input_finalized journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=8",
+            "2026-08-31 10:00:07 Google Live evidence_response_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=8",
+            "2026-08-31 10:00:08 Google Live model_audio_start_hold_input response_id=8",
+            "2026-08-31 10:00:09 Google Live model_output_chunk_forwarded journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=8",
+            "2026-08-31 10:00:10 Google Live model_audio_end_ready_to_listen response_id=8",
+            "2026-08-31 10:00:10 Google Live evidence_response_ended journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=8",
+            "2026-08-31 10:00:11 Google Live evidence_connection_close journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 pending_tasks=0",
+        ]
+        tmp, log_path = _write_log(body)
+        self.addCleanup(tmp.cleanup)
+        transport_path = Path(tmp.name) / "transport.json"
+        candidate_path = Path(tmp.name) / "candidate.json"
+        out_path = Path(tmp.name) / "combined.json"
+        transport = _transport_observation(
+            logWindow={
+                "windowId": "bargein-journey-1",
+                "start": "2026-08-31T10:00:00",
+                "end": "2026-08-31T10:00:59",
+            }
+        )
+        transport_path.write_text(json.dumps(transport), encoding="utf-8")
+        candidate_path.write_text(json.dumps(CANDIDATE_IDENTITY), encoding="utf-8")
+        argv = [
+            "analyze_google_live_log.py",
+            "--log",
+            str(log_path),
+            "--correlate-transport",
+            str(transport_path),
+            "--expected-candidate-json",
+            str(candidate_path),
+            "--out-json",
+            str(out_path),
+        ]
+
+        with patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()):
+            analyze_google_live_log.main()
+
+        report = json.loads(out_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["status"], "PASS", report)
+        self.assertEqual(report["journeyId"], "bargein-journey-1")
+
+    def test_cli_correlation_rejects_missing_journey_identity_or_window(self):
+        tmp, log_path = _write_log([])
+        self.addCleanup(tmp.cleanup)
+        candidate_path = Path(tmp.name) / "candidate.json"
+        candidate_path.write_text(json.dumps(CANDIDATE_IDENTITY), encoding="utf-8")
+        for field in ("journeyId", "candidateIdentity", "logWindow"):
+            with self.subTest(field=field):
+                transport = _transport_observation()
+                transport.pop(field)
+                transport_path = Path(tmp.name) / f"transport-{field}.json"
+                out_path = Path(tmp.name) / f"combined-{field}.json"
+                transport_path.write_text(json.dumps(transport), encoding="utf-8")
+                argv = [
+                    "analyze_google_live_log.py",
+                    "--log",
+                    str(log_path),
+                    "--correlate-transport",
+                    str(transport_path),
+                    "--expected-candidate-json",
+                    str(candidate_path),
+                    "--out-json",
+                    str(out_path),
+                ]
+                with patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        analyze_google_live_log.main()
 
 
 class AnalyzeGoogleLiveLogTest(unittest.TestCase):

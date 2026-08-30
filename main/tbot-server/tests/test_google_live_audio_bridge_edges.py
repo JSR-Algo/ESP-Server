@@ -4,6 +4,7 @@ import json
 import time
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from core.voice.child_safety import SAFE_DEFLECTION_LINE
 from core.voice.google_live.audio_bridge import GoogleLiveAudioBridge
@@ -205,6 +206,32 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
 
         bridge._locally_cancelled_response_ids = {f"old-{idx:02d}" for idx in range(25)}
         self.assertTrue(await bridge.handle_event({"type": "audio_start"}))
+
+    async def test_evidence_first_forwarded_chunk_is_logged_once_per_response(self):
+        logger = _Logger()
+        conn = _Conn(websocket=_WebSocket())
+        conn.google_live_evidence_journey_id = "bargein-journey-1"
+        conn.google_live_live_connection_id = "live-7"
+        bridge = self.make_bridge(
+            conn=conn,
+            logger=logger,
+            response_id_getter=lambda: 9,
+        )
+        bridge._send_binary_audio_message = AsyncMock()
+
+        await bridge.handle_event({"type": "audio_start"})
+        await bridge.handle_event({"type": "audio", "audio": b"one"})
+        await bridge.handle_event({"type": "audio", "audio": b"two"})
+
+        markers = [
+            args
+            for level, args, _kwargs in logger.messages
+            if level == "info"
+            and args
+            and "Google Live model_output_chunk_forwarded journey_id=" in str(args[0])
+        ]
+        self.assertEqual(len(markers), 1)
+        self.assertEqual(markers[0][1:], ("bargein-journey-1", "session-1", "live-7", 9))
         self.assertLessEqual(len(bridge._locally_cancelled_response_ids), 11)
 
         bridge._moderation_block_active = True

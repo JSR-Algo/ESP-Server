@@ -109,6 +109,7 @@ class GoogleLiveAudioBridge:
         self._output_preroll_sent = False
         self._output_chunk_count = 0
         self._output_byte_count = 0
+        self._evidence_first_chunk_logged = False
         self._input_chunk_count = 0
         self._suppress_audio_until = 0
         self._block_model_output_until_user_ack = False
@@ -275,6 +276,7 @@ class GoogleLiveAudioBridge:
             self._output_preroll_sent = False
             self._output_chunk_count = 0
             self._output_byte_count = 0
+            self._evidence_first_chunk_logged = False
             self.logger.bind(tag="GoogleLive").info("Google Live audio_start")
             await self._send_tts_message("start")
             return True
@@ -305,6 +307,29 @@ class GoogleLiveAudioBridge:
                 audio_format=event.get("audio_format"),
                 mime_type=event.get("mime_type"),
             )
+            journey_id = getattr(
+                self.conn, "google_live_evidence_journey_id", None
+            )
+            if (
+                isinstance(journey_id, str)
+                and journey_id
+                and not self._evidence_first_chunk_logged
+            ):
+                self._evidence_first_chunk_logged = True
+                self.logger.bind(tag="GoogleLive").info(
+                    "Google Live model_output_chunk_forwarded journey_id={} "
+                    "connection_id={} live_connection_id={} response_id={}",
+                    journey_id,
+                    str(getattr(self.conn, "session_id", "unknown")),
+                    str(
+                        getattr(
+                            self.conn,
+                            "google_live_live_connection_id",
+                            "none",
+                        )
+                    ),
+                    self._active_response_id,
+                )
             return True
 
         if event_type == "audio_end":
@@ -716,6 +741,26 @@ class GoogleLiveAudioBridge:
                 self._active_response_id,
                 self._response_id_getter(),
             )
+            journey_id = getattr(
+                self.conn, "google_live_evidence_journey_id", None
+            )
+            if isinstance(journey_id, str) and journey_id:
+                self.logger.bind(tag="GoogleLive").info(
+                    "Google Live evidence_stale_model_drop journey_id={} "
+                    "connection_id={} live_connection_id={} response_id={} "
+                    "current_response_id={}",
+                    journey_id,
+                    str(getattr(self.conn, "session_id", "unknown")),
+                    str(
+                        getattr(
+                            self.conn,
+                            "google_live_live_connection_id",
+                            "none",
+                        )
+                    ),
+                    self._active_response_id,
+                    self._response_id_getter(),
+                )
         except Exception:
             pass
 

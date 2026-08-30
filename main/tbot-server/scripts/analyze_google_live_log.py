@@ -15,6 +15,7 @@ import math
 import re
 import statistics
 import sys
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -137,6 +138,8 @@ P_MODEL_OUTPUT_UNBLOCK_TRIGGER = re.compile(
 
 P_RELIABILITY_WINDOW_START = re.compile(
     r"Google Live reliability_window_start window_id=(?P<window_id>[A-Za-z0-9._:-]+) "
+    r"(?:journey_id=(?P<journey_id>[A-Za-z0-9._:-]+) )?"
+    r"(?:journeys=(?P<journeys>[A-Za-z0-9._:,-]+) )?"
     r"candidate_identity=(?P<candidate_identity>\{.*\})$"
 )
 P_RELIABILITY_WINDOW_END = re.compile(
@@ -150,6 +153,80 @@ P_RESPONSE_AUDIO_END = re.compile(
 )
 P_RESPONSE_AUDIO_FORWARDED = re.compile(
     r"Google Live model_output_chunk_forwarded response_id=(?P<response_id>\d+)\b"
+)
+P_EVIDENCE_RESPONSE_START = re.compile(
+    r"Google Live evidence_response_started journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"response_id=(?P<response_id>\d+)"
+)
+P_EVIDENCE_RESPONSE_END = re.compile(
+    r"Google Live evidence_response_ended journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"response_id=(?P<response_id>\d+)"
+)
+P_EVIDENCE_FORWARDED = re.compile(
+    r"Google Live model_output_chunk_forwarded journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"response_id=(?P<response_id>\d+)"
+)
+P_EVIDENCE_INTERRUPT_STARTED = re.compile(
+    r"Google Live user_interrupt_started journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"reason=(?P<reason>\S+) cancelled_response_id=(?P<cancelled>\d+) "
+    r"next_response_id=(?P<next>\d+)"
+)
+P_EVIDENCE_INTERRUPT_STOPPED = re.compile(
+    r"Google Live interrupt_output_stopped journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"cancelled_response_id=(?P<cancelled>\d+) next_response_id=(?P<next>\d+)"
+)
+P_EVIDENCE_USER_INTERRUPTED = re.compile(
+    r"Google Live evidence_user_interrupted journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"reason=(?P<reason>\S+) cancelled_response_id=(?P<cancelled>\d+) "
+    r"next_response_id=(?P<next>\d+)"
+)
+P_EVIDENCE_CONNECTION_CLOSE = re.compile(
+    r"Google Live evidence_connection_close journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"pending_tasks=(?P<pending_tasks>\d+)"
+)
+P_EVIDENCE_STALE_DROP = re.compile(
+    r"Google Live evidence_stale_model_drop journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"response_id=(?P<response_id>\d+) current_response_id=(?P<current_response_id>\d+)"
+)
+P_EVIDENCE_INTERRUPT_REPLAYED = re.compile(
+    r"Google Live evidence_interrupt_audio_replayed journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"response_id=(?P<response_id>\d+)"
+)
+P_EVIDENCE_INTERRUPT_FINALIZED = re.compile(
+    r"Google Live evidence_interrupt_input_finalized journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"response_id=(?P<response_id>\d+)"
+)
+P_CLIENT_DISCONNECTED = re.compile(
+    r"Client disconnected\b.*\bclose_code=(?P<close_code>\d+)\b"
+)
+P_EVIDENCE_RECONNECT_STARTED = re.compile(
+    r"Google Live evidence_reconnect_started journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) attempt=(?P<attempt>\d+) reason=(?P<reason>\S+)"
+)
+P_EVIDENCE_REOPEN_READY = re.compile(
+    r"Google Live evidence_reopen_ready journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) attempt=(?P<attempt>\d+) "
+    r"live_connection_id=(?P<live_connection_id>\S+)"
+)
+P_EVIDENCE_REPLAYED_BUFFERED = re.compile(
+    r"Google Live evidence_replayed_buffered_audio journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) attempt=(?P<attempt>\d+) "
+    r"live_connection_id=(?P<live_connection_id>\S+)"
+)
+P_EVIDENCE_RECONNECT_OUTCOME = re.compile(
+    r"Google Live evidence_reconnect_(?P<outcome>succeeded|failed) "
+    r"journey_id=(?P<journey_id>\S+) connection_id=(?P<connection_id>\S+) "
+    r"attempt=(?P<attempt>\d+)(?: live_connection_id=(?P<live_connection_id>\S+)| error_class=(?P<error_class>\S+))"
 )
 P_STALE_MODEL_DROP_IDS = re.compile(
     r"Google Live stale_model_event_dropped type=(?P<type>\w+) reason=(?P<reason>\w+) "
@@ -182,10 +259,10 @@ P_PENDING_TASK_CLOSE = re.compile(
 )
 P_LESSON_STEP_START = re.compile(r"Google Live lesson_step_started step_id=(?P<step_id>\S+)")
 P_LESSON_STEP_PROGRESS = re.compile(
-    r"Google Live lesson_(?:step_progress|conversation_progress) step_id=(?P<step_id>\S+)"
+    r"Google Live lesson_(?:step_progress|conversation_progress) .*?step_id=(?P<step_id>\S+)"
 )
 P_LESSON_STEP_END = re.compile(r"Google Live lesson_step_ended step_id=(?P<step_id>\S+)")
-P_FIRMWARE_LESSON_PING = re.compile(r"firmware_ping lesson_step=(?P<step_id>\S+)")
+P_FIRMWARE_LESSON_PING = re.compile(r"firmware_ping .*?lesson_step=(?P<step_id>\S+)")
 P_CLEAN_CONNECTION_CLOSE = re.compile(
     r"Client disconnected\b.*\bclose_code=(?:1000|1001)\b|Google Live clean_close\b"
 )
@@ -198,6 +275,21 @@ _RELIABILITY_MARKERS = (
     P_RESPONSE_AUDIO_START,
     P_RESPONSE_AUDIO_END,
     P_RESPONSE_AUDIO_FORWARDED,
+    P_EVIDENCE_RESPONSE_START,
+    P_EVIDENCE_RESPONSE_END,
+    P_EVIDENCE_FORWARDED,
+    P_EVIDENCE_INTERRUPT_STARTED,
+    P_EVIDENCE_INTERRUPT_STOPPED,
+    P_EVIDENCE_USER_INTERRUPTED,
+    P_EVIDENCE_CONNECTION_CLOSE,
+    P_EVIDENCE_STALE_DROP,
+    P_EVIDENCE_INTERRUPT_REPLAYED,
+    P_EVIDENCE_INTERRUPT_FINALIZED,
+    P_CLIENT_DISCONNECTED,
+    P_EVIDENCE_RECONNECT_STARTED,
+    P_EVIDENCE_REOPEN_READY,
+    P_EVIDENCE_REPLAYED_BUFFERED,
+    P_EVIDENCE_RECONNECT_OUTCOME,
     P_INTERRUPT,
     P_TTS_STOP_SENT,
     P_STALE_MODEL_DROP_IDS,
@@ -1182,10 +1274,10 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     previous_ts: datetime | None = None
     receive_loops_active = 0
     max_receive_loops_active = 0
-    response_starts: dict[int, int] = defaultdict(int)
+    response_starts: dict[Any, int] = defaultdict(int)
     replay_counts_by_reopen: dict[str, int] = {}
     current_reopen: str | None = None
-    reopen_index = 0
+    current_reopen_ready = False
     pending_timeouts: list[dict[str, int]] = []
     non_retriable_error_line: int | None = None
     handoff_balance = 0
@@ -1193,6 +1285,9 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     stale_audio_after_replacement = 0
     interrupt_records: list[dict[str, Any]] = []
     active_lesson_step: dict[str, Any] | None = None
+    observed_marker_families: dict[str, set[str]] = defaultdict(set)
+    scoped_interrupts: list[dict[str, Any]] = []
+    scoped_reconnects: dict[tuple[str, str, int], dict[str, Any]] = {}
 
     with log_path.open("r", encoding="utf-8", errors="replace") as fh:
         for line_number, raw_line in enumerate(fh, 1):
@@ -1237,6 +1332,10 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     "timestamp": ts,
                     "line": line_number,
                     "candidateIdentity": candidate_identity,
+                    "journeyId": start_match.group("journey_id"),
+                    "claimedJourneys": set(
+                        filter(None, (start_match.group("journeys") or "").split(","))
+                    ),
                 }
                 active = True
                 previous_ts = ts
@@ -1334,6 +1433,248 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         _failure("FORBIDDEN_LOG_MARKER", line_number, label)
                     )
 
+            disconnected = P_CLIENT_DISCONNECTED.search(line)
+            if disconnected and disconnected.group("close_code") not in {"1000", "1001"}:
+                failures.append(
+                    _failure(
+                        "ABNORMAL_CONNECTION_CLOSE",
+                        line_number,
+                        f"unexpected close code {disconnected.group('close_code')}",
+                    )
+                )
+
+            scoped_start = P_EVIDENCE_RESPONSE_START.search(line)
+            if scoped_start:
+                observed_marker_families[scoped_start.group("journey_id")].add(
+                    "response_started"
+                )
+                response_key = (
+                    scoped_start.group("connection_id"),
+                    scoped_start.group("live_connection_id"),
+                    int(scoped_start.group("response_id")),
+                )
+                response_starts[response_key] += 1
+                for record in scoped_interrupts:
+                    if (
+                        record["journeyId"] == scoped_start.group("journey_id")
+                        and record["connectionId"] == scoped_start.group("connection_id")
+                        and record["liveConnectionId"] == scoped_start.group("live_connection_id")
+                        and record["replacementResponseId"] == int(scoped_start.group("response_id"))
+                    ):
+                        record["orderInvalid"] |= record["phase"] != 5
+                        record["phase"] = 6
+                continue
+            scoped_end = P_EVIDENCE_RESPONSE_END.search(line)
+            if scoped_end:
+                observed_marker_families[scoped_end.group("journey_id")].add(
+                    "response_ended"
+                )
+                for record in scoped_interrupts:
+                    if (
+                        record["journeyId"] == scoped_end.group("journey_id")
+                        and record["connectionId"] == scoped_end.group("connection_id")
+                        and record["liveConnectionId"] == scoped_end.group("live_connection_id")
+                        and record["replacementResponseId"] == int(scoped_end.group("response_id"))
+                    ):
+                        record["orderInvalid"] |= record["phase"] != 7
+                        record["phase"] = 8
+                continue
+            scoped_forwarded = P_EVIDENCE_FORWARDED.search(line)
+            if scoped_forwarded:
+                observed_marker_families[scoped_forwarded.group("journey_id")].add(
+                    "forwarded"
+                )
+                for record in scoped_interrupts:
+                    if (
+                        record["journeyId"] == scoped_forwarded.group("journey_id")
+                        and record["connectionId"] == scoped_forwarded.group("connection_id")
+                        and record["liveConnectionId"] == scoped_forwarded.group("live_connection_id")
+                        and record["replacementResponseId"] == int(scoped_forwarded.group("response_id"))
+                    ):
+                        record["orderInvalid"] |= record["phase"] != 6
+                        record["phase"] = 7
+                continue
+            scoped_interrupt_start = P_EVIDENCE_INTERRUPT_STARTED.search(line)
+            if scoped_interrupt_start:
+                observed_marker_families[
+                    scoped_interrupt_start.group("journey_id")
+                ].add("interrupt_started")
+                scoped_interrupts.append(
+                    {
+                        "journeyId": scoped_interrupt_start.group("journey_id"),
+                        "connectionId": scoped_interrupt_start.group("connection_id"),
+                        "liveConnectionId": scoped_interrupt_start.group("live_connection_id"),
+                        "cancelledResponseId": int(scoped_interrupt_start.group("cancelled")),
+                        "replacementResponseId": int(scoped_interrupt_start.group("next")),
+                        "phase": 0,
+                        "orderInvalid": False,
+                    }
+                )
+                continue
+            scoped_interrupt_stop = P_EVIDENCE_INTERRUPT_STOPPED.search(line)
+            if scoped_interrupt_stop:
+                observed_marker_families[
+                    scoped_interrupt_stop.group("journey_id")
+                ].add("interrupt_stopped")
+                for record in scoped_interrupts:
+                    if (
+                        record["journeyId"] == scoped_interrupt_stop.group("journey_id")
+                        and record["connectionId"] == scoped_interrupt_stop.group("connection_id")
+                        and record["liveConnectionId"] == scoped_interrupt_stop.group("live_connection_id")
+                        and record["cancelledResponseId"] == int(scoped_interrupt_stop.group("cancelled"))
+                        and record["replacementResponseId"] == int(scoped_interrupt_stop.group("next"))
+                    ):
+                        record["orderInvalid"] |= record["phase"] != 0
+                        record["phase"] = 1
+                continue
+            scoped_interrupted = P_EVIDENCE_USER_INTERRUPTED.search(line)
+            if scoped_interrupted:
+                observed_marker_families[scoped_interrupted.group("journey_id")].add(
+                    "interrupt_finalized"
+                )
+                for record in scoped_interrupts:
+                    if (
+                        record["journeyId"] == scoped_interrupted.group("journey_id")
+                        and record["connectionId"] == scoped_interrupted.group("connection_id")
+                        and record["liveConnectionId"] == scoped_interrupted.group("live_connection_id")
+                        and record["cancelledResponseId"] == int(scoped_interrupted.group("cancelled"))
+                        and record["replacementResponseId"] == int(scoped_interrupted.group("next"))
+                    ):
+                        record["orderInvalid"] |= record["phase"] != 1
+                        record["phase"] = 2
+                continue
+            scoped_close = P_EVIDENCE_CONNECTION_CLOSE.search(line)
+            if scoped_close:
+                observed_marker_families[scoped_close.group("journey_id")].add(
+                    "cleanup"
+                )
+                if int(scoped_close.group("pending_tasks")) != 0:
+                    failures.append(
+                        _failure(
+                            "PENDING_TASK_AT_CLOSE",
+                            line_number,
+                            "scoped connection closed with provider-owned work pending",
+                        )
+                    )
+                continue
+            scoped_reconnect_start = P_EVIDENCE_RECONNECT_STARTED.search(line)
+            if scoped_reconnect_start:
+                journey_id = scoped_reconnect_start.group("journey_id")
+                key = (
+                    journey_id,
+                    scoped_reconnect_start.group("connection_id"),
+                    int(scoped_reconnect_start.group("attempt")),
+                )
+                scoped_reconnects[key] = {"ready": False, "replayed": False}
+                observed_marker_families[journey_id].add("reconnect_started")
+                continue
+            scoped_reopen_ready = P_EVIDENCE_REOPEN_READY.search(line)
+            if scoped_reopen_ready:
+                journey_id = scoped_reopen_ready.group("journey_id")
+                key = (
+                    journey_id,
+                    scoped_reopen_ready.group("connection_id"),
+                    int(scoped_reopen_ready.group("attempt")),
+                )
+                state = scoped_reconnects.get(key)
+                if state is None:
+                    failures.append(
+                        _failure("REOPEN_READY_WITHOUT_ATTEMPT", line_number, str(key))
+                    )
+                else:
+                    state["ready"] = True
+                    state["liveConnectionId"] = scoped_reopen_ready.group(
+                        "live_connection_id"
+                    )
+                observed_marker_families[journey_id].add("reopen_ready")
+                continue
+            scoped_buffer_replay = P_EVIDENCE_REPLAYED_BUFFERED.search(line)
+            if scoped_buffer_replay:
+                journey_id = scoped_buffer_replay.group("journey_id")
+                key = (
+                    journey_id,
+                    scoped_buffer_replay.group("connection_id"),
+                    int(scoped_buffer_replay.group("attempt")),
+                )
+                state = scoped_reconnects.get(key)
+                if (
+                    state is None
+                    or not state.get("ready")
+                    or state.get("liveConnectionId")
+                    != scoped_buffer_replay.group("live_connection_id")
+                ):
+                    failures.append(
+                        _failure(
+                            "BUFFER_REPLAY_WITHOUT_SUCCESSFUL_REOPEN",
+                            line_number,
+                            str(key),
+                        )
+                    )
+                else:
+                    state["replayed"] = True
+                observed_marker_families[journey_id].add("reconnect_replay")
+                continue
+            scoped_reconnect_outcome = P_EVIDENCE_RECONNECT_OUTCOME.search(line)
+            if scoped_reconnect_outcome:
+                journey_id = scoped_reconnect_outcome.group("journey_id")
+                key = (
+                    journey_id,
+                    scoped_reconnect_outcome.group("connection_id"),
+                    int(scoped_reconnect_outcome.group("attempt")),
+                )
+                state = scoped_reconnects.get(key)
+                if state is None:
+                    failures.append(
+                        _failure("RECONNECT_OUTCOME_WITHOUT_ATTEMPT", line_number, str(key))
+                    )
+                elif scoped_reconnect_outcome.group("outcome") == "succeeded" and (
+                    not state.get("ready")
+                    or state.get("liveConnectionId")
+                    != scoped_reconnect_outcome.group("live_connection_id")
+                ):
+                    failures.append(
+                        _failure("RECONNECT_SUCCESS_WITHOUT_READY", line_number, str(key))
+                    )
+                observed_marker_families[journey_id].add("reconnect_outcome")
+                continue
+            scoped_stale = P_EVIDENCE_STALE_DROP.search(line)
+            if scoped_stale:
+                for record in scoped_interrupts:
+                    if (
+                        record["journeyId"] == scoped_stale.group("journey_id")
+                        and record["connectionId"] == scoped_stale.group("connection_id")
+                        and record["liveConnectionId"] == scoped_stale.group("live_connection_id")
+                        and record["cancelledResponseId"] == int(scoped_stale.group("response_id"))
+                        and record["replacementResponseId"] == int(scoped_stale.group("current_response_id"))
+                    ):
+                        record["orderInvalid"] |= record["phase"] != 2
+                        record["phase"] = 3
+                continue
+            scoped_replay = P_EVIDENCE_INTERRUPT_REPLAYED.search(line)
+            if scoped_replay:
+                for record in scoped_interrupts:
+                    if (
+                        record["journeyId"] == scoped_replay.group("journey_id")
+                        and record["connectionId"] == scoped_replay.group("connection_id")
+                        and record["liveConnectionId"] == scoped_replay.group("live_connection_id")
+                        and record["replacementResponseId"] == int(scoped_replay.group("response_id"))
+                    ):
+                        record["orderInvalid"] |= record["phase"] != 3
+                        record["phase"] = 4
+                continue
+            scoped_finalized = P_EVIDENCE_INTERRUPT_FINALIZED.search(line)
+            if scoped_finalized:
+                for record in scoped_interrupts:
+                    if (
+                        record["journeyId"] == scoped_finalized.group("journey_id")
+                        and record["connectionId"] == scoped_finalized.group("connection_id")
+                        and record["liveConnectionId"] == scoped_finalized.group("live_connection_id")
+                        and record["replacementResponseId"] == int(scoped_finalized.group("response_id"))
+                    ):
+                        record["orderInvalid"] |= record["phase"] != 4
+                        record["phase"] = 5
+                continue
+
             if P_RECV_START.search(line):
                 receive_loops_active += 1
                 max_receive_loops_active = max(
@@ -1362,6 +1703,12 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
 
             match = P_INTERRUPT.search(line)
             if match:
+                if any(
+                    record["cancelledResponseId"] == int(match.group("cancelled"))
+                    and record["replacementResponseId"] == int(match.group("next"))
+                    for record in scoped_interrupts
+                ):
+                    continue
                 interrupt_records.append(
                     {
                         "line": line_number,
@@ -1382,7 +1729,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             start = P_RESPONSE_AUDIO_START.search(line)
             if start:
                 response_id = int(start.group("response_id"))
-                response_starts[response_id] += 1
+                if not start_anchor.get("journeyId"):
+                    response_starts[response_id] += 1
                 for record in interrupt_records:
                     if response_id == record["replacementResponseId"]:
                         if record["phase"] != 4:
@@ -1464,21 +1812,37 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
 
             reconnect_owner = P_RECONNECT_REASON.search(line)
+            if start_anchor.get("journeyId") and (
+                reconnect_owner
+                or P_REOPEN_READY.search(line)
+                or P_RECONNECT_SUCCEEDED.search(line)
+                or P_RECONNECT_FAILED.search(line)
+                or P_REPLAYED_BUFFERED_AUDIO.search(line)
+            ):
+                continue
+            if reconnect_owner:
+                current_reopen = f"attempt-{reconnect_owner.group('attempt')}"
+                replay_counts_by_reopen.setdefault(current_reopen, 0)
+                current_reopen_ready = False
             reopen_ready = P_REOPEN_READY.search(line)
             if reopen_ready:
-                reopen_index += 1
-                current_reopen = f"reopen-{reopen_index}"
-                replay_counts_by_reopen[current_reopen] = 0
-            if P_RECONNECT_SUCCEEDED.search(line):
+                ready_key = f"attempt-{reopen_ready.group('attempt')}"
                 if current_reopen is None:
-                    reopen_index += 1
-                    current_reopen = f"reopen-{reopen_index}"
-                    replay_counts_by_reopen[current_reopen] = 0
+                    current_reopen = ready_key
+                    replay_counts_by_reopen.setdefault(current_reopen, 0)
+                if current_reopen == ready_key:
+                    current_reopen_ready = True
+            reconnect_succeeded = P_RECONNECT_SUCCEEDED.search(line)
+            if reconnect_succeeded:
+                if current_reopen is None:
+                    current_reopen = f"attempt-{reconnect_succeeded.group('attempt')}"
+                    replay_counts_by_reopen.setdefault(current_reopen, 0)
+                current_reopen_ready = True
                 pending_timeouts.clear()
                 continue
             buffered_replay = P_REPLAYED_BUFFERED_AUDIO.search(line)
             if buffered_replay:
-                if current_reopen is None:
+                if current_reopen is None or not current_reopen_ready:
                     failures.append(
                         _failure(
                             "BUFFER_REPLAY_WITHOUT_SUCCESSFUL_REOPEN",
@@ -1528,6 +1892,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                             )
                         )
                     current_reopen = None
+                    current_reopen_ready = False
 
             classified = P_NON_RETRIABLE_CLASSIFICATION.search(line)
             if classified:
@@ -1575,12 +1940,22 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
             lesson_ping = P_FIRMWARE_LESSON_PING.search(line)
             if lesson_ping and active_lesson_step is not None:
+                journey_match = re.search(r"journey_id=(\S+)", line)
+                if journey_match:
+                    observed_marker_families[journey_match.group(1)].add(
+                        "lesson_ping"
+                    )
                 if lesson_ping.group("step_id") == active_lesson_step["stepId"]:
                     active_lesson_step["pingLine"] = line_number
                     active_lesson_step["progressAfterPing"] = False
                 continue
             lesson_progress = P_LESSON_STEP_PROGRESS.search(line)
             if lesson_progress and active_lesson_step is not None:
+                journey_match = re.search(r"journey_id=(\S+)", line)
+                if journey_match:
+                    observed_marker_families[journey_match.group(1)].add(
+                        "lesson_progress"
+                    )
                 if (
                     lesson_progress.group("step_id") == active_lesson_step["stepId"]
                     and active_lesson_step["pingLine"] is not None
@@ -1647,9 +2022,9 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             )
         )
 
-    duplicate_response_ids = sorted(
+    duplicate_response_ids = [
         response_id for response_id, count in response_starts.items() if count > 1
-    )
+    ]
     for response_id in duplicate_response_ids:
         failures.append(
             _failure(
@@ -1694,33 +2069,111 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     ",".join(item["missing"]),
                 )
             )
-    if len(interrupt_records) > 1 and not correlation_failures:
-        failures.append(
-            _failure(
-                "AMBIGUOUS_BARGEIN_CORRELATION",
-                interrupt_records[1]["line"],
-                "bounded window contains more than one complete interrupt chain",
+    valid_correlations = [
+        {
+            "status": "PASS",
+            "cancelledResponseId": record["cancelledResponseId"],
+            "replacementResponseId": record["replacementResponseId"],
+        }
+        for record in interrupt_records
+        if not record["orderInvalid"]
+        and all(record[field] for field in required_correlation_fields)
+    ]
+    if scoped_interrupts:
+        reported_correlations = [
+            {
+                "status": "PASS" if not item["orderInvalid"] and item["phase"] == 8 else "FAIL",
+                **{key: value for key, value in item.items() if key not in {"phase", "orderInvalid"}},
+            }
+            for item in scoped_interrupts
+        ]
+    else:
+        reported_correlations = valid_correlations
+    for item in reported_correlations:
+        if item.get("status") == "FAIL":
+            failures.append(
+                _failure(
+                    "SCOPED_BARGEIN_CORRELATION_INVALID",
+                    0,
+                    str(item.get("journeyId", "unknown")),
+                )
             )
-        )
-
-    if (
-        len(interrupt_records) == 1
-        and not correlation_failures
-        and not interrupt_records[0]["orderInvalid"]
-    ):
-        record = interrupt_records[0]
+    if scoped_interrupts and len(reported_correlations) == 1 and reported_correlations[0]["status"] == "PASS":
+        correlation = {
+            "status": "PASS",
+            "cancelledResponseId": reported_correlations[0]["cancelledResponseId"],
+            "replacementResponseId": reported_correlations[0]["replacementResponseId"],
+        }
+    elif len(valid_correlations) == 1:
+        record = valid_correlations[0]
         correlation = {
             "status": "PASS",
             "cancelledResponseId": record["cancelledResponseId"],
             "replacementResponseId": record["replacementResponseId"],
         }
-    elif not interrupt_records:
+    elif not interrupt_records and not scoped_interrupts:
         correlation = {"status": "NOT_OBSERVED"}
     else:
         correlation = {
-            "status": "FAIL" if correlation_failures else "AMBIGUOUS",
+            "status": "FAIL" if correlation_failures else "MULTIPLE",
             "observedInterrupts": len(interrupt_records),
         }
+
+    claimed_journeys = start_anchor.get("claimedJourneys", set()) if start_anchor else set()
+    if "bargein" in claimed_journeys:
+        required_families = {
+            "interrupt_started",
+            "interrupt_stopped",
+            "interrupt_finalized",
+            "response_started",
+            "forwarded",
+            "response_ended",
+            "cleanup",
+        }
+        journey_id = start_anchor.get("journeyId") if start_anchor else None
+        missing_families = sorted(
+            required_families - observed_marker_families.get(journey_id, set())
+        )
+        if missing_families:
+            failures.append(
+                _failure(
+                    "COVERAGE_MISSING",
+                    start_anchor["line"] if start_anchor else 0,
+                    ",".join(missing_families),
+                )
+            )
+    if "reconnect" in claimed_journeys:
+        reconnect_families = {
+            "reconnect_started",
+            "reopen_ready",
+            "reconnect_outcome",
+        }
+        journey_id = start_anchor.get("journeyId") if start_anchor else None
+        missing_families = sorted(
+            reconnect_families - observed_marker_families.get(journey_id, set())
+        )
+        if missing_families:
+            failures.append(
+                _failure(
+                    "COVERAGE_MISSING",
+                    start_anchor["line"] if start_anchor else 0,
+                    ",".join(missing_families),
+                )
+            )
+    if "lesson" in claimed_journeys:
+        lesson_families = {"lesson_ping", "lesson_progress"}
+        journey_id = start_anchor.get("journeyId") if start_anchor else None
+        missing_families = sorted(
+            lesson_families - observed_marker_families.get(journey_id, set())
+        )
+        if missing_families:
+            failures.append(
+                _failure(
+                    "COVERAGE_MISSING",
+                    start_anchor["line"] if start_anchor else 0,
+                    ",".join(missing_families),
+                )
+            )
 
     candidate_identity = (
         start_anchor.get("candidateIdentity") if start_anchor is not None else None
@@ -1747,6 +2200,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
         "unreleasedLessonHandoffs": handoff_lines,
         "fatalHits": fatal_hits,
         "correlation": correlation,
+        "correlations": reported_correlations,
         "failures": failures,
     }
     return redact_mapping(report)
@@ -1816,8 +2270,25 @@ def correlate_websocket_bargein_evidence(
         failures.append({"code": "CANDIDATE_IDENTITY_MISMATCH", "layer": "server_log"})
     if transport_observation.get("logWindow") != log_verdict.get("logWindow"):
         failures.append({"code": "LOG_WINDOW_MISMATCH"})
-    if log_verdict.get("correlation", {}).get("status") != "PASS":
-        failures.append({"code": "SERVER_LOG_CORRELATION_NOT_PASS"})
+    journey_id = transport_observation.get("journeyId")
+    if not isinstance(journey_id, str) or not journey_id:
+        failures.append({"code": "TRANSPORT_JOURNEY_ID_INVALID"})
+        matching_correlations = []
+    else:
+        matching_correlations = [
+            item
+            for item in log_verdict.get("correlations", [])
+            if item.get("journeyId") == journey_id
+        ]
+    if len(matching_correlations) != 1:
+        failures.append(
+            {
+                "code": "SERVER_LOG_JOURNEY_CORRELATION_COUNT",
+                "observed": len(matching_correlations),
+            }
+        )
+    elif matching_correlations[0].get("status") != "PASS":
+        failures.append({"code": "SERVER_LOG_JOURNEY_CORRELATION_NOT_PASS"})
 
     transport_layer = {
         "name": "websocket_audio_bargein_transport",
@@ -1835,12 +2306,18 @@ def correlate_websocket_bargein_evidence(
     )
     failures.extend(verdict["failures"])
     status = "PASS" if not failures else "FAIL"
-    correlation = log_verdict.get("correlation", {})
+    correlation = (
+        matching_correlations[0]
+        if len(matching_correlations) == 1
+        and matching_correlations[0].get("status") == "PASS"
+        else {}
+    )
     report = {
         "schemaVersion": SCHEMA_VERSION,
         "name": "websocket_audio_bargein_correlated",
         "status": status,
         "candidateIdentity": expected_candidate_identity,
+        "journeyId": journey_id,
         "logWindow": log_verdict.get("logWindow"),
         "correlationSource": "server_log",
         "correlationStatus": "PASS" if status == "PASS" else "FAIL",
@@ -1888,6 +2365,100 @@ def _sanitize_reliability_cli_report(report: dict[str, Any]) -> dict[str, Any]:
     return redact_mapping(safe)
 
 
+def _correlate_transport_cli(
+    *,
+    log_path: Path,
+    transport_path: Path,
+    expected_candidate_path: Path,
+) -> dict[str, Any]:
+    try:
+        transport = json.loads(transport_path.read_text(encoding="utf-8"))
+        expected_candidate = json.loads(
+            expected_candidate_path.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        return redact_mapping(
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "name": "websocket_audio_bargein_correlated",
+                "status": "FAIL",
+                "failures": [{"code": "EVIDENCE_JSON_INVALID", "detail": type(exc).__name__}],
+            }
+        )
+    failures = []
+    journey_id = transport.get("journeyId")
+    log_window = transport.get("logWindow")
+    if transport.get("schemaVersion") != SCHEMA_VERSION:
+        failures.append({"code": "TRANSPORT_SCHEMA_INVALID"})
+    if transport.get("candidateIdentity") != expected_candidate:
+        failures.append({"code": "CANDIDATE_IDENTITY_MISMATCH"})
+    if not isinstance(journey_id, str) or re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", journey_id) is None:
+        failures.append({"code": "TRANSPORT_JOURNEY_ID_INVALID"})
+    if not isinstance(log_window, dict):
+        failures.append({"code": "TRANSPORT_LOG_WINDOW_INVALID"})
+        start = end = None
+    else:
+        try:
+            start = datetime.fromisoformat(log_window["start"])
+            end = datetime.fromisoformat(log_window["end"])
+            if (
+                start.tzinfo is not None
+                or end.tzinfo is not None
+                or start > end
+                or log_window.get("windowId") != journey_id
+            ):
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            failures.append({"code": "TRANSPORT_LOG_WINDOW_INVALID"})
+            start = end = None
+    if failures:
+        return redact_mapping(
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "name": "websocket_audio_bargein_correlated",
+                "status": "FAIL",
+                "journeyId": journey_id,
+                "candidateIdentity": expected_candidate,
+                "failures": failures,
+            }
+        )
+    if not _candidate_identity_valid(expected_candidate):
+        return redact_mapping(
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "name": "websocket_audio_bargein_correlated",
+                "status": "FAIL",
+                "journeyId": journey_id,
+                "candidateIdentity": expected_candidate,
+                "failures": [{"code": "EXPECTED_CANDIDATE_IDENTITY_INVALID"}],
+            }
+        )
+
+    selected_lines = []
+    with log_path.open("r", encoding="utf-8", errors="replace") as fh:
+        for raw_line in fh:
+            timestamp = parse_timestamp(raw_line)
+            if timestamp is not None and start <= timestamp <= end:
+                selected_lines.append(raw_line.rstrip("\n"))
+    identity = json.dumps(expected_candidate, sort_keys=True, separators=(",", ":"))
+    bounded_lines = [
+        f"{start:%Y-%m-%d %H:%M:%S} Google Live reliability_window_start "
+        f"window_id={journey_id} journey_id={journey_id} journeys=bargein "
+        f"candidate_identity={identity}",
+        *selected_lines,
+        f"{end:%Y-%m-%d %H:%M:%S} Google Live reliability_window_end window_id={journey_id}",
+    ]
+    with tempfile.TemporaryDirectory() as temp_dir:
+        bounded_path = Path(temp_dir) / "bounded.log"
+        bounded_path.write_text("\n".join(bounded_lines), encoding="utf-8")
+        log_verdict = analyze_reliability_window(bounded_path)
+    return correlate_websocket_bargein_evidence(
+        transport,
+        log_verdict,
+        expected_candidate_identity=expected_candidate,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--log", required=True, type=Path, help="Path to server.log")
@@ -1923,10 +2494,31 @@ def main():
             "embed the result in JSON output, and exit non-zero on failure."
         ),
     )
+    parser.add_argument("--correlate-transport", type=Path)
+    parser.add_argument("--expected-candidate-json", type=Path)
     args = parser.parse_args()
 
     if not args.log.exists():
         raise SystemExit(f"Log file not found: {args.log}")
+
+    if args.correlate_transport is not None:
+        if args.expected_candidate_json is None or args.out_json is None:
+            raise SystemExit(
+                "--correlate-transport requires --expected-candidate-json and --out-json"
+            )
+        correlated = _correlate_transport_cli(
+            log_path=args.log,
+            transport_path=args.correlate_transport,
+            expected_candidate_path=args.expected_candidate_json,
+        )
+        args.out_json.parent.mkdir(parents=True, exist_ok=True)
+        args.out_json.write_text(
+            json.dumps(redact_mapping(correlated), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        if correlated.get("status") != "PASS":
+            raise SystemExit(1)
+        return
 
     if getattr(args, "check_chain", False):
         chain_report = check_chain(args.log)

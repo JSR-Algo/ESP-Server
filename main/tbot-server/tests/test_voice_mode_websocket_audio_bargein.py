@@ -5,6 +5,7 @@ import io
 import json
 import sys
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -36,6 +37,18 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
             "robot-1",
             "--client-id",
             "client-1",
+            "--journey-id",
+            "bargein-journey-1",
+            "--candidate-git-sha",
+            "candidate-sha",
+            "--candidate-image-digest",
+            f"sha256:{'a' * 64}",
+            "--firmware-identity",
+            "firmware-v1",
+            "--config-json",
+            "{}",
+            "--fixture-sha256",
+            "b" * 64,
         ]
         with patch.object(audio_bargein, "run_smoke", _pending), patch.object(
             sys, "argv", argv
@@ -48,6 +61,67 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
             "PENDING_BOUNDED_SERVER_LOG_VERIFICATION",
             stderr.getvalue(),
         )
+
+    def test_cli_writes_redacted_pending_transport_report(self):
+        audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        async def _pending(_args):
+            return {
+                "schemaVersion": "google-live-reliability.v1",
+                "status": "SKIPPED",
+                "pendingCode": "PENDING_BOUNDED_SERVER_LOG_VERIFICATION",
+                "candidateIdentity": {"gitSha": "candidate-sha"},
+                "authorization": "Bearer secret",
+            }
+
+        with self.subTest("report is always written while exit remains blocking"):
+            import tempfile
+            from pathlib import Path
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                report_path = Path(temp_dir) / "transport.json"
+                argv = [
+                    "voice_mode_websocket_audio_bargein.py",
+                    "--device-id",
+                    "robot-1",
+                    "--client-id",
+                    "client-1",
+                    "--journey-id",
+                    "bargein-journey-1",
+                    "--candidate-git-sha",
+                    "candidate-sha",
+                    "--candidate-image-digest",
+                    f"sha256:{'a' * 64}",
+                    "--firmware-identity",
+                    "firmware-v1",
+                    "--config-json",
+                    "{}",
+                    "--fixture-sha256",
+                    "b" * 64,
+                    "--report",
+                    str(report_path),
+                ]
+                with patch.object(audio_bargein, "run_smoke", _pending), patch.object(
+                    sys, "argv", argv
+                ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    exit_code = audio_bargein.main()
+
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(report["authorization"], "<redacted>")
+        self.assertEqual(report["status"], "SKIPPED")
+
+    def test_evidence_context_rejects_unsafe_journey_id(self):
+        audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
+
+        with self.assertRaisesRegex(ValueError, "journey_id"):
+            audio_bargein._evidence_context(self._args(journey_id="unsafe journey"))
+
+        with self.assertRaisesRegex(ValueError, "journey_id"):
+            audio_bargein._evidence_context(self._args(journey_id="hành-trình"))
 
     @staticmethod
     def _args(**overrides):
@@ -67,6 +141,12 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
             "open_timeout_sec": 5,
             "event_timeout_sec": 20,
             "interrupt_timeout_sec": 5,
+            "journey_id": "bargein-journey-1",
+            "candidate_git_sha": "candidate-sha",
+            "candidate_image_digest": f"sha256:{'a' * 64}",
+            "firmware_identity": "firmware-v1",
+            "config_json": "{}",
+            "fixture_sha256": "b" * 64,
         }
         values.update(overrides)
         return SimpleNamespace(**values)
@@ -92,6 +172,8 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
                     self.binary_sent.set()
                     if captured is not None:
                         captured.setdefault("sentBinary", []).append(payload)
+                elif captured is not None:
+                    captured.setdefault("sentText", []).append(json.loads(payload))
                 return None
 
             async def recv(self):
@@ -150,6 +232,10 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         async def _sleep(_seconds):
             return None
 
+        wall_times = iter(
+            [datetime(2026, 8, 31, 10, 0, 0), datetime(2026, 8, 31, 10, 0, 1)]
+        )
+
         with patch.object(
             audio_bargein.websockets,
             "connect",
@@ -157,7 +243,13 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         ), patch.object(
             audio_bargein, "_opus_packets", return_value=[b"interrupt-opus"]
         ), patch.object(audio_bargein.asyncio, "sleep", _sleep):
-            record = asyncio.run(audio_bargein.run_smoke(self._args(), clock=_Clock()))
+            record = asyncio.run(
+                audio_bargein.run_smoke(
+                    self._args(),
+                    clock=_Clock(),
+                    wall_clock=lambda: next(wall_times),
+                )
+            )
 
         self.assertEqual(record["status"], "SKIPPED", record)
         self.assertEqual(record["schemaVersion"], "google-live-reliability.v1")
@@ -172,6 +264,40 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         self.assertEqual(record["maxServerOutputGapMs"], 60.0)
         self.assertLessEqual(record["bargeinStopMs"], 500.0)
         self.assertEqual(record["correlationSource"], "server_log")
+        self.assertEqual(record["journeyId"], "bargein-journey-1")
+        self.assertEqual(record["candidateIdentity"]["gitSha"], "candidate-sha")
+        self.assertEqual(record["logWindow"]["start"], "2026-08-31T10:00:00")
+        self.assertEqual(record["logWindow"]["end"], "2026-08-31T10:00:01")
+
+    def test_run_smoke_sends_validated_evidence_journey_in_hello(self):
+        audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
+        captured = {}
+        messages = [
+            json.dumps({"type": "hello"}),
+            json.dumps({"type": "tts", "state": "start"}),
+            json.dumps({"type": "tts", "state": "stop", "reason": "interrupt"}),
+            json.dumps({"type": "tts", "state": "start"}),
+            b"replacement-audio",
+            json.dumps({"type": "tts", "state": "stop"}),
+        ]
+
+        async def _sleep(_seconds):
+            return None
+
+        with patch.object(
+            audio_bargein.websockets,
+            "connect",
+            self._connect_for(messages, captured),
+        ), patch.object(
+            audio_bargein, "_opus_packets", return_value=[b"interrupt-opus"]
+        ), patch.object(audio_bargein.asyncio, "sleep", _sleep):
+            asyncio.run(audio_bargein.run_smoke(self._args()))
+
+        self.assertEqual(captured["sentText"][0]["type"], "hello")
+        self.assertEqual(
+            captured["sentText"][0]["evidence_journey_id"],
+            "bargein-journey-1",
+        )
 
     def test_run_smoke_fails_closed_when_replacement_response_is_incomplete(self):
         audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")

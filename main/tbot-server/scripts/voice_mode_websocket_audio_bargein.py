@@ -3,8 +3,10 @@ import argparse
 import asyncio
 import json
 import math
+import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +21,8 @@ from core.utils.util import audio_to_data_stream  # noqa: E402
 from scripts.google_live_reliability import (  # noqa: E402
     GOOGLE_LIVE_LIMITS,
     SCHEMA_VERSION,
+    build_candidate_identity,
+    redact_mapping,
 )
 from scripts.voice_mode_websocket_soak import (  # noqa: E402
     _build_headers,
@@ -32,6 +36,7 @@ DEFAULT_TEXT = (
     "khi robot đang nói."
 )
 REPLACEMENT_RESPONSE_INCOMPLETE = "REPLACEMENT_RESPONSE_INCOMPLETE"
+SAFE_JOURNEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 
 
 def _detect_message(text):
@@ -222,7 +227,34 @@ async def _drain_preflight_terminal(websocket, *, timeout_sec):
     return None
 
 
-async def run_smoke(args, *, clock=time.monotonic):
+def _evidence_context(args):
+    journey_id = str(getattr(args, "journey_id", "") or "").strip()
+    if SAFE_JOURNEY_RE.fullmatch(journey_id) is None:
+        raise ValueError("journey_id must be 1-64 safe identifier characters")
+    try:
+        config = json.loads(getattr(args, "config_json", ""))
+    except json.JSONDecodeError as exc:
+        raise ValueError("config_json must be valid JSON") from exc
+    if not isinstance(config, dict):
+        raise ValueError("config_json must contain an object")
+    identity = build_candidate_identity(
+        getattr(args, "candidate_git_sha", ""),
+        getattr(args, "candidate_image_digest", ""),
+        getattr(args, "firmware_identity", ""),
+        config,
+        getattr(args, "fixture_sha256", ""),
+    )
+    return journey_id, identity
+
+
+async def run_smoke(
+    args,
+    *,
+    clock=time.monotonic,
+    wall_clock=datetime.now,
+):
+    journey_id, candidate_identity = _evidence_context(args)
+    window_start = wall_clock().replace(tzinfo=None).isoformat(timespec="seconds")
     headers = _build_headers(args)
     if getattr(args, "audio_file", ""):
         packets = _opus_packets_from_audio_file(
@@ -259,117 +291,130 @@ async def run_smoke(args, *, clock=time.monotonic):
         "correlationStatus": "PENDING_BOUNDED_SERVER_LOG_VERIFICATION",
         "aggregateReleaseEligible": False,
         "firstInterruptPacketSentAtMonotonicMs": None,
+        "journeyId": journey_id,
+        "candidateIdentity": candidate_identity,
+        "logWindow": {
+            "windowId": journey_id,
+            "start": window_start,
+            "end": None,
+        },
     }
 
-    async with websockets.connect(
-        args.websocket_url,
-        additional_headers=headers,
-        open_timeout=args.open_timeout_sec,
-        max_size=None,
-    ) as websocket:
-        hello = _hello_message()
-        hello["audio_params"]["sample_rate"] = args.sample_rate
-        hello["audio_params"]["frame_duration"] = args.frame_duration_ms
-        await websocket.send(json.dumps(hello))
-        ack, binary_count, _messages = await _recv_until(
-            websocket,
-            lambda payload: payload.get("type") == "hello",
-            args.event_timeout_sec,
-        )
-        summary["binary_chunks"] += binary_count
-        if ack is None:
-            raise RuntimeError("hello ack timeout")
+    try:
+        async with websockets.connect(
+            args.websocket_url,
+            additional_headers=headers,
+            open_timeout=args.open_timeout_sec,
+            max_size=None,
+        ) as websocket:
+            hello = _hello_message()
+            hello["audio_params"]["sample_rate"] = args.sample_rate
+            hello["audio_params"]["frame_duration"] = args.frame_duration_ms
+            hello["evidence_journey_id"] = journey_id
+            await websocket.send(json.dumps(hello))
+            ack, binary_count, _messages = await _recv_until(
+                websocket,
+                lambda payload: payload.get("type") == "hello",
+                args.event_timeout_sec,
+            )
+            summary["binary_chunks"] += binary_count
+            if ack is None:
+                raise RuntimeError("hello ack timeout")
 
-        await websocket.send(json.dumps(_detect_message(args.text)))
-        start, binary_count, _messages = await _recv_until(
-            websocket,
-            lambda payload: _is_tts_state(payload, "start"),
-            args.event_timeout_sec,
-        )
-        summary["binary_chunks"] += binary_count
-        if start is None:
-            raise RuntimeError("tts start timeout")
-        summary["tts_starts"] += 1
+            await websocket.send(json.dumps(_detect_message(args.text)))
+            start, binary_count, _messages = await _recv_until(
+                websocket,
+                lambda payload: _is_tts_state(payload, "start"),
+                args.event_timeout_sec,
+            )
+            summary["binary_chunks"] += binary_count
+            if start is None:
+                raise RuntimeError("tts start timeout")
+            summary["tts_starts"] += 1
 
-        await asyncio.sleep(args.interrupt_delay_sec)
-        preflight_failure = await _drain_preflight_terminal(
-            websocket,
-            timeout_sec=args.interrupt_timeout_sec,
-        )
-        if preflight_failure is not None:
-            summary["failureCode"] = preflight_failure
-            return summary
-        first_packet_sent = asyncio.Event()
-        stop_task = asyncio.create_task(
-            _observe_interrupt_stop(
+            await asyncio.sleep(args.interrupt_delay_sec)
+            preflight_failure = await _drain_preflight_terminal(
                 websocket,
                 timeout_sec=args.interrupt_timeout_sec,
-                clock=clock,
-                first_packet_sent=first_packet_sent,
             )
-        )
-        try:
-            for packet in packets:
-                await websocket.send(packet)
-                if not first_packet_sent.is_set():
-                    first_packet_sent_at = clock()
-                    summary["firstInterruptPacketSentAtMonotonicMs"] = round(
-                        first_packet_sent_at * 1000,
-                        3,
-                    )
-                    first_packet_sent.set()
-                await asyncio.sleep(args.frame_duration_ms / 1000)
-            stop_result = await stop_task
-        finally:
-            if not stop_task.done():
-                stop_task.cancel()
-                await asyncio.gather(stop_task, return_exceptions=True)
+            if preflight_failure is not None:
+                summary["failureCode"] = preflight_failure
+                return summary
+            first_packet_sent = asyncio.Event()
+            stop_task = asyncio.create_task(
+                _observe_interrupt_stop(
+                    websocket,
+                    timeout_sec=args.interrupt_timeout_sec,
+                    clock=clock,
+                    first_packet_sent=first_packet_sent,
+                )
+            )
+            try:
+                for packet in packets:
+                    await websocket.send(packet)
+                    if not first_packet_sent.is_set():
+                        first_packet_sent_at = clock()
+                        summary["firstInterruptPacketSentAtMonotonicMs"] = round(
+                            first_packet_sent_at * 1000,
+                            3,
+                        )
+                        first_packet_sent.set()
+                    await asyncio.sleep(args.frame_duration_ms / 1000)
+                stop_result = await stop_task
+            finally:
+                if not stop_task.done():
+                    stop_task.cancel()
+                    await asyncio.gather(stop_task, return_exceptions=True)
 
-        summary["binary_chunks"] += stop_result["binaryCount"]
-        if stop_result.get("failureCode"):
-            summary["failureCode"] = stop_result["failureCode"]
-            return summary
-        stop = stop_result["stop"]
-        if stop is None:
-            raise RuntimeError("audio interrupt tts stop timeout")
-        summary["tts_stops"] += 1
-        summary["interruptStopMarkerObserved"] = True
-        summary["bargeinStopMs"] = round(
-            (stop_result["observedAt"] - first_packet_sent_at) * 1000,
-            1,
-        )
-
-        replacement = await _collect_replacement_response(
-            websocket,
-            timeout_sec=args.event_timeout_sec,
-            clock=clock,
-        )
-        summary.update(replacement)
-        summary["binary_chunks"] += replacement["replacementBinaryChunks"]
-        if replacement["replacementResponseStarted"]:
-            summary["tts_starts"] += 1
-        if replacement["replacementResponseStopped"]:
+            summary["binary_chunks"] += stop_result["binaryCount"]
+            if stop_result.get("failureCode"):
+                summary["failureCode"] = stop_result["failureCode"]
+                return summary
+            stop = stop_result["stop"]
+            if stop is None:
+                raise RuntimeError("audio interrupt tts stop timeout")
             summary["tts_stops"] += 1
+            summary["interruptStopMarkerObserved"] = True
+            summary["bargeinStopMs"] = round(
+                (stop_result["observedAt"] - first_packet_sent_at) * 1000,
+                1,
+            )
 
-        if (
-            not replacement["replacementResponseStarted"]
-            or replacement["replacementBinaryChunks"] < 1
-            or not replacement["replacementResponseStopped"]
-        ):
-            summary["failureCode"] = REPLACEMENT_RESPONSE_INCOMPLETE
-            return summary
-        if summary["bargeinStopMs"] > GOOGLE_LIVE_LIMITS["physicalBargeinP95Ms"]:
-            summary["failureCode"] = "BARGEIN_STOP_LATENCY_EXCEEDED"
-            return summary
-        if (
-            replacement["maxServerOutputGapMs"]
-            > GOOGLE_LIVE_LIMITS["serverOutputGapMaxMs"]
-        ):
-            summary["failureCode"] = "SERVER_OUTPUT_GAP_EXCEEDED"
-            return summary
+            replacement = await _collect_replacement_response(
+                websocket,
+                timeout_sec=args.event_timeout_sec,
+                clock=clock,
+            )
+            summary.update(replacement)
+            summary["binary_chunks"] += replacement["replacementBinaryChunks"]
+            if replacement["replacementResponseStarted"]:
+                summary["tts_starts"] += 1
+            if replacement["replacementResponseStopped"]:
+                summary["tts_stops"] += 1
 
-        summary["status"] = "SKIPPED"
-        summary["pendingCode"] = "PENDING_BOUNDED_SERVER_LOG_VERIFICATION"
+            if (
+                not replacement["replacementResponseStarted"]
+                or replacement["replacementBinaryChunks"] < 1
+                or not replacement["replacementResponseStopped"]
+            ):
+                summary["failureCode"] = REPLACEMENT_RESPONSE_INCOMPLETE
+                return summary
+            if summary["bargeinStopMs"] > GOOGLE_LIVE_LIMITS["physicalBargeinP95Ms"]:
+                summary["failureCode"] = "BARGEIN_STOP_LATENCY_EXCEEDED"
+                return summary
+            if (
+                replacement["maxServerOutputGapMs"]
+                > GOOGLE_LIVE_LIMITS["serverOutputGapMaxMs"]
+            ):
+                summary["failureCode"] = "SERVER_OUTPUT_GAP_EXCEEDED"
+                return summary
+
+            summary["status"] = "SKIPPED"
+            summary["pendingCode"] = "PENDING_BOUNDED_SERVER_LOG_VERIFICATION"
+    finally:
+        summary["logWindow"]["end"] = (
+            wall_clock().replace(tzinfo=None).isoformat(timespec="seconds")
+        )
     return summary
 
 
@@ -392,6 +437,13 @@ def main():
     parser.add_argument("--open-timeout-sec", type=float, default=5)
     parser.add_argument("--event-timeout-sec", type=float, default=20)
     parser.add_argument("--interrupt-timeout-sec", type=float, default=5)
+    parser.add_argument("--journey-id", required=True)
+    parser.add_argument("--candidate-git-sha", required=True)
+    parser.add_argument("--candidate-image-digest", required=True)
+    parser.add_argument("--firmware-identity", required=True)
+    parser.add_argument("--config-json", required=True)
+    parser.add_argument("--fixture-sha256", required=True)
+    parser.add_argument("--report", type=Path)
     args = parser.parse_args()
 
     try:
@@ -399,6 +451,12 @@ def main():
     except Exception as exc:
         print(f"AUDIO_BARGE_IN_FAIL {exc}", file=sys.stderr)
         return 1
+    if args.report is not None:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(
+            json.dumps(redact_mapping(summary), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     if summary["status"] == "SKIPPED":
         print(
             "AUDIO_BARGE_IN_PENDING "
