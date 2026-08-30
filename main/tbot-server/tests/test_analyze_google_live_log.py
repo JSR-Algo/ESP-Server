@@ -1087,6 +1087,75 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                     with self.assertRaises(SystemExit):
                         analyze_google_live_log.main()
 
+    def test_cli_correlation_rejects_non_object_transport_json_redacted(self):
+        secret = "secret-non-object-transport"
+        cases = {
+            "array": "[]",
+            "null": "null",
+            "string": json.dumps(secret),
+            "number": "42",
+        }
+
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                tmp, log_path = _write_log([])
+                self.addCleanup(tmp.cleanup)
+                transport_path = Path(tmp.name) / "transport.json"
+                candidate_path = Path(tmp.name) / "candidate.json"
+                out_path = Path(tmp.name) / "combined.json"
+                transport_path.write_text(payload, encoding="utf-8")
+                candidate_path.write_text(
+                    json.dumps(CANDIDATE_IDENTITY), encoding="utf-8"
+                )
+                argv = [
+                    "analyze_google_live_log.py", "--log", str(log_path),
+                    "--correlate-transport", str(transport_path),
+                    "--expected-candidate-json", str(candidate_path),
+                    "--out-json", str(out_path),
+                ]
+
+                with patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        analyze_google_live_log.main()
+
+                self.assertEqual(raised.exception.code, 1)
+                encoded = out_path.read_text(encoding="utf-8")
+                report = json.loads(encoded)
+                self.assertEqual(report["status"], "FAIL")
+                self.assertIn(
+                    "EVIDENCE_JSON_INVALID",
+                    [item["code"] for item in report["failures"]],
+                )
+                self.assertNotIn(secret, encoded)
+
+    def test_cli_correlation_rejects_non_object_candidate_json_redacted(self):
+        secret = "secret-non-object-candidate"
+        tmp, log_path = _write_log([])
+        self.addCleanup(tmp.cleanup)
+        transport_path = Path(tmp.name) / "transport.json"
+        candidate_path = Path(tmp.name) / "candidate.json"
+        out_path = Path(tmp.name) / "combined.json"
+        transport_path.write_text(
+            json.dumps(_transport_observation()), encoding="utf-8"
+        )
+        candidate_path.write_text(json.dumps(secret), encoding="utf-8")
+        argv = [
+            "analyze_google_live_log.py", "--log", str(log_path),
+            "--correlate-transport", str(transport_path),
+            "--expected-candidate-json", str(candidate_path),
+            "--out-json", str(out_path),
+        ]
+
+        with patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                analyze_google_live_log.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        encoded = out_path.read_text(encoding="utf-8")
+        report = json.loads(encoded)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertNotIn(secret, encoded)
+
     def test_cli_correlation_fails_redacted_on_malformed_reliability_line(self):
         secret = "secret-token-value"
         tmp, log_path = _write_log(

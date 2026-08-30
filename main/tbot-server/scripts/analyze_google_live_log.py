@@ -2725,6 +2725,24 @@ def _correlate_transport_cli(
                 "failures": [{"code": "EVIDENCE_JSON_INVALID", "detail": type(exc).__name__}],
             }
         )
+    if not isinstance(transport, Mapping):
+        return {
+            "schemaVersion": SCHEMA_VERSION,
+            "name": "websocket_audio_bargein_correlated",
+            "status": "FAIL",
+            "failures": [
+                {"code": "EVIDENCE_JSON_INVALID", "field": "transport"}
+            ],
+        }
+    if not isinstance(expected_candidate, Mapping):
+        return {
+            "schemaVersion": SCHEMA_VERSION,
+            "name": "websocket_audio_bargein_correlated",
+            "status": "FAIL",
+            "failures": [
+                {"code": "EVIDENCE_JSON_INVALID", "field": "expectedCandidate"}
+            ],
+        }
     failures = []
     journey_id = transport.get("journeyId")
     log_window = transport.get("logWindow")
