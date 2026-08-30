@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -133,6 +134,7 @@ def candidate(repositories: dict[str, Path], tmp_path: Path, monkeypatch: pytest
         node[key] = {"version": version, "executable": str(executable),
                      "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
                      "packageRoot": str(package_root),
+                     "packageRootMode": package_tree["rootMode"],
                      "packageTreeSha256": package_tree["sha256"],
                      **package_tools}
     esp_idf = tmp_path / "esp-idf"
@@ -266,10 +268,98 @@ def test_candidate_rejects_mutated_node_package_dependency(candidate: dict) -> N
     dependency.parent.mkdir(parents=True, exist_ok=True)
     package_tree = manifest.secure_node_package_tree_descriptor(Path(descriptor["packageRoot"]))
     assert package_tree is not None
+    descriptor["packageRootMode"] = package_tree["rootMode"]
     descriptor["packageTreeSha256"] = package_tree["sha256"]
     dependency.write_text("module.exports = 'changed';\n", encoding="utf-8")
 
     assert "tools.node.backend.packageTreeSha256" in validate_candidate(candidate, now=NOW)
+
+
+def test_node_package_tree_descriptor_binds_secure_root_mode(candidate: dict) -> None:
+    descriptor = candidate["tools"]["node"]["backend"]
+    package_root = Path(descriptor["packageRoot"])
+    original = manifest.secure_node_package_tree_descriptor(package_root)
+    assert original is not None
+    assert original["schema"] == manifest.NODE_PACKAGE_TREE_SCHEMA
+    assert original["rootMode"] == 0o755
+
+    package_root.chmod(0o700)
+    private = manifest.secure_node_package_tree_descriptor(package_root)
+    assert private is not None
+    assert private["rootMode"] == 0o700
+    assert private["sha256"] != original["sha256"]
+
+    package_root.chmod(0o777)
+    assert manifest.secure_node_package_tree_descriptor(package_root) is None
+
+
+def test_node_package_tree_descriptor_rejects_root_mode_race(
+    candidate: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_root = Path(candidate["tools"]["node"]["backend"]["packageRoot"])
+    original = manifest._secure_browser_bundle_descriptor_fd
+
+    def scan_then_change_mode(root_fd: int, root_metadata: os.stat_result):
+        descriptor = original(root_fd, root_metadata)
+        package_root.chmod(0o700)
+        return descriptor
+
+    monkeypatch.setattr(manifest, "_secure_browser_bundle_descriptor_fd", scan_then_change_mode)
+
+    assert manifest.secure_node_package_tree_descriptor(package_root) is None
+
+
+def test_node_package_tree_descriptor_binds_open_root_across_ancestor_aba(
+    candidate: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_root = Path(candidate["tools"]["node"]["backend"]["packageRoot"])
+    expected = manifest.secure_node_package_tree_descriptor(package_root)
+    assert expected is not None
+    ancestor = package_root.parents[2]
+    moved = ancestor.with_name(ancestor.name + "-moved")
+    original = manifest._secure_browser_bundle_descriptor_fd
+    swapped = False
+
+    def swap_ancestor_during_scan(root_fd: int, root_metadata: os.stat_result):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            ancestor.rename(moved)
+            replacement = ancestor / package_root.relative_to(ancestor)
+            replacement.mkdir(parents=True)
+            (replacement / "replacement.js").write_text("replacement", encoding="utf-8")
+            descriptor = original(root_fd, root_metadata)
+            shutil.rmtree(ancestor)
+            moved.rename(ancestor)
+            return descriptor
+        return original(root_fd, root_metadata)
+
+    monkeypatch.setattr(manifest, "_secure_browser_bundle_descriptor_fd", swap_ancestor_during_scan)
+
+    assert manifest.secure_node_package_tree_descriptor(package_root) == expected
+    assert swapped is True
+
+
+def test_node_package_tree_descriptor_rejects_invalid_filename_bytes(
+    candidate: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_root = Path(candidate["tools"]["node"]["backend"]["packageRoot"])
+    monkeypatch.setattr(
+        manifest, "_secure_browser_bundle_descriptor_fd",
+        lambda *_args: (_ for _ in ()).throw(
+            UnicodeEncodeError("utf-8", "\udcff", 0, 1, "surrogate filename"),
+        ),
+    )
+
+    assert manifest.secure_node_package_tree_descriptor(package_root) is None
+
+
+def test_candidate_rejects_node_package_root_mode_drift(candidate: dict) -> None:
+    descriptor = candidate["tools"]["node"]["backend"]
+    package_root = Path(descriptor["packageRoot"])
+    package_root.chmod(0o700)
+
+    assert "tools.node.backend.packageRootMode" in validate_candidate(candidate, now=NOW)
 
 
 def test_candidate_rejects_node_package_root_outside_canonical_install(
@@ -504,9 +594,16 @@ def test_browser_bundle_descriptor_rejects_surrogateescaped_filename(
             return metadata
 
     original_scandir = os.scandir
+
+    def invalid_root_entry(directory):
+        if isinstance(directory, int):
+            opened = os.fstat(directory)
+            if (opened.st_dev, opened.st_ino) == (metadata.st_dev, metadata.st_ino):
+                return [InvalidByteEntry()]
+        return original_scandir(directory)
+
     monkeypatch.setattr(
-        manifest.os, "scandir",
-        lambda directory: [InvalidByteEntry()] if Path(directory) == root else original_scandir(directory),
+        manifest.os, "scandir", invalid_root_entry,
     )
 
     assert manifest.secure_browser_bundle_descriptor(root) == (None, "path")

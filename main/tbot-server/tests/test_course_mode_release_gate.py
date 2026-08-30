@@ -392,6 +392,7 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         node[key] = {"version": version, "executable": str(executable),
                      "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
                      "packageRoot": str(package_root),
+                     "packageRootMode": package_tree["rootMode"],
                      "packageTreeSha256": package_tree["sha256"],
                      **package_tools}
     esp_idf = tmp_path / "esp-idf"
@@ -580,6 +581,7 @@ def test_staged_package_manager_keeps_complete_descriptor_bound_package_tree(
     package_tree = gate._manifest.secure_node_package_tree_descriptor(package_root)
     assert package_tree is not None
     descriptor["packageRoot"] = str(package_root)
+    descriptor["packageRootMode"] = package_tree["rootMode"]
     descriptor["packageTreeSha256"] = package_tree["sha256"]
 
     stage = gate.stage_execution_candidate(
@@ -618,6 +620,7 @@ def test_real_staged_npm_and_npx_run_without_original_tool_paths(candidate_file:
         "executable": str(node),
         "sha256": hashlib.sha256(node.read_bytes()).hexdigest(),
         "packageRoot": str(package_root),
+        "packageRootMode": package_tree["rootMode"],
         "packageTreeSha256": package_tree["sha256"],
     }
     for tool in ("npm", "npx"):
@@ -698,6 +701,368 @@ def test_snapshot_cleanup_runs_after_lane_failure(candidate_file: Path, monkeypa
     assert observed and not observed[0].exists()
 
 
+def test_lane_cleanup_removes_zero_mode_runtime_directories(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[Path] = []
+    original = gate.LaneExecution.cleanup
+
+    def record_cleanup(self):
+        observed.append(self.root)
+        return original(self)
+
+    monkeypatch.setattr(gate.LaneExecution, "cleanup", record_cleanup)
+    lane = _lane(
+        "hostile-cleanup-permissions",
+        "import os;from pathlib import Path;"
+        "[Path(os.environ[name]).chmod(0) for name in "
+        "('HOME','XDG_CACHE_HOME','COURSE_MODE_LANE_REPORT_ROOT')]",
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "PASS", result
+    assert observed and all(not root.exists() for root in observed)
+
+
+def test_lane_cannot_rename_root_to_evade_cleanup(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[gate.LaneExecution] = []
+    original_create = gate.ExecutionStage.create_lane_execution
+    original_remove = gate._remove_owned_tree
+
+    def record_lane(self):
+        execution = original_create(self)
+        observed.append(execution)
+        return execution
+
+    monkeypatch.setattr(gate.ExecutionStage, "create_lane_execution", record_lane)
+    lane = _lane(
+        "rename-cleanup-root",
+        "import os;from pathlib import Path;"
+        "root=Path(os.environ['HOME']).parents[1];"
+        "root.rename(root.with_name(root.name+'-retained'))",
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "cleanup"
+    assert result["retainedOwner"] == "current-process"
+    assert observed
+    moved = observed[0].root.with_name(observed[0].root.name + "-retained")
+    assert result["retainedPaths"] == [str(moved)]
+    assert moved.exists()
+    original_remove(moved)
+
+
+def test_owned_cleanup_rejects_root_swap_between_stat_and_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "owned-root"
+    root.mkdir()
+    (root / "secret.txt").write_text("retained", encoding="utf-8")
+    identity = gate._owned_tree_identity(root)
+    renamed = tmp_path / "renamed-root"
+    original_open = gate.os.open
+    swapped = False
+
+    def swap_then_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and path == root.name and dir_fd is not None:
+            swapped = True
+            root.rename(renamed)
+            root.mkdir()
+            (root / "decoy.txt").write_text("decoy", encoding="utf-8")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(gate.os, "open", swap_then_open)
+
+    assert gate._remove_owned_tree(root, identity) is False
+    assert (renamed / "secret.txt").read_text(encoding="utf-8") == "retained"
+
+    monkeypatch.setattr(gate.os, "open", original_open)
+    gate._remove_owned_tree(root)
+    gate._remove_owned_tree(renamed)
+
+
+def test_owned_cleanup_rejects_child_swap_between_stat_and_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "owned-root"
+    child = root / "child"
+    child.mkdir(parents=True)
+    (child / "secret.txt").write_text("retained", encoding="utf-8")
+    identity = gate._owned_tree_identity(root)
+    renamed = root / "renamed-child"
+    original_open = gate.os.open
+    swapped = False
+
+    def swap_then_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and path == child.name and dir_fd is not None:
+            swapped = True
+            child.rename(renamed)
+            child.mkdir()
+            (child / "decoy.txt").write_text("decoy", encoding="utf-8")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(gate.os, "open", swap_then_open)
+
+    assert gate._remove_owned_tree(root, identity) is False
+    assert (renamed / "secret.txt").read_text(encoding="utf-8") == "retained"
+
+    monkeypatch.setattr(gate.os, "open", original_open)
+    gate._remove_owned_tree(root)
+
+
+def test_owned_cleanup_rejects_root_swap_immediately_before_rmdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "owned-root"
+    root.mkdir()
+    identity = gate._owned_tree_identity(root)
+    renamed = tmp_path / "renamed-root"
+    original_rmdir = gate.os.rmdir
+    swapped = False
+
+    def swap_then_rmdir(path, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and path == root.name and dir_fd is not None:
+            swapped = True
+            root.rename(renamed)
+            root.mkdir()
+        return original_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(gate.os, "rmdir", swap_then_rmdir)
+
+    assert gate._remove_owned_tree(root, identity) is False
+    assert renamed.exists()
+
+    monkeypatch.setattr(gate.os, "rmdir", original_rmdir)
+    gate._remove_owned_tree(renamed)
+
+
+def test_owned_cleanup_rejects_child_swap_immediately_before_rmdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "owned-root"
+    child = root / "child"
+    child.mkdir(parents=True)
+    identity = gate._owned_tree_identity(root)
+    renamed = root / "renamed-child"
+    original_rmdir = gate.os.rmdir
+    swapped = False
+
+    def swap_then_rmdir(path, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and path == child.name and dir_fd is not None:
+            swapped = True
+            child.rename(renamed)
+            child.mkdir()
+        return original_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(gate.os, "rmdir", swap_then_rmdir)
+
+    assert gate._remove_owned_tree(root, identity) is False
+    assert renamed.exists()
+
+    monkeypatch.setattr(gate.os, "rmdir", original_rmdir)
+    gate._remove_owned_tree(root)
+
+
+def test_lane_cleanup_reports_cross_parent_move_during_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "owned-root"
+    root.mkdir()
+    destination_parent = tmp_path / "relocated"
+    destination_parent.mkdir()
+    relocated = destination_parent / "owned-root"
+    execution = gate.LaneExecution(
+        root, {}, {}, gate._owned_tree_identity(root), gate._open_snapshot_directory(root),
+    )
+    original_rmdir = gate.os.rmdir
+    swapped = False
+
+    def move_then_rmdir(path, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and path == root.name and dir_fd is not None:
+            swapped = True
+            root.rename(relocated)
+            root.mkdir()
+        return original_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(gate.os, "rmdir", move_then_rmdir)
+
+    assert execution.cleanup() is False
+    assert execution.retained_path() == relocated
+    assert relocated.exists()
+
+    monkeypatch.setattr(gate.os, "rmdir", original_rmdir)
+    gate._remove_owned_tree(relocated)
+
+
+def test_gate_reports_lane_root_moved_to_another_parent(
+    candidate_file: Path, tmp_path: Path,
+) -> None:
+    relocated = tmp_path / "relocated-lane"
+    lane = _lane(
+        "relocate-cleanup-root",
+        "import os;from pathlib import Path;"
+        "root=Path(os.environ['HOME']).parents[1];"
+        f"root.rename(Path({str(relocated)!r}))",
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "cleanup"
+    assert result["retainedOwner"] == "current-process"
+    assert result["retainedPaths"] == [str(relocated)]
+    assert relocated.exists()
+    gate._remove_owned_tree(relocated)
+
+
+def test_report_serialization_escapes_surrogate_retained_paths(tmp_path: Path) -> None:
+    report_path = tmp_path / "report.json"
+    retained = "/tmp/retained-\udcff"
+    report = {
+        "verdict": "BLOCKED",
+        "failedLane": "cleanup",
+        "retainedOwner": "current-process",
+        "retainedPaths": [retained],
+    }
+
+    assert gate._write_report_atomic(report_path, report) is True
+    payload = report_path.read_bytes()
+    assert b"\\udcff" in payload
+    assert json.loads(payload) == report
+
+
+def test_gate_reports_retained_snapshot_when_owned_cleanup_cannot_finish(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retained: list[Path] = []
+    original = gate._remove_owned_tree
+
+    def refuse_lane_cleanup(
+        path: Path, expected_identity: tuple[int, int] | None = None,
+    ) -> bool:
+        if path.name.startswith("course-mode-lane-"):
+            retained.append(path)
+            return False
+        return original(path, expected_identity)
+
+    monkeypatch.setattr(gate, "_remove_owned_tree", refuse_lane_cleanup)
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(_lane("cleanup-owner", "pass"),))
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "cleanup"
+    assert result["retainedOwner"] == "current-process"
+    assert result["retainedPaths"] == sorted({str(path) for path in retained})
+    for path in set(retained):
+        original(path)
+
+
+def test_lane_construction_cleanup_failure_still_removes_snapshot(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retained: list[Path] = []
+    snapshots: list[Path] = []
+    original_remove = gate._remove_owned_tree
+    original_stage = gate.stage_execution_candidate
+
+    def record_stage(candidate, lanes):
+        stage = original_stage(candidate, lanes)
+        snapshots.append(stage.root)
+        return stage
+
+    def refuse_lane_cleanup(
+        path: Path, expected_identity: tuple[int, int] | None = None,
+    ) -> bool:
+        if path.name.startswith("course-mode-lane-"):
+            retained.append(path)
+            return False
+        return original_remove(path, expected_identity)
+
+    monkeypatch.setattr(gate, "stage_execution_candidate", record_stage)
+    monkeypatch.setattr(gate, "_remove_owned_tree", refuse_lane_cleanup)
+    monkeypatch.setattr(
+        gate, "_make_tree_owner_writable",
+        lambda _root: (_ for _ in ()).throw(OSError("forced lane construction failure")),
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(_lane("cleanup-owner", "pass"),))
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "cleanup"
+    assert result["retainedOwner"] == "current-process"
+    assert result["retainedPaths"] == sorted({str(path) for path in retained})
+    assert snapshots and all(not path.exists() for path in snapshots)
+    for path in set(retained):
+        original_remove(path)
+
+
+def test_lane_descriptor_open_failure_removes_created_root(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    stage = gate.stage_execution_candidate(candidate, (_lane("descriptor-open", "pass"),))
+    lane_roots: list[Path] = []
+    original_mkdtemp = gate.tempfile.mkdtemp
+    original_open = gate._open_snapshot_directory
+
+    def record_mkdtemp(*args, **kwargs):
+        path = Path(original_mkdtemp(*args, **kwargs))
+        if kwargs.get("prefix") == "course-mode-lane-":
+            lane_roots.append(path)
+        return str(path)
+
+    def refuse_lane_descriptor(path: Path) -> int:
+        if path.name.startswith("course-mode-lane-"):
+            raise OSError("forced descriptor failure")
+        return original_open(path)
+
+    monkeypatch.setattr(gate.tempfile, "mkdtemp", record_mkdtemp)
+    monkeypatch.setattr(gate, "_open_snapshot_directory", refuse_lane_descriptor)
+    try:
+        with pytest.raises(OSError, match="forced descriptor failure"):
+            stage.create_lane_execution()
+        assert lane_roots and all(not path.exists() for path in lane_roots)
+    finally:
+        stage.cleanup()
+
+
+def test_stage_identity_failure_removes_created_root(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    stage_roots: list[Path] = []
+    original_mkdtemp = gate.tempfile.mkdtemp
+    original_identity = gate._owned_tree_identity
+
+    def record_mkdtemp(*args, **kwargs):
+        path = Path(original_mkdtemp(*args, **kwargs))
+        if kwargs.get("prefix") == "course-mode-stage-":
+            stage_roots.append(path)
+        return str(path)
+
+    def refuse_stage_identity(path: Path) -> tuple[int, int]:
+        if path.name.startswith("course-mode-stage-"):
+            raise OSError("forced stage identity failure")
+        return original_identity(path)
+
+    monkeypatch.setattr(gate.tempfile, "mkdtemp", record_mkdtemp)
+    monkeypatch.setattr(gate, "_owned_tree_identity", refuse_stage_identity)
+
+    with pytest.raises(OSError, match="forced stage identity failure"):
+        gate.stage_execution_candidate(candidate, (_lane("stage-identity", "pass"),))
+    assert stage_roots and all(not path.exists() for path in stage_roots)
+
+
 def test_staged_child_context_contains_no_original_repository_or_node_paths(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -747,6 +1112,52 @@ def test_snapshot_cleanup_runs_after_unexpected_runner_error(
         gate.run_gate(candidate_file, "quick", lanes=(_lane("error", "pass"),))
 
     assert observed and not observed[0].exists()
+
+
+def test_snapshot_copy_preserves_read_only_directory_modes_after_population(tmp_path: Path) -> None:
+    source = tmp_path / "read-only-source"
+    child = source / "nested"
+    child.mkdir(parents=True)
+    (child / "payload.txt").write_text("payload", encoding="utf-8")
+    child.chmod(0o555)
+    source.chmod(0o555)
+    destination = tmp_path / "snapshot"
+
+    gate._copy_snapshot_tree(source, destination, {"entries": 0, "bytes": 0})
+
+    assert (destination / "nested/payload.txt").read_text(encoding="utf-8") == "payload"
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o555
+    assert stat.S_IMODE((destination / "nested").stat().st_mode) == 0o555
+
+
+def test_unexpected_runner_error_reports_cleanup_failure(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retained: list[Path] = []
+    original_remove = gate._remove_owned_tree
+
+    def refuse_lane_cleanup(
+        path: Path, expected_identity: tuple[int, int] | None = None,
+    ) -> bool:
+        if path.name.startswith("course-mode-lane-"):
+            retained.append(path)
+            return False
+        return original_remove(path, expected_identity)
+
+    monkeypatch.setattr(gate, "_remove_owned_tree", refuse_lane_cleanup)
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(_lane("error", "pass"),))
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "cleanup"
+    assert result["retainedOwner"] == "current-process"
+    assert result["retainedPaths"] == sorted({str(path) for path in retained})
+    for path in set(retained):
+        original_remove(path)
 
 
 def test_assignment_environment_uses_image_ids_not_mutable_tags(candidate_file: Path) -> None:
@@ -965,7 +1376,7 @@ def test_lane_workspace_is_writable_for_real_build_outputs_and_is_destroyed(
 
     def record_cleanup(self):
         observed_roots.append(self.root)
-        original(self)
+        return original(self)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(gate.LaneExecution, "cleanup", record_cleanup)
@@ -986,6 +1397,29 @@ def test_writable_lane_copy_cannot_mutate_immutable_verified_base(candidate_file
         assert stat.S_IMODE(lane_file.stat().st_mode) & stat.S_IWUSR
         lane_file.write_text("lane mutation", encoding="utf-8")
         assert base_file.read_text(encoding="utf-8") == "adminEsp"
+    finally:
+        execution.cleanup()
+        stage.cleanup()
+
+
+def test_staged_node_package_root_preserves_bound_mode(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "backend", ".", "backend")
+    descriptor = candidate["tools"]["node"]["backend"]
+    package_root = Path(descriptor["packageRoot"])
+    package_root.chmod(0o700)
+    package_tree = gate._manifest.secure_node_package_tree_descriptor(package_root)
+    assert package_tree is not None
+    descriptor["packageRootMode"] = package_tree["rootMode"]
+    descriptor["packageTreeSha256"] = package_tree["sha256"]
+
+    stage = gate.stage_execution_candidate(
+        candidate, (gate.Lane("backend-node", "backend", ".", ("node", "--version"), 5.0),),
+    )
+    execution = stage.create_lane_execution()
+    try:
+        staged_root = Path(execution.candidate["tools"]["node"]["backend"]["packageRoot"])
+        assert stat.S_IMODE(staged_root.stat().st_mode) == 0o700
     finally:
         execution.cleanup()
         stage.cleanup()

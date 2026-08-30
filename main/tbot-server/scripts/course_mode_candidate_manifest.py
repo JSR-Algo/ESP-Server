@@ -85,13 +85,16 @@ DATABASE_KEYS = {"engineImage", "engineImageId", "migrationHead", "migrationHead
 TOOLS_KEYS = {"nodeInstalls", "robotPreviewBrowser", "node", "espIdf"}
 NODE_KEYS = {"backend", "adminManagerWeb"}
 NODE_DESCRIPTOR_KEYS = {
-    "version", "executable", "sha256", "packageRoot", "packageTreeSha256", "npm", "npx",
+    "version", "executable", "sha256", "packageRoot", "packageRootMode",
+    "packageTreeSha256", "npm", "npx",
 }
 NODE_ENTRYPOINT_KEYS = {"entrypoint", "sha256"}
 ESP_IDF_KEYS = {"version", "commit", "root", "versionFile", "versionFileSha256"}
 NODE_INSTALL_KEYS = {"version", "root", "packageLockSha256", "treeDigest"}
 NODE_TREE_KEYS = {"schema", "sha256", "entryCount", "totalBytes"}
 NODE_TREE_SCHEMA = "sha256-path-mode-bytes-symlink-v1"
+NODE_PACKAGE_TREE_SCHEMA = "sha256-root-mode-path-mode-bytes-v1"
+SECURE_NODE_PACKAGE_ROOT_MODES = {0o700, 0o755}
 FIRMWARE_MANIFEST_KEYS = {
     "status", "profile", "board", "target", "sourceCommit", "createdAt", "app", "elf",
     "partition", "reproducibility", "toolchain", "config", "tests", "safety",
@@ -466,104 +469,160 @@ def _digest_field(digest: Any, value: bytes) -> None:
     digest.update(value)
 
 
+def _tree_metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
+        metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns,
+    )
+
+
+def _secure_browser_bundle_descriptor_fd(
+    root_fd: int, root_metadata: os.stat_result,
+) -> tuple[dict[str, Any] | None, str | None]:
+    digest = hashlib.sha256()
+    state = {"entryCount": 0, "totalBytes": 0}
+
+    def visit(directory_fd: int, relative_parent: Path, depth: int) -> bool:
+        if depth > MAX_BROWSER_BUNDLE_DEPTH:
+            return False
+        for name in sorted(entry.name for entry in os.scandir(directory_fd)):
+            relative = relative_parent / name
+            metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            state["entryCount"] += 1
+            if state["entryCount"] > 10_000:
+                return False
+            mode = stat.S_IMODE(metadata.st_mode)
+            if stat.S_ISDIR(metadata.st_mode):
+                child_fd = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=directory_fd,
+                )
+                try:
+                    if _tree_metadata_identity(os.fstat(child_fd)) != _tree_metadata_identity(metadata):
+                        return False
+                    _digest_field(digest, b"directory")
+                    _digest_field(digest, relative.as_posix().encode())
+                    _digest_field(digest, str(mode).encode())
+                    if not visit(child_fd, relative, depth + 1):
+                        return False
+                    if (
+                        _tree_metadata_identity(os.fstat(child_fd))
+                        != _tree_metadata_identity(metadata)
+                        or _tree_metadata_identity(
+                            os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                        ) != _tree_metadata_identity(metadata)
+                    ):
+                        return False
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+                state["totalBytes"] += metadata.st_size
+                if state["totalBytes"] > MAX_BROWSER_EXECUTABLE_BYTES:
+                    return False
+                file_fd = os.open(
+                    name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd,
+                )
+                try:
+                    identity = _tree_metadata_identity(metadata)
+                    if _tree_metadata_identity(os.fstat(file_fd)) != identity:
+                        return False
+                    _digest_field(digest, b"regular")
+                    _digest_field(digest, relative.as_posix().encode())
+                    _digest_field(digest, str(mode).encode())
+                    _digest_field(digest, str(metadata.st_size).encode())
+                    remaining = metadata.st_size
+                    while remaining:
+                        chunk = os.read(file_fd, min(1024 * 1024, remaining))
+                        if not chunk:
+                            return False
+                        digest.update(chunk)
+                        remaining -= len(chunk)
+                    if (
+                        _tree_metadata_identity(os.fstat(file_fd)) != identity
+                        or _tree_metadata_identity(
+                            os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                        ) != identity
+                    ):
+                        return False
+                finally:
+                    os.close(file_fd)
+            else:
+                return False
+        return True
+
+    if not visit(root_fd, Path(), 0):
+        return None, "tree"
+    if _tree_metadata_identity(os.fstat(root_fd)) != _tree_metadata_identity(root_metadata):
+        return None, "changed"
+    return {
+        "schema": BROWSER_TREE_SCHEMA, "sha256": digest.hexdigest(),
+        "entryCount": state["entryCount"], "totalBytes": state["totalBytes"],
+    }, None
+
+
 def secure_browser_bundle_descriptor(root: Path) -> tuple[dict[str, Any] | None, str | None]:
+    root_fd = None
     try:
         if not root.is_absolute() or str(root) != str(root.resolve(strict=True)) or root.is_symlink():
             return None, "path"
         root_before = root.lstat()
         if not stat.S_ISDIR(root_before.st_mode):
             return None, "path"
-        digest = hashlib.sha256()
-        state = {"entryCount": 0, "totalBytes": 0}
-
-        def visit(directory: Path, relative_parent: Path, depth: int) -> bool:
-            if depth > MAX_BROWSER_BUNDLE_DEPTH:
-                return False
-            for entry in sorted(os.scandir(directory), key=lambda item: item.name):
-                relative = relative_parent / entry.name
-                metadata = entry.stat(follow_symlinks=False)
-                state["entryCount"] += 1
-                if state["entryCount"] > 10_000:
-                    return False
-                mode = stat.S_IMODE(metadata.st_mode)
-                if stat.S_ISDIR(metadata.st_mode):
-                    _digest_field(digest, b"directory")
-                    _digest_field(digest, relative.as_posix().encode())
-                    _digest_field(digest, str(mode).encode())
-                    if not visit(Path(entry.path), relative, depth + 1):
-                        return False
-                    after = os.stat(entry.path, follow_symlinks=False)
-                    if (
-                        metadata.st_dev, metadata.st_ino, metadata.st_mode,
-                        metadata.st_nlink, metadata.st_mtime_ns, metadata.st_ctime_ns,
-                    ) != (
-                        after.st_dev, after.st_ino, after.st_mode,
-                        after.st_nlink, after.st_mtime_ns, after.st_ctime_ns,
-                    ):
-                        return False
-                elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
-                    state["totalBytes"] += metadata.st_size
-                    if state["totalBytes"] > MAX_BROWSER_EXECUTABLE_BYTES:
-                        return False
-                    file_fd = os.open(entry.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-                    try:
-                        opened = os.fstat(file_fd)
-                        identity = (
-                            metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
-                            metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns,
-                        )
-                        if identity != (
-                            opened.st_dev, opened.st_ino, opened.st_mode, opened.st_nlink,
-                            opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns,
-                        ):
-                            return False
-                        _digest_field(digest, b"regular")
-                        _digest_field(digest, relative.as_posix().encode())
-                        _digest_field(digest, str(mode).encode())
-                        _digest_field(digest, str(metadata.st_size).encode())
-                        remaining = metadata.st_size
-                        while remaining:
-                            chunk = os.read(file_fd, min(1024 * 1024, remaining))
-                            if not chunk:
-                                return False
-                            digest.update(chunk)
-                            remaining -= len(chunk)
-                        after = os.fstat(file_fd)
-                        named = os.stat(entry.path, follow_symlinks=False)
-                        if identity != (
-                            after.st_dev, after.st_ino, after.st_mode, after.st_nlink,
-                            after.st_size, after.st_mtime_ns, after.st_ctime_ns,
-                        ) or identity != (
-                            named.st_dev, named.st_ino, named.st_mode, named.st_nlink,
-                            named.st_size, named.st_mtime_ns, named.st_ctime_ns,
-                        ):
-                            return False
-                    finally:
-                        os.close(file_fd)
-                else:
-                    return False
-            return True
-
-        if not visit(root, Path(), 0):
-            return None, "tree"
-        root_after = root.lstat()
-        if (root_before.st_dev, root_before.st_ino, root_before.st_mtime_ns) != (
-            root_after.st_dev, root_after.st_ino, root_after.st_mtime_ns,
-        ):
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+        if _tree_metadata_identity(os.fstat(root_fd)) != _tree_metadata_identity(root_before):
             return None, "changed"
-        return {
-            "schema": BROWSER_TREE_SCHEMA, "sha256": digest.hexdigest(),
-            "entryCount": state["entryCount"], "totalBytes": state["totalBytes"],
-        }, None
+        descriptor, error = _secure_browser_bundle_descriptor_fd(root_fd, root_before)
+        if error is not None:
+            return descriptor, error
+        if _tree_metadata_identity(root.lstat()) != _tree_metadata_identity(root_before):
+            return None, "changed"
+        return descriptor, None
     except RecursionError:
         return None, "tree"
     except (OSError, UnicodeEncodeError):
         return None, "path"
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
 
 
 def secure_node_package_tree_descriptor(root: Path) -> dict[str, Any] | None:
-    descriptor, error = secure_browser_bundle_descriptor(root)
-    return descriptor if error is None else None
+    root_fd = None
+    try:
+        metadata = root.lstat()
+    except (OSError, UnicodeEncodeError):
+        return None
+    root_mode = stat.S_IMODE(metadata.st_mode)
+    if (
+        not stat.S_ISDIR(metadata.st_mode) or root.is_symlink()
+        or root_mode not in SECURE_NODE_PACKAGE_ROOT_MODES
+    ):
+        return None
+    try:
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+        if _tree_metadata_identity(os.fstat(root_fd)) != _tree_metadata_identity(metadata):
+            return None
+        descriptor, error = _secure_browser_bundle_descriptor_fd(root_fd, metadata)
+        if error is not None or descriptor is None:
+            return None
+        final_metadata = root.lstat()
+    except (OSError, UnicodeEncodeError):
+        return None
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
+    if _tree_metadata_identity(final_metadata) != _tree_metadata_identity(metadata):
+        return None
+    digest = hashlib.sha256()
+    _digest_field(digest, NODE_PACKAGE_TREE_SCHEMA.encode("ascii"))
+    _digest_field(digest, str(root_mode).encode("ascii"))
+    _digest_field(digest, descriptor["sha256"].encode("ascii"))
+    return {
+        **descriptor,
+        "schema": NODE_PACKAGE_TREE_SCHEMA,
+        "sha256": digest.hexdigest(),
+        "rootMode": root_mode,
+    }
 
 
 def _validate_robot_preview_browser(value: Any, reasons: set[str], *, verify_identity: bool) -> None:
@@ -960,6 +1019,7 @@ def _validate_node_tools(value: Any, reasons: set[str], *, verify_identity: bool
         executable = descriptor.get("executable")
         digest = descriptor.get("sha256")
         package_root = descriptor.get("packageRoot")
+        package_root_mode = descriptor.get("packageRootMode")
         package_tree_sha256 = descriptor.get("packageTreeSha256")
         if not isinstance(version, str) or re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", version) is None:
             reasons.add(f"{prefix}.version")
@@ -978,6 +1038,11 @@ def _validate_node_tools(value: Any, reasons: set[str], *, verify_identity: bool
             or expected_package_root is None or Path(package_root) != expected_package_root
         ):
             reasons.add(f"{prefix}.packageRoot")
+        if (
+            type(package_root_mode) is not int
+            or package_root_mode not in SECURE_NODE_PACKAGE_ROOT_MODES
+        ):
+            reasons.add(f"{prefix}.packageRootMode")
         if (
             not isinstance(package_tree_sha256, str)
             or SHA256_RE.fullmatch(package_tree_sha256) is None
@@ -1014,8 +1079,14 @@ def _validate_node_tools(value: Any, reasons: set[str], *, verify_identity: bool
             secure_node_package_tree_descriptor(Path(package_root))
             if isinstance(package_root, str) else None
         )
-        if package_tree is None or package_tree["sha256"] != package_tree_sha256:
+        if (
+            package_tree is None
+            or package_tree["sha256"] != package_tree_sha256
+            or package_tree["rootMode"] != package_root_mode
+        ):
             reasons.add(f"{prefix}.packageTreeSha256")
+            if package_tree is not None and package_tree["rootMode"] != package_root_mode:
+                reasons.add(f"{prefix}.packageRootMode")
         result = run_bounded_command(
             [executable, "--version"], cwd=Path("/"), env=SECURE_ENV,
             timeout_sec=5.0, max_output_bytes=4096,
@@ -1102,6 +1173,7 @@ def upgrade_candidate_schema(
         if package_tree is None:
             raise ValueError("candidate schema upgrade failed")
         descriptor["packageRoot"] = str(package_root)
+        descriptor["packageRootMode"] = package_tree["rootMode"]
         descriptor["packageTreeSha256"] = package_tree["sha256"]
         for tool in ("npm", "npx"):
             entrypoint = executable.parent.parent / f"lib/node_modules/npm/bin/{tool}-cli.js"

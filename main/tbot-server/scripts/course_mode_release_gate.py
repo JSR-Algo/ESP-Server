@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import fcntl
 import hashlib
 import importlib
 import ipaddress
@@ -233,32 +234,53 @@ class Lane:
     reject_pytest_skips: bool = False
 
 
+class RetainedStagingError(RuntimeError):
+    def __init__(self, *paths: Path):
+        self.paths = tuple(sorted({str(path) for path in paths}))
+        super().__init__("retained staging ownership")
+
+
 @dataclass
 class ExecutionStage:
     root: Path
     candidate: dict
+    identity: tuple[int, int]
+    descriptor: int | None
+    _retained_path: Path | None = None
 
-    def cleanup(self) -> None:
-        if not self.root.exists():
-            return
-        for directory, names, files in os.walk(self.root):
-            Path(directory).chmod(0o700)
-            for name in names:
-                path = Path(directory) / name
-                if not path.is_symlink():
-                    path.chmod(0o700)
-            for name in files:
-                path = Path(directory) / name
-                if not path.is_symlink():
-                    path.chmod(0o600)
-        shutil.rmtree(self.root, ignore_errors=True)
+    def cleanup(self) -> bool:
+        if self.descriptor is None:
+            return not os.path.lexists(self.root)
+        actual = _directory_fd_path(self.descriptor)
+        if actual is not None and actual != self.root:
+            self._retained_path = actual
+            os.close(self.descriptor)
+            self.descriptor = None
+            return False
+        removed = _remove_owned_tree(self.root, self.identity)
+        if not removed:
+            self._retained_path = (
+                _directory_fd_path(self.descriptor)
+                or _find_owned_tree(self.root.parent, self.identity) or self.root
+            )
+        os.close(self.descriptor)
+        self.descriptor = None
+        return removed
+
+    def retained_path(self) -> Path:
+        return self._retained_path or self.root
 
     def __del__(self) -> None:
-        self.cleanup()
+        with contextlib.suppress(Exception):
+            self.cleanup()
 
     def create_lane_execution(self) -> LaneExecution:
         lane_root = Path(tempfile.mkdtemp(prefix="course-mode-lane-", dir=self.root.parent))
+        lane_identity: tuple[int, int] | None = None
+        lane_descriptor: int | None = None
         try:
+            lane_identity = _owned_tree_identity(lane_root)
+            lane_descriptor = _open_snapshot_directory(lane_root)
             execution_root = lane_root / "candidate"
             shutil.copytree(self.root, execution_root, symlinks=True)
             _make_tree_owner_writable(execution_root)
@@ -284,9 +306,14 @@ class ExecutionStage:
                 "XDG_CACHE_HOME": str(runtime / "cache"),
                 "COURSE_MODE_LANE_REPORT_ROOT": str(runtime / "reports"),
             })
-            return LaneExecution(lane_root, rebase(self.candidate), environment)
+            return LaneExecution(
+                lane_root, rebase(self.candidate), environment, lane_identity, lane_descriptor,
+            )
         except Exception:
-            shutil.rmtree(lane_root, ignore_errors=True)
+            if lane_descriptor is not None:
+                os.close(lane_descriptor)
+            if not _remove_owned_tree(lane_root, lane_identity):
+                raise RetainedStagingError(lane_root)
             raise
 
 
@@ -295,12 +322,35 @@ class LaneExecution:
     root: Path
     candidate: dict
     environment: dict[str, str]
+    identity: tuple[int, int]
+    descriptor: int | None
+    _retained_path: Path | None = None
 
-    def cleanup(self) -> None:
-        shutil.rmtree(self.root, ignore_errors=True)
+    def cleanup(self) -> bool:
+        if self.descriptor is None:
+            return not os.path.lexists(self.root)
+        actual = _directory_fd_path(self.descriptor)
+        if actual is not None and actual != self.root:
+            self._retained_path = actual
+            os.close(self.descriptor)
+            self.descriptor = None
+            return False
+        removed = _remove_owned_tree(self.root, self.identity)
+        if not removed:
+            self._retained_path = (
+                _directory_fd_path(self.descriptor)
+                or _find_owned_tree(self.root.parent, self.identity) or self.root
+            )
+        os.close(self.descriptor)
+        self.descriptor = None
+        return removed
+
+    def retained_path(self) -> Path:
+        return self._retained_path or self.root
 
     def __del__(self) -> None:
-        self.cleanup()
+        with contextlib.suppress(Exception):
+            self.cleanup()
 
 
 def _make_tree_read_only(root: Path) -> None:
@@ -312,8 +362,9 @@ def _make_tree_read_only(root: Path) -> None:
         for name in names:
             path = Path(directory) / name
             if not path.is_symlink():
-                path.chmod(0o555)
-        Path(directory).chmod(0o555)
+                path.chmod(path.stat().st_mode & 0o555)
+        directory_path = Path(directory)
+        directory_path.chmod(directory_path.stat().st_mode & 0o555)
 
 
 def _make_tree_owner_writable(root: Path) -> None:
@@ -334,6 +385,181 @@ def _snapshot_identity(metadata: os.stat_result) -> tuple[int, ...]:
         metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
         metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns,
     )
+
+
+def _owned_tree_identity(root: Path) -> tuple[int, int]:
+    metadata = root.lstat()
+    if metadata.st_uid != os.geteuid() or not stat.S_ISDIR(metadata.st_mode):
+        raise OSError("gate-owned directory required")
+    return metadata.st_dev, metadata.st_ino
+
+
+def _directory_fd_path(descriptor: int) -> Path | None:
+    try:
+        if hasattr(fcntl, "F_GETPATH"):
+            raw = fcntl.fcntl(descriptor, fcntl.F_GETPATH, bytearray(1024))
+            value = raw.split(b"\0", 1)[0]
+        else:
+            value = os.fsencode(os.readlink(f"/proc/self/fd/{descriptor}"))
+            if value.endswith(b" (deleted)"):
+                value = value[:-10]
+        path = Path(os.fsdecode(value))
+        return path if path.is_absolute() else None
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+
+def _find_owned_tree(parent: Path, identity: tuple[int, int]) -> Path | None:
+    try:
+        parent_fd = _open_snapshot_directory(parent)
+    except OSError:
+        return None
+    try:
+        for name in sorted(entry.name for entry in os.scandir(parent_fd)):
+            try:
+                metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            except OSError:
+                continue
+            if (
+                metadata.st_uid == os.geteuid() and stat.S_ISDIR(metadata.st_mode)
+                and (metadata.st_dev, metadata.st_ino) == identity
+            ):
+                return parent / name
+        return None
+    finally:
+        os.close(parent_fd)
+
+
+class _StagingIdentityChanged(OSError):
+    pass
+
+
+def _remove_owned_tree(root: Path, expected_identity: tuple[int, int] | None = None) -> bool:
+    """Remove a private staging tree without following links or hiding retained state."""
+    if not os.path.lexists(root):
+        return expected_identity is None
+    effective_uid = os.geteuid()
+
+    def clear(directory_fd: int, directory_path: Path) -> None:
+        for name in sorted(entry.name for entry in os.scandir(directory_fd)):
+            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if before.st_uid != effective_uid:
+                raise _StagingIdentityChanged("staging entry ownership changed")
+            if stat.S_ISDIR(before.st_mode):
+                os.chmod(name, 0o700, dir_fd=directory_fd, follow_symlinks=False)
+                child_fd = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=directory_fd,
+                )
+                try:
+                    opened = os.fstat(child_fd)
+                    if (
+                        opened.st_uid != effective_uid or not stat.S_ISDIR(opened.st_mode)
+                        or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                    ):
+                        raise _StagingIdentityChanged("staging directory identity changed")
+                    os.fchmod(child_fd, 0o700)
+                    clear(child_fd, directory_path / name)
+                    try:
+                        named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    except FileNotFoundError as error:
+                        raise _StagingIdentityChanged("staging directory path vanished") from error
+                    if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
+                        raise _StagingIdentityChanged("staging directory path changed")
+                    try:
+                        os.rmdir(name, dir_fd=directory_fd)
+                    except OSError as error:
+                        raise _StagingIdentityChanged("staging directory removal raced") from error
+                    try:
+                        os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        current = _directory_fd_path(child_fd)
+                        if current is None or current != directory_path / name:
+                            raise _StagingIdentityChanged("staging directory moved during removal")
+                    else:
+                        raise _StagingIdentityChanged("staging directory path recreated")
+                finally:
+                    os.close(child_fd)
+            else:
+                os.unlink(name, dir_fd=directory_fd)
+
+    for _attempt in range(2):
+        parent_fd = None
+        root_fd = None
+        try:
+            parent_fd = _open_snapshot_directory(root.parent)
+            metadata = os.stat(root.name, dir_fd=parent_fd, follow_symlinks=False)
+            if (
+                metadata.st_uid != effective_uid or not stat.S_ISDIR(metadata.st_mode)
+                or expected_identity is not None
+                and (metadata.st_dev, metadata.st_ino) != expected_identity
+            ):
+                return False
+            os.chmod(root.name, 0o700, dir_fd=parent_fd, follow_symlinks=False)
+            root_fd = os.open(
+                root.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd,
+            )
+            opened = os.fstat(root_fd)
+            if (
+                opened.st_uid != effective_uid or not stat.S_ISDIR(opened.st_mode)
+                or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+                or expected_identity is not None
+                and (opened.st_dev, opened.st_ino) != expected_identity
+            ):
+                raise _StagingIdentityChanged("staging root identity changed")
+            os.fchmod(root_fd, 0o700)
+            clear(root_fd, root)
+            try:
+                named = os.stat(root.name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError as error:
+                raise _StagingIdentityChanged("staging root path vanished") from error
+            if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
+                raise _StagingIdentityChanged("staging root path changed")
+            try:
+                os.rmdir(root.name, dir_fd=parent_fd)
+            except OSError as error:
+                raise _StagingIdentityChanged("staging root removal raced") from error
+            try:
+                os.stat(root.name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                current = _directory_fd_path(root_fd)
+                if current is None or current != root:
+                    raise _StagingIdentityChanged("staging root moved during removal")
+                return True
+            raise _StagingIdentityChanged("staging root path recreated")
+        except _StagingIdentityChanged:
+            return False
+        except OSError:
+            pass
+        finally:
+            if root_fd is not None:
+                os.close(root_fd)
+            if parent_fd is not None:
+                os.close(parent_fd)
+    return expected_identity is None and not os.path.lexists(root)
+
+
+def _cleanup_gate_owned(report: dict, *owned: ExecutionStage | LaneExecution | None) -> bool:
+    retained = []
+    for item in owned:
+        if item is not None and not item.cleanup():
+            retained.append(str(item.retained_path()))
+    if retained:
+        report["verdict"] = "BLOCKED"
+        report["failedLane"] = "cleanup"
+        report["retainedOwner"] = "current-process"
+        report["retainedPaths"] = sorted(set(retained))
+        return False
+    return True
+
+
+def _cleanup_gate_owned_or_raise(*owned: ExecutionStage | LaneExecution | None) -> None:
+    retained = []
+    for item in owned:
+        if item is not None and not item.cleanup():
+            retained.append(str(item.retained_path()))
+    if retained:
+        raise RetainedStagingError(*(Path(path) for path in retained))
 
 
 def _open_snapshot_directory(path: Path) -> int:
@@ -478,7 +704,7 @@ def _copy_snapshot_tree(
     if not stat.S_ISDIR(root_opened.st_mode):
         os.close(root_fd)
         raise ValueError("special source root in snapshot")
-    destination.mkdir()
+    destination.mkdir(mode=0o700)
 
     def visit(directory_fd: int, relative: Path, target: Path, depth: int) -> None:
         if depth > MAX_SNAPSHOT_DEPTH:
@@ -501,8 +727,9 @@ def _copy_snapshot_tree(
                     opened = os.fstat(child_fd)
                     if _snapshot_identity(opened) != _snapshot_identity(before):
                         raise ValueError("source changed during snapshot")
-                    destination_entry.mkdir(mode=stat.S_IMODE(before.st_mode))
+                    destination_entry.mkdir(mode=0o700)
                     visit(child_fd, relative_entry, destination_entry, depth + 1)
+                    destination_entry.chmod(stat.S_IMODE(before.st_mode))
                     after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
                     final = os.fstat(child_fd)
                     if (
@@ -550,6 +777,7 @@ def _copy_snapshot_tree(
         root_final = os.fstat(root_fd)
         if _snapshot_identity(root_final) != _snapshot_identity(root_opened):
             raise ValueError("source root changed during snapshot")
+        destination.chmod(stat.S_IMODE(root_opened.st_mode))
     finally:
         os.close(root_fd)
 
@@ -692,8 +920,10 @@ def _archive_repository(source: Path, sha: str, destination: Path, state: dict[s
 def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> ExecutionStage:
     temporary_parent = Path("/private/tmp") if sys.platform == "darwin" else Path(tempfile.gettempdir())
     root = Path(tempfile.mkdtemp(prefix="course-mode-stage-", dir=temporary_parent))
-    staged = json.loads(json.dumps(candidate))
+    root_identity: tuple[int, int] | None = None
     try:
+        root_identity = _owned_tree_identity(root)
+        staged = json.loads(json.dumps(candidate))
         state = {"entries": 0, "bytes": 0}
         repositories_root = root / "repositories"
         repositories_root.mkdir()
@@ -732,9 +962,11 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
             if (
                 observed_package is None
                 or observed_package["sha256"] != descriptor["packageTreeSha256"]
+                or observed_package["rootMode"] != descriptor["packageRootMode"]
             ):
                 raise ValueError("staged npm package descriptor mismatch")
             staged_descriptor["packageRoot"] = str(package_root)
+            staged_descriptor["packageRootMode"] = observed_package["rootMode"]
             for tool in ("npm", "npx"):
                 entrypoint = prefix / f"lib/node_modules/npm/bin/{tool}-cli.js"
                 if _secure_file_sha256(entrypoint, MAX_PACKAGE_LOCK_BYTES) != descriptor[tool]["sha256"]:
@@ -765,9 +997,10 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
                 raise ValueError("staged browser descriptor mismatch")
             staged["tools"]["robotPreviewBrowser"]["root"] = str(browser_target)
         _make_tree_read_only(root)
-        return ExecutionStage(root, staged)
+        return ExecutionStage(root, staged, root_identity, _open_snapshot_directory(root))
     except Exception:
-        shutil.rmtree(root, ignore_errors=True)
+        if not _remove_owned_tree(root, root_identity):
+            raise RetainedStagingError(root)
         raise
 
 
@@ -2084,7 +2317,7 @@ def _command_for_lane(lane: Lane, candidate: dict) -> tuple[str, ...] | None:
 
 def _write_report_atomic(path: Path, report: dict, parent_fd: int | None = None) -> bool:
     payload = json.dumps(
-        report, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+        report, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False,
     ).encode("utf-8") + b"\n"
     if len(payload) > MAX_REPORT_BYTES or not path.is_absolute():
         return False
@@ -2334,19 +2567,26 @@ def run_gate(
                     execution_stage = stage_execution_candidate(candidate, (lane,))
                     lane_execution = execution_stage.create_lane_execution()
                     execution_candidate = lane_execution.candidate
-                except (OSError, RuntimeError, TypeError, ValueError):
-                    if execution_stage is not None:
-                        execution_stage.cleanup()
+                except RetainedStagingError as error:
+                    retained_paths = set(error.paths)
+                    if execution_stage is not None and not execution_stage.cleanup():
+                        retained_paths.add(str(execution_stage.root))
                     report["verdict"] = "BLOCKED"
-                    report["failedLane"] = "snapshot"
+                    report["failedLane"] = "cleanup"
+                    report["retainedOwner"] = "current-process"
+                    report["retainedPaths"] = sorted(retained_paths)
+                    break
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    if _cleanup_gate_owned(report, execution_stage):
+                        report["verdict"] = "BLOCKED"
+                        report["failedLane"] = "snapshot"
                     break
                 command = _resolve_candidate_command(lane_command, execution_candidate, lane) if lane_command else None
                 if command is None:
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
-                    lane_execution.cleanup()
-                    execution_stage.cleanup()
+                    _cleanup_gate_owned(report, lane_execution, execution_stage)
                     break
                 root = Path(execution_candidate["repositories"][lane.repository]["path"])
                 cwd = root / lane.relative_cwd
@@ -2357,8 +2597,7 @@ def run_gate(
                 except OSError:
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
-                    lane_execution.cleanup()
-                    execution_stage.cleanup()
+                    _cleanup_gate_owned(report, lane_execution, execution_stage)
                     break
                 started = time.monotonic_ns()
                 junit_path: Path | None = None
@@ -2377,8 +2616,14 @@ def run_gate(
                     )
                     skip_state = pytest_report_has_skips(junit_path) if junit_path else False
                 except BaseException:
-                    lane_execution.cleanup()
-                    execution_stage.cleanup()
+                    try:
+                        _cleanup_gate_owned_or_raise(lane_execution, execution_stage)
+                    except RetainedStagingError as error:
+                        report["verdict"] = "BLOCKED"
+                        report["failedLane"] = "cleanup"
+                        report["retainedOwner"] = "current-process"
+                        report["retainedPaths"] = list(error.paths)
+                        break
                     raise
                 finally:
                     if junit_path is not None:
@@ -2389,8 +2634,8 @@ def run_gate(
                 report["lanes"].append({
                     "name": lane.name, "exitCode": exit_code, "durationMs": duration_ms,
                 })
-                lane_execution.cleanup()
-                execution_stage.cleanup()
+                if not _cleanup_gate_owned(report, lane_execution, execution_stage):
+                    break
                 if not _candidate_metadata_matches(candidate_path, candidate):
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
@@ -2423,7 +2668,7 @@ def run_gate(
 
 def _emit(report: dict) -> None:
     print(json.dumps(
-        report, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+        report, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False,
     ))
 
 
