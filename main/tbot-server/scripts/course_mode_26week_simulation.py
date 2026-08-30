@@ -84,6 +84,7 @@ PEDAGOGY_MARKERS = {
     "spiralCheckpoint": "checkpoint_welcome",
     "celebrationShowcase": "showcase_welcome",
 }
+REPRESENTATIVE_CROSS_PROCESS_WEEKS = (1, 2, 3, 7, 4, 26)
 
 
 class CourseModeSimulationError(RuntimeError):
@@ -686,6 +687,7 @@ def _simulate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
         "schemaVersion": 1, "simulator": "course-mode-26week.v1", "status": "pass",
         "lessonCount": len(lessons), "scenarioCount": len(RESPONSE_MATRIX),
         "pedagogyCount": len(PEDAGOGY_WEEKS), "actions": sorted(all_actions), "lessons": lessons,
+        "crossProcessRepresentativeWeeks": list(REPRESENTATIVE_CROSS_PROCESS_WEEKS),
     }
     if "backendSha" in fixture:
         summary["backendSha"] = fixture["backendSha"]

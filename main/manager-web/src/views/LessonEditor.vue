@@ -737,6 +737,7 @@ export default {
       validationRequestId: 0,
       previewing: false,
       previewProofVersion: -1,
+      previewRecoveryProofVersion: -1,
       publishing: false,
       creatingNextVersion: false,
       publishPreparing: false,
@@ -839,6 +840,7 @@ export default {
       tvideoJourneySaveMessage: '',
       tvideoJourneyRequestId: 0,
       courseModeContract: null,
+      courseModeExpectedChecksum: null,
       courseModeDraft: null,
       courseModeLoading: false,
       courseModeSaving: false,
@@ -911,7 +913,7 @@ export default {
         this.lesson
         && this.lesson.lessonId === this.lessonId
         && this.lesson.manifestVersion === 'teebot-lesson-renderer.v5'
-        && this.hasLoadedCourseModeAuthority
+        && (this.hasLoadedCourseModeAuthority || this.courseModeContract)
       );
     },
     canCreateCourseModeV5Version() {
@@ -1045,8 +1047,7 @@ export default {
       return this.lessonVisualPair.objectAssetKey;
     },
     lessonVisualSelectionDisabled() {
-      return this.isCourseModeAuthority
-        || this.savingLessonVisuals
+      return this.savingLessonVisuals
         || this.savingStep
         || this.rebindingSharedVisual
         || this.assetMutating
@@ -1311,6 +1312,7 @@ export default {
     resetCourseModeState() {
       this.courseModeRequestId += 1;
       this.courseModeContract = null;
+      this.courseModeExpectedChecksum = null;
       this.courseModeDraft = null;
       this.courseModeLoading = false;
       this.courseModeSaving = false;
@@ -1329,6 +1331,7 @@ export default {
         if (this.editorDestroying || requestId !== this.courseModeRequestId || lessonId !== this.lessonId) return;
         const contract = response && response.contract ? response.contract : response;
         this.courseModeContract = contract;
+        this.courseModeExpectedChecksum = contract && contract.contractChecksum ? contract.contractChecksum : null;
         this.courseModeDraft = JSON.parse(JSON.stringify(contract));
         this.courseModeDirty = false;
         this.courseModeRevision = 0;
@@ -1351,11 +1354,14 @@ export default {
       try {
         const contract = await withCourseModeChecksum(normalizeCourseModeVisualKeys(this.courseModeDraft));
         if (this.editorDestroying || requestId !== this.courseModeRequestId || lessonId !== this.lessonId) return false;
-        Api.lesson.saveCourseModeContract(lessonId, contract, (response) => {
+        Api.lesson.saveCourseModeContract(lessonId, contract, this.courseModeExpectedChecksum, (response) => {
           if (this.editorDestroying || requestId !== this.courseModeRequestId || lessonId !== this.lessonId) return;
           const saved = response && response.contract ? response.contract : contract;
           this.courseModeSaving = false;
           this.courseModeContract = saved;
+          this.courseModeExpectedChecksum = response && response.checksum
+            ? response.checksum
+            : saved.contractChecksum;
           if (this.courseModeRevision === saveRevision) {
             this.courseModeDraft = JSON.parse(JSON.stringify(saved));
             this.courseModeDirty = false;
@@ -1666,6 +1672,7 @@ export default {
         && !this.assetRefreshIsProofRecovery) this.invalidatePreview();
       this.assetProofFingerprint = fingerprint;
       this.bundleAssets = nextAssets;
+      if (typeof this.autoPreviewIfReady === 'function') this.autoPreviewIfReady();
       return true;
     },
     onAssetReadStarted(metadata) {
@@ -2015,6 +2022,16 @@ export default {
       this.promptSaveRequestId += 1;
       this.savingStep = false;
     },
+    autoPreviewIfReady() {
+      if (!this.cinematicDemoUrl || !this.lessonCapabilities.exactEspTftPreview
+        || !this.steps.length || this.assetProofFingerprint === null
+        || this.previewManifest || this.previewing) return false;
+      this.$nextTick(() => {
+        if (this.editorDestroying || this.previewManifest || this.previewing) return;
+        this.doPreview();
+      });
+      return true;
+    },
     fetchSteps(options = {}) {
       const requestId = this.lessonStepsRequestId + 1;
       const lessonLoadRequestId = this.lessonLoadRequestId;
@@ -2047,12 +2064,8 @@ export default {
           this.resetPromptDraft(rows[this.selectedStepIndex] || null);
         }
         if (options.onSuccess) options.onSuccess(rows, promptStateApplied);
-        // Auto-generate the espTft preview for the canonical cinematic lesson so the
-        // fly-in + step→video sync work without the author clicking "Preview" first.
-        if (this.cinematicDemoUrl && this.lessonCapabilities.exactEspTftPreview
-          && !this.previewManifest && !this.previewing) {
-          this.$nextTick(() => this.doPreview());
-        }
+        // Both reads affect proofVersion; preview only after their initial snapshots settle.
+        if (typeof this.autoPreviewIfReady === 'function') this.autoPreviewIfReady();
       }, (msg) => {
         if (!requestIsCurrent()) return;
         this.$message.error(msg);
@@ -2738,7 +2751,7 @@ export default {
         || this.addingStep || this.reordering || this.deletingStepKey
         || !this.steps.length) return false;
       const confirmedPair = this.lessonVisualReconciliationRequired ? this.pendingLessonVisualPair : null;
-      const nextPair = { ...this.lessonVisualPair, ...(patch || {}) };
+      const nextPair = { ...(this.pendingLessonVisualPair || this.lessonVisualPair), ...(patch || {}) };
       this.lessonVisualReconciliationRequired = false;
       this.pendingLessonVisualPair = nextPair;
       this.$nextTick(() => this.pushCinematicStep());
@@ -2747,7 +2760,7 @@ export default {
         return false;
       }
 
-      const request = buildLessonVisualRequest(this.lessonVisualPair, patch);
+      const request = buildLessonVisualRequest(nextPair);
       if (this.isCourseModeV5) {
         if (!nextPair.robotAssetVersionId) {
           this.$message.warning(this.$t('lesson.visualTripleRequired'));
@@ -3174,9 +3187,17 @@ export default {
         'espTft',
         (res) => {
           if (this.editorDestroying) return;
-          if (requestId !== this.previewRequestId || proofVersion !== this.proofVersion
-            || lessonId !== this.lessonId || lessonLoadRequestId !== this.lessonLoadRequestId) return;
+          if (lessonId !== this.lessonId || lessonLoadRequestId !== this.lessonLoadRequestId) return;
+          if (requestId !== this.previewRequestId) return;
           this.previewing = false;
+          if (proofVersion !== this.proofVersion) {
+            if (!this.previewManifest && this.previewRecoveryProofVersion !== this.proofVersion
+              && typeof this.autoPreviewIfReady === 'function') {
+              this.previewRecoveryProofVersion = this.proofVersion;
+              this.autoPreviewIfReady();
+            }
+            return;
+          }
           const normalized = res && !res.preview && res.manifest && res.manifest.profile === 'espTft'
             ? { ...res, preview: { profile: 'espTft', width: 480, height: 320 } }
             : res;
@@ -3190,14 +3211,16 @@ export default {
             this.preview = { checksum: normalized.checksum, etag: normalized.etag };
             this.previewManifest = normalized;
             this.previewProofVersion = proofVersion;
+            this.previewRecoveryProofVersion = -1;
           }
           if (typeof onSuccess === 'function') onSuccess(normalized);
         },
         (msg) => {
           if (this.editorDestroying) return;
-          if (requestId !== this.previewRequestId || proofVersion !== this.proofVersion
-            || lessonId !== this.lessonId || lessonLoadRequestId !== this.lessonLoadRequestId) return;
+          if (lessonId !== this.lessonId || lessonLoadRequestId !== this.lessonLoadRequestId) return;
+          if (requestId !== this.previewRequestId) return;
           this.previewing = false;
+          if (proofVersion !== this.proofVersion) return;
           this.$message.error(msg);
           if (typeof onError === 'function') onError(msg);
         },

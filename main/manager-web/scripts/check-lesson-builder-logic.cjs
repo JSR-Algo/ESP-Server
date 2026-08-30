@@ -472,10 +472,10 @@ lessonApi.getCourseModeContract('lesson-course-mode', onSuccess, onError);
 assert.strictEqual(apiRequests[0].url, '/v1/admin/lessons/lesson-course-mode/course-mode');
 assert.strictEqual(apiRequests[0].method, 'GET');
 assert.strictEqual(typeof lessonApi.saveCourseModeContract, 'function');
-lessonApi.saveCourseModeContract('lesson-course-mode', courseModeContract, onSuccess, onError);
+lessonApi.saveCourseModeContract('lesson-course-mode', courseModeContract, courseModeContract.contractChecksum, onSuccess, onError);
 assert.strictEqual(apiRequests[1].url, '/v1/admin/lessons/lesson-course-mode/course-mode');
 assert.strictEqual(apiRequests[1].method, 'PUT');
-assert.strictEqual(JSON.stringify(apiRequests[1].data), JSON.stringify({ contract: courseModeContract }));
+assert.strictEqual(JSON.stringify(apiRequests[1].data), JSON.stringify({ expectedChecksum: courseModeContract.contractChecksum, contract: courseModeContract }));
 apiRequests.length = 0;
 
 assert.strictEqual(typeof lessonApi.reviewSharedVisualImpact, 'function');

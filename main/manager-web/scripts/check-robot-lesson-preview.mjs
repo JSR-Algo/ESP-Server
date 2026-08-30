@@ -243,6 +243,33 @@ const hostileV3 = structuredClone(rendererV3);
 hostileV3.steps[0].scene.robotOverlay.asset.src = 'https://bad.test/robot.webm';
 assert.ok(projection.findForbiddenFirmwareCapabilities(hostileV3).some((warning) => warning.includes('video source')));
 
+const rendererV5 = structuredClone(servedManifest);
+rendererV5.manifestVersion = 'teebot-lesson-renderer.v5';
+rendererV5.steps[0].activityId = 'w01.a01';
+rendererV5.steps[0].scene.backgroundScene.poster.src = 'https://cdn.test/background.jpg';
+rendererV5.steps[0].scene.teachingObject.asset.src = 'https://cdn.test/object.png';
+rendererV5.steps[0].scene.robotOverlay.asset.src = 'https://cdn.test/robot.mp4';
+rendererV5.cinematicPhases = [{
+  templateId: 'layeredCinematic',
+  phaseId: 'flyIn',
+  activityIds: ['w01.a01'],
+  layers: [
+    { slot: 'backgroundScene', metadata: { mediaKind: 'image', mediaType: 'image/jpeg', rect: { x: 0, y: 0, width: 480, height: 320 } } },
+    { slot: 'teachingObject', metadata: { mediaKind: 'image', mediaType: 'image/png', rect: { x: 20, y: 168, width: 95, height: 95 } } },
+    { slot: 'robotOverlay', metadata: { mediaKind: 'video', mediaType: 'video/mp4', rect: { x: 118, y: 160, width: 150, height: 150 }, chromaKey: { keyColor: '#00ff00' } } }
+  ]
+}];
+const exactV5 = projection.projectEspTftPreview(rendererV5, 0, 'correct');
+assert.deepEqual(
+  exactV5.layers.slice(0, 3).map(({ id, src, mediaType, bounds, chromaKey }) => ({ id, src, mediaType, bounds, chromaKey })),
+  [
+    { id: 'background', src: 'https://cdn.test/background.jpg', mediaType: 'image/jpeg', bounds: { x: 0, y: 0, width: 480, height: 320, fit: 'cover' }, chromaKey: null },
+    { id: 'teachingObject', src: 'https://cdn.test/object.png', mediaType: 'image/png', bounds: { x: 20, y: 168, width: 95, height: 95, fit: 'contain' }, chromaKey: null },
+    { id: 'robotOverlay', src: 'https://cdn.test/robot.mp4', mediaType: 'video/mp4', bounds: { x: 118, y: 160, width: 150, height: 150, fit: 'contain' }, chromaKey: { color: { r: 0, g: 255, b: 0 }, tolerance: 0, feather: 0 } }
+  ],
+  'renderer-v5 must use the selected layered cinematic phase metadata as media authority'
+);
+
 const duplicateOpening = structuredClone(rendererV2);
 duplicateOpening.steps.push({ ...structuredClone(duplicateOpening.steps[0]), id: 'second-step', entrance: 'flyIn' });
 assert.ok(projection.projectEspTftPreview(duplicateOpening).warnings.some((warning) => warning.includes('exactly one opening entrance')));

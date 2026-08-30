@@ -185,6 +185,7 @@ export default {
   'monitoring.filterLessonId': 'Lọc theo mã bài học',
   'monitoring.filterState': 'Trạng thái',
   'monitoring.colLesson': 'Bài học',
+  'monitoring.colVersion': 'Phiên bản',
   'monitoring.colState': 'Trạng thái',
   'monitoring.colDevice': 'Thiết bị',
   'monitoring.colChild': 'Trẻ',

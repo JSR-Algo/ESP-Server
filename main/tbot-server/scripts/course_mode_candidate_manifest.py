@@ -20,7 +20,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
 REQUIRED_KEYS = {
     "candidateId", "createdAt", "expiresAt", "course", "repositories",
     "images", "firmware", "database", "curriculum", "tools", "evidenceRoot",
@@ -45,6 +44,8 @@ RENDERER_ID = "teebot-lesson-renderer.v5"
 CONTRACT_IDENTITY = "courseCompanion.v2.contract.v1"
 MAX_CANDIDATE_BYTES = 1024 * 1024
 MAX_DIRTY_FILE_BYTES = 4 * 1024 * 1024
+MAX_BROWSER_EXECUTABLE_BYTES = 512 * 1024 * 1024
+MAX_BROWSER_BUNDLE_DEPTH = 128
 MAX_GIT_OUTPUT_BYTES = 1024 * 1024
 GIT_TIMEOUT_SEC = 10.0
 _GIT_CANDIDATES = (
@@ -63,6 +64,9 @@ SECURE_ENV = {
     "GIT_OPTIONAL_LOCKS": "0",
     "PAGER": "cat",
 }
+BROWSER_DESCRIPTOR_KEYS = {"version", "engine", "revision", "root", "executable", "treeDigest"}
+BROWSER_TREE_KEYS = {"schema", "sha256", "entryCount", "totalBytes"}
+BROWSER_TREE_SCHEMA = "sha256-path-mode-bytes-v1"
 
 
 @dataclass(frozen=True)
@@ -297,6 +301,197 @@ def _secure_hash_relative(root: Path, relative: str) -> tuple[str | None, str | 
         os.close(directory_fd)
 
 
+def secure_executable_descriptor(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        if not path.is_absolute() or str(path) != str(path.resolve(strict=True)):
+            return None, "path"
+        parent_fd = _open_directory_secure(path.parent)
+    except OSError:
+        return None, "path"
+    file_fd: int | None = None
+    try:
+        file_fd = os.open(path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+        before = os.fstat(file_fd)
+        if (
+            not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+            or before.st_size <= 0 or before.st_size > MAX_BROWSER_EXECUTABLE_BYTES
+            or before.st_mode & 0o111 == 0
+        ):
+            return None, "path"
+        digest = hashlib.sha256()
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(file_fd, min(1024 * 1024, remaining))
+            if not chunk:
+                return None, "changed"
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if os.read(file_fd, 1):
+            return None, "changed"
+        after = os.fstat(file_fd)
+        current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        identity = (
+            before.st_dev, before.st_ino, before.st_mode, before.st_nlink,
+            before.st_size, before.st_mtime_ns, before.st_ctime_ns,
+        )
+        if (
+            identity != (
+                after.st_dev, after.st_ino, after.st_mode, after.st_nlink,
+                after.st_size, after.st_mtime_ns, after.st_ctime_ns,
+            )
+            or identity != (
+                current.st_dev, current.st_ino, current.st_mode, current.st_nlink,
+                current.st_size, current.st_mtime_ns, current.st_ctime_ns,
+            )
+        ):
+            return None, "changed"
+        return {"path": str(path), "sha256": digest.hexdigest(), "bytes": before.st_size}, None
+    except OSError:
+        return None, "path"
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        os.close(parent_fd)
+
+
+def _digest_field(digest: Any, value: bytes) -> None:
+    digest.update(len(value).to_bytes(8, "big"))
+    digest.update(value)
+
+
+def secure_browser_bundle_descriptor(root: Path) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        if not root.is_absolute() or str(root) != str(root.resolve(strict=True)) or root.is_symlink():
+            return None, "path"
+        root_before = root.lstat()
+        if not stat.S_ISDIR(root_before.st_mode):
+            return None, "path"
+        digest = hashlib.sha256()
+        state = {"entryCount": 0, "totalBytes": 0}
+
+        def visit(directory: Path, relative_parent: Path, depth: int) -> bool:
+            if depth > MAX_BROWSER_BUNDLE_DEPTH:
+                return False
+            for entry in sorted(os.scandir(directory), key=lambda item: item.name):
+                relative = relative_parent / entry.name
+                metadata = entry.stat(follow_symlinks=False)
+                state["entryCount"] += 1
+                if state["entryCount"] > 10_000:
+                    return False
+                mode = stat.S_IMODE(metadata.st_mode)
+                if stat.S_ISDIR(metadata.st_mode):
+                    _digest_field(digest, b"directory")
+                    _digest_field(digest, relative.as_posix().encode())
+                    _digest_field(digest, str(mode).encode())
+                    if not visit(Path(entry.path), relative, depth + 1):
+                        return False
+                    after = os.stat(entry.path, follow_symlinks=False)
+                    if (
+                        metadata.st_dev, metadata.st_ino, metadata.st_mode,
+                        metadata.st_nlink, metadata.st_mtime_ns, metadata.st_ctime_ns,
+                    ) != (
+                        after.st_dev, after.st_ino, after.st_mode,
+                        after.st_nlink, after.st_mtime_ns, after.st_ctime_ns,
+                    ):
+                        return False
+                elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+                    state["totalBytes"] += metadata.st_size
+                    if state["totalBytes"] > MAX_BROWSER_EXECUTABLE_BYTES:
+                        return False
+                    file_fd = os.open(entry.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                    try:
+                        opened = os.fstat(file_fd)
+                        identity = (
+                            metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
+                            metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns,
+                        )
+                        if identity != (
+                            opened.st_dev, opened.st_ino, opened.st_mode, opened.st_nlink,
+                            opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns,
+                        ):
+                            return False
+                        _digest_field(digest, b"regular")
+                        _digest_field(digest, relative.as_posix().encode())
+                        _digest_field(digest, str(mode).encode())
+                        _digest_field(digest, str(metadata.st_size).encode())
+                        remaining = metadata.st_size
+                        while remaining:
+                            chunk = os.read(file_fd, min(1024 * 1024, remaining))
+                            if not chunk:
+                                return False
+                            digest.update(chunk)
+                            remaining -= len(chunk)
+                        after = os.fstat(file_fd)
+                        named = os.stat(entry.path, follow_symlinks=False)
+                        if identity != (
+                            after.st_dev, after.st_ino, after.st_mode, after.st_nlink,
+                            after.st_size, after.st_mtime_ns, after.st_ctime_ns,
+                        ) or identity != (
+                            named.st_dev, named.st_ino, named.st_mode, named.st_nlink,
+                            named.st_size, named.st_mtime_ns, named.st_ctime_ns,
+                        ):
+                            return False
+                    finally:
+                        os.close(file_fd)
+                else:
+                    return False
+            return True
+
+        if not visit(root, Path(), 0):
+            return None, "tree"
+        root_after = root.lstat()
+        if (root_before.st_dev, root_before.st_ino, root_before.st_mtime_ns) != (
+            root_after.st_dev, root_after.st_ino, root_after.st_mtime_ns,
+        ):
+            return None, "changed"
+        return {
+            "schema": BROWSER_TREE_SCHEMA, "sha256": digest.hexdigest(),
+            "entryCount": state["entryCount"], "totalBytes": state["totalBytes"],
+        }, None
+    except RecursionError:
+        return None, "tree"
+    except (OSError, UnicodeEncodeError):
+        return None, "path"
+
+
+def _validate_robot_preview_browser(value: Any, reasons: set[str], *, verify_identity: bool) -> None:
+    prefix = "tools.robotPreviewBrowser"
+    if not isinstance(value, dict) or set(value) != BROWSER_DESCRIPTOR_KEYS:
+        reasons.add(f"{prefix}.keys")
+        return
+    if type(value.get("version")) is not int or value["version"] != 2:
+        reasons.add(f"{prefix}.version")
+    if value.get("engine") != "chromium-headless-shell":
+        reasons.add(f"{prefix}.engine")
+    revision = value.get("revision")
+    if not isinstance(revision, str) or re.fullmatch(r"[1-9][0-9]*", revision) is None:
+        reasons.add(f"{prefix}.revision")
+    root = value.get("root")
+    executable = value.get("executable")
+    tree = value.get("treeDigest")
+    if not isinstance(root, str) or not Path(root).is_absolute():
+        reasons.add(f"{prefix}.root")
+    if not _valid_relative_path(executable):
+        reasons.add(f"{prefix}.executable")
+    if not isinstance(tree, dict) or set(tree) != BROWSER_TREE_KEYS:
+        reasons.add(f"{prefix}.treeDigest.keys")
+    elif (
+        tree.get("schema") != BROWSER_TREE_SCHEMA
+        or not isinstance(tree.get("sha256"), str) or SHA256_RE.fullmatch(tree["sha256"]) is None
+        or type(tree.get("entryCount")) is not int or tree["entryCount"] <= 0
+        or type(tree.get("totalBytes")) is not int or tree["totalBytes"] <= 0
+    ):
+        reasons.add(f"{prefix}.treeDigest")
+    if verify_identity and not any(reason.startswith(f"{prefix}.") for reason in reasons):
+        observed, error = secure_browser_bundle_descriptor(Path(root))
+        executable_path = Path(root) / executable
+        if (
+            error or observed != tree or not executable_path.is_file()
+            or executable_path.is_symlink() or not os.access(executable_path, os.X_OK)
+        ):
+            reasons.add(f"{prefix}.identity")
+
+
 def _valid_relative_path(value: Any) -> bool:
     if not isinstance(value, str) or not value or "\0" in value:
         return False
@@ -402,7 +597,9 @@ def _parse_rfc3339_utc(value: Any) -> datetime | None:
         return None
 
 
-def validate_candidate(candidate: Any, *, now: datetime | None = None) -> list[str]:
+def validate_candidate(
+    candidate: Any, *, now: datetime | None = None, verify_external_tools: bool = True,
+) -> list[str]:
     """Return sorted, stable and privacy-safe validation reason codes."""
     reasons: set[str] = set()
     if not isinstance(candidate, dict):
@@ -425,6 +622,11 @@ def validate_candidate(candidate: Any, *, now: datetime | None = None) -> list[s
     for field in ("images", "firmware", "database", "tools"):
         if not isinstance(candidate.get(field), dict):
             reasons.add(field)
+    tools = candidate.get("tools")
+    if isinstance(tools, dict):
+        _validate_robot_preview_browser(
+            tools.get("robotPreviewBrowser"), reasons, verify_identity=verify_external_tools,
+        )
     evidence_root = candidate.get("evidenceRoot")
     if not isinstance(evidence_root, str) or not Path(evidence_root).is_absolute():
         reasons.add("evidenceRoot")

@@ -7,18 +7,26 @@ import argparse
 import contextlib
 import hashlib
 import importlib
+import ipaddress
 import json
 import math
 import os
+import posixpath
+import queue
+import re
 import secrets
 import shutil
+import socket
 import stat
+import sys
 import tempfile
+import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 try:
     _manifest = importlib.import_module("scripts.course_mode_candidate_manifest")
@@ -32,6 +40,7 @@ run_bounded_command = _manifest.run_bounded_command
 strict_json_loads = _manifest.strict_json_loads
 validate_candidate = _manifest.validate_candidate
 _candidate_git = _manifest._git
+secure_browser_bundle_descriptor = _manifest.secure_browser_bundle_descriptor
 
 
 SECURE_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -56,9 +65,47 @@ MAX_NODE_INSTALL_DEPTH = 128
 MAX_NODE_PROJECT_SCAN_ENTRIES = 500_000
 MAX_PACKAGE_LOCK_BYTES = 32 * 1024 * 1024
 NODE_TREE_SCHEMA = "sha256-path-mode-bytes-symlink-v1"
+ROBOT_PREVIEW_BROWSER_ENVIRONMENT = {
+    "root": "TBOT_ROBOT_PREVIEW_BROWSER_ROOT",
+    "executable": "TBOT_ROBOT_PREVIEW_BROWSER_EXECUTABLE",
+    "engine": "TBOT_ROBOT_PREVIEW_BROWSER_ENGINE",
+    "revision": "TBOT_ROBOT_PREVIEW_BROWSER_REVISION",
+    "treeSha256": "TBOT_ROBOT_PREVIEW_BROWSER_TREE_SHA256",
+    "treeEntryCount": "TBOT_ROBOT_PREVIEW_BROWSER_TREE_ENTRY_COUNT",
+    "treeTotalBytes": "TBOT_ROBOT_PREVIEW_BROWSER_TREE_TOTAL_BYTES",
+}
 MODES = ("quick", "full", "live-db", "physical-preflight")
 COURSE_MODE_SOFTWARE_TESTS = "@course-mode-software-tests"
 PLAYWRIGHT_CONTRACT_PATH = "main/manager-web/course-mode.playwright.contract.json"
+PLAYWRIGHT_SOURCE_PATHS = (
+    "docs/docker/docker-compose.lesson-studio-e2e.yml",
+    "docs/docker/lesson-studio-e2e/seed-postgres.sql",
+    "main/manager-web/e2e/lesson-studio/course-mode-authoring.spec.js-snapshots/course-mode-step-1-course-mode-webkit-desktop-darwin.png",
+    "main/manager-web/e2e/lesson-studio/course-mode-authoring.spec.js-snapshots/course-mode-step-1-course-mode-webkit-mobile-darwin.png",
+    "main/manager-web/e2e/lesson-studio/course-mode-authoring.spec.js-snapshots/course-mode-step-2-course-mode-webkit-desktop-darwin.png",
+    "main/manager-web/e2e/lesson-studio/course-mode-authoring.spec.js-snapshots/course-mode-step-2-course-mode-webkit-mobile-darwin.png",
+    "main/manager-web/playwright.lesson-studio.config.js",
+    "main/manager-web/scripts/check-canonical-demo-ui.mjs",
+    "main/manager-web/scripts/check-flattened-cinematic-preview.mjs",
+    "main/manager-web/scripts/check-lesson-assignment-ui-contracts.mjs",
+    "main/manager-web/scripts/check-lesson-builder-logic.cjs",
+    "main/manager-web/scripts/check-lesson-editor-ui-contracts.mjs",
+    "main/manager-web/scripts/check-lesson-visual-selection.cjs",
+    "main/manager-web/scripts/check-robot-lesson-preview.mjs",
+    "main/manager-web/scripts/lesson-studio-e2e-environment.test.cjs",
+    "main/manager-web/scripts/page-errors-helper.test.cjs",
+    "main/manager-web/src/apis/module/lesson.js",
+    "main/manager-web/src/components/lesson/CinematicVideoLayer.vue",
+    "main/manager-web/src/components/lesson/RobotEspTftProjectionPreview.vue",
+    "main/manager-web/src/components/lesson/flattened-cinematic-preview.js",
+    "main/manager-web/src/components/lesson/robot-preview-projection.js",
+    "main/manager-web/src/i18n/en.js",
+    "main/manager-web/src/i18n/vi.js",
+    "main/manager-web/src/views/LessonEditor.vue",
+    "main/manager-web/src/views/LessonMonitoring.vue",
+    "main/manager-web/src/views/login.vue",
+    "main/manager-web/tests/browser/lesson-builder-main.js",
+)
 PLAYWRIGHT_PROJECTS = (
     "course-mode-chromium-desktop",
     "course-mode-webkit-desktop",
@@ -70,6 +117,78 @@ PLAYWRIGHT_PROJECT_CONTRACT = (
     {"name": "course-mode-webkit-desktop", "device": "Desktop Safari", "viewport": {"width": 1440, "height": 900}},
     {"name": "course-mode-chromium-mobile", "device": "Pixel 7", "viewport": {"width": 390, "height": 844}},
     {"name": "course-mode-webkit-mobile", "device": "iPhone 13", "viewport": {"width": 390, "height": 844}},
+)
+PLAYWRIGHT_ASSIGNMENT_CONTRACT = {
+    "fixtureCommand": "node --test scripts/task4-assignment-fixture.test.cjs",
+    "newCommand": "node scripts/run-task4-assignment-phase.cjs new",
+    "rollbackCommand": "node scripts/run-task4-assignment-phase.cjs rollback",
+    "sourcePaths": [
+        "docs/docker/task4-admin-assignment/bootstrap.cjs",
+        "docs/docker/task4-admin-assignment/docker-compose.new.yml",
+        "docs/docker/task4-admin-assignment/docker-compose.rollback.yml",
+        "docs/docker/task4-admin-assignment/serve-media.cjs",
+        "main/manager-web/e2e/lesson-studio/assignment-rollback-phase.spec.js",
+        "main/manager-web/playwright.assignment-rollback.config.js",
+        "main/manager-web/scripts/prepare-task4-media-templates.cjs",
+        "main/manager-web/scripts/run-task4-assignment-phase.cjs",
+        "main/manager-web/scripts/task4-assignment-fixture.test.cjs",
+        "main/manager-web/scripts/task4-image-identity.cjs",
+    ],
+}
+PLAYWRIGHT_ASSIGNMENT_SCRIPTS = {
+    "test:course-mode:assignment-fixture": PLAYWRIGHT_ASSIGNMENT_CONTRACT["fixtureCommand"],
+    "test:e2e:course-mode:assignment:new": PLAYWRIGHT_ASSIGNMENT_CONTRACT["newCommand"],
+    "test:e2e:course-mode:assignment:rollback": PLAYWRIGHT_ASSIGNMENT_CONTRACT["rollbackCommand"],
+}
+TASK4_ASSIGNMENT_CANDIDATE_ENV = (
+    "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME", "LESSON_STUDIO_E2E_RESOURCE_PREFIX",
+    "TASK4_ASSIGNMENT_RUNTIME_ROOT", "JWT_PUBLIC_KEY", "TBOT_DEVICE_MINT_SECRET",
+    "LESSON_ASSET_ORIGIN_BASE", "ROBOT_ESP_BASE_URL",
+)
+TASK4_BACKEND_MOUNT_ROOTS = (
+    "src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json",
+    "src/lessons/fixtures/tvideo-raw-code/assets/admin",
+    "src/lessons/fixtures/tvideo-raw-code/assets/esp-tft",
+)
+TASK4_FIRMWARE_MOUNT_ROOTS = ("lesson/assets",)
+TASK4_BACKEND_MOUNT_INPUTS = (
+    "src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json",
+    "src/lessons/fixtures/tvideo-raw-code/assets/admin/deep-barn-farm-background-6s.mp4",
+    "src/lessons/fixtures/tvideo-raw-code/assets/admin/source/objects/barn.png",
+    "src/lessons/fixtures/tvideo-raw-code/assets/admin/source/robot-alive/robots-bright-alive-k3-glowface.png",
+    "src/lessons/fixtures/tvideo-raw-code/assets/admin/source/scenes/scene-07-farm.png",
+    "src/lessons/fixtures/tvideo-raw-code/assets/esp-tft/barn-192.png",
+    "src/lessons/fixtures/tvideo-raw-code/assets/esp-tft/robots-bright-alive-k3-glowface-192.png",
+    "src/lessons/fixtures/tvideo-raw-code/assets/esp-tft/scene-07-farm-320x180.jpg",
+)
+TASK4_FIRMWARE_MOUNT_INPUTS = (
+    "lesson/assets/background/barn-round-field-poster.jpg",
+    "lesson/assets/background/barn-round-field.mp4",
+    "lesson/assets/objects/barn-raw-candidate-0.png",
+    "lesson/assets/objects/barn.png",
+    "lesson/assets/objects/farm-raw-candidate-0.png",
+    "lesson/assets/objects/farm.png",
+    "lesson/assets/objects/hay-raw-candidate-0.png",
+    "lesson/assets/objects/hay.png",
+    "lesson/assets/reference/barn-celebrate.png",
+    "lesson/assets/reference/barn-step-1.png",
+    "lesson/assets/reference/barn-step-2.png",
+    "lesson/assets/reference/barn-step-3.png",
+    "lesson/assets/reference/lesson-w01-barn.png",
+    "lesson/assets/robot/bright-black-sprite-sheet-source.png",
+    "lesson/assets/robot/bright-sprite-atlas.json",
+    "lesson/assets/robot/bright-sprite-atlas.png",
+    "lesson/assets/robot/poses/bright-cards.png",
+    "lesson/assets/robot/poses/bright-celebrate.png",
+    "lesson/assets/robot/poses/bright-idle.png",
+    "lesson/assets/robot/poses/bright-listening.png",
+    "lesson/assets/robot/poses/bright-side.png",
+    "lesson/assets/robot/poses/bright-teach.png",
+    "lesson/assets/robot/poses/bright-thinking.png",
+    "lesson/assets/robot/poses/bright-wave.png",
+    "lesson/assets/robot/rive-source/teebot-face-import-v2.svg",
+    "lesson/assets/robot/rive-source/teebot-face.svg",
+    "lesson/assets/robot/rive-source/teebot-states-reference.svg",
 )
 PLAYWRIGHT_FIXED_CONTRACT = {
     "testDir": "./e2e/lesson-studio",
@@ -154,7 +273,7 @@ QUICK_LANES = (
 FULL_LANES = (
     _lane("backend-lint", "backend", ".", ("npm", "run", "lint")),
     _lane("backend-typecheck", "backend", ".", ("npm", "run", "typecheck")),
-    _lane("backend-tests", "backend", ".", ("npm", "test"), 1800.0),
+    _lane("backend-tests", "backend", ".", ("npm", "test", "--", "--no-cache"), 1800.0),
     _lane("backend-build", "backend", ".", ("npm", "run", "build")),
     _lane(
         "backend-curriculum-verifier", "backend", ".",
@@ -172,6 +291,23 @@ FULL_LANES = (
             required_source_contract="course-mode-playwright",
         )
         for project in PLAYWRIGHT_PROJECTS
+    ),
+    _lane(
+        "admin-course-mode-assignment-fixture", "adminEsp", "main/manager-web",
+        ("npm", "run", "test:course-mode:assignment-fixture"),
+        required_source_contract="course-mode-playwright",
+    ),
+    _lane(
+        "admin-course-mode-assignment-new", "adminEsp", "main/manager-web",
+        ("npm", "run", "test:e2e:course-mode:assignment:new"), 1200.0,
+        TASK4_ASSIGNMENT_CANDIDATE_ENV,
+        required_source_contract="course-mode-playwright",
+    ),
+    _lane(
+        "admin-course-mode-assignment-rollback", "adminEsp", "main/manager-web",
+        ("npm", "run", "test:e2e:course-mode:assignment:rollback"), 1200.0,
+        TASK4_ASSIGNMENT_CANDIDATE_ENV,
+        required_source_contract="course-mode-playwright",
     ),
     _lane(
         "esp-course-mode-full", "adminEsp", "main/tbot-server",
@@ -211,9 +347,27 @@ LIVE_DB_LANE = _lane(
         "tests/integration/course-mode-local-materializer.integration.spec.ts",
     ),
     1800.0,
-    ("COURSE_MODE_V2_TEST_DATABASE_URL", "COURSE_MODE_TEST_DATABASE_URL", "DATABASE_URL"),
-    (("TBOT_RUN_LIVE_DB_TESTS", "true"),),
+    (
+        "COURSE_MODE_V2_TEST_DATABASE_URL",
+        "COURSE_MODE_TEST_DATABASE_URL",
+        "DATABASE_URL",
+        "COURSE_MODE_ROLLBACK_TEST_DATABASE_URL",
+    ),
+    (
+        ("TBOT_RUN_LIVE_DB_TESTS", "true"),
+        ("COURSE_MODE_TEST_DATABASE_CONFIRMED", "1"),
+    ),
 )
+
+LIVE_DB_URL_VARIABLES = (
+    "COURSE_MODE_V2_TEST_DATABASE_URL",
+    "COURSE_MODE_TEST_DATABASE_URL",
+    "DATABASE_URL",
+    "COURSE_MODE_ROLLBACK_TEST_DATABASE_URL",
+)
+POSTGRES_IDENTITY_QUERY_KEYS = {
+    "database", "dbname", "host", "hostaddr", "port", "service", "servicefile",
+}
 
 
 PHYSICAL_PREFLIGHT_LANE = _lane(
@@ -283,6 +437,46 @@ def candidate_paths_match(repository: Mapping[str, object], relative_paths: Sequ
                 return False
         return True
     except (KeyError, OSError, RuntimeError, TypeError):
+        return False
+
+
+def assignment_input_sources_ready(candidate: dict) -> bool:
+    try:
+        repositories = candidate["repositories"]
+        selections = (
+            (repositories["backend"], TASK4_BACKEND_MOUNT_ROOTS),
+            (repositories["firmware"], TASK4_FIRMWARE_MOUNT_ROOTS),
+        )
+        for repository, roots in selections:
+            dirty = tuple(item["path"] for item in repository["dirtyExceptions"])
+            if any(
+                dirty_path == root or dirty_path.startswith(f"{root}/")
+                or root.startswith(f"{dirty_path}/")
+                for dirty_path in dirty for root in roots
+            ):
+                return False
+            tracked = tuple(filter(None, _candidate_git(
+                Path(repository["path"]), "ls-tree", "-r", "--name-only", "-z",
+                repository["sha"], "--", *roots,
+            ).split("\0")))
+            if not tracked or not candidate_paths_match(repository, tracked):
+                return False
+            repository_root = Path(repository["path"])
+            current: set[str] = set()
+            for relative in roots:
+                mounted = repository_root / relative
+                if mounted.is_symlink() or not mounted.exists():
+                    return False
+                candidates = (mounted,) if mounted.is_file() else mounted.rglob("*")
+                for path in candidates:
+                    if path.is_symlink():
+                        return False
+                    if path.is_file():
+                        current.add(path.relative_to(repository_root).as_posix())
+            if current != set(tracked):
+                return False
+        return True
+    except (KeyError, RuntimeError, TypeError):
         return False
 
 
@@ -374,6 +568,48 @@ def _playwright_spec_paths(admin_root: Path, sha: str) -> tuple[str, ...]:
         relative for relative in tracked
         if Path(relative).name.startswith("course-mode") and relative.endswith(".spec.js")
     )
+
+
+_COMMON_JS_REQUIRE = re.compile(
+    r"^[ \t]*(?:(?:(?:const|let|var)\b[^\n=]*|})\s*=\s*)?"
+    r"require\(\s*(['\"])(\.[^'\"]*)\1\s*\)",
+    re.MULTILINE,
+)
+
+
+def _playwright_harness_paths(
+    admin_root: Path, sha: str, contract: Mapping[str, object], specs: Sequence[str],
+) -> tuple[str, ...] | None:
+    fixed = contract.get("fixed")
+    global_setup = fixed.get("globalSetup") if isinstance(fixed, dict) else None
+    if not isinstance(global_setup, str):
+        return None
+    web_prefix = "main/manager-web/"
+    pending = ["main/manager-web/playwright.config.js", *specs]
+    pending.append(web_prefix + global_setup.removeprefix("./"))
+    discovered: set[str] = set()
+    while pending:
+        relative = posixpath.normpath(pending.pop())
+        if relative in discovered:
+            continue
+        if not relative.startswith(web_prefix) or relative.startswith("../"):
+            return None
+        source = _committed_text(admin_root, sha, relative)
+        if source is None:
+            return None
+        discovered.add(relative)
+        for match in _COMMON_JS_REQUIRE.finditer(source):
+            requested = match.group(2)
+            base = posixpath.normpath(posixpath.join(posixpath.dirname(relative), requested))
+            candidates = (base, f"{base}.js", f"{base}.cjs", f"{base}.mjs", f"{base}/index.js")
+            resolved = next(
+                (candidate for candidate in candidates if _committed_text(admin_root, sha, candidate) is not None),
+                None,
+            )
+            if resolved is None or not resolved.startswith(web_prefix):
+                return None
+            pending.append(resolved)
+    return tuple(sorted(discovered))
 
 
 def lane_candidate_paths(lane: Lane, candidate: dict) -> tuple[str, ...]:
@@ -785,12 +1021,50 @@ def node_install_authorized(
         return False
 
 
+def robot_preview_browser_authorized(candidate: dict) -> bool:
+    try:
+        descriptor = candidate["tools"]["robotPreviewBrowser"]
+        if not isinstance(descriptor, dict) or set(descriptor) != {
+            "version", "engine", "revision", "root", "executable", "treeDigest",
+        }:
+            return False
+        observed, error = secure_browser_bundle_descriptor(Path(descriptor["root"]))
+        if error or observed != descriptor["treeDigest"]:
+            return False
+        admin_root = Path(candidate["repositories"]["adminEsp"]["path"])
+        metadata_path = admin_root / "main/manager-web/node_modules/playwright-core/browsers.json"
+        metadata = strict_json_loads(read_secure_regular(metadata_path, 1024 * 1024))
+        browsers = metadata.get("browsers") if isinstance(metadata, dict) else None
+        entry = next(
+            item for item in browsers
+            if isinstance(item, dict) and item.get("name") == "chromium-headless-shell"
+        )
+        if entry.get("revision") != descriptor["revision"] or descriptor["engine"] != "chromium-headless-shell":
+            return False
+        machine = os.uname().machine.lower()
+        platform_suffix = {
+            ("darwin", "arm64"): "chrome-headless-shell-mac-arm64/chrome-headless-shell",
+            ("darwin", "x86_64"): "chrome-headless-shell-mac-x64/chrome-headless-shell",
+            ("linux", "aarch64"): "chrome-linux/headless_shell",
+            ("linux", "x86_64"): "chrome-headless-shell-linux64/chrome-headless-shell",
+        }.get((sys.platform, machine))
+        if platform_suffix is None:
+            return False
+        expected_root = Path(f"chromium_headless_shell-{descriptor['revision']}") / Path(platform_suffix).parent
+        return (
+            Path(descriptor["root"]).parts[-len(expected_root.parts):] == expected_root.parts
+            and descriptor["executable"] == Path(platform_suffix).name
+        )
+    except (KeyError, OSError, StopIteration, TypeError, ValueError):
+        return False
+
+
 def release_state_matches(
     candidate_path: Path, candidate: dict, lanes: Sequence[Lane], runtime_root: Path | None,
     require_runtime: bool, node_lanes: Sequence[Lane] | None = None,
 ) -> bool:
     current = _load_candidate(candidate_path)
-    if current != candidate or current is None or validate_candidate(current):
+    if current != candidate or current is None or validate_candidate(current, verify_external_tools=False):
         return False
     if not _candidate_matches(candidate):
         return False
@@ -806,6 +1080,8 @@ def release_state_matches(
     node_cache: dict = {}
     for lane in lanes if node_lanes is None else node_lanes:
         if not node_install_authorized(lane, candidate, node_cache):
+            return False
+        if lane.name == "admin-browser" and not robot_preview_browser_authorized(candidate):
             return False
     return True
 
@@ -833,13 +1109,22 @@ def _json_exact_equal(actual: object, expected: object) -> bool:
 
 def validate_playwright_contract(contract: object) -> bool:
     if not isinstance(contract, dict) or set(contract) != {
-        "version", "specs", "testMatch", "projects", "fixed",
+        "version", "sourcePaths", "specs", "testMatch", "projects", "assignmentPhases", "fixed",
     }:
         return False
+    source_paths = contract.get("sourcePaths")
     specs = contract.get("specs")
     test_match = contract.get("testMatch")
     if (
         type(contract.get("version")) is not int or contract.get("version") != 1
+        or not isinstance(source_paths, list)
+        or source_paths != sorted(set(source_paths))
+        or any(
+            not isinstance(relative, str) or not relative
+            or Path(relative).is_absolute() or ".." in Path(relative).parts
+            for relative in source_paths
+        )
+        or not _json_exact_equal(source_paths, list(PLAYWRIGHT_SOURCE_PATHS))
         or not isinstance(specs, list) or not specs
         or any(
             not isinstance(spec, str) or not spec.startswith("e2e/lesson-studio/")
@@ -851,6 +1136,7 @@ def validate_playwright_contract(contract: object) -> bool:
         or specs != sorted(set(specs))
         or test_match != [Path(spec).name for spec in specs]
         or not _json_exact_equal(contract.get("projects"), list(PLAYWRIGHT_PROJECT_CONTRACT))
+        or not _json_exact_equal(contract.get("assignmentPhases"), PLAYWRIGHT_ASSIGNMENT_CONTRACT)
         or not _json_exact_equal(contract.get("fixed"), PLAYWRIGHT_FIXED_CONTRACT)
     ):
         return False
@@ -927,7 +1213,10 @@ def source_contract_ready(admin_root: Path, contract: str, sha: str) -> bool:
         return False
     scripts = package.get("scripts") if isinstance(package, dict) else None
     script = scripts.get("test:e2e:course-mode") if isinstance(scripts, dict) else None
-    if script != "playwright test --config=playwright.config.js":
+    if (
+        script != "playwright test --config=playwright.config.js"
+        or not all(scripts.get(name) == command for name, command in PLAYWRIGHT_ASSIGNMENT_SCRIPTS.items())
+    ):
         return False
     try:
         generated = generate_playwright_config(document)
@@ -936,9 +1225,13 @@ def source_contract_ready(admin_root: Path, contract: str, sha: str) -> bool:
     normalized_specs = [relative.removeprefix("main/manager-web/") for relative in specs]
     if document["specs"] != normalized_specs or config_raw != generated:
         return False
+    harness = _playwright_harness_paths(admin_root, sha, document, specs)
+    if harness is None:
+        return False
     bound = (
         "main/manager-web/package.json", "main/manager-web/playwright.config.js",
-        PLAYWRIGHT_CONTRACT_PATH, *specs,
+        PLAYWRIGHT_CONTRACT_PATH, *harness, *document["sourcePaths"],
+        *document["assignmentPhases"]["sourcePaths"],
     )
     return candidate_paths_match(
         {"path": str(admin_root), "sha": sha, "dirtyExceptions": []}, bound,
@@ -1035,8 +1328,191 @@ def _child_environment(candidate: dict, source: Mapping[str, str], lane: Lane) -
     for name in _required_environment(lane):
         if source.get(name):
             environment[name] = source[name]
+    if lane.name == LIVE_DB_LANE.name:
+        environment["COURSE_MODE_V5_SOURCE_ROOT"] = candidate["repositories"]["adminEsp"]["path"]
+    assignment = _assignment_candidate_environment(candidate, lane)
+    if assignment is not None:
+        environment.update(assignment)
     environment.update(dict(lane.fixed_environment))
+    if lane.name == "admin-browser":
+        browser = candidate["tools"]["robotPreviewBrowser"]
+        values = {
+            "root": browser["root"], "executable": browser["executable"],
+            "engine": browser["engine"], "revision": browser["revision"],
+            "treeSha256": browser["treeDigest"]["sha256"],
+            "treeEntryCount": browser["treeDigest"]["entryCount"],
+            "treeTotalBytes": browser["treeDigest"]["totalBytes"],
+        }
+        for field, name in ROBOT_PREVIEW_BROWSER_ENVIRONMENT.items():
+            environment[name] = str(values[field])
     return environment
+
+
+def _postgres_host_identity(host: str | None) -> str | None:
+    if not host:
+        return None
+    normalized = host.lower().removesuffix(".")
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        if re.fullmatch(r"[0-9.]+", normalized):
+            return None
+        labels = normalized.split(".")
+        if len(normalized) > 253 or any(
+            re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) is None
+            for label in labels
+        ):
+            return None
+        return normalized
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.compressed
+
+
+def _postgres_identity(value: object) -> tuple[str, int, str] | None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or any(character.isspace() or ord(character) < 32 for character in value)
+        or re.search(r"%(?![0-9A-Fa-f]{2})", value)
+    ):
+        return None
+    try:
+        parsed = urlsplit(value)
+        query = (
+            parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+            if parsed.query else []
+        )
+        endpoint = parsed.netloc.rsplit("@", 1)[-1]
+        parsed_port = parsed.port
+        port = 5432 if parsed_port is None else parsed_port
+        host = _postgres_host_identity(parsed.hostname)
+    except (UnicodeError, ValueError):
+        return None
+    if (
+        parsed.scheme not in {"postgres", "postgresql"}
+        or not parsed.netloc
+        or parsed.fragment
+        or endpoint.endswith(":")
+        or host is None
+        or not 1 <= port <= 65535
+        or any(key.lower() in POSTGRES_IDENTITY_QUERY_KEYS for key, _ in query)
+    ):
+        return None
+    database = unquote(parsed.path.removeprefix("/"))
+    if not database or "/" in database or "\\" in database or "\x00" in database:
+        return None
+    return (host, port, database)
+
+
+def _local_postgres_identity(value: object) -> tuple[str, int, str] | None:
+    identity = _postgres_identity(value)
+    if identity is None:
+        return None
+    try:
+        literal_host = urlsplit(value).hostname.lower()
+    except (AttributeError, UnicodeError, ValueError):
+        return None
+    if literal_host not in {"127.0.0.1", "::1"}:
+        return None
+    return ("loopback", identity[1], identity[2])
+
+
+def _resolved_postgres_addresses(host: str, port: int) -> frozenset[str] | None:
+    results: queue.SimpleQueue[object] = queue.SimpleQueue()
+
+    def resolve() -> None:
+        try:
+            results.put(socket.getaddrinfo(
+                host, port, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM,
+                proto=socket.IPPROTO_TCP,
+            ))
+        except (OSError, UnicodeError, ValueError):
+            results.put(None)
+
+    worker = threading.Thread(target=resolve, daemon=True)
+    worker.start()
+    worker.join(2.0)
+    if worker.is_alive() or results.empty():
+        return None
+    raw = results.get()
+    if not isinstance(raw, list) or not raw or len(raw) > 32:
+        return None
+    addresses = set()
+    try:
+        for family, _, _, _, sockaddr in raw:
+            if family not in {socket.AF_INET, socket.AF_INET6} or not isinstance(sockaddr, tuple):
+                return None
+            address = ipaddress.ip_address(sockaddr[0])
+            if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+                address = address.ipv4_mapped
+            addresses.add(address.compressed)
+    except (IndexError, TypeError, ValueError):
+        return None
+    return frozenset(addresses) if addresses else None
+
+
+def _live_db_topology_ready(source: Mapping[str, str]) -> bool:
+    identities = tuple(_local_postgres_identity(source.get(name)) for name in LIVE_DB_URL_VARIABLES)
+    if any(identity is None for identity in identities):
+        return False
+    v2, curriculum, materializer, rollback = identities
+    if not (v2 == curriculum and materializer == rollback and curriculum != materializer):
+        return False
+    if "PRODUCTION_DATABASE_URL" not in source:
+        return True
+    production = _postgres_identity(source.get("PRODUCTION_DATABASE_URL"))
+    if production is None:
+        return False
+    host, port, database = production
+    addresses = _resolved_postgres_addresses(host, port)
+    if addresses is None:
+        return False
+    production_is_loopback = any(ipaddress.ip_address(address).is_loopback for address in addresses)
+    aliases_test_database = production_is_loopback and any(
+        (port, database) == identity[1:] for identity in (curriculum, materializer)
+    )
+    return not aliases_test_database
+
+
+def _live_db_source_snapshot(source: Mapping[str, str]) -> dict[str, str] | None:
+    missing = object()
+    snapshot = {}
+    try:
+        for name in (*LIVE_DB_URL_VARIABLES, "PRODUCTION_DATABASE_URL"):
+            value = source.get(name, missing)
+            if value is not missing:
+                snapshot[name] = value
+    except (AttributeError, KeyError, RuntimeError, TypeError):
+        return None
+    return snapshot
+
+
+def _assignment_candidate_environment(candidate: dict, lane: Lane) -> dict[str, str] | None:
+    if lane.name not in {
+        "admin-course-mode-assignment-new", "admin-course-mode-assignment-rollback",
+    }:
+        return {}
+    try:
+        images = candidate["images"]
+        backend = images["lessonStudioBackend"]
+        web = images["lessonStudioWeb"]
+        values = {
+            "TBOT_BACKEND_WORKTREE": candidate["repositories"]["backend"]["path"],
+            "TBOT_FIRMWARE_WORKTREE": candidate["repositories"]["firmware"]["path"],
+            "TBOT_LESSON_STUDIO_BACKEND_IMAGE": backend["reference"],
+            "TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID": backend["id"],
+            "TBOT_LESSON_STUDIO_WEB_IMAGE": web["reference"],
+            "TBOT_LESSON_STUDIO_WEB_IMAGE_ID": web["id"],
+        }
+    except (KeyError, TypeError):
+        return None
+    if any(not isinstance(value, str) or not value for value in values.values()):
+        return None
+    for key in ("TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID", "TBOT_LESSON_STUDIO_WEB_IMAGE_ID"):
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", values[key]) is None:
+            return None
+    return values
 
 
 def _command_for_lane(lane: Lane, candidate: dict) -> tuple[str, ...] | None:
@@ -1246,6 +1722,17 @@ def run_gate(
             }
             source = source_environment if source_environment is not None else os.environ
             for lane in selected:
+                lane_source = source
+                if lane.name == LIVE_DB_LANE.name:
+                    live_db_source = _live_db_source_snapshot(source)
+                    if live_db_source is None:
+                        report["lanes"].append({
+                            "name": lane.name, "exitCode": None, "durationMs": 0,
+                        })
+                        report["verdict"] = "BLOCKED"
+                        report["failedLane"] = lane.name
+                        break
+                    lane_source = live_db_source
                 if not release_state_matches(
                     candidate_path, candidate, selected, runtime_root, require_runtime,
                     node_lanes=(lane,),
@@ -1255,7 +1742,24 @@ def run_gate(
                     report["failedLane"] = lane.name
                     break
                 required_environment = _required_environment(lane)
-                if any(not source.get(name) for name in required_environment):
+                if any(not lane_source.get(name) for name in required_environment):
+                    report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
+                    report["verdict"] = "BLOCKED"
+                    report["failedLane"] = lane.name
+                    break
+                if lane.name == LIVE_DB_LANE.name and not _live_db_topology_ready(lane_source):
+                    report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
+                    report["verdict"] = "BLOCKED"
+                    report["failedLane"] = lane.name
+                    break
+                if _assignment_candidate_environment(candidate, lane) is None:
+                    report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
+                    report["verdict"] = "BLOCKED"
+                    report["failedLane"] = lane.name
+                    break
+                if lane.name in {
+                    "admin-course-mode-assignment-new", "admin-course-mode-assignment-rollback",
+                } and not assignment_input_sources_ready(candidate):
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
@@ -1303,7 +1807,7 @@ def run_gate(
                     result = run_bounded_command(
                         list(command), cwd=resolved_cwd, timeout_sec=lane.timeout_sec,
                         max_output_bytes=max_output_bytes,
-                        env=_child_environment(candidate, source, lane),
+                        env=_child_environment(candidate, lane_source, lane),
                     )
                     skip_state = pytest_report_has_skips(junit_path) if junit_path else False
                 finally:

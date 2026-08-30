@@ -53,13 +53,25 @@ openssl pkey -pubin -in "${BACKEND_ROOT}/keys/dev-public.pem" -outform DER \
   fail "backend canonical Course Mode v5 materializer source is missing"
 TBOT_ESP_REPOSITORY_ROOT="$(cd -- "${HERE}/../../.." && pwd -P)"
 export TBOT_ESP_REPOSITORY_ROOT
+ESP_SHA="$(git -C "${TBOT_ESP_REPOSITORY_ROOT}" rev-parse HEAD)"
+[[ "${ESP_SHA}" =~ ^[0-9a-f]{40}$ ]] || fail "ESP repository HEAD is not a full Git SHA"
+[[ -z "$(git -C "${TBOT_ESP_REPOSITORY_ROOT}" status --porcelain --untracked-files=all)" ]] || \
+  fail "ESP repository must be clean so the SHA-tagged web image has exact source provenance"
+[[ -f "${TBOT_ESP_REPOSITORY_ROOT}/Dockerfile-web" ]] || fail "ESP web Dockerfile is missing"
+ESP_BUILD_CONTEXT="${KEY_CHECK_DIR}/esp-source"
+mkdir -p "${ESP_BUILD_CONTEXT}"
+git -C "${TBOT_ESP_REPOSITORY_ROOT}" archive --format=tar "${ESP_SHA}" | \
+  tar -xf - -C "${ESP_BUILD_CONTEXT}" || fail "could not materialize tracked ESP source"
+[[ -f "${ESP_BUILD_CONTEXT}/Dockerfile-web" ]] || fail "tracked ESP web Dockerfile is missing"
 
 BACKEND_IMAGE="local/tbot-backend:course-mode-physical-tft-${ACTUAL_SHA}"
 MATERIALIZER_IMAGE="local/tbot-course-mode-v5-materializer:${ACTUAL_SHA}"
+WEB_IMAGE="local/tbot-server-web:course-mode-physical-tft-${ESP_SHA}"
 COMPOSE_PROJECT="tbot-course-mode-physical-tft"
 export TBOT_BACKEND_WORKTREE="${BACKEND_ROOT}"
 export TBOT_LESSON_STUDIO_BACKEND_IMAGE="${BACKEND_IMAGE}"
 export TBOT_COURSE_MODE_V5_MATERIALIZER_IMAGE="${MATERIALIZER_IMAGE}"
+export TBOT_LESSON_STUDIO_WEB_IMAGE="${WEB_IMAGE}"
 export JWT_PUBLIC_KEY="$(cat "${BACKEND_ROOT}/keys/dev-public.pem")"
 export JWT_PRIVATE_KEY="$(cat "${BACKEND_ROOT}/keys/dev-private-pkcs8.pem")"
 export LESSON_ASSET_ORIGIN_BASE="${COURSE_MODE_ASSET_ORIGIN_BASE}"
@@ -94,6 +106,14 @@ docker build --pull=false \
 echo "[course-mode-physical-tft] verifying compiled materializer in ${BACKEND_IMAGE}"
 docker run --rm --entrypoint node "${MATERIALIZER_IMAGE}" \
   -e "require('node:fs').accessSync('/app/dist/lessons/course-mode/course-mode-v5-identity-materializer.js')"
+
+echo "[course-mode-physical-tft] building ${WEB_IMAGE} from reviewed ESP source"
+docker build --pull=false \
+  --build-arg "WEB_NODE_IMAGE=node:20" \
+  --label "org.opencontainers.image.revision=${ESP_SHA}" \
+  --label "com.tbot.course-mode.build-source=reviewed-clean-git-worktree" \
+  -f "${ESP_BUILD_CONTEXT}/Dockerfile-web" \
+  -t "${WEB_IMAGE}" "${ESP_BUILD_CONTEXT}"
 
 COMPOSE=(docker compose --project-name "${COMPOSE_PROJECT}" -f "${BASE_COMPOSE}" -f "${OVERLAY_COMPOSE}")
 echo "[course-mode-physical-tft] validating Compose with ${BACKEND_IMAGE}"

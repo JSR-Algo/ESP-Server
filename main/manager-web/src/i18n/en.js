@@ -185,6 +185,7 @@ export default {
   'monitoring.filterLessonId': 'Filter by lesson ID',
   'monitoring.filterState': 'State',
   'monitoring.colLesson': 'Lesson',
+  'monitoring.colVersion': 'Version',
   'monitoring.colState': 'State',
   'monitoring.colDevice': 'Device',
   'monitoring.colChild': 'Child',

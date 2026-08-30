@@ -425,6 +425,23 @@ export default {
   transition: transform 0.3s ease;
 }
 
+@media (max-width: 600px) {
+  .welcome {
+    min-width: 0;
+  }
+
+  .login-person {
+    display: none;
+  }
+
+  .login-box {
+    left: 50%;
+    right: auto;
+    width: min(450px, calc(100vw - 24px));
+    transform: translate(-50%, -50%);
+  }
+}
+
 :deep(.el-button--primary) {
   background-color: #5778ff;
   border-color: #5778ff;

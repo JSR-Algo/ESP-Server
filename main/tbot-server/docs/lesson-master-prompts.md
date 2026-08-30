@@ -85,7 +85,7 @@ start_lesson_function_desc = {
             "Chuyển robot sang CHẾ ĐỘ BÀI HỌC và bắt đầu ĐÚNG bài học đang được "
             "GIAO cho trẻ (assignment hiện hành của thiết bị). Gọi hàm này khi trẻ "
             "muốn bắt đầu, vào, mở, chuyển sang, hoặc học tiếp BÀI HỌC / TIẾT HỌC / "
-            "KHOÁ HỌC của mình. Switch the robot into LESSON mode and start the "
+            "KHÓA HỌC của mình. Switch the robot into LESSON mode and start the "
             "child's currently ASSIGNED lesson. Call this when the child wants to "
             "begin, enter, open, switch to, or resume their lesson / class / course. "
             "Triggers (Tiếng Việt): 'học bài thôi', 'con muốn học bài', "

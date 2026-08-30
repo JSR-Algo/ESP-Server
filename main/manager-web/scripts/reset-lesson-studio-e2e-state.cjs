@@ -19,9 +19,15 @@ function buildResetCommands({ composeFile = DEFAULT_COMPOSE_FILE, projectName = 
     ],
     [
       ...compose,
+      'exec', '-T', 'redis', 'redis-cli', 'EVAL',
+      "local keys=redis.call('keys','rl:*'); if #keys > 0 then return redis.call('del',unpack(keys)) end return 0",
+      '0',
+    ],
+    [
+      ...compose,
       'exec', '-T', 'postgres', 'psql', '-v', 'ON_ERROR_STOP=1',
       '-U', 'tbot', '-d', 'tbot', '-c',
-      "DELETE FROM admin_login_attempts WHERE email='lesson-author-e2e@local.invalid';",
+      "DELETE FROM admin_login_attempts WHERE email IN ('lesson-author-e2e@local.invalid','lesson-author-b-e2e@local.invalid','lesson-manager-e2e@local.invalid');",
     ],
   ];
 }

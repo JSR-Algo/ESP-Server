@@ -1,12 +1,14 @@
 import hashlib
 import json
 import os
+import pwd
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from copy import deepcopy
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
@@ -29,6 +31,7 @@ REPLACEMENT_ID = "2fe871e4-bf3d-43a8-91f4-63e755b4a12c"
 ASSIGNMENT_ID = "38b6deaf-8075-42e6-b827-0ca54dcc8f54"
 VOICE_PATH = "main/tbot-server/tests/test_lesson_voice_output_discipline.py"
 VOICE_SHA = "08f77b5452301224b17b4b333d2d032fff40c06aa2eaea97fa90932dae7d97e3"
+VOICE_SOURCE_COMMIT = "8c22b284d3e049de66205d1d4beb3fd42c1acf44"
 APP_OFFSET = 0x20000
 APP_PARTITION_SIZE = 0x7E0000
 NVS_OFFSET = 0x9000
@@ -38,6 +41,39 @@ EXPECTED_IDENTITIES = {}
 EXPECTED_SIGNATURES = {}
 EXPECTED_PUBLIC_KEYS = {}
 EXPECTED_FINGERPRINTS = {}
+DARWIN_TEST_TOOLS: set[Path] = set()
+
+
+@lru_cache(maxsize=1)
+def _pinned_voice_bytes() -> bytes:
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "show", f"{VOICE_SOURCE_COMMIT}:{VOICE_PATH}"],
+        capture_output=True,
+        check=True,
+    )
+    assert hashlib.sha256(result.stdout).hexdigest() == VOICE_SHA
+    return result.stdout
+
+
+@pytest.fixture(autouse=True)
+def trust_only_explicit_test_tools_on_darwin(monkeypatch):
+    sys.path.insert(0, str(SERVER / "scripts"))
+    import course_mode_physical_tft_preflight as preflight
+
+    real_path_policy = preflight._darwin_tool_path_is_approved
+    real_metadata_policy = preflight._darwin_path_is_root_owned_immutable
+    monkeypatch.setattr(
+        preflight,
+        "_darwin_tool_path_is_approved",
+        lambda name, path, digest: path in DARWIN_TEST_TOOLS or real_path_policy(name, path, digest),
+    )
+    monkeypatch.setattr(
+        preflight,
+        "_darwin_path_is_root_owned_immutable",
+        lambda path, opened=None: path in DARWIN_TEST_TOOLS or real_metadata_policy(path, opened),
+    )
+    yield
+    DARWIN_TEST_TOOLS.clear()
 
 
 @pytest.fixture
@@ -148,6 +184,7 @@ def _create_trusted_tools(tmp_path: Path) -> tuple[Path, Path, Path]:
     compile_launcher(git_script, git)
     compile_launcher(docker_script, docker)
     compile_launcher(compose_script, compose)
+    DARWIN_TEST_TOOLS.update((git, docker, compose))
     return git, docker, compose
 
 
@@ -160,7 +197,7 @@ def valid_input(session: Path, tmp_path: Path) -> dict:
         if name == "esp":
             protected = path / VOICE_PATH
             protected.parent.mkdir(parents=True)
-            protected.write_bytes((ROOT / VOICE_PATH).read_bytes())
+            protected.write_bytes(_pinned_voice_bytes())
             exceptions = [{"path": VOICE_PATH, "sha256": hashlib.sha256(protected.read_bytes()).hexdigest()}]
         repos[name] = {"path": str(path), "sha": sha, "dirtyExceptions": exceptions}
     trusted_git, trusted_docker, trusted_compose = _create_trusted_tools(tmp_path)
@@ -724,6 +761,7 @@ def test_run_timeout_and_invalid_utf8_are_deterministic(tmp_path):
     _run = preflight._run
 
     python = Path(sys.executable).resolve()
+    DARWIN_TEST_TOOLS.add(python)
     python_sha = hashlib.sha256(python.read_bytes()).hexdigest()
 
     _, ok, reason = _run(
@@ -775,6 +813,7 @@ def test_run_cleans_descendants_after_successful_parent_exit(tmp_path):
     _run = preflight._run
 
     python = Path(sys.executable).resolve()
+    DARWIN_TEST_TOOLS.add(python)
     python_sha = hashlib.sha256(python.read_bytes()).hexdigest()
 
     marker = tmp_path / "descendant-marker"
@@ -869,6 +908,9 @@ def test_verified_executable_fd_defeats_path_replacement(tmp_path, monkeypatch):
     sys.path.insert(0, str(SERVER / "scripts"))
     import course_mode_physical_tft_preflight as preflight
 
+    if preflight.FD_EXEC_ROOT is None:
+        pytest.skip("verified-FD launch is the Linux execution boundary")
+
     executable = tmp_path / "trusted-tool"
     source = tmp_path / "trusted-tool.c"
     source.write_text("int main(void){return 0;}\n")
@@ -898,79 +940,7 @@ def test_verified_executable_fd_defeats_path_replacement(tmp_path, monkeypatch):
     assert not attacker_marker.exists()
 
 
-def test_darwin_sealed_copy_is_cleaned_when_fsync_fails(tmp_path, monkeypatch):
-    sys.path.insert(0, str(SERVER / "scripts"))
-    import course_mode_physical_tft_preflight as preflight
-
-    executable = tmp_path / "trusted-tool"
-    source = tmp_path / "trusted-tool.c"
-    source.write_text("int main(void){return 0;}\n")
-    subprocess.run(["/usr/bin/cc", str(source), "-o", str(executable)], check=True)
-    expected_sha = hashlib.sha256(executable.read_bytes()).hexdigest()
-    sealed_directory = tmp_path / "sealed"
-
-    def create_sealed_directory(*_args, **_kwargs):
-        sealed_directory.mkdir(mode=0o700)
-        return str(sealed_directory)
-
-    monkeypatch.setattr(preflight, "FD_EXEC_ROOT", None)
-    monkeypatch.setattr(preflight.tempfile, "mkdtemp", create_sealed_directory)
-    monkeypatch.setattr(preflight.os, "fsync", lambda _fd: (_ for _ in ()).throw(OSError("fsync")))
-    stdout, ok, reason = preflight._run(
-        [str(executable)],
-        tmp_path,
-        {"PATH": "/usr/bin:/bin"},
-        allowed_executable=executable,
-        expected_executable_sha256=expected_sha,
-    )
-    assert (stdout, ok, reason) == ("", False, "executable")
-    assert not sealed_directory.exists()
-
-
-@pytest.mark.parametrize("failure", ["chmod", "stat"])
-def test_darwin_sealed_copy_is_cleaned_on_setup_metadata_failures(tmp_path, monkeypatch, failure):
-    sys.path.insert(0, str(SERVER / "scripts"))
-    import course_mode_physical_tft_preflight as preflight
-
-    executable = tmp_path / "trusted-tool"
-    source = tmp_path / "trusted-tool.c"
-    source.write_text("int main(void){return 0;}\n")
-    subprocess.run(["/usr/bin/cc", str(source), "-o", str(executable)], check=True)
-    expected_sha = hashlib.sha256(executable.read_bytes()).hexdigest()
-    sealed_directory = tmp_path / "sealed"
-    real_chmod = Path.chmod
-    real_stat = Path.stat
-
-    def create_sealed_directory(*_args, **_kwargs):
-        sealed_directory.mkdir(mode=0o700)
-        return str(sealed_directory)
-
-    def fail_selected_chmod(path, mode):
-        if failure == "chmod" and path == sealed_directory:
-            raise OSError("chmod")
-        return real_chmod(path, mode)
-
-    def fail_selected_stat(path, *args, **kwargs):
-        if failure == "stat" and path == sealed_directory / "tool":
-            raise OSError("stat")
-        return real_stat(path, *args, **kwargs)
-
-    monkeypatch.setattr(preflight, "FD_EXEC_ROOT", None)
-    monkeypatch.setattr(preflight.tempfile, "mkdtemp", create_sealed_directory)
-    monkeypatch.setattr(Path, "chmod", fail_selected_chmod)
-    monkeypatch.setattr(Path, "stat", fail_selected_stat)
-    stdout, ok, reason = preflight._run(
-        [str(executable)],
-        tmp_path,
-        {"PATH": "/usr/bin:/bin"},
-        allowed_executable=executable,
-        expected_executable_sha256=expected_sha,
-    )
-    assert (stdout, ok, reason) == ("", False, "executable")
-    assert not sealed_directory.exists()
-
-
-def test_darwin_child_rejects_replaced_sealed_copy(tmp_path, monkeypatch):
+def test_darwin_tool_cannot_change_after_verification_before_exec(tmp_path, monkeypatch):
     sys.path.insert(0, str(SERVER / "scripts"))
     import course_mode_physical_tft_preflight as preflight
 
@@ -980,33 +950,113 @@ def test_darwin_child_rejects_replaced_sealed_copy(tmp_path, monkeypatch):
     subprocess.run(["/usr/bin/cc", str(source), "-o", str(executable)], check=True)
     expected_sha = hashlib.sha256(executable.read_bytes()).hexdigest()
     attacker_marker = tmp_path / "attacker-marker"
-    sealed_directories = []
+    swap_attempted = False
     real_popen = preflight.subprocess.Popen
 
-    def replace_sealed_then_spawn(*args, **kwargs):
-        sealed = Path(kwargs["executable"])
-        sealed_directories.append(sealed.parent)
-        sealed.unlink()
-        sealed.write_text(f"#!/bin/sh\ntouch {attacker_marker}\n")
-        sealed.chmod(0o500)
+    def replace_then_spawn(*args, **kwargs):
+        nonlocal swap_attempted
+        swap_attempted = True
+        executable.unlink()
+        executable.write_text(f"#!/bin/sh\ntouch {attacker_marker}\n")
+        executable.chmod(0o755)
         return real_popen(*args, **kwargs)
 
     monkeypatch.setattr(preflight, "FD_EXEC_ROOT", None)
-    monkeypatch.setattr(preflight.subprocess, "Popen", replace_sealed_then_spawn)
-    stdout, ok, reason = preflight._run(
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
+    DARWIN_TEST_TOOLS.add(executable)
+    monkeypatch.setattr(preflight.subprocess, "Popen", replace_then_spawn)
+    result = preflight._run(
         [str(executable)],
         tmp_path,
         {"PATH": "/usr/bin:/bin"},
         allowed_executable=executable,
         expected_executable_sha256=expected_sha,
     )
-    assert (stdout, ok, reason) == ("", False, None)
+    assert result == ("", False, "executable")
+    assert swap_attempted is True
     assert not attacker_marker.exists()
-    assert sealed_directories and all(not directory.exists() for directory in sealed_directories)
 
 
-@pytest.mark.parametrize("failure", ["preexec", "temporary_file"])
-def test_darwin_sealed_copy_is_cleaned_when_launch_setup_fails(tmp_path, monkeypatch, failure):
+def test_darwin_runtime_has_no_user_owned_sealed_copy_fallback():
+    source = SCRIPT.read_text()
+    assert 'mkdtemp(prefix="tbot-preflight-tool-' not in source
+    assert "seal_verified_fd" not in source
+
+
+@pytest.mark.parametrize("tool_name", ["docker", "dockerCompose"])
+def test_darwin_expected_identity_requires_hash_addressed_libexec_tool(
+    tmp_path, session_dir, monkeypatch, tool_name
+):
+    document = valid_input(session_dir, tmp_path)
+    identity, identity_ref = EXPECTED_IDENTITIES[str(session_dir)]
+    changed = deepcopy(identity)
+    tool = changed["tools"][tool_name]
+    basename = "docker-compose" if tool_name == "dockerCompose" else "docker"
+    tool["path"] = f"/Applications/Docker.app/Contents/Resources/bin/{basename}"
+    sys.path.insert(0, str(SERVER / "scripts"))
+    import course_mode_physical_tft_preflight as preflight
+
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
+    monkeypatch.setattr(preflight, "_secure_hash_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(preflight.os, "access", lambda *_args, **_kwargs: True)
+    reasons = preflight.validate_input(
+        document,
+        repository_root=ROOT,
+        expected_identity=changed,
+        expected_identity_sha256=identity_ref["sha256"],
+    )
+    assert f"expected_identity.tools.{tool_name}" in reasons
+
+
+def test_darwin_hash_addressed_tool_path_binds_directory_to_digest():
+    sys.path.insert(0, str(SERVER / "scripts"))
+    import course_mode_physical_tft_preflight as preflight
+
+    digest = "a" * 64
+    root = Path("/usr/local/libexec/tbot-preflight")
+    assert preflight._darwin_tool_path_is_approved("docker", root / digest / "docker", digest)
+    assert preflight._darwin_tool_path_is_approved(
+        "dockerCompose", root / digest / "docker-compose", digest
+    )
+    assert not preflight._darwin_tool_path_is_approved(
+        "docker", root / ("b" * 64) / "docker", digest
+    )
+
+
+def test_darwin_tool_metadata_rejects_user_owned_mutable_and_symlink_paths(tmp_path):
+    sys.path.insert(0, str(SERVER / "scripts"))
+    import course_mode_physical_tft_preflight as preflight
+
+    mutable_parent = tmp_path / "mutable"
+    mutable_parent.mkdir(mode=0o777)
+    tool = mutable_parent / "docker"
+    tool.write_text("#!/bin/sh\nexit 0\n")
+    tool.chmod(0o755)
+    link = tmp_path / "docker-link"
+    link.symlink_to(tool)
+    assert not preflight._darwin_path_is_root_owned_immutable(tool)
+    assert not preflight._darwin_path_is_root_owned_immutable(link)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin ACL contract")
+def test_darwin_extended_acl_is_detected(tmp_path):
+    sys.path.insert(0, str(SERVER / "scripts"))
+    import course_mode_physical_tft_preflight as preflight
+
+    tool = tmp_path / "acl-tool"
+    tool.write_text("#!/bin/sh\nexit 0\n")
+    tool.chmod(0o555)
+    subprocess.run(
+        ["/bin/chmod", "+a", f"{pwd.getpwuid(os.getuid()).pw_name} allow write,delete", str(tool)],
+        check=True,
+    )
+    try:
+        assert preflight._darwin_path_has_extended_acl(tool) is True
+    finally:
+        subprocess.run(["/bin/chmod", "-N", str(tool)], check=True)
+
+
+def test_darwin_rejects_user_owned_tool_before_popen(tmp_path, monkeypatch):
     sys.path.insert(0, str(SERVER / "scripts"))
     import course_mode_physical_tft_preflight as preflight
 
@@ -1015,26 +1065,13 @@ def test_darwin_sealed_copy_is_cleaned_when_launch_setup_fails(tmp_path, monkeyp
     source.write_text("int main(void){return 0;}\n")
     subprocess.run(["/usr/bin/cc", str(source), "-o", str(executable)], check=True)
     expected_sha = hashlib.sha256(executable.read_bytes()).hexdigest()
-    sealed_directory = tmp_path / "sealed"
-
-    def create_sealed_directory(*_args, **_kwargs):
-        sealed_directory.mkdir(mode=0o700)
-        return str(sealed_directory)
-
+    attacker_marker = tmp_path / "attacker-marker"
     monkeypatch.setattr(preflight, "FD_EXEC_ROOT", None)
-    monkeypatch.setattr(preflight.tempfile, "mkdtemp", create_sealed_directory)
-    if failure == "preexec":
-        monkeypatch.setattr(
-            preflight.subprocess,
-            "Popen",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(subprocess.SubprocessError("preexec")),
-        )
-    else:
-        monkeypatch.setattr(
-            preflight.tempfile,
-            "TemporaryFile",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("temporary file")),
-        )
+    monkeypatch.setattr(
+        preflight.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Popen must not run")),
+    )
     stdout, ok, reason = preflight._run(
         [str(executable)],
         tmp_path,
@@ -1042,8 +1079,8 @@ def test_darwin_sealed_copy_is_cleaned_when_launch_setup_fails(tmp_path, monkeyp
         allowed_executable=executable,
         expected_executable_sha256=expected_sha,
     )
-    assert (stdout, ok, reason) == ("", False, "os_error")
-    assert not sealed_directory.exists()
+    assert (stdout, ok, reason) == ("", False, "executable")
+    assert not attacker_marker.exists()
 
 
 @pytest.mark.parametrize("git_path", [Path("/usr/bin/git"), Path("/opt/homebrew/bin/git")])
@@ -1072,7 +1109,7 @@ def test_darwin_expected_identity_rejects_unapproved_git_path(tmp_path, session_
     assert "expected_identity.tools.git" in reasons
 
 
-def test_real_host_compose_binary_is_fd_launch_compatible_when_available(tmp_path):
+def test_real_host_compose_binary_outside_hash_addressed_root_is_rejected(tmp_path):
     candidates = [
         Path("/Applications/Docker.app/Contents/Resources/cli-plugins/docker-compose"),
         Path("/usr/local/bin/docker-compose"),
@@ -1095,8 +1132,7 @@ def test_real_host_compose_binary_is_fd_launch_compatible_when_available(tmp_pat
         allowed_executable=compose,
         expected_executable_sha256=digest,
     )
-    assert ok, reason
-    assert stdout.strip()
+    assert (stdout, ok, reason) == ("", False, "executable")
 
 
 def test_pinned_signer_fingerprint_is_derived_and_policy_checked(tmp_path, session_dir, monkeypatch):
@@ -1134,7 +1170,10 @@ def test_python_canonical_json_matches_node_unicode_bytes():
         + "Object.fromEntries(Object.keys(x).sort().map(k=>[k,s(x[k])])):x);"
         + "process.stdout.write(JSON.stringify(s(v)));"
     )
-    node = subprocess.run(["node", "-e", script], capture_output=True, check=True)
+    node_path = shutil.which("node")
+    if node_path is None:
+        pytest.skip("node is unavailable")
+    node = subprocess.run([node_path, "-e", script], capture_output=True, check=True)
     assert node.stdout == _canonical_bytes(value)
 
 

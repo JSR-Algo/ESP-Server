@@ -5,6 +5,8 @@ services:
     image: ${TBOT_LESSON_STUDIO_BACKEND_IMAGE:?run docs/docker/course-mode-physical-tft/up.sh}
     extra_hosts:
       - host.docker.internal:host-gateway
+    labels:
+      com.tbot.course-mode.restart-target: backend
     ports: !override
       - "127.0.0.1:3000:3000"
     environment:
@@ -18,6 +20,12 @@ services:
       JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY:?course-mode physical TFT requires a matching local private PEM}
       LESSON_ASSET_ORIGIN_BASE: ${COURSE_MODE_ASSET_ORIGIN_BASE:?export the robot-reachable local asset origin ending in /}
       FLATTENED_CINEMATIC_PUBLIC_BASE_URL: ${COURSE_MODE_ASSET_ORIGIN_BASE:?export the robot-reachable local asset origin ending in /}
+
+  postgres:
+    ports: !override
+      - "127.0.0.1:5432:5432"
+    labels:
+      com.tbot.course-mode.readback-boundary: postgres
 
   course-mode-materialize:
     image: ${TBOT_COURSE_MODE_V5_MATERIALIZER_IMAGE:?run docs/docker/course-mode-physical-tft/up.sh}

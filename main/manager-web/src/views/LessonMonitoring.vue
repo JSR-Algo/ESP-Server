@@ -76,6 +76,13 @@
               <span v-else class="muted">{{ scope.row.lessonId }}</span>
             </template>
           </el-table-column>
+          <el-table-column :label="$t('monitoring.colVersion')" width="95" align="center">
+            <template slot-scope="scope">
+              <span data-testid="monitoring-lesson-version">
+                {{ scope.row.lessonVersion > 0 ? `v${scope.row.lessonVersion}` : '—' }}
+              </span>
+            </template>
+          </el-table-column>
           <el-table-column :label="$t('monitoring.colState')" width="130">
             <template slot-scope="scope">
               <el-tag :type="stateType(scope.row.state)" size="small">{{ scope.row.state }}</el-tag>

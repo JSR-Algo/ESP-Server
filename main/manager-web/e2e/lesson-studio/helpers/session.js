@@ -1,4 +1,7 @@
 const { expect } = require('@playwright/test');
+const { existsSync, readFileSync } = require('node:fs');
+const { get: httpsGet } = require('node:https');
+const { resolve } = require('node:path');
 const { resetLessonStudioE2EState } = require('../../../scripts/reset-lesson-studio-e2e-state.cjs');
 
 const managerUser = process.env.LESSON_STUDIO_E2E_MANAGER_USER || 'lesson_admin_e2e';
@@ -7,7 +10,40 @@ const captcha = process.env.LESSON_STUDIO_E2E_CAPTCHA || 'E2E42';
 const authorEmail = process.env.LESSON_STUDIO_E2E_AUTHOR_EMAIL || 'lesson-author-e2e@local.invalid';
 const authorPassword = process.env.LESSON_STUDIO_E2E_AUTHOR_PASSWORD || 'TbotAuthorE2E!2026';
 
-async function loginAsLessonAuthor(page) {
+async function installTrustedTask4MediaRoute(page) {
+  const tlsRoot = process.env.TASK4_ASSIGNMENT_TLS_ROOT
+    || (process.env.TASK4_ASSIGNMENT_RUNTIME_ROOT
+      ? resolve(process.env.TASK4_ASSIGNMENT_RUNTIME_ROOT, 'tls') : null);
+  const certificate = tlsRoot ? resolve(tlsRoot, 'cert.pem') : null;
+  if (!certificate || !existsSync(certificate)) return;
+  const ca = readFileSync(certificate);
+  await page.route(/^https:\/\/task4-media\.localhost:\d+\/(?:tvideo-demo\/|flattened-cinematic\/)/, async (route) => {
+    const reachable = new URL(route.request().url());
+    reachable.hostname = '127.0.0.1';
+    const response = await new Promise((resolveResponse, reject) => {
+      const request = httpsGet(reachable, {
+        ca,
+        servername: 'task4-media.localhost',
+        headers: route.request().headers(),
+      }, (incoming) => {
+        const chunks = [];
+        incoming.on('data', (chunk) => chunks.push(chunk));
+        incoming.on('end', () => resolveResponse({
+          status: incoming.statusCode,
+          headers: incoming.headers,
+          body: Buffer.concat(chunks),
+        }));
+      });
+      request.on('error', reject);
+    });
+    await route.fulfill(response);
+  });
+}
+
+async function loginAsLessonAuthor(page, credentials = {}) {
+  const selectedAuthorEmail = credentials.authorEmail || authorEmail;
+  const selectedAuthorPassword = credentials.authorPassword || authorPassword;
+  await installTrustedTask4MediaRoute(page);
   resetLessonStudioE2EState();
   await page.goto('/login');
   await expect(page.getByRole('img', { name: 'Verification code' })).toHaveAttribute('src', /^blob:/);
@@ -51,14 +87,16 @@ async function loginAsLessonAuthor(page) {
     await page.evaluate(() => window.dispatchEvent(new CustomEvent('tbot:nest-auth-required')));
   }
   await expect(authorDialog).toBeVisible();
-  await authorDialog.getByText('Email').locator('..').getByRole('textbox').fill(authorEmail);
-  await authorDialog.locator('input[type="password"]').fill(authorPassword);
-  const authorLogin = page.waitForResponse((response) =>
-    response.url().includes('/nestjs/v1/admin/auth/login') && response.request().method() === 'POST');
-  await authorDialog.getByRole('button', { name: /author sign-in/i }).click();
-  expect((await authorLogin).status()).toBe(200);
+  await authorDialog.getByText('Email').locator('..').getByRole('textbox').fill(selectedAuthorEmail);
+  await authorDialog.locator('input[type="password"]').fill(selectedAuthorPassword);
+  const [authorLogin] = await Promise.all([
+    page.waitForResponse((response) =>
+      response.url().includes('/nestjs/v1/admin/auth/login') && response.request().method() === 'POST'),
+    authorDialog.locator('input[type="password"]').press('Enter'),
+  ]);
+  expect(authorLogin.status()).toBe(200);
   await expect(authorDialog).toBeHidden();
   await expect(page.getByRole('heading', { name: 'Courses' })).toBeVisible();
 }
 
-module.exports = { loginAsLessonAuthor, managerUser };
+module.exports = { installTrustedTask4MediaRoute, loginAsLessonAuthor, managerUser };

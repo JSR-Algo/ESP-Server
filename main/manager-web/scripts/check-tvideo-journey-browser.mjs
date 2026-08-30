@@ -1,18 +1,16 @@
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import WebSocket from 'ws';
+import { withCandidateBoundBrowser } from './_lib/candidate-browser-harness.mjs';
 
 const managerRoot = normalize(join(dirname(fileURLToPath(import.meta.url)), '..'));
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
-let temp; let server; let chrome; let socket;
-async function stopChild(child) { if (!child || child.exitCode !== null) return; child.kill('SIGTERM'); await Promise.race([new Promise((resolve) => child.once('exit', resolve)), new Promise((resolve) => setTimeout(resolve, 1500))]); if (child.exitCode === null) child.kill('SIGKILL'); }
-async function waitForFile(path) { for (let index = 0; index < 200; index += 1) { if (existsSync(path)) return readFileSync(path, 'utf8'); await new Promise((resolve) => setTimeout(resolve, 50)); } throw new Error(`timeout: ${path}`); }
+let temp; let server;
 
 try {
   temp = await mkdtemp(join(tmpdir(), 'tbot-tvideo-journey-'));
@@ -21,36 +19,25 @@ try {
   assert.equal(build.status, 0, `mounted journey harness build failed:\n${build.stdout}\n${build.stderr}`);
   server = createServer((request, response) => { const requestPath = request.url.split('?')[0]; const path = normalize(join(buildDir, requestPath === '/' ? 'index.html' : requestPath)); if (!path.startsWith(buildDir)) { response.writeHead(403).end(); return; } let body; try { body = readFileSync(path); } catch { response.writeHead(404).end(); return; } response.writeHead(200, { 'content-type': mime[extname(path)] || 'application/octet-stream' }).end(body); });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  // The path stage asserts the lesson's own H.264 background actually decodes
-  // (readyState >= 2), so Chrome proper must come before Playwright's
-  // chrome-headless-shell — that build ships without proprietary codecs and
-  // neither loads the MP4 nor raises `error`, which reads as a bare timeout.
-  const chromeBin = [process.env.CHROME_BIN, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', join(homedir(), 'Library/Caches/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-mac-arm64/chrome-headless-shell')].filter(Boolean).find(existsSync);
-  assert.ok(chromeBin, 'Chromium is required');
-  chrome = spawn(chromeBin, ['--headless', '--disable-gpu', '--remote-debugging-port=0', `--user-data-dir=${profileDir}`, 'about:blank'], { stdio: 'ignore' });
-  const [debugPort] = (await waitForFile(join(profileDir, 'DevToolsActivePort'))).trim().split('\n');
-  const target = await fetch(`http://127.0.0.1:${debugPort}/json/new?about:blank`, { method: 'PUT' }).then((response) => response.json());
-  socket = new WebSocket(target.webSocketDebuggerUrl); await new Promise((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); });
-  let commandId = 0; const pending = new Map(); const runtimeErrors = []; const vueConsoleErrors = [];
-  socket.on('message', (raw) => {
-    const message = JSON.parse(raw);
+  const runtimeErrors = []; const vueConsoleErrors = [];
+  await withCandidateBoundBrowser({
+    profileDir,
+    label: 'TVideo journey browser',
+    onMessage: (message) => {
     if (message.method === 'Runtime.exceptionThrown') runtimeErrors.push(message.params.exceptionDetails.exception?.description || message.params.exceptionDetails.text);
     if (message.method === 'Runtime.consoleAPICalled' && ['error', 'warning'].includes(message.params.type)) {
       const text = message.params.args.map((arg) => arg.value || arg.description || '').join(' ');
       if (/\bVue\b|\[Vue warn\]|Error in/.test(text)) vueConsoleErrors.push(text);
     }
-    if (message.id && pending.has(message.id)) { const callbacks = pending.get(message.id); pending.delete(message.id); message.error ? callbacks.reject(new Error(message.error.message)) : callbacks.resolve(message.result); }
-  });
-  const cdp = (method, params = {}) => new Promise((resolve, reject) => { const id = ++commandId; pending.set(id, { resolve, reject }); socket.send(JSON.stringify({ id, method, params })); });
-  const evaluate = async (expression) => { const result = await cdp('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }); if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text); return result.result.value; };
+    },
+  }, async ({ cdp, evaluate, waitForReadiness, browserExecutablePath }) => {
   await cdp('Page.enable'); await cdp('Runtime.enable'); await cdp('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/` });
   // Report the missing codec directly instead of surfacing it as a media timeout.
   assert.ok(
     await evaluate("Boolean(document.createElement('video').canPlayType('video/mp4; codecs=\"avc1.42E01E\"'))"),
-    `${chromeBin} cannot decode the H.264 path background this gate asserts loads. Set CHROME_BIN to a Chrome build with proprietary codecs.`,
+    `${browserExecutablePath} cannot decode the H.264 path background this candidate-bound gate asserts loads.`,
   );
-  for (let index = 0; index < 100 && !(await evaluate('Boolean(window.__LESSON_BUILDER_READY__)')); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.equal(await evaluate('Boolean(window.__LESSON_BUILDER_READY__)'), true, `LessonEditor fixture did not mount: ${runtimeErrors.join('; ')}`);
+  await waitForReadiness('Boolean(window.__LESSON_BUILDER_READY__)', 'TVideo journey fixture readiness', 'document.body.innerText');
 
   const result = await evaluate(`(async()=>{
     const t=window.__LESSON_BUILDER_TEST__,e=t.editor,tick=()=>new Promise(r=>setTimeout(r,0)),wait=async(test)=>{for(let i=0;i<80&&!test();i+=1)await new Promise(r=>setTimeout(r,25));if(!test())throw new Error('journey fixture timeout')};
@@ -149,6 +136,7 @@ try {
   assert.deepEqual(runtimeErrors, [], `mounted journey runtime errors: ${runtimeErrors.join('; ')}`);
   assert.deepEqual(vueConsoleErrors, [], `mounted journey Vue console errors: ${vueConsoleErrors.join('; ')}`);
   console.log('mounted TVideo Journey tabs, media, editing, simulation, clock, save, gate, accessibility, and legacy isolation PASS (11 groups)');
+  });
 } finally {
-  if (socket) socket.close(); await stopChild(chrome); if (server) await new Promise((resolve) => server.close(resolve)); if (temp) await rm(temp, { recursive: true, force: true });
+  if (server) await new Promise((resolve) => server.close(resolve)); if (temp) await rm(temp, { recursive: true, force: true });
 }

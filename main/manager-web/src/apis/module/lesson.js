@@ -557,11 +557,11 @@ export default {
     });
   },
 
-  saveCourseModeContract(lessonId, contract, onSuccess, onError) {
+  saveCourseModeContract(lessonId, contract, expectedChecksum, onSuccess, onError) {
     nestRequest({
       url: `${getNestUrl()}/lessons/${lessonId}/course-mode`,
       method: 'PUT',
-      data: { contract },
+      data: { expectedChecksum, contract },
       onSuccess,
       onError,
     });

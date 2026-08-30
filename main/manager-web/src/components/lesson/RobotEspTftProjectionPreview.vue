@@ -547,6 +547,6 @@ export default {
 @keyframes entranceFade { 0% { opacity: 0; } 100% { opacity: 1; } }
 @media (max-width: 1100px) { .cinematic-comparison--enabled { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 720px) { .contract-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-@media (max-width: 560px) { .contract-head { flex-direction:column; }.contract-grid { grid-template-columns:1fr; }.stage-shell { padding: 8px; }.stage { transform-origin: top left; } .preview-toolbar label { width: 100%; margin-left: 0; } }
+@media (max-width: 560px) { .contract-head { flex-direction:column; }.contract-grid { grid-template-columns:1fr; }.stage-shell { height: 240px; padding: 8px; }.stage { margin: 0; transform: scale(.7); transform-origin: top left; } .preview-toolbar label { width: 100%; margin-left: 0; } }
 @media (prefers-reduced-motion: reduce) { .layer-robotOverlay { animation: none; } }
 </style>
