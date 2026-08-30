@@ -113,7 +113,7 @@ Object.assign(Api.lesson, {
   getRolloutCapabilities(ok) { ok({ sharedVisualAuthoring: true, exactEspTftPreview: true }); },
   getLesson(id, ok) { ok({ lessonId: id, lessonKey: 'farm-1', title: 'Farm friends', status: 'draft', lessonVersion: 1, locale: 'vi', manifestVersion: courseModeEnabled ? 'teebot-lesson-renderer.v5' : (lessonManifestVersions[id] || 'teebot-lesson-renderer.v2'), courseModeContract: courseModeEnabled ? courseModeContract : null }); },
   getCourseModeContract(id, ok, fail) { calls.courseModeLoads.push(id); if (calls.deferNextCourseModeLoad) { calls.deferNextCourseModeLoad = false; calls.pendingCourseModeLoads.push({ id, ok, fail }); return; } if (courseModeEnabled && !courseModeLoadFails) ok({ lessonId: id, checksum: courseModeContract.contractChecksum, contract: courseModeContract }); else fail(courseModeEnabled ? 'course mode unavailable' : 'not found', { status: courseModeEnabled ? 503 : 404 }); },
-  saveCourseModeContract(id, contract, ok, fail) { calls.courseModeSaves.push({ id, contract }); if (calls.deferNextCourseModeSave) { calls.deferNextCourseModeSave = false; calls.pendingCourseModeSaves.push({ id, contract, ok, fail }); return; } ok({ lessonId: id, checksum: contract.contractChecksum, contract }); },
+  saveCourseModeContract(id, contract, expectedChecksum, ok, fail) { calls.courseModeSaves.push({ id, contract, expectedChecksum }); if (calls.deferNextCourseModeSave) { calls.deferNextCourseModeSave = false; calls.pendingCourseModeSaves.push({ id, contract, expectedChecksum, ok, fail }); return; } ok({ lessonId: id, checksum: contract.contractChecksum, contract }); },
   getTVideoJourneyPreset(ok) { ok(journeyPreset); },
   getTVideoJourney(id, ok, fail) {
     calls.journeyLoads.push(id);

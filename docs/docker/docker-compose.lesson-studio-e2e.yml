@@ -51,7 +51,7 @@ services:
     networks: [lesson-studio-e2e]
 
   backend:
-    image: ${TBOT_LESSON_STUDIO_BACKEND_IMAGE:-local/tbot-backend:lesson-studio-e2e}
+    image: ${TBOT_LESSON_STUDIO_BACKEND_IMAGE:?set the candidate backend image}
     container_name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${COMPOSE_PROJECT_NAME:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-backend
     depends_on:
       postgres:
@@ -73,6 +73,7 @@ services:
       TBOT_ESP_SERVER_URL: ${TBOT_ESP_SERVER_URL:-}
       LESSON_SHARED_VISUAL_AUTHORING_ENABLED: "true"
       LESSON_EXACT_ESPTFT_PREVIEW_ENABLED: "true"
+      COURSE_MODE_V2_PUBLISH_ENABLED: "true"
       LESSON_ROLLOUT_ADMIN_ID_ALLOWLIST: 11111111-1111-4111-8111-111111111111
       LESSON_ROLLOUT_DEVICE_ALLOWLIST: e2e-robot-1
       LESSON_STUDIO_NEW_ASSIGNMENTS_ENABLED: "false"
@@ -114,7 +115,7 @@ services:
     networks: [lesson-studio-e2e]
 
   web:
-    image: ${TBOT_LESSON_STUDIO_WEB_IMAGE:-local/tbot-server-web:lesson-studio-e2e}
+    image: ${TBOT_LESSON_STUDIO_WEB_IMAGE:?set the candidate web image}
     container_name: ${LESSON_STUDIO_E2E_RESOURCE_PREFIX:-${COMPOSE_PROJECT_NAME:-${LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME:-tbot-ls-e2e}}}-web
     depends_on:
       backend:
@@ -141,9 +142,9 @@ services:
     ports:
       - "${LESSON_STUDIO_E2E_WEB_HOST_PORT:-8102}:8002"
     volumes:
-      - ${TBOT_BACKEND_WORKTREE:-../../../../tbot-backend}/src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json:/usr/share/nginx/html/tvideo-demo/asset-manifest.json:ro
-      - ${TBOT_BACKEND_WORKTREE:-../../../../tbot-backend}/src/lessons/fixtures/tvideo-raw-code/assets/admin:/usr/share/nginx/html/tvideo-demo/admin:ro
-      - ${TBOT_BACKEND_WORKTREE:-../../../../tbot-backend}/src/lessons/fixtures/tvideo-raw-code/assets/esp-tft:/usr/share/nginx/html/tvideo-demo/esp-tft:ro
+      - ${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}/src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json:/usr/share/nginx/html/tvideo-demo/asset-manifest.json:ro
+      - ${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}/src/lessons/fixtures/tvideo-raw-code/assets/admin:/usr/share/nginx/html/tvideo-demo/admin:ro
+      - ${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}/src/lessons/fixtures/tvideo-raw-code/assets/esp-tft:/usr/share/nginx/html/tvideo-demo/esp-tft:ro
       - ${TBOT_FIRMWARE_WORKTREE:-../../../TBOT-Firmware}/lesson/assets:/usr/share/nginx/html/tvideo-demo/assets:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null 'http://127.0.0.1:8002/login'"]
@@ -164,7 +165,7 @@ services:
     command:
       - sh
       - -c
-      - mysql -h mysql -u root tbot_esp32_server -e 'source /seed/seed-mysql.sql' && touch /tmp/seed-complete && exec sleep infinity
+      - until mysql -h mysql -u root tbot_esp32_server -e 'SELECT 1 FROM sys_user LIMIT 1' >/dev/null 2>&1; do sleep 2; done; mysql -h mysql -u root tbot_esp32_server -e 'source /seed/seed-mysql.sql' && touch /tmp/seed-complete && exec sleep infinity
     volumes:
       - ./lesson-studio-e2e/seed-mysql.sql:/seed/seed-mysql.sql:ro
     healthcheck:

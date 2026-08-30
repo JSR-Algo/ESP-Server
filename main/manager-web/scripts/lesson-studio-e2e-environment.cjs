@@ -19,6 +19,7 @@ function lessonStudioWebOrigin(env = process.env) {
   const safe = (url.protocol === 'http:' || url.protocol === 'https:')
     && !url.username
     && !url.password
+    && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
     && url.pathname === '/'
     && !url.search
     && !url.hash;

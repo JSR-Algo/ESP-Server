@@ -381,6 +381,23 @@ function extractGuardPredicate(sourceText, name) {
 }
 
 const monitoringSource = source('src/views/LessonMonitoring.vue');
+const monitoringLessonColumn = monitoringSource.indexOf('prop="lessonTitle"');
+const monitoringLessonColumnEnd = monitoringSource.indexOf('</el-table-column>', monitoringLessonColumn)
+  + '</el-table-column>'.length;
+const monitoringVersionColumn = monitoringSource.indexOf(
+  '<el-table-column :label="$t(\'monitoring.colVersion\')"',
+);
+if (monitoringLessonColumn < 0 || monitoringLessonColumnEnd < '</el-table-column>'.length
+    || monitoringVersionColumn < 0
+    || monitoringSource.slice(monitoringLessonColumnEnd, monitoringVersionColumn).trim() !== '') {
+  throw new Error('monitoring Version column must remain immediately after Lesson');
+}
+expectContains('src/i18n/en.js', "'monitoring.colVersion': 'Version'", 'English monitoring Version label required');
+expectContains('src/i18n/vi.js', "'monitoring.colVersion': 'Phiên bản'", 'Vietnamese monitoring Version label required');
+if (!monitoringSource.includes('data-testid="monitoring-lesson-version"')
+    || !monitoringSource.includes("scope.row.lessonVersion > 0 ? `v${scope.row.lessonVersion}` : '—'")) {
+  throw new Error('monitoring rows must expose the exact lesson version with a stable browser selector');
+}
 const monitoringApi = {};
 const monitoringMethods = vm.runInNewContext(`(() => ({
   isListRequestCurrent: ${extractGuardPredicate(monitoringSource, 'isListRequestCurrent')},

@@ -19,7 +19,7 @@
 </template>
 
 <script>
-import { shouldResyncVideo } from './flattened-cinematic-preview';
+import { applyChromaKey, shouldResyncVideo } from './flattened-cinematic-preview';
 
 export default {
   name: 'CinematicVideoLayer',
@@ -198,20 +198,7 @@ export default {
         if (!context) return false;
         context.drawImage(video, 0, 0, width, height);
         const frame = context.getImageData(0, 0, width, height);
-        const color = this.chromaKey.color;
-        const tolerance = Math.max(0, Number(this.chromaKey.tolerance) || 0);
-        const feather = Math.max(1, Number(this.chromaKey.feather) || 1);
-        for (let offset = 0; offset < frame.data.length; offset += 4) {
-          const distance = Math.max(
-            Math.abs(frame.data[offset] - color.r),
-            Math.abs(frame.data[offset + 1] - color.g),
-            Math.abs(frame.data[offset + 2] - color.b)
-          );
-          if (distance <= tolerance) frame.data[offset + 3] = 0;
-          else if (distance < tolerance + feather) {
-            frame.data[offset + 3] = Math.round(255 * (distance - tolerance) / feather);
-          }
-        }
+        applyChromaKey(frame.data, this.chromaKey);
         context.putImageData(frame, 0, 0);
         return true;
       } catch (error) {

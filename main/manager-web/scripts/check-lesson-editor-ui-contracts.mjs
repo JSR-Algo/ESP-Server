@@ -202,6 +202,9 @@ expectContains(
 expectContains('src/views/LessonEditor.vue', 'lessonVisualPair()', 'visual selection must derive one pair independent of selected step');
 expectContains('src/views/LessonEditor.vue', 'applyLessonVisualSelection(patch)', 'both visual selectors need one save path');
 expectContains('src/views/LessonEditor.vue', 'Api.lesson.applyLessonVisuals(', 'visual selection must use the lesson-level API');
+expectNotContains('src/views/LessonEditor.vue', 'lessonVisualSelectionDisabled() {\n      return this.isCourseModeAuthority', 'Course Mode must keep lesson-level cinematic visual selection enabled');
+expectContains('src/views/LessonEditor.vue', '&& (this.hasLoadedCourseModeAuthority || this.courseModeContract)', 'renderer-v5 visual triple detection must not depend on a preview that requires the triple');
+expectContains('src/apis/module/lesson.js', 'data: { expectedChecksum, contract }', 'Course Mode saves must carry the optimistic concurrency checksum');
 expectNotContains('src/views/LessonEditor.vue', '<SharedAssetPicker', 'the primary editor must not expose a second per-step object selector');
 const lessonEditorSource = read('src/views/LessonEditor.vue');
 expectContains(
@@ -603,26 +606,75 @@ const proofContext = {
   lessonId: 'lesson-1',
   lessonCapabilities: { exactEspTftPreview: true },
   proofVersion: 0,
+  previewRecoveryProofVersion: -1,
   previewRequestId: 0,
   previewing: false,
   preview: null,
   previewManifest: null,
   simulationEvidence: null,
   invalidatePreview,
+  autoPreviewIfReady() { this.autoPreviewRetries = (this.autoPreviewRetries || 0) + 1; },
   hasUnsafeProofState: () => false,
   $message: { error() {} },
 };
 doPreview.call(proofContext);
 const stalePreviewSuccess = previewRequest[2];
-invalidatePreview.call(proofContext);
+proofContext.proofVersion += 1;
 stalePreviewSuccess({
   checksum: 'stale-checksum',
   etag: 'stale-etag',
   preview: { profile: 'espTft', width: 480, height: 320 },
   manifest: { steps: [] },
 });
+if (proofContext.previewing) {
+  throw new Error('a stale preview response for the current request must clear the loading state');
+}
 if (proofContext.preview || proofContext.previewManifest || proofContext.simulationEvidence) {
   throw new Error('a preview response started before a mutation must not repopulate proof');
+}
+if (proofContext.autoPreviewRetries !== 1) {
+  throw new Error('a stale preview response must schedule a fresh preview when authoring state is ready');
+}
+const retryCount = proofContext.autoPreviewRetries;
+stalePreviewSuccess({
+  checksum: 'older-checksum', etag: 'older-etag',
+  preview: { profile: 'espTft', width: 480, height: 320 }, manifest: { steps: [] },
+});
+if (proofContext.autoPreviewRetries !== retryCount) {
+  throw new Error('stale proof recovery must not loop more than once per proof version');
+}
+proofContext.previewRequestId += 1;
+stalePreviewSuccess({
+  checksum: 'superseded-checksum', etag: 'superseded-etag',
+  preview: { profile: 'espTft', width: 480, height: 320 }, manifest: { steps: [] },
+});
+if (proofContext.autoPreviewRetries !== retryCount) {
+  throw new Error('a superseded preview request must not schedule another preview');
+}
+
+const autoPreviewIfReady = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'autoPreviewIfReady')})`);
+let autoPreviewCalls = 0;
+const autoPreviewContext = {
+  cinematicDemoUrl: '/tvideo-demo/demo.html',
+  lessonCapabilities: { exactEspTftPreview: true },
+  steps: [],
+  assetProofFingerprint: null,
+  previewManifest: null,
+  previewing: false,
+  $nextTick(callback) { callback(); },
+  doPreview() { autoPreviewCalls += 1; this.previewing = true; },
+};
+autoPreviewIfReady.call(autoPreviewContext);
+autoPreviewContext.steps = [{ stepKey: 's1' }];
+autoPreviewIfReady.call(autoPreviewContext);
+if (autoPreviewCalls !== 0) throw new Error('auto-preview must wait for the first asset snapshot');
+autoPreviewContext.assetProofFingerprint = 'assets-ready';
+autoPreviewIfReady.call(autoPreviewContext);
+if (autoPreviewCalls !== 1) throw new Error('auto-preview must run once steps and assets are both ready');
+for (const methodName of ['fetchSteps', 'onAssetsLoaded']) {
+  if (!extractObjectMethod(editorSource, methodName).includes('autoPreviewIfReady')) {
+    throw new Error(`${methodName} must re-evaluate auto-preview readiness`);
+  }
 }
 
 const hasUnsafeProofState = vm.runInNewContext(`(${extractObjectMethod(editorSource, 'hasUnsafeProofState')})`);

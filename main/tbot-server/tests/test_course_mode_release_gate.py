@@ -16,9 +16,41 @@ import pytest
 gate = importlib.import_module("scripts.course_mode_release_gate")
 
 
+_PLAYWRIGHT_SOURCE_PATHS = [
+    "docs/docker/docker-compose.lesson-studio-e2e.yml",
+    "docs/docker/lesson-studio-e2e/seed-postgres.sql",
+    "main/manager-web/e2e/lesson-studio/course-mode-authoring.spec.js-snapshots/course-mode-step-1-course-mode-webkit-desktop-darwin.png",
+    "main/manager-web/e2e/lesson-studio/course-mode-authoring.spec.js-snapshots/course-mode-step-1-course-mode-webkit-mobile-darwin.png",
+    "main/manager-web/e2e/lesson-studio/course-mode-authoring.spec.js-snapshots/course-mode-step-2-course-mode-webkit-desktop-darwin.png",
+    "main/manager-web/e2e/lesson-studio/course-mode-authoring.spec.js-snapshots/course-mode-step-2-course-mode-webkit-mobile-darwin.png",
+    "main/manager-web/playwright.lesson-studio.config.js",
+    "main/manager-web/scripts/check-canonical-demo-ui.mjs",
+    "main/manager-web/scripts/check-flattened-cinematic-preview.mjs",
+    "main/manager-web/scripts/check-lesson-assignment-ui-contracts.mjs",
+    "main/manager-web/scripts/check-lesson-builder-logic.cjs",
+    "main/manager-web/scripts/check-lesson-editor-ui-contracts.mjs",
+    "main/manager-web/scripts/check-lesson-visual-selection.cjs",
+    "main/manager-web/scripts/check-robot-lesson-preview.mjs",
+    "main/manager-web/scripts/lesson-studio-e2e-environment.test.cjs",
+    "main/manager-web/scripts/page-errors-helper.test.cjs",
+    "main/manager-web/src/apis/module/lesson.js",
+    "main/manager-web/src/components/lesson/CinematicVideoLayer.vue",
+    "main/manager-web/src/components/lesson/RobotEspTftProjectionPreview.vue",
+    "main/manager-web/src/components/lesson/flattened-cinematic-preview.js",
+    "main/manager-web/src/components/lesson/robot-preview-projection.js",
+    "main/manager-web/src/i18n/en.js",
+    "main/manager-web/src/i18n/vi.js",
+    "main/manager-web/src/views/LessonEditor.vue",
+    "main/manager-web/src/views/LessonMonitoring.vue",
+    "main/manager-web/src/views/login.vue",
+    "main/manager-web/tests/browser/lesson-builder-main.js",
+]
+
+
 def _valid_playwright_contract() -> dict:
     return {
         "version": 1,
+        "sourcePaths": list(_PLAYWRIGHT_SOURCE_PATHS),
         "specs": ["e2e/lesson-studio/course-mode-authoring.spec.js"],
         "testMatch": ["course-mode-authoring.spec.js"],
         "projects": [
@@ -27,6 +59,23 @@ def _valid_playwright_contract() -> dict:
             {"name": "course-mode-chromium-mobile", "device": "Pixel 7", "viewport": {"width": 390, "height": 844}},
             {"name": "course-mode-webkit-mobile", "device": "iPhone 13", "viewport": {"width": 390, "height": 844}},
         ],
+        "assignmentPhases": {
+            "fixtureCommand": "node --test scripts/task4-assignment-fixture.test.cjs",
+            "newCommand": "node scripts/run-task4-assignment-phase.cjs new",
+            "rollbackCommand": "node scripts/run-task4-assignment-phase.cjs rollback",
+            "sourcePaths": [
+                "docs/docker/task4-admin-assignment/bootstrap.cjs",
+                "docs/docker/task4-admin-assignment/docker-compose.new.yml",
+                "docs/docker/task4-admin-assignment/docker-compose.rollback.yml",
+                "docs/docker/task4-admin-assignment/serve-media.cjs",
+                "main/manager-web/e2e/lesson-studio/assignment-rollback-phase.spec.js",
+                "main/manager-web/playwright.assignment-rollback.config.js",
+                "main/manager-web/scripts/prepare-task4-media-templates.cjs",
+                "main/manager-web/scripts/run-task4-assignment-phase.cjs",
+                "main/manager-web/scripts/task4-assignment-fixture.test.cjs",
+                "main/manager-web/scripts/task4-image-identity.cjs",
+            ],
+        },
         "fixed": {
             "testDir": "./e2e/lesson-studio",
             "globalSetup": "./e2e/lesson-studio/global-setup.cjs",
@@ -63,14 +112,66 @@ def _commit_playwright_fixture(
     root: Path, *, contract: dict | None = None, contract_raw: str | None = None,
     config: str | None = None,
     script: str = "playwright test --config=playwright.config.js",
+    assignment_script_mutator=None,
 ) -> tuple[Path, str]:
     web = root / "main/manager-web"
     spec = web / "e2e/lesson-studio/course-mode-authoring.spec.js"
     spec.parent.mkdir(parents=True)
     spec.write_text("test('course mode', async () => {});\n", encoding="utf-8")
-    (web / "package.json").write_text(
-        json.dumps({"scripts": {"test:e2e:course-mode": script}}), encoding="utf-8",
+    (spec.parent / "global-setup.cjs").write_text(
+        "require('../../scripts/reset-lesson-studio-e2e-state.cjs');\n", encoding="utf-8",
     )
+    helpers = spec.parent / "helpers"
+    helpers.mkdir()
+    (helpers / "session.js").write_text(
+        "require('../../../scripts/reset-lesson-studio-e2e-state.cjs');\n"
+        "const command = \"require('./runtime-only-module')\";\n",
+        encoding="utf-8",
+    )
+    spec.write_text(
+        "require('./helpers/session');\ntest('course mode', async () => {});\n",
+        encoding="utf-8",
+    )
+    scripts = web / "scripts"
+    scripts.mkdir()
+    (scripts / "reset-lesson-studio-e2e-state.cjs").write_text(
+        "require('./lesson-studio-e2e-environment.cjs');\n", encoding="utf-8",
+    )
+    (scripts / "lesson-studio-e2e-environment.cjs").write_text(
+        "module.exports = {};\n", encoding="utf-8",
+    )
+    package_scripts = {
+        "test:e2e:course-mode": script,
+        "test:course-mode:assignment-fixture": "node --test scripts/task4-assignment-fixture.test.cjs",
+        "test:e2e:course-mode:assignment:new": "node scripts/run-task4-assignment-phase.cjs new",
+        "test:e2e:course-mode:assignment:rollback": "node scripts/run-task4-assignment-phase.cjs rollback",
+    }
+    if assignment_script_mutator is not None:
+        assignment_script_mutator(package_scripts)
+    (web / "package.json").write_text(
+        json.dumps({"scripts": package_scripts}), encoding="utf-8",
+    )
+    assignment_files = {
+        "docs/docker/task4-admin-assignment/bootstrap.cjs": "module.exports = {};\n",
+        "docs/docker/task4-admin-assignment/docker-compose.new.yml": "services: {}\n",
+        "docs/docker/task4-admin-assignment/docker-compose.rollback.yml": "services: {}\n",
+        "docs/docker/task4-admin-assignment/serve-media.cjs": "module.exports = {};\n",
+        "main/manager-web/e2e/lesson-studio/assignment-rollback-phase.spec.js": "test('assignment phase', async () => {});\n",
+        "main/manager-web/playwright.assignment-rollback.config.js": "module.exports = require('./playwright.config');\n",
+        "main/manager-web/scripts/prepare-task4-media-templates.cjs": "module.exports = {};\n",
+        "main/manager-web/scripts/run-task4-assignment-phase.cjs": "module.exports = {};\n",
+        "main/manager-web/scripts/task4-assignment-fixture.test.cjs": "require('node:test')('fixture', () => {});\n",
+        "main/manager-web/scripts/task4-image-identity.cjs": "module.exports = {};\n",
+    }
+    for relative, source in assignment_files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+    for relative in _PLAYWRIGHT_SOURCE_PATHS:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_bytes(b"source contract fixture\n")
     selected_contract = contract if contract is not None else _valid_playwright_contract()
     (web / "course-mode.playwright.contract.json").write_text(
         contract_raw if contract_raw is not None else json.dumps(selected_contract, sort_keys=True),
@@ -169,6 +270,15 @@ def candidate_file(tmp_path: Path) -> Path:
             curriculum = root / "src/lessons/course-mode/curriculum-course-mode.ts"
             curriculum.parent.mkdir(parents=True)
             curriculum.write_text("export const curriculum = 26;\n", encoding="utf-8")
+            for relative in gate.TASK4_BACKEND_MOUNT_INPUTS:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(relative.encode("utf-8"))
+        if name == "firmware":
+            for relative in gate.TASK4_FIRMWARE_MOUNT_INPUTS:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(relative.encode("utf-8"))
         if name == "adminEsp":
             python_gate = root / "main/tbot-server/scripts/course_mode_release_gate.py"
             manifest_helper = root / "main/tbot-server/scripts/course_mode_candidate_manifest.py"
@@ -197,7 +307,16 @@ def candidate_file(tmp_path: Path) -> Path:
             "courseKey": "english-6month-4-6",
         },
         "repositories": repositories,
-        "images": {},
+        "images": {
+            "lessonStudioBackend": {
+                "reference": "local/backend:candidate",
+                "id": "sha256:" + "1" * 64,
+            },
+            "lessonStudioWeb": {
+                "reference": "local/web:candidate",
+                "id": "sha256:" + "2" * 64,
+            },
+        },
         "firmware": {},
         "database": {},
         "curriculum": {
@@ -675,12 +794,16 @@ def test_full_lane_inventory_is_exhaustive_and_uses_candidate_roots() -> None:
         "admin-course-mode-playwright-webkit-desktop",
         "admin-course-mode-playwright-chromium-mobile",
         "admin-course-mode-playwright-webkit-mobile",
+        "admin-course-mode-assignment-fixture",
+        "admin-course-mode-assignment-new",
+        "admin-course-mode-assignment-rollback",
         "esp-course-mode-full", "firmware-renderer",
         "firmware-handler", "firmware-backward-compatibility", "cross-contract-parity",
     ]
     for marker in (
         "verify-course-mode-curriculum", "run_host_native_lesson_cinematic_renderer_test.sh",
-        "test:e2e:course-mode", gate.COURSE_MODE_SOFTWARE_TESTS,
+        "test:e2e:course-mode", "test:e2e:course-mode:assignment:new",
+        "test:e2e:course-mode:assignment:rollback", gate.COURSE_MODE_SOFTWARE_TESTS,
     ):
         assert marker in commands
     assert all(not Path(lane.relative_cwd).is_absolute() for lane in gate.lanes_for_mode("full"))
@@ -1214,6 +1337,86 @@ def test_full_esp_lane_maps_task06_roots_and_rejects_skips(candidate_file: Path)
     assert lane.reject_pytest_skips is True
 
 
+def test_assignment_lane_identity_is_derived_only_from_candidate(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(
+        item for item in gate.lanes_for_mode("full")
+        if item.name == "admin-course-mode-assignment-new"
+    )
+    hostile = {
+        "TBOT_BACKEND_WORKTREE": "/attacker/backend",
+        "TBOT_FIRMWARE_WORKTREE": "/attacker/firmware",
+        "TBOT_LESSON_STUDIO_BACKEND_IMAGE": "attacker/backend:latest",
+        "TBOT_LESSON_STUDIO_WEB_IMAGE": "attacker/web:latest",
+        "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME": "tbot-task4-unit",
+        "LESSON_STUDIO_E2E_RESOURCE_PREFIX": "tbot-task4-unit",
+        "TASK4_ASSIGNMENT_RUNTIME_ROOT": str(Path(candidate["repositories"]["adminEsp"]["path"]) / "main/manager-web/output/task4"),
+        "JWT_PUBLIC_KEY": "test-public-key",
+        "TBOT_DEVICE_MINT_SECRET": "test-mint-secret",
+        "LESSON_ASSET_ORIGIN_BASE": "https://task4-media.localhost:18443/tvideo-demo",
+        "ROBOT_ESP_BASE_URL": "http://127.0.0.1:18013",
+    }
+
+    environment = gate._child_environment(candidate, hostile, lane)
+
+    assert environment["TBOT_BACKEND_WORKTREE"] == candidate["repositories"]["backend"]["path"]
+    assert environment["TBOT_FIRMWARE_WORKTREE"] == candidate["repositories"]["firmware"]["path"]
+    assert environment["TBOT_LESSON_STUDIO_BACKEND_IMAGE"] == "local/backend:candidate"
+    assert environment["TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID"] == "sha256:" + "1" * 64
+    assert environment["TBOT_LESSON_STUDIO_WEB_IMAGE"] == "local/web:candidate"
+    assert environment["TBOT_LESSON_STUDIO_WEB_IMAGE_ID"] == "sha256:" + "2" * 64
+    assert environment["LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME"] == "tbot-task4-unit"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda images: images.pop("lessonStudioWeb"),
+        lambda images: images["lessonStudioBackend"].pop("id"),
+        lambda images: images["lessonStudioWeb"].update({"id": "sha256:mutable"}),
+        lambda images: images["lessonStudioBackend"].update({"reference": ""}),
+    ],
+)
+def test_assignment_lane_blocks_malformed_candidate_image_identity(
+    candidate_file: Path, mutation,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    mutation(candidate["images"])
+    lane = next(
+        item for item in gate.lanes_for_mode("full")
+        if item.name == "admin-course-mode-assignment-new"
+    )
+
+    assert gate._assignment_candidate_environment(candidate, lane) is None
+
+
+def test_assignment_mount_inputs_are_bound_to_backend_and_firmware_commits(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+
+    assert gate.assignment_input_sources_ready(candidate) is True
+
+    backend = Path(candidate["repositories"]["backend"]["path"])
+    (backend / gate.TASK4_BACKEND_MOUNT_INPUTS[0]).write_bytes(b"retag-race-input")
+    assert gate.assignment_input_sources_ready(candidate) is False
+
+
+@pytest.mark.parametrize("repository,relative", [
+    ("backend", "src/lessons/fixtures/tvideo-raw-code/assets/admin"),
+    ("backend", "src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json"),
+    ("firmware", "lesson/assets"),
+    ("firmware", "lesson/assets/robot/poses/bright-teach.png"),
+])
+def test_assignment_mount_inputs_reject_overlapping_dirty_exceptions(
+    candidate_file: Path, repository: str, relative: str,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    candidate["repositories"][repository]["dirtyExceptions"] = [{
+        "path": relative, "sha256": "1" * 64,
+    }]
+
+    assert gate.assignment_input_sources_ready(candidate) is False
+
+
 @pytest.mark.parametrize("skipped,expected", [(0, False), (1, True), (7, True)])
 def test_pytest_junit_skip_detection_is_deterministic(tmp_path: Path, skipped: int, expected: bool) -> None:
     report = tmp_path / "pytest.xml"
@@ -1266,12 +1469,36 @@ def test_playwright_full_has_named_desktop_and_mobile_chromium_and_webkit_lanes(
     assert all(lane.required_source_contract == "course-mode-playwright" for lane in lanes)
 
 
-def test_current_playwright_config_fails_closed_until_named_projects_are_committed() -> None:
+def test_playwright_full_adds_explicit_new_and_rollback_assignment_lanes() -> None:
+    lanes = {lane.name: lane for lane in gate.lanes_for_mode("full")}
+
+    assert lanes["admin-course-mode-assignment-fixture"].command == (
+        "npm", "run", "test:course-mode:assignment-fixture",
+    )
+    assert lanes["admin-course-mode-assignment-new"].command == (
+        "npm", "run", "test:e2e:course-mode:assignment:new",
+    )
+    assert lanes["admin-course-mode-assignment-rollback"].command == (
+        "npm", "run", "test:e2e:course-mode:assignment:rollback",
+    )
+    assert lanes["admin-course-mode-assignment-new"].required_environment == gate.TASK4_ASSIGNMENT_CANDIDATE_ENV
+    assert lanes["admin-course-mode-assignment-rollback"].required_environment == gate.TASK4_ASSIGNMENT_CANDIDATE_ENV
+    assert all(
+        lanes[name].required_source_contract == "course-mode-playwright"
+        for name in (
+            "admin-course-mode-assignment-fixture",
+            "admin-course-mode-assignment-new",
+            "admin-course-mode-assignment-rollback",
+        )
+    )
+
+
+def test_current_playwright_source_contract_is_complete_and_committed() -> None:
     admin_root = Path(__file__).resolve().parents[3]
 
     assert gate.source_contract_ready(
         admin_root, "course-mode-playwright", _git(admin_root, "rev-parse", "HEAD"),
-    ) is False
+    ) is True
 
 
 def test_playwright_contract_requires_named_projects_and_matching_devices(tmp_path: Path) -> None:
@@ -1324,6 +1551,8 @@ def test_playwright_contract_rejects_any_noncanonical_config_bytes(
         lambda contract: contract["projects"][2]["viewport"].update({"width": 391}),
         lambda contract: contract.update({"testMatch": ["rewards.spec.js"]}),
         lambda contract: contract.update({"specs": ["e2e/lesson-studio/missing.spec.js"]}),
+        lambda contract: contract["assignmentPhases"].update({"newCommand": "playwright test"}),
+        lambda contract: contract["assignmentPhases"]["sourcePaths"].pop(),
         lambda contract: contract["fixed"].update({"workers": 2}),
     ],
 )
@@ -1333,6 +1562,48 @@ def test_playwright_contract_rejects_schema_or_inventory_variation(
     contract = _valid_playwright_contract()
     mutator(contract)
     _, sha = _commit_playwright_fixture(tmp_path, contract=contract, config="module.exports = {};\n")
+
+    assert gate.source_contract_ready(tmp_path, "course-mode-playwright", sha) is False
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda paths: paths.reverse(),
+        lambda paths: paths.append(paths[0]),
+        lambda paths: paths.__setitem__(0, "../outside.yml"),
+        lambda paths: paths.__setitem__(0, "/absolute.yml"),
+        lambda paths: paths.__setitem__(0, ""),
+    ],
+)
+def test_playwright_contract_rejects_nondeterministic_or_unsafe_source_paths(mutator) -> None:
+    contract = _valid_playwright_contract()
+    mutator(contract["sourcePaths"])
+
+    assert gate.validate_playwright_contract(contract) is False
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "docs/docker/docker-compose.lesson-studio-e2e.yml",
+        "docs/docker/lesson-studio-e2e/seed-postgres.sql",
+        "main/manager-web/scripts/check-lesson-editor-ui-contracts.mjs",
+        "main/manager-web/src/components/lesson/CinematicVideoLayer.vue",
+        "main/manager-web/src/i18n/vi.js",
+        "main/manager-web/e2e/lesson-studio/course-mode-authoring.spec.js-snapshots/course-mode-step-1-course-mode-webkit-desktop-darwin.png",
+    ],
+)
+def test_changed_course_mode_sources_are_candidate_bound(tmp_path: Path, relative: str) -> None:
+    _, sha = _commit_playwright_fixture(tmp_path)
+    (tmp_path / relative).write_bytes(b"dirty working bytes\n")
+
+    assert gate.source_contract_ready(tmp_path, "course-mode-playwright", sha) is False
+
+
+def test_playwright_source_inventory_requires_every_path_to_exist(tmp_path: Path) -> None:
+    _, sha = _commit_playwright_fixture(tmp_path)
+    (tmp_path / _PLAYWRIGHT_SOURCE_PATHS[-1]).unlink()
 
     assert gate.source_contract_ready(tmp_path, "course-mode-playwright", sha) is False
 
@@ -1387,6 +1658,51 @@ def test_playwright_contract_rejects_malformed_or_duplicate_json(
     ],
 )
 def test_playwright_package_config_contract_and_specs_are_candidate_bound(
+    tmp_path: Path, relative: str,
+) -> None:
+    web, sha = _commit_playwright_fixture(tmp_path)
+    (web / relative).write_text("dirty working bytes\n", encoding="utf-8")
+
+    assert gate.source_contract_ready(tmp_path, "course-mode-playwright", sha) is False
+
+
+@pytest.mark.parametrize(
+    "script_name",
+    [
+        "test:course-mode:assignment-fixture",
+        "test:e2e:course-mode:assignment:new",
+        "test:e2e:course-mode:assignment:rollback",
+    ],
+)
+def test_playwright_contract_rejects_noncanonical_assignment_commands(
+    tmp_path: Path, script_name: str,
+) -> None:
+    _, sha = _commit_playwright_fixture(
+        tmp_path,
+        assignment_script_mutator=lambda scripts: scripts.__setitem__(script_name, "true"),
+    )
+
+    assert gate.source_contract_ready(tmp_path, "course-mode-playwright", sha) is False
+
+
+@pytest.mark.parametrize("relative", _valid_playwright_contract()["assignmentPhases"]["sourcePaths"])
+def test_assignment_phase_sources_are_candidate_bound(tmp_path: Path, relative: str) -> None:
+    _, sha = _commit_playwright_fixture(tmp_path)
+    (tmp_path / relative).write_text("dirty working bytes\n", encoding="utf-8")
+
+    assert gate.source_contract_ready(tmp_path, "course-mode-playwright", sha) is False
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "e2e/lesson-studio/global-setup.cjs",
+        "e2e/lesson-studio/helpers/session.js",
+        "scripts/reset-lesson-studio-e2e-state.cjs",
+        "scripts/lesson-studio-e2e-environment.cjs",
+    ],
+)
+def test_playwright_transitive_harness_files_are_candidate_bound(
     tmp_path: Path, relative: str,
 ) -> None:
     web, sha = _commit_playwright_fixture(tmp_path)

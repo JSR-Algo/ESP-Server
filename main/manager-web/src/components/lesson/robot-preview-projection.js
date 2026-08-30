@@ -227,6 +227,38 @@ function cinematicLayer(manifest, slot) {
   return layers.find((candidate) => asObject(candidate).slot === slot) || null;
 }
 
+function layeredCinematicLayer(manifest, step, slot) {
+  if (String(asObject(manifest).manifestVersion) !== 'teebot-lesson-renderer.v5') return null;
+  const activityId = String(asObject(step).activityId || asObject(step).id || '');
+  const phases = Array.isArray(asObject(manifest).cinematicPhases) ? manifest.cinematicPhases : [];
+  const phase = phases.find((candidate) => {
+    const value = asObject(candidate);
+    return value.templateId === 'layeredCinematic'
+      && Array.isArray(value.activityIds)
+      && value.activityIds.map(String).includes(activityId);
+  });
+  const layers = Array.isArray(asObject(phase).layers) ? phase.layers : [];
+  return layers.find((candidate) => asObject(candidate).slot === slot) || null;
+}
+
+function layerMediaType(layer) {
+  const value = asObject(layer);
+  const metadata = asObject(value.metadata);
+  return String(metadata.mediaType || value.mediaType || '');
+}
+
+function layerChromaKey(layer) {
+  const chromaKey = asObject(asObject(asObject(layer).metadata).chromaKey);
+  if (asObject(chromaKey.color).r !== undefined) return chromaKey;
+  const match = String(chromaKey.keyColor || '').match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+  if (!match) return null;
+  return {
+    color: { r: parseInt(match[1], 16), g: parseInt(match[2], 16), b: parseInt(match[3], 16) },
+    tolerance: Number(chromaKey.tolerance) || 0,
+    feather: Number(chromaKey.featherPx) || 0
+  };
+}
+
 function cinematicBounds(layer, fallback, fit) {
   const rect = asObject(asObject(asObject(layer).metadata).rect);
   const valid = ['x', 'y', 'width', 'height'].every((key) => Number.isFinite(rect[key]));
@@ -330,6 +362,9 @@ export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'c
   const cinematicBackground = cinematicLayer(served, 'backgroundScene');
   const cinematicObject = cinematicLayer(served, 'teachingObject');
   const cinematicRobot = cinematicLayer(served, 'robotOverlay');
+  const layeredBackground = layeredCinematicLayer(served, step, 'backgroundScene');
+  const layeredObject = layeredCinematicLayer(served, step, 'teachingObject');
+  const layeredRobot = layeredCinematicLayer(served, step, 'robotOverlay');
   const backgroundSrc = v3 ? cinematicSource(cinematicBackground) : mediaSource(background.poster);
   const objectSrc = v3 ? cinematicSource(cinematicObject) : mediaSource(object.asset);
   const robotSrc = v3 ? cinematicSource(cinematicRobot) : (mediaSource(robot.asset) || mediaSource(robot.atlas));
@@ -365,9 +400,9 @@ export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'c
     stage: ESP_TFT_GEOMETRY.stage,
     safeZones: ESP_TFT_GEOMETRY.safeZones,
     layers: [
-      { id: 'background', z: 0, bounds: v3 ? cinematicBounds(cinematicBackground, ESP_TFT_GEOMETRY.background, 'cover') : ESP_TFT_GEOMETRY.background, src: backgroundSrc, mediaType: v3 ? String(asObject(cinematicBackground).mediaType || '') : '', chromaKey: null, visible: Boolean(backgroundSrc) },
-      { id: 'teachingObject', z: 10, bounds: v3 ? cinematicBounds(cinematicObject, ESP_TFT_GEOMETRY.teachingObject, 'contain') : ESP_TFT_GEOMETRY.teachingObject, src: optionalVisualMissing ? '' : objectSrc, mediaType: v3 ? String(asObject(cinematicObject).mediaType || '') : '', chromaKey: v3 ? (asObject(asObject(cinematicObject).metadata).chromaKey || null) : null, visible: !optionalVisualMissing && Boolean(objectSrc) },
-      { id: 'robotOverlay', z: 20, bounds: v3 ? cinematicBounds(cinematicRobot, ESP_TFT_GEOMETRY.robotOverlay, 'contain') : (openingPhaseTrace.length ? openingPhaseTrace[openingPhaseTrace.length - 1].bounds : ESP_TFT_GEOMETRY.robotOverlay), src: robotSrc, mediaType: v3 ? String(asObject(cinematicRobot).mediaType || '') : '', chromaKey: v3 ? (asObject(asObject(cinematicRobot).metadata).chromaKey || null) : null, visible: !hideRobotOverlay && Boolean(robotSrc), overlayKey: String(visualStateOverride.overlayKey || robot.assetKey || robot.overlayKey || '') },
+      { id: 'background', z: 0, bounds: v3 ? cinematicBounds(cinematicBackground, ESP_TFT_GEOMETRY.background, 'cover') : (layeredBackground ? cinematicBounds(layeredBackground, ESP_TFT_GEOMETRY.background, 'cover') : ESP_TFT_GEOMETRY.background), src: backgroundSrc, mediaType: v3 ? layerMediaType(cinematicBackground) : layerMediaType(layeredBackground), chromaKey: null, visible: Boolean(backgroundSrc) },
+      { id: 'teachingObject', z: 10, bounds: v3 ? cinematicBounds(cinematicObject, ESP_TFT_GEOMETRY.teachingObject, 'contain') : (layeredObject ? cinematicBounds(layeredObject, ESP_TFT_GEOMETRY.teachingObject, 'contain') : ESP_TFT_GEOMETRY.teachingObject), src: optionalVisualMissing ? '' : objectSrc, mediaType: v3 ? layerMediaType(cinematicObject) : layerMediaType(layeredObject), chromaKey: v3 ? layerChromaKey(cinematicObject) : layerChromaKey(layeredObject), visible: !optionalVisualMissing && Boolean(objectSrc) },
+      { id: 'robotOverlay', z: 20, bounds: v3 ? cinematicBounds(cinematicRobot, ESP_TFT_GEOMETRY.robotOverlay, 'contain') : (layeredRobot ? cinematicBounds(layeredRobot, ESP_TFT_GEOMETRY.robotOverlay, 'contain') : (openingPhaseTrace.length ? openingPhaseTrace[openingPhaseTrace.length - 1].bounds : ESP_TFT_GEOMETRY.robotOverlay)), src: robotSrc, mediaType: v3 ? layerMediaType(cinematicRobot) : layerMediaType(layeredRobot), chromaKey: v3 ? layerChromaKey(cinematicRobot) : layerChromaKey(layeredRobot), visible: !hideRobotOverlay && Boolean(robotSrc), overlayKey: String(visualStateOverride.overlayKey || robot.assetKey || robot.overlayKey || '') },
       { id: 'wordPill', z: 30, bounds: ESP_TFT_GEOMETRY.wordPill, text: String(teachingWord.text || object.primaryWord || ''), visible: Boolean(teachingWord.text || object.primaryWord) },
       { id: 'progress', z: 40, bounds: ESP_TFT_GEOMETRY.progress, active: safeIndex + 1, total: steps.length, visible: steps.length > 0 },
       { id: 'prompt', z: 50, bounds: ESP_TFT_GEOMETRY.prompt, text: String(response.prompt || step.prompt || ''), visible: Boolean(response.prompt || step.prompt) }

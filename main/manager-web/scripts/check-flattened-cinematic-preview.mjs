@@ -193,9 +193,11 @@ for (const propContract of [
 }
 assert.match(
   videoLayerSource,
-  /import\s*\{\s*shouldResyncVideo\s*\}\s*from\s*['"]\.\/flattened-cinematic-preview['"]/,
+  /import\s*\{\s*applyChromaKey,\s*shouldResyncVideo\s*\}\s*from\s*['"]\.\/flattened-cinematic-preview['"]/,
   'CinematicVideoLayer must share the 80 ms synchronization helper'
 );
+assert.match(videoLayerSource, /applyChromaKey\(frame\.data, this\.chromaKey\)/,
+  'exact video layers must share the tested chroma compositor');
 assert.ok(videoLayerSource.includes('syncPlayback('), 'CinematicVideoLayer must provide syncPlayback');
 assert.match(videoLayerSource, /:autoplay="!controlled"/, 'legacy mode must retain autoplay while controlled mode disables it');
 assert.match(videoLayerSource, /:loop="!controlled"/, 'legacy mode must retain looping while controlled mode disables it');
@@ -496,6 +498,34 @@ const keyed = preview.applyChromaKey(pixels, {
 assert.equal(keyed[3], 0);
 assert.ok(keyed[7] > 0 && keyed[7] < 255);
 assert.equal(keyed[11], 128);
+
+const mjpegGreen = new Uint8ClampedArray([63, 251, 0, 255]);
+preview.applyChromaKey(mjpegGreen, {
+  color: { r: 0, g: 255, b: 0 },
+  tolerance: 20,
+  feather: 1
+});
+assert.equal(mjpegGreen[3], 0, 'MJPEG chroma subsampling must not leave the authoritative green screen opaque');
+
+const greenEdge = new Uint8ClampedArray([91, 230, 0, 255]);
+preview.applyChromaKey(greenEdge, {
+  color: { r: 0, g: 255, b: 0 },
+  tolerance: 20,
+  feather: 20
+});
+assert.ok(greenEdge[3] > 0 && greenEdge[3] < 255, 'green-key hue edge must feather instead of popping');
+
+const nonKeyColors = new Uint8ClampedArray([
+  232, 177, 141, 255,
+  20, 90, 220, 255,
+  220, 40, 35, 255
+]);
+preview.applyChromaKey(nonKeyColors, {
+  color: { r: 0, g: 255, b: 0 },
+  tolerance: 20,
+  feather: 20
+});
+assert.deepEqual([nonKeyColors[3], nonKeyColors[7], nonKeyColors[11]], [255, 255, 255]);
 
 const unchanged = new Uint8ClampedArray([10, 20, 30, 40]);
 assert.equal(preview.applyChromaKey(unchanged, null), unchanged);
