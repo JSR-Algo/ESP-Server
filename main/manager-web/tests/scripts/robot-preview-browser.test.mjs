@@ -87,6 +87,19 @@ test('stages candidate-bound bundle and cleans the private lease', async () => {
   }
 });
 
+test('ignores hostile ambient cache paths and stages only the custom candidate root', async () => {
+  const value = await fixture();
+  value.environment.PLAYWRIGHT_BROWSERS_PATH = join(value.base, 'hostile-default-cache');
+  try {
+    const lease = await acquirePinnedRobotPreviewChromium({ ...value, stagingParent: value.base });
+    assert.equal(lease.executablePath.startsWith(join(value.base, 'tbot-robot-preview-browser-')), true);
+    assert.equal(await readFile(lease.executablePath, 'utf8'), CONTENT);
+    await lease.cleanup();
+  } finally {
+    await rm(value.base, { recursive: true, force: true });
+  }
+});
+
 test('atomic source replacement after staging cannot change executable lease', async () => {
   const value = await fixture();
   const original = join(value.root, value.executable);

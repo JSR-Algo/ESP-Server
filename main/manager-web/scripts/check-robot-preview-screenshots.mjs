@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { dirname, extname, join, normalize } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +19,7 @@ const spawnCleanupSelfTest = process.argv.includes('--test-spawn-cleanup');
 const childCleanupSelfTest = process.argv.includes('--test-child-cleanup');
 const runtimeExitSelfTest = process.argv.includes('--test-runtime-exit-cleanup');
 const operationTimeoutSelfTest = process.argv.includes('--test-operation-timeout-cleanup');
+const candidateBrowserSelfTest = process.argv.includes('--candidate-browser');
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.ico': 'image/x-icon' };
 const BROWSER_OPERATION_TIMEOUT_MS = 10000;
 
@@ -42,25 +43,37 @@ async function acquireSelfTestLease(onLease = () => {}) {
   };
 }
 
-async function acquireInstalledBrowserSelfTestLease() {
-  const metadata = JSON.parse(await readFile(join(managerRoot, 'node_modules/playwright-core/browsers.json'), 'utf8'));
-  const revision = metadata.browsers?.find((entry) => entry.name === 'chromium-headless-shell')?.revision;
-  assert.match(revision || '', /^[1-9][0-9]*$/, 'Playwright headless-shell revision is required for lifecycle self-test');
-  const cacheRoot = process.env.PLAYWRIGHT_BROWSERS_PATH && process.env.PLAYWRIGHT_BROWSERS_PATH !== '0'
-    ? process.env.PLAYWRIGHT_BROWSERS_PATH
-    : process.platform === 'darwin'
-      ? join(homedir(), 'Library/Caches/ms-playwright')
-      : join(homedir(), '.cache/ms-playwright');
-  const layout = {
-    'darwin-arm64': ['chrome-headless-shell-mac-arm64', 'chrome-headless-shell'],
-    'darwin-x64': ['chrome-headless-shell-mac-x64', 'chrome-headless-shell'],
-    'linux-arm64': ['chrome-linux', 'headless_shell'],
-    'linux-x64': ['chrome-headless-shell-linux64', 'chrome-headless-shell']
-  }[`${process.platform}-${process.arch}`];
-  assert.ok(layout, `Unsupported lifecycle self-test platform: ${process.platform}-${process.arch}`);
-  const executablePath = join(cacheRoot, `chromium_headless_shell-${revision}`, ...layout);
-  assert.ok(existsSync(executablePath), `Pinned Playwright browser is missing: ${executablePath}`);
-  return { executablePath, cleanup: async () => {} };
+function createDevToolsSelfTestDouble(onSpawn = () => {}) {
+  const child = new EventEmitter();
+  child.exitCode = null;
+  child.signalCode = null;
+  child.pid = 1234;
+  child.kill = (signal) => {
+    queueMicrotask(() => {
+      child.signalCode = signal;
+      child.emit('exit', null, signal);
+    });
+    return true;
+  };
+  const spawnBrowser = (_executable, args) => {
+    onSpawn(_executable);
+    const profile = args.find((value) => value.startsWith('--user-data-dir=')).slice('--user-data-dir='.length);
+    void mkdir(profile, { recursive: true }).then(() => writeFile(join(profile, 'DevToolsActivePort'), '9222\n'));
+    return child;
+  };
+  const createSocket = () => {
+    const socket = new EventEmitter();
+    socket.readyState = WebSocket.CONNECTING;
+    socket.send = () => {};
+    socket.close = () => {
+      socket.readyState = WebSocket.CLOSED;
+      queueMicrotask(() => socket.emit('close'));
+    };
+    socket.terminate = socket.close;
+    queueMicrotask(() => { socket.readyState = WebSocket.OPEN; socket.emit('open'); });
+    return socket;
+  };
+  return { child, spawnBrowser, createSocket };
 }
 
 async function waitForFile(path, timeoutMs = 10000, signal = null) {
@@ -153,6 +166,10 @@ async function runHarness({
   onTemp = () => {},
   acquireBrowser = acquirePinnedRobotPreviewChromium,
   spawnBrowser = spawn,
+  fetchDevToolsTarget = (debugPort, signal) => fetch(
+    `http://127.0.0.1:${debugPort}/json/new?about:blank`, { method: 'PUT', signal }
+  ).then((response) => response.json()),
+  createDevToolsSocket = (url) => new WebSocket(url),
   afterSocketOpen = async () => {},
   sendCdp = (socket, payload) => socket.send(payload),
   operationTimeoutMs = BROWSER_OPERATION_TIMEOUT_MS,
@@ -215,14 +232,14 @@ async function runHarness({
     let target;
     try {
       target = await boundedLifecycle(
-        fetch(`http://127.0.0.1:${debugPort}/json/new?about:blank`, { method: 'PUT', signal: fetchController.signal }).then((response) => response.json()),
+        fetchDevToolsTarget(debugPort, fetchController.signal),
         'Robot preview DevTools target request',
         () => fetchController.abort()
       );
     } finally {
       fetchController.abort();
     }
-    socket = new WebSocket(target.webSocketDebuggerUrl);
+    socket = createDevToolsSocket(target.webSocketDebuggerUrl);
     socket.on('error', (error) => failLifecycle(new Error(`Robot preview DevTools socket failed: ${error.message}`)));
     socket.on('close', () => failLifecycle(new Error('Robot preview DevTools socket closed')));
     await boundedLifecycle(new Promise((resolve) => socket.once('open', resolve)), 'Robot preview DevTools socket open');
@@ -365,22 +382,50 @@ if (childCleanupSelfTest) {
   console.log('mounted RobotLessonPreview child cleanup PASS');
 } else if (runtimeExitSelfTest) {
   const harnessTemps = [];
+  const leaseTemps = [];
+  const spawnedExecutables = [];
+  const fake = createDevToolsSelfTestDouble((path) => spawnedExecutables.push(path));
+  const selfTestDependencies = candidateBrowserSelfTest ? { sendCdp: () => {} } : {
+    acquireBrowser: () => acquireSelfTestLease((path) => leaseTemps.push(path)),
+    spawnBrowser: fake.spawnBrowser,
+    fetchDevToolsTarget: async () => ({ webSocketDebuggerUrl: 'ws://self-test' }),
+    createDevToolsSocket: fake.createSocket
+  };
   await assert.rejects(runHarness({
-    acquireBrowser: acquireInstalledBrowserSelfTestLease,
+    ...selfTestDependencies,
     onTemp: (path) => harnessTemps.push(path),
     afterSocketOpen: async ({ chrome }) => { chrome.kill('SIGKILL'); }
   }), /(?:Chromium exited during preview|DevTools socket closed)/);
   assertTrackedTempsRemoved(harnessTemps, 'runtime browser exit must clean harness temp directories');
+  assertTrackedTempsRemoved(leaseTemps, 'runtime browser exit must clean browser lease temp directories');
+  if (!candidateBrowserSelfTest) {
+    assert.equal(spawnedExecutables.length, 1);
+    assert.equal(spawnedExecutables.every((path) => leaseTemps.some((root) => path.startsWith(`${root}/`))), true);
+  }
   console.log('mounted RobotLessonPreview runtime-exit cleanup PASS');
 } else if (operationTimeoutSelfTest) {
   const harnessTemps = [];
+  const leaseTemps = [];
+  const spawnedExecutables = [];
+  const fake = createDevToolsSelfTestDouble((path) => spawnedExecutables.push(path));
+  const selfTestDependencies = candidateBrowserSelfTest ? {} : {
+    acquireBrowser: () => acquireSelfTestLease((path) => leaseTemps.push(path)),
+    spawnBrowser: fake.spawnBrowser,
+    fetchDevToolsTarget: async () => ({ webSocketDebuggerUrl: 'ws://self-test' }),
+    createDevToolsSocket: fake.createSocket
+  };
   await assert.rejects(runHarness({
-    acquireBrowser: acquireInstalledBrowserSelfTestLease,
+    ...selfTestDependencies,
     onTemp: (path) => harnessTemps.push(path),
     sendCdp: () => {},
     operationTimeoutMs: 100
   }), /Robot preview CDP Page\.enable timed out after 100ms/);
   assertTrackedTempsRemoved(harnessTemps, 'CDP timeout must clean harness temp directories');
+  assertTrackedTempsRemoved(leaseTemps, 'CDP timeout must clean browser lease temp directories');
+  if (!candidateBrowserSelfTest) {
+    assert.equal(spawnedExecutables.length, 1);
+    assert.equal(spawnedExecutables.every((path) => leaseTemps.some((root) => path.startsWith(`${root}/`))), true);
+  }
   console.log('mounted RobotLessonPreview operation-timeout cleanup PASS');
 } else if (spawnCleanupSelfTest) {
   const harnessTemps = [];
