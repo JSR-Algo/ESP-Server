@@ -9,6 +9,14 @@ ROOT = Path(__file__).resolve().parents[1]
 GATE = ROOT / "scripts/course_robot_e2e_gates.sh"
 
 
+def test_repository_does_not_track_virtual_environment_artifacts() -> None:
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=ROOT, check=True, capture_output=True,
+    ).stdout.decode("utf-8").split("\0")
+
+    assert not any("/.venv" in f"/{path}" or "/venv/" in f"/{path}/" for path in tracked)
+
+
 def test_canonical_gate_bootstraps_trusted_sources_before_python() -> None:
     script = GATE.read_text(encoding="utf-8")
 
