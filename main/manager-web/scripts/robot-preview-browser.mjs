@@ -369,7 +369,9 @@ async function acquirePinnedRobotPreviewChromiumInProcess({
 function acquisitionOwnership(error, leaseRoot, workerPid) {
   error.retainedLeasePath ||= leaseRoot;
   error.leaseOwner ||= 'acquirePinnedRobotPreviewChromium';
-  if (Number.isSafeInteger(workerPid) && workerPid > 0) error.workerPid ||= workerPid;
+  if (error.workerPid === undefined) {
+    error.workerPid = Number.isSafeInteger(workerPid) && workerPid > 0 ? workerPid : null;
+  }
   return error;
 }
 
@@ -377,7 +379,7 @@ function serializeError(error) {
   return {
     message: error?.message || String(error), code: error?.code,
     retainedLeasePath: error?.retainedLeasePath, leaseOwner: error?.leaseOwner,
-    workerPid: error?.workerPid, cleanupWorkerPid: error?.cleanupWorkerPid,
+    workerPid: error?.workerPid, childPid: error?.childPid, cleanupWorkerPid: error?.cleanupWorkerPid,
   };
 }
 
@@ -392,21 +394,24 @@ function ipcSafe(value) {
 
 function deserializeError(value) {
   const error = new Error(value?.message || 'Candidate browser acquisition worker failed');
-  for (const key of ['code', 'retainedLeasePath', 'leaseOwner', 'workerPid', 'cleanupWorkerPid']) {
+  for (const key of ['code', 'retainedLeasePath', 'leaseOwner', 'workerPid', 'childPid', 'cleanupWorkerPid']) {
     if (value?.[key] !== undefined) error[key] = value[key];
   }
   return error;
 }
 
-async function terminateOwnedWorker(child, timeoutMs) {
+async function terminateOwnedWorker(child, deadline, timeoutMs) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return true;
+  const remainingMs = () => deadline === undefined
+    ? timeoutMs
+    : Math.max(0, Math.min(timeoutMs, deadline - Date.now()));
   child.kill('SIGTERM');
-  if (await waitForProcessExit(child, Math.max(0, Math.floor(timeoutMs / 2)))) return true;
+  if (await waitForProcessExit(child, Math.floor(remainingMs() / 2))) return true;
   child.kill('SIGKILL');
-  return waitForProcessExit(child, Math.max(0, timeoutMs - Math.floor(timeoutMs / 2)));
+  return waitForProcessExit(child, remainingMs());
 }
 
-export async function acquirePinnedRobotPreviewChromium({
+export async function startPinnedRobotPreviewChromiumAcquisition({
   environment = process.env,
   metadataPath = METADATA_PATH,
   platform = process.platform,
@@ -428,9 +433,6 @@ export async function acquirePinnedRobotPreviewChromium({
   cleanupReapTimeoutMs = 1000,
   cleanupRetryLimit = 3,
 } = {}) {
-  throwIfAcquisitionCancelled(signal, deadline);
-  // Validate before allocating the owned lease; the worker validates the same inputs again.
-  descriptorFromEnvironment(environment);
   const leaseRoot = await mkdtemp(join(stagingParent, 'tbot-robot-preview-browser-'));
   await chmod(leaseRoot, 0o700);
   const owner = 'acquirePinnedRobotPreviewChromium';
@@ -455,7 +457,6 @@ export async function acquirePinnedRobotPreviewChromium({
     const cleanupError = new Error(`Candidate browser lease cleanup failed after ${cleanupRetryLimit} attempts`, { cause: lastError });
     if (lastError?.cleanupWorkerPid !== undefined) {
       cleanupError.cleanupWorkerPid = lastError.cleanupWorkerPid;
-      cleanupError.workerPid = lastError.cleanupWorkerPid;
     }
     throw acquisitionOwnership(cleanupError, leaseRoot, workerPid);
   };
@@ -465,80 +466,124 @@ export async function acquirePinnedRobotPreviewChromium({
     } catch (cleanupError) {
       const error = new Error(`${sourceError.message}; ${cleanupError.message}`, { cause: cleanupError });
       if (cleanupError.cleanupWorkerPid !== undefined) error.cleanupWorkerPid = cleanupError.cleanupWorkerPid;
-      if (cleanupError.workerPid !== undefined) error.workerPid = cleanupError.workerPid;
       throw acquisitionOwnership(error, leaseRoot, workerPid);
     }
     throw sourceError;
   };
 
-  try {
-    const result = await new Promise((resolve, reject) => {
-      const finish = (callback, value) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(deadlineTimer);
-        signal?.removeEventListener('abort', onAbort);
-        callback(value);
-      };
-      const fail = (error) => finish(reject, error);
-      const onAbort = () => fail(signal.reason || new Error('Candidate browser acquisition aborted'));
-      const sendToWorker = (message) => {
-        try {
-          worker.send(message, (error) => { if (error) fail(error); });
-        } catch (error) {
-          fail(error);
-        }
-      };
-      try {
-        worker = spawnAcquisitionWorker(fileURLToPath(import.meta.url), ['--acquisition-worker'], {
-          stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
-        });
-      } catch (error) {
-        fail(error);
+  let resolveWorkerResult;
+  let rejectWorkerResult;
+  const workerResult = new Promise((resolve, reject) => {
+    resolveWorkerResult = resolve;
+    rejectWorkerResult = reject;
+  });
+  const finish = (callback, value) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(deadlineTimer);
+    signal?.removeEventListener('abort', onAbort);
+    callback(value);
+  };
+  const fail = (error) => finish(rejectWorkerResult, error);
+  const onAbort = () => fail(signal.reason || new Error('Candidate browser acquisition aborted'));
+  const sendToWorker = (message) => {
+    try {
+      worker.send(message, (error) => { if (error) fail(error); });
+    } catch (error) {
+      fail(error);
+    }
+  };
+  if (signal?.aborted || (deadline !== undefined && Date.now() >= deadline)) {
+    fail(signal?.reason || new Error('Candidate browser acquisition deadline exceeded'));
+  } else {
+    try {
+      worker = spawnAcquisitionWorker(fileURLToPath(import.meta.url), ['--acquisition-worker'], {
+        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+      });
+    } catch (error) {
+      fail(error);
+    }
+  }
+  if (worker) {
+    worker.on('error', (error) => { workerSpawnFailed = true; fail(error); });
+    worker.once('exit', (code, workerSignal) => {
+      if (!settled) fail(new Error(`Candidate browser acquisition worker exited ${workerSignal || code}`));
+    });
+    worker.on('message', async (message) => {
+      if (settled) return;
+      if (message?.type === 'ready') {
+        sendToWorker({ type: 'start', options: {
+          environment: Object.fromEntries(Object.entries(environment).filter(([key]) => key.startsWith('TBOT_ROBOT_PREVIEW_BROWSER_'))),
+          metadataPath, platform, arch, leaseRoot, deadline,
+        } });
         return;
       }
-      worker.on('error', (error) => { workerSpawnFailed = true; fail(error); });
-      worker.once('exit', (code, workerSignal) => {
-        if (!settled) fail(new Error(`Candidate browser acquisition worker exited ${workerSignal || code}`));
-      });
-      worker.on('message', async (message) => {
-        if (settled) return;
-        if (message?.type === 'ready') {
-          sendToWorker({ type: 'start', options: {
-            environment: Object.fromEntries(Object.entries(environment).filter(([key]) => key.startsWith('TBOT_ROBOT_PREVIEW_BROWSER_'))),
-            metadataPath, platform, arch, leaseRoot, deadline,
-          } });
-          return;
+      if (message?.type === 'progress') {
+        const hook = { beforeSeal, afterStage, stage: onStageProgress, seal: onSealProgress, verify: onVerifyProgress }[message.phase];
+        try {
+          await hook(message.payload);
+          sendToWorker({ type: 'continue', id: message.id });
+        } catch (error) {
+          sendToWorker({ type: 'reject', id: message.id, error: serializeError(error) });
         }
-        if (message?.type === 'progress') {
-          const hook = { beforeSeal, afterStage, stage: onStageProgress, seal: onSealProgress, verify: onVerifyProgress }[message.phase];
-          try {
-            await hook(message.payload);
-            sendToWorker({ type: 'continue', id: message.id });
-          } catch (error) {
-            sendToWorker({ type: 'reject', id: message.id, error: serializeError(error) });
-          }
-          return;
-        }
-        if (message?.type === 'success') finish(resolve, message);
-        if (message?.type === 'failure') fail(deserializeError(message.error));
-      });
-      signal?.addEventListener('abort', onAbort, { once: true });
-      const remaining = deadline === undefined ? 60000 : Math.max(0, deadline - Date.now());
-      deadlineTimer = setTimeout(() => fail(new Error('Candidate browser acquisition deadline exceeded')), remaining);
+        return;
+      }
+      if (message?.type === 'success') finish(resolveWorkerResult, message);
+      if (message?.type === 'failure') fail(deserializeError(message.error));
     });
-    if (!await terminateOwnedWorker(worker, acquisitionWorkerReapTimeoutMs)) {
-      throw acquisitionOwnership(new Error('Candidate browser acquisition worker could not be reaped after success'), leaseRoot, worker?.pid);
-    }
-    const cleanup = async () => removeOwnedLease(worker?.pid);
-    return { executablePath: result.executablePath, leasePath: leaseRoot, leaseOwner: owner, cleanup };
-  } catch (error) {
-    const workerPid = worker?.pid;
-    const reaped = workerSpawnFailed || await terminateOwnedWorker(worker, acquisitionWorkerReapTimeoutMs);
-    const ownedError = acquisitionOwnership(error, leaseRoot, workerPid);
-    if (!reaped) throw acquisitionOwnership(new Error('Candidate browser acquisition worker could not be reaped after SIGKILL', { cause: ownedError }), leaseRoot, workerPid);
-    return cleanupOwnedLease(ownedError, workerPid);
   }
+  signal?.addEventListener('abort', onAbort, { once: true });
+  const remaining = deadline === undefined ? 60000 : Math.max(0, deadline - Date.now());
+  if (!settled) deadlineTimer = setTimeout(() => fail(new Error('Candidate browser acquisition deadline exceeded')), remaining);
+
+  const workerPid = Number.isSafeInteger(worker?.pid) && worker.pid > 0 ? worker.pid : null;
+  const completion = (async () => {
+    try {
+      const result = await workerResult;
+      if (!await terminateOwnedWorker(worker, cleanupDeadline, acquisitionWorkerReapTimeoutMs)) {
+        throw acquisitionOwnership(new Error('Candidate browser acquisition worker could not be reaped after success'), leaseRoot, workerPid);
+      }
+      const cleanup = async () => removeOwnedLease(workerPid);
+      return {
+        executablePath: result.executablePath,
+        leasePath: leaseRoot,
+        leaseOwner: owner,
+        workerPid,
+        cleanup,
+      };
+    } catch (error) {
+      const spawnFailedWithoutChild = workerSpawnFailed && !(Number.isSafeInteger(worker?.pid) && worker.pid > 0);
+      const reaped = spawnFailedWithoutChild
+        || await terminateOwnedWorker(worker, cleanupDeadline, acquisitionWorkerReapTimeoutMs);
+      const ownedError = acquisitionOwnership(error, leaseRoot, workerPid);
+      if (!reaped) {
+        throw acquisitionOwnership(
+          new Error('Candidate browser acquisition worker could not be reaped after SIGKILL', { cause: ownedError }),
+          leaseRoot,
+          workerPid,
+        );
+      }
+      return cleanupOwnedLease(ownedError, workerPid);
+    }
+  })();
+  completion.catch(() => {});
+  const cancel = (reason = new Error('Candidate browser acquisition cancelled')) => {
+    fail(reason);
+    return completion;
+  };
+  return {
+    retainedLeasePath: leaseRoot,
+    leaseOwner: owner,
+    worker,
+    workerPid,
+    completion,
+    cancel,
+  };
+}
+
+export async function acquirePinnedRobotPreviewChromium(options = {}) {
+  const acquisition = await startPinnedRobotPreviewChromiumAcquisition(options);
+  return acquisition.completion;
 }
 
 if (process.argv[2] === '--acquisition-worker' && process.send) {

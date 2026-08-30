@@ -6,7 +6,11 @@ import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import test from 'node:test';
 
-import { acquirePinnedRobotPreviewChromium, decodeBrowserEntryName } from '../../scripts/robot-preview-browser.mjs';
+import {
+  acquirePinnedRobotPreviewChromium,
+  decodeBrowserEntryName,
+  startPinnedRobotPreviewChromiumAcquisition,
+} from '../../scripts/robot-preview-browser.mjs';
 
 const CONTENT = 'pinned chromium fixture\n';
 const SHA = createHash('sha256').update(CONTENT).digest('hex');
@@ -325,6 +329,29 @@ function fakeAcquisitionWorker({ pid = 4343, spawnError, reapAfterKill = true } 
   return child;
 }
 
+test('owned acquisition exposes lease identity and worker handle before staging completes', async () => {
+  const value = await fixture();
+  const child = fakeAcquisitionWorker();
+  try {
+    const acquisition = await startPinnedRobotPreviewChromiumAcquisition({
+      ...value, stagingParent: value.base, deadline: Date.now() + 100,
+      spawnAcquisitionWorker: () => child,
+    });
+    assert.match(acquisition.retainedLeasePath, /tbot-robot-preview-browser-/);
+    assert.equal(acquisition.leaseOwner, 'acquirePinnedRobotPreviewChromium');
+    assert.equal(acquisition.worker, child);
+    assert.equal(acquisition.workerPid, 4343);
+    await assert.rejects(acquisition.cancel(new Error('test cancellation')), (error) => {
+      assert.equal(error.retainedLeasePath, acquisition.retainedLeasePath);
+      assert.equal(error.leaseOwner, acquisition.leaseOwner);
+      assert.equal(error.workerPid, 4343);
+      return true;
+    });
+  } finally {
+    await rm(value.base, { recursive: true, force: true });
+  }
+});
+
 test('hung acquisition worker is killed and reaped before its retained lease is reported', async () => {
   const value = await fixture();
   const child = fakeAcquisitionWorker();
@@ -360,7 +387,7 @@ for (const code of ['EAGAIN', 'ENOENT']) {
         assert.match(error.message, new RegExp(code));
         assert.match(error.retainedLeasePath, /tbot-robot-preview-browser-/);
         assert.equal(error.leaseOwner, 'acquirePinnedRobotPreviewChromium');
-        assert.equal(error.workerPid, undefined);
+        assert.equal(error.workerPid, null);
         return true;
       });
     } finally {
@@ -379,7 +406,8 @@ test('unreaped cleanup worker exposes pid and retained lease ownership synchrono
       spawnCleanupWorker: () => fakeCleanupWorker({ reapAfterKill: false }),
     }), (error) => {
       assert.equal(error.cleanupWorkerPid, 4242);
-      assert.equal(error.workerPid, 4242);
+      assert.equal(Number.isSafeInteger(error.workerPid), true);
+      assert.notEqual(error.workerPid, 4242);
       assert.equal(error.leaseOwner, 'acquirePinnedRobotPreviewChromium');
       assert.match(error.retainedLeasePath, /tbot-robot-preview-browser-/);
       return true;

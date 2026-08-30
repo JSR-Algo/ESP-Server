@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import WebSocket from 'ws';
 
-import { acquirePinnedRobotPreviewChromium } from '../robot-preview-browser.mjs';
+import { startPinnedRobotPreviewChromiumAcquisition } from '../robot-preview-browser.mjs';
 
 const DEFAULT_OPERATION_TIMEOUT_MS = 60000;
 const DEFAULT_READINESS_TIMEOUT_MS = 10000;
@@ -44,7 +45,7 @@ async function stopChild(child, remainingMs, label) {
     if (!await waitForChildExit(child, Math.max(0, remainingMs()))) {
       const error = new Error(`${label} lease retained because Chromium child was not reaped before the lifecycle deadline`);
       error.leaseOwner = label;
-      error.workerPid = child.pid;
+      error.childPid = child.pid;
       throw error;
     }
   }
@@ -78,19 +79,20 @@ async function defaultWaitForDevToolsPort(path, timeoutMs, signal) {
 export async function withCandidateBoundBrowser({
   profileDir,
   label,
-  acquireBrowser = acquirePinnedRobotPreviewChromium,
+  startBrowserAcquisition = startPinnedRobotPreviewChromiumAcquisition,
   spawnBrowser = spawn,
   waitForDevToolsPort = defaultWaitForDevToolsPort,
   fetchDevToolsTarget = (debugPort, signal) => fetch(
     `http://127.0.0.1:${debugPort}/json/new?about:blank`, { method: 'PUT', signal }
   ).then((response) => response.json()),
-  createDevToolsSocket = async (url) => new (await import('ws')).default(url),
+  createDevToolsSocket = (url) => new WebSocket(url),
   operationTimeoutMs = DEFAULT_OPERATION_TIMEOUT_MS,
   readinessTimeoutMs = DEFAULT_READINESS_TIMEOUT_MS,
   readinessPollMs = 50,
   onMessage = () => {},
 }, run) {
   let lease;
+  let acquisition;
   let child;
   let socket;
   const pending = new Map();
@@ -103,13 +105,28 @@ export async function withCandidateBoundBrowser({
   const runtimeDeadline = lifecycleDeadline - cleanupReserveMs;
   const remainingMs = () => Math.max(0, lifecycleDeadline - Date.now());
   const runtimeRemainingMs = () => Math.max(0, runtimeDeadline - Date.now());
-  const lifecycleTimeout = () => new Error(`${label} lifecycle timed out after ${operationTimeoutMs}ms`);
+  const addOwnership = (error) => {
+    const retainedLeasePath = lease?.leasePath || acquisition?.retainedLeasePath
+      || (lease?.executablePath ? dirname(lease.executablePath) : undefined);
+    if (retainedLeasePath) error.retainedLeasePath ||= retainedLeasePath;
+    error.leaseOwner ||= lease?.leaseOwner || acquisition?.leaseOwner || label;
+    const workerPid = lease?.workerPid || acquisition?.workerPid;
+    if (error.workerPid === undefined) {
+      error.workerPid = Number.isSafeInteger(workerPid) && workerPid > 0 ? workerPid : null;
+    }
+    if (error.childPid === undefined) {
+      error.childPid = Number.isSafeInteger(child?.pid) && child.pid > 0 ? child.pid : null;
+    }
+    return error;
+  };
+  const lifecycleTimeout = () => addOwnership(new Error(`${label} lifecycle timed out after ${operationTimeoutMs}ms`));
   const lifecycleFailure = new Promise((_, reject) => { rejectLifecycle = reject; });
   lifecycleFailure.catch(() => {});
 
   const failLifecycle = (error) => {
-    rejectLifecycle(error);
-    for (const callbacks of pending.values()) callbacks.reject(error);
+    const ownedError = addOwnership(error);
+    rejectLifecycle(ownedError);
+    for (const callbacks of pending.values()) callbacks.reject(ownedError);
     pending.clear();
   };
   const lifecycleBounded = async (
@@ -142,37 +159,29 @@ export async function withCandidateBoundBrowser({
   );
 
   try {
-    const acquisitionController = new AbortController();
-    const acquisition = Promise.resolve().then(() => acquireBrowser({
-      signal: acquisitionController.signal,
-      deadline: runtimeDeadline,
-      cleanupDeadline: lifecycleDeadline,
-    }));
     try {
-      lease = await lifecycleBounded(
-        acquisition, `${label} candidate browser acquisition`, operationTimeoutMs,
-        () => acquisitionController.abort(lifecycleTimeout())
-      );
-    } catch (error) {
-      acquisitionController.abort(error);
-      const terminalRemainingMs = remainingMs();
-      if (terminalRemainingMs > 0) {
-        try {
-          await lifecycleBounded(acquisition, `${label} candidate browser acquisition termination`, terminalRemainingMs, () => {}, remainingMs);
-        } catch (acquisitionError) {
-          if (acquisitionError?.retainedLeasePath) throw acquisitionError;
+      try {
+        acquisition = await lifecycleBounded(
+          startBrowserAcquisition({ deadline: runtimeDeadline, cleanupDeadline: lifecycleDeadline }),
+          `${label} candidate browser acquisition worker start`,
+        );
+        lease = await lifecycleBounded(
+          acquisition.completion, `${label} candidate browser acquisition`, operationTimeoutMs
+        );
+      } catch (error) {
+        if (acquisition) {
+          try {
+            await acquisition.cancel(error);
+          } catch (acquisitionError) {
+            throw acquisitionError;
+          }
         }
-      } else {
-        acquisition.catch((acquisitionError) => {
-          if (acquisitionError?.retainedLeasePath) process.emitWarning(acquisitionError);
-        });
+        throw error;
       }
-      throw error;
-    }
-    child = spawnBrowser(lease.executablePath, [
-      '--headless', '--disable-gpu', '--remote-debugging-port=0',
-      `--user-data-dir=${profileDir}`, 'about:blank',
-    ], { stdio: 'ignore' });
+      child = spawnBrowser(lease.executablePath, [
+        '--headless', '--disable-gpu', '--remote-debugging-port=0',
+        `--user-data-dir=${profileDir}`, 'about:blank',
+      ], { stdio: 'ignore' });
     child.once('error', (error) => failLifecycle(new Error(`${label} Chromium spawn failed: ${error.message}`)));
     child.once('exit', (code, signal) => failLifecycle(new Error(`${label} Chromium exited before completion (${signal || code})`)));
 
@@ -264,10 +273,13 @@ export async function withCandidateBoundBrowser({
       throw timedOut();
     };
 
-    return await bounded(
-      Promise.resolve().then(() => run({ cdp, evaluate, waitForReadiness, browserExecutablePath: lease.executablePath })),
-      `${label} callback`,
-    );
+      return await bounded(
+        Promise.resolve().then(() => run({ cdp, evaluate, waitForReadiness, browserExecutablePath: lease.executablePath })),
+        `${label} callback`,
+      );
+    } catch (error) {
+      throw addOwnership(error);
+    }
   } finally {
     const childDeadline = Date.now() + Math.min(childReapReserveMs, remainingMs());
     let childReapError;
@@ -277,7 +289,9 @@ export async function withCandidateBoundBrowser({
       childReapError = error;
       if (lease) {
         error.retainedLeasePath = lease.leasePath || dirname(lease.executablePath);
-        error.leaseOwner ||= lease.leaseOwner || label;
+        error.leaseOwner = lease.leaseOwner || label;
+        error.workerPid ||= lease.workerPid;
+        error.childPid ||= child?.pid;
       }
     }
     await closeSocket(socket, Math.min(socketCloseReserveMs, remainingMs())).catch(() => {});
@@ -294,6 +308,8 @@ export async function withCandidateBoundBrowser({
       } catch (error) {
         error.retainedLeasePath ||= lease.leasePath || dirname(lease.executablePath);
         error.leaseOwner ||= lease.leaseOwner || label;
+        error.workerPid ||= lease.workerPid;
+        error.childPid ||= child?.pid;
         throw error;
       }
     }

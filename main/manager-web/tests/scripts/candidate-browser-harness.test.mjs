@@ -70,12 +70,36 @@ function outerWatchdog(operation, timeoutMs = 250) {
   ]);
 }
 
+function ownedAcquisition(completion, cancel = async (reason) => { throw reason; }) {
+  return {
+    retainedLeasePath: '/candidate/staged',
+    leaseOwner: 'test acquisition',
+    worker: { pid: 4141 },
+    workerPid: 4141,
+    completion: Promise.resolve(completion),
+    cancel,
+  };
+}
+
+function controllableAcquisition() {
+  let rejectCompletion;
+  const completion = new Promise((_, reject) => { rejectCompletion = reject; });
+  const handle = ownedAcquisition(completion, async (reason) => {
+    rejectCompletion(reason);
+    return completion;
+  });
+  return handle;
+}
+
 function dependencies({ onCommand, spawnBrowser } = {}) {
   const state = { cleanupCalls: 0, spawned: [], child: null, socket: null };
   return {
     state,
-    acquireBrowser: async () => ({
+    startBrowserAcquisition: async () => ownedAcquisition({
       executablePath: '/candidate/staged/chrome-headless-shell',
+      leasePath: '/candidate/staged',
+      leaseOwner: 'test acquisition',
+      workerPid: 4141,
       cleanup: async () => { state.cleanupCalls += 1; },
     }),
     spawnBrowser: spawnBrowser || ((executablePath) => {
@@ -101,6 +125,16 @@ test('all remaining browser gates use only the candidate-bound lifecycle helper'
   }
 });
 
+test('candidate lifecycle requires an owned acquisition-worker handle instead of an arbitrary acquisition Promise', async () => {
+  const source = await readFile(join(managerRoot, 'scripts/_lib/candidate-browser-harness.mjs'), 'utf8');
+  assert.match(source, /startPinnedRobotPreviewChromiumAcquisition/);
+  assert.match(source, /startBrowserAcquisition/);
+  assert.doesNotMatch(source, /acquireBrowser\s*=/);
+  assert.doesNotMatch(source, /Promise\.resolve\(\)\.then\(\(\)\s*=>\s*acquireBrowser/);
+  assert.match(source, /import WebSocket from 'ws'/);
+  assert.doesNotMatch(source, /createDevToolsSocket\s*=\s*async/);
+});
+
 test('lesson studio aggregate runs the candidate browser lifecycle regressions', async () => {
   const packageJson = JSON.parse(await readFile(join(managerRoot, 'package.json'), 'utf8'));
   assert.match(packageJson.scripts['test:lesson-studio'], /npm run test:candidate-browser-harness/);
@@ -121,16 +155,21 @@ test('spawn failure cleans the candidate browser lease', async () => {
     profileDir: '/tmp/profile',
     label: 'test gate',
     ...deps,
-  }, async () => {}), /simulated spawn failure/);
+  }, async () => {}), (error) => {
+    assert.match(error.message, /simulated spawn failure/);
+    assert.equal(error.retainedLeasePath, '/candidate/staged');
+    assert.equal(error.leaseOwner, 'test acquisition');
+    assert.equal(error.workerPid, 4141);
+    assert.equal(error.childPid, null);
+    return true;
+  });
   assert.equal(deps.state.cleanupCalls, 1);
 });
 
 test('stalled candidate browser acquisition rejects before the outer watchdog', async () => {
   const { withCandidateBoundBrowser } = await importHarness();
   const deps = dependencies();
-  deps.acquireBrowser = ({ signal }) => new Promise((_, reject) => {
-    signal.addEventListener('abort', () => reject(signal.reason || new Error('aborted')), { once: true });
-  });
+  deps.startBrowserAcquisition = async () => controllableAcquisition();
   await assert.rejects(outerWatchdog(withCandidateBoundBrowser({
     profileDir: '/tmp/profile',
     label: 'test gate',
@@ -146,7 +185,7 @@ test('stalled candidate browser acquisition rejects before the outer watchdog', 
 test('acquisition that ignores abort cannot outlive the harness deadline', async () => {
   const { withCandidateBoundBrowser } = await importHarness();
   const deps = dependencies();
-  deps.acquireBrowser = () => new Promise(() => {});
+  deps.startBrowserAcquisition = async () => controllableAcquisition();
   await assert.rejects(outerWatchdog(withCandidateBoundBrowser({
     profileDir: '/tmp/profile', label: 'uncooperative acquisition', operationTimeoutMs: 20, ...deps,
   }, async () => assert.fail('callback must not run')), 75), /uncooperative acquisition lifecycle timed out after 20ms/);
@@ -202,7 +241,7 @@ test('stalled CDP command times out and cleans child, socket, and lease', async 
 test('stalled candidate browser cleanup rejects before the outer watchdog after local resources close', async () => {
   const { withCandidateBoundBrowser } = await importHarness();
   const deps = dependencies();
-  deps.acquireBrowser = async () => ({
+  deps.startBrowserAcquisition = async () => ownedAcquisition({
     executablePath: '/candidate/staged/chrome-headless-shell',
     cleanup: async () => {
       deps.state.cleanupCalls += 1;
@@ -223,7 +262,7 @@ test('stalled candidate browser cleanup rejects before the outer watchdog after 
 test('failed candidate cleanup is surfaced synchronously', async () => {
   const { withCandidateBoundBrowser } = await importHarness();
   const deps = dependencies();
-  deps.acquireBrowser = async () => ({
+  deps.startBrowserAcquisition = async () => ownedAcquisition({
     executablePath: '/candidate/staged/chrome-headless-shell',
     cleanup: async () => { deps.state.cleanupCalls += 1; throw new Error('cleanup failed'); },
   });
@@ -238,11 +277,16 @@ test('timed out acquisition aborts and finishes owned cleanup before rejecting',
   const { withCandidateBoundBrowser } = await importHarness();
   const deps = dependencies();
   let cleanupCalls = 0;
-  deps.acquireBrowser = ({ signal }) => new Promise((_, reject) => signal.addEventListener('abort', async () => {
-    cleanupCalls += 1;
-    await new Promise((resolve) => setTimeout(resolve, 1));
-    reject(signal.reason || new Error('aborted'));
-  }, { once: true }));
+  deps.startBrowserAcquisition = async () => {
+    let rejectCompletion;
+    const completion = new Promise((_, reject) => { rejectCompletion = reject; });
+    return ownedAcquisition(completion, async (reason) => {
+      cleanupCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      rejectCompletion(reason);
+      return completion;
+    });
+  };
   await assert.rejects(withCandidateBoundBrowser({
     profileDir: '/tmp/profile', label: 'late gate', operationTimeoutMs: 20,
     ...deps,
@@ -382,7 +426,11 @@ test('completed child and socket cleanup do not leave deadline timers keeping No
     await withCandidateBoundBrowser({
       profileDir: '/tmp/profile',
       label: 'timer test',
-      acquireBrowser: async () => ({ executablePath: '/candidate/chrome', cleanup: async () => {} }),
+      startBrowserAcquisition: async () => ({
+        retainedLeasePath: '/candidate', leaseOwner: 'timer test', worker: { pid: 4141 }, workerPid: 4141,
+        completion: Promise.resolve({ executablePath: '/candidate/chrome', leasePath: '/candidate', leaseOwner: 'timer test', workerPid: 4141, cleanup: async () => {} }),
+        cancel: async (reason) => { throw reason; },
+      }),
       spawnBrowser: () => child,
       waitForDevToolsPort: async () => '9222\\n',
       fetchDevToolsTarget: async () => ({ webSocketDebuggerUrl: 'ws://candidate-bound' }),
@@ -399,10 +447,10 @@ test('completed child and socket cleanup do not leave deadline timers keeping No
 test('cumulative browser phases share one absolute lifecycle deadline', async () => {
   const { withCandidateBoundBrowser } = await importHarness();
   const deps = dependencies();
-  deps.acquireBrowser = async () => {
+  deps.startBrowserAcquisition = async () => ownedAcquisition((async () => {
     await new Promise((resolve) => setTimeout(resolve, 7));
     return { executablePath: '/candidate/staged/chrome-headless-shell', cleanup: async () => { deps.state.cleanupCalls += 1; } };
-  };
+  })());
   deps.waitForDevToolsPort = async () => { await new Promise((resolve) => setTimeout(resolve, 7)); return '9222\n'; };
   deps.fetchDevToolsTarget = async () => { await new Promise((resolve) => setTimeout(resolve, 7)); return { webSocketDebuggerUrl: 'ws://candidate-bound' }; };
   await assert.rejects(outerWatchdog(withCandidateBoundBrowser({
@@ -426,8 +474,9 @@ test('stubborn child retains the lease when it cannot be reaped before the lifec
   }, async () => { throw new Error('trigger cleanup'); }), 75), (error) => {
     assert.match(error.message, /lease retained.*child.*not reaped/i);
     assert.equal(error.retainedLeasePath, '/candidate/staged');
-    assert.equal(error.leaseOwner, 'stubborn gate');
-    assert.equal(error.workerPid, 5151);
+    assert.equal(error.leaseOwner, 'test acquisition');
+    assert.equal(error.workerPid, 4141);
+    assert.equal(error.childPid, 5151);
     return true;
   });
   assert.equal(deps.state.cleanupCalls, 0);
@@ -452,7 +501,7 @@ test('SIGKILL reap completes before candidate lease cleanup', async () => {
     deps.state.child = child;
     return child;
   } });
-  deps.acquireBrowser = async () => ({
+  deps.startBrowserAcquisition = async () => ownedAcquisition({
     executablePath: '/candidate/staged/chrome-headless-shell',
     cleanup: async () => { events.push('cleanup'); deps.state.cleanupCalls += 1; },
   });
@@ -487,7 +536,7 @@ test('silent socket shutdown cannot starve child reap or candidate cleanup', asy
     deps.state.socket = socket;
     return socket;
   };
-  deps.acquireBrowser = async () => ({
+  deps.startBrowserAcquisition = async () => ownedAcquisition({
     executablePath: '/candidate/staged/chrome-headless-shell',
     cleanup: async () => { events.push('cleanup'); deps.state.cleanupCalls += 1; },
   });
@@ -502,18 +551,22 @@ test('reserve exhaustion waits for acquisition-owned cleanup terminal error with
   const { withCandidateBoundBrowser } = await importHarness();
   const deps = dependencies();
   let cleanupActive = false;
-  deps.acquireBrowser = ({ signal, deadline }) => new Promise((_, reject) => {
-    signal.addEventListener('abort', () => {
+  deps.startBrowserAcquisition = async ({ deadline }) => {
+    let rejectCompletion;
+    const completion = new Promise((_, reject) => { rejectCompletion = reject; });
+    return ownedAcquisition(completion, async () => {
       cleanupActive = true;
       setTimeout(() => {
         cleanupActive = false;
         const error = new Error('owned cleanup could not finish');
         error.retainedLeasePath = '/tmp/auditable-retained-browser-lease';
         error.leaseOwner = 'test acquisition';
-        reject(error);
+        error.workerPid = 4141;
+        rejectCompletion(error);
       }, Math.max(0, deadline - Date.now()));
-    }, { once: true });
-  });
+      return completion;
+    });
+  };
   await assert.rejects(outerWatchdog(withCandidateBoundBrowser({
     profileDir: '/tmp/profile', label: 'owned gate', operationTimeoutMs: 20, ...deps,
   }, async () => {}), 75), (error) => {
@@ -523,3 +576,26 @@ test('reserve exhaustion waits for acquisition-owned cleanup terminal error with
   });
   assert.equal(cleanupActive, false);
 });
+
+for (const code of ['EAGAIN', 'ENOENT']) {
+  test(`asynchronous Chromium spawn ${code} surfaces lease, acquisition worker, and child ownership`, async () => {
+    const { withCandidateBoundBrowser } = await importHarness();
+    const deps = dependencies({ spawnBrowser: () => {
+      const child = fakeChild();
+      child.pid = 5252;
+      queueMicrotask(() => child.emit('error', Object.assign(new Error(code), { code })));
+      deps.state.child = child;
+      return child;
+    } });
+    await assert.rejects(withCandidateBoundBrowser({
+      profileDir: '/tmp/profile', label: 'spawn ownership gate', operationTimeoutMs: 100, ...deps,
+    }, async () => assert.fail('callback must not run after spawn failure')), (error) => {
+      assert.match(error.message, new RegExp(code));
+      assert.equal(error.retainedLeasePath, '/candidate/staged');
+      assert.equal(error.leaseOwner, 'test acquisition');
+      assert.equal(error.workerPid, 4141);
+      assert.equal(error.childPid, 5252);
+      return true;
+    });
+  });
+}
