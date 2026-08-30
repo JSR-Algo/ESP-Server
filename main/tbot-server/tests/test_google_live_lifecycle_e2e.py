@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from core.voice.google_live.client import GoogleLiveClient
+from core.voice.session_orchestrator import SessionMode
 from core.voice.session_provider.google_live import GoogleLiveProvider
 
 HISTORICAL_REGRESSION_NODE_IDS = (
@@ -126,6 +127,31 @@ class _Connection:
     def clearSpeakStatus(self):  # noqa: N802 - production connection API
         self.client_is_speaking = False
 
+    def _set_session_mode(self, mode, *, reason):
+        self.session_mode = mode
+
+
+class _TimeoutRecoveryRuntime:
+    state = "RUNNING"
+    _step_passive = False
+    _step_completed = False
+
+    def __init__(self):
+        self.timeout_reasons = []
+
+    def conversation_tool_path_active(self):
+        return True
+
+    async def conversation_live_interruption(self, reason):
+        self.timeout_reasons.append(reason)
+        return SimpleNamespace(
+            accepted=len(self.timeout_reasons) == 1,
+            code="RECONNECT_ONCE",
+            window_id="timeout-window",
+            reconnect_allowed=True,
+            prompt="",
+        )
+
 
 class _LifecycleCounters:
     def __init__(self):
@@ -238,6 +264,7 @@ class _FakeGenaiModule:
 class _FakeTransport:
     def __init__(self):
         self.counters = _LifecycleCounters()
+        self.clients = []
         self.sessions = []
         self.connect_configs = []
         self.module = _FakeGenaiModule(self)
@@ -247,9 +274,15 @@ class _InProcessGoogleLiveClient(GoogleLiveClient):
     def __init__(self, config, logger, genai_module):
         super().__init__(config, logger)
         self._genai_module = genai_module
+        self.observed_events = []
 
     def _import_genai_module(self):
         return self._genai_module
+
+    async def receive_events(self):
+        async for event in super().receive_events():
+            self.observed_events.append(event)
+            yield event
 
 
 def _server_message(*, user_text=None, audio=None, turn_complete=False):
@@ -310,7 +343,9 @@ async def _run_lifecycle_journey():
     result = LifecycleResult()
 
     def client_factory(config, logger):
-        return _InProcessGoogleLiveClient(config, logger, transport.module)
+        client = _InProcessGoogleLiveClient(config, logger, transport.module)
+        transport.clients.append(client)
+        return client
 
     provider = GoogleLiveProvider(conn, client_factory=client_factory)
     try:
@@ -422,6 +457,68 @@ async def _run_lifecycle_journey():
     return result
 
 
+async def _run_receive_timeout_recovery():
+    conn = _Connection()
+    conn.session_mode = SessionMode.LESSON
+    conn.lesson_runtime = _TimeoutRecoveryRuntime()
+    conn.config["google_live"].update(
+        {
+            "prewarm_live_on_connect": False,
+            "recv_timeout_sec": 0.01,
+        }
+    )
+    transport = _FakeTransport()
+
+    def client_factory(config, logger):
+        client = _InProcessGoogleLiveClient(config, logger, transport.module)
+        transport.clients.append(client)
+        return client
+
+    provider = GoogleLiveProvider(conn, client_factory=client_factory)
+    try:
+        with patch.object(
+            GoogleLiveProvider,
+            "_ensure_required_aec_ready",
+            autospec=True,
+        ):
+            await provider._open_live_session()
+            await _wait_until(lambda: len(transport.sessions) == 2)
+            replacement_session = transport.sessions[1]
+            conn.google_live_lesson_prompt_output_allowed = True
+            await replacement_session.emit(
+                _server_message(
+                    user_text="timeout replacement transcript",
+                    audio=b"timeout-new-audio",
+                    turn_complete=True,
+                )
+            )
+            await _wait_until(
+                lambda: b"timeout-new-audio" in conn.websocket.sent
+            )
+    finally:
+        await provider.close()
+
+    await _wait_until(lambda: transport.counters.receive_loop_active == 0)
+    return {
+        "typed_timeout_events": [
+            event
+            for event in transport.clients[0].observed_events
+            if event == {"type": "receive_timeout"}
+        ],
+        "timeout_reasons": conn.lesson_runtime.timeout_reasons,
+        "session_count": len(transport.sessions),
+        "replacement_transcripts": [
+            event["text"]
+            for event in transport.clients[1].observed_events
+            if event.get("type") == "transcript" and event.get("source") == "user"
+        ],
+        "device_audio": [
+            raw for raw in conn.websocket.sent if isinstance(raw, bytes)
+        ],
+        "pending_owned_tasks": _pending_provider_tasks(provider),
+    }
+
+
 def test_historical_regression_node_ids_are_unique_and_well_named():
     assert len(HISTORICAL_REGRESSION_NODE_IDS) == 8
     assert len(set(HISTORICAL_REGRESSION_NODE_IDS)) == 8
@@ -429,6 +526,18 @@ def test_historical_regression_node_ids_are_unique_and_well_named():
         path, *names = node_id.split("::")
         assert path.startswith("tests/test_") and path.endswith(".py")
         assert names[-1].startswith("test_")
+
+
+@pytest.mark.asyncio
+async def test_real_receive_timeout_routes_to_bounded_recovery_and_replacement_output():
+    result = await _run_receive_timeout_recovery()
+
+    assert result["typed_timeout_events"] == [{"type": "receive_timeout"}]
+    assert result["timeout_reasons"] == ["timeout"]
+    assert result["session_count"] == 2
+    assert result["replacement_transcripts"] == ["timeout replacement transcript"]
+    assert result["device_audio"] == [b"timeout-new-audio"]
+    assert result["pending_owned_tasks"] == ()
 
 
 @pytest.mark.asyncio
