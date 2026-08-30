@@ -327,28 +327,24 @@ export async function withCandidateBoundBrowser({
       throw addOwnership(error);
     }
   } finally {
-    const socketDeadline = Date.now() + Math.min(socketCloseReserveMs, remainingMs());
+    const socketDeadline = Date.now() + socketCloseReserveMs;
     let socketReapError;
     if (socketHandle) {
       try {
-        const cancelTimeoutMs = Math.max(0, Math.min(remainingMs(), socketDeadline - Date.now()));
+        const cancelTimeoutMs = Math.max(0, socketDeadline - Date.now());
         const cancellation = socketHandle.cancel(cancelTimeoutMs);
         if (typeof cancellation?.then === 'function') {
           throw new Error(`${label} DevTools socket cancel must synchronously start owned cleanup`);
         }
-        await lifecycleBounded(
-          socketHandle.completion,
-          `${label} DevTools socket cleanup`, operationTimeoutMs, () => {},
-          () => Math.max(0, Math.min(remainingMs(), socketDeadline - Date.now())),
-        );
+        await socketHandle.completion;
       } catch (error) {
         socketReapError = addOwnership(error);
       }
     }
-    const childDeadline = Date.now() + Math.min(childReapReserveMs, remainingMs());
+    const childDeadline = Date.now() + childReapReserveMs;
     let childReapError;
     try {
-      await stopChild(child, () => Math.max(0, Math.min(remainingMs(), childDeadline - Date.now())), label);
+      await stopChild(child, () => Math.max(0, childDeadline - Date.now()), label);
     } catch (error) {
       childReapError = error;
       if (lease) {
@@ -358,24 +354,23 @@ export async function withCandidateBoundBrowser({
         error.childPid ||= child?.pid;
       }
     }
-    if (childReapError) throw childReapError;
-    if (socketReapError) throw socketReapError;
-    if (lease) {
+    if (!childReapError && !socketReapError && lease) {
       try {
-        await lifecycleBounded(
-          Promise.resolve().then(() => lease.cleanup()),
-          `${label} candidate browser cleanup`,
-          operationTimeoutMs,
-          () => {},
-          remainingMs,
-        );
+        if (typeof lease.cleanup !== 'function') {
+          throw new Error(`${label} candidate browser lease is missing its owned cleanup protocol`);
+        }
+        const cleanupDeadline = Date.now() + cleanupReserveMs;
+        const cleanupHandle = lease.cleanup({ deadline: cleanupDeadline });
+        if (!cleanupHandle || typeof cleanupHandle !== 'object' || typeof cleanupHandle.then === 'function'
+          || typeof cleanupHandle.completion?.then !== 'function') {
+          throw new Error(`${label} candidate browser cleanup must synchronously return an owned handle`);
+        }
+        await cleanupHandle.completion;
       } catch (error) {
-        error.retainedLeasePath ||= lease.leasePath || dirname(lease.executablePath);
-        error.leaseOwner ||= lease.leaseOwner || label;
-        error.workerPid ||= lease.workerPid;
-        error.childPid ||= child?.pid;
-        throw error;
+        throw addOwnership(error);
       }
     }
+    if (childReapError) throw childReapError;
+    if (socketReapError) throw socketReapError;
   }
 }

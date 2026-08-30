@@ -243,18 +243,60 @@ async function removeBrowserLease(root, {
       .catch((error) => { console.error(error.message); process.exitCode = 1; });
   `;
   const child = spawnCleanupWorker(process.execPath, ['-e', cleanupScript, root], { stdio: 'ignore' });
+  const ownedTerminal = ownProcessTerminal(child);
   const remainingMs = deadline === undefined
     ? cleanupWorkerTimeoutMs
     : Math.min(cleanupWorkerTimeoutMs, Math.max(0, deadline - Date.now()));
   const termBudgetMs = Math.max(0, Math.floor(remainingMs / 2));
-  const exited = await waitForProcessExit(child, termBudgetMs);
-  if (!exited) {
-    child.kill('SIGKILL');
+  const terminal = await waitForProcessTerminal(ownedTerminal, termBudgetMs);
+  if (terminal.error) {
+    if (!(Number.isSafeInteger(child.pid) && child.pid > 0)) {
+      terminal.error.retainedLeasePath = root;
+      terminal.error.leaseOwner = 'acquirePinnedRobotPreviewChromium';
+      throw terminal.error;
+    }
+    let killError;
+    try {
+      if (!child.kill('SIGKILL')) killError = new Error('Candidate browser cleanup worker SIGKILL was not delivered');
+    } catch (error) {
+      killError = error;
+    }
     const reapBudgetMs = deadline === undefined
       ? cleanupReapTimeoutMs
       : Math.min(cleanupReapTimeoutMs, Math.max(0, deadline - Date.now()));
-    if (!await waitForProcessExit(child, reapBudgetMs)) {
-      const error = new Error('Candidate browser cleanup worker could not be reaped after SIGKILL');
+    const reaped = await waitForProcessTerminal(ownedTerminal, reapBudgetMs, false);
+    if (!reaped.exited) {
+      const detail = killError?.message ? `: ${killError.message}` : '';
+      const error = new Error(`Candidate browser cleanup worker could not be reaped after runtime error${detail}`, {
+        cause: killError || terminal.error,
+      });
+      error.code = killError?.code || terminal.error.code;
+      error.cleanupWorkerPid = child.pid;
+      error.retainedLeasePath = root;
+      error.leaseOwner = 'acquirePinnedRobotPreviewChromium';
+      throw error;
+    }
+    terminal.error.retainedLeasePath = root;
+    terminal.error.leaseOwner = 'acquirePinnedRobotPreviewChromium';
+    throw terminal.error;
+  }
+  if (!terminal.exited) {
+    let killError;
+    try {
+      if (!child.kill('SIGKILL')) killError = new Error('Candidate browser cleanup worker SIGKILL was not delivered');
+    } catch (error) {
+      killError = error;
+    }
+    const reapBudgetMs = deadline === undefined
+      ? cleanupReapTimeoutMs
+      : Math.min(cleanupReapTimeoutMs, Math.max(0, deadline - Date.now()));
+    const reaped = await waitForProcessTerminal(ownedTerminal, reapBudgetMs, false);
+    if (!reaped.exited) {
+      const detail = killError?.message ? `: ${killError.message}` : '';
+      const error = new Error(`Candidate browser cleanup worker could not be reaped after SIGKILL${detail}`, {
+        cause: killError || ownedTerminal.error,
+      });
+      error.code = killError?.code || ownedTerminal.error?.code;
       error.cleanupWorkerPid = child.pid;
       error.retainedLeasePath = root;
       error.leaseOwner = 'acquirePinnedRobotPreviewChromium';
@@ -263,6 +305,46 @@ async function removeBrowserLease(root, {
     throw new Error('Candidate browser cleanup process timed out');
   }
   if (child.exitCode !== 0) throw new Error(`Candidate browser cleanup process exited ${child.exitCode}`);
+}
+
+function ownProcessTerminal(child) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return { completion: Promise.resolve({ exited: true }) };
+  }
+  const ownedTerminal = { completion: null, failure: null, error: null };
+  let resolveFailure;
+  ownedTerminal.failure = new Promise((resolve) => { resolveFailure = resolve; });
+  ownedTerminal.completion = new Promise((resolve) => {
+    const finish = (value) => {
+      child.off('exit', onExit);
+      child.off('error', onError);
+      resolve(value);
+    };
+    const onExit = () => finish({ exited: true });
+    const onError = (error) => {
+      if (ownedTerminal.error) return;
+      ownedTerminal.error = error;
+      resolveFailure({ exited: false, error });
+    };
+    child.once('exit', onExit);
+    child.on('error', onError);
+  });
+  return ownedTerminal;
+}
+
+async function waitForProcessTerminal(ownedTerminal, timeoutMs, observeFailure = true) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ exited: false }), timeoutMs);
+  });
+  try {
+    const terminalSignals = [ownedTerminal.completion];
+    if (observeFailure && ownedTerminal.failure) terminalSignals.push(ownedTerminal.failure);
+    terminalSignals.push(timeout);
+    return await Promise.race(terminalSignals);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function waitForProcessExit(child, timeoutMs) {
@@ -316,7 +398,9 @@ async function acquirePinnedRobotPreviewChromiumInProcess({
     if (cleanupPromise) return cleanupPromise;
     cleanupPromise = (async () => {
       let lastError;
+      let attemptsMade = 0;
       for (let attempt = 1; attempt <= cleanupRetryLimit; attempt += 1) {
+        attemptsMade = attempt;
         const cleanupController = new AbortController();
         const cleanupRemainingMs = deadline === undefined ? 10000 : Math.max(0, deadline - Date.now());
         const cleanupTimer = setTimeout(
@@ -337,7 +421,8 @@ async function acquirePinnedRobotPreviewChromiumInProcess({
           clearTimeout(cleanupTimer);
         }
       }
-      const cleanupError = new Error(`Candidate browser lease cleanup failed after ${cleanupRetryLimit} attempts`, { cause: lastError });
+      const attemptLabel = attemptsMade === 1 ? 'attempt' : 'attempts';
+      const cleanupError = new Error(`Candidate browser lease cleanup failed after ${attemptsMade} ${attemptLabel}`, { cause: lastError });
       cleanupError.retainedLeasePath = leaseRoot;
       cleanupError.leaseOwner = 'acquirePinnedRobotPreviewChromium';
       if (lastError?.cleanupWorkerPid !== undefined) cleanupError.cleanupWorkerPid = lastError.cleanupWorkerPid;
@@ -454,20 +539,26 @@ export function startPinnedRobotPreviewChromiumAcquisition({
   let workerSpawnFailed = false;
   let deadlineTimer;
 
-  const removeOwnedLease = async (workerPid) => {
+  const removeOwnedLease = async (workerPid, deadlineOverride = cleanupDeadline) => {
     let lastError;
+    let attemptsMade = 0;
     for (let attempt = 1; attempt <= cleanupRetryLimit; attempt += 1) {
+      attemptsMade = attempt;
       try {
         await removeLease(leaseRoot, {
-          deadline: cleanupDeadline, spawnCleanupWorker, cleanupWorkerTimeoutMs, cleanupReapTimeoutMs,
+          deadline: deadlineOverride, spawnCleanupWorker, cleanupWorkerTimeoutMs, cleanupReapTimeoutMs,
         });
         return;
       } catch (error) {
         lastError = error;
-        if (cleanupDeadline !== undefined && Date.now() >= cleanupDeadline) break;
+        if (error.cleanupWorkerPid !== undefined) break;
+        if (deadlineOverride !== undefined && Date.now() >= deadlineOverride) break;
       }
     }
-    const cleanupError = new Error(`Candidate browser lease cleanup failed after ${cleanupRetryLimit} attempts`, { cause: lastError });
+    const detail = lastError?.message ? `: ${lastError.message}` : '';
+    const attemptLabel = attemptsMade === 1 ? 'attempt' : 'attempts';
+    const cleanupError = new Error(`Candidate browser lease cleanup failed after ${attemptsMade} ${attemptLabel}${detail}`, { cause: lastError });
+    if (lastError?.code !== undefined) cleanupError.code = lastError.code;
     if (lastError?.cleanupWorkerPid !== undefined) {
       cleanupError.cleanupWorkerPid = lastError.cleanupWorkerPid;
     }
@@ -478,6 +569,7 @@ export function startPinnedRobotPreviewChromiumAcquisition({
       await removeOwnedLease(workerPid);
     } catch (cleanupError) {
       const error = new Error(`${sourceError.message}; ${cleanupError.message}`, { cause: cleanupError });
+      if (cleanupError.code !== undefined) error.code = cleanupError.code;
       if (cleanupError.cleanupWorkerPid !== undefined) error.cleanupWorkerPid = cleanupError.cleanupWorkerPid;
       throw acquisitionOwnership(error, leaseRoot, workerPid);
     }
@@ -556,7 +648,14 @@ export function startPinnedRobotPreviewChromiumAcquisition({
       if (!await terminateOwnedWorker(worker, cleanupDeadline, acquisitionWorkerReapTimeoutMs)) {
         throw acquisitionOwnership(new Error('Candidate browser acquisition worker could not be reaped after success'), leaseRoot, workerPid);
       }
-      const cleanup = async () => removeOwnedLease(workerPid);
+      const cleanup = (options) => {
+        const cleanupLeaseDeadline = options?.deadline;
+        const completion = removeOwnedLease(workerPid, cleanupLeaseDeadline ?? cleanupDeadline);
+        completion.catch(() => {});
+        // Keep the public acquisition helper Promise-compatible while the harness requests an owned handle.
+        if (options === undefined) return completion;
+        return { completion };
+      };
       return {
         executablePath: result.executablePath,
         leasePath: leaseRoot,

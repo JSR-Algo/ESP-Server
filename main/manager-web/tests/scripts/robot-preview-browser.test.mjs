@@ -76,6 +76,10 @@ async function fixture({ platform = 'darwin', arch = 'arm64', nestedDirectoryMod
   };
 }
 
+async function cleanupLease(lease) {
+  await lease.cleanup({}).completion;
+}
+
 test('stages candidate-bound bundle and cleans the private lease', async () => {
   const value = await fixture();
   try {
@@ -99,7 +103,7 @@ test('ignores hostile ambient cache paths and stages only the custom candidate r
     const lease = await acquirePinnedRobotPreviewChromium({ ...value, stagingParent: value.base });
     assert.equal(lease.executablePath.startsWith(join(value.base, 'tbot-robot-preview-browser-')), true);
     assert.equal(await readFile(lease.executablePath, 'utf8'), CONTENT);
-    await lease.cleanup();
+    await cleanupLease(lease);
   } finally {
     await rm(value.base, { recursive: true, force: true });
   }
@@ -119,7 +123,7 @@ test('atomic source replacement after staging cannot change executable lease', a
     });
     assert.equal(await readFile(lease.executablePath, 'utf8'), CONTENT);
     assert.equal(createHash('sha256').update(await readFile(lease.executablePath)).digest('hex'), SHA);
-    await lease.cleanup();
+    await cleanupLease(lease);
   } finally {
     await rm(value.base, { recursive: true, force: true });
   }
@@ -171,7 +175,7 @@ test('caller cleanup removes sealed lease after simulated spawn failure', async 
     } catch (error) {
       assert.match(error.message, /spawn failure/);
     } finally {
-      await lease.cleanup();
+      await cleanupLease(lease);
     }
     assert.equal((await readdir(value.base)).some((name) => name.startsWith('tbot-robot-preview-browser-')), false);
   } finally {
@@ -184,7 +188,7 @@ test('supports Playwright 1.60 linux-arm64 bundle layout', async () => {
   try {
     const lease = await acquirePinnedRobotPreviewChromium({ ...value, stagingParent: value.base });
     assert.equal(lease.executablePath.endsWith('/headless_shell'), true);
-    await lease.cleanup();
+    await cleanupLease(lease);
   } finally {
     await rm(value.base, { recursive: true, force: true });
   }
@@ -204,7 +208,7 @@ test('keeps staged directories owner-accessible until the bundle is sealed', asy
       }
     });
     assert.equal(await readFile(join(lease.executablePath, '../resources/locale.pak'), 'utf8'), 'locale\n');
-    await lease.cleanup();
+    await cleanupLease(lease);
   } finally {
     await chmod(join(value.root, 'resources'), 0o700).catch(() => {});
     await rm(value.base, { recursive: true, force: true });
@@ -296,18 +300,21 @@ test('abort during sealed-file verification hashing cleans before rejection', as
   }
 });
 
-function fakeCleanupWorker({ reapAfterKill }) {
+function fakeCleanupWorker({ reapAfterKill, spawnError, runtimeError, pid = 4242, killResult = true, killError }) {
   const child = new EventEmitter();
-  child.pid = 4242;
+  child.pid = pid;
   child.exitCode = null;
   child.signalCode = null;
   child.kill = (signal) => {
+    if (killError) throw Object.assign(new Error(killError), { code: killError });
     if (reapAfterKill) queueMicrotask(() => {
       child.signalCode = signal;
       child.emit('exit', null, signal);
     });
-    return true;
+    return killResult;
   };
+  if (spawnError) queueMicrotask(() => child.emit('error', Object.assign(new Error(spawnError), { code: spawnError })));
+  if (runtimeError) queueMicrotask(() => child.emit('error', Object.assign(new Error(runtimeError), { code: runtimeError })));
   return child;
 }
 
@@ -392,6 +399,62 @@ for (const code of ['EAGAIN', 'ENOENT']) {
         assert.equal(error.workerPid, null);
         return true;
       });
+    } finally {
+      await rm(value.base, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const code of ['EAGAIN', 'ENOENT']) {
+  test(`asynchronous cleanup worker spawn ${code} rejects without crashing and retains ownership`, async () => {
+    const value = await fixture();
+    value.environment.TBOT_ROBOT_PREVIEW_BROWSER_TREE_SHA256 = '0'.repeat(64);
+    try {
+      await assert.rejects(acquirePinnedRobotPreviewChromium({
+        ...value, stagingParent: value.base, deadline: Date.now() + 1000,
+        cleanupRetryLimit: 1,
+        spawnCleanupWorker: () => fakeCleanupWorker({ reapAfterKill: false, spawnError: code, pid: null }),
+      }), (error) => {
+        assert.match(error.message, new RegExp(code));
+        assert.equal(error.code, code);
+        assert.match(error.retainedLeasePath, /tbot-robot-preview-browser-/);
+        assert.equal(error.leaseOwner, 'acquirePinnedRobotPreviewChromium');
+        assert.equal(Number.isSafeInteger(error.workerPid), true);
+        assert.equal(error.cleanupWorkerPid, undefined);
+        return true;
+      });
+    } finally {
+      await rm(value.base, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const killMode of ['false', 'EPERM']) {
+  test(`live cleanup worker runtime error with kill ${killMode} remains explicitly owned without retry`, async () => {
+    const value = await fixture();
+    value.environment.TBOT_ROBOT_PREVIEW_BROWSER_TREE_SHA256 = '0'.repeat(64);
+    let spawnCalls = 0;
+    try {
+      await assert.rejects(acquirePinnedRobotPreviewChromium({
+        ...value, stagingParent: value.base, deadline: Date.now() + 1000,
+        cleanupRetryLimit: 3, cleanupWorkerTimeoutMs: 10, cleanupReapTimeoutMs: 10,
+        spawnCleanupWorker: () => {
+          spawnCalls += 1;
+          return fakeCleanupWorker({
+            reapAfterKill: false, runtimeError: 'cleanup worker runtime failure',
+            killResult: killMode !== 'false', killError: killMode === 'EPERM' ? 'EPERM' : undefined,
+          });
+        },
+      }), (error) => {
+        assert.match(error.message, /cleanup failed after 1 attempt:/);
+        assert.match(error.message, /runtime failure|EPERM|could not be reaped/i);
+        assert.match(error.retainedLeasePath, /tbot-robot-preview-browser-/);
+        assert.equal(error.leaseOwner, 'acquirePinnedRobotPreviewChromium');
+        assert.equal(Number.isSafeInteger(error.workerPid), true);
+        assert.equal(error.cleanupWorkerPid, 4242);
+        return true;
+      });
+      assert.equal(spawnCalls, 1);
     } finally {
       await rm(value.base, { recursive: true, force: true });
     }

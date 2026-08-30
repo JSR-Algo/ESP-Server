@@ -88,6 +88,19 @@ function ownedSocket(socket, cancel = () => socket.close()) {
   return { socket, completion, cancel };
 }
 
+function ownedCleanup(run) {
+  return (options = {}) => {
+    let completion;
+    try {
+      completion = Promise.resolve(run(options));
+    } catch (error) {
+      completion = Promise.reject(error);
+    }
+    completion.catch(() => {});
+    return { completion };
+  };
+}
+
 function controllableAcquisition() {
   let rejectCompletion;
   const completion = new Promise((_, reject) => { rejectCompletion = reject; });
@@ -106,7 +119,7 @@ function dependencies({ onCommand, spawnBrowser } = {}) {
       leasePath: '/candidate/staged',
       leaseOwner: 'test acquisition',
       workerPid: 4141,
-      cleanup: async () => { state.cleanupCalls += 1; },
+      cleanup: ownedCleanup(async () => { state.cleanupCalls += 1; }),
     }),
     spawnBrowser: spawnBrowser || ((executablePath) => {
       state.spawned.push(executablePath);
@@ -230,7 +243,7 @@ test('lease resolving during acquisition cancellation is cleaned exactly once be
         leasePath: '/candidate/late',
         leaseOwner: 'late acquisition',
         workerPid: 4141,
-        cleanup: async () => { deps.state.cleanupCalls += 1; },
+        cleanup: ownedCleanup(async () => { deps.state.cleanupCalls += 1; }),
       }));
     },
   });
@@ -325,20 +338,55 @@ test('stalled candidate browser cleanup rejects before the outer watchdog after 
   const deps = dependencies();
   deps.startBrowserAcquisition = () => ownedAcquisition({
     executablePath: '/candidate/staged/chrome-headless-shell',
-    cleanup: async () => {
+    cleanup: ownedCleanup(async ({ deadline }) => {
       deps.state.cleanupCalls += 1;
-      await new Promise(() => {});
-    },
+      await new Promise((_, reject) => setTimeout(
+        () => reject(new Error('owned cleanup could not finish before reserve deadline')),
+        Math.max(0, deadline - Date.now()),
+      ));
+    }),
   });
   await assert.rejects(outerWatchdog(withCandidateBoundBrowser({
     profileDir: '/tmp/profile',
     label: 'test gate',
     operationTimeoutMs: 25,
     ...deps,
-  }, async () => {})), /test gate lifecycle timed out after 25ms/);
+  }, async () => {})), (error) => {
+    assert.match(error.message, /owned cleanup could not finish before reserve deadline/);
+    assert.equal(error.retainedLeasePath, '/candidate/staged');
+    assert.equal(error.leaseOwner, 'test acquisition');
+    assert.equal(error.workerPid, 4141);
+    return true;
+  });
   assert.equal(deps.state.cleanupCalls, 1);
   assert.equal(deps.state.child.signalCode, 'SIGTERM');
   assert.equal(deps.state.socket.readyState, 3);
+});
+
+test('zero normal lifecycle budget still waits for lease cleanup terminal completion', async () => {
+  const { withCandidateBoundBrowser } = await importHarness();
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const deps = dependencies();
+    let cleanupFinished = false;
+    deps.startBrowserAcquisition = () => ownedAcquisition({
+      executablePath: '/candidate/staged/chrome-headless-shell',
+      leasePath: '/candidate/staged', leaseOwner: 'zero-budget test', workerPid: 4141,
+      cleanup: ownedCleanup(async () => {
+        deps.state.cleanupCalls += 1;
+        await new Promise((resolve) => queueMicrotask(resolve));
+        cleanupFinished = true;
+      }),
+    });
+    await assert.rejects(outerWatchdog(withCandidateBoundBrowser({
+      profileDir: '/tmp/profile', label: 'zero-budget cleanup gate', operationTimeoutMs: 25, ...deps,
+    }, async () => {
+      const end = Date.now() + 30;
+      while (Date.now() < end) { /* Exhaust the normal lifecycle budget deterministically. */ }
+      throw new Error('trigger zero-budget cleanup');
+    }), 100), /trigger zero-budget cleanup|lifecycle timed out/);
+    assert.equal(deps.state.cleanupCalls, 1, `cleanup start attempt ${attempt}`);
+    assert.equal(cleanupFinished, true, `cleanup terminal attempt ${attempt}`);
+  }
 });
 
 test('failed candidate cleanup is surfaced synchronously', async () => {
@@ -346,7 +394,7 @@ test('failed candidate cleanup is surfaced synchronously', async () => {
   const deps = dependencies();
   deps.startBrowserAcquisition = () => ownedAcquisition({
     executablePath: '/candidate/staged/chrome-headless-shell',
-    cleanup: async () => { deps.state.cleanupCalls += 1; throw new Error('cleanup failed'); },
+    cleanup: ownedCleanup(async () => { deps.state.cleanupCalls += 1; throw new Error('cleanup failed'); }),
   });
   await assert.rejects(withCandidateBoundBrowser({
     profileDir: '/tmp/profile', label: 'test gate', operationTimeoutMs: 100,
@@ -428,7 +476,7 @@ test('owned DevTools socket cancellation completes before child and lease cleanu
   deps.startBrowserAcquisition = () => ownedAcquisition({
     executablePath: '/candidate/staged/chrome-headless-shell',
     leasePath: '/candidate/staged', leaseOwner: 'test acquisition', workerPid: 4141,
-    cleanup: async () => { events.push('cleanup'); deps.state.cleanupCalls += 1; },
+    cleanup: ownedCleanup(async () => { events.push('cleanup'); deps.state.cleanupCalls += 1; }),
   });
   await withCandidateBoundBrowser({
     profileDir: '/tmp/visual-library-profile', label: 'Lesson visual library browser',
@@ -524,7 +572,10 @@ test('completed child and socket cleanup do not leave deadline timers keeping No
       label: 'timer test',
       startBrowserAcquisition: () => ({
         retainedLeasePath: '/candidate', leaseOwner: 'timer test', worker: { pid: 4141 }, workerPid: 4141,
-        completion: Promise.resolve({ executablePath: '/candidate/chrome', leasePath: '/candidate', leaseOwner: 'timer test', workerPid: 4141, cleanup: async () => {} }),
+        completion: Promise.resolve({
+          executablePath: '/candidate/chrome', leasePath: '/candidate', leaseOwner: 'timer test', workerPid: 4141,
+          cleanup: () => ({ completion: Promise.resolve() }),
+        }),
         cancel: (reason) => { throw reason; },
       }),
       spawnBrowser: () => child,
@@ -577,7 +628,7 @@ for (const mode of ['malformed-frame', 'handler-throw']) {
             completion: Promise.resolve({
               executablePath: '/candidate/message-failure/chrome', leasePath: '/candidate/message-failure',
               leaseOwner: 'message test', workerPid: 4141,
-              cleanup: async () => { state.cleanupCalls += 1; },
+              cleanup: () => ({ completion: Promise.resolve().then(() => { state.cleanupCalls += 1; }) }),
             }),
             cancel: () => {},
           }),
@@ -607,7 +658,10 @@ test('cumulative browser phases share one absolute lifecycle deadline', async ()
   const deps = dependencies();
   deps.startBrowserAcquisition = () => ownedAcquisition((async () => {
     await new Promise((resolve) => setTimeout(resolve, 7));
-    return { executablePath: '/candidate/staged/chrome-headless-shell', cleanup: async () => { deps.state.cleanupCalls += 1; } };
+    return {
+      executablePath: '/candidate/staged/chrome-headless-shell',
+      cleanup: ownedCleanup(async () => { deps.state.cleanupCalls += 1; }),
+    };
   })());
   deps.waitForDevToolsPort = async () => { await new Promise((resolve) => setTimeout(resolve, 7)); return '9222\n'; };
   deps.fetchDevToolsTarget = async () => { await new Promise((resolve) => setTimeout(resolve, 7)); return { webSocketDebuggerUrl: 'ws://candidate-bound' }; };
@@ -661,7 +715,7 @@ test('SIGKILL reap completes before candidate lease cleanup', async () => {
   } });
   deps.startBrowserAcquisition = () => ownedAcquisition({
     executablePath: '/candidate/staged/chrome-headless-shell',
-    cleanup: async () => { events.push('cleanup'); deps.state.cleanupCalls += 1; },
+    cleanup: ownedCleanup(async () => { events.push('cleanup'); deps.state.cleanupCalls += 1; }),
   });
   await assert.rejects(withCandidateBoundBrowser({
     profileDir: '/tmp/profile', label: 'reap gate', operationTimeoutMs: 100, ...deps,
@@ -703,7 +757,7 @@ test('silent socket shutdown cannot starve child reap or candidate cleanup', asy
   };
   deps.startBrowserAcquisition = () => ownedAcquisition({
     executablePath: '/candidate/staged/chrome-headless-shell',
-    cleanup: async () => { events.push('cleanup'); deps.state.cleanupCalls += 1; },
+    cleanup: ownedCleanup(async () => { events.push('cleanup'); deps.state.cleanupCalls += 1; }),
   });
   await withCandidateBoundBrowser({
     profileDir: '/tmp/profile', label: 'silent socket gate', operationTimeoutMs: 100, ...deps,
