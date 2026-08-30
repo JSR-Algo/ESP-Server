@@ -124,6 +124,21 @@ def _identity_args():
     ]
 
 
+def _connect_identity_args():
+    return [
+        "--candidate-git-sha",
+        "candidate-sha",
+        "--candidate-image-digest",
+        f"sha256:{'1' * 64}",
+        "--firmware-identity",
+        "firmware-1",
+        "--config-fingerprint",
+        "sha256:4f64b552410469f6442ab03ff90cc4428762fbd347042432055778e1417db9ff",
+        "--fixture-sha256",
+        "3" * 64,
+    ]
+
+
 class GoogleLiveSmokeScriptTest(unittest.TestCase):
     def test_build_env_config_uses_secret_placeholder(self):
         smoke = importlib.import_module("scripts.google_live_smoke")
@@ -248,6 +263,42 @@ class GoogleLiveSmokeScriptTest(unittest.TestCase):
         self.assertEqual(report["name"], "real_api")
         self.assertEqual(report["status"], "FAIL")
         self.assertEqual(report["error"]["apiKey"], "<redacted>")
+
+    def test_connect_only_report_fingerprints_exact_client_config_without_audio(self):
+        smoke = importlib.import_module("scripts.google_live_smoke")
+        reliability = importlib.import_module("scripts.google_live_reliability")
+        captured = {}
+
+        async def fake_run_smoke(config):
+            captured.update(config)
+
+        with TemporaryDirectory() as directory:
+            report_path = Path(directory) / "report.json"
+            missing_audio = Path(directory) / "not-used.wav"
+            with patch.dict("os.environ", {"GOOGLE_API_KEY": "key"}, clear=True), patch(
+                "sys.argv",
+                [
+                    "google_live_smoke.py",
+                    "--report",
+                    str(report_path),
+                    "--audio-file",
+                    str(missing_audio),
+                    *_connect_identity_args(),
+                ],
+            ), patch.object(smoke, "_run_smoke", fake_run_smoke):
+                self.assertEqual(smoke.main(), 0)
+            report = json.loads(report_path.read_text())
+
+        expected = reliability.build_candidate_identity(
+            "candidate-sha",
+            f"sha256:{'1' * 64}",
+            "firmware-1",
+            captured,
+            "3" * 64,
+        )
+        self.assertEqual(report["status"], "PASS")
+        self.assertEqual(report["candidateIdentity"], expected)
+        self.assertNotIn("input_sample_rate", captured)
 
     def test_missing_credentials_writes_blocking_skipped_report(self):
         smoke = importlib.import_module("scripts.google_live_smoke")

@@ -423,7 +423,7 @@ def _declared_candidate_identity(args):
 
 
 def _validate_candidate_identity(args, config, declared_identity, fixture_sha256):
-    if declared_identity["fixtureSha256"].lower() != fixture_sha256:
+    if declared_identity["fixtureSha256"].lower() != fixture_sha256.lower():
         raise ValueError("fixture SHA-256 does not match the audio file")
     try:
         effective_identity = build_candidate_identity(
@@ -489,11 +489,21 @@ def _run_report_mode(args):
     try:
         candidate_identity = _declared_candidate_identity(args)
         config = _load_cli_config(args)
-        candidate_identity, effective_config, chunks = _prepare_round_trip(
-            args,
-            config,
-            candidate_identity,
-        )
+        if args.round_trip:
+            candidate_identity, execution_config, chunks = _prepare_round_trip(
+                args,
+                config,
+                candidate_identity,
+            )
+        else:
+            candidate_identity = _validate_candidate_identity(
+                args,
+                config,
+                candidate_identity,
+                candidate_identity["fixtureSha256"],
+            )
+            execution_config = config
+            chunks = None
         if not _has_resolvable_api_key(config):
             result = _safe_failure(
                 _MissingCredentialError("Google Live API key is missing"),
@@ -502,13 +512,13 @@ def _run_report_mode(args):
         elif args.round_trip:
             result = asyncio.run(
                 _run_prepared_round_trip(
-                    effective_config,
+                    execution_config,
                     chunks,
                     args.event_timeout_sec,
                 )
             )
         else:
-            asyncio.run(_run_smoke(config))
+            asyncio.run(_run_smoke(execution_config))
             result = {"status": "PASS", "attempts": 1}
     except Exception as error:
         result = _safe_failure(error)
