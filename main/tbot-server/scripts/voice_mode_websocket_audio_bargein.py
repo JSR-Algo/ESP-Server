@@ -3,9 +3,9 @@ import argparse
 import asyncio
 import json
 import math
-from pathlib import Path
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 import websockets
@@ -14,9 +14,10 @@ SERVER_ROOT = Path(__file__).resolve().parents[1]
 if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
 
-from core.utils.opus_encoder_utils import OpusEncoderUtils
-from core.utils.util import audio_to_data_stream
-from scripts.voice_mode_websocket_soak import (
+from core.utils.opus_encoder_utils import OpusEncoderUtils  # noqa: E402
+from core.utils.util import audio_to_data_stream  # noqa: E402
+from scripts.google_live_reliability import GOOGLE_LIVE_LIMITS  # noqa: E402
+from scripts.voice_mode_websocket_soak import (  # noqa: E402
     _build_headers,
     _hello_message,
     _is_tts_state,
@@ -27,6 +28,7 @@ DEFAULT_TEXT = (
     "Hãy trả lời bằng tiếng Việt trong khoảng hai câu về kiểm thử ngắt ngang "
     "khi robot đang nói."
 )
+REPLACEMENT_RESPONSE_INCOMPLETE = "REPLACEMENT_RESPONSE_INCOMPLETE"
 
 
 def _detect_message(text):
@@ -69,7 +71,50 @@ def _opus_packets_from_audio_file(audio_file, sample_rate, frame_duration_ms):
     return packets
 
 
-async def run_smoke(args):
+async def _collect_replacement_response(websocket, *, timeout_sec, clock=time.monotonic):
+    deadline = clock() + timeout_sec
+    started = False
+    terminal_stopped = False
+    binary_times = []
+    while True:
+        remaining = deadline - clock()
+        if remaining <= 0:
+            break
+        try:
+            message = await asyncio.wait_for(
+                websocket.recv(),
+                timeout=max(0.01, remaining),
+            )
+        except asyncio.TimeoutError:
+            break
+        now = clock()
+        if isinstance(message, bytes):
+            if started:
+                binary_times.append(now)
+            continue
+        try:
+            payload = json.loads(message)
+        except json.JSONDecodeError:
+            continue
+        if _is_tts_state(payload, "start"):
+            started = True
+        elif started and _is_tts_state(payload, "stop"):
+            terminal_stopped = True
+            break
+
+    gaps = [
+        (right - left) * 1000
+        for left, right in zip(binary_times, binary_times[1:], strict=False)
+    ]
+    return {
+        "replacementResponseStarted": started,
+        "replacementResponseStopped": terminal_stopped,
+        "replacementBinaryChunks": len(binary_times),
+        "maxServerOutputGapMs": round(max(gaps, default=0.0), 1),
+    }
+
+
+async def run_smoke(args, *, clock=time.monotonic):
     headers = _build_headers(args)
     if getattr(args, "audio_file", ""):
         packets = _opus_packets_from_audio_file(
@@ -88,10 +133,18 @@ async def run_smoke(args):
         raise RuntimeError("no opus packets generated")
 
     summary = {
+        "status": "FAIL",
         "opus_packets": len(packets),
         "tts_starts": 0,
         "tts_stops": 0,
         "binary_chunks": 0,
+        "oldResponseStopped": False,
+        "replacementResponseStarted": False,
+        "replacementResponseStopped": False,
+        "replacementBinaryChunks": 0,
+        "maxServerOutputGapMs": 0.0,
+        "bargeinStopMs": None,
+        "correlationSource": "server_log",
     }
 
     async with websockets.connect(
@@ -125,6 +178,7 @@ async def run_smoke(args):
         summary["tts_starts"] += 1
 
         await asyncio.sleep(args.interrupt_delay_sec)
+        interrupt_sent_at = clock()
         for packet in packets:
             await websocket.send(packet)
             await asyncio.sleep(args.frame_duration_ms / 1000)
@@ -134,12 +188,47 @@ async def run_smoke(args):
             lambda payload: _is_tts_state(payload, "stop"),
             args.interrupt_timeout_sec,
         )
+        stop_observed_at = clock()
         summary["binary_chunks"] += binary_count
         if stop is None:
             raise RuntimeError("audio interrupt tts stop timeout")
         summary["tts_stops"] += 1
+        summary["oldResponseStopped"] = True
+        summary["bargeinStopMs"] = round(
+            (stop_observed_at - interrupt_sent_at) * 1000,
+            1,
+        )
 
-        await websocket.close()
+        replacement = await _collect_replacement_response(
+            websocket,
+            timeout_sec=args.event_timeout_sec,
+            clock=clock,
+        )
+        summary.update(replacement)
+        summary["binary_chunks"] += replacement["replacementBinaryChunks"]
+        if replacement["replacementResponseStarted"]:
+            summary["tts_starts"] += 1
+        if replacement["replacementResponseStopped"]:
+            summary["tts_stops"] += 1
+
+        if (
+            not replacement["replacementResponseStarted"]
+            or replacement["replacementBinaryChunks"] < 1
+            or not replacement["replacementResponseStopped"]
+        ):
+            summary["failureCode"] = REPLACEMENT_RESPONSE_INCOMPLETE
+            return summary
+        if summary["bargeinStopMs"] > GOOGLE_LIVE_LIMITS["physicalBargeinP95Ms"]:
+            summary["failureCode"] = "BARGEIN_STOP_LATENCY_EXCEEDED"
+            return summary
+        if (
+            replacement["maxServerOutputGapMs"]
+            > GOOGLE_LIVE_LIMITS["serverOutputGapMaxMs"]
+        ):
+            summary["failureCode"] = "SERVER_OUTPUT_GAP_EXCEEDED"
+            return summary
+
+        summary["status"] = "PASS"
     return summary
 
 
@@ -169,12 +258,21 @@ def main():
     except Exception as exc:
         print(f"AUDIO_BARGE_IN_FAIL {exc}", file=sys.stderr)
         return 1
+    if summary["status"] != "PASS":
+        print(
+            "AUDIO_BARGE_IN_FAIL "
+            f"failure_code={summary.get('failureCode', 'UNKNOWN')}",
+            file=sys.stderr,
+        )
+        return 1
     print(
         "AUDIO_BARGE_IN_OK "
         f"opus_packets={summary['opus_packets']} "
         f"tts_starts={summary['tts_starts']} "
         f"tts_stops={summary['tts_stops']} "
-        f"binary_chunks={summary['binary_chunks']}"
+        f"binary_chunks={summary['binary_chunks']} "
+        f"replacement_binary_chunks={summary['replacementBinaryChunks']} "
+        f"bargein_stop_ms={summary['bargeinStopMs']}"
     )
     return 0
 
