@@ -164,9 +164,9 @@ The transport command intentionally exits non-zero with `SKIPPED` and
 evidence can never be a standalone PASS. Only Task 5 correlation with the exact
 bounded server log can upgrade the composite WebSocket layer.
 
-Capture only this WebSocket journey into its own bounded log. Never append a
-physical or soak journey to this file: `analyze_reliability_window()` rejects a
-second start/end anchor as `DUPLICATE_WINDOW_START`/`DUPLICATE_WINDOW_END`.
+Capture only this WebSocket journey into its own raw log file. Never append a
+physical or soak journey: the correlation path selects the transport UTC window
+and rejects foreign or malformed scoped reliability markers inside it.
 
 Then correlate the exact WebSocket window:
 
@@ -185,20 +185,27 @@ PYTHONPATH=. python3 scripts/analyze_google_live_log.py \
   --correlate-transport "$EVIDENCE_ROOT/websocket-e2e/transport.json" \
   --expected-candidate-json "$EVIDENCE_ROOT/candidate.json" \
   --out-json "$EVIDENCE_ROOT/websocket-e2e/correlated.json"
-EVIDENCE_ROOT="$EVIDENCE_ROOT" PYTHONPATH=. python3 - <<'PY'
-import json, os
-from pathlib import Path
-from scripts.analyze_google_live_log import analyze_reliability_window
-root = Path(os.environ["EVIDENCE_ROOT"])
-report = analyze_reliability_window(root / "websocket-e2e/timeline.log")
-(root / "websocket-e2e/log-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-raise SystemExit(0 if report.get("status") == "PASS" else 1)
-PY
 ```
 
-The analyzer requires the exact journey, connection, peer hash, Live connection
-transition ledger, candidate identity, and UTC window. Foreign or unscoped log
-markers cannot satisfy the journey.
+This correlation command is the only currently supported path for the raw
+WebSocket capture. It uses the transport report's UTC `logWindow`, selects those
+server lines, synthesizes the required start/end anchors in a temporary file,
+validates that temporary bounded window, and emits the composite
+`correlated.json`. The temporary standalone log verdict is not persisted or
+exposed by the CLI.
+
+Do not call `analyze_reliability_window()` directly on `timeline.log`: normal
+server output does not contain `reliability_window_start` and
+`reliability_window_end`, so the raw file is not a standalone Task 5 report.
+Until a checked-in producer exposes the validated bounded verdict,
+`websocket-e2e/log-report.json` and the release wrapper that requires its
+`logEvidence` field are unavailable. A passing `correlated.json` proves the
+supported WebSocket correlation path, but it does not by itself satisfy the
+six-layer release aggregator.
+
+The analyzer still requires the exact journey, connection, peer hash, Live
+connection transition ledger, candidate identity, and UTC window. Foreign or
+unscoped log markers cannot satisfy the journey.
 
 ## 5. Historical compatibility matrix
 

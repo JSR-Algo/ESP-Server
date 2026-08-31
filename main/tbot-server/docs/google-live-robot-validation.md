@@ -7,34 +7,44 @@ flash, reset, or control a robot automatically.
 Use the exact `RUN_ID`, `EVIDENCE_ROOT`, candidate identity, configuration
 fingerprint, and fixture checksum exported by the smoke runbook.
 
-Production release is currently blocked by the two software gaps documented in
-Sections 5 and 6. The preflight and physical sequence remain useful for
-diagnosis, but they are not a complete release gate until both gaps are fixed.
+Production release is currently blocked by four software gaps documented below:
+there is no standalone bounded log-report producer, production firmware does
+not establish a candidate-bound physical journey scope, there is no operator
+producer for the 33-execution soak manifest, and metadata-only transcript logs
+cannot provide the physical expected-match proof. The preflight and physical
+sequence remain useful for diagnosis, but they are not a complete release gate
+until all four gaps are fixed.
 
-## 1. Evidence layout and privacy
+## 1. Target evidence layout and privacy
 
 `RUN_ID` must be UTC, for example `20260830T140500Z`:
+
+This is the required post-remediation release layout, not a claim that every
+artifact can be produced today.
 
 ```text
 task-artifacts/google-live/$RUN_ID/
   deterministic/report.json
-  server-regression/report.json
+  server-regression/report.json       # unavailable until producer remediation
   real-api/report.json
-  websocket-e2e/report.json
-  physical/report.json
-  candidate-soak/report.json
+  websocket-e2e/report.json           # unavailable until producer remediation
+  physical/report.json                # unavailable until producer remediation
+  candidate-soak/report.json          # unavailable until producer remediation
   timeline.log
   commands.txt
   checksums.sha256
   release-verdict.json
 ```
 
-Additional bounded intermediates include
-`websocket-e2e/timeline.log`, `websocket-e2e/log-report.json`,
-`physical/timeline.log`, `physical/audit.json`, `pytest.xml`, and operator notes.
-Each analyzer input contains exactly one reliability start/end anchor. The
-top-level `timeline.log` is a privacy-safe index of the separate window paths,
-window IDs, and UTC bounds; it is never a concatenation of raw journey logs.
+Currently capturable intermediates include `websocket-e2e/timeline.log`,
+`websocket-e2e/transport.json`, `websocket-e2e/correlated.json`,
+`physical/timeline.log`, `pytest.xml`, and operator notes. The standalone
+`websocket-e2e/log-report.json`, physical candidate audit, soak report, and
+release reports remain unavailable until the documented producers exist. After
+remediation, each analyzer input must contain exactly one reliability start/end
+anchor. The top-level `timeline.log` must be a privacy-safe index of the
+separate window paths, window IDs, and UTC bounds; it must never concatenate raw
+journey logs.
 `commands.txt` records commands with `$GOOGLE_API_KEY`, `$OTA_TOKEN`, device IDs,
 and protected paths left as redacted variable names, never expanded values.
 
@@ -74,9 +84,16 @@ wait "$PHYSICAL_LOG_PID" 2>/dev/null || true
 date -u +%Y-%m-%dT%H:%M:%SZ | tee "$EVIDENCE_ROOT/physical/server-end-utc.txt"
 ```
 
-The physical file must contain exactly one journey-generated reliability start
-and one matching end anchor. Do not merge it with the WebSocket file or any of
-the 33 candidate-soak execution windows.
+This physical file is currently diagnostic only. Production firmware does not
+send the optional `evidence_journey_id` in its hello message, so the server does
+not establish `google_live_evidence_journey_id` or emit candidate-bound scoped
+reliability markers. Separately, normal raw server logs do not emit the
+reliability-window start/end anchors required by the standalone analyzers. Do
+not insert scope or anchors manually or reuse the synthetic WebSocket hello:
+none would prove the production firmware journey. After a production producer
+is implemented, the physical analyzer input must contain exactly one produced
+start anchor and one matching end anchor. Never merge it with the WebSocket
+file or any candidate-soak execution window.
 
 ## 3. Physical Vietnamese journey
 
@@ -101,47 +118,28 @@ Record only verdicts, timings, response/session IDs already safe for logs, and
 operator timestamps. Do not transcribe the child's or operator's speech into
 the evidence bundle.
 
-## 4. Separate lifecycle reports and WebSocket composite
+## 4. Supported WebSocket correlation and unavailable lifecycle reports
 
-Create the release `server_regression` layer from the single physical window.
-This is also the exact upstream lifecycle report embedded by the physical layer:
+The command in `google-live-smoke.md` can currently produce and validate
+`websocket-e2e/correlated.json`. It selects the raw server lines using the
+transport report's UTC window, adds anchors only in a temporary file, and
+correlates that temporary log verdict with the exact transport evidence.
 
-```bash
-EVIDENCE_ROOT="$EVIDENCE_ROOT" PYTHONPATH=. python3 - <<'PY'
-import json, os
-from pathlib import Path
-from scripts.analyze_google_live_log import analyze_reliability_window
+It does not persist the temporary verdict as
+`websocket-e2e/log-report.json`. Directly running
+`analyze_reliability_window()` on either raw timeline is unsupported because
+normal server logs lack the required start/end anchors. Consequently:
 
-root = Path(os.environ["EVIDENCE_ROOT"])
-report = analyze_reliability_window(root / "physical/timeline.log")
-(root / "server-regression/report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-raise SystemExit(0 if report.get("status") == "PASS" else 1)
-PY
-```
+- `server-regression/report.json` cannot currently be produced from
+  `physical/timeline.log`;
+- `websocket-e2e/report.json` cannot currently be built with the separate
+  `logEvidence` object required by `google_live_release_gate.py`;
+- the passing correlated WebSocket artifact is diagnostic evidence, not a
+  substitute for either missing release report.
 
-The standalone WebSocket transport remains `SKIPPED/PENDING`. Its composite uses
-the separate `websocket-e2e/log-report.json`, never the physical lifecycle file:
-
-```bash
-EVIDENCE_ROOT="$EVIDENCE_ROOT" python3 - <<'PY'
-import json, os
-from pathlib import Path
-
-root = Path(os.environ["EVIDENCE_ROOT"])
-transport = json.loads((root / "websocket-e2e/transport.json").read_text())
-log_evidence = json.loads((root / "websocket-e2e/log-report.json").read_text())
-correlated = json.loads((root / "websocket-e2e/correlated.json").read_text())
-ok = correlated.get("status") == "PASS" and correlated.get("aggregateReleaseEligible") is True
-report = {
-    "schemaVersion": "google-live-reliability.v1", "name": "websocket_e2e",
-    "status": "PASS" if ok else "FAIL", "candidateIdentity": transport.get("candidateIdentity"),
-    "transportEvidence": transport, "logEvidence": log_evidence,
-    "correlatedEvidence": correlated,
-    "failures": [] if ok else [{"code": "WEBSOCKET_CORRELATION_FAILED"}],
-}
-(root / "websocket-e2e/report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-PY
-```
+A checked-in producer must expose the validated standalone bounded verdict
+without fabricating anchors or accepting foreign log lines. The physical path
+also requires the production firmware journey scope described in Section 2.
 
 ## 5. Production-candidate soak: current release blocker
 
@@ -167,9 +165,12 @@ A valid producer must record, rather than synthesize:
 Until a checked-in operator producer emits that contract, the candidate-soak
 layer is `SKIPPED`/missing and production release is blocked. Do not hand-author,
 copy from tests, or transform logs into a manifest. The replay command is a
-validator, not evidence that the 30-minute workload ran.
+validator, not evidence that the 30-minute workload ran. It also consumes the
+currently unavailable standalone WebSocket log report, so both producers must
+exist before this future command is runnable.
 
-After the producer exists, validate its output with the current replay CLI:
+After both the journey-manifest and standalone log-report producers exist,
+validate the manifest with the current replay CLI:
 
 ```bash
 python3 scripts/google_live_robot_soak.py \
@@ -190,9 +191,18 @@ python3 scripts/google_live_robot_soak.py \
   --report "$EVIDENCE_ROOT/candidate-soak/report.json"
 ```
 
-## 6. Physical production-candidate audit: current release blocker
+## 6. Physical production-candidate audit: two current release blockers
 
-The physical CLI currently requires the production report to contain exactly
+The first blocker is candidate scope. Production firmware does not send
+`evidence_journey_id`, so the physical connection lacks the journey-bound scope
+and start/end anchors required to tie its log evidence to the exact candidate.
+Test fixtures that construct marker lines or synthetic WebSocket clients that
+send the field are not production evidence. A production-safe firmware/runtime
+producer must create this scope before `server-regression/report.json` or a
+candidate physical audit can be generated.
+
+The second blocker is transcript-match proof. The physical CLI currently
+requires the production report to contain exactly
 10 `expected_user_transcripts`, 10 expected matches, and 10 post-interrupt
 expected matches. `--expected-user-transcript` is repeatable and each occurrence
 adds one expected phrase. However, production Google Live logs intentionally
@@ -206,9 +216,10 @@ fabricating legacy lines, or copying phrases into retained artifacts is
 forbidden. A future privacy-safe producer must emit candidate-bound match/count
 proof without raw speech, and the audit must validate that proof.
 
-Until that remediation and the candidate-soak producer exist, do not claim the
-following production profile is runnable or release-eligible. The interface
-below is retained only to show the remaining validator inputs after remediation:
+Until both physical remediations, the standalone log-report producer, and the
+candidate-soak producer exist, do not claim the following production profile is
+runnable or release-eligible. The interface below is retained only to show the
+remaining validator inputs after remediation:
 
 ```bash
 python3 scripts/physical_smoke_audit.py "$EVIDENCE_ROOT/physical/timeline.log" \
@@ -244,8 +255,9 @@ then weaken its failure. The expected phrases may be runtime-only inputs after a
 privacy-safe proof path exists; they must still be redacted from `commands.txt`
 and absent from retained reports.
 
-Only after the privacy-safe producer exists and the raw audit genuinely passes,
-wrap it with the exact upstream evidence required by the release gate:
+Only after all required producers exist and the raw audit genuinely passes,
+wrap it with the exact upstream evidence required by the release gate. This is
+a future, non-runnable interface while any blocker remains:
 
 ```bash
 EVIDENCE_ROOT="$EVIDENCE_ROOT" python3 - <<'PY'
@@ -279,9 +291,10 @@ All six layers are mandatory and must be `PASS` for the exact same candidate.
 No layer may be missing, `SKIPPED`, or `PENDING`. In particular, the WebSocket
 layer passes only as the Task 4 + Task 5 correlated composite.
 
-After the two blockers above are implemented and all reports exist, create the
-top-level timeline as an index of bounded windows. This file contains references
-and UTC metadata only; no raw log lines are concatenated:
+After all four blockers are implemented and all reports exist, create the
+top-level timeline as an index of bounded windows. The following commands in
+this section are future release steps and are not currently runnable. The index
+contains references and UTC metadata only; no raw log lines are concatenated:
 
 ```bash
 EVIDENCE_ROOT="$EVIDENCE_ROOT" python3 - <<'PY'
@@ -361,6 +374,8 @@ reports no failures, and every checksum is verified.
 | Deterministic or historical contract | `deterministic/pytest.xml` and compatibility matrix | Stop; fix code/tests before any physical rerun |
 | Real API auth/quota/config | `real-api/report.json` classified failure | Fix credential/service/config; do not retry as transport recovery |
 | Raw WebSocket `SKIPPED/PENDING` | `websocket-e2e/transport.json` and Task 5 correlation | Expected until exact bounded correlation; never waive it |
+| Standalone bounded log report unavailable | Raw timelines lack persisted start/end anchors; correlation keeps its synthesized verdict temporary | Software release blocker; expose the validated bounded verdict through a checked-in producer, never hand-insert anchors |
+| Physical candidate scope unavailable | Production firmware hello omits `evidence_journey_id` | Software release blocker; add a production-safe journey scope and anchor producer, never substitute the synthetic WebSocket client |
 | Lifecycle/replay/ownership failure | The layer report and its matching single-window log | Stop; preserve that window; never concatenate another anchored journey |
 | Physical latency/self-interrupt/stale audio | `physical/audit.json` plus operator timestamps | Check LAN/AEC/firmware posture, then reproduce on the same candidate |
 | Physical expected-match proof unavailable | Metadata-only transcript logs and repeated flag semantics | Software release blocker; implement privacy-safe proof, never enable/store raw transcripts |
