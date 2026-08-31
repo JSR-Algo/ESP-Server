@@ -146,6 +146,34 @@ async def test_handler_auth_validation_safe_get_and_cancel(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("method", "device", "journey"),
+    [
+        ("handle_get", " AA:BB ", "physical.run-1"),
+        ("handle_get", "AA:BB", " physical.run-1 "),
+        ("handle_delete", "AA/BB", "physical.run-1"),
+        ("handle_delete", "AA:BB", "physical/run-1"),
+    ],
+)
+async def test_handler_rejects_unsafe_path_ids_without_reading_or_cancelling(
+    monkeypatch, method, device, journey
+):
+    monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint-secret")
+    registry = EvidenceEnrollmentRegistry()
+    _register(registry)
+    handler = GoogleLiveEvidenceHandler(registry)
+
+    response = await getattr(handler, method)(Request(device=device, journey=journey))
+
+    assert response.status == 400
+    assert json.loads(response.text) == {
+        "error": "INVALID_REQUEST",
+        "message": "Invalid Google Live evidence path identity",
+    }
+    assert registry.ota_journey("aa:bb", "robot-client") == "physical.run-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "change",
     [
         {"ttlSec": 29},

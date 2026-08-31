@@ -62,12 +62,15 @@ class GoogleLiveEvidenceHandler:
         auth_error = self._authorize(request)
         if auth_error is not None:
             return auth_error
-        journey_id = request.match_info.get("journeyId", "")
+        try:
+            device_id, journey_id = self._path_ids(request)
+        except ValueError:
+            return self._invalid_path()
         try:
             snapshot = self.registry.safe_snapshot(journey_id)
         except EnrollmentError:
             return self._error(404, "JOURNEY_NOT_FOUND", "Evidence journey not found")
-        if not self._device_matches(request.match_info.get("deviceId", ""), journey_id):
+        if not self._device_matches(device_id, journey_id):
             return self._error(404, "JOURNEY_NOT_FOUND", "Evidence journey not found")
         return web.json_response(snapshot, headers={"Cache-Control": "no-store"})
 
@@ -75,8 +78,11 @@ class GoogleLiveEvidenceHandler:
         auth_error = self._authorize(request)
         if auth_error is not None:
             return auth_error
-        journey_id = request.match_info.get("journeyId", "")
-        if not self._device_matches(request.match_info.get("deviceId", ""), journey_id):
+        try:
+            device_id, journey_id = self._path_ids(request)
+        except ValueError:
+            return self._invalid_path()
+        if not self._device_matches(device_id, journey_id):
             return self._error(404, "JOURNEY_NOT_FOUND", "Evidence journey not found")
         try:
             snapshot = self.registry.finalize(
@@ -92,6 +98,15 @@ class GoogleLiveEvidenceHandler:
 
     def _device_matches(self, device_id: str, journey_id: str) -> bool:
         return self.registry.device_matches(device_id=device_id, journey_id=journey_id)
+
+    def _path_ids(self, request: web.Request) -> tuple[str, str]:
+        return (
+            self._safe_id(request.match_info.get("deviceId", "")),
+            self._safe_id(request.match_info.get("journeyId", "")),
+        )
+
+    def _invalid_path(self) -> web.Response:
+        return self._error(400, "INVALID_REQUEST", "Invalid Google Live evidence path identity")
 
     def _parse_body(self, route_device_id: str, body) -> dict:
         if not isinstance(body, dict) or set(body) != _POST_FIELDS:

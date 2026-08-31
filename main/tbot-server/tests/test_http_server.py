@@ -923,14 +923,23 @@ def test_build_servers_disabled_preserves_legacy_constructor_shape(monkeypatch):
     captures = {}
 
     class WS:
-        def __init__(self, config, *, lesson_sd_online_index=None):
+        def __init__(self, config, *, lesson_sd_online_index=None, evidence_registry=None):
             self.lesson_connections = {}
             captures["ws_index"] = lesson_sd_online_index
+            captures["ws_evidence_registry"] = evidence_registry
 
     class HTTP:
-        def __init__(self, config, connections, *, lesson_sd_online_index=None):
+        def __init__(
+            self,
+            config,
+            connections,
+            *,
+            lesson_sd_online_index=None,
+            evidence_registry=None,
+        ):
             captures["http_index"] = lesson_sd_online_index
             captures["connections"] = connections
+            captures["http_evidence_registry"] = evidence_registry
 
     ws, http = app._build_servers(
         {"server": {"api_url": "http://backend.test"}},
@@ -941,6 +950,23 @@ def test_build_servers_disabled_preserves_legacy_constructor_shape(monkeypatch):
     assert ws is not None and http is not None
     assert captures["ws_index"] is captures["http_index"]
     assert captures["connections"] is ws.lesson_connections
+    assert captures["ws_evidence_registry"] is captures["http_evidence_registry"]
+
+def test_build_servers_rejects_factory_that_cannot_receive_evidence_registry(monkeypatch):
+    import app
+
+    monkeypatch.delenv("LESSON_GENERATION_CMS_URL", raising=False)
+
+    class WS:
+        def __init__(self, config, *, lesson_sd_online_index=None):
+            self.lesson_connections = {}
+
+    with pytest.raises(RuntimeError, match="evidence_registry"):
+        app._build_servers(
+            {"server": {"api_url": "http://backend.test"}},
+            websocket_server_factory=WS,
+            http_server_factory=lambda *_args, **_kwargs: object(),
+        )
 
 
 @pytest.mark.asyncio
@@ -1044,6 +1070,29 @@ async def test_build_servers_enabled_shares_global_stack_and_adapts_positional_f
         [{"cacheKey": "lesson/v1-checksum"}],
     )
     assert captures["ws_evidence_registry"] is captures["http_evidence_registry"]
+
+    class WSWithoutEvidenceRegistry:
+        def __init__(
+            self,
+            config,
+            *,
+            lesson_sd_online_index=None,
+            global_generation_sessions=None,
+        ):
+            self.lesson_connections = {}
+
+    with pytest.raises(RuntimeError, match="evidence_registry"):
+        await app._build_servers_async(
+            config,
+            websocket_server_factory=WSWithoutEvidenceRegistry,
+            http_server_factory=HTTP,
+            redis_factory=lambda _url, **_kwargs: redis,
+            store_factory=Store,
+            sessions_factory=Sessions,
+            sync_factory=Sync,
+            poller_factory=Poller,
+            status_factory=Status,
+        )
 
 
 @pytest.mark.asyncio

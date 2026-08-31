@@ -115,12 +115,27 @@ def _generation_enabled(config) -> bool:
     )
 
 
-def _accepts_keyword(factory, keyword: str) -> bool:
-    parameters = inspect.signature(factory).parameters.values()
-    return any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == keyword
+def _call_evidence_factory(factory, *args, evidence_registry, **kwargs):
+    try:
+        parameters = inspect.signature(factory).parameters.values()
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"{factory!r} must expose an evidence_registry constructor argument"
+        ) from exc
+    accepts_registry = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        or (
+            parameter.name == "evidence_registry"
+            and parameter.kind
+            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        )
         for parameter in parameters
     )
+    if not accepts_registry:
+        raise RuntimeError(
+            f"{factory!r} must accept evidence_registry to preserve shared evidence state"
+        )
+    return factory(*args, evidence_registry=evidence_registry, **kwargs)
 
 
 def _build_servers(
@@ -141,14 +156,19 @@ def _build_servers(
     evidence_registry = EvidenceEnrollmentRegistry()
     if _generation_enabled(config):
         raise RuntimeError("enabled generation servers require _build_servers_async")
-    ws_kwargs = {"lesson_sd_online_index": lesson_sd_online_index}
-    if _accepts_keyword(websocket_server_factory, "evidence_registry"):
-        ws_kwargs["evidence_registry"] = evidence_registry
-    ws_server = websocket_server_factory(config, **ws_kwargs)
-    http_kwargs = {"lesson_sd_online_index": lesson_sd_online_index}
-    if _accepts_keyword(http_server_factory, "evidence_registry"):
-        http_kwargs["evidence_registry"] = evidence_registry
-    ota_server = http_server_factory(config, ws_server.lesson_connections, **http_kwargs)
+    ws_server = _call_evidence_factory(
+        websocket_server_factory,
+        config,
+        lesson_sd_online_index=lesson_sd_online_index,
+        evidence_registry=evidence_registry,
+    )
+    ota_server = _call_evidence_factory(
+        http_server_factory,
+        config,
+        ws_server.lesson_connections,
+        lesson_sd_online_index=lesson_sd_online_index,
+        evidence_registry=evidence_registry,
+    )
     return ws_server, ota_server
 
 
@@ -217,9 +237,12 @@ async def _build_servers_async(
             "lesson_sd_online_index": lesson_sd_online_index,
             "global_generation_sessions": sessions,
         }
-        if _accepts_keyword(websocket_server_factory, "evidence_registry"):
-            ws_kwargs["evidence_registry"] = evidence_registry
-        ws_server = websocket_server_factory(config, **ws_kwargs)
+        ws_server = _call_evidence_factory(
+            websocket_server_factory,
+            config,
+            evidence_registry=evidence_registry,
+            **ws_kwargs,
+        )
         http_kwargs = {
             "lesson_sd_online_index": lesson_sd_online_index,
             "generation_poller": poller,
@@ -227,9 +250,13 @@ async def _build_servers_async(
             "generation_redis": redis,
             "owns_generation_redis": True,
         }
-        if _accepts_keyword(http_server_factory, "evidence_registry"):
-            http_kwargs["evidence_registry"] = evidence_registry
-        ota_server = http_server_factory(config, ws_server.lesson_connections, **http_kwargs)
+        ota_server = _call_evidence_factory(
+            http_server_factory,
+            config,
+            ws_server.lesson_connections,
+            evidence_registry=evidence_registry,
+            **http_kwargs,
+        )
         return ws_server, ota_server
     except BaseException:
         if poller is not None:
