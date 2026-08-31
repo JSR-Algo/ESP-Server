@@ -3330,7 +3330,12 @@ def test_child_environment_is_sanitized_and_path_shadow_is_ignored(
     assert result["verdict"] == "PASS"
 
 
-def test_runtime_gate_must_be_the_candidate_admin_checkout(candidate_file: Path) -> None:
+def test_runtime_gate_must_be_the_candidate_admin_checkout(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+
     result = gate.run_gate(candidate_file, "quick")
 
     assert result["verdict"] == "BLOCKED"
@@ -3670,6 +3675,7 @@ def test_full_esp_lane_discovers_every_committed_software_course_mode_suite() ->
         "tests/test_course_mode_e2e_journeys.py",
         "tests/test_course_mode_evidence_audit.py",
         "tests/test_course_mode_forwarder.py",
+        "tests/test_course_mode_operator_attestation.py",
         "tests/test_course_mode_physical_tft_compose.py",
         "tests/test_course_mode_physical_tft_ledger_validate.py",
         "tests/test_course_mode_physical_tft_preflight.py",
@@ -4160,6 +4166,8 @@ def test_physical_preflight_rejects_dirty_cross_repository_authority_before_comm
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     _commit_then_dirty(candidate, repository_name, "runtime-dependency.txt")
     candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
     marker = tmp_path / "must-not-run"
     monkeypatch.setattr(
         gate, "_command_for_lane",
@@ -4189,6 +4197,8 @@ def test_physical_preflight_rejects_dirty_admin_paths_outside_unselected_tests(
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     _commit_then_dirty(candidate, "adminEsp", relative)
     candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
     marker = tmp_path / "must-not-run"
     monkeypatch.setattr(
         gate, "_command_for_lane",
@@ -4630,8 +4640,12 @@ def test_live_db_adds_to_full_and_physical_mode_is_read_only_preflight() -> None
     assert all("build" not in token.lower() for token in physical[0].command)
 
 
-def test_physical_preflight_requires_candidate_bound_signed_evidence(candidate_file: Path) -> None:
+def test_physical_preflight_requires_candidate_bound_signed_evidence(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
 
     assert gate.physical_preflight_command(candidate) is None
 
