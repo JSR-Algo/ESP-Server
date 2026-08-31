@@ -3931,6 +3931,36 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
 
     def _candidate_audit_options(self):
         identity = self._candidate_identity()
+        stage_names = [
+            name
+            for name, count in (
+                ("conversation", 17),
+                ("bargein", 10),
+                ("quiet", 2),
+                ("reopen", 1),
+                ("reconnect", 1),
+                ("lesson", 1),
+                ("conversation_after_lesson", 1),
+            )
+            for _ in range(count)
+        ]
+        cursor = datetime(2026, 8, 31, 11, 0, tzinfo=timezone.utc)
+        evidence_executions = []
+        for sequence, stage in enumerate(stage_names, start=1):
+            end = cursor + timedelta(seconds=40 if sequence == len(stage_names) else 55)
+            evidence_executions.append(
+                {
+                    "sequence": sequence,
+                    "stage": stage,
+                    "status": "PASS",
+                    "logWindow": {
+                        "windowId": f"window-{sequence}",
+                        "start": cursor.isoformat(),
+                        "end": end.isoformat(),
+                    },
+                }
+            )
+            cursor = end + timedelta(seconds=0.3125)
         reliability_report = {
             "schemaVersion": "google-live-reliability.v1",
             "name": "google_live_log_reliability",
@@ -3995,11 +4025,34 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
                     ("conversation_after_lesson", 1),
                 )
             ],
-            "cleanupVerdict": {"status": "PASS"},
+            "cleanupVerdict": {
+                "status": "PASS",
+                "websocketClosed": True,
+                "pendingOwnedTasks": 0,
+                "actualPendingCleanupTasks": 0,
+                "activeSessions": 0,
+                "activeReceiveLoops": 0,
+                "providerFinalizeStatus": "PASS",
+                "providerCloseStatus": "PASS",
+                "logStatus": "PASS",
+                "resourceEndSampleAccounted": True,
+            },
             "durationSec": 1800.0,
+            "runtimeElapsedSec": 1800.0,
+            "recordedRuntimeElapsedSec": None,
+            "evidenceGapBudgetSec": 10.0,
+            "evidenceAnchors": {
+                "serverStartUtc": "2026-08-31T11:00:00+00:00",
+                "serverEndUtc": "2026-08-31T11:30:10+00:00",
+            },
+            "evidenceExecutions": evidence_executions,
+            "quietPadding": [],
             "totals": {
                 "successfulTurns": 30,
                 "bargeins": 10,
+                "latestIntentSuccesses": 10,
+                "falseInterrupts": 0,
+                "unexpectedFallbacks": 0,
                 "latestIntentSuccessRate": 1.0,
             },
             "latencyMetrics": {
@@ -4009,11 +4062,70 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
                 "reconnectRecoveryP95Ms": 900.0,
             },
             "serverOutputGapP95Ms": 100.0,
-            "latencyComparison": {"pass": True},
-            "resourceVerdict": {"status": "PASS"},
+            "latencyComparison": {
+                "checks": {
+                    "firstAudioP50Regression": True,
+                    "firstAudioP95Regression": True,
+                    "bargeinP95Regression": True,
+                    "reconnectRecoveryP95Regression": True,
+                },
+                "regressionPct": {
+                    "firstAudioP50Ms": 0.0,
+                    "firstAudioP95Ms": 0.0,
+                    "bargeinP95Ms": 0.0,
+                    "reconnectRecoveryP95Ms": 0.0,
+                },
+                "pass": True,
+            },
+            "resourceVerdict": {
+                "status": "PASS",
+                "checks": {
+                    "rssDeltaBounded": True,
+                    "fdDeltaBounded": True,
+                    "taskDeltaBounded": True,
+                    "threadDeltaBounded": True,
+                    "rssSlopeBounded": True,
+                    "fdSlopeBounded": True,
+                    "taskSlopeBounded": True,
+                    "threadSlopeBounded": True,
+                },
+                "failures": [],
+                "deltas": {
+                    "rssBytes": 0,
+                    "fdCount": 0,
+                    "asyncioTaskCount": 0,
+                    "threadCount": 0,
+                },
+                "slopes": {
+                    "rssBytesPerSample": 0.0,
+                    "fdCountPerSample": 0.0,
+                    "asyncioTaskCountPerSample": 0.0,
+                    "threadCountPerSample": 0.0,
+                },
+                "limits": {
+                    "rssDeltaBytes": 33554432,
+                    "fdDelta": 8,
+                    "asyncioTaskDelta": 4,
+                    "threadDelta": 4,
+                    "rssSlopeBytesPerSample": 1048576,
+                    "fdSlopePerSample": 0.25,
+                    "asyncioTaskSlopePerSample": 0.25,
+                    "threadSlopePerSample": 0.25,
+                },
+            },
+            "upstreamLayers": [
+                {"name": name, "status": status, "candidateIdentity": identity}
+                for name, status in (
+                    ("real_api", "PASS"),
+                    ("websocket_audio_bargein_transport", "SKIPPED"),
+                    ("websocket_audio_bargein_correlated", "PASS"),
+                    ("google_live_log_reliability", "PASS"),
+                )
+            ],
             "failures": [],
             "rawAudioPersisted": False,
             "transcriptPersisted": False,
+            "exit_code": 0,
         }
         return {
             "device_id": "3c:0f:02:de:c2:e0",
@@ -4331,6 +4443,59 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertIn("candidate_soak_report_pass", result["missing"])
         self.assertIn("candidate_soak_report_privacy_safe", result["missing"])
+
+    def test_candidate_physical_audit_uses_full_candidate_soak_contract(self):
+        mutations = (
+            ("websocket_open", lambda report: report["cleanupVerdict"].update(websocketClosed=False)),
+            ("pending_bool", lambda report: report["cleanupVerdict"].update(pendingOwnedTasks=False)),
+            ("pending_float", lambda report: report["cleanupVerdict"].update(pendingOwnedTasks=0.0)),
+            ("pending_nonzero", lambda report: report["cleanupVerdict"].update(pendingOwnedTasks=1)),
+            ("active_session", lambda report: report["cleanupVerdict"].update(activeSessions=1)),
+            ("active_receive", lambda report: report["cleanupVerdict"].update(activeReceiveLoops=1)),
+            ("provider_finalize", lambda report: report["cleanupVerdict"].update(providerFinalizeStatus="FAIL")),
+            ("provider_close", lambda report: report["cleanupVerdict"].update(providerCloseStatus="FAIL")),
+            ("stage_bool", lambda report: report["stages"][3].update(executions=True)),
+            ("totals_float", lambda report: report["totals"].update(successfulTurns=30.0)),
+            ("false_interrupt_bool", lambda report: report["totals"].update(falseInterrupts=False)),
+            ("false_interrupt", lambda report: report["totals"].update(falseInterrupts=1)),
+            ("unexpected_fallback", lambda report: report["totals"].update(unexpectedFallbacks=1)),
+            ("resource_status", lambda report: report["resourceVerdict"].update(status="FAIL")),
+            ("resource_check_int", lambda report: report["resourceVerdict"]["checks"].update(rssDeltaBounded=1)),
+            ("resource_leak", lambda report: report["resourceVerdict"]["deltas"].update(rssBytes=33554433)),
+            ("latency_comparison", lambda report: report["latencyComparison"].update(pass_=False)),
+            ("latency_check_int", lambda report: report["latencyComparison"]["checks"].update(firstAudioP50Regression=1)),
+            ("latency_failures", lambda report: report["latencyComparison"].update(failures=[{"code": "FAIL"}])),
+            ("latency_zero", lambda report: report["latencyMetrics"].update(reconnectRecoveryP95Ms=0.0)),
+            ("latency_metric", lambda report: report["latencyMetrics"].update(firstAudioP95Ms=1801.0)),
+            ("duration", lambda report: report.update(durationSec=1799.0)),
+            ("recorded_runtime", lambda report: report.update(recordedRuntimeElapsedSec=1799.0)),
+            ("gap_budget", lambda report: report.update(evidenceGapBudgetSec=1000.0)),
+            ("anchor", lambda report: report["evidenceAnchors"].update(serverEndUtc="2026-08-31T10:59:00+00:00")),
+            ("execution_fail", lambda report: report["evidenceExecutions"][0].update(status="FAIL")),
+            ("fake_padding", lambda report: report["quietPadding"].append({"status": "PASS"})),
+            ("raw_audio_flag_int", lambda report: report.update(rawAudioPersisted=0)),
+            (
+                "upstream_identity",
+                lambda report: report["upstreamLayers"][0].update(
+                    candidateIdentity={**self._candidate_identity(), "gitSha": "other"}
+                ),
+            ),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                report = deepcopy(
+                    self._candidate_audit_options()["candidate_soak_report"]
+                )
+                mutate(report)
+                if "pass_" in report.get("latencyComparison", {}):
+                    report["latencyComparison"]["pass"] = report[
+                        "latencyComparison"
+                    ].pop("pass_")
+                result = self._candidate_audit(
+                    self._candidate_physical_log(), candidate_soak_report=report
+                )
+                self.assertFalse(result["passed"])
+                self.assertIn("candidate_soak_report_pass", result["missing"])
 
     def test_candidate_cli_requires_complete_valid_identity(self):
         with tempfile.TemporaryDirectory() as tmp:

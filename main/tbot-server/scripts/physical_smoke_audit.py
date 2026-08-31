@@ -18,6 +18,7 @@ from scripts.google_live_reliability import (  # noqa: E402
     GOOGLE_LIVE_LIMITS,
     SCHEMA_VERSION,
     percentile,
+    validate_candidate_soak_report,
     validate_log_reliability_contract,
 )
 
@@ -768,71 +769,14 @@ def _upstream_candidate_evidence(
     if _forbidden_report_fields(reliability_report):
         failures.append("log_reliability_report_privacy_safe")
 
-    if not isinstance(candidate_soak_report, dict):
-        failures.append("candidate_soak_report_pass")
-        candidate_soak_report = {}
-    elif (
-        candidate_soak_report.get("schemaVersion") != SCHEMA_VERSION
-        or candidate_soak_report.get("name") != "candidate_soak"
-        or candidate_soak_report.get("status") != "PASS"
-        or candidate_soak_report.get("failures") != []
-        or candidate_soak_report.get("rawAudioPersisted") is not False
-        or candidate_soak_report.get("transcriptPersisted") is not False
-        or (candidate_soak_report.get("cleanupVerdict") or {}).get("status") != "PASS"
-        or not _finite_number(candidate_soak_report.get("durationSec"), minimum=1800.0)
-        or (candidate_soak_report.get("resourceVerdict") or {}).get("status") != "PASS"
-        or (candidate_soak_report.get("latencyComparison") or {}).get("pass") is not True
+    if validate_candidate_soak_report(
+        candidate_soak_report, expected_candidate_identity=candidate_identity
     ):
         failures.append("candidate_soak_report_pass")
+    if not isinstance(candidate_soak_report, dict):
+        candidate_soak_report = {}
     if _forbidden_report_fields(candidate_soak_report):
         failures.append("candidate_soak_report_privacy_safe")
-
-    stages = candidate_soak_report.get("stages")
-    expected_stages = [
-        {"name": name, "executions": count, "status": "PASS"}
-        for name, count in _CANDIDATE_STAGE_COUNTS
-    ]
-    if stages != expected_stages:
-        failures.append("candidate_soak_stage_multiplicity")
-
-    totals = candidate_soak_report.get("totals")
-    if (
-        not isinstance(totals, dict)
-        or type(totals.get("successfulTurns")) is not int
-        or totals.get("successfulTurns") < 30
-        or type(totals.get("bargeins")) is not int
-        or totals.get("bargeins") < 10
-        or not _finite_number(totals.get("latestIntentSuccessRate"), minimum=0.8)
-        or totals.get("latestIntentSuccessRate") > 1.0
-    ):
-        failures.append("candidate_soak_totals")
-
-    latency_metrics = candidate_soak_report.get("latencyMetrics")
-    latency_limits = {
-        "firstAudioP50Ms": GOOGLE_LIVE_LIMITS["firstAudioP50Ms"],
-        "firstAudioP95Ms": GOOGLE_LIVE_LIMITS["firstAudioP95Ms"],
-        "bargeinP95Ms": GOOGLE_LIVE_LIMITS["physicalBargeinP95Ms"],
-    }
-    if (
-        not isinstance(latency_metrics, dict)
-        or set(latency_metrics)
-        != {
-            "firstAudioP50Ms",
-            "firstAudioP95Ms",
-            "bargeinP95Ms",
-            "reconnectRecoveryP95Ms",
-        }
-        or any(
-            not _finite_number(latency_metrics.get(key))
-            or latency_metrics[key] > limit
-            for key, limit in latency_limits.items()
-        )
-        or not _finite_number(latency_metrics.get("reconnectRecoveryP95Ms"))
-        or not _finite_number(candidate_soak_report.get("serverOutputGapP95Ms"))
-        or candidate_soak_report.get("serverOutputGapP95Ms")
-        > GOOGLE_LIVE_LIMITS["serverOutputGapMaxMs"]
-    ):
-        failures.append("candidate_soak_latency_evidence")
 
     upstream_identities = (
         reliability_report.get("candidateIdentity"),

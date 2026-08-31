@@ -75,6 +75,7 @@ from scripts.google_live_reliability import (  # noqa: E402
     redact_mapping,
     resource_verdict,
     sample_process_resources,
+    validate_candidate_soak_report,
 )
 from scripts.voice_mode_websocket_audio_bargein import (  # noqa: E402
     _opus_packets_from_audio_file,
@@ -2685,6 +2686,14 @@ async def _run_candidate_soak_impl(
         "transcriptPersisted": False,
         "exit_code": 0 if not failures else 1,
     }
+    if report["status"] == "PASS":
+        contract_failures = validate_candidate_soak_report(
+            report, expected_candidate_identity=identity
+        )
+        if contract_failures:
+            report["status"] = "FAIL"
+            report["failures"].extend(contract_failures)
+            report["exit_code"] = 1
     return redact_mapping(report)
 
 
