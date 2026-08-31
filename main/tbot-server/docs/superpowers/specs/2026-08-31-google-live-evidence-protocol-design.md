@@ -18,7 +18,7 @@ The hello ack includes this scope. No raw device ID, client ID, token, or author
 
 The journey ID, server `connectionId`, and `peerIdentityHash` are immutable for the full evidence window. A validated reconnect may change only the Live owner. The provider keeps an append-only ordered `liveConnectionTransitions` ledger; each entry contains a strictly increasing reconnect `attempt`, the exact current `fromLiveConnectionId`, and a distinct `toLiveConnectionId`.
 
-The new Live ID becomes current only when the reopened session reaches `evidence_reopen_ready`. A failure before ready retains the previous ID and emits a terminal failure marker against that owner. A failure after ready retains the accepted new owner. Replay and reconnect-success markers must name the exact accepted transition; arbitrary same-journey Live-ID drift is invalid.
+`evidence_reopen_ready` creates only a provisional `from -> to` transition. The new Live ID becomes committed current state and enters the ordered ledger only at the successful terminal point, after all replay and other fallible reconnect work completes; the matching `evidence_reconnect_succeeded` marker names and certifies that committed transition. Any terminal failure before commit retains or restores `fromLiveConnectionId`, emits the failure marker against that rolled-back owner, and discards provisional replay and interrupt-owner migration. Replay and reconnect-success markers must name the exact provisional transition; arbitrary same-journey Live-ID drift is invalid.
 
 ## Output Ownership
 
@@ -53,7 +53,7 @@ All new ack fields, per-chunk markers, and finalize handling are gated by a vali
 - server UTC anchors override client clock/skew and end only after cleanup;
 - missing, failed, timed-out, or ambiguous finalization fails closed;
 - reconnect attempts must be strictly ordered and bind exact old/new Live owners;
-- failure before ready retains the old owner, while accepted ready advances the owner;
+- reopen-ready remains provisional; only matching reconnect success commits the new owner, while any earlier failure rolls back to the old owner and discards provisional replay or migration;
 - cleanup on a non-final Live owner fails;
 - Task 4 and the server report must contain the same initial ID, final ID, and transition ledger;
 - public correlator returns a failed verdict for list, null, string, and scalar inputs.
