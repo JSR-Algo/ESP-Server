@@ -324,7 +324,17 @@ def test_candidate_rejects_foreign_owned_repository_internal_file(
     assert "repositories.backend.path" in validate_candidate(candidate, now=NOW)
 
 
-def test_candidate_rejects_repository_ancestor_aba_during_git_identity(
+def test_candidate_rejects_repository_special_file(
+    candidate: dict,
+) -> None:
+    backend = Path(candidate["repositories"]["backend"]["path"])
+    fifo = backend / "untrusted-fifo"
+    os.mkfifo(fifo, 0o666)
+
+    assert "repositories.backend.path" in validate_candidate(candidate, now=NOW)
+
+
+def test_candidate_allows_same_uid_repository_ancestor_aba_outside_threat_model(
     candidate: dict, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     backend = Path(candidate["repositories"]["backend"]["path"])
@@ -349,8 +359,23 @@ def test_candidate_rejects_repository_ancestor_aba_during_git_identity(
 
     monkeypatch.setattr(manifest, "_git", swap_then_restore)
 
-    assert "repositories.backend.path" in validate_candidate(candidate, now=NOW)
+    assert validate_candidate(candidate, now=NOW) == []
     assert swapped is True
+
+
+def test_trusted_source_ancestry_ignores_unrelated_sibling_churn(
+    candidate: dict,
+) -> None:
+    backend = Path(candidate["repositories"]["backend"]["path"])
+    root_fd, metadata, ancestry = manifest._open_trusted_source_directory(backend)
+    sibling = backend.parent / "unrelated-sibling"
+    try:
+        sibling.mkdir()
+        assert manifest._trusted_source_directory_still_named(
+            backend, root_fd, metadata, ancestry,
+        ) is True
+    finally:
+        os.close(root_fd)
 
 
 def test_candidate_rejects_symlink_repository_root(candidate: dict, tmp_path: Path) -> None:
@@ -686,7 +711,7 @@ def test_node_package_tree_descriptor_rejects_root_mode_race(
     assert manifest.secure_node_package_tree_descriptor(package_root) is None
 
 
-def test_node_package_tree_descriptor_rejects_ancestor_aba(
+def test_node_package_tree_descriptor_binds_open_root_across_same_uid_ancestor_aba(
     candidate: dict, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     package_root = Path(candidate["tools"]["node"]["backend"]["packageRoot"])
@@ -713,7 +738,7 @@ def test_node_package_tree_descriptor_rejects_ancestor_aba(
 
     monkeypatch.setattr(manifest, "_secure_browser_bundle_descriptor_fd", swap_ancestor_during_scan)
 
-    assert manifest.secure_node_package_tree_descriptor(package_root) is None
+    assert manifest.secure_node_package_tree_descriptor(package_root) == expected
     assert swapped is True
 
 

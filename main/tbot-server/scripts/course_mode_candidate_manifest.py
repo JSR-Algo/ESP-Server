@@ -277,6 +277,13 @@ def _source_directory_identity(metadata: os.stat_result) -> tuple[int, ...]:
     return (*_tree_metadata_identity(metadata), metadata.st_uid, metadata.st_gid)
 
 
+def _source_directory_authority_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev, metadata.st_ino, metadata.st_mode,
+        metadata.st_uid, metadata.st_gid,
+    )
+
+
 def _open_trusted_source_directory(
     path: Path,
 ) -> tuple[int, os.stat_result, tuple[tuple[int, ...], ...]]:
@@ -294,7 +301,7 @@ def _open_trusted_source_directory(
         ):
             raise OSError("untrusted source directory")
         metadata = root_metadata
-        ancestry = [_source_directory_identity(root_metadata)]
+        ancestry = [_source_directory_authority_identity(root_metadata)]
         for component in path.parts[1:]:
             named = os.stat(component, dir_fd=current, follow_symlinks=False)
             if (
@@ -322,7 +329,7 @@ def _open_trusted_source_directory(
             assert next_fd is not None
             current = next_fd
             metadata = opened
-            ancestry.append(_source_directory_identity(opened))
+            ancestry.append(_source_directory_authority_identity(opened))
         if metadata.st_uid != effective_uid:
             raise OSError("source root owner")
         return current, metadata, tuple(ancestry)
@@ -672,6 +679,8 @@ def _secure_source_authority_fd(
                         return False
                 except (OSError, UnicodeEncodeError):
                     return False
+            else:
+                return False
         return True
 
     return (
