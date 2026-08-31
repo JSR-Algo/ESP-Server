@@ -516,6 +516,52 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             "physical.run-1", response_generation=token
         )
 
+    async def test_final_post_lesson_binds_after_outstanding_prior_normal_response(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.google_live_evidence_lesson_released = True
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.next_transcript_phase.return_value = None
+        conn.evidence_registry.observe_transcript.return_value = {
+            "slot": 11, "phase": "post_lesson", "chars": 5,
+            "matched": True, "observedAt": 10.0,
+        }
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._response_generation = 4
+        provider._interaction.response_id = 4
+        provider._client = SimpleNamespace(bind_response_generation=MagicMock())
+        provider._interaction.transition(google_live_module.InteractionState.WAITING_MODEL)
+
+        provider._mark_clean_user_turn_opened("audio_input")
+        self.assertEqual(provider._response_generation, 5)
+        provider._client.bind_response_generation.assert_called_once_with(5)
+        self.assertFalse(await provider._on_user_transcript("final"))
+        token = conn.evidence_registry.observe_transcript.call_args.kwargs[
+            "response_generation"
+        ]
+        self.assertEqual(
+            provider._evidence_final_response_reservation["providerGeneration"],
+            5,
+        )
+
+        await provider._handle_live_event(
+            {"type": "audio_start", "response_generation": 4}
+        )
+        await provider._handle_live_event(
+            {"type": "audio_end", "response_generation": 4}
+        )
+        conn.evidence_registry.mark_output_idle.assert_not_called()
+
+        await provider._handle_live_event(
+            {"type": "audio_start", "response_generation": 5}
+        )
+        await provider._handle_live_event(
+            {"type": "audio_end", "response_generation": 5}
+        )
+        conn.evidence_registry.mark_output_idle.assert_called_once_with(
+            "physical.run-1", response_generation=token
+        )
+
     async def test_final_post_lesson_direct_barge_callback_reserves_same_causal_contract(self):
         conn = _Conn()
         conn.google_live_evidence_journey_id = "physical.run-1"

@@ -7,6 +7,8 @@ from contextlib import suppress
 from core.voice.child_safety import ensure_child_safety_block
 from core.voice.google_live_credentials import resolve_google_live_api_key
 
+_RESPONSE_GENERATION_REBOUND = object()
+
 
 # Eager import of google.genai at module load (server startup).
 # First-time import of this SDK costs 80-100 seconds (protobuf + grpc + auth
@@ -58,12 +60,24 @@ class GoogleLiveClient:
         self._audio_chunk_count = 0
         self._audio_byte_count = 0
         self._response_generation_getter = None
+        self._receive_pending_message_task = None
+        self._receive_rebind_requested = False
         self._evidence_scope_getter = None
         self._receive_loop_active = False
         self._evidence_receive_loop_started = False
 
     def set_response_generation_getter(self, getter):
         self._response_generation_getter = getter if callable(getter) else None
+
+    def bind_response_generation(self, response_generation):
+        if not isinstance(response_generation, int):
+            return False
+        if self._receive_loop_active:
+            self._receive_rebind_requested = True
+            pending_task = self._receive_pending_message_task
+            if pending_task is not None and not pending_task.done():
+                pending_task.cancel()
+        return True
 
     def set_evidence_scope_getter(self, getter):
         self._evidence_scope_getter = getter if callable(getter) else None
@@ -194,6 +208,7 @@ class GoogleLiveClient:
         try:
             while self.connected and self._session is not None:
                 received_turn_message = False
+                response_rebound = False
                 origin_generation = (
                     self._response_generation_getter() if self._response_generation_getter is not None else None
                 )
@@ -203,9 +218,18 @@ class GoogleLiveClient:
                         pending_message_task = asyncio.create_task(
                             message_iterator.__anext__()
                         )
+                        self._receive_pending_message_task = pending_message_task
                     message, pending_message_task = await self._next_message(
                         pending_message_task,
                     )
+                    self._receive_pending_message_task = pending_message_task
+                    if message is _RESPONSE_GENERATION_REBOUND:
+                        close_iterator = getattr(message_iterator, "aclose", None)
+                        if callable(close_iterator):
+                            with suppress(asyncio.CancelledError, Exception):
+                                await close_iterator()
+                        response_rebound = True
+                        break
                     if message is None:
                         yield {"type": "receive_timeout"}
                         continue
@@ -224,6 +248,8 @@ class GoogleLiveClient:
                             event = dict(event)
                             event.setdefault("response_generation", origin_generation)
                         yield event
+                if response_rebound:
+                    continue
                 if not received_turn_message:
                     break
         finally:
@@ -237,12 +263,24 @@ class GoogleLiveClient:
                 self._log_evidence_receive("loop_stopped")
             self._receive_loop_active = False
             self._evidence_receive_loop_started = False
+            self._receive_pending_message_task = None
+            self._receive_rebind_requested = False
 
     async def _next_message(self, pending_message_task):
         recv_timeout = self._get_receive_timeout()
         try:
+            if self._receive_rebind_requested:
+                self._receive_rebind_requested = False
+                if not pending_message_task.done():
+                    pending_message_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await pending_message_task
+                return _RESPONSE_GENERATION_REBOUND, None
             if recv_timeout is None:
                 result = await pending_message_task
+                if self._receive_rebind_requested:
+                    self._receive_rebind_requested = False
+                    return _RESPONSE_GENERATION_REBOUND, None
                 self._log_recv_timer_reset(result)
                 return result, None
             done, _pending = await asyncio.wait(
@@ -253,11 +291,22 @@ class GoogleLiveClient:
                 self.logger.bind(tag="GoogleLive").warning("Google Live receive timed out")
                 self._log_evidence_receive("timeout")
                 return None, pending_message_task
+            if self._receive_rebind_requested:
+                self._receive_rebind_requested = False
+                return _RESPONSE_GENERATION_REBOUND, None
             result = pending_message_task.result()
             self._log_recv_timer_reset(result)
             return result, None
         except StopAsyncIteration:
             return False, None
+        except asyncio.CancelledError:
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling():
+                raise
+            if self._receive_rebind_requested:
+                self._receive_rebind_requested = False
+                return _RESPONSE_GENERATION_REBOUND, None
+            raise
 
     def _log_recv_timer_reset(self, message):
         # Each yielded server message implicitly resets the recv_timeout window

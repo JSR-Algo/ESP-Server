@@ -277,9 +277,11 @@ def _expected_user_transcript_match_count(transcript_texts, expected_transcripts
 
 
 _TRANSCRIPT_PROOF_MARKER_RE = re.compile(
-    r"Google Live evidence_transcript_match "
+    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} - "
+    r"[A-Za-z0-9._:-]{1,128} - core\.voice\.session_provider\.google_live - "
+    r"INFO - GoogleLive - Google Live evidence_transcript_match "
     r"journey_id=([A-Za-z0-9._:-]{1,64}) slot=(\d+) "
-    r"phase=(interrupt|lesson|post_lesson) chars=(\d+) matched=(true|false)\b"
+    r"phase=(interrupt|lesson|post_lesson) chars=(\d+) matched=(true|false)$"
 )
 
 
@@ -290,7 +292,7 @@ def _transcript_proof_markers(lines, *, journey_id):
     for line in lines:
         if "Google Live evidence_transcript_match" not in line:
             continue
-        match = _TRANSCRIPT_PROOF_MARKER_RE.search(line)
+        match = _TRANSCRIPT_PROOF_MARKER_RE.fullmatch(line)
         if match is None:
             malformed += 1
             continue

@@ -652,6 +652,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     )
                     return True
             try:
+                self._mark_clean_user_turn_opened("text_input")
                 await self._client.send_text(text)
                 self._mark_complete_text_user_turn("text_input")
                 return True
@@ -837,6 +838,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self.conn.client_abort = False
                 return True
             self.conn.client_abort = False
+            self._mark_clean_user_turn_opened("audio_input")
             if decoded_audio is not None and hasattr(
                 self._bridge, "forward_decoded_input_audio"
             ):
@@ -854,7 +856,6 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if not buffered_current_frame:
                 self._buffer_pending_interrupt_audio_while_blocked(decoded_audio)
             self._record_start_lesson_asr_fallback_audio(audio_bytes, decoded_audio)
-            self._mark_clean_user_turn_opened("audio_input")
             self._record_user_stream_audio(decoded_audio)
             if self._user_turn_can_finalize():
                 await self._finalize_user_turn_clean()
@@ -5951,11 +5952,37 @@ class GoogleLiveProvider(VoiceSessionProvider):
         return response_id in self._cancelled_response_ids
 
     def _mark_clean_user_turn_opened(self, reason):
+        previous_state = self._interaction.state
         self._interaction.transition(InteractionState.USER_STREAMING)
         if self._bridge is not None and hasattr(self._bridge, "allow_model_output"):
             self._bridge.allow_model_output()
         if self._last_clean_user_turn_response_id == self._response_generation:
             return
+        response_already_bound = (
+            previous_state == InteractionState.INTERRUPTING
+            or self._interrupt_capture_response_id == self._response_generation
+        )
+        if not response_already_bound:
+            previous_response_id = self._response_generation
+            self._response_generation += 1
+            self._cancelled_response_ids.add(previous_response_id)
+            self._interaction.turn_id = max(
+                self._interaction.turn_id + 1,
+                self._response_generation,
+            )
+            self._interaction.response_id = self._response_generation
+            bind_generation = getattr(
+                self._client, "bind_response_generation", None
+            )
+            if callable(bind_generation):
+                try:
+                    bind_generation(self._response_generation)
+                except Exception:
+                    pass
+            if len(self._cancelled_response_ids) > 20:
+                self._cancelled_response_ids = set(
+                    sorted(self._cancelled_response_ids)[-10:]
+                )
         self._last_clean_user_turn_response_id = self._response_generation
         self.conn.google_live_turn_started_at = time.monotonic()
         self.conn.logger.bind(tag="GoogleLive").info(
@@ -5965,7 +5992,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
         )
 
     def _mark_complete_text_user_turn(self, reason):
-        self._mark_clean_user_turn_opened(reason)
+        if self._last_clean_user_turn_response_id != self._response_generation:
+            self._mark_clean_user_turn_opened(reason)
         self._interaction.transition(InteractionState.WAITING_MODEL)
         self._waiting_model_since = time.monotonic()
         self._schedule_waiting_model_timeout_task()

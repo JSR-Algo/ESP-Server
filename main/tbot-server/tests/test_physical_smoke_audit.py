@@ -3924,13 +3924,15 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         lines.extend(extra_lines or [])
         if include_transcript_proofs:
             lines.extend(
-                f"260518 20:14:{index:02d}[GoogleLive]-INFO-Google Live "
+                f"2026-08-31 20:14:{index:02d} - 0.9.3_00000000000000 - "
+                "core.voice.session_provider.google_live - INFO - GoogleLive - Google Live "
                 f"evidence_transcript_match journey_id=physical-1 slot={index + 1} "
                 "phase=interrupt chars=8 matched=true"
                 for index in range(10)
             )
             lines.append(
-                "260518 20:14:20[GoogleLive]-INFO-Google Live "
+                "2026-08-31 20:14:20 - 0.9.3_00000000000000 - "
+                "core.voice.session_provider.google_live - INFO - GoogleLive - Google Live "
                 "evidence_transcript_match journey_id=physical-1 slot=11 "
                 "phase=post_lesson chars=12 matched=true"
             )
@@ -4249,7 +4251,8 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         duplicate = self._candidate_audit(
             self._candidate_physical_log(
                 extra_lines=[
-                    "260518 20:14:21[GoogleLive]-INFO-Google Live "
+                    "2026-08-31 20:14:21 - 0.9.3_00000000000000 - "
+                    "core.voice.session_provider.google_live - INFO - GoogleLive - Google Live "
                     "evidence_transcript_match journey_id=physical-1 slot=1 "
                     "phase=interrupt chars=8 matched=true"
                 ]
@@ -4260,6 +4263,35 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         self.assertIn("transcript_proof_exact_slots", missing["missing"])
         self.assertFalse(duplicate["passed"])
         self.assertIn("transcript_proof_exact_slots", duplicate["missing"])
+
+    def test_transcript_proof_parser_accepts_only_exact_canonical_info_record(self):
+        audit = importlib.import_module("scripts.physical_smoke_audit")
+        canonical = (
+            "2026-08-31 20:14:01 - 0.9.3_00000000000000 - "
+            "core.voice.session_provider.google_live - INFO - GoogleLive - Google Live "
+            "evidence_transcript_match journey_id=physical-1 slot=1 "
+            "phase=interrupt chars=8 matched=true"
+        )
+        spoofed = (
+            "2026-08-31 20:14:01 - 0.9.3_x - provider - WARNING - GoogleLive - "
+            "provider text: " + canonical,
+            canonical + " trailing text",
+            canonical + " extra=value",
+            canonical + " slot=2",
+            canonical.replace(" - INFO - ", " - WARNING - "),
+            canonical.replace(" - GoogleLive - ", " - provider - "),
+        )
+
+        markers, malformed, mismatches = audit._transcript_proof_markers(
+            [canonical, *spoofed], journey_id="physical-1"
+        )
+
+        self.assertEqual(
+            markers,
+            [{"slot": 1, "phase": "interrupt", "chars": 8, "matched": True}],
+        )
+        self.assertEqual(malformed, len(spoofed))
+        self.assertEqual(mismatches, 0)
 
     def test_candidate_physical_audit_legacy_raw_text_cannot_replace_safe_proof(self):
         result = self._candidate_audit(
@@ -4280,7 +4312,8 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         result = self._candidate_audit(
             self._candidate_physical_log(
                 extra_lines=[
-                    "260518 20:10:30[GoogleLive]-INFO-Google Live "
+                    "2026-08-31 20:10:30 - 0.9.3_00000000000000 - "
+                    "core.voice.session_provider.google_live - INFO - GoogleLive - Google Live "
                     "evidence_transcript_match journey_id=physical-1 slot=1 "
                     "phase=lesson chars=5 matched=false"
                 ]
