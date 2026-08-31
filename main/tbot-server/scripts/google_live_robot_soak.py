@@ -62,6 +62,8 @@ from core.voice.google_live_credentials import (  # noqa: E402
 )
 from scripts.analyze_google_live_log import (  # noqa: E402
     _parse_utc_iso,
+    _validate_log_reliability_contract,
+    _validated_live_connection_transition_chain,
     correlate_websocket_bargein_evidence,
 )
 from scripts.google_live_reliability import (  # noqa: E402
@@ -1638,6 +1640,78 @@ def _evidence_reuse_key(*, journey_id, connection_id, log_window):
     return (journey_id, connection_id, *window_values)
 
 
+def _validated_execution_server_scope(value, *, identity, allowed_live_connection_ids):
+    scope = value.get("evidenceScope")
+    log_window = value.get("logWindow")
+    transitions = value.get("liveConnectionTransitions")
+    if not isinstance(scope, Mapping) or not isinstance(log_window, Mapping):
+        return None
+    expected_scope = {
+        "journeyId": value.get("journeyId"),
+        "connectionId": value.get("connectionId"),
+        "liveConnectionId": value.get("liveConnectionId"),
+        "initialLiveConnectionId": value.get("initialLiveConnectionId"),
+        "peerIdentityHash": value.get("peerIdentityHash"),
+        "serverStartUtc": log_window.get("start"),
+    }
+    valid = (
+        value.get("serverIssued") is True
+        and dict(scope) == expected_scope
+        and isinstance(expected_scope["journeyId"], str)
+        and bool(expected_scope["journeyId"])
+        and isinstance(expected_scope["connectionId"], str)
+        and bool(expected_scope["connectionId"])
+        and isinstance(expected_scope["liveConnectionId"], str)
+        and bool(expected_scope["liveConnectionId"])
+        and expected_scope["initialLiveConnectionId"]
+        == expected_scope["liveConnectionId"]
+        and expected_scope["initialLiveConnectionId"] in allowed_live_connection_ids
+        and value.get("finalLiveConnectionId") in allowed_live_connection_ids
+        and isinstance(expected_scope["peerIdentityHash"], str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", expected_scope["peerIdentityHash"])
+        is not None
+        and _validated_live_connection_transition_chain(
+            value.get("initialLiveConnectionId"),
+            value.get("finalLiveConnectionId"),
+            transitions,
+        )
+        == value.get("finalLiveConnectionId")
+    )
+    if not valid:
+        return None
+    log_proof = value.get("task5LogEvidence")
+    if _validate_log_reliability_contract(
+        log_proof,
+        expected_candidate_identity=identity,
+        expected_log_window=dict(log_window),
+        expected_evidence_scope=dict(scope),
+    ) or any(
+        log_proof.get(field) != value.get(field)
+        for field in (
+            "initialLiveConnectionId",
+            "finalLiveConnectionId",
+            "liveConnectionTransitions",
+        )
+    ):
+        return None
+    anchor = {
+        "connectionId": scope["connectionId"],
+        "peerIdentityHash": scope["peerIdentityHash"],
+    }
+    if value.get("name") != "bargein":
+        return anchor
+    transport = value.get("task4TransportEvidence")
+    correlated = value.get("task5CorrelatedEvidence")
+    normalized = correlate_websocket_bargein_evidence(
+        transport,
+        log_proof,
+        expected_candidate_identity=identity,
+    )
+    if normalized.get("status") != "PASS" or correlated != normalized:
+        return None
+    return anchor
+
+
 def _validate_upstream_layer(report, *, name, identity, failures, status="PASS"):
     if not isinstance(report, Mapping):
         failures.append({"code": "UPSTREAM_LAYER_MALFORMED", "layer": name})
@@ -1714,7 +1788,7 @@ def _validated_quiet_padding(
         and _finite_nonnegative(value.get("durationSec"))
         and abs(float(value["durationSec"]) - duration) <= 1.0
         and gap is not None
-        and 0 < gap <= gap_budget_sec
+        and 0 <= gap <= gap_budget_sec
         and isinstance(journey_id, str)
         and bool(journey_id)
         and journey_id not in seen_journeys
@@ -1791,10 +1865,40 @@ async def _run_candidate_soak_impl(
     first_window_start = None
     previous_window_end = None
     last_window_end = None
+    monitored_duration = 0.0
     gap_budget_sec = float(getattr(args, "evidence_gap_budget_sec", 10.0))
     if not math.isfinite(gap_budget_sec) or not 0 < gap_budget_sec <= 10.0:
         failures.append({"code": "EVIDENCE_GAP_BUDGET_INVALID"})
     maximum_padding_windows = int(getattr(args, "maximum_padding_windows", 60))
+    execution_anchors = []
+    task5_server_anchor = None
+    expected_correlated_report = getattr(args, "correlated_transport_report", {})
+    if isinstance(expected_correlated_report, (str, Path)):
+        try:
+            expected_correlated_report = _read_json_evidence(
+                expected_correlated_report, "correlated_transport_report"
+            )
+        except ValueError:
+            expected_correlated_report = {}
+    expected_transitions = (
+        expected_correlated_report.get("liveConnectionTransitions", [])
+        if isinstance(expected_correlated_report, Mapping)
+        else []
+    )
+    allowed_live_connection_ids = {
+        expected_correlated_report.get("initialLiveConnectionId"),
+        expected_correlated_report.get("finalLiveConnectionId"),
+    }
+    if isinstance(expected_transitions, list):
+        for transition in expected_transitions:
+            if isinstance(transition, Mapping):
+                allowed_live_connection_ids.update(
+                    {
+                        transition.get("fromLiveConnectionId"),
+                        transition.get("toLiveConnectionId"),
+                    }
+                )
+    allowed_live_connection_ids.discard(None)
 
     for stage_name, count in _CANDIDATE_STAGE_COUNTS:
         callable_name = "conversation" if stage_name == "conversation_after_lesson" else stage_name
@@ -1832,6 +1936,19 @@ async def _run_candidate_soak_impl(
             if result.get("evidenceSequence") != expected_sequence:
                 failures.append({"code": "EVIDENCE_SEQUENCE_INVALID", "stage": stage_name})
             expected_sequence += 1
+            execution_anchor = _validated_execution_server_scope(
+                result,
+                identity=identity,
+                allowed_live_connection_ids=allowed_live_connection_ids,
+            )
+            if execution_anchor is None:
+                failures.append(
+                    {"code": "EXECUTION_SERVER_SCOPE_INVALID", "stage": stage_name}
+                )
+            else:
+                execution_anchors.append(execution_anchor)
+                if stage_name == "bargein" and task5_server_anchor is None:
+                    task5_server_anchor = execution_anchor
             journey_id = result.get("journeyId")
             window_id = result.get("windowId")
             if not isinstance(journey_id, str) or not journey_id or journey_id in seen_journeys:
@@ -1874,13 +1991,14 @@ async def _run_candidate_soak_impl(
                     else 0.0
                 )
                 if previous_window_end is not None and (
-                    gap_sec <= 0 or gap_sec > gap_budget_sec
+                    gap_sec < 0 or gap_sec > gap_budget_sec
                 ):
                     failures.append({"code": "EVIDENCE_UTC_WINDOW_INVALID", "stage": stage_name})
                 else:
                     first_window_start = first_window_start or start_utc
                     previous_window_end = end_utc
                     last_window_end = end_utc
+                    monitored_duration += (end_utc - start_utc).total_seconds()
             evidence_key = _evidence_reuse_key(
                 journey_id=journey_id,
                 connection_id=connection_id,
@@ -1898,14 +2016,17 @@ async def _run_candidate_soak_impl(
         if failures:
             break
 
+    if (
+        task5_server_anchor is None
+        or len(execution_anchors) != len(executions)
+        or any(anchor != task5_server_anchor for anchor in execution_anchors)
+    ):
+        failures.append({"code": "EXECUTION_SERVER_ANCHOR_MISMATCH"})
+
     elapsed = clock() - started
     minimum_duration = float(args.minimum_duration_sec)
     padding_evidence = []
-    proven_duration = (
-        (last_window_end - first_window_start).total_seconds()
-        if first_window_start is not None and last_window_end is not None
-        else 0.0
-    )
+    proven_duration = monitored_duration
     replay_mode = bool(getattr(args, "replay_candidate_evidence", False))
     if (proven_duration < minimum_duration or (elapsed < minimum_duration and not replay_mode)) and not failures:
         monitor = journeys.get("monitor")
@@ -1951,6 +2072,7 @@ async def _run_candidate_soak_impl(
                     seen_windows.add(safe_padding["windowId"])
                     seen_utc_windows.add(utc_window)
                     padding_evidence.append(safe_padding)
+                    monitored_duration += (utc_window[1] - utc_window[0]).total_seconds()
                     samples.append(safe_sample())
                 elapsed = clock() - started
         else:
@@ -1994,6 +2116,7 @@ async def _run_candidate_soak_impl(
         and cleanup_evidence.get("status") == "PASS"
         and cleanup_evidence.get("candidateIdentity") == identity
         and cleanup_evidence.get("finalScope") == final_scope
+        and cleanup_evidence.get("serverAnchor") == task5_server_anchor
         and cleanup_evidence.get("websocketClosed") is True
         and cleanup_evidence.get("providerFinalizeStatus") == "PASS"
         and cleanup_evidence.get("providerCloseStatus") == "PASS"
@@ -2169,11 +2292,7 @@ async def _run_candidate_soak_impl(
         failures.append({"code": "FALSE_INTERRUPT_OBSERVED"})
     if totals["unexpectedFallbacks"]:
         failures.append({"code": "UNEXPECTED_FALLBACK_OBSERVED"})
-    proven_duration = (
-        (last_window_end - first_window_start).total_seconds()
-        if first_window_start is not None and last_window_end is not None
-        else 0.0
-    )
+    proven_duration = monitored_duration
     claimed_duration = getattr(args, "candidate_evidence_duration_sec", None)
     if proven_duration < minimum_duration:
         failures.append({"code": "PROVEN_DURATION_NOT_MET"})
@@ -2184,6 +2303,12 @@ async def _run_candidate_soak_impl(
         or abs(float(claimed_duration) - proven_duration) > 1.0
     ):
         failures.append({"code": "CLAIMED_DURATION_MISMATCH"})
+    claimed_runtime = getattr(args, "candidate_evidence_runtime_sec", None)
+    if replay_mode and claimed_runtime is not None and (
+        not _finite_nonnegative(claimed_runtime)
+        or float(claimed_runtime) < proven_duration
+    ):
+        failures.append({"code": "CLAIMED_RUNTIME_MISMATCH"})
 
     try:
         latency_metrics = _latency_metrics(executions)
@@ -2235,6 +2360,9 @@ async def _run_candidate_soak_impl(
         "candidateIdentity": identity,
         "durationSec": round(proven_duration, 3),
         "runtimeElapsedSec": round(elapsed, 3),
+        "recordedRuntimeElapsedSec": float(claimed_runtime)
+        if replay_mode and _finite_nonnegative(claimed_runtime)
+        else None,
         "evidenceGapBudgetSec": gap_budget_sec,
         "evidenceAnchors": {
             "serverStartUtc": first_window_start.isoformat()
@@ -2267,7 +2395,13 @@ async def _run_candidate_soak_impl(
                 "sequence": item.get("evidenceSequence"),
                 "stage": item.get("name"),
                 "journeyId": item.get("journeyId"),
+                "connectionId": item.get("connectionId"),
                 "windowId": item.get("windowId"),
+                "evidenceScope": item.get("evidenceScope"),
+                "initialLiveConnectionId": item.get("initialLiveConnectionId"),
+                "finalLiveConnectionId": item.get("finalLiveConnectionId"),
+                "liveConnectionTransitions": item.get("liveConnectionTransitions"),
+                "logWindow": item.get("logWindow"),
                 "status": item.get("status"),
             }
             for item in executions
@@ -2492,6 +2626,12 @@ async def run_soak(args):
             if not _finite_nonnegative(evidence_duration):
                 raise ValueError("journey evidence durationSec must be finite and non-negative")
             args.candidate_evidence_duration_sec = evidence_duration
+            evidence_runtime = manifest.get("runtimeElapsedSec")
+            if evidence_runtime is not None and not _finite_nonnegative(evidence_runtime):
+                raise ValueError(
+                    "journey evidence runtimeElapsedSec must be finite and non-negative"
+                )
+            args.candidate_evidence_runtime_sec = evidence_runtime
             args.replay_candidate_evidence = True
             recorded_padding = manifest.get("quietPadding", [])
             if not isinstance(recorded_padding, list):

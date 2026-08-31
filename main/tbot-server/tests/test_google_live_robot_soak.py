@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from scripts.analyze_google_live_log import correlate_websocket_bargein_evidence
 from scripts.google_live_robot_soak import (
     _build_argument_parser,
     _candidate_failure_report,
@@ -45,8 +46,90 @@ def _execution_window(sequence):
     return {
         "windowId": f"window-{sequence}",
         "start": start.isoformat(),
-        "end": (start + timedelta(seconds=30)).isoformat(),
+        "end": (start + timedelta(seconds=40)).isoformat(),
     }
+
+
+def _refresh_execution_contract(result):
+    result["evidenceScope"] = {
+        "journeyId": result["journeyId"],
+        "connectionId": result["connectionId"],
+        "liveConnectionId": result["liveConnectionId"],
+        "initialLiveConnectionId": result["initialLiveConnectionId"],
+        "peerIdentityHash": result["peerIdentityHash"],
+        "serverStartUtc": result["logWindow"]["start"],
+    }
+    cancelled_id = result["evidenceSequence"] * 2 - 1
+    replacement_id = result["evidenceSequence"] * 2
+    result["task5LogEvidence"] = {
+        "schemaVersion": "google-live-reliability.v1",
+        "name": "google_live_log_reliability",
+        "status": "PASS",
+        "candidateIdentity": IDENTITY,
+        "receiveLoopBalance": 0,
+        "maxReceiveLoopsActive": 1,
+        "staleAudioAfterReplacement": 0,
+        "unrecoveredTimeouts": [],
+        "unreleasedLessonHandoffs": [],
+        "fatalHits": [],
+        "failures": [],
+        "duplicateResponseIds": [],
+        "replayCountsByReopen": {},
+        "correlation": {"status": "NOT_OBSERVED"},
+        "correlations": [],
+        "evidenceScope": deepcopy(result["evidenceScope"]),
+        "initialLiveConnectionId": result["initialLiveConnectionId"],
+        "finalLiveConnectionId": result["finalLiveConnectionId"],
+        "liveConnectionTransitions": deepcopy(result["liveConnectionTransitions"]),
+        "logWindow": deepcopy(result["logWindow"]),
+    }
+    if result["name"] == "bargein":
+        result["task5LogEvidence"]["correlation"] = {
+            "status": "PASS",
+            "cancelledResponseId": cancelled_id,
+            "replacementResponseId": replacement_id,
+        }
+        result["task5LogEvidence"]["correlations"] = [
+            {
+                "status": "PASS",
+                "journeyId": result["journeyId"],
+                "connectionId": result["connectionId"],
+                "liveConnectionId": result["finalLiveConnectionId"],
+                "cancelledResponseId": cancelled_id,
+                "replacementResponseId": replacement_id,
+            }
+        ]
+        result["task4TransportEvidence"] = {
+            "schemaVersion": "google-live-reliability.v1",
+            "name": "websocket_audio_bargein_transport",
+            "status": "SKIPPED",
+            "candidateIdentity": IDENTITY,
+            "pendingCode": "PENDING_BOUNDED_SERVER_LOG_VERIFICATION",
+            "correlationSource": "server_log",
+            "correlationStatus": "PENDING_BOUNDED_SERVER_LOG_VERIFICATION",
+            "aggregateReleaseEligible": False,
+            "interruptStopMarkerObserved": True,
+            "replacementResponseStarted": True,
+            "replacementResponseStopped": True,
+            "replacementBinaryChunks": 2,
+            "bargeinStopMs": 200.0,
+            "maxServerOutputGapMs": 80.0,
+            "journeyId": result["journeyId"],
+            "evidenceScope": deepcopy(result["evidenceScope"]),
+            "serverConnectionId": result["connectionId"],
+            "liveConnectionId": result["liveConnectionId"],
+            "peerIdentityHash": result["peerIdentityHash"],
+            "initialLiveConnectionId": result["initialLiveConnectionId"],
+            "finalLiveConnectionId": result["finalLiveConnectionId"],
+            "liveConnectionTransitions": deepcopy(result["liveConnectionTransitions"]),
+            "logWindow": deepcopy(result["logWindow"]),
+        }
+        result["task5CorrelatedEvidence"] = correlate_websocket_bargein_evidence(
+            result["task4TransportEvidence"],
+            result["task5LogEvidence"],
+            expected_candidate_identity=IDENTITY,
+        )
+    return result
 
 
 def _layer(name):
@@ -169,9 +252,12 @@ def _journeys(*, mutation=None):
             "evidenceSequence": sequence,
             "journeyId": f"candidate-{sequence}",
             "connectionId": "candidate-soak-websocket",
-            "initialLiveConnectionId": "live-session-reusable-after-close",
-            "finalLiveConnectionId": "live-session-reusable-after-close",
+            "liveConnectionId": "live-1",
+            "initialLiveConnectionId": "live-1",
+            "finalLiveConnectionId": "live-1",
             "liveConnectionTransitions": [],
+            "peerIdentityHash": PEER_HASH,
+            "serverIssued": True,
             "windowId": f"window-{sequence}",
             "logWindow": _execution_window(sequence),
             "successfulTurns": 0 if name in {"quiet", "lesson"} else 1,
@@ -181,10 +267,12 @@ def _journeys(*, mutation=None):
             "unexpectedFallbacks": 0,
             "latencies": {},
         }
+        _refresh_execution_contract(result)
         if name in {"conversation", "conversation_after_lesson"}:
             result["latencies"] = {"firstAudioMs": [1000]}
         elif name == "bargein":
             result["latencies"] = {"firstAudioMs": [1000], "bargeinMs": [400]}
+            _refresh_execution_contract(result)
         elif name in {"reopen", "reconnect"}:
             result["latencies"] = {"reconnectRecoveryMs": [1000]}
         elif name == "lesson":
@@ -196,7 +284,7 @@ def _journeys(*, mutation=None):
 
     async def monitor(_args, *, duration_sec):
         start = datetime.fromisoformat(last_window["end"]) + timedelta(seconds=10)
-        end = datetime(2026, 8, 31, 11, 30, tzinfo=timezone.utc)
+        end = start + timedelta(seconds=duration_sec)
         return [
             {
                 "schemaVersion": "google-live-reliability.v1",
@@ -232,6 +320,10 @@ def _journeys(*, mutation=None):
             "status": "PASS",
             "candidateIdentity": IDENTITY,
             "finalScope": final_scope,
+            "serverAnchor": {
+                "connectionId": "candidate-soak-websocket",
+                "peerIdentityHash": PEER_HASH,
+            },
             "websocketClosed": True,
             "providerFinalizeStatus": "PASS",
             "providerCloseStatus": "PASS",
@@ -267,6 +359,10 @@ def _cleanup_evidence(final_scope):
         "status": "PASS",
         "candidateIdentity": IDENTITY,
         "finalScope": final_scope,
+        "serverAnchor": {
+            "connectionId": "candidate-soak-websocket",
+            "peerIdentityHash": PEER_HASH,
+        },
         "websocketClosed": True,
         "providerFinalizeStatus": "PASS",
         "providerCloseStatus": "PASS",
@@ -341,6 +437,8 @@ def test_candidate_soak_runs_fixed_sequence_and_meets_production_budgets():
     assert report["candidateIdentity"] == IDENTITY
     assert len(report["evidenceExecutions"]) == 33
     assert len({item["journeyId"] for item in report["evidenceExecutions"]}) == 33
+    assert all(item["evidenceScope"]["peerIdentityHash"] == PEER_HASH for item in report["evidenceExecutions"])
+    assert all(item["connectionId"] == item["evidenceScope"]["connectionId"] for item in report["evidenceExecutions"])
     assert report["status"] == "PASS"  # Live IDs are transition-scoped, not globally unique.
     assert "raw child" not in json.dumps(report).lower()
 
@@ -637,6 +735,148 @@ def test_candidate_soak_rejects_each_reused_execution_identity_component(
 
 
 @pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_scope",
+        "client_authored",
+        "cross_peer",
+        "flat_connection_mismatch",
+        "fabricated_transition",
+        "bargein_task5_mismatch",
+    ],
+)
+def test_candidate_soak_requires_immutable_server_execution_scope(mutation):
+    def corrupt(result, sequence, name, _index, _label):
+        if mutation == "bargein_task5_mismatch":
+            if name != "bargein":
+                return
+        elif sequence != 1:
+            return
+        if mutation == "missing_scope":
+            result.pop("evidenceScope")
+        elif mutation == "client_authored":
+            result["serverIssued"] = False
+        elif mutation == "cross_peer":
+            result["evidenceScope"]["peerIdentityHash"] = f"sha256:{'e' * 64}"
+        elif mutation == "flat_connection_mismatch":
+            result["connectionId"] = "fabricated-connection"
+        elif mutation == "fabricated_transition":
+            result["finalLiveConnectionId"] = "fabricated-live"
+        else:
+            result["task5CorrelatedEvidence"]["logWindow"]["end"] = (
+                "2026-08-31T11:59:59+00:00"
+            )
+
+    report = _run(journeys=_journeys(mutation=corrupt))
+
+    assert "EXECUTION_SERVER_SCOPE_INVALID" in {
+        item["code"] for item in report["failures"]
+    }
+
+
+@pytest.mark.parametrize("mutation", ["cross_peer_both", "fabricated_live_both"])
+def test_candidate_soak_binds_execution_scope_to_independent_server_identity(mutation):
+    def corrupt(result, sequence, _name, _index, _label):
+        if sequence != 1:
+            return
+        if mutation == "cross_peer_both":
+            value = f"sha256:{'e' * 64}"
+            result["peerIdentityHash"] = value
+            result["evidenceScope"]["peerIdentityHash"] = value
+            result["task5LogEvidence"]["evidenceScope"]["peerIdentityHash"] = value
+        else:
+            result["liveConnectionId"] = "fabricated-live"
+            result["initialLiveConnectionId"] = "fabricated-live"
+            result["finalLiveConnectionId"] = "fabricated-live"
+            result["evidenceScope"]["liveConnectionId"] = "fabricated-live"
+            result["evidenceScope"]["initialLiveConnectionId"] = "fabricated-live"
+
+    report = _run(journeys=_journeys(mutation=corrupt))
+
+    assert {
+        "EXECUTION_SERVER_SCOPE_INVALID",
+        "EXECUTION_SERVER_ANCHOR_MISMATCH",
+    } & {item["code"] for item in report["failures"]}
+
+
+def test_candidate_soak_rejects_three_sided_fabricated_live_owner():
+    def corrupt(result, sequence, _name, _index, _label):
+        if sequence != 1:
+            return
+        for target in (result, result["evidenceScope"], result["task5LogEvidence"]):
+            if "liveConnectionId" in target:
+                target["liveConnectionId"] = "fabricated-live"
+            target["initialLiveConnectionId"] = "fabricated-live"
+        result["finalLiveConnectionId"] = "fabricated-live"
+        result["task5LogEvidence"]["finalLiveConnectionId"] = "fabricated-live"
+        result["task5LogEvidence"]["evidenceScope"]["liveConnectionId"] = (
+            "fabricated-live"
+        )
+        result["task5LogEvidence"]["evidenceScope"]["initialLiveConnectionId"] = (
+            "fabricated-live"
+        )
+
+    report = _run(journeys=_journeys(mutation=corrupt))
+
+    assert "EXECUTION_SERVER_SCOPE_INVALID" in {
+        item["code"] for item in report["failures"]
+    }
+
+
+def test_candidate_soak_rejects_reduced_non_bargein_log_proof():
+    def reduce(result, sequence, name, _index, _label):
+        if sequence == 1 and name != "bargein":
+            result["task5LogEvidence"] = {
+                key: result["task5LogEvidence"][key]
+                for key in (
+                    "schemaVersion",
+                    "name",
+                    "status",
+                    "candidateIdentity",
+                    "evidenceScope",
+                    "initialLiveConnectionId",
+                    "finalLiveConnectionId",
+                    "liveConnectionTransitions",
+                    "logWindow",
+                )
+            }
+
+    report = _run(journeys=_journeys(mutation=reduce))
+
+    assert "EXECUTION_SERVER_SCOPE_INVALID" in {
+        item["code"] for item in report["failures"]
+    }
+
+
+def test_candidate_soak_accepts_full_task5_correlated_artifact_fields():
+    report = _run()
+
+    assert report["status"] == "PASS"
+
+
+def test_candidate_soak_rejects_minimal_fabricated_task5_projection():
+    def minimize(result, _sequence, name, _index, _label):
+        if name == "bargein":
+            result["task5CorrelatedEvidence"] = {
+                key: result["task5CorrelatedEvidence"][key]
+                for key in (
+                    "schemaVersion",
+                    "name",
+                    "status",
+                    "candidateIdentity",
+                    "journeyId",
+                    "evidenceScope",
+                )
+            }
+
+    report = _run(journeys=_journeys(mutation=minimize))
+
+    assert "EXECUTION_SERVER_SCOPE_INVALID" in {
+        item["code"] for item in report["failures"]
+    }
+
+
+@pytest.mark.parametrize(
     ("case", "start", "end"),
     [
         ("malformed", "not-a-time", "2026-08-31T11:01:10+00:00"),
@@ -698,6 +938,7 @@ def test_claimed_duration_cannot_replace_zero_actual_or_proven_duration():
 
     assert report["status"] == "FAIL"
     assert "PROVEN_DURATION_NOT_MET" in {item["code"] for item in report["failures"]}
+    assert "ACTUAL_DURATION_NOT_MET" in {item["code"] for item in report["failures"]}
 
 
 @pytest.mark.parametrize("failure", ["missing", "malformed", "gapped", "overlap"])
@@ -780,6 +1021,50 @@ def test_replay_derives_duration_from_execution_and_padding_windows():
     assert report["runtimeElapsedSec"] < report["durationSec"]
 
 
+def test_replay_does_not_credit_inter_window_gaps_toward_duration():
+    manifest = _full_span_manifest()
+    start = datetime(2026, 8, 31, 11, 0, tzinfo=timezone.utc)
+    for index, execution in enumerate(manifest["executions"]):
+        window_start = start + timedelta(seconds=index * 55)
+        execution["logWindow"].update(
+            start=window_start.isoformat(),
+            end=(window_start + timedelta(seconds=45)).isoformat(),
+        )
+        _refresh_execution_contract(execution)
+    manifest["durationSec"] = 1485
+    manifest["cleanup"] = _cleanup_evidence(
+        {
+            "journeyId": manifest["executions"][-1]["journeyId"],
+            "connectionId": manifest["executions"][-1]["connectionId"],
+            "windowId": manifest["executions"][-1]["windowId"],
+            "serverEndUtc": manifest["executions"][-1]["logWindow"]["end"],
+        }
+    )
+
+    report = _run_manifest(manifest)
+
+    assert report["durationSec"] == 1485.0
+    assert "PROVEN_DURATION_NOT_MET" in {item["code"] for item in report["failures"]}
+
+
+def test_replay_sums_monitored_windows_with_gaps_to_exact_duration():
+    report = _run_manifest(_full_span_manifest())
+
+    assert report["status"] == "PASS"
+    assert report["durationSec"] == 1800.0
+
+
+def test_replay_runtime_scalar_is_informational_but_cannot_undercut_coverage():
+    manifest = _full_span_manifest()
+    manifest["runtimeElapsedSec"] = 1799.5
+
+    report = _run_manifest(manifest)
+
+    assert "CLAIMED_RUNTIME_MISMATCH" in {
+        item["code"] for item in report["failures"]
+    }
+
+
 @pytest.mark.parametrize(
     ("field", "secret"),
     [
@@ -857,11 +1142,14 @@ def _full_span_manifest(*, padding=None, samples=35):
                 )
                 item["logWindow"].update(
                     start=start.isoformat(),
-                    end=(start + timedelta(seconds=55)).isoformat(),
+                    end=(
+                        start + timedelta(seconds=40 if sequence == 33 else 55)
+                    ).isoformat(),
                 )
+                _refresh_execution_contract(item)
                 executions.append(item)
         return {
-            "durationSec": 1847,
+            "durationSec": 1800,
             "executions": executions,
             "quietPadding": [] if padding is None else padding,
             "cleanup": _cleanup_evidence(
