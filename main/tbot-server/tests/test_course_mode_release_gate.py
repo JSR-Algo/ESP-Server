@@ -637,6 +637,43 @@ def test_production_gate_rejects_report_path_equal_to_operator_attestation(
     assert attestation.read_bytes() == original
 
 
+def test_production_gate_rejects_case_variant_report_alias_before_lane(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attestation = _write_operator_attestation(candidate_file)
+    report_alias = attestation.with_name(attestation.name.swapcase())
+    try:
+        aliases_attestation = os.path.samefile(report_alias, attestation)
+    except FileNotFoundError:
+        aliases_attestation = False
+    if not aliases_attestation:
+        pytest.skip("filesystem is case-sensitive")
+    original = attestation.read_bytes()
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(
+        gate, "lanes_for_mode", lambda _mode: (_lane("must-not-run", "raise SystemExit(0)"),),
+    )
+    original_run = gate.run_bounded_command
+    calls = 0
+
+    def count_lane(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(gate, "run_bounded_command", count_lane)
+
+    result = gate.run_gate(
+        candidate_file, "quick", runtime_root=_runtime_root(candidate_file),
+        report_path=report_alias,
+    )
+
+    assert calls == 0
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "report"
+    assert attestation.read_bytes() == original
+
+
 def test_production_gate_replaces_pass_report_if_attestation_changes_during_publish(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

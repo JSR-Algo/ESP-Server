@@ -2765,6 +2765,17 @@ def _operator_attestation_binding(
             os.close(parent_fd)
 
 
+def _paths_alias(left: Path, right: Path) -> bool:
+    normalized_left = Path(os.path.abspath(left))
+    normalized_right = Path(os.path.abspath(right))
+    if normalized_left == normalized_right:
+        return True
+    try:
+        return os.path.samefile(normalized_left, normalized_right)
+    except OSError:
+        return False
+
+
 def _command_for_lane(lane: Lane, candidate: dict) -> tuple[str, ...] | None:
     if lane.command == (COURSE_MODE_SOFTWARE_TESTS,):
         repository = candidate["repositories"]["adminEsp"]
@@ -2960,8 +2971,8 @@ def run_gate(
         operator_binding := _operator_attestation_binding(candidate, source)
     ) is None:
         report = _blocked(candidate_id, "operator-precondition")
-    elif lanes is None and report_path is not None and (
-        Path(os.path.abspath(report_path)) == operator_binding.path
+    elif lanes is None and report_path is not None and _paths_alias(
+        report_path, operator_binding.path,
     ):
         assert report_parent_fd is not None
         os.close(report_parent_fd)
