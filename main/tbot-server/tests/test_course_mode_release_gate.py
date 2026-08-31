@@ -3415,7 +3415,9 @@ def test_esp_python_lane_stages_attested_backend_node_runtime(candidate_file: Pa
             gate._manifest.secure_backend_snapshot_tree_descriptor(staged_backend)
         )
         before, before_error = gate._manifest.secure_backend_execution_tree_descriptor(staged_backend)
-        assert gate._backend_execution_snapshot_matches(stage) is True
+        binding = gate._backend_snapshot_environment(stage)
+        assert binding is not None
+        assert gate._backend_execution_snapshot_matches(stage, binding) is True
         modules = staged_backend / "node_modules"
         link = modules / "fixture-link"
         modules.chmod(0o755)
@@ -3429,7 +3431,15 @@ def test_esp_python_lane_stages_attested_backend_node_runtime(candidate_file: Pa
         assert source_before_error is None and source_after_error is None
         assert source_before == source_after
         assert before_error is None and after_error is None and before != after
-        assert gate._backend_execution_snapshot_matches(stage) is False
+        authority = stage.root / ".course-mode-authority/backend.json"
+        document = json.loads(authority.read_text(encoding="utf-8"))
+        document["executionTreeDigest"] = after
+        authority.parent.chmod(0o755)
+        authority.chmod(0o644)
+        authority.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
+        authority.chmod(0o444)
+        authority.parent.chmod(0o555)
+        assert gate._backend_execution_snapshot_matches(stage, binding) is False
     finally:
         assert stage.cleanup() is True
 

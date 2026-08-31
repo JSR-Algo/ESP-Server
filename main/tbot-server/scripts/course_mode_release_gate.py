@@ -289,6 +289,10 @@ class ExecutionStage:
         with contextlib.suppress(Exception):
             self.cleanup()
 
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self.cleanup()
+
     def create_lane_execution(self) -> LaneExecution:
         lane_root = Path(tempfile.mkdtemp(prefix="course-mode-lane-", dir=self.root.parent))
         lane_identity: tuple[int, int] | None = None
@@ -389,9 +393,12 @@ class LaneExecution:
     def retained_path(self) -> Path:
         return self._retained_path or self.root
 
-    def __del__(self) -> None:
-        with contextlib.suppress(Exception):
-            self.cleanup()
+
+@dataclass(frozen=True)
+class BackendSnapshotBinding:
+    environment: dict[str, str]
+    execution_tree: dict
+    authority_sha256: str
 
 
 def _make_tree_read_only(root: Path) -> None:
@@ -2383,7 +2390,7 @@ def _sandboxed_python_lane_command(
     )
 
 
-def _backend_snapshot_environment(execution_stage: ExecutionStage) -> dict[str, str] | None:
+def _backend_snapshot_environment(execution_stage: ExecutionStage) -> BackendSnapshotBinding | None:
     try:
         authority = execution_stage.root / ".course-mode-authority/backend.json"
         raw = read_secure_regular(authority, 4096)
@@ -2406,26 +2413,33 @@ def _backend_snapshot_environment(execution_stage: ExecutionStage) -> dict[str, 
             or execution_error or observed_execution != document.get("executionTreeDigest")
         ):
             return None
-        return {
+        authority_sha256 = hashlib.sha256(raw).hexdigest()
+        environment = {
             "COURSE_MODE_BACKEND_ROOT": backend["path"],
             "COURSE_MODE_BACKEND_SHA": backend["sha"],
             "COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY": str(authority),
-            "COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY_SHA256": hashlib.sha256(raw).hexdigest(),
+            "COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY_SHA256": authority_sha256,
         }
+        return BackendSnapshotBinding(environment, observed_execution, authority_sha256)
     except (KeyError, OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
         return None
 
 
-def _backend_execution_snapshot_matches(execution_stage: ExecutionStage) -> bool:
+def _backend_execution_snapshot_matches(
+    execution_stage: ExecutionStage, binding: BackendSnapshotBinding,
+) -> bool:
     try:
         authority = execution_stage.root / ".course-mode-authority/backend.json"
-        document = strict_json_loads(read_secure_regular(authority, 4096))
+        raw = read_secure_regular(authority, 4096)
+        document = strict_json_loads(raw)
         backend = execution_stage.candidate["repositories"]["backend"]
         observed, error = _manifest.secure_backend_execution_tree_descriptor(Path(backend["path"]))
         return (
-            isinstance(document, dict) and document.get("version") == 3
+            hashlib.sha256(raw).hexdigest() == binding.authority_sha256
+            and isinstance(document, dict) and document.get("version") == 3
             and document.get("root") == backend["path"] and document.get("sha") == backend["sha"]
-            and not error and observed == document.get("executionTreeDigest")
+            and document.get("executionTreeDigest") == binding.execution_tree
+            and not error and observed == binding.execution_tree
         )
     except (KeyError, OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
         return False
@@ -2979,11 +2993,11 @@ def run_gate(
                     child_environment = _child_environment(execution_candidate, lane_source, lane)
                     child_environment.update(lane_execution.environment)
                     if _python_test_runtime_required(lane):
-                        backend_environment = _backend_snapshot_environment(execution_stage)
-                        if backend_environment is None:
+                        backend_binding = _backend_snapshot_environment(execution_stage)
+                        if backend_binding is None:
                             result = _manifest.BoundedCommandResult(None, "", "authority")
                         else:
-                            child_environment.update(backend_environment)
+                            child_environment.update(backend_binding.environment)
                             result = run_bounded_command(
                                 list(command), cwd=resolved_cwd, timeout_sec=lane.timeout_sec,
                                 max_output_bytes=max_output_bytes, env=child_environment,
@@ -2995,7 +3009,10 @@ def run_gate(
                         )
                     if (
                         _python_test_runtime_required(lane)
-                        and not _backend_execution_snapshot_matches(execution_stage)
+                        and (
+                            backend_binding is None
+                            or not _backend_execution_snapshot_matches(execution_stage, backend_binding)
+                        )
                     ):
                         result = _manifest.BoundedCommandResult(None, "", "authority")
                     skip_state = pytest_report_has_skips(junit_path) if junit_path else False
