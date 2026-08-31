@@ -292,6 +292,71 @@ def _body(**overrides):
     return value
 
 
+def _candidate_identity(**overrides):
+    value = {
+        "gitSha": "a" * 40,
+        "imageDigest": "sha256:" + "b" * 64,
+        "firmwareIdentity": "firmware-v1",
+        "fixtureSha256": "c" * 64,
+        "configFingerprint": "sha256:" + "d" * 64,
+    }
+    value.update(overrides)
+    return {"candidateIdentity": value}
+
+
+@pytest.mark.asyncio
+async def test_candidate_identity_binding_is_authenticated_exact_and_immutable(monkeypatch):
+    monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint-secret")
+    registry = EvidenceEnrollmentRegistry()
+    _register(registry)
+    handler = GoogleLiveEvidenceHandler(registry)
+
+    bound = await handler.handle_candidate_identity_put(
+        Request(body=_candidate_identity())
+    )
+    repeated = await handler.handle_candidate_identity_put(
+        Request(body=_candidate_identity())
+    )
+    changed = await handler.handle_candidate_identity_put(
+        Request(body=_candidate_identity(firmwareIdentity="firmware-v2"))
+    )
+    secret = await handler.handle_candidate_identity_put(
+        Request(body=_candidate_identity(firmwareIdentity="device-AA:BB-secret"))
+    )
+    transcript_mac = await handler.handle_candidate_identity_put(
+        Request(body=_candidate_identity(fixtureSha256="a" * 64))
+    )
+
+    assert bound.status == 200
+    assert repeated.status == 200
+    assert changed.status == 409
+    assert secret.status == 400
+    assert transcript_mac.status == 400
+    encoded = bound.text + repeated.text + changed.text + secret.text + transcript_mac.text
+    assert "AA:BB" not in encoded
+    assert "robot-client" not in encoded
+    assert "secret" not in encoded.lower()
+
+
+def test_scope_claim_requires_server_bound_candidate_identity():
+    registry = EvidenceEnrollmentRegistry()
+    _register(registry)
+
+    assert registry.claim_for_scope(
+        device_id="aa:bb", client_id="robot-client", journey_id="physical.run-1"
+    ) is None
+
+    registry.bind_candidate_identity(
+        device_id="aa:bb",
+        journey_id="physical.run-1",
+        candidate_identity=_candidate_identity()["candidateIdentity"],
+    )
+    claimed = registry.claim_for_scope(
+        device_id="aa:bb", client_id="robot-client", journey_id="physical.run-1"
+    )
+    assert claimed == _candidate_identity()["candidateIdentity"]
+
+
 @pytest.mark.asyncio
 async def test_handler_auth_validation_safe_get_and_cancel(monkeypatch):
     monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint-secret")

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 import os
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from functools import wraps
-from typing import Callable, Literal
+from typing import Callable, Literal, Mapping
 
 
 def normalize_peer_id(value: str) -> str:
@@ -60,6 +62,7 @@ class _EvidenceEnrollmentState:
     monotonic_deadline: float = field(repr=False)
     connected: bool = False
     finalized: bool = False
+    candidate_identity: dict[str, str] | None = field(default=None, repr=False)
 
 
 class EvidenceEnrollmentRegistry:
@@ -169,24 +172,113 @@ class EvidenceEnrollmentRegistry:
         return self._view(enrollment)
 
     @_synchronized
-    def claimed_peer_matches(
+    def bind_candidate_identity(
+        self,
+        *,
+        device_id: str,
+        journey_id: str,
+        candidate_identity: Mapping[str, str],
+    ) -> dict[str, str]:
+        self._prepare()
+        enrollment = self._active.get(journey_id)
+        if enrollment is None or enrollment.device_id != normalize_peer_id(device_id):
+            raise EnrollmentError("JOURNEY_NOT_FOUND")
+        identity = dict(candidate_identity)
+        rendered = json.dumps(identity, sort_keys=True).casefold()
+        private_values = (
+            enrollment.device_id,
+            enrollment.client_id,
+            enrollment.hmac_key.hex(),
+            base64.b64encode(enrollment.hmac_key).decode("ascii"),
+            *(item.expected_mac for item in enrollment.transcript_plan),
+        )
+        if any(value and value.casefold() in rendered for value in private_values) or any(
+            token in rendered
+            for token in ("secret", "password", "authorization", "bearer", "hmac")
+        ):
+            raise EnrollmentError("INVALID_CANDIDATE_IDENTITY")
+        if enrollment.connected and enrollment.candidate_identity is None:
+            raise EnrollmentError("CANDIDATE_IDENTITY_CONFLICT")
+        if enrollment.candidate_identity is not None:
+            if enrollment.candidate_identity != identity:
+                raise EnrollmentError("CANDIDATE_IDENTITY_CONFLICT")
+            return dict(enrollment.candidate_identity)
+        enrollment.candidate_identity = identity
+        return dict(identity)
+
+    @_synchronized
+    def claim_for_scope(
+        self, *, device_id: str, client_id: str, journey_id: str
+    ) -> dict[str, str] | None:
+        self._prepare()
+        enrollment = self._active.get(journey_id)
+        if (
+            enrollment is None
+            or enrollment.connected
+            or enrollment.candidate_identity is None
+            or enrollment.device_id != normalize_peer_id(device_id)
+            or enrollment.client_id != normalize_peer_id(client_id)
+        ):
+            return None
+        enrollment.connected = True
+        return dict(enrollment.candidate_identity)
+
+    @_synchronized
+    def active_claim_matches(
         self, *, device_id: str, client_id: str, journey_id: str
     ) -> bool:
         self._prepare()
         enrollment = self._active.get(journey_id)
-        if enrollment is not None:
-            return bool(
-                enrollment.connected
-                and enrollment.device_id == normalize_peer_id(device_id)
-                and enrollment.client_id == normalize_peer_id(client_id)
-            )
         return bool(
-            journey_id in self._tombstones
+            enrollment is not None
+            and enrollment.connected
+            and enrollment.device_id == normalize_peer_id(device_id)
+            and enrollment.client_id == normalize_peer_id(client_id)
+        )
+
+    @_synchronized
+    def terminal_claim_matches(
+        self, *, device_id: str, client_id: str, journey_id: str
+    ) -> bool:
+        self._prepare()
+        tombstone = self._tombstones.get(journey_id)
+        return bool(
+            tombstone is not None
+            and tombstone.get("status") in ("PASS", "FAIL")
             and self._terminal_peer_digests.get(journey_id)
             == self._peer_digest(device_id)
             and self._terminal_client_digests.get(journey_id)
             == self._peer_digest(client_id)
         )
+
+    def claimed_peer_matches(
+        self, *, device_id: str, client_id: str, journey_id: str
+    ) -> bool:
+        return self.active_claim_matches(
+            device_id=device_id,
+            client_id=client_id,
+            journey_id=journey_id,
+        )
+
+    @_synchronized
+    def abort_claim(
+        self,
+        *,
+        device_id: str,
+        client_id: str,
+        journey_id: str,
+        failure_code: str,
+    ) -> dict:
+        self._prepare()
+        enrollment = self._active.get(journey_id)
+        if (
+            enrollment is None
+            or not enrollment.connected
+            or enrollment.device_id != normalize_peer_id(device_id)
+            or enrollment.client_id != normalize_peer_id(client_id)
+        ):
+            raise EnrollmentError("JOURNEY_NOT_FOUND")
+        return self.finalize(journey_id, status="FAIL", failure_code=failure_code)
 
     @_synchronized
     def finalize(

@@ -24,6 +24,17 @@ _POST_FIELDS = {
     "transcriptPlan",
 }
 _PLAN_FIELDS = {"slot", "phase", "expectedMac"}
+_CANDIDATE_FIELDS = {
+    "gitSha",
+    "imageDigest",
+    "firmwareIdentity",
+    "configFingerprint",
+    "fixtureSha256",
+}
+_LOWER_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_LOWER_IMAGE_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_GIT_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_SAFE_FIRMWARE_IDENTITY = re.compile(r"^[A-Za-z0-9._:+/-]{1,128}$")
 
 
 class GoogleLiveEvidenceHandler:
@@ -106,6 +117,53 @@ class GoogleLiveEvidenceHandler:
             return self._error(404, "JOURNEY_NOT_FOUND", "Evidence journey not found")
         return web.json_response(snapshot, headers={"Cache-Control": "no-store"})
 
+    async def handle_candidate_identity_put(self, request: web.Request) -> web.Response:
+        auth_error = self._authorize(request)
+        if auth_error is not None:
+            return auth_error
+        try:
+            device_id, journey_id = self._path_ids(request)
+            body = await request.json()
+            if not isinstance(body, dict) or set(body) != {"candidateIdentity"}:
+                raise ValueError
+            identity = body["candidateIdentity"]
+            if not isinstance(identity, dict) or set(identity) != _CANDIDATE_FIELDS:
+                raise ValueError
+            if (
+                _GIT_SHA.fullmatch(identity.get("gitSha", "")) is None
+                or _LOWER_IMAGE_DIGEST.fullmatch(identity.get("imageDigest", ""))
+                is None
+                or _SAFE_FIRMWARE_IDENTITY.fullmatch(
+                    identity.get("firmwareIdentity", "")
+                )
+                is None
+                or _LOWER_IMAGE_DIGEST.fullmatch(
+                    identity.get("configFingerprint", "")
+                )
+                is None
+                or _LOWER_SHA256.fullmatch(identity.get("fixtureSha256", ""))
+                is None
+            ):
+                raise ValueError
+            self.registry.bind_candidate_identity(
+                device_id=device_id,
+                journey_id=journey_id,
+                candidate_identity=identity,
+            )
+        except EnrollmentError as exc:
+            code = str(exc)
+            if code == "CANDIDATE_IDENTITY_CONFLICT":
+                return self._error(409, code, "Candidate identity is already bound")
+            if code == "JOURNEY_NOT_FOUND":
+                return self._error(404, code, "Evidence journey not found")
+            return self._error(400, "INVALID_REQUEST", "Invalid candidate identity")
+        except Exception:
+            return self._error(400, "INVALID_REQUEST", "Invalid candidate identity")
+        return web.json_response(
+            {"data": {"bound": True, "journeyId": journey_id}},
+            headers={"Cache-Control": "no-store"},
+        )
+
     async def handle_finalize(self, request: web.Request) -> web.Response:
         auth_error = self._authorize(request)
         if auth_error is not None:
@@ -142,10 +200,27 @@ class GoogleLiveEvidenceHandler:
                 or not isinstance(scope, dict)
                 or scope.get("journeyId") != journey_id
                 or scope.get("connectionId") != session_id
-                or not self.registry.claimed_peer_matches(
+                or not self.registry.active_claim_matches(
                     device_id=device_id, client_id=client_id, journey_id=journey_id
                 )
             ):
+                cached = getattr(connection, "google_live_evidence_finalize_result", None)
+                if (
+                    current
+                    and isinstance(scope, dict)
+                    and scope.get("journeyId") == journey_id
+                    and scope.get("connectionId") == session_id
+                    and isinstance(cached, dict)
+                    and cached.get("evidenceScope") == scope
+                    and self.registry.terminal_claim_matches(
+                        device_id=device_id,
+                        client_id=client_id,
+                        journey_id=journey_id,
+                    )
+                ):
+                    return web.json_response(
+                        cached, headers={"Cache-Control": "no-store"}
+                    )
                 return self._error(409, "EVIDENCE_SCOPE_INVALID", "Evidence scope is not active")
             finalize = getattr(connection, "finalize_google_live_evidence", None)
             if not callable(finalize):

@@ -20,8 +20,6 @@ from core.utils.wakeup_word import WakeupWordsConfig
 
 TAG = __name__
 SAFE_EVIDENCE_JOURNEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
-_SHA256_DIGEST_RE = re.compile(r"^sha256:[0-9a-fA-F]{64}$")
-_HEX_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def _utc_now_iso():
@@ -46,26 +44,6 @@ def _single_client_id(conn):
     value = headers.get("client-id", headers.get("Client-Id", ""))
     return value if isinstance(value, str) else ""
 
-
-def _safe_candidate_identity(value):
-    fields = {
-        "gitSha",
-        "imageDigest",
-        "firmwareIdentity",
-        "fixtureSha256",
-        "configFingerprint",
-    }
-    if not isinstance(value, dict) or set(value) != fields:
-        return None
-    if any(not isinstance(value[field], str) or not value[field] for field in fields):
-        return None
-    if (
-        _SHA256_DIGEST_RE.fullmatch(value["imageDigest"]) is None
-        or _HEX_SHA256_RE.fullmatch(value["fixtureSha256"]) is None
-        or _SHA256_DIGEST_RE.fullmatch(value["configFingerprint"]) is None
-    ):
-        return None
-    return value
 
 WAKEUP_CONFIG = {
     "refresh_time": 10,
@@ -122,6 +100,7 @@ def _google_live_output_sample_rate(conn: "ConnectionHandler"):
 async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
     """Handle hello message"""
     send_mcp_initialize = False
+    connection_transition_to_log = None
     evidence_journey_id = msg_json.get("evidence_journey_id")
     conn.google_live_evidence_journey_id = (
         evidence_journey_id
@@ -131,22 +110,25 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
         else None
     )
     conn.google_live_evidence_scope = None
+    conn.google_live_evidence_candidate_identity = None
     enrollment_invalid = False
     registry = getattr(conn, "evidence_registry", None)
     if conn.google_live_evidence_journey_id is not None and registry is not None:
-        claim_once = getattr(registry, "claim_once", None)
+        claim_for_scope = getattr(registry, "claim_for_scope", None)
         claimed = (
-            claim_once(
+            claim_for_scope(
                 device_id=str(getattr(conn, "device_id", "") or ""),
                 client_id=_single_client_id(conn),
                 journey_id=conn.google_live_evidence_journey_id,
             )
-            if callable(claim_once)
+            if callable(claim_for_scope)
             else None
         )
         if claimed is None:
             conn.google_live_evidence_journey_id = None
             enrollment_invalid = True
+        else:
+            conn.google_live_evidence_candidate_identity = claimed
     audio_params = msg_json.get("audio_params")
     if audio_params:
         format = audio_params.get("format")
@@ -203,23 +185,6 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
             }
             conn.google_live_evidence_scope = scope
             hello_ack["evidenceScope"] = scope
-            candidate_identity = _safe_candidate_identity(
-                msg_json.get("candidate_identity")
-            ) or {}
-            conn.logger.bind(tag=TAG).info(
-                "Google Live reliability_window_start window_id={} journey_id={} "
-                "connection_id={} live_connection_id={} initial_live_connection_id={} "
-                "peer_identity_hash={} server_start_utc={} server_issued=true "
-                "candidate_identity={}",
-                scope["journeyId"],
-                scope["journeyId"],
-                scope["connectionId"],
-                scope["liveConnectionId"],
-                scope["initialLiveConnectionId"],
-                scope["peerIdentityHash"],
-                scope["serverStartUtc"],
-                json.dumps(candidate_identity, sort_keys=True, separators=(",", ":")),
-            )
             previous = getattr(conn, "google_live_previous_server_connection", None)
             previous_scope = (
                 previous.get("evidenceScope") if isinstance(previous, dict) else None
@@ -255,23 +220,71 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
                 conn.google_live_server_connection_transition = transition
                 conn.google_live_previous_server_connection = None
                 hello_ack["connectionTransition"] = transition
-                conn.logger.bind(tag=TAG).info(
-                    "Google Live evidence_server_connection_transition "
-                    f"from_journey_id={transition['fromJourneyId']} "
-                    f"from_connection_id={transition['fromConnectionId']} "
-                    f"to_journey_id={transition['toJourneyId']} "
-                    f"to_connection_id={transition['toConnectionId']} "
-                    f"peer_identity_hash={transition['peerIdentityHash']} "
-                    "sequence=1 reason=same_device_reconnect"
-                )
+                connection_transition_to_log = transition
         else:
+            if registry is not None:
+                try:
+                    registry.abort_claim(
+                        device_id=str(getattr(conn, "device_id", "") or ""),
+                        client_id=_single_client_id(conn),
+                        journey_id=conn.google_live_evidence_journey_id,
+                        failure_code="LIVE_SCOPE_UNAVAILABLE",
+                    )
+                except Exception:
+                    pass
             conn.google_live_evidence_journey_id = None
             hello_ack["evidenceScope"] = {
                 "status": "FAIL",
                 "failureCode": "LIVE_SCOPE_UNAVAILABLE",
             }
 
-    await conn.websocket.send(json.dumps(hello_ack))
+    try:
+        await conn.websocket.send(json.dumps(hello_ack))
+    except Exception:
+        scope = getattr(conn, "google_live_evidence_scope", None)
+        if registry is not None and isinstance(scope, dict):
+            try:
+                registry.abort_claim(
+                    device_id=str(getattr(conn, "device_id", "") or ""),
+                    client_id=_single_client_id(conn),
+                    journey_id=scope["journeyId"],
+                    failure_code="HELLO_ACK_FAILED",
+                )
+            except Exception:
+                pass
+        conn.google_live_evidence_journey_id = None
+        conn.google_live_evidence_scope = None
+        raise
+    scope = getattr(conn, "google_live_evidence_scope", None)
+    candidate_identity = getattr(
+        conn, "google_live_evidence_candidate_identity", None
+    )
+    if isinstance(scope, dict):
+        conn.logger.bind(tag=TAG).info(
+            "Google Live reliability_window_start window_id={} journey_id={} "
+            "connection_id={} live_connection_id={} initial_live_connection_id={} "
+            "peer_identity_hash={} server_start_utc={} server_issued=true "
+            "candidate_identity={}",
+            scope["journeyId"],
+            scope["journeyId"],
+            scope["connectionId"],
+            scope["liveConnectionId"],
+            scope["initialLiveConnectionId"],
+            scope["peerIdentityHash"],
+            scope["serverStartUtc"],
+            json.dumps(candidate_identity or {}, sort_keys=True, separators=(",", ":")),
+        )
+        if connection_transition_to_log is not None:
+            transition = connection_transition_to_log
+            conn.logger.bind(tag=TAG).info(
+                "Google Live evidence_server_connection_transition "
+                f"from_journey_id={transition['fromJourneyId']} "
+                f"from_connection_id={transition['fromConnectionId']} "
+                f"to_journey_id={transition['toJourneyId']} "
+                f"to_connection_id={transition['toConnectionId']} "
+                f"peer_identity_hash={transition['peerIdentityHash']} "
+                "sequence=1 reason=same_device_reconnect"
+            )
     if send_mcp_initialize:
         conn.schedule_mcp_background_task(send_mcp_initialize_message(conn))
 

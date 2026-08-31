@@ -1255,6 +1255,66 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         release_cleanup.set()
         await asyncio.sleep(0)
 
+    async def test_evidence_finalize_timeout_leaves_boundary_open_until_cleanup_terminal(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.config["google_live"] = {"evidence_finalize_timeout_sec": 0.1}
+        handler.logger = _RecordingLogger()
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        release = asyncio.Event()
+        terminal = []
+        handler.evidence_registry = types.SimpleNamespace(
+            finalize=lambda journey_id, status, failure_code=None: terminal.append(
+                (journey_id, status, failure_code)
+            )
+        )
+
+        async def slow_cleanup():
+            await release.wait()
+            return {
+                "status": "PASS",
+                "journeyId": "bargein-1",
+                "connectionId": "server-conn-1",
+                "peerIdentityHash": "sha256:" + "a" * 64,
+                "initialLiveConnectionId": "live-7",
+                "finalLiveConnectionId": "live-7",
+                "liveConnectionTransitions": [],
+                "pendingTasks": 0,
+            }
+
+        handler.voice_provider = types.SimpleNamespace(
+            finalize_evidence=slow_cleanup,
+            request_evidence_finalize_stop=AsyncMock(),
+        )
+
+        first = await handler.finalize_google_live_evidence(scope)
+        self.assertEqual(first["failureCode"], "EVIDENCE_FINALIZE_TIMEOUT")
+        self.assertFalse(
+            any("reliability_window_end" in record[1] for record in handler.logger.records)
+        )
+        self.assertEqual(terminal, [])
+
+        release.set()
+        second, third = await asyncio.gather(
+            handler.finalize_google_live_evidence(scope),
+            handler.finalize_google_live_evidence(scope),
+        )
+        self.assertEqual(second, third)
+        self.assertEqual(second["status"], "PASS")
+        self.assertEqual(
+            sum("reliability_window_end" in record[1] for record in handler.logger.records),
+            1,
+        )
+        self.assertEqual(terminal, [("bargein-1", "PASS", None)])
+
     async def test_evidence_finalize_rejects_changed_live_id_or_pending_cleanup(self):
         for result in (
             {"status": "PASS", "liveConnectionId": "live-other", "pendingTasks": 0},

@@ -20,6 +20,9 @@ warnings.filterwarnings(
 import websockets  # noqa: E402
 
 from config.logger import setup_logging  # noqa: E402
+from core.voice.google_live.evidence_enrollment import (  # noqa: E402
+    EvidenceEnrollmentRegistry,
+)
 
 
 class SuppressInvalidHandshakeFilter(logging.Filter):
@@ -136,7 +139,11 @@ class WebSocketServer:
         self.lesson_connections = ConnectionRegistry()
         self.lesson_sd_online_index = lesson_sd_online_index
         self.global_generation_sessions = global_generation_sessions
-        self.evidence_registry = evidence_registry
+        self.evidence_registry = (
+            evidence_registry
+            if evidence_registry is not None
+            else EvidenceEnrollmentRegistry()
+        )
         self.accept_cap = self._resolve_accept_cap()
         self._active_device_connections = 0
         self.is_draining = False

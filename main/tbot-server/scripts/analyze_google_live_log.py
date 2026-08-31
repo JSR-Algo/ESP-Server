@@ -1507,7 +1507,10 @@ def _bounded_server_window(log_path: Path, journey_id: str) -> list[str]:
         foreign_end = P_RELIABILITY_WINDOW_END.search(line)
         if foreign_start or foreign_end:
             raise ValueError("foreign reliability anchor")
-        if _is_reliability_line(line):
+        scoped_marker, scoped_valid = _scoped_marker_validation(line)
+        if "Google Live evidence_" in line and (not scoped_marker or not scoped_valid):
+            raise ValueError("malformed scoped evidence marker")
+        if _is_reliability_line(line) or scoped_marker:
             marker_journey = re.search(r"\bjourney_id=([A-Za-z0-9._:-]+)", line)
             if marker_journey is not None and marker_journey.group(1) != journey_id:
                 raise ValueError("foreign reliability marker")
@@ -1518,7 +1521,7 @@ def _persist_reliability_window(log_path: Path, journey_id: str, out_path: Path)
     try:
         if SAFE_EVIDENCE_JOURNEY_RE.fullmatch(journey_id) is None:
             raise ValueError("invalid journey")
-        if not log_path.is_file():
+        if log_path.is_symlink() or not log_path.is_file():
             raise ValueError("log file unavailable")
         if out_path.exists() and os.path.samefile(log_path, out_path):
             return 1

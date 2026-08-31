@@ -217,6 +217,49 @@ def test_cli_reliability_window_rejects_synthetic_anchors(tmp_path):
     assert json.loads(out.read_text(encoding="utf-8"))["status"] == "FAIL"
 
 
+def test_cli_reliability_window_rejects_malformed_scoped_evidence_marker(tmp_path):
+    scope = {**EVIDENCE_SCOPE, "journeyId": "physical.run-1"}
+    log = tmp_path / "server.log"
+    out = tmp_path / "report.json"
+    log.write_text(
+        "\n".join(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live evidence_response_started "
+                "journey_id=physical.run-1 connection_id=conn-1 missing_fields=true",
+                journey_id="physical.run-1",
+                evidence_scope=scope,
+                window_id="physical.run-1",
+                server_issued=True,
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main([
+        "--log", str(log), "--reliability-window",
+        "--journey-id", "physical.run-1", "--out-json", str(out),
+    ])
+
+    assert exit_code != 0
+    assert json.loads(out.read_text(encoding="utf-8"))["status"] == "FAIL"
+
+
+def test_cli_reliability_window_rejects_symlink_input(tmp_path):
+    real_log = tmp_path / "real.log"
+    log = tmp_path / "server.log"
+    out = tmp_path / "report.json"
+    real_log.write_text("malformed", encoding="utf-8")
+    log.symlink_to(real_log)
+
+    exit_code = main([
+        "--log", str(log), "--reliability-window",
+        "--journey-id", "physical.run-1", "--out-json", str(out),
+    ])
+
+    assert exit_code != 0
+    assert json.loads(out.read_text(encoding="utf-8"))["status"] == "FAIL"
+
+
 def test_cli_reliability_window_rejects_output_alias(tmp_path):
     log = tmp_path / "server.log"
     log.write_text("malformed", encoding="utf-8")

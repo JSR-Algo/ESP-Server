@@ -17,7 +17,10 @@ from core.lesson.global_generation_status import (
     GlobalGenerationStatus,
     GlobalGenerationStatusError,
 )
-from core.voice.google_live.evidence_enrollment import TranscriptExpectation
+from core.voice.google_live.evidence_enrollment import (
+    EvidenceEnrollmentRegistry,
+    TranscriptExpectation,
+)
 
 # T6.4 — /internal/lesson-runtime/* now share the X-Mint-Secret gate that every
 # other /internal/ route already used, so these tests must authenticate.
@@ -319,6 +322,12 @@ async def test_http_server_start_registers_routes_and_starts_site(monkeypatch):
         == "/internal/devices/{deviceId}/google-live-evidence/{journeyId}/finalize"
         for route in runner_apps[0].router.routes()
     )
+    assert any(
+        route.method == "PUT"
+        and route.resource.canonical
+        == "/internal/devices/{deviceId}/google-live-evidence/{journeyId}/candidate-identity"
+        for route in runner_apps[0].router.routes()
+    )
     assert "/internal/lesson-assets/generation/retry" in route_paths
     assert "/internal/lesson-runtime/preload-voice-alarm" in route_paths
     assert "/internal/lesson-runtime/preload-voice-alarm/reset" in route_paths
@@ -345,13 +354,17 @@ async def test_google_live_evidence_http_finalize_reserves_exact_current_connect
     )
     scope = {"journeyId": "physical.run-1", "connectionId": "session-1"}
 
+    connection = None
+
     async def finalize(expected_scope):
         registry.finalize("physical.run-1", status="PASS")
-        return {
+        result = {
             "type": "evidence_finalized",
             "status": "PASS",
             "evidenceScope": expected_scope,
         }
+        connection.google_live_evidence_finalize_result = result
+        return result
 
     finalize_mock = AsyncMock(side_effect=finalize)
     connection = types.SimpleNamespace(
@@ -377,7 +390,55 @@ async def test_google_live_evidence_http_finalize_reserves_exact_current_connect
     retry = await server.google_live_evidence_handler.handle_finalize(request)
     assert retry.status == 200
     assert retry.text == response.text
-    assert connection.finalize_google_live_evidence.await_count == 2
+    assert connection.finalize_google_live_evidence.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_google_live_evidence_http_finalize_rejects_expired_tombstone():
+    class Clock:
+        now = 1000.0
+
+        def __call__(self):
+            return self.now
+
+    clock = Clock()
+    registry = EvidenceEnrollmentRegistry(clock=clock)
+    connections = ConnectionRegistry()
+    server = SimpleHttpServer(
+        _config(), lesson_connections=connections, evidence_registry=registry
+    )
+    registry.register(
+        device_id="device-1",
+        client_id="client-1",
+        journey_id="physical.run-1",
+        transcript_plan=(TranscriptExpectation(1, "interrupt", "a" * 64),),
+        hmac_key=b"k" * 32,
+        ttl_sec=30,
+    )
+    registry.claim(
+        device_id="device-1", client_id="client-1", journey_id="physical.run-1"
+    )
+    clock.now += 31
+    finalize = AsyncMock()
+    connections["device-1"] = types.SimpleNamespace(
+        session_id="session-1",
+        client_id="client-1",
+        google_live_evidence_scope={
+            "journeyId": "physical.run-1", "connectionId": "session-1"
+        },
+        finalize_google_live_evidence=finalize,
+    )
+    request = make_mocked_request(
+        "POST",
+        "/internal/devices/device-1/google-live-evidence/physical.run-1/finalize",
+        headers={"X-Mint-Secret": INTERNAL_MINT_SECRET},
+        match_info={"deviceId": "device-1", "journeyId": "physical.run-1"},
+    )
+
+    response = await server.google_live_evidence_handler.handle_finalize(request)
+
+    assert response.status == 409
+    finalize.assert_not_awaited()
 
 
 @pytest.mark.asyncio

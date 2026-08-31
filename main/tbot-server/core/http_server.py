@@ -227,6 +227,10 @@ class SimpleHttpServer:
                             "/internal/devices/{deviceId}/google-live-evidence/{journeyId}",
                             self.google_live_evidence_handler.handle_delete,
                         ),
+                        web.put(
+                            "/internal/devices/{deviceId}/google-live-evidence/{journeyId}/candidate-identity",
+                            self.google_live_evidence_handler.handle_candidate_identity_put,
+                        ),
                         web.post(
                             "/internal/devices/{deviceId}/google-live-evidence/{journeyId}/finalize",
                             self.google_live_evidence_handler.handle_finalize,

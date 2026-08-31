@@ -91,6 +91,17 @@ class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
             hmac_key=b"k" * 32,
             ttl_sec=120,
         )
+        registry.bind_candidate_identity(
+            device_id=conn.device_id,
+            journey_id=journey_id,
+            candidate_identity={
+                "gitSha": "a" * 40,
+                "imageDigest": "sha256:" + "b" * 64,
+                "firmwareIdentity": "firmware-v1",
+                "fixtureSha256": "c" * 64,
+                "configFingerprint": "sha256:" + "d" * 64,
+            },
+        )
         conn.evidence_registry = registry
         return registry
 
@@ -137,6 +148,103 @@ class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             any("reliability_window_start" in message for message in conn.logger.infos)
         )
+
+    async def test_google_live_hello_ignores_fabricated_client_candidate_identity(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(return_value="live-7")
+        )
+        self._enroll(conn)
+        fabricated = {
+            "gitSha": "f" * 40,
+            "imageDigest": "sha256:" + "f" * 64,
+            "firmwareIdentity": "fabricated",
+            "fixtureSha256": "f" * 64,
+            "configFingerprint": "sha256:" + "f" * 64,
+        }
+
+        await handleHelloMessage(
+            conn,
+            {
+                "evidence_journey_id": "physical.run-1",
+                "candidate_identity": fabricated,
+            },
+        )
+
+        logs = " ".join(conn.logger.infos)
+        self.assertNotIn(json.dumps(fabricated, sort_keys=True), logs)
+
+    async def test_google_live_hello_without_bound_identity_fails_before_scope(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(return_value="live-7")
+        )
+        registry = EvidenceEnrollmentRegistry()
+        registry.register(
+            device_id=conn.device_id,
+            client_id=conn.client_id,
+            journey_id="physical.run-1",
+            transcript_plan=(TranscriptExpectation(1, "interrupt", "a" * 64),),
+            hmac_key=b"k" * 32,
+            ttl_sec=120,
+        )
+        conn.evidence_registry = registry
+
+        await handleHelloMessage(conn, {"evidence_journey_id": "physical.run-1"})
+
+        ack = json.loads(conn.websocket.sent[0])
+        self.assertEqual(
+            ack["evidenceScope"]["failureCode"], "EVIDENCE_ENROLLMENT_INVALID"
+        )
+        conn.voice_provider.prepare_evidence_scope.assert_not_awaited()
+
+    async def test_google_live_start_marker_is_after_ack_and_send_failure_aborts_claim(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(return_value="live-7")
+        )
+        registry = self._enroll(conn)
+
+        async def fail_send(_payload):
+            raise RuntimeError("send failed")
+
+        conn.websocket.send = fail_send
+        with self.assertRaises(RuntimeError):
+            await handleHelloMessage(conn, {"evidence_journey_id": "physical.run-1"})
+
+        self.assertFalse(
+            any("reliability_window_start" in message for message in conn.logger.infos)
+        )
+        self.assertEqual(registry.safe_snapshot("physical.run-1")["status"], "FAIL")
+
+    async def test_google_live_start_marker_is_logged_after_successful_ack(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(return_value="live-7")
+        )
+        self._enroll(conn)
+        events = []
+        original_info = conn.logger.info
+
+        async def record_send(payload):
+            events.append("ack")
+            conn.websocket.sent.append(payload)
+
+        def record_info(message, *args, **kwargs):
+            original_info(message, *args, **kwargs)
+            if "reliability_window_start" in message:
+                events.append("start")
+
+        conn.websocket.send = record_send
+        conn.logger.info = record_info
+
+        await handleHelloMessage(conn, {"evidence_journey_id": "physical.run-1"})
+
+        self.assertEqual(events, ["ack", "start"])
     async def test_client_audio_params_update_connection_sample_rate(self):
         conn = _Conn()
 

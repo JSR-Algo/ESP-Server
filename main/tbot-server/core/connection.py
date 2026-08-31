@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import hashlib
+import inspect
 import json
 import os
 import queue
@@ -1252,7 +1253,34 @@ class ConnectionHandler:
                         timeout=max(0.1, min(timeout, 30.0)),
                     )
                 except asyncio.TimeoutError:
-                    failure_code = "EVIDENCE_FINALIZE_TIMEOUT"
+                    request_stop = getattr(
+                        provider, "request_evidence_finalize_stop", None
+                    )
+                    if callable(request_stop):
+                        try:
+                            stop_result = request_stop()
+                            if inspect.isawaitable(stop_result):
+                                await stop_result
+                        except Exception:
+                            pass
+                    cleanup_grace = max(0.1, min(timeout, 5.0))
+                    try:
+                        result = await asyncio.wait_for(
+                            asyncio.shield(finalize_task),
+                            timeout=cleanup_grace,
+                        )
+                    except asyncio.TimeoutError:
+                        return {
+                            "type": "evidence_finalized",
+                            "status": "FAIL",
+                            "failureCode": "EVIDENCE_FINALIZE_TIMEOUT",
+                            "evidenceScope": scope,
+                            "retryable": True,
+                        }
+                    except asyncio.CancelledError:
+                        failure_code = "EVIDENCE_FINALIZE_TIMEOUT"
+                    except Exception:
+                        failure_code = "EVIDENCE_FINALIZE_FAILED"
                 except Exception:
                     failure_code = "EVIDENCE_FINALIZE_FAILED"
                 validated_transition_result = self._validated_evidence_transition_result(
