@@ -176,9 +176,11 @@ def resolve_backend_root(
             or document.get("repository") != "backend"
             or document.get("root") != str(root)
             or document.get("sha") != bound_expected_sha
-            or document.get("version") != 2
-            or set(document) != {"repository", "root", "sha", "treeDigest", "version"}
-            or tree_error or observed_tree != document.get("treeDigest")
+            or document.get("version") != 3
+            or set(document) != {
+                "executionTreeDigest", "repository", "root", "sha", "sourceTreeDigest", "version",
+            }
+            or tree_error or observed_tree != document.get("sourceTreeDigest")
         ):
             return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
         return BackendRootResolution(root, None, bound_expected_sha)

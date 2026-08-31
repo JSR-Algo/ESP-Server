@@ -2114,7 +2114,12 @@ def test_python_lane_stages_backend_snapshot_authority(candidate_file: Path) -> 
             Path(stage.candidate["repositories"]["backend"]["path"]),
         )
         assert error is None
-        assert document["treeDigest"] == observed
+        assert document["sourceTreeDigest"] == observed
+        execution, execution_error = gate._manifest.secure_backend_execution_tree_descriptor(
+            Path(stage.candidate["repositories"]["backend"]["path"]),
+        )
+        assert execution_error is None
+        assert document["executionTreeDigest"] == execution
     finally:
         assert stage.cleanup() is True
 
@@ -3406,15 +3411,25 @@ def test_esp_python_lane_stages_attested_backend_node_runtime(candidate_file: Pa
         staged_node = Path(stage.candidate["tools"]["node"]["backend"]["executable"])
         assert (staged_backend / "node_modules/.bin/vite-node").exists()
         assert staged_node.is_file()
-        before, before_error = gate._manifest.secure_backend_snapshot_tree_descriptor(staged_backend)
+        source_before, source_before_error = (
+            gate._manifest.secure_backend_snapshot_tree_descriptor(staged_backend)
+        )
+        before, before_error = gate._manifest.secure_backend_execution_tree_descriptor(staged_backend)
+        assert gate._backend_execution_snapshot_matches(stage) is True
         modules = staged_backend / "node_modules"
         link = modules / "fixture-link"
         modules.chmod(0o755)
         link.unlink()
         link.symlink_to(".bin", target_is_directory=True)
         modules.chmod(0o555)
-        after, after_error = gate._manifest.secure_backend_snapshot_tree_descriptor(staged_backend)
+        source_after, source_after_error = (
+            gate._manifest.secure_backend_snapshot_tree_descriptor(staged_backend)
+        )
+        after, after_error = gate._manifest.secure_backend_execution_tree_descriptor(staged_backend)
+        assert source_before_error is None and source_after_error is None
+        assert source_before == source_after
         assert before_error is None and after_error is None and before != after
+        assert gate._backend_execution_snapshot_matches(stage) is False
     finally:
         assert stage.cleanup() is True
 

@@ -89,7 +89,7 @@ def _bind_gitless_snapshot(
     assert tree_error is None and tree is not None
     authority.write_text(json.dumps({
         "repository": "backend", "root": str(root.resolve()), "sha": sha,
-        "treeDigest": tree, "version": 2,
+        "sourceTreeDigest": tree, "executionTreeDigest": tree, "version": 3,
     }, sort_keys=True), encoding="utf-8")
     monkeypatch.setattr(simulation, "COURSE_MODE_STAGE_PARENT", stage.parent)
     monkeypatch.setenv("COURSE_MODE_BACKEND_SHA", sha)

@@ -511,6 +511,7 @@ def _secure_browser_bundle_descriptor_fd(
     root_fd: int, root_metadata: os.stat_result, *, require_read_only: bool = False,
     allow_safe_symlinks: bool = False, max_entries: int = 10_000,
     max_bytes: int = MAX_BROWSER_EXECUTABLE_BYTES,
+    excluded_root_directories: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, Any] | None, str | None]:
     digest = hashlib.sha256()
     state = {"entryCount": 0, "totalBytes": 0}
@@ -525,6 +526,13 @@ def _secure_browser_bundle_descriptor_fd(
             if state["entryCount"] > max_entries:
                 return False
             mode = stat.S_IMODE(metadata.st_mode)
+            if depth == 0 and name in excluded_root_directories:
+                if not stat.S_ISDIR(metadata.st_mode) or (require_read_only and mode & 0o222):
+                    return False
+                _digest_field(digest, b"excluded-directory")
+                _digest_field(digest, relative.as_posix().encode())
+                _digest_field(digest, str(mode).encode())
+                continue
             if require_read_only and not stat.S_ISLNK(metadata.st_mode) and mode & 0o222:
                 return False
             if stat.S_ISDIR(metadata.st_mode):
@@ -662,8 +670,7 @@ def secure_backend_snapshot_tree_descriptor(
             return None, "changed"
         descriptor, error = _secure_browser_bundle_descriptor_fd(
             root_fd, metadata, require_read_only=True,
-            allow_safe_symlinks=True, max_entries=MAX_BACKEND_SNAPSHOT_ENTRIES,
-            max_bytes=MAX_BACKEND_SNAPSHOT_BYTES,
+            excluded_root_directories=frozenset({"node_modules"}),
         )
         if error or descriptor is None:
             return None, error or "tree"
@@ -673,6 +680,35 @@ def secure_backend_snapshot_tree_descriptor(
         _digest_field(digest, BACKEND_SNAPSHOT_TREE_SCHEMA.encode("ascii"))
         _digest_field(digest, descriptor["sha256"].encode("ascii"))
         return {**descriptor, "schema": BACKEND_SNAPSHOT_TREE_SCHEMA, "sha256": digest.hexdigest()}, None
+    except (OSError, UnicodeEncodeError):
+        return None, "path"
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
+
+
+def secure_backend_execution_tree_descriptor(
+    root: Path,
+) -> tuple[dict[str, Any] | None, str | None]:
+    root_fd = None
+    try:
+        if not root.is_absolute() or str(root) != str(root.resolve(strict=True)) or root.is_symlink():
+            return None, "path"
+        metadata = root.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o222:
+            return None, "path"
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+        if _tree_metadata_identity(os.fstat(root_fd)) != _tree_metadata_identity(metadata):
+            return None, "changed"
+        descriptor, error = _secure_browser_bundle_descriptor_fd(
+            root_fd, metadata, require_read_only=True, allow_safe_symlinks=True,
+            max_entries=MAX_BACKEND_SNAPSHOT_ENTRIES, max_bytes=MAX_BACKEND_SNAPSHOT_BYTES,
+        )
+        if error or descriptor is None:
+            return None, error or "tree"
+        if _tree_metadata_identity(root.lstat()) != _tree_metadata_identity(metadata):
+            return None, "changed"
+        return descriptor, None
     except (OSError, UnicodeEncodeError):
         return None, "path"
     finally:

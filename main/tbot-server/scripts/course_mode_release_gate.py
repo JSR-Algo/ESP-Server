@@ -1208,17 +1208,24 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
         if any(_python_test_runtime_required(lane) for lane in lanes):
             backend_root = Path(staged["repositories"]["backend"]["path"])
             _make_tree_read_only(backend_root)
-            backend_tree, backend_tree_error = _manifest.secure_backend_snapshot_tree_descriptor(
+            source_tree, source_tree_error = _manifest.secure_backend_snapshot_tree_descriptor(
                 backend_root,
             )
-            if backend_tree_error or backend_tree is None:
+            execution_tree, execution_tree_error = (
+                _manifest.secure_backend_execution_tree_descriptor(backend_root)
+            )
+            if (
+                source_tree_error or source_tree is None
+                or execution_tree_error or execution_tree is None
+            ):
                 raise ValueError("staged backend snapshot descriptor mismatch")
             authority_root = root / ".course-mode-authority"
             authority_root.mkdir()
             (authority_root / "backend.json").write_text(json.dumps({
                 "repository": "backend", "root": str(backend_root),
                 "sha": staged["repositories"]["backend"]["sha"],
-                "treeDigest": backend_tree, "version": 2,
+                "sourceTreeDigest": source_tree,
+                "executionTreeDigest": execution_tree, "version": 3,
             }, sort_keys=True), encoding="utf-8")
         _make_tree_read_only(root)
         stage = ExecutionStage(root, staged, root_identity, root_descriptor)
@@ -2382,15 +2389,21 @@ def _backend_snapshot_environment(execution_stage: ExecutionStage) -> dict[str, 
         raw = read_secure_regular(authority, 4096)
         document = strict_json_loads(raw)
         backend = execution_stage.candidate["repositories"]["backend"]
-        observed_tree, tree_error = _manifest.secure_backend_snapshot_tree_descriptor(
+        observed_source, source_error = _manifest.secure_backend_snapshot_tree_descriptor(
             Path(backend["path"]),
         )
+        observed_execution, execution_error = (
+            _manifest.secure_backend_execution_tree_descriptor(Path(backend["path"]))
+        )
         if (
-            not isinstance(document, dict) or document.get("version") != 2
+            not isinstance(document, dict) or document.get("version") != 3
             or document.get("repository") != "backend"
             or document.get("root") != backend["path"] or document.get("sha") != backend["sha"]
-            or set(document) != {"repository", "root", "sha", "treeDigest", "version"}
-            or tree_error or observed_tree != document.get("treeDigest")
+            or set(document) != {
+                "executionTreeDigest", "repository", "root", "sha", "sourceTreeDigest", "version",
+            }
+            or source_error or observed_source != document.get("sourceTreeDigest")
+            or execution_error or observed_execution != document.get("executionTreeDigest")
         ):
             return None
         return {
@@ -2401,6 +2414,21 @@ def _backend_snapshot_environment(execution_stage: ExecutionStage) -> dict[str, 
         }
     except (KeyError, OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
         return None
+
+
+def _backend_execution_snapshot_matches(execution_stage: ExecutionStage) -> bool:
+    try:
+        authority = execution_stage.root / ".course-mode-authority/backend.json"
+        document = strict_json_loads(read_secure_regular(authority, 4096))
+        backend = execution_stage.candidate["repositories"]["backend"]
+        observed, error = _manifest.secure_backend_execution_tree_descriptor(Path(backend["path"]))
+        return (
+            isinstance(document, dict) and document.get("version") == 3
+            and document.get("root") == backend["path"] and document.get("sha") == backend["sha"]
+            and not error and observed == document.get("executionTreeDigest")
+        )
+    except (KeyError, OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        return False
 
 
 def _child_environment(candidate: dict, source: Mapping[str, str], lane: Lane) -> dict[str, str]:
@@ -2965,6 +2993,11 @@ def run_gate(
                             list(command), cwd=resolved_cwd, timeout_sec=lane.timeout_sec,
                             max_output_bytes=max_output_bytes, env=child_environment,
                         )
+                    if (
+                        _python_test_runtime_required(lane)
+                        and not _backend_execution_snapshot_matches(execution_stage)
+                    ):
+                        result = _manifest.BoundedCommandResult(None, "", "authority")
                     skip_state = pytest_report_has_skips(junit_path) if junit_path else False
                 except BaseException:
                     try:
