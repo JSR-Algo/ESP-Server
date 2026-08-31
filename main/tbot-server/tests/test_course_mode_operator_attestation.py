@@ -86,6 +86,26 @@ def test_refuses_missing_confirmations(tmp_path: Path, flags: tuple[str, ...]) -
     assert not output.exists()
 
 
+@pytest.mark.parametrize(
+    "option",
+    ["--confirm-trusted-operator-acc", "--unrecognized-option"],
+)
+def test_refuses_abbreviated_or_unknown_options_without_creating_output(
+    tmp_path: Path, option: str,
+) -> None:
+    candidate_path, candidate = _candidate(tmp_path)
+    output = Path(candidate["evidenceRoot"]) / "operator-attestation.json"
+
+    with pytest.raises(SystemExit) as raised:
+        _run(
+            candidate_path, output, option,
+            "--confirm-untrusted-automation-stopped",
+        )
+
+    assert raised.value.code != 0
+    assert not output.exists()
+
+
 def test_refuses_existing_output_without_overwriting(tmp_path: Path) -> None:
     candidate_path, candidate = _candidate(tmp_path)
     output = Path(candidate["evidenceRoot"]) / "operator-attestation.json"

@@ -239,7 +239,9 @@ def _create(candidate_path: Path, output: Path) -> None:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Record the Course Mode operator precondition.")
+    parser = argparse.ArgumentParser(
+        description="Record the Course Mode operator precondition.", allow_abbrev=False,
+    )
     parser.add_argument("--candidate", required=True, type=Path, metavar="PATH")
     parser.add_argument("--output", required=True, type=Path, metavar="PATH")
     parser.add_argument("--confirm-trusted-operator-account", action="store_true")
