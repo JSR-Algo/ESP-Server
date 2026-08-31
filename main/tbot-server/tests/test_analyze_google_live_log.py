@@ -244,6 +244,43 @@ def test_cli_reliability_window_rejects_malformed_scoped_evidence_marker(tmp_pat
     assert json.loads(out.read_text(encoding="utf-8"))["status"] == "FAIL"
 
 
+def test_cli_reliability_window_rejects_malformed_non_evidence_scoped_family(
+    tmp_path,
+):
+    markers = [
+        "Google Live user_interrupt_started journey_id=physical.run-1 "
+        "connection_id=conn-1 malformed=true",
+        "Google Live firmware_ping journey_id=physical.run-1 "
+        "connection_id=conn-1 malformed=true",
+    ]
+    for index, marker in enumerate(markers):
+        scope = {**EVIDENCE_SCOPE, "journeyId": "physical.run-1"}
+        log = tmp_path / f"server-{index}.log"
+        out = tmp_path / f"report-{index}.json"
+        log.write_text(
+            "\n".join(
+                _window_lines(
+                    f"2026-08-31 10:00:01 {marker}",
+                    journey_id="physical.run-1",
+                    evidence_scope=scope,
+                    window_id="physical.run-1",
+                    server_issued=True,
+                )
+            ),
+            encoding="utf-8",
+        )
+
+        exit_code = main([
+            "--log", str(log), "--reliability-window",
+            "--journey-id", "physical.run-1", "--out-json", str(out),
+        ])
+
+        assert exit_code != 0
+        report = json.loads(out.read_text(encoding="utf-8"))
+        assert report["status"] == "FAIL"
+        assert report["failures"] == [{"code": "BOUNDED_LOG_INVALID"}]
+
+
 def test_cli_reliability_window_rejects_symlink_input(tmp_path):
     real_log = tmp_path / "real.log"
     log = tmp_path / "server.log"

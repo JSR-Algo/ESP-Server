@@ -1508,7 +1508,7 @@ def _bounded_server_window(log_path: Path, journey_id: str) -> list[str]:
         if foreign_start or foreign_end:
             raise ValueError("foreign reliability anchor")
         scoped_marker, scoped_valid = _scoped_marker_validation(line)
-        if "Google Live evidence_" in line and (not scoped_marker or not scoped_valid):
+        if scoped_marker and not scoped_valid:
             raise ValueError("malformed scoped evidence marker")
         if _is_reliability_line(line) or scoped_marker:
             marker_journey = re.search(r"\bjourney_id=([A-Za-z0-9._:-]+)", line)
