@@ -1443,6 +1443,116 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(finalize_task.done())
         self.assertNotIn(finalize_task, handler.mcp_background_tasks)
 
+    async def test_evidence_finalize_drain_is_bounded_when_task_swallows_cancel(self):
+        handler = self._build_handler()
+        handler.logger = _RecordingLogger()
+        handler.config["google_live"] = {
+            "evidence_finalize_cancel_grace_sec": 0.05,
+        }
+        release = asyncio.Event()
+        cancellation_swallowed = asyncio.Event()
+        terminal = []
+        handler.evidence_registry = types.SimpleNamespace(
+            finalize=lambda *args, **kwargs: terminal.append((args, kwargs))
+        )
+
+        async def cancellation_resistant_finalize():
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    cancellation_swallowed.set()
+
+        finalize_task = handler.schedule_mcp_background_task(
+            cancellation_resistant_finalize()
+        )
+        finalize_task.set_name("google-live-evidence-finalize")
+        handler.google_live_evidence_finalize_task = finalize_task
+        handler.voice_provider = types.SimpleNamespace(
+            request_evidence_finalize_stop=AsyncMock(),
+            force_close_after_evidence_finalize_cancel=AsyncMock(),
+            close=AsyncMock(),
+        )
+
+        started = asyncio.get_running_loop().time()
+        await asyncio.wait_for(
+            handler._drain_evidence_finalize_task_for_teardown(timeout=0.05),
+            timeout=0.3,
+        )
+        elapsed = asyncio.get_running_loop().time() - started
+
+        self.assertLess(elapsed, 0.2)
+        self.assertTrue(cancellation_swallowed.is_set())
+        handler.voice_provider.force_close_after_evidence_finalize_cancel.assert_awaited_once()
+        self.assertFalse(finalize_task.done())
+        self.assertIn(finalize_task, handler.mcp_background_tasks)
+        self.assertIsNone(
+            getattr(handler, "google_live_evidence_finalize_result", None)
+        )
+        self.assertEqual(terminal, [])
+        self.assertFalse(
+            any("reliability_window_end" in record[1] for record in handler.logger.records)
+        )
+        await asyncio.wait_for(handler._close_mcp_background_tasks(), timeout=0.2)
+        self.assertIn(finalize_task, handler.mcp_background_tasks)
+        release.set()
+        await asyncio.wait_for(finalize_task, timeout=0.3)
+        await asyncio.sleep(0)
+        self.assertNotIn(finalize_task, handler.mcp_background_tasks)
+
+    async def test_cancelled_evidence_drain_is_bounded_when_task_swallows_cancel(self):
+        handler = self._build_handler()
+        handler.logger = _RecordingLogger()
+        handler.config["google_live"] = {
+            "evidence_finalize_cancel_grace_sec": 0.05,
+        }
+        release = asyncio.Event()
+        terminal = []
+        handler.evidence_registry = types.SimpleNamespace(
+            finalize=lambda *args, **kwargs: terminal.append((args, kwargs))
+        )
+
+        async def cancellation_resistant_finalize():
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    pass
+
+        finalize_task = handler.schedule_mcp_background_task(
+            cancellation_resistant_finalize()
+        )
+        finalize_task.set_name("google-live-evidence-finalize")
+        handler.google_live_evidence_finalize_task = finalize_task
+        handler.voice_provider = types.SimpleNamespace(
+            request_evidence_finalize_stop=AsyncMock(),
+            force_close_after_evidence_finalize_cancel=AsyncMock(),
+            close=AsyncMock(),
+        )
+        drain = asyncio.create_task(
+            handler._drain_evidence_finalize_task_for_teardown(timeout=1.0)
+        )
+        await asyncio.sleep(0)
+        started = asyncio.get_running_loop().time()
+        drain.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(drain, timeout=0.3)
+        elapsed = asyncio.get_running_loop().time() - started
+
+        self.assertLess(elapsed, 0.2)
+        handler.voice_provider.force_close_after_evidence_finalize_cancel.assert_awaited_once()
+        self.assertFalse(finalize_task.done())
+        self.assertIn(finalize_task, handler.mcp_background_tasks)
+        self.assertEqual(terminal, [])
+        self.assertFalse(
+            any("reliability_window_end" in record[1] for record in handler.logger.records)
+        )
+        release.set()
+        await asyncio.wait_for(finalize_task, timeout=0.3)
+        await asyncio.sleep(0)
+        self.assertNotIn(finalize_task, handler.mcp_background_tasks)
+
     async def test_evidence_finalize_rejects_changed_live_id_or_pending_cleanup(self):
         for result in (
             {"status": "PASS", "liveConnectionId": "live-other", "pendingTasks": 0},

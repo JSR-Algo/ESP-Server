@@ -3149,13 +3149,21 @@ class ConnectionHandler:
 
     async def _close_mcp_background_tasks(self):
         self.mcp_tasks_closed = True
-        tasks = tuple(self.mcp_background_tasks)
+        retained = {
+            task
+            for task in (
+                getattr(self, "google_live_evidence_finalize_task", None),
+                getattr(self, "google_live_evidence_force_close_task", None),
+            )
+            if task is not None and not task.done()
+        }
+        tasks = tuple(self.mcp_background_tasks - retained)
         for task in tasks:
             if not task.done():
                 task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        self.mcp_background_tasks.clear()
+        self.mcp_background_tasks.difference_update(tasks)
 
     async def _drain_evidence_finalize_task_for_teardown(self, timeout=1.0):
         task = getattr(self, "google_live_evidence_finalize_task", None)
@@ -3192,8 +3200,18 @@ class ConnectionHandler:
     async def _cancel_and_force_close_evidence_finalize(self, task, timeout):
         if not task.done():
             task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        await self._force_close_evidence_provider_for_teardown(timeout)
+        google_live = (self.config or {}).get("google_live") or {}
+        try:
+            cancel_grace = float(
+                google_live.get("evidence_finalize_cancel_grace_sec", 0.25)
+            )
+        except (TypeError, ValueError):
+            cancel_grace = 0.25
+        cancel_grace = max(0.01, min(cancel_grace, 2.0))
+        await asyncio.wait({task}, timeout=cancel_grace)
+        await self._force_close_evidence_provider_for_teardown(
+            min(float(timeout), cancel_grace)
+        )
 
     async def _force_close_evidence_provider_for_teardown(self, timeout):
         provider = getattr(self, "voice_provider", None)
@@ -3207,7 +3225,19 @@ class ConnectionHandler:
         try:
             result = force_close()
             if inspect.isawaitable(result):
-                await asyncio.wait_for(result, timeout=max(0.1, float(timeout)))
+                close_task = self.schedule_mcp_background_task(result)
+                if close_task is None:
+                    return
+                close_task.set_name("google-live-evidence-force-close")
+                self.google_live_evidence_force_close_task = close_task
+                done, _pending = await asyncio.wait(
+                    {close_task}, timeout=max(0.01, float(timeout))
+                )
+                if close_task not in done:
+                    close_task.cancel()
+                    return
+                if close_task.cancelled() or close_task.exception() is not None:
+                    return
             self.google_live_evidence_force_close_completed = True
         except Exception:
             pass
