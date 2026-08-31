@@ -3406,6 +3406,15 @@ def test_esp_python_lane_stages_attested_backend_node_runtime(candidate_file: Pa
         staged_node = Path(stage.candidate["tools"]["node"]["backend"]["executable"])
         assert (staged_backend / "node_modules/.bin/vite-node").exists()
         assert staged_node.is_file()
+        before, before_error = gate._manifest.secure_backend_snapshot_tree_descriptor(staged_backend)
+        modules = staged_backend / "node_modules"
+        link = modules / "fixture-link"
+        modules.chmod(0o755)
+        link.unlink()
+        link.symlink_to(".bin", target_is_directory=True)
+        modules.chmod(0o555)
+        after, after_error = gate._manifest.secure_backend_snapshot_tree_descriptor(staged_backend)
+        assert before_error is None and after_error is None and before != after
     finally:
         assert stage.cleanup() is True
 

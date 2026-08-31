@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import posixpath
 import re
 import selectors
 import signal
@@ -47,6 +48,8 @@ CONTRACT_IDENTITY = "courseCompanion.v2.contract.v1"
 MAX_CANDIDATE_BYTES = 1024 * 1024
 MAX_DIRTY_FILE_BYTES = 4 * 1024 * 1024
 MAX_BROWSER_EXECUTABLE_BYTES = 512 * 1024 * 1024
+MAX_BACKEND_SNAPSHOT_ENTRIES = 750_000
+MAX_BACKEND_SNAPSHOT_BYTES = 4 * 1024 * 1024 * 1024
 MAX_FIRMWARE_ARTIFACT_BYTES = 128 * 1024 * 1024
 MAX_FIRMWARE_MANIFEST_BYTES = 1024 * 1024
 MAX_BROWSER_BUNDLE_DEPTH = 128
@@ -506,7 +509,8 @@ def _tree_metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
 
 def _secure_browser_bundle_descriptor_fd(
     root_fd: int, root_metadata: os.stat_result, *, require_read_only: bool = False,
-    excluded_root_names: frozenset[str] = frozenset(),
+    allow_safe_symlinks: bool = False, max_entries: int = 10_000,
+    max_bytes: int = MAX_BROWSER_EXECUTABLE_BYTES,
 ) -> tuple[dict[str, Any] | None, str | None]:
     digest = hashlib.sha256()
     state = {"entryCount": 0, "totalBytes": 0}
@@ -515,15 +519,13 @@ def _secure_browser_bundle_descriptor_fd(
         if depth > MAX_BROWSER_BUNDLE_DEPTH:
             return False
         for name in sorted(entry.name for entry in os.scandir(directory_fd)):
-            if depth == 0 and name in excluded_root_names:
-                continue
             relative = relative_parent / name
             metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
             state["entryCount"] += 1
-            if state["entryCount"] > 10_000:
+            if state["entryCount"] > max_entries:
                 return False
             mode = stat.S_IMODE(metadata.st_mode)
-            if require_read_only and mode & 0o222:
+            if require_read_only and not stat.S_ISLNK(metadata.st_mode) and mode & 0o222:
                 return False
             if stat.S_ISDIR(metadata.st_mode):
                 child_fd = os.open(
@@ -550,7 +552,7 @@ def _secure_browser_bundle_descriptor_fd(
                     os.close(child_fd)
             elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
                 state["totalBytes"] += metadata.st_size
-                if state["totalBytes"] > MAX_BROWSER_EXECUTABLE_BYTES:
+                if state["totalBytes"] > max_bytes:
                     return False
                 file_fd = os.open(
                     name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd,
@@ -579,6 +581,32 @@ def _secure_browser_bundle_descriptor_fd(
                         return False
                 finally:
                     os.close(file_fd)
+            elif allow_safe_symlinks and stat.S_ISLNK(metadata.st_mode):
+                try:
+                    target = os.readlink(name, dir_fd=directory_fd)
+                    normalized = posixpath.normpath(posixpath.join(relative_parent.as_posix(), target))
+                    if (
+                        not target or "\0" in target or posixpath.isabs(target)
+                        or normalized == ".." or normalized.startswith("../")
+                    ):
+                        return False
+                    target_bytes = os.fsencode(target)
+                    state["totalBytes"] += len(target_bytes)
+                    if state["totalBytes"] > max_bytes:
+                        return False
+                    if (
+                        os.readlink(name, dir_fd=directory_fd) != target
+                        or _tree_metadata_identity(
+                            os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                        ) != _tree_metadata_identity(metadata)
+                    ):
+                        return False
+                    _digest_field(digest, b"symlink")
+                    _digest_field(digest, relative.as_posix().encode())
+                    _digest_field(digest, str(mode).encode())
+                    _digest_field(digest, target_bytes)
+                except (OSError, UnicodeEncodeError):
+                    return False
             else:
                 return False
         return True
@@ -634,7 +662,8 @@ def secure_backend_snapshot_tree_descriptor(
             return None, "changed"
         descriptor, error = _secure_browser_bundle_descriptor_fd(
             root_fd, metadata, require_read_only=True,
-            excluded_root_names=frozenset({"node_modules"}),
+            allow_safe_symlinks=True, max_entries=MAX_BACKEND_SNAPSHOT_ENTRIES,
+            max_bytes=MAX_BACKEND_SNAPSHOT_BYTES,
         )
         if error or descriptor is None:
             return None, error or "tree"
