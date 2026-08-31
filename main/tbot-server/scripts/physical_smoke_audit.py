@@ -468,6 +468,153 @@ def _forbidden_report_fields(value, path=""):
     return forbidden_report_fields(value, path)
 
 
+def validate_physical_candidate_report(
+    report,
+    *,
+    expected_candidate_identity,
+    reliability_report,
+    candidate_soak_report,
+    production_profile,
+):
+    """Validate released Task 7 physical budgets and its exact upstream bindings."""
+    failures = []
+
+    def mismatch(field):
+        failures.append({"code": "PHYSICAL_CONTRACT_MISMATCH", "field": field})
+
+    if not isinstance(report, dict):
+        mismatch("report")
+        return failures
+    exact = {
+        "passed": True,
+        "candidateIdentity": dict(expected_candidate_identity),
+        "missing": [],
+        "fatal_hits": [],
+        "malformedLatencyMarkers": 0,
+        "live_identity_mismatches": 0,
+        "model_echo_user_transcripts": 0,
+        "receiveLoopBalance": 0,
+        "maxReceiveLoopsActive": 1,
+        "physical_ws_connected": True,
+    }
+    for field, expected in exact.items():
+        if report.get(field) != expected or type(report.get(field)) is not type(expected):
+            mismatch(field)
+    for field in ("input_audio_diag", "user_transcripts"):
+        if type(report.get(field)) is not int or report.get(field) < 1:
+            mismatch(field)
+
+    expected_profile = {
+        "strictMarkersValidated": True,
+        "lessonValidated": True,
+        "postLessonValidated": True,
+        "receiveLoopBalanceRequired": True,
+        "sampleCounts": dict(_PHYSICAL_AUDIT_SAMPLE_COUNTS),
+        "budgetsMs": {
+            "firstAudioP50": 1200.0,
+            "firstAudioP95": 1800.0,
+            "interruptStopMax": 250.0,
+            "physicalBargeinP95": 500.0,
+            "serverOutputGapMax": 250.0,
+        },
+    }
+    if production_profile != expected_profile:
+        mismatch("productionProfile")
+
+    metric_specs = (
+        ("firstAudioLatencyMs", "p50", 1200.0),
+        ("firstAudioLatencyMs", "p95", 1800.0),
+        ("interruptStopLatencyMs", "max", 250.0),
+        ("physicalBargeinLatencyMs", "p95", 500.0),
+        ("serverOutputGapMs", "max", 250.0),
+    )
+    for field, statistic, limit in metric_specs:
+        value = report.get(field)
+        if (
+            not isinstance(value, dict)
+            or type(value.get("count")) is not int
+            or value.get("count") != _PHYSICAL_AUDIT_SAMPLE_COUNTS[
+                {
+                    "firstAudioLatencyMs": "firstAudio",
+                    "interruptStopLatencyMs": "interruptStop",
+                    "physicalBargeinLatencyMs": "physicalBargein",
+                    "serverOutputGapMs": "serverOutputGap",
+                }[field]
+            ]
+            or any(
+                isinstance(value.get(name), bool)
+                or not isinstance(value.get(name), (int, float))
+                or not math.isfinite(value.get(name))
+                or value.get(name) < 0
+                for name in ("min", "max", "p50", "p95")
+            )
+            or not value["min"] <= value["p50"] <= value["p95"] <= value["max"]
+            or value.get(statistic) > limit
+        ):
+            mismatch(field)
+
+    gaps = report.get("serverOutputGapMs")
+    if not isinstance(gaps, dict):
+        mismatch("serverOutputGapEvidence")
+    else:
+        allowed_boundaries = _INTENTIONAL_OUTPUT_GAP_BOUNDARIES
+        boundaries = gaps.get("excludedByBoundary")
+        durations = gaps.get("excludedDurationMsByBoundary")
+        if (
+            type(gaps.get("observed")) is not int
+            or gaps.get("observed") < _PHYSICAL_AUDIT_SAMPLE_COUNTS["serverOutputGap"]
+            or type(gaps.get("invalid")) is not int
+            or gaps.get("invalid") != 0
+            or type(gaps.get("excludedIntentional")) is not int
+            or gaps.get("excludedIntentional") < 0
+            or not isinstance(boundaries, dict)
+            or not set(boundaries) <= allowed_boundaries
+            or any(type(value) is not int or value < 0 for value in boundaries.values())
+            or not isinstance(durations, dict)
+            or set(durations) != set(boundaries)
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+                for value in durations.values()
+            )
+        ):
+            mismatch("serverOutputGapEvidence")
+        for nested in ("rawGapDurationMs", "unexplainedResidualMs"):
+            value = gaps.get(nested)
+            if (
+                not isinstance(value, dict)
+                or type(value.get("count")) is not int
+                or value.get("count") != gaps.get("observed")
+                or any(
+                    isinstance(value.get(name), bool)
+                    or not isinstance(value.get(name), (int, float))
+                    or not math.isfinite(value.get(name))
+                    or value.get(name) < 0
+                    for name in ("min", "max", "p50", "p95")
+                )
+                or (nested == "unexplainedResidualMs" and value.get("max") > 250.0)
+            ):
+                mismatch(nested)
+
+    if not isinstance(reliability_report, dict) or validate_log_reliability_contract(
+        reliability_report,
+        expected_candidate_identity=expected_candidate_identity,
+        expected_log_window=reliability_report.get("logWindow", {}),
+        expected_evidence_scope=reliability_report.get("evidenceScope", {}),
+    ):
+        mismatch("logEvidence")
+    if validate_candidate_soak_report(
+        candidate_soak_report,
+        expected_candidate_identity=expected_candidate_identity,
+    ):
+        mismatch("candidateSoakEvidence")
+    if _forbidden_report_fields(report):
+        mismatch("privacy")
+    return failures
+
+
 def _candidate_identity_valid(identity):
     required = {
         "gitSha",

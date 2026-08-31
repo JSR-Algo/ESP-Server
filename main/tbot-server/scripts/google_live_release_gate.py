@@ -6,9 +6,10 @@ import argparse
 import hashlib
 import hmac
 import json
-import math
+import os
 import re
 import sys
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -18,13 +19,13 @@ if __package__ in {None, ""}:
 
 from scripts.analyze_google_live_log import correlate_websocket_bargein_evidence
 from scripts.google_live_reliability import (
-    GOOGLE_LIVE_LIMITS,
     SCHEMA_VERSION,
     forbidden_report_fields,
     validate_candidate_soak_report,
     validate_log_reliability_contract,
     validate_real_api_pass_report,
 )
+from scripts.physical_smoke_audit import validate_physical_candidate_report
 
 RELEASE_SCHEMA_VERSION = "google-live-release-verdict.v1"
 REQUIRED_LAYERS = (
@@ -53,15 +54,6 @@ def _failure(code: str, layer: str | None = None, field: str | None = None) -> d
     if field is not None:
         result["field"] = field
     return result
-
-
-def _finite_nonnegative(value: Any) -> bool:
-    return (
-        not isinstance(value, bool)
-        and isinstance(value, (int, float))
-        and math.isfinite(value)
-        and value >= 0
-    )
 
 
 def _identity_failures(identity: Any, expected: Mapping[str, Any], layer: str) -> list[dict]:
@@ -141,36 +133,28 @@ def _websocket_valid(report: Any) -> bool:
     )
 
 
-def _bounded_stats(value: Any, *, count: int, field: str, limit: float) -> bool:
+def _physical_valid(report: Any, expected_identity: Mapping[str, Any]) -> bool:
     return (
-        isinstance(value, Mapping)
-        and value.get("count") == count
-        and type(value.get("count")) is int
-        and all(
-            _finite_nonnegative(value.get(metric))
-            for metric in ("min", "max", "p50", "p95")
+        _generic_report_valid(report, "physical")
+        and set(report)
+        == {
+            "schemaVersion",
+            "name",
+            "status",
+            "candidateIdentity",
+            "auditReport",
+            "productionProfile",
+            "logEvidence",
+            "candidateSoakEvidence",
+            "failures",
+        }
+        and not validate_physical_candidate_report(
+            report.get("auditReport"),
+            expected_candidate_identity=expected_identity,
+            reliability_report=report.get("logEvidence"),
+            candidate_soak_report=report.get("candidateSoakEvidence"),
+            production_profile=report.get("productionProfile"),
         )
-        and value.get("min") <= value.get("p50") <= value.get("p95") <= value.get("max")
-        and _finite_nonnegative(value.get(field))
-        and value.get(field) <= limit
-    )
-
-
-def _physical_valid(report: Any) -> bool:
-    return (
-        isinstance(report, Mapping)
-        and report.get("passed") is True
-        and report.get("missing") == []
-        and report.get("fatal_hits") == []
-        and report.get("receiveLoopBalance") == 0
-        and type(report.get("receiveLoopBalance")) is int
-        and report.get("maxReceiveLoopsActive") == 1
-        and type(report.get("maxReceiveLoopsActive")) is int
-        and _bounded_stats(report.get("firstAudioLatencyMs"), count=10, field="p50", limit=GOOGLE_LIVE_LIMITS["firstAudioP50Ms"])
-        and _bounded_stats(report.get("firstAudioLatencyMs"), count=10, field="p95", limit=GOOGLE_LIVE_LIMITS["firstAudioP95Ms"])
-        and _bounded_stats(report.get("interruptStopLatencyMs"), count=10, field="max", limit=GOOGLE_LIVE_LIMITS["serverStopMaxMs"])
-        and _bounded_stats(report.get("physicalBargeinLatencyMs"), count=10, field="p95", limit=GOOGLE_LIVE_LIMITS["physicalBargeinP95Ms"])
-        and _bounded_stats(report.get("serverOutputGapMs"), count=10, field="max", limit=GOOGLE_LIVE_LIMITS["serverOutputGapMaxMs"])
     )
 
 
@@ -182,7 +166,7 @@ def _layer_valid(layer: str, report: Any, expected_identity: Mapping[str, Any]) 
             value, expected_candidate_identity=expected_identity
         ),
         "websocket_e2e": _websocket_valid,
-        "physical": _physical_valid,
+        "physical": lambda value: _physical_valid(value, expected_identity),
         "candidate_soak": lambda value: not validate_candidate_soak_report(
             value, expected_candidate_identity=expected_identity
         ),
@@ -310,6 +294,43 @@ def _parse_layers(values: list[str]) -> dict[str, Path]:
     return result
 
 
+def _same_file(left: Path, right: Path) -> bool:
+    if left.resolve(strict=False) == right.resolve(strict=False):
+        return True
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return False
+
+
+def _output_aliases_evidence(
+    output: Path, layer_paths: Mapping[str, Path], checksum_path: Path
+) -> bool:
+    if output.is_symlink():
+        return True
+    return any(
+        _same_file(output, evidence)
+        for evidence in (*layer_paths.values(), checksum_path)
+    )
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expected-git-sha", required=True)
@@ -330,14 +351,16 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         paths = _parse_layers(args.layer)
+        if _output_aliases_evidence(args.out, paths, args.checksums_file):
+            raise ValueError("output aliases release evidence")
         checksums = load_checksum_manifest(args.checksums_file, paths)
     except (OSError, UnicodeError, ValueError):
         paths = {}
         checksums = {}
     verdict = aggregate_release_evidence(identity, paths, checksums)
     rendered = json.dumps(verdict, indent=2, sort_keys=True) + "\n"
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(rendered, encoding="utf-8")
+    if paths:
+        _atomic_write(args.out, rendered)
     print(rendered, end="")
     return 0 if verdict["status"] == "PASS" else 1
 

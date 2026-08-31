@@ -67,6 +67,9 @@ def _websocket_report() -> dict:
 
 
 def _reports() -> dict[str, dict]:
+    physical_audit = _PHYSICAL_CASE._candidate_audit(
+        _PHYSICAL_CASE._candidate_physical_log()
+    )
     return {
         "deterministic": {
             "schemaVersion": "google-live-reliability.v1",
@@ -95,9 +98,35 @@ def _reports() -> dict[str, dict]:
             "firstAudioMs": 700.0,
         },
         "websocket_e2e": _websocket_report(),
-        "physical": _PHYSICAL_CASE._candidate_audit(
-            _PHYSICAL_CASE._candidate_physical_log()
-        ),
+        "physical": {
+            "schemaVersion": "google-live-reliability.v1",
+            "name": "physical",
+            "status": "PASS",
+            "candidateIdentity": copy.deepcopy(IDENTITY),
+            "auditReport": physical_audit,
+            "productionProfile": {
+                "strictMarkersValidated": True,
+                "lessonValidated": True,
+                "postLessonValidated": True,
+                "receiveLoopBalanceRequired": True,
+                "sampleCounts": {
+                    "firstAudio": 10,
+                    "interruptStop": 10,
+                    "physicalBargein": 10,
+                    "serverOutputGap": 10,
+                },
+                "budgetsMs": {
+                    "firstAudioP50": 1200.0,
+                    "firstAudioP95": 1800.0,
+                    "interruptStopMax": 250.0,
+                    "physicalBargeinP95": 500.0,
+                    "serverOutputGapMax": 250.0,
+                },
+            },
+            "logEvidence": copy.deepcopy(_OPTIONS["reliability_report"]),
+            "candidateSoakEvidence": copy.deepcopy(_OPTIONS["candidate_soak_report"]),
+            "failures": [],
+        },
         "candidate_soak": copy.deepcopy(_OPTIONS["candidate_soak_report"]),
     }
 
@@ -343,8 +372,16 @@ def test_checksum_manifest_rejects_path_escape(tmp_path: Path) -> None:
                 maxServerOutputGapMs=251.0
             ),
         ),
-        ("physical", lambda report: report["firstAudioLatencyMs"].update(p95=1801.0)),
-        ("physical", lambda report: report.update(receiveLoopBalance=1)),
+        (
+            "physical",
+            lambda report: report["auditReport"]["firstAudioLatencyMs"].update(
+                p95=1801.0
+            ),
+        ),
+        (
+            "physical",
+            lambda report: report["auditReport"].update(receiveLoopBalance=1),
+        ),
         ("candidate_soak", lambda report: report["latencyComparison"].update(pass_=False)),
         ("candidate_soak", lambda report: report["resourceVerdict"].update(status="FAIL")),
         ("candidate_soak", lambda report: report["cleanupVerdict"].update(websocketClosed=False)),
@@ -410,6 +447,46 @@ def test_websocket_release_recomputes_exact_task4_task5_correlation(
     )
 
 
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        lambda report: report["auditReport"].update(malformedLatencyMarkers=1),
+        lambda report: report["auditReport"].update(live_identity_mismatches=1),
+        lambda report: report["auditReport"]["serverOutputGapMs"].update(observed=0),
+        lambda report: report["auditReport"]["serverOutputGapMs"].update(invalid=1),
+        lambda report: report["auditReport"]["serverOutputGapMs"][
+            "unexplainedResidualMs"
+        ].update(max=251.0),
+        lambda report: report["auditReport"].update(input_audio_diag=0),
+        lambda report: report["auditReport"].update(user_transcripts=0),
+        lambda report: report["productionProfile"].update(
+            strictMarkersValidated=False
+        ),
+        lambda report: report["logEvidence"].update(receiveLoopBalance=1),
+        lambda report: report["candidateSoakEvidence"]["cleanupVerdict"].update(
+            websocketClosed=False
+        ),
+        lambda report: report["candidateSoakEvidence"].update(
+            candidateIdentity={**IDENTITY, "gitSha": "other"}
+        ),
+    ],
+)
+def test_physical_release_revalidates_full_task7_and_upstream_bindings(
+    tmp_path: Path, tamper
+) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    _rewrite(paths["physical"], tamper)
+    checksums["physical"] = hashlib.sha256(paths["physical"].read_bytes()).hexdigest()
+
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+
+    assert verdict["status"] == "FAIL"
+    assert any(
+        item["code"] == "LAYER_CONTRACT_INVALID" and item["layer"] == "physical"
+        for item in verdict["failures"]
+    )
+
+
 def test_cli_reads_checksum_manifest_and_writes_deterministic_failure(tmp_path: Path) -> None:
     paths, _, manifest = _write_evidence(tmp_path)
     _rewrite(paths["real_api"], lambda report: report.update(status="SKIPPED"))
@@ -422,3 +499,43 @@ def test_cli_reads_checksum_manifest_and_writes_deterministic_failure(tmp_path: 
     assert completed.returncode == 1
     assert json.loads(completed.stdout) == json.loads(out.read_text(encoding="utf-8"))
     assert json.loads(completed.stdout)["status"] == "FAIL"
+
+
+@pytest.mark.parametrize("alias_kind", ["direct", "symlink", "hardlink"])
+def test_cli_never_overwrites_evidence_through_output_alias(
+    tmp_path: Path, alias_kind: str
+) -> None:
+    paths, _, manifest = _write_evidence(tmp_path)
+    target = paths["real_api"]
+    original = target.read_bytes()
+    if alias_kind == "direct":
+        out = target
+    else:
+        out = tmp_path / f"{alias_kind}-release-verdict.json"
+        if alias_kind == "symlink":
+            out.symlink_to(target)
+        else:
+            out.hardlink_to(target)
+    completed = _run_cli(paths, manifest, out)
+
+    assert completed.returncode == 1
+    assert target.read_bytes() == original
+    assert out.read_bytes() == original
+
+
+def test_cli_never_overwrites_checksum_manifest(tmp_path: Path) -> None:
+    paths, _, manifest = _write_evidence(tmp_path)
+    original = manifest.read_bytes()
+
+    completed = _run_cli(paths, manifest, manifest)
+
+    assert completed.returncode == 1
+    assert manifest.read_bytes() == original
+
+
+def _run_cli(paths: dict[str, Path], manifest: Path, out: Path) -> subprocess.CompletedProcess:
+    script = Path(__file__).parents[1] / "scripts" / "google_live_release_gate.py"
+    command = [sys.executable, str(script), "--expected-git-sha", IDENTITY["gitSha"], "--expected-image-digest", IDENTITY["imageDigest"], "--expected-firmware-identity", IDENTITY["firmwareIdentity"], "--expected-config-fingerprint", IDENTITY["configFingerprint"], "--expected-fixture-sha256", IDENTITY["fixtureSha256"], "--checksums-file", str(manifest), "--out", str(out)]
+    for layer in REQUIRED_LAYERS:
+        command.extend(["--layer", f"{layer}={paths[layer]}"])
+    return subprocess.run(command, text=True, capture_output=True, check=False)
