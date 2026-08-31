@@ -1954,6 +1954,20 @@ async def run_candidate_soak(
         except Exception as exc:
             failures.append({"code": "JOURNEY_CLEANUP_FAILED", "errorClass": type(exc).__name__})
     samples.append(safe_sample())
+    accounting = journeys.get("accounting")
+    if callable(accounting):
+        try:
+            accounting_failures = accounting()
+        except Exception:
+            accounting_failures = [{"code": "UNEXPECTED_EVIDENCE"}]
+        if isinstance(accounting_failures, list):
+            failures.extend(
+                item
+                for item in accounting_failures
+                if isinstance(item, Mapping) and isinstance(item.get("code"), str)
+            )
+        else:
+            failures.append({"code": "UNEXPECTED_EVIDENCE"})
 
     upstream = {}
     for field in (
@@ -2250,21 +2264,29 @@ async def run_soak(args):
             if not isinstance(recorded_padding, list):
                 raise ValueError("journey evidence quietPadding must be a list")
             recorded_samples = manifest.get("resourceSamples")
-            expected_samples = expected_count + len(recorded_padding) + 2
-            if not isinstance(recorded_samples, list) or len(recorded_samples) != expected_samples:
-                raise ValueError(
-                    f"journey evidence must contain exactly {expected_samples} resource samples"
-                )
+            if not isinstance(recorded_samples, list):
+                raise ValueError("journey evidence resourceSamples must be a list")
             sample_cursor = 0
+            seen_sample_ids = set()
+            resource_accounting_invalid = False
 
             def recorded_sample():
-                nonlocal sample_cursor
+                nonlocal resource_accounting_invalid, sample_cursor
                 if sample_cursor >= len(recorded_samples):
                     raise ValueError("resource evidence was over-consumed")
                 sample = recorded_samples[sample_cursor]
                 sample_cursor += 1
                 if not isinstance(sample, Mapping):
                     raise ValueError("resource evidence sample must be an object")
+                sample_id = sample.get("sampleId")
+                if (
+                    not isinstance(sample_id, str)
+                    or not sample_id
+                    or sample_id in seen_sample_ids
+                ):
+                    resource_accounting_invalid = True
+                else:
+                    seen_sample_ids.add(sample_id)
                 return dict(sample)
 
             candidate_sampler = recorded_sample
@@ -2291,11 +2313,30 @@ async def run_soak(args):
                     raise ValueError("journey evidence was not fully consumed")
 
             journeys["cleanup"] = recorded_cleanup
+            padding_consumed = 0
 
             async def recorded_monitor(_args, *, duration_sec):
+                nonlocal padding_consumed
+                if padding_consumed:
+                    return []
+                padding_consumed = len(recorded_padding)
                 return [dict(item) if isinstance(item, Mapping) else item for item in recorded_padding]
 
             journeys["monitor"] = recorded_monitor
+
+            def recorded_accounting():
+                accounting_failures = []
+                if cursor != len(recorded):
+                    accounting_failures.append({"code": "UNEXPECTED_EVIDENCE"})
+                if padding_consumed != len(recorded_padding):
+                    accounting_failures.append({"code": "UNEXPECTED_EVIDENCE"})
+                if sample_cursor != len(recorded_samples):
+                    accounting_failures.append({"code": "RESOURCE_SAMPLE_UNUSED"})
+                if resource_accounting_invalid:
+                    accounting_failures.append({"code": "RESOURCE_SAMPLE_UNUSED"})
+                return accounting_failures
+
+            journeys["accounting"] = recorded_accounting
         return await run_candidate_soak(
             args,
             journeys=journeys,

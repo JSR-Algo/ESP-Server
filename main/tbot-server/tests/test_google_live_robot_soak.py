@@ -718,7 +718,10 @@ def test_replay_derives_duration_from_execution_and_padding_windows():
             "durationSec": 1800,
             "executions": executions,
             "quietPadding": padding,
-            "resourceSamples": [_samples() for _ in range(36)],
+            "resourceSamples": [
+                {**_samples(), "sampleId": f"resource-{index}"}
+                for index in range(1, 37)
+            ],
         }
 
     args = _args(
@@ -785,6 +788,124 @@ def test_candidate_manifest_is_scanned_centrally_before_artifact_sections():
     assert str(captured.value) == "candidate evidence contains forbidden fields"
     assert "manifest-secret" not in str(captured.value)
     assert "xGoogleApiKey" not in str(captured.value)
+
+
+def _full_span_manifest(*, padding=None, samples=35):
+    async def build():
+        journeys = _journeys()
+        executions = []
+        sequence = 0
+        for name, count in (
+            ("conversation", 17),
+            ("bargein", 10),
+            ("quiet", 2),
+            ("reopen", 1),
+            ("reconnect", 1),
+            ("lesson", 1),
+            ("conversation_after_lesson", 1),
+        ):
+            callable_name = "conversation" if name == "conversation_after_lesson" else name
+            for index in range(1, count + 1):
+                sequence += 1
+                item = await journeys[callable_name](_args(), name=name, index=index)
+                start = datetime(2026, 8, 31, 11, 0, tzinfo=timezone.utc) + timedelta(
+                    seconds=(sequence - 1) * 56
+                )
+                item["logWindow"].update(
+                    start=start.isoformat(),
+                    end=(start + timedelta(seconds=55)).isoformat(),
+                )
+                executions.append(item)
+        return {
+            "durationSec": 1847,
+            "executions": executions,
+            "quietPadding": [] if padding is None else padding,
+            "resourceSamples": [
+                {**_samples(), "sampleId": f"resource-{index}"}
+                for index in range(1, samples + 1)
+            ],
+        }
+
+    return asyncio.run(build())
+
+
+def _run_manifest(manifest):
+    return asyncio.run(
+        run_soak(
+            _args(
+                mode="candidate",
+                candidate_journeys=None,
+                journey_evidence=manifest,
+            )
+        )
+    )
+
+
+def test_full_span_rejects_any_supplied_padding_even_when_safe():
+    safe_padding = [
+        {
+            "schemaVersion": "google-live-reliability.v1",
+            "name": "quiet_padding",
+            "status": "PASS",
+            "candidateIdentity": IDENTITY,
+        }
+    ]
+    report = _run_manifest(_full_span_manifest(padding=safe_padding, samples=36))
+    assert "UNEXPECTED_EVIDENCE" in {item["code"] for item in report["failures"]}
+
+
+def test_full_span_rejects_malformed_padding_instead_of_ignoring_it():
+    report = _run_manifest(
+        _full_span_manifest(padding=[{"name": "quiet_padding"}], samples=36)
+    )
+    assert "UNEXPECTED_EVIDENCE" in {item["code"] for item in report["failures"]}
+
+
+def test_full_span_rejects_unused_or_leaking_resource_sample():
+    manifest = _full_span_manifest(samples=36)
+    manifest["resourceSamples"][-1]["exception"] = "token=unused-secret"
+    with pytest.raises(ValueError, match="forbidden fields") as captured:
+        _run_manifest(manifest)
+    assert "unused-secret" not in str(captured.value)
+
+
+def test_full_span_rejects_safe_extra_resource_sample():
+    report = _run_manifest(_full_span_manifest(samples=36))
+    assert "RESOURCE_SAMPLE_UNUSED" in {item["code"] for item in report["failures"]}
+
+
+def test_needed_padding_rejects_duplicate_resource_sample_id():
+    # Reuse the proven 22-minute + padding manifest from the replay test shape.
+    async def build():
+        journeys = _journeys()
+        executions = []
+        for name, count in (
+            ("conversation", 17),
+            ("bargein", 10),
+            ("quiet", 2),
+            ("reopen", 1),
+            ("reconnect", 1),
+            ("lesson", 1),
+            ("conversation_after_lesson", 1),
+        ):
+            callable_name = "conversation" if name == "conversation_after_lesson" else name
+            for index in range(1, count + 1):
+                executions.append(await journeys[callable_name](_args(), name=name, index=index))
+        padding = await journeys["monitor"](_args(), duration_sec=480)
+        samples = [
+            {**_samples(), "sampleId": f"resource-{index}"}
+            for index in range(1, 37)
+        ]
+        samples[-1]["sampleId"] = samples[-2]["sampleId"]
+        return {
+            "durationSec": 1800,
+            "executions": executions,
+            "quietPadding": padding,
+            "resourceSamples": samples,
+        }
+
+    report = _run_manifest(asyncio.run(build()))
+    assert "RESOURCE_SAMPLE_UNUSED" in {item["code"] for item in report["failures"]}
 
 
 def test_candidate_soak_rejects_hard_latency_budget_even_with_matching_baseline():
