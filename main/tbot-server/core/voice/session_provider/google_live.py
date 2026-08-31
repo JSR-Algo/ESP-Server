@@ -358,6 +358,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._closing = False
         self._lifecycle_lock = None
         self._lifecycle_generation = 0
+        self._reconnect_transaction_lock = None
+        self._active_reconnect_task = None
         self._live_open_lock = None
         self._session_generation = 0
         self._response_generation = 0
@@ -1005,15 +1007,25 @@ class GoogleLiveProvider(VoiceSessionProvider):
     async def finalize_evidence(self):
         if self._evidence_finalize_result is not None:
             return dict(self._evidence_finalize_result)
-        evidence_scope = self._evidence_scope()
-        if evidence_scope is None:
-            return {"status": "FAIL", "failureCode": "EVIDENCE_SCOPE_MISSING"}
-        self._ensure_evidence_live_identity()
-        self._closing = True
-        self._lifecycle_generation += 1
+        async with self._get_lifecycle_lock():
+            self._closing = True
+            self._lifecycle_generation += 1
+            reconnect_task = self._active_reconnect_task
+        current_task = asyncio.current_task()
+        if (
+            reconnect_task is not None
+            and reconnect_task is not current_task
+            and not reconnect_task.done()
+        ):
+            reconnect_task.cancel()
+            await asyncio.wait({reconnect_task}, timeout=2.0)
         async with self._get_lifecycle_lock():
             if self._evidence_finalize_result is not None:
                 return dict(self._evidence_finalize_result)
+            evidence_scope = self._evidence_scope()
+            if evidence_scope is None:
+                return {"status": "FAIL", "failureCode": "EVIDENCE_SCOPE_MISSING"}
+            self._ensure_evidence_live_identity()
             await self._close_live_resources()
             if self._fallback_provider is not None:
                 await self._fallback_provider.close()
@@ -3040,6 +3052,30 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._lifecycle_lock = asyncio.Lock()
         return self._lifecycle_lock
 
+    def _get_reconnect_transaction_lock(self):
+        if self._reconnect_transaction_lock is None:
+            self._reconnect_transaction_lock = asyncio.Lock()
+        return self._reconnect_transaction_lock
+
+    async def _begin_reconnect_transaction(self):
+        await self._get_reconnect_transaction_lock().acquire()
+        current_task = asyncio.current_task()
+        async with self._get_lifecycle_lock():
+            if self._closing or self._evidence_finalize_result is not None:
+                self._get_reconnect_transaction_lock().release()
+                return None
+            self._active_reconnect_task = current_task
+            return self._lifecycle_generation
+
+    async def _end_reconnect_transaction(self):
+        current_task = asyncio.current_task()
+        async with self._get_lifecycle_lock():
+            if self._active_reconnect_task is current_task:
+                self._active_reconnect_task = None
+        lock = self._get_reconnect_transaction_lock()
+        if lock.locked():
+            lock.release()
+
     def _get_live_open_lock(self):
         if self._live_open_lock is None:
             self._live_open_lock = asyncio.Lock()
@@ -3882,6 +3918,39 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return await self._try_reconnect_with_lease(exc)
 
     async def _try_reconnect_with_lease(self, exc):
+        lifecycle_generation = await self._begin_reconnect_transaction()
+        if lifecycle_generation is None:
+            return False
+        try:
+            return await self._try_reconnect_locked(exc, lifecycle_generation)
+        except asyncio.CancelledError:
+            if self._closing or self._evidence_finalize_result is not None:
+                return False
+            raise
+        finally:
+            await self._end_reconnect_transaction()
+
+    async def _try_reconnect_locked(self, exc, lifecycle_generation):
+        def lifecycle_current():
+            return bool(
+                not self._closing
+                and self._evidence_finalize_result is None
+                and self._lifecycle_generation == lifecycle_generation
+            )
+
+        async def abort_for_lifecycle_change(evidence_transition=None):
+            failed_attempt = self._fail_evidence_reconnect()
+            try:
+                await self._close_live_resources()
+            except Exception:
+                pass
+            self._log_evidence_reconnect_failed(
+                failed_attempt or evidence_transition, "closing"
+            )
+            return False
+
+        if not lifecycle_current():
+            return False
         reconnect_config = self._get_reconnect_config()
         if not reconnect_config.get("enabled"):
             return False
@@ -3906,6 +3975,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
         evidence_transition = None
         try:
             await self._close_live_resources()
+            if not lifecycle_current():
+                return await abort_for_lifecycle_change()
             while self._reconnect_attempts < reconnect_config["max_retries"]:
                 self._reconnect_attempts += 1
                 attempt_number = self._reconnect_attempts
@@ -3936,26 +4007,17 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     )
                 if backoff_ms > 0:
                     await asyncio.sleep(backoff_ms / 1000.0)
-                if self._closing:
-                    failed_attempt = self._fail_evidence_reconnect()
-                    if evidence_scope is not None and failed_attempt is not None:
-                        self.conn.logger.bind(tag="GoogleLive").info(
-                            "Google Live evidence_reconnect_failed journey_id={} "
-                            "connection_id={} attempt={} from_live_connection_id={} "
-                            "live_connection_id={} error_class={}",
-                            evidence_scope[0],
-                            evidence_scope[1],
-                            failed_attempt["attempt"],
-                            failed_attempt["fromLiveConnectionId"],
-                            self._evidence_current_live_connection_id,
-                            "closing",
-                        )
-                    return False
+                if not lifecycle_current():
+                    return await abort_for_lifecycle_change(evidence_transition)
                 try:
                     # Account each reconnect against the live-admission gate BEFORE
                     # re-opening Live, so reconnect storms count toward the device budget.
                     await self._record_reconnect_attempt()
+                    if not lifecycle_current():
+                        return await abort_for_lifecycle_change(evidence_transition)
                     await self._open_live_session()
+                    if not lifecycle_current():
+                        return await abort_for_lifecycle_change(evidence_transition)
                     self.conn.logger.bind(tag="GoogleLive").info(
                         "Google Live reopen_ready reason={} attempt={} live_connection_id={}",
                         error_class,
@@ -3979,6 +4041,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
                             evidence_transition["toLiveConnectionId"],
                         )
                     await self._forward_pending_reconnect_audio()
+                    if not lifecycle_current():
+                        return await abort_for_lifecycle_change(evidence_transition)
                     self._reconnect_attempts = 0
                     self.conn.voice_provider = self
                     self.conn.logger.bind(tag="GoogleLive").info(
@@ -3990,6 +4054,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
                         attempt_number,
                         self._interaction.live_connection_id,
                     )
+                    if not lifecycle_current():
+                        return await abort_for_lifecycle_change(evidence_transition)
                     committed_transition = self._commit_evidence_reconnect(
                         evidence_transition
                     )
@@ -4034,6 +4100,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return False
         except asyncio.CancelledError:
             failed_attempt = self._fail_evidence_reconnect()
+            try:
+                await self._close_live_resources()
+            except Exception:
+                pass
             self._log_evidence_reconnect_failed(
                 failed_attempt or evidence_transition, "cancelled"
             )
@@ -4790,6 +4860,43 @@ class GoogleLiveProvider(VoiceSessionProvider):
     async def _reopen_silent_live_session_after_timeouts_with_lease(
         self, timeout
     ):
+        lifecycle_generation = await self._begin_reconnect_transaction()
+        if lifecycle_generation is None:
+            return False
+        try:
+            return await self._reopen_silent_live_session_after_timeouts_locked(
+                timeout, lifecycle_generation
+            )
+        except asyncio.CancelledError:
+            if self._closing or self._evidence_finalize_result is not None:
+                return False
+            raise
+        finally:
+            await self._end_reconnect_transaction()
+
+    async def _reopen_silent_live_session_after_timeouts_locked(
+        self, timeout, lifecycle_generation
+    ):
+        def lifecycle_current():
+            return bool(
+                not self._closing
+                and self._evidence_finalize_result is None
+                and self._lifecycle_generation == lifecycle_generation
+            )
+
+        async def abort_for_lifecycle_change(evidence_transition=None):
+            failed_attempt = self._fail_evidence_reconnect()
+            try:
+                await self._close_live_resources()
+            except Exception:
+                pass
+            self._log_evidence_reconnect_failed(
+                failed_attempt or evidence_transition, "closing"
+            )
+            return False
+
+        if not lifecycle_current():
+            return False
         if self._consecutive_waiting_model_timeouts < self._SILENT_LIVE_REOPEN_TIMEOUTS:
             return False
         if self._client is None:
@@ -4838,8 +4945,14 @@ class GoogleLiveProvider(VoiceSessionProvider):
                         evidence_attempt["attempt"],
                     )
                 await self._record_reconnect_attempt()
+                if not lifecycle_current():
+                    return await abort_for_lifecycle_change(evidence_transition)
                 await self._close_live_resources()
+                if not lifecycle_current():
+                    return await abort_for_lifecycle_change(evidence_transition)
                 await self._open_live_session_locked(restore_session_resumption=False)
+                if not lifecycle_current():
+                    return await abort_for_lifecycle_change(evidence_transition)
                 self.conn.logger.bind(tag="GoogleLive").info(
                     "Google Live reopen_ready reason=waiting_model_timeout attempt=1 "
                     "live_connection_id={}",
@@ -4862,6 +4975,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
                         evidence_transition["toLiveConnectionId"],
                     )
                 await self._forward_pending_reconnect_audio()
+                if not lifecycle_current():
+                    return await abort_for_lifecycle_change(evidence_transition)
                 self._interaction.transition(InteractionState.LISTENING)
                 self._waiting_model_since = None
                 self.conn.client_abort = False
@@ -4876,6 +4991,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 return True
             except asyncio.CancelledError:
                 failed_attempt = self._fail_evidence_reconnect()
+                try:
+                    await self._close_live_resources()
+                except Exception:
+                    pass
                 self._log_evidence_reconnect_failed(
                     failed_attempt or evidence_transition, "cancelled"
                 )
@@ -7302,14 +7421,31 @@ class GoogleLiveProvider(VoiceSessionProvider):
         return max(0.1, min(value, 5.0))
 
     async def _attempt_lesson_reconnect_once(self, reason):
-        async with self._get_lifecycle_lock():
+        lifecycle_generation = await self._begin_reconnect_transaction()
+        if lifecycle_generation is None:
+            return False
+        try:
+            return await self._attempt_lesson_reconnect_transaction(
+                reason, lifecycle_generation
+            )
+        except asyncio.CancelledError:
+            if self._closing or self._evidence_finalize_result is not None:
+                return False
+            raise
+        finally:
+            await self._end_reconnect_transaction()
+
+    async def _attempt_lesson_reconnect_transaction(
+        self, reason, lifecycle_generation
+    ):
+        if True:
             if self._closing or self._fallback_provider is not None or self._reconnecting:
                 return False
-            lifecycle_generation = self._lifecycle_generation
 
             def lifecycle_current():
                 return bool(
                     not self._closing
+                    and self._evidence_finalize_result is None
                     and self._lifecycle_generation == lifecycle_generation
                 )
 
@@ -7369,6 +7505,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     reason,
                 )
                 await self._forward_pending_reconnect_audio()
+                if not lifecycle_current():
+                    failed_attempt = self._fail_evidence_reconnect()
+                    self._log_evidence_reconnect_failed(
+                        failed_attempt or evidence_transition, "closing"
+                    )
+                    await self._close_live_resources()
+                    return False
                 committed_transition = self._commit_evidence_reconnect(
                     evidence_transition
                 )
@@ -7438,22 +7581,31 @@ class GoogleLiveProvider(VoiceSessionProvider):
     async def _hard_reconnect_after_interrupt_with_lease(
         self, reason, *, restore_session_resumption=True
     ):
-        async with self._get_lifecycle_lock():
+        lifecycle_generation = await self._begin_reconnect_transaction()
+        if lifecycle_generation is None:
+            return False
+        try:
             return await self._hard_reconnect_after_interrupt_locked(
                 reason,
+                lifecycle_generation=lifecycle_generation,
                 restore_session_resumption=restore_session_resumption,
             )
+        except asyncio.CancelledError:
+            if self._closing or self._evidence_finalize_result is not None:
+                return False
+            raise
+        finally:
+            await self._end_reconnect_transaction()
 
     async def _hard_reconnect_after_interrupt_locked(
-        self, reason, *, restore_session_resumption=True
+        self, reason, *, lifecycle_generation, restore_session_resumption=True
     ):
         if self._closing or self._fallback_provider is not None or self._reconnecting:
             return False
-        lifecycle_generation = self._lifecycle_generation
-
         def lifecycle_current():
             return bool(
                 not self._closing
+                and self._evidence_finalize_result is None
                 and self._lifecycle_generation == lifecycle_generation
             )
 
@@ -7512,6 +7664,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self._response_generation,
             )
             await self._forward_pending_reconnect_audio()
+            if not lifecycle_current():
+                failed_attempt = self._fail_evidence_reconnect()
+                self._log_evidence_reconnect_failed(
+                    failed_attempt or evidence_transition, "closing"
+                )
+                await self._close_live_resources()
+                return False
             committed_transition = self._commit_evidence_reconnect(evidence_transition)
             if evidence_transition is not None and committed_transition is None:
                 raise RuntimeError("evidence reconnect commit mismatch")
@@ -7521,6 +7680,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return True
         except asyncio.CancelledError:
             failed_attempt = self._fail_evidence_reconnect()
+            try:
+                await self._close_live_resources()
+            except Exception:
+                pass
             self._log_evidence_reconnect_failed(
                 failed_attempt or evidence_transition, "cancelled"
             )

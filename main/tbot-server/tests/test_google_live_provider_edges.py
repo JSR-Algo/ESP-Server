@@ -5329,6 +5329,159 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider._evidence_scope()[2], "live-1")
         provider._open_live_session.assert_not_awaited()
 
+    async def test_finalize_racing_normal_reconnect_aborts_new_live_owner(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        conn.google_live_evidence_scope = {
+            "peerIdentityHash": "sha256:" + "a" * 64,
+        }
+        conn.config["google_live"]["reconnect"] = {
+            "enabled": True,
+            "max_retries": 1,
+            "backoff_ms": 0,
+            "backoff_multiplier": 1,
+        }
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._record_reconnect_attempt = AsyncMock()
+        open_started = asyncio.Event()
+        release_open = asyncio.Event()
+
+        async def controlled_close():
+            provider._client = None
+            provider._bridge = None
+
+        async def controlled_open():
+            provider._client = _Client()
+            provider._bridge = _Bridge()
+            provider._interaction.start_live_connection("live-2")
+            open_started.set()
+            await release_open.wait()
+
+        provider._close_live_resources = AsyncMock(side_effect=controlled_close)
+        provider._open_live_session = AsyncMock(side_effect=controlled_open)
+
+        reconnect_task = asyncio.create_task(
+            provider._try_reconnect_with_lease(RuntimeError("network"))
+        )
+        await open_started.wait()
+        finalize_started_at = time.monotonic()
+        finalize_task = asyncio.create_task(provider.finalize_evidence())
+        await asyncio.sleep(0)
+        release_open.set()
+
+        self.assertFalse(await reconnect_task)
+        finalized = await finalize_task
+        finalized_again = await provider.finalize_evidence()
+
+        self.assertEqual(finalized["status"], "PASS")
+        self.assertLess(time.monotonic() - finalize_started_at, 5.0)
+        self.assertEqual(finalized, finalized_again)
+        self.assertEqual(finalized["finalLiveConnectionId"], "live-1")
+        self.assertEqual(finalized["liveConnectionTransitions"], [])
+        self.assertIsNone(provider._client)
+        self.assertIsNone(provider._bridge)
+        self.assertIsNone(provider._evidence_pending_reconnect)
+
+    async def test_normal_reconnect_can_commit_before_finalize(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        conn.google_live_evidence_scope = {
+            "peerIdentityHash": "sha256:" + "a" * 64,
+        }
+        conn.config["google_live"]["reconnect"] = {
+            "enabled": True,
+            "max_retries": 1,
+            "backoff_ms": 0,
+            "backoff_multiplier": 1,
+        }
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._record_reconnect_attempt = AsyncMock()
+        provider._close_live_resources = AsyncMock()
+
+        async def open_new_owner():
+            provider._interaction.start_live_connection("live-2")
+
+        provider._open_live_session = AsyncMock(side_effect=open_new_owner)
+
+        self.assertTrue(
+            await provider._try_reconnect_with_lease(RuntimeError("network"))
+        )
+        finalized = await provider.finalize_evidence()
+
+        self.assertEqual(finalized["status"], "PASS")
+        self.assertEqual(finalized["finalLiveConnectionId"], "live-2")
+        self.assertEqual(
+            finalized["liveConnectionTransitions"],
+            [
+                {
+                    "attempt": 1,
+                    "fromLiveConnectionId": "live-1",
+                    "toLiveConnectionId": "live-2",
+                }
+            ],
+        )
+
+    async def test_finalize_survives_reconnect_cancellation_cleanup_failure(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        conn.google_live_evidence_scope = {
+            "peerIdentityHash": "sha256:" + "a" * 64,
+        }
+        conn.config["google_live"]["reconnect"] = {
+            "enabled": True,
+            "max_retries": 1,
+            "backoff_ms": 0,
+            "backoff_multiplier": 1,
+        }
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._record_reconnect_attempt = AsyncMock()
+        open_started = asyncio.Event()
+        close_calls = 0
+
+        async def controlled_close():
+            nonlocal close_calls
+            close_calls += 1
+            if close_calls == 2:
+                raise RuntimeError("cancel cleanup failed")
+            provider._client = None
+            provider._bridge = None
+
+        async def blocked_open():
+            provider._client = _Client()
+            provider._bridge = _Bridge()
+            provider._interaction.start_live_connection("live-2")
+            open_started.set()
+            await asyncio.Event().wait()
+
+        provider._close_live_resources = AsyncMock(side_effect=controlled_close)
+        provider._open_live_session = AsyncMock(side_effect=blocked_open)
+
+        reconnect_task = asyncio.create_task(
+            provider._try_reconnect_with_lease(RuntimeError("network"))
+        )
+        await open_started.wait()
+        finalized = await provider.finalize_evidence()
+
+        self.assertFalse(await reconnect_task)
+        self.assertEqual(finalized["status"], "PASS")
+        self.assertEqual(finalized["finalLiveConnectionId"], "live-1")
+        self.assertEqual(finalized["liveConnectionTransitions"], [])
+        self.assertIsNone(provider._client)
+        self.assertIsNone(provider._bridge)
+        self.assertIsNone(provider._evidence_pending_reconnect)
+
     async def test_hard_interrupt_recomputes_replacement_evidence_owner(self):
         conn = _Conn()
         conn.google_live_evidence_journey_id = "journey-1"
