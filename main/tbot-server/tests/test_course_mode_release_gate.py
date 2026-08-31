@@ -2077,6 +2077,48 @@ def test_staged_node_package_root_preserves_bound_mode(candidate_file: Path) -> 
         stage.cleanup()
 
 
+def test_backend_node_lane_stages_symlinked_node_modules_without_python_authority(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    install = _add_node_install(candidate, "backend", ".", "backend")
+    (install / "fixture-link").symlink_to("fixture-package", target_is_directory=True)
+    candidate["tools"]["nodeInstalls"]["backend"] = gate.describe_node_install(
+        install, install.parent / "package-lock.json",
+    )
+    lane = gate.Lane(
+        "backend-node-symlink", "backend", ".", ("npx", "vitest", "run"), 5.0,
+    )
+
+    stage = gate.stage_execution_candidate(candidate, (lane,))
+    try:
+        staged = Path(stage.candidate["repositories"]["backend"]["path"])
+        assert (staged / "node_modules/fixture-link").is_symlink()
+        assert not (stage.root / ".course-mode-authority/backend.json").exists()
+    finally:
+        assert stage.cleanup() is True
+
+
+def test_python_lane_stages_backend_snapshot_authority(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = gate.Lane(
+        "esp-python-authority", "adminEsp", "main/tbot-server",
+        ("python3", "-m", "pytest", "-q"), 5.0,
+    )
+
+    stage = gate.stage_execution_candidate(candidate, (lane,))
+    try:
+        authority = stage.root / ".course-mode-authority/backend.json"
+        document = json.loads(authority.read_text(encoding="utf-8"))
+        observed, error = gate._manifest.secure_backend_snapshot_tree_descriptor(
+            Path(stage.candidate["repositories"]["backend"]["path"]),
+        )
+        assert error is None
+        assert document["treeDigest"] == observed
+    finally:
+        assert stage.cleanup() is True
+
+
 def test_snapshot_directory_open_rejects_symlink_parent(tmp_path: Path) -> None:
     real = tmp_path / "real"
     child = real / "child"

@@ -1205,20 +1205,21 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
             if error or observed != browser["treeDigest"]:
                 raise ValueError("staged browser descriptor mismatch")
             staged["tools"]["robotPreviewBrowser"]["root"] = str(browser_target)
-        backend_root = Path(staged["repositories"]["backend"]["path"])
-        _make_tree_read_only(backend_root)
-        backend_tree, backend_tree_error = _manifest.secure_backend_snapshot_tree_descriptor(
-            backend_root,
-        )
-        if backend_tree_error or backend_tree is None:
-            raise ValueError("staged backend snapshot descriptor mismatch")
-        authority_root = root / ".course-mode-authority"
-        authority_root.mkdir()
-        (authority_root / "backend.json").write_text(json.dumps({
-            "repository": "backend", "root": str(backend_root),
-            "sha": staged["repositories"]["backend"]["sha"],
-            "treeDigest": backend_tree, "version": 2,
-        }, sort_keys=True), encoding="utf-8")
+        if any(_python_test_runtime_required(lane) for lane in lanes):
+            backend_root = Path(staged["repositories"]["backend"]["path"])
+            _make_tree_read_only(backend_root)
+            backend_tree, backend_tree_error = _manifest.secure_backend_snapshot_tree_descriptor(
+                backend_root,
+            )
+            if backend_tree_error or backend_tree is None:
+                raise ValueError("staged backend snapshot descriptor mismatch")
+            authority_root = root / ".course-mode-authority"
+            authority_root.mkdir()
+            (authority_root / "backend.json").write_text(json.dumps({
+                "repository": "backend", "root": str(backend_root),
+                "sha": staged["repositories"]["backend"]["sha"],
+                "treeDigest": backend_tree, "version": 2,
+            }, sort_keys=True), encoding="utf-8")
         _make_tree_read_only(root)
         stage = ExecutionStage(root, staged, root_identity, root_descriptor)
         root_descriptor = None
