@@ -795,8 +795,11 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
                 "voice-task-finished",
                 "executor-shutdown",
                 "coordinator-close",
-                "provider-close",
             ],
+        )
+        self.assertEqual(
+            sum(item[0] == "provider-close" for item in observations),
+            1,
         )
         provider_snapshot = observations[0][1]
         self.assertFalse(provider_snapshot["closed"])
