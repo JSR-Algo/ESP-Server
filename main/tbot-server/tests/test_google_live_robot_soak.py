@@ -1,6 +1,7 @@
 import asyncio
 import json
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,6 +35,17 @@ LOG_WINDOW = {
     "start": EVIDENCE_SCOPE["serverStartUtc"],
     "end": "2026-08-31T10:01:00+00:00",
 }
+
+
+def _execution_window(sequence):
+    start = datetime(2026, 8, 31, 11, 0, tzinfo=timezone.utc) + timedelta(
+        seconds=(sequence - 1) * 40
+    )
+    return {
+        "windowId": f"window-{sequence}",
+        "start": start.isoformat(),
+        "end": (start + timedelta(seconds=30)).isoformat(),
+    }
 
 
 def _layer(name):
@@ -156,11 +168,7 @@ def _journeys(*, mutation=None):
             "finalLiveConnectionId": "live-session-reusable-after-close",
             "liveConnectionTransitions": [],
             "windowId": f"window-{sequence}",
-            "logWindow": {
-                "windowId": f"window-{sequence}",
-                "start": f"2026-08-31T11:{sequence:02d}:00+00:00",
-                "end": f"2026-08-31T11:{sequence:02d}:30+00:00",
-            },
+            "logWindow": _execution_window(sequence),
             "successfulTurns": 0 if name in {"quiet", "lesson"} else 1,
             "bargeins": 1 if name == "bargein" else 0,
             "latestIntentSuccesses": 1 if name == "bargein" else 0,
@@ -546,6 +554,45 @@ def test_candidate_soak_rejects_each_reused_execution_identity_component(
     report = _run(journeys=_journeys(mutation=reuse))
 
     assert expected_code in {item["code"] for item in report["failures"]}
+
+
+@pytest.mark.parametrize(
+    ("case", "start", "end"),
+    [
+        ("malformed", "not-a-time", "2026-08-31T11:01:10+00:00"),
+        ("naive", "2026-08-31T11:00:40", "2026-08-31T11:01:10"),
+        ("non utc", "2026-08-31T18:00:40+07:00", "2026-08-31T18:01:10+07:00"),
+        ("reversed", "2026-08-31T11:01:10+00:00", "2026-08-31T11:00:40+00:00"),
+        ("equal", "2026-08-31T11:00:40+00:00", "2026-08-31T11:00:40+00:00"),
+        ("overlap", "2026-08-31T11:00:20+00:00", "2026-08-31T11:00:50+00:00"),
+        ("touching", "2026-08-31T11:00:30+00:00", "2026-08-31T11:01:00+00:00"),
+        ("out of order", "2026-08-31T10:59:00+00:00", "2026-08-31T10:59:30+00:00"),
+    ],
+)
+def test_candidate_soak_rejects_invalid_or_non_chronological_utc_windows(
+    case, start, end
+):
+    def mutate(result, sequence, _name, _index, _label):
+        if sequence == 2:
+            result["logWindow"].update(start=start, end=end)
+
+    report = _run(journeys=_journeys(mutation=mutate))
+
+    assert "EVIDENCE_UTC_WINDOW_INVALID" in {
+        item["code"] for item in report["failures"]
+    }, case
+
+
+def test_candidate_soak_rejects_utc_window_span_beyond_soak_duration():
+    def mutate(result, sequence, _name, _index, _label):
+        if sequence == 33:
+            result["logWindow"]["end"] = "2026-08-31T12:00:00+00:00"
+
+    report = _run(journeys=_journeys(mutation=mutate))
+
+    assert "EVIDENCE_UTC_SPAN_EXCEEDS_SOAK" in {
+        item["code"] for item in report["failures"]
+    }
 
 
 def test_candidate_soak_rejects_hard_latency_budget_even_with_matching_baseline():

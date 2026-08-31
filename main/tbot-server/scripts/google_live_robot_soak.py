@@ -60,6 +60,7 @@ from core.voice.google_live_credentials import (  # noqa: E402
     resolve_google_live_env_api_key,
 )
 from scripts.analyze_google_live_log import (  # noqa: E402
+    _parse_utc_iso,
     correlate_websocket_bargein_evidence,
 )
 from scripts.google_live_reliability import (  # noqa: E402
@@ -1689,6 +1690,9 @@ async def run_candidate_soak(
     seen_utc_windows = set()
     seen_evidence_keys = set()
     expected_sequence = 1
+    first_window_start = None
+    previous_window_end = None
+    last_window_end = None
 
     for stage_name, count in _CANDIDATE_STAGE_COUNTS:
         callable_name = "conversation" if stage_name == "conversation_after_lesson" else stage_name
@@ -1738,22 +1742,36 @@ async def run_candidate_soak(
                 seen_windows.add(window_id)
             connection_id = result.get("connectionId")
             log_window = result.get("logWindow")
-            utc_window = (
-                (log_window.get("start"), log_window.get("end"))
+            start_utc = (
+                _parse_utc_iso(log_window.get("start"))
                 if isinstance(log_window, Mapping)
                 else None
             )
+            end_utc = (
+                _parse_utc_iso(log_window.get("end"))
+                if isinstance(log_window, Mapping)
+                else None
+            )
+            utc_window = (start_utc, end_utc)
             if (
                 not isinstance(log_window, Mapping)
                 or log_window.get("windowId") != window_id
-                or utc_window is None
-                or any(not isinstance(value, str) or not value for value in utc_window)
+                or start_utc is None
+                or end_utc is None
+                or end_utc <= start_utc
             ):
-                failures.append({"code": "EVIDENCE_SCOPE_MALFORMED", "stage": stage_name})
-            elif utc_window in seen_utc_windows:
-                failures.append({"code": "EVIDENCE_UTC_WINDOW_REUSED", "stage": stage_name})
+                failures.append({"code": "EVIDENCE_UTC_WINDOW_INVALID", "stage": stage_name})
             else:
-                seen_utc_windows.add(utc_window)
+                if utc_window in seen_utc_windows:
+                    failures.append({"code": "EVIDENCE_UTC_WINDOW_REUSED", "stage": stage_name})
+                else:
+                    seen_utc_windows.add(utc_window)
+                if previous_window_end is not None and start_utc <= previous_window_end:
+                    failures.append({"code": "EVIDENCE_UTC_WINDOW_INVALID", "stage": stage_name})
+                else:
+                    first_window_start = first_window_start or start_utc
+                    previous_window_end = end_utc
+                    last_window_end = end_utc
             evidence_key = _evidence_reuse_key(
                 journey_id=journey_id,
                 connection_id=connection_id,
@@ -1875,7 +1893,10 @@ async def run_candidate_soak(
         upstream_window.get("windowId") if isinstance(upstream_window, Mapping) else None
     )
     upstream_utc_window = (
-        (upstream_window.get("start"), upstream_window.get("end"))
+        (
+            _parse_utc_iso(upstream_window.get("start")),
+            _parse_utc_iso(upstream_window.get("end")),
+        )
         if isinstance(upstream_window, Mapping)
         else None
     )
@@ -1937,6 +1958,12 @@ async def run_candidate_soak(
         failures.append({"code": "UNEXPECTED_FALLBACK_OBSERVED"})
     if elapsed < minimum_duration:
         failures.append({"code": "MINIMUM_DURATION_NOT_MET"})
+    if (
+        first_window_start is None
+        or last_window_end is None
+        or (last_window_end - first_window_start).total_seconds() > elapsed
+    ):
+        failures.append({"code": "EVIDENCE_UTC_SPAN_EXCEEDS_SOAK"})
 
     try:
         latency_metrics = _latency_metrics(executions)
