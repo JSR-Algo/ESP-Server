@@ -59,6 +59,26 @@ def test_backend_source_can_be_bound_to_candidate_sha() -> None:
     assert result.error is None and result.path == BACKEND_ROOT.resolve()
 
 
+def test_explicit_backend_root_does_not_inherit_another_candidate_sha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "backend"
+    verifier = root / "scripts/verify-course-mode-curriculum.mjs"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text("", encoding="utf-8")
+    subprocess.run(["git", "init", "-b", "candidate"], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "candidate@example.invalid"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Candidate Test"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-m", "fixture"], cwd=root, check=True, capture_output=True)
+    monkeypatch.setenv("COURSE_MODE_BACKEND_ROOT", str(BACKEND_ROOT))
+    monkeypatch.setenv("COURSE_MODE_BACKEND_SHA", "f" * 40)
+
+    result = resolve_backend_root(root)
+
+    assert result.error is None and result.path == root.resolve()
+
+
 def _bind_gitless_snapshot(
     monkeypatch: pytest.MonkeyPatch, stage: Path, root: Path, authority: Path, sha: str,
 ) -> None:

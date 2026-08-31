@@ -109,14 +109,10 @@ class BackendRootResolution:
 def resolve_backend_root(
     requested: Path | None, *, expected_sha: str | None = None,
 ) -> BackendRootResolution:
-    bound_expected_sha = (
-        expected_sha if expected_sha is not None else os.environ.get("COURSE_MODE_BACKEND_SHA")
-    )
-    if bound_expected_sha is not None and re.fullmatch(r"[0-9a-f]{40}", bound_expected_sha) is None:
-        return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
-    configured = requested or (
+    environment_root = (
         Path(value) if (value := os.environ.get("COURSE_MODE_BACKEND_ROOT")) else None
     )
+    configured = requested or environment_root
     if configured is None:
         return BackendRootResolution(None, "BACKEND_ROOT_REQUIRED")
     if not configured.is_absolute():
@@ -124,6 +120,15 @@ def resolve_backend_root(
     try:
         root = configured.resolve(strict=True)
     except OSError:
+        return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
+    bound_expected_sha = expected_sha
+    if bound_expected_sha is None and environment_root is not None:
+        try:
+            if environment_root.resolve(strict=True) == root:
+                bound_expected_sha = os.environ.get("COURSE_MODE_BACKEND_SHA")
+        except OSError:
+            return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
+    if bound_expected_sha is not None and re.fullmatch(r"[0-9a-f]{40}", bound_expected_sha) is None:
         return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
     if not root.is_dir() or not (root / "scripts/verify-course-mode-curriculum.mjs").is_file():
         return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")

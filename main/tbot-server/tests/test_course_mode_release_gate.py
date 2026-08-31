@@ -3387,6 +3387,28 @@ def test_selected_esp_test_drift_blocks_before_execution(candidate_file: Path, t
     assert not marker.exists()
 
 
+def test_esp_python_lane_stages_attested_backend_node_runtime(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    install = _add_node_install(candidate, "backend", ".", "backend")
+    vite_node = install / ".bin/vite-node"
+    vite_node.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    vite_node.chmod(0o755)
+    candidate["tools"]["nodeInstalls"]["backend"] = gate.describe_node_install(
+        install, install.parent / "package-lock.json",
+    )
+    lane = gate.QUICK_LANES[2]
+
+    assert gate._node_install_requirement(lane) == ("backend", ".")
+    stage = gate.stage_execution_candidate(candidate, (lane,))
+    try:
+        staged_backend = Path(stage.candidate["repositories"]["backend"]["path"])
+        staged_node = Path(stage.candidate["tools"]["node"]["backend"]["executable"])
+        assert (staged_backend / "node_modules/.bin/vite-node").exists()
+        assert staged_node.is_file()
+    finally:
+        assert stage.cleanup() is True
+
+
 @pytest.mark.parametrize(
     ("repository_name", "relative", "lane"),
     [

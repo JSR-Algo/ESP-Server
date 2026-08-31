@@ -1950,6 +1950,18 @@ def _has_unbound_node_modules(project_root: Path, allowed_root: Path) -> bool | 
 
 
 def _node_install_requirement(lane: Lane) -> tuple[str, str] | None:
+    if (
+        lane.repository == "adminEsp"
+        and lane.relative_cwd == "main/tbot-server"
+        and (
+            lane.command == (COURSE_MODE_SOFTWARE_TESTS,)
+            or (
+                lane.command[:3] == ("python3", "-m", "pytest")
+                and "tests/test_course_mode_curriculum_e2e.py" in lane.command
+            )
+        )
+    ):
+        return "backend", "."
     if lane.command[0] not in {"npm", "npx", "node"}:
         return None
     if lane.repository == "backend" and lane.relative_cwd == ".":
@@ -1976,7 +1988,8 @@ def node_install_authorized(
     if not key:
         return False
     try:
-        repository = candidate["repositories"][lane.repository]
+        repository_name = "backend" if key == "backend" else "adminEsp"
+        repository = candidate["repositories"][repository_name]
         repository_root = Path(repository["path"])
         install_parent = repository_root / relative_cwd
         install_root = install_parent / "node_modules"
