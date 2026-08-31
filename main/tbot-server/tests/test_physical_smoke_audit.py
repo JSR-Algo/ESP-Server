@@ -3947,7 +3947,7 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         cursor = datetime(2026, 8, 31, 11, 0, tzinfo=timezone.utc)
         evidence_executions = []
         for sequence, stage in enumerate(stage_names, start=1):
-            end = cursor + timedelta(seconds=40 if sequence == len(stage_names) else 55)
+            end = cursor + timedelta(seconds=40)
             connection_id = "connection-2" if sequence >= 31 else "connection-1"
             journey_id = f"journey-{sequence}"
             window_id = f"window-{sequence}"
@@ -3995,7 +3995,42 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
                     },
                 }
             )
-            cursor = end + timedelta(seconds=0.3125)
+            cursor = end
+        padding_start = cursor + timedelta(seconds=10)
+        padding_end = padding_start + timedelta(seconds=480)
+        quiet_padding = [
+            {
+                "journeyId": "quiet-padding-1",
+                "candidateIdentity": identity,
+                "connectionId": "connection-2",
+                "windowId": "quiet-padding-window-1",
+                "logWindow": {
+                    "windowId": "quiet-padding-window-1",
+                    "start": padding_start.isoformat(),
+                    "end": padding_end.isoformat(),
+                },
+                "durationSec": 480.0,
+                "status": "PASS",
+                "serverIssued": True,
+                "peerIdentityHash": f"sha256:{'d' * 64}",
+                "liveConnectionId": "padding-live-1",
+                "initialLiveConnectionId": "padding-live-1",
+                "finalLiveConnectionId": "padding-live-1",
+                "liveConnectionTransitions": [],
+                "evidenceScope": {
+                    "journeyId": "quiet-padding-1",
+                    "connectionId": "connection-2",
+                    "liveConnectionId": "padding-live-1",
+                    "initialLiveConnectionId": "padding-live-1",
+                    "peerIdentityHash": f"sha256:{'d' * 64}",
+                    "serverStartUtc": padding_start.isoformat(),
+                },
+                "falseInterrupts": 0,
+                "unexpectedFallbacks": 0,
+                "resourceVerdict": {"status": "PASS"},
+                "logStatus": "PASS",
+            }
+        ]
         reliability_report = {
             "schemaVersion": "google-live-reliability.v1",
             "name": "google_live_log_reliability",
@@ -4082,7 +4117,7 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
                 "serverEndUtc": "2026-08-31T11:30:10+00:00",
             },
             "evidenceExecutions": evidence_executions,
-            "quietPadding": [],
+            "quietPadding": quiet_padding,
             "totals": {
                 "successfulTurns": 30,
                 "bargeins": 10,
@@ -4550,6 +4585,17 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
                 ),
             ),
             ("execution_server_transition_stripped", lambda report: report["evidenceExecutions"][30].update(serverConnectionTransitions=[])),
+            ("padding_candidate_identity", lambda report: report["quietPadding"][0].update(candidateIdentity={**self._candidate_identity(), "gitSha": "other"})),
+            ("padding_journey_duplicate", lambda report: report["quietPadding"][0].update(journeyId=report["evidenceExecutions"][0]["journeyId"], evidenceScope={**report["quietPadding"][0]["evidenceScope"], "journeyId": report["evidenceExecutions"][0]["journeyId"]})),
+            ("padding_connection", lambda report: report["quietPadding"][0].update(connectionId="unrelated", evidenceScope={**report["quietPadding"][0]["evidenceScope"], "connectionId": "unrelated"})),
+            ("padding_scope_missing", lambda report: report["quietPadding"][0].pop("evidenceScope")),
+            ("padding_peer", lambda report: report["quietPadding"][0].update(peerIdentityHash=f"sha256:{'e' * 64}", evidenceScope={**report["quietPadding"][0]["evidenceScope"], "peerIdentityHash": f"sha256:{'e' * 64}"})),
+            ("padding_live_final", lambda report: report["quietPadding"][0].update(finalLiveConnectionId="fabricated-live")),
+            ("padding_live_transitions", lambda report: report["quietPadding"][0].update(liveConnectionTransitions=[{"attempt": 1, "fromLiveConnectionId": "wrong", "toLiveConnectionId": "fabricated-live"}])),
+            ("padding_log_status", lambda report: report["quietPadding"][0].update(logStatus="FAIL")),
+            ("padding_log_status_missing", lambda report: report["quietPadding"][0].pop("logStatus")),
+            ("padding_extra_field", lambda report: report["quietPadding"][0].update(extra=True)),
+            ("padding_window_duplicate", lambda report: report["quietPadding"][0].update(windowId=report["evidenceExecutions"][0]["windowId"], logWindow={**report["quietPadding"][0]["logWindow"], "windowId": report["evidenceExecutions"][0]["windowId"]})),
             ("fake_padding", lambda report: report["quietPadding"].append({"status": "PASS"})),
             ("raw_audio_flag_int", lambda report: report.update(rawAudioPersisted=0)),
             (

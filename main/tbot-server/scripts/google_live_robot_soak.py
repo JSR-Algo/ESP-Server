@@ -1920,6 +1920,7 @@ def _validated_quiet_padding(
         return None
     normalized = dict(value)
     normalized["serverIssued"] = True
+    normalized["logStatus"] = "PASS"
     return normalized, end_utc, utc_window
 
 
@@ -2602,12 +2603,18 @@ async def _run_candidate_soak_impl(
         "quietPadding": [
             {
                 "journeyId": item.get("journeyId"),
+                "candidateIdentity": item.get("candidateIdentity"),
                 "connectionId": item.get("connectionId"),
                 "windowId": item.get("windowId"),
                 "logWindow": item.get("logWindow"),
                 "durationSec": item.get("durationSec"),
                 "status": item.get("status"),
                 "serverIssued": item.get("serverIssued"),
+                "peerIdentityHash": item.get("peerIdentityHash"),
+                "liveConnectionId": item.get("liveConnectionId"),
+                "initialLiveConnectionId": item.get("initialLiveConnectionId"),
+                "finalLiveConnectionId": item.get("finalLiveConnectionId"),
+                "liveConnectionTransitions": item.get("liveConnectionTransitions"),
                 "evidenceScope": item.get("evidenceScope"),
                 "falseInterrupts": item.get("falseInterrupts"),
                 "unexpectedFallbacks": item.get("unexpectedFallbacks"),

@@ -547,6 +547,7 @@ def validate_candidate_soak_report(
     )
     monitored_duration = _candidate_monitored_duration(
         report,
+        expected_candidate_identity=expected_candidate_identity,
         expected_stage_names=[name for name, count in stage_specs for _ in range(count)],
         expected_start=start,
         expected_end=end,
@@ -612,6 +613,7 @@ def _finite_positive(value):
 def _candidate_monitored_duration(
     report,
     *,
+    expected_candidate_identity,
     expected_stage_names,
     expected_start,
     expected_end,
@@ -715,20 +717,69 @@ def _candidate_monitored_duration(
         seen_journey_ids.add(item["journeyId"])
         previous_execution = item
         windows.append(window)
+    padding_fields = {
+        "journeyId",
+        "candidateIdentity",
+        "connectionId",
+        "windowId",
+        "logWindow",
+        "durationSec",
+        "status",
+        "serverIssued",
+        "peerIdentityHash",
+        "liveConnectionId",
+        "initialLiveConnectionId",
+        "finalLiveConnectionId",
+        "liveConnectionTransitions",
+        "evidenceScope",
+        "falseInterrupts",
+        "unexpectedFallbacks",
+        "resourceVerdict",
+        "logStatus",
+    }
+    previous_connection_id = previous_execution.get("connectionId")
     for item in padding:
+        scope = item.get("evidenceScope") if isinstance(item, Mapping) else None
+        window = item.get("logWindow") if isinstance(item, Mapping) else None
+        expected_scope = {
+            "journeyId": item.get("journeyId") if isinstance(item, Mapping) else None,
+            "connectionId": item.get("connectionId") if isinstance(item, Mapping) else None,
+            "liveConnectionId": item.get("liveConnectionId") if isinstance(item, Mapping) else None,
+            "initialLiveConnectionId": item.get("initialLiveConnectionId") if isinstance(item, Mapping) else None,
+            "peerIdentityHash": item.get("peerIdentityHash") if isinstance(item, Mapping) else None,
+            "serverStartUtc": window.get("start") if isinstance(window, Mapping) else None,
+        }
         if (
             not isinstance(item, Mapping)
+            or set(item) != padding_fields
+            or item.get("candidateIdentity") != dict(expected_candidate_identity)
             or item.get("status") != "PASS"
             or item.get("serverIssued") is not True
+            or not isinstance(item.get("journeyId"), str)
+            or not item.get("journeyId")
+            or item.get("journeyId") in seen_journey_ids
+            or item.get("connectionId") != previous_connection_id
+            or not isinstance(scope, Mapping)
+            or dict(scope) != expected_scope
+            or item.get("peerIdentityHash") != peer_identity_hash
+            or item.get("liveConnectionId") != item.get("initialLiveConnectionId")
+            or _live_transition_final(
+                item.get("initialLiveConnectionId"),
+                item.get("liveConnectionTransitions"),
+            )
+            != item.get("finalLiveConnectionId")
             or type(item.get("falseInterrupts")) is not int
             or item.get("falseInterrupts") != 0
             or type(item.get("unexpectedFallbacks")) is not int
             or item.get("unexpectedFallbacks") != 0
             or not isinstance(item.get("resourceVerdict"), Mapping)
             or item["resourceVerdict"].get("status") != "PASS"
+            or item.get("logStatus") != "PASS"
         ):
             return None
-        windows.append(item.get("logWindow"))
+        seen_journey_ids.add(item["journeyId"])
+        previous_connection_id = item["connectionId"]
+        windows.append(window)
 
     parsed_windows = []
     seen_window_ids = set()
