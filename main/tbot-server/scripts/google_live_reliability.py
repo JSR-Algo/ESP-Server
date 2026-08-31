@@ -208,6 +208,165 @@ def reliability_verdict(
     }
 
 
+def validate_log_reliability_contract(
+    report: Any,
+    *,
+    expected_candidate_identity: Mapping[str, Any],
+    expected_log_window: Any,
+    expected_evidence_scope: Any,
+) -> list[dict[str, Any]]:
+    """Validate the normalized Task 5 identity, lifecycle, and correlation contract."""
+    failures = []
+
+    def mismatch(field):
+        failures.append({"code": "SERVER_LOG_CONTRACT_MISMATCH", "field": field})
+
+    if not isinstance(report, Mapping):
+        mismatch("report")
+        return failures
+    required = {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": "google_live_log_reliability",
+        "status": "PASS",
+        "candidateIdentity": dict(expected_candidate_identity),
+        "logWindow": expected_log_window,
+        "evidenceScope": expected_evidence_scope,
+        "failures": [],
+    }
+    for field, expected in required.items():
+        if report.get(field) != expected:
+            mismatch(field)
+
+    scope = expected_evidence_scope if isinstance(expected_evidence_scope, Mapping) else {}
+    initial_id = report.get("initialLiveConnectionId")
+    final_id = report.get("finalLiveConnectionId")
+    transitions = report.get("liveConnectionTransitions")
+    if initial_id != scope.get("initialLiveConnectionId"):
+        mismatch("initialLiveConnectionId")
+    if _live_transition_final(initial_id, transitions) != final_id:
+        mismatch("liveConnectionTransitions")
+
+    server_transitions = report.get("serverConnectionTransitions", [])
+    if not isinstance(server_transitions, list) or len(server_transitions) > 1:
+        mismatch("serverConnectionTransitions")
+    elif server_transitions:
+        transition = server_transitions[0]
+        if not (
+            isinstance(transition, Mapping)
+            and transition.get("status") == "PASS"
+            and transition.get("source") == "server_log"
+            and transition.get("serverIssued") is True
+            and transition.get("sequence") == 1
+            and transition.get("reason") == "same_device_reconnect"
+            and transition.get("toJourneyId") == scope.get("journeyId")
+            and transition.get("toConnectionId") == scope.get("connectionId")
+            and transition.get("peerIdentityHash") == scope.get("peerIdentityHash")
+            and isinstance(transition.get("fromJourneyId"), str)
+            and bool(transition.get("fromJourneyId"))
+            and isinstance(transition.get("fromConnectionId"), str)
+            and bool(transition.get("fromConnectionId"))
+            and transition.get("fromConnectionId") != transition.get("toConnectionId")
+        ):
+            mismatch("serverConnectionTransitions")
+
+    exact_zero_fields = ("receiveLoopBalance", "staleAudioAfterReplacement")
+    for field in exact_zero_fields:
+        if type(report.get(field)) is not int or report.get(field) != 0:
+            mismatch(field)
+    if type(report.get("maxReceiveLoopsActive")) is not int or report.get(
+        "maxReceiveLoopsActive"
+    ) not in {0, 1}:
+        mismatch("maxReceiveLoopsActive")
+    replay_counts = report.get("replayCountsByReopen")
+    if not isinstance(replay_counts, Mapping) or any(
+        not isinstance(key, str) or type(value) is not int or value not in {0, 1}
+        for key, value in replay_counts.items()
+    ):
+        mismatch("replayCountsByReopen")
+    for field in (
+        "duplicateResponseIds",
+        "unrecoveredTimeouts",
+        "unreleasedLessonHandoffs",
+        "fatalHits",
+    ):
+        if report.get(field) != []:
+            mismatch(field)
+
+    correlations = report.get("correlations")
+    if not isinstance(correlations, list):
+        mismatch("correlations")
+        correlations = []
+    for item in correlations:
+        if (
+            not isinstance(item, Mapping)
+            or item.get("status") != "PASS"
+            or any(
+                not isinstance(item.get(field), str) or not item.get(field)
+                for field in ("journeyId", "connectionId", "liveConnectionId")
+            )
+            or item.get("liveConnectionId") != final_id
+            or not _nonnegative_int(item.get("cancelledResponseId"))
+            or not _nonnegative_int(item.get("replacementResponseId"))
+        ):
+            mismatch("correlations")
+            break
+    correlation = report.get("correlation")
+    if not isinstance(correlation, Mapping):
+        mismatch("correlation")
+    elif correlation.get("status") == "PASS":
+        if (
+            len(correlations) != 1
+            or not _nonnegative_int(correlation.get("cancelledResponseId"))
+            or not _nonnegative_int(correlation.get("replacementResponseId"))
+            or any(
+                correlation.get(field) != correlations[0].get(field)
+                for field in ("cancelledResponseId", "replacementResponseId")
+            )
+        ):
+            mismatch("correlation")
+    elif correlation.get("status") == "MULTIPLE":
+        observed = correlation.get("observedInterrupts")
+        if type(observed) is not int or len(correlations) < 2 or observed not in {
+            0,
+            len(correlations),
+        }:
+            mismatch("correlation")
+    elif correlation.get("status") == "NOT_OBSERVED":
+        if correlations:
+            mismatch("correlation")
+    else:
+        mismatch("correlation")
+    return failures
+
+
+def _live_transition_final(initial_id, transitions):
+    if not isinstance(initial_id, str) or not initial_id or not isinstance(transitions, list):
+        return None
+    current = initial_id
+    previous_attempt = 0
+    for transition in transitions:
+        if not isinstance(transition, Mapping):
+            return None
+        attempt = transition.get("attempt")
+        next_id = transition.get("toLiveConnectionId")
+        if (
+            type(attempt) is not int
+            or attempt <= previous_attempt
+            or transition.get("fromLiveConnectionId") != current
+            or not isinstance(next_id, str)
+            or not next_id
+            or next_id == current
+        ):
+            return None
+        previous_attempt = attempt
+        current = next_id
+    return current
+
+
+def _nonnegative_int(value):
+    return type(value) is int and value >= 0
+
+
 def sample_process_resources() -> dict[str, int]:
     """Sample the process metrics used by the established resource-soak contract."""
     try:

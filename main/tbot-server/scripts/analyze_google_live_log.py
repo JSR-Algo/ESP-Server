@@ -30,6 +30,7 @@ from scripts.google_live_reliability import (
     SCHEMA_VERSION,
     redact_mapping,
     reliability_verdict,
+    validate_log_reliability_contract as _shared_validate_log_reliability_contract,
 )
 from scripts.physical_smoke_audit import (
     FATAL_PATTERNS as PHYSICAL_FATAL_PATTERNS,
@@ -3694,7 +3695,7 @@ def _validated_live_connection_transition_chain(initial_id, final_id, transition
     return current_id if final_id == current_id else None
 
 
-def _validate_log_reliability_contract(
+def _legacy_validate_log_reliability_contract(
     report: Any,
     *,
     expected_candidate_identity: dict[str, Any],
@@ -3722,6 +3723,19 @@ def _validate_log_reliability_contract(
     for contract_field, expected in required_values.items():
         if contract_field not in report or report.get(contract_field) != expected:
             mismatch(contract_field)
+
+    expected_scope = (
+        expected_evidence_scope if isinstance(expected_evidence_scope, Mapping) else {}
+    )
+    initial_live_id = report.get("initialLiveConnectionId")
+    final_live_id = report.get("finalLiveConnectionId")
+    transitions = report.get("liveConnectionTransitions")
+    if initial_live_id != expected_scope.get("initialLiveConnectionId"):
+        mismatch("initialLiveConnectionId")
+    if _validated_live_connection_transition_chain(
+        initial_live_id, final_live_id, transitions
+    ) is None:
+        mismatch("liveConnectionTransitions")
 
     server_transitions = report.get("serverConnectionTransitions", [])
     if not isinstance(server_transitions, list) or len(server_transitions) > 1:
@@ -3802,6 +3816,9 @@ def _validate_log_reliability_contract(
             ):
                 mismatch("correlations")
                 break
+            if item.get("liveConnectionId") != final_live_id:
+                mismatch("correlations")
+                break
     correlation = report.get("correlation")
     if not isinstance(correlation, Mapping):
         mismatch("correlation")
@@ -3839,6 +3856,21 @@ def _validate_log_reliability_contract(
     else:
         mismatch("correlation")
     return failures
+
+
+def _validate_log_reliability_contract(
+    report: Any,
+    *,
+    expected_candidate_identity: dict[str, Any],
+    expected_log_window: Any,
+    expected_evidence_scope: Any,
+) -> list[dict[str, Any]]:
+    return _shared_validate_log_reliability_contract(
+        report,
+        expected_candidate_identity=expected_candidate_identity,
+        expected_log_window=expected_log_window,
+        expected_evidence_scope=expected_evidence_scope,
+    )
 
 
 def _nonnegative_int(value: Any) -> bool:

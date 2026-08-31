@@ -17,6 +17,7 @@ from scripts.google_live_reliability import (  # noqa: E402
     GOOGLE_LIVE_LIMITS,
     SCHEMA_VERSION,
     percentile,
+    validate_log_reliability_contract,
 )
 
 
@@ -109,6 +110,12 @@ _CANDIDATE_STAGE_COUNTS = (
     ("lesson", 1),
     ("conversation_after_lesson", 1),
 )
+_PHYSICAL_AUDIT_SAMPLE_COUNTS = {
+    "firstAudio": 10,
+    "interruptStop": 10,
+    "physicalBargein": 10,
+    "serverOutputGap": 10,
+}
 _INTENTIONAL_OUTPUT_GAP_BOUNDARIES = frozenset(
     {"interrupt", "turn_completion", "backpressure", "transport_recovery"}
 )
@@ -539,7 +546,9 @@ def _candidate_window_evidence(log_text):
             identity = None
         fields = dict(
             re.findall(
-                r"\b(journey_id|connection_id|live_connection_id)=([^\s]+)",
+                r"\b(journey_id|connection_id|live_connection_id|"
+                r"initial_live_connection_id|peer_identity_hash|server_start_utc)="
+                r"([^\s]+)",
                 match.group("fields"),
             )
         )
@@ -550,12 +559,22 @@ def _candidate_window_evidence(log_text):
                 "journeyId": fields.get("journey_id"),
                 "connectionId": fields.get("connection_id"),
                 "liveConnectionId": fields.get("live_connection_id"),
+                "initialLiveConnectionId": fields.get(
+                    "initial_live_connection_id"
+                ),
+                "peerIdentityHash": fields.get("peer_identity_hash"),
+                "serverStartUtc": fields.get("server_start_utc"),
             }
         )
-    ends = re.findall(
-        r"Google Live reliability_window_end window_id=([A-Za-z0-9._:-]+)",
-        log_text,
-    )
+    ends = [
+        {"windowId": match.group("window_id"), "serverEndUtc": match.group("end")}
+        for match in re.finditer(
+            r"Google Live reliability_window_end window_id=(?P<window_id>[A-Za-z0-9._:-]+)"
+            r"(?: server_end_utc=(?P<end>\S+))?$",
+            log_text,
+            re.MULTILINE,
+        )
+    ]
     return starts, ends
 
 
@@ -637,7 +656,12 @@ def _malformed_latency_marker_count(log_text):
 
 
 def _upstream_candidate_evidence(
-    *, candidate_identity, reliability_report, candidate_soak_report, starts, ends
+    *,
+    candidate_identity,
+    reliability_report,
+    candidate_soak_report,
+    starts,
+    ends,
 ):
     failures = []
     if not _candidate_identity_valid(candidate_identity):
@@ -750,18 +774,39 @@ def _upstream_candidate_evidence(
     if any(identity != candidate_identity for identity in upstream_identities):
         failures.append("candidate_identity_match")
 
-    scope = reliability_report.get("evidenceScope")
-    log_window = reliability_report.get("logWindow")
+    expected_scope = starts[0] if len(starts) == 1 else {}
+    scope = {
+        key: expected_scope.get(key)
+        for key in (
+            "journeyId",
+            "connectionId",
+            "liveConnectionId",
+            "initialLiveConnectionId",
+            "peerIdentityHash",
+            "serverStartUtc",
+        )
+    }
+    expected_end = ends[0] if len(ends) == 1 else {}
+    log_window = {
+        "windowId": expected_scope.get("windowId"),
+        "start": expected_scope.get("serverStartUtc"),
+        "end": expected_end.get("serverEndUtc"),
+    }
+    shared_failures = validate_log_reliability_contract(
+        reliability_report,
+        expected_candidate_identity=candidate_identity,
+        expected_log_window=log_window,
+        expected_evidence_scope=scope,
+    )
+    if shared_failures:
+        failures.append("log_reliability_report_pass")
     valid_scope = (
         len(starts) == 1
-        and ends == [starts[0]["windowId"]]
+        and len(ends) == 1
+        and ends[0]["windowId"] == starts[0]["windowId"]
         and starts[0]["candidateIdentity"] == candidate_identity
-        and isinstance(scope, dict)
-        and scope.get("journeyId") == starts[0]["journeyId"]
-        and scope.get("connectionId") == starts[0]["connectionId"]
-        and scope.get("liveConnectionId") == starts[0]["liveConnectionId"]
-        and isinstance(log_window, dict)
-        and log_window.get("windowId") == starts[0]["windowId"]
+        and all(scope.values())
+        and all(log_window.values())
     )
     if not valid_scope:
         failures.append("candidate_evidence_scope_match")
@@ -1656,10 +1701,10 @@ def audit_log(
             missing.append("first_audio_out_ms")
         elif first_audio_out_ms["max"] > float(max_first_audio_ms):
             missing.append(f"first_audio_out_ms<={_format_budget(max_first_audio_ms)}")
-    if min_first_audio_samples is not None and first_audio_out_ms["count"] < int(
+    if min_first_audio_samples is not None and first_audio_out_ms["count"] != int(
         min_first_audio_samples
     ):
-        missing.append(f"first_audio_samples>={int(min_first_audio_samples)}")
+        missing.append(f"first_audio_samples={int(min_first_audio_samples)}")
     if max_first_audio_p50_ms is not None and (
         first_audio_out_ms.get("p50") is None
         or first_audio_out_ms["p50"] > float(max_first_audio_p50_ms)
@@ -1680,8 +1725,15 @@ def audit_log(
             if min_interrupt_stop_samples is not None
             else min_interrupt_tts_stops or min_interrupts
         )
-        if interrupt_stop_latency_ms["count"] < expected_count:
-            missing.append(f"interrupt_stop_latency_ms>={expected_count}")
+        exact_interrupt_samples = min_interrupt_stop_samples is not None
+        count_mismatch = (
+            interrupt_stop_latency_ms["count"] != expected_count
+            if exact_interrupt_samples
+            else interrupt_stop_latency_ms["count"] < expected_count
+        )
+        if count_mismatch:
+            operator = "=" if exact_interrupt_samples else ">="
+            missing.append(f"interrupt_stop_latency_ms{operator}{expected_count}")
         elif interrupt_stop_latency_ms["max"] > float(max_interrupt_stop_latency_ms):
             missing.append(
                 "interrupt_stop_latency_ms"
@@ -1689,9 +1741,9 @@ def audit_log(
             )
     if min_physical_bargein_samples is not None and physical_bargein_latency_ms[
         "count"
-    ] < int(min_physical_bargein_samples):
+    ] != int(min_physical_bargein_samples):
         missing.append(
-            f"physical_bargein_samples>={int(min_physical_bargein_samples)}"
+            f"physical_bargein_samples={int(min_physical_bargein_samples)}"
         )
     if max_physical_bargein_p95_ms is not None and (
         physical_bargein_latency_ms.get("p95") is None
@@ -1702,11 +1754,11 @@ def audit_log(
             f"<={_format_budget(max_physical_bargein_p95_ms)}"
         )
     if min_server_output_gap_samples is not None and (
-        server_output_gap_ms["observed"] < int(min_server_output_gap_samples)
+        server_output_gap_ms["observed"] != int(min_server_output_gap_samples)
         or server_output_gap_ms["count"] < 1
     ):
         missing.append(
-            f"server_output_gap_samples>={int(min_server_output_gap_samples)}"
+            f"server_output_gap_samples={int(min_server_output_gap_samples)}"
         )
     if server_output_gap_ms["invalid"]:
         missing.append("server_output_gap_boundaries_valid")
@@ -2322,13 +2374,25 @@ def main():
             if args.production_google_live_candidate
             else None
         ),
-        min_first_audio_samples=10 if args.production_google_live_candidate else None,
-        min_interrupt_stop_samples=10 if args.production_google_live_candidate else None,
+        min_first_audio_samples=(
+            _PHYSICAL_AUDIT_SAMPLE_COUNTS["firstAudio"]
+            if args.production_google_live_candidate
+            else None
+        ),
+        min_interrupt_stop_samples=(
+            _PHYSICAL_AUDIT_SAMPLE_COUNTS["interruptStop"]
+            if args.production_google_live_candidate
+            else None
+        ),
         min_physical_bargein_samples=(
-            10 if args.production_google_live_candidate else None
+            _PHYSICAL_AUDIT_SAMPLE_COUNTS["physicalBargein"]
+            if args.production_google_live_candidate
+            else None
         ),
         min_server_output_gap_samples=(
-            10 if args.production_google_live_candidate else None
+            _PHYSICAL_AUDIT_SAMPLE_COUNTS["serverOutputGap"]
+            if args.production_google_live_candidate
+            else None
         ),
         candidate_identity=candidate_identity,
         reliability_report=reliability_report,

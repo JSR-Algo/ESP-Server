@@ -4,8 +4,9 @@ import json
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
 import unittest
+from copy import deepcopy
+from pathlib import Path
 
 
 class PhysicalSmokeAuditTest(unittest.TestCase):
@@ -3867,7 +3868,10 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         )
         lines = [
             "260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}",
-            "260518 20:10:00[GoogleLive]-INFO-Google Live reliability_window_start window_id=physical-1 journey_id=physical-1 connection_id=connection-1 live_connection_id=live-1 candidate_identity=" + identity,
+            "2026-08-31 13:10:00+00:00[GoogleLive]-INFO-Google Live reliability_window_start window_id=physical-1 journey_id=physical-1 connection_id=connection-1 live_connection_id=live-1 initial_live_connection_id=live-1 peer_identity_hash=sha256:"
+            + "d" * 64
+            + " server_start_utc=2026-08-31T13:10:00+00:00 candidate_identity="
+            + identity,
             "260518 20:10:00[GoogleLive]-INFO-Google Live evidence_receive_loop_started journey_id=physical-1 connection_id=connection-1 live_connection_id=live-1 generation=1",
             "260518 20:10:01[GoogleLive]-INFO-Google Live input_audio_diag encoded_bytes=80 decoded_bytes=640 rms=921 source_rate=16000 target_rate=16000 sample_width=2",
             "260518 20:10:02[GoogleLive]-INFO-Google Live transcript source=user chars=8 text='xin chào'",
@@ -3893,25 +3897,35 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         lines.extend(
             [
                 "260518 20:15:00[GoogleLive]-INFO-Google Live evidence_receive_loop_stopped journey_id=physical-1 connection_id=connection-1 live_connection_id=live-1 generation=1",
-                "260518 20:15:01[GoogleLive]-INFO-Google Live reliability_window_end window_id=physical-1",
+                "2026-08-31 13:15:01+00:00[GoogleLive]-INFO-Google Live reliability_window_end window_id=physical-1 server_end_utc=2026-08-31T13:15:01+00:00",
             ]
         )
         return "\n".join(lines)
 
-    def _candidate_audit(self, log_text, **overrides):
-        audit = importlib.import_module("scripts.physical_smoke_audit")
+    def _candidate_audit_options(self):
         identity = self._candidate_identity()
         reliability_report = {
             "schemaVersion": "google-live-reliability.v1",
             "name": "google_live_log_reliability",
             "status": "PASS",
             "candidateIdentity": identity,
-            "logWindow": {"windowId": "physical-1"},
+            "logWindow": {
+                "windowId": "physical-1",
+                "start": "2026-08-31T13:10:00+00:00",
+                "end": "2026-08-31T13:15:01+00:00",
+            },
             "evidenceScope": {
                 "journeyId": "physical-1",
                 "connectionId": "connection-1",
                 "liveConnectionId": "live-1",
+                "initialLiveConnectionId": "live-1",
+                "peerIdentityHash": f"sha256:{'d' * 64}",
+                "serverStartUtc": "2026-08-31T13:10:00+00:00",
             },
+            "initialLiveConnectionId": "live-1",
+            "finalLiveConnectionId": "live-1",
+            "liveConnectionTransitions": [],
+            "serverConnectionTransitions": [],
             "receiveLoopBalance": 0,
             "maxReceiveLoopsActive": 1,
             "staleAudioAfterReplacement": 0,
@@ -3919,7 +3933,21 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
             "unrecoveredTimeouts": [],
             "unreleasedLessonHandoffs": [],
             "replayCountsByReopen": {},
-            "correlations": [{"status": "PASS", "journeyId": "physical-1"}],
+            "correlations": [
+                {
+                    "status": "PASS",
+                    "journeyId": "physical-1",
+                    "connectionId": "connection-1",
+                    "liveConnectionId": "live-1",
+                    "cancelledResponseId": 1,
+                    "replacementResponseId": 2,
+                }
+            ],
+            "correlation": {
+                "status": "PASS",
+                "cancelledResponseId": 1,
+                "replacementResponseId": 2,
+            },
             "failures": [],
             "fatalHits": [],
         }
@@ -3960,7 +3988,7 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
             "rawAudioPersisted": False,
             "transcriptPersisted": False,
         }
-        options = {
+        return {
             "device_id": "3c:0f:02:de:c2:e0",
             "client_id": "d16afa54-eb44-4fcb-8cac-cdefdf05f6fc",
             "min_interrupts": 0,
@@ -3978,6 +4006,10 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
             "min_server_output_gap_samples": 10,
             "require_receive_loop_balance": True,
         }
+
+    def _candidate_audit(self, log_text, **overrides):
+        audit = importlib.import_module("scripts.physical_smoke_audit")
+        options = self._candidate_audit_options()
         options.update(overrides)
         return audit.audit_log(log_text, **options)
 
@@ -4029,20 +4061,92 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
 
         self.assertFalse(result["passed"])
         self.assertIn("candidate_identity_match", result["missing"])
-        self.assertIn("first_audio_samples>=10", result["missing"])
+        self.assertIn("first_audio_samples=10", result["missing"])
 
     def test_candidate_physical_audit_rejects_missing_latency_evidence(self):
         cases = (
-            ({"first_audio": []}, "first_audio_samples>=10"),
-            ({"interrupt_stop": []}, "interrupt_stop_latency_ms>=10"),
-            ({"physical_bargein": []}, "physical_bargein_samples>=10"),
-            ({"output_gaps": []}, "server_output_gap_samples>=10"),
+            ({"first_audio": []}, "first_audio_samples=10"),
+            ({"interrupt_stop": []}, "interrupt_stop_latency_ms=10"),
+            ({"physical_bargein": []}, "physical_bargein_samples=10"),
+            ({"output_gaps": []}, "server_output_gap_samples=10"),
         )
         for changes, expected_missing in cases:
             with self.subTest(expected_missing=expected_missing):
                 result = self._candidate_audit(self._candidate_physical_log(**changes))
                 self.assertFalse(result["passed"])
                 self.assertIn(expected_missing, result["missing"])
+
+    def test_candidate_physical_audit_requires_exact_metric_multiplicities(self):
+        cases = (
+            ("first_audio", 600.0, "first_audio_samples=10"),
+            ("interrupt_stop", 25.0, "interrupt_stop_latency_ms=10"),
+            ("physical_bargein", 300.0, "physical_bargein_samples=10"),
+            ("output_gaps", (100.0, "continuous"), "server_output_gap_samples=10"),
+        )
+        for field, sample, expected_missing in cases:
+            for count in (9, 11):
+                with self.subTest(field=field, count=count):
+                    result = self._candidate_audit(
+                        self._candidate_physical_log(**{field: [sample] * count})
+                    )
+                    self.assertFalse(result["passed"])
+                    self.assertIn(expected_missing, result["missing"])
+
+    def test_candidate_physical_audit_uses_full_normalized_log_contract(self):
+        mutations = (
+            (
+                "peer",
+                lambda report: report["evidenceScope"].update(
+                    peerIdentityHash=f"sha256:{'e' * 64}"
+                ),
+            ),
+            (
+                "connection",
+                lambda report: report["evidenceScope"].update(
+                    connectionId="fabricated"
+                ),
+            ),
+            (
+                "window_time",
+                lambda report: report["logWindow"].update(
+                    end="2026-08-31T13:16:01+00:00"
+                ),
+            ),
+            (
+                "initial_live",
+                lambda report: report.update(
+                    initialLiveConnectionId="fabricated-live"
+                ),
+            ),
+            (
+                "final_live",
+                lambda report: report.update(finalLiveConnectionId="fabricated-live"),
+            ),
+            (
+                "transition_ledger",
+                lambda report: report.update(
+                    liveConnectionTransitions=[
+                        {
+                            "attempt": 2,
+                            "fromLiveConnectionId": "live-1",
+                            "toLiveConnectionId": "fabricated-live",
+                            "status": "committed",
+                        }
+                    ]
+                ),
+            ),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                report = deepcopy(
+                    self._candidate_audit_options()["reliability_report"]
+                )
+                mutate(report)
+                result = self._candidate_audit(
+                    self._candidate_physical_log(), reliability_report=report
+                )
+                self.assertFalse(result["passed"])
+                self.assertIn("log_reliability_report_pass", result["missing"])
 
     def test_candidate_physical_audit_rejects_malformed_latency_evidence(self):
         log_text = self._candidate_physical_log() + "\n" + "\n".join(
@@ -4077,12 +4181,23 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
             "name": "google_live_log_reliability",
             "status": "PASS",
             "candidateIdentity": identity,
-            "logWindow": {"windowId": "physical-1"},
+            "logWindow": {
+                "windowId": "physical-1",
+                "start": "2026-08-31T13:10:00+00:00",
+                "end": "2026-08-31T13:15:01+00:00",
+            },
             "evidenceScope": {
                 "journeyId": "physical-1",
                 "connectionId": "connection-1",
                 "liveConnectionId": "live-1",
+                "initialLiveConnectionId": "live-1",
+                "peerIdentityHash": f"sha256:{'d' * 64}",
+                "serverStartUtc": "2026-08-31T13:10:00+00:00",
             },
+            "initialLiveConnectionId": "live-1",
+            "finalLiveConnectionId": "live-1",
+            "liveConnectionTransitions": [],
+            "serverConnectionTransitions": [],
             "receiveLoopBalance": 1,
             "maxReceiveLoopsActive": 2,
             "staleAudioAfterReplacement": 0,
@@ -4090,7 +4205,21 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
             "unrecoveredTimeouts": [],
             "unreleasedLessonHandoffs": [],
             "replayCountsByReopen": {},
-            "correlations": [{"status": "PASS", "journeyId": "physical-1"}],
+            "correlations": [
+                {
+                    "status": "PASS",
+                    "journeyId": "physical-1",
+                    "connectionId": "connection-1",
+                    "liveConnectionId": "live-1",
+                    "cancelledResponseId": 1,
+                    "replacementResponseId": 2,
+                }
+            ],
+            "correlation": {
+                "status": "PASS",
+                "cancelledResponseId": 1,
+                "replacementResponseId": 2,
+            },
             "failures": [],
             "fatalHits": [],
         }
