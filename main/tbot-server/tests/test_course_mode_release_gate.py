@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import errno
+import gc
 import hashlib
 import importlib
 import json
@@ -1379,6 +1381,33 @@ def test_successful_cleanup_remains_successful_when_repeated(
     assert owner.cleanup() is True
     assert owner.cleanup() is True
     assert not root.exists()
+
+
+def test_lane_execution_gc_fallback_closes_descriptor_and_removes_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned-lane"
+    root.mkdir()
+    identity = gate._owned_tree_identity(root)
+    descriptor = gate._open_snapshot_directory(root)
+    execution = gate.LaneExecution(root, {}, {}, identity, descriptor)
+
+    del execution
+    gc.collect()
+
+    root_exists = root.exists()
+    try:
+        descriptor_metadata = os.fstat(descriptor)
+    except OSError as exc:
+        descriptor_closed = exc.errno == errno.EBADF
+    else:
+        descriptor_closed = False
+        if (descriptor_metadata.st_dev, descriptor_metadata.st_ino) == identity:
+            os.close(descriptor)
+    shutil.rmtree(root, ignore_errors=True)
+
+    assert descriptor_closed is True
+    assert root_exists is False
 
 
 def test_gate_reports_lane_root_moved_to_another_parent(

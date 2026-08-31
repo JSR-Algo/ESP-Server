@@ -289,10 +289,6 @@ class ExecutionStage:
         with contextlib.suppress(Exception):
             self.cleanup()
 
-    def __del__(self) -> None:
-        with contextlib.suppress(Exception):
-            self.cleanup()
-
     def create_lane_execution(self) -> LaneExecution:
         lane_root = Path(tempfile.mkdtemp(prefix="course-mode-lane-", dir=self.root.parent))
         lane_identity: tuple[int, int] | None = None
@@ -393,6 +389,10 @@ class LaneExecution:
     def retained_path(self) -> Path:
         return self._retained_path or self.root
 
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self.cleanup()
+
 
 @dataclass(frozen=True)
 class BackendSnapshotBinding:
@@ -445,7 +445,7 @@ def _owned_tree_identity(root: Path) -> tuple[int, int]:
 def _directory_fd_path(descriptor: int) -> Path | None:
     try:
         if hasattr(fcntl, "F_GETPATH"):
-            raw = fcntl.fcntl(descriptor, fcntl.F_GETPATH, bytearray(1024))
+            raw = fcntl.fcntl(descriptor, fcntl.F_GETPATH, bytes(1024))
             value = raw.split(b"\0", 1)[0]
         else:
             value = os.fsencode(os.readlink(f"/proc/self/fd/{descriptor}"))
