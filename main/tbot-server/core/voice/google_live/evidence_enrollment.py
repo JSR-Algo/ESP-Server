@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from functools import wraps
 from typing import Callable, Literal
 
 
@@ -16,6 +18,15 @@ class EnrollmentError(ValueError):
     pass
 
 
+def _synchronized(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return locked
+
+
 @dataclass(frozen=True, slots=True)
 class TranscriptExpectation:
     slot: int
@@ -23,7 +34,7 @@ class TranscriptExpectation:
     expected_mac: str = field(repr=False)
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class EvidenceEnrollment:
     device_id: str
     client_id: str
@@ -35,23 +46,44 @@ class EvidenceEnrollment:
     finalized: bool = False
 
 
+@dataclass(slots=True)
+class _EvidenceEnrollmentState:
+    device_id: str
+    client_id: str
+    journey_id: str
+    transcript_plan: tuple[TranscriptExpectation, ...]
+    hmac_key: bytearray = field(repr=False)
+    created_at: float
+    expires_at: float
+    monotonic_deadline: float = field(repr=False)
+    connected: bool = False
+    finalized: bool = False
+
+
 class EvidenceEnrollmentRegistry:
     def __init__(
         self,
         *,
-        clock: Callable[[], float] = time.time,
+        clock: Callable[[], float] | None = None,
+        wall_clock: Callable[[], float] = time.time,
+        monotonic_clock: Callable[[], float] = time.monotonic,
         max_active: int = 128,
         max_tombstones: int = 256,
     ):
-        self._clock = clock
+        if clock is not None:
+            wall_clock = clock
+            monotonic_clock = clock
+        self._wall_clock = wall_clock
+        self._monotonic_clock = monotonic_clock
         self._max_active = max_active
         self._max_tombstones = max_tombstones
-        self._active: dict[str, EvidenceEnrollment] = {}
+        self._lock = threading.RLock()
+        self._active: dict[str, _EvidenceEnrollmentState] = {}
         self._tombstones: OrderedDict[str, dict] = OrderedDict()
-        self._created_at: dict[str, float] = {}
         self._terminal_peer_digests: dict[str, bytes] = {}
         self._peer_digest_key = os.urandom(32)
 
+    @_synchronized
     def register(
         self,
         *,
@@ -62,7 +94,8 @@ class EvidenceEnrollmentRegistry:
         hmac_key: bytearray,
         ttl_sec: int,
     ) -> EvidenceEnrollment:
-        now = self._prepare()
+        wall_now = self._prepare()
+        monotonic_now = self._monotonic_clock()
         device_id = normalize_peer_id(device_id)
         client_id = normalize_peer_id(client_id)
         error = None
@@ -78,18 +111,20 @@ class EvidenceEnrollmentRegistry:
         if error is not None:
             self._zeroize(hmac_key)
             raise EnrollmentError(error)
-        enrollment = EvidenceEnrollment(
+        enrollment = _EvidenceEnrollmentState(
             device_id=device_id,
             client_id=client_id,
             journey_id=journey_id,
             transcript_plan=tuple(transcript_plan),
-            hmac_key=hmac_key,
-            expires_at=now + ttl_sec,
+            hmac_key=bytearray(hmac_key),
+            created_at=wall_now,
+            expires_at=wall_now + ttl_sec,
+            monotonic_deadline=monotonic_now + ttl_sec,
         )
         self._active[journey_id] = enrollment
-        self._created_at[journey_id] = now
-        return enrollment
+        return self._view(enrollment)
 
+    @_synchronized
     def ota_journey(self, device_id: str, client_id: str) -> str | None:
         self._prepare()
         device_id = normalize_peer_id(device_id)
@@ -99,6 +134,7 @@ class EvidenceEnrollmentRegistry:
                 return enrollment.journey_id
         return None
 
+    @_synchronized
     def claim(self, *, device_id: str, client_id: str, journey_id: str) -> EvidenceEnrollment | None:
         self._prepare()
         enrollment = self._active.get(journey_id)
@@ -110,8 +146,9 @@ class EvidenceEnrollmentRegistry:
         ):
             return None
         enrollment.connected = True
-        return enrollment
+        return self._view(enrollment)
 
+    @_synchronized
     def finalize(
         self,
         journey_id: str,
@@ -140,6 +177,7 @@ class EvidenceEnrollmentRegistry:
         self._add_tombstone(snapshot)
         return dict(snapshot)
 
+    @_synchronized
     def safe_snapshot(self, journey_id: str) -> dict:
         self._prepare()
         tombstone = self._tombstones.get(journey_id)
@@ -151,12 +189,13 @@ class EvidenceEnrollmentRegistry:
         return {
             "journeyId": enrollment.journey_id,
             "status": "ACTIVE",
-            "createdAt": self._created_at[journey_id],
+            "createdAt": enrollment.created_at,
             "expiresAt": enrollment.expires_at,
             "connected": enrollment.connected,
             "transcriptCount": len(enrollment.transcript_plan),
         }
 
+    @_synchronized
     def device_matches(self, *, device_id: str, journey_id: str) -> bool:
         self._prepare()
         enrollment = self._active.get(journey_id)
@@ -168,11 +207,12 @@ class EvidenceEnrollmentRegistry:
         return expected == self._peer_digest(device_id)
 
     def _prepare(self) -> float:
-        now = self._clock()
+        wall_now = self._wall_clock()
+        monotonic_now = self._monotonic_clock()
         expired = [
             journey_id
             for journey_id, enrollment in self._active.items()
-            if enrollment.expires_at <= now
+            if enrollment.monotonic_deadline <= monotonic_now
         ]
         for journey_id in expired:
             enrollment = self._active[journey_id]
@@ -180,19 +220,42 @@ class EvidenceEnrollmentRegistry:
             self._active.pop(journey_id)
             self._zeroize(enrollment.hmac_key)
             self._add_tombstone(
-                self._terminal_snapshot(enrollment, status="EXPIRED", timestamp=now)
+                self._terminal_snapshot(
+                    enrollment,
+                    status="EXPIRED",
+                    timestamp=wall_now,
+                )
             )
-        return now
+        return wall_now
 
-    def _terminal_snapshot(self, enrollment: EvidenceEnrollment, *, status: str, timestamp: float) -> dict:
+    def _terminal_snapshot(
+        self,
+        enrollment: _EvidenceEnrollmentState,
+        *,
+        status: str,
+        timestamp: float,
+    ) -> dict:
         return {
             "journeyId": enrollment.journey_id,
             "status": status,
-            "createdAt": self._created_at.pop(enrollment.journey_id),
+            "createdAt": enrollment.created_at,
             "expiresAt": enrollment.expires_at,
-            "finalizedAt": timestamp,
+            "finalizedAt": max(timestamp, enrollment.created_at),
             "transcriptCount": len(enrollment.transcript_plan),
         }
+
+    @staticmethod
+    def _view(enrollment: _EvidenceEnrollmentState) -> EvidenceEnrollment:
+        return EvidenceEnrollment(
+            device_id=enrollment.device_id,
+            client_id=enrollment.client_id,
+            journey_id=enrollment.journey_id,
+            transcript_plan=enrollment.transcript_plan,
+            hmac_key=bytearray(enrollment.hmac_key),
+            expires_at=enrollment.expires_at,
+            connected=enrollment.connected,
+            finalized=enrollment.finalized,
+        )
 
     def _add_tombstone(self, snapshot: dict) -> None:
         self._tombstones[snapshot["journeyId"]] = snapshot

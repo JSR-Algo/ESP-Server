@@ -46,7 +46,6 @@ class GoogleLiveEvidenceHandler:
             body = await request.json()
             parsed = self._parse_body(request.match_info.get("deviceId", ""), body)
             self.registry.register(**parsed)
-            snapshot = self.registry.safe_snapshot(parsed["journey_id"])
         except EnrollmentError as exc:
             code = str(exc)
             if code in ("JOURNEY_REUSED", "ENROLLMENT_ACTIVE"):
@@ -56,7 +55,16 @@ class GoogleLiveEvidenceHandler:
             return self._error(400, "INVALID_REQUEST", "Invalid Google Live evidence enrollment request")
         except Exception:
             return self._error(400, "INVALID_REQUEST", "Invalid Google Live evidence enrollment request")
-        return web.json_response(snapshot, status=201, headers={"Cache-Control": "no-store"})
+        return web.json_response(
+            {
+                "data": {
+                    "registered": True,
+                    "journeyId": parsed["journey_id"],
+                }
+            },
+            status=201,
+            headers={"Cache-Control": "no-store"},
+        )
 
     async def handle_get(self, request: web.Request) -> web.Response:
         auth_error = self._authorize(request)
