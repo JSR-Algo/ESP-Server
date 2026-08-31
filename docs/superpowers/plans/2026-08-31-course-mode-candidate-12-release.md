@@ -190,6 +190,9 @@ Expected: zero failures and zero skips.
 
 ~~~bash
 cd /Users/manhhodinh/Documents/TBOT/robot/esp32-server/main/tbot-server
+COURSE_MODE_BACKEND_ROOT=/Users/manhhodinh/Documents/TBOT-candidate-worktrees/backend-c2a4e342
+COURSE_MODE_BACKEND_SHA=c9a0fe08f6e30004a6b193a9a7cbf715ab699634
+export COURSE_MODE_BACKEND_ROOT COURSE_MODE_BACKEND_SHA
 $PY311 -m pytest -q tests/test_course_mode_curriculum_e2e.py tests/test_course_mode_runtime_integration.py
 ~~~
 
