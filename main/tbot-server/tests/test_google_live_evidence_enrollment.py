@@ -62,6 +62,7 @@ def test_registry_detaches_input_key_and_returned_enrollments_from_internal_stat
     returned = _register(registry, hmac_key=input_key)
 
     input_key[:] = b"x" * 32
+    assert returned.hmac_key == bytearray()
     for field_name, value in (
         ("device_id", "mutated-device"),
         ("client_id", "mutated-client"),
@@ -71,7 +72,6 @@ def test_registry_detaches_input_key_and_returned_enrollments_from_internal_stat
     ):
         with pytest.raises(FrozenInstanceError):
             setattr(returned, field_name, value)
-    returned.hmac_key[:] = b"z" * 32
 
     snapshot = registry.safe_snapshot("physical.run-1")
     assert snapshot["connected"] is False
@@ -89,8 +89,7 @@ def test_registry_detaches_input_key_and_returned_enrollments_from_internal_stat
         journey_id="physical.run-1",
     )
     assert claimed is not None
-    assert claimed.hmac_key == bytearray(b"k" * 32)
-    claimed.hmac_key[:] = b"q" * 32
+    assert claimed.hmac_key == bytearray()
     with pytest.raises(FrozenInstanceError):
         claimed.device_id = "other"
     with pytest.raises(FrozenInstanceError):
@@ -103,7 +102,24 @@ def test_registry_detaches_input_key_and_returned_enrollments_from_internal_stat
     assert claimed_again is not None
     assert claimed_again.device_id == "aa:bb"
     assert claimed_again.connected is True
-    assert claimed_again.hmac_key == bytearray(b"k" * 32)
+    assert claimed_again.hmac_key == bytearray()
+    assert registry._active["physical.run-1"].hmac_key == bytearray(b"k" * 32)
+
+
+def test_registry_accepts_immutable_key_bytes_and_rejects_without_mutation_errors():
+    registry = EvidenceEnrollmentRegistry(max_active=1)
+    registered = _register(registry, hmac_key=b"k" * 32)
+
+    assert registry._active["physical.run-1"].hmac_key == bytearray(b"k" * 32)
+    with pytest.raises(EnrollmentError, match="CAPACITY_EXCEEDED"):
+        _register(
+            registry,
+            device_id="other-device",
+            client_id="other-client",
+            journey_id="other-journey",
+            hmac_key=b"r" * 32,
+        )
+    assert registered.hmac_key == bytearray()
 
 
 def test_registry_expires_and_zeroizes_without_exposing_secrets():
@@ -160,6 +176,8 @@ def test_registry_expiry_uses_monotonic_deadline_despite_wall_clock_rollback():
     assert registry.ota_journey("aa:bb", "robot-client") is None
     assert owned_key == bytearray(32)
     assert registry.safe_snapshot("physical.run-1")["status"] == "EXPIRED"
+    expired = registry.safe_snapshot("physical.run-1")
+    assert expired["finalizedAt"] >= expired["expiresAt"] >= expired["createdAt"]
 
 
 def test_registry_enforces_production_active_capacity_boundary():

@@ -36,6 +36,8 @@ class TranscriptExpectation:
 
 @dataclass(frozen=True, slots=True)
 class EvidenceEnrollment:
+    """Detached public enrollment view; ``hmac_key`` is always redacted."""
+
     device_id: str
     client_id: str
     journey_id: str
@@ -91,7 +93,7 @@ class EvidenceEnrollmentRegistry:
         client_id: str,
         journey_id: str,
         transcript_plan: tuple[TranscriptExpectation, ...],
-        hmac_key: bytearray,
+        hmac_key: bytes | bytearray,
         ttl_sec: int,
     ) -> EvidenceEnrollment:
         wall_now = self._prepare()
@@ -109,7 +111,8 @@ class EvidenceEnrollmentRegistry:
         elif len(self._active) >= self._max_active:
             error = "CAPACITY_EXCEEDED"
         if error is not None:
-            self._zeroize(hmac_key)
+            if isinstance(hmac_key, bytearray):
+                self._zeroize(hmac_key)
             raise EnrollmentError(error)
         enrollment = _EvidenceEnrollmentState(
             device_id=device_id,
@@ -235,12 +238,15 @@ class EvidenceEnrollmentRegistry:
         status: str,
         timestamp: float,
     ) -> dict:
+        terminal_at = max(timestamp, enrollment.created_at)
+        if status == "EXPIRED":
+            terminal_at = max(terminal_at, enrollment.expires_at)
         return {
             "journeyId": enrollment.journey_id,
             "status": status,
             "createdAt": enrollment.created_at,
             "expiresAt": enrollment.expires_at,
-            "finalizedAt": max(timestamp, enrollment.created_at),
+            "finalizedAt": terminal_at,
             "transcriptCount": len(enrollment.transcript_plan),
         }
 
@@ -251,7 +257,7 @@ class EvidenceEnrollmentRegistry:
             client_id=enrollment.client_id,
             journey_id=enrollment.journey_id,
             transcript_plan=enrollment.transcript_plan,
-            hmac_key=bytearray(enrollment.hmac_key),
+            hmac_key=bytearray(),
             expires_at=enrollment.expires_at,
             connected=enrollment.connected,
             finalized=enrollment.finalized,
