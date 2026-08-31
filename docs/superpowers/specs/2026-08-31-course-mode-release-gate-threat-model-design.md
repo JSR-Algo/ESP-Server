@@ -97,6 +97,26 @@ Software PASS remains separate from physical authority. The workflow may issue
 `SOFTWARE_GO_FOR_ATTENDED_FLASH` only after the new candidate passes all
 software, isolated live-database, evidence, and independent-review gates.
 
+## Candidate Assembly Time
+
+A release candidate is assembled after its component evidence has been
+produced and qualified. The candidate `createdAt` therefore records the real
+UTC time when that exact candidate is frozen, not the creation time copied
+from an older component manifest.
+
+For the firmware evidence bound into a candidate, validation requires:
+
+```text
+firmwareEvidence.createdAt <= candidate.createdAt < candidate.expiresAt
+```
+
+The firmware evidence timestamp must be canonical RFC 3339 UTC and must not
+postdate the candidate that consumes it. Reusing byte-identical, previously
+qualified firmware evidence is allowed when every existing firmware identity,
+source, reproducibility, safety, and artifact check still passes. This change
+does not authorize a firmware rebuild, flash, serial access, HIL, or physical
+device access.
+
 At the flash point, fresh user confirmation is still required for the robot
 identity, serial port, candidate SHA, application offset `0x20000`, binary size,
 and preserved partitions. No earlier approval substitutes for that point-of-use

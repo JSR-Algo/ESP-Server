@@ -256,6 +256,72 @@ $PY311 main/tbot-server/scripts/course_mode_candidate_manifest.py "$CANDIDATE" >
 
 Expected: exit 0 and reasons is empty.
 
+### Task 5A: Bind Candidate Creation to Real Assembly Time
+
+**Files:**
+- Modify: `main/tbot-server/tests/test_course_mode_candidate_manifest.py`
+- Modify: `main/tbot-server/scripts/course_mode_candidate_manifest.py`
+- Regenerate: `/Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-production-readiness/candidates/course-mode-2026-08-31.12.json`
+- Regenerate: `/Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-production-readiness/course-mode-2026-08-31.12/00-candidate-validator.json`
+
+- [ ] **Step 1: Write failing firmware-evidence ordering tests**
+
+Add focused cases proving that evidence created before the candidate is
+accepted, evidence created exactly at candidate creation is accepted, and
+evidence created after candidate creation is rejected with
+`firmware.evidenceManifestPath`.
+
+- [ ] **Step 2: Verify RED on Python 3.11 and 3.14**
+
+~~~bash
+$PY311 -m pytest -q main/tbot-server/tests/test_course_mode_candidate_manifest.py -k firmware_evidence_creation
+python3 -m pytest -q main/tbot-server/tests/test_course_mode_candidate_manifest.py -k firmware_evidence_creation
+~~~
+
+Expected: the before-candidate case fails and the after-candidate case passes
+under the reversed legacy comparison.
+
+- [ ] **Step 3: Implement the assembly-time ordering**
+
+Change the firmware evidence time predicate to require:
+
+~~~python
+evidence_created <= candidate_created < candidate_expires
+~~~
+
+Keep all existing canonical timestamp, manifest identity, source, artifact,
+reproducibility, safety, and expiry checks unchanged.
+
+- [ ] **Step 4: Verify and commit the validator change**
+
+~~~bash
+$PY311 -m pytest -q main/tbot-server/tests/test_course_mode_candidate_manifest.py
+python3 -m pytest -q main/tbot-server/tests/test_course_mode_candidate_manifest.py -k firmware_evidence_creation
+git diff --check
+git add main/tbot-server/scripts/course_mode_candidate_manifest.py main/tbot-server/tests/test_course_mode_candidate_manifest.py
+git commit -m "fix: bind candidate creation after firmware evidence"
+~~~
+
+Expected: zero failures and zero skips.
+
+- [ ] **Step 5: Regenerate candidate .12 with truthful UTC creation**
+
+Set `createdAt` to the actual UTC freeze time after the exact admin commit and
+image IDs already bound in `.12`. Set `expiresAt` later than `createdAt` using
+the existing release validity window. Do not change firmware bytes or forge a
+new firmware manifest.
+
+- [ ] **Step 6: Regenerate and verify the validator evidence**
+
+~~~bash
+$PY311 main/tbot-server/scripts/course_mode_candidate_manifest.py "$CANDIDATE" > "$EVIDENCE/00-candidate-validator.json"
+/usr/bin/jq -e '.status == "pass" and .reasons == []' "$EVIDENCE/00-candidate-validator.json"
+~~~
+
+Expected: exit 0, `reasons` is empty, candidate `createdAt` is later than the
+firmware evidence timestamp and the exact admin commit timestamp, and the
+candidate/evidence hashes are recorded again before Task 6.
+
 ### Task 6: Run Quick and Full Gates
 
 - [ ] **Step 1: Obtain fresh software-gate confirmation**
