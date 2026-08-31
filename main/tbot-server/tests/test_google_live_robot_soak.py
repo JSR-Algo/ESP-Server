@@ -24,6 +24,8 @@ IDENTITY = {
     "configFingerprint": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
 }
 PEER_HASH = f"sha256:{'d' * 64}"
+SOAK_CONNECTION_1 = "candidate-soak-websocket-1"
+SOAK_CONNECTION_2 = "candidate-soak-websocket-2"
 EVIDENCE_SCOPE = {
     "journeyId": "transport-journey",
     "connectionId": "connection-transport",
@@ -81,6 +83,7 @@ def _refresh_execution_contract(result):
         "initialLiveConnectionId": result["initialLiveConnectionId"],
         "finalLiveConnectionId": result["finalLiveConnectionId"],
         "liveConnectionTransitions": deepcopy(result["liveConnectionTransitions"]),
+        "serverConnectionTransitions": [],
         "logWindow": deepcopy(result["logWindow"]),
     }
     if result["name"] == "bargein":
@@ -130,6 +133,27 @@ def _refresh_execution_contract(result):
             expected_candidate_identity=IDENTITY,
         )
     return result
+
+
+def _refresh_execution_sequence(executions):
+    previous_scope = None
+    for result in executions:
+        _refresh_execution_contract(result)
+        if result["name"] == "reconnect":
+            result["task5LogEvidence"]["serverConnectionTransitions"] = [{
+                "status": "PASS",
+                "source": "server_log",
+                "serverIssued": True,
+                "sequence": 1,
+                "reason": "same_device_reconnect",
+                "fromJourneyId": previous_scope["journeyId"],
+                "fromConnectionId": previous_scope["connectionId"],
+                "toJourneyId": result["journeyId"],
+                "toConnectionId": result["connectionId"],
+                "peerIdentityHash": result["peerIdentityHash"],
+            }]
+        previous_scope = deepcopy(result["evidenceScope"])
+    return executions
 
 
 def _layer(name):
@@ -240,10 +264,15 @@ def _args(**overrides):
 def _journeys(*, mutation=None):
     sequence = 0
     last_window = None
+    previous_scope = None
+    current_connection = SOAK_CONNECTION_1
 
     async def journey(_args, *, name, index, label=None, **_kwargs):
-        nonlocal sequence, last_window
+        nonlocal sequence, last_window, previous_scope, current_connection
         sequence += 1
+        previous_connection = current_connection
+        if name == "reconnect":
+            current_connection = SOAK_CONNECTION_2
         result = {
             "schemaVersion": "google-live-reliability.v1",
             "name": name,
@@ -251,7 +280,7 @@ def _journeys(*, mutation=None):
             "candidateIdentity": IDENTITY,
             "evidenceSequence": sequence,
             "journeyId": f"candidate-{sequence}",
-            "connectionId": "candidate-soak-websocket",
+            "connectionId": current_connection,
             "liveConnectionId": "live-1",
             "initialLiveConnectionId": "live-1",
             "finalLiveConnectionId": "live-1",
@@ -275,11 +304,25 @@ def _journeys(*, mutation=None):
             _refresh_execution_contract(result)
         elif name in {"reopen", "reconnect"}:
             result["latencies"] = {"reconnectRecoveryMs": [1000]}
+            if name == "reconnect":
+                result["task5LogEvidence"]["serverConnectionTransitions"] = [{
+                    "status": "PASS",
+                    "source": "server_log",
+                    "serverIssued": True,
+                    "sequence": 1,
+                    "reason": "same_device_reconnect",
+                    "fromJourneyId": previous_scope["journeyId"],
+                    "fromConnectionId": previous_connection,
+                    "toJourneyId": result["journeyId"],
+                    "toConnectionId": current_connection,
+                    "peerIdentityHash": PEER_HASH,
+                }]
         elif name == "lesson":
             result["lessonManifestSha256"] = "sha256:006c27e334a18ca85cdaf3a6e8ff2718219aab2004caf8233417ea6b80fd5652"
         if mutation is not None:
             mutation(result, sequence, name, index, label)
         last_window = deepcopy(result["logWindow"])
+        previous_scope = deepcopy(result.get("evidenceScope"))
         return result
 
     async def monitor(_args, *, duration_sec):
@@ -292,7 +335,7 @@ def _journeys(*, mutation=None):
                 "status": "PASS",
                 "candidateIdentity": IDENTITY,
                 "journeyId": "quiet-padding-1",
-                "connectionId": "candidate-soak-websocket",
+                "connectionId": SOAK_CONNECTION_2,
                 "serverIssued": True,
                 "windowId": "quiet-padding-window-1",
                 "logWindow": {
@@ -302,7 +345,7 @@ def _journeys(*, mutation=None):
                 },
                 "evidenceScope": {
                     "journeyId": "quiet-padding-1",
-                    "connectionId": "candidate-soak-websocket",
+                    "connectionId": SOAK_CONNECTION_2,
                     "serverStartUtc": start.isoformat(),
                 },
                 "durationSec": (end - start).total_seconds(),
@@ -321,7 +364,7 @@ def _journeys(*, mutation=None):
             "candidateIdentity": IDENTITY,
             "finalScope": final_scope,
             "serverAnchor": {
-                "connectionId": "candidate-soak-websocket",
+                "connectionId": SOAK_CONNECTION_2,
                 "peerIdentityHash": PEER_HASH,
             },
             "websocketClosed": True,
@@ -360,7 +403,7 @@ def _cleanup_evidence(final_scope):
         "candidateIdentity": IDENTITY,
         "finalScope": final_scope,
         "serverAnchor": {
-            "connectionId": "candidate-soak-websocket",
+            "connectionId": SOAK_CONNECTION_2,
             "peerIdentityHash": PEER_HASH,
         },
         "websocketClosed": True,
@@ -854,6 +897,97 @@ def test_candidate_soak_accepts_full_task5_correlated_artifact_fields():
     assert report["status"] == "PASS"
 
 
+def test_candidate_soak_accepts_single_server_connection_reconnect():
+    report = _run()
+    executions = report["evidenceExecutions"]
+
+    assert {item["connectionId"] for item in executions[:30]} == {
+        SOAK_CONNECTION_1
+    }
+    assert {item["connectionId"] for item in executions[30:]} == {
+        SOAK_CONNECTION_2
+    }
+    assert report["quietPadding"][0]["connectionId"] == SOAK_CONNECTION_2
+    assert report["cleanupVerdict"]["status"] == "PASS"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "missing",
+        "same_connection",
+        "reordered",
+        "proof_mismatch",
+        "extra",
+        "drift_before",
+        "drift_after",
+        "peer_change",
+    ],
+)
+def test_candidate_soak_rejects_invalid_server_connection_transition(failure):
+    def corrupt(result, sequence, name, _index, _label):
+        if name == "reconnect":
+            transitions = result["task5LogEvidence"]["serverConnectionTransitions"]
+            transition = transitions[0]
+            if failure == "missing":
+                transitions.clear()
+            elif failure == "same_connection":
+                transition["toConnectionId"] = transition["fromConnectionId"]
+            elif failure == "reordered":
+                transition["fromConnectionId"], transition["toConnectionId"] = (
+                    transition["toConnectionId"],
+                    transition["fromConnectionId"],
+                )
+            elif failure == "proof_mismatch":
+                transition["fromJourneyId"] = result["journeyId"]
+        if failure == "extra" and name == "lesson":
+            result["task5LogEvidence"]["serverConnectionTransitions"] = [{
+                "status": "PASS",
+                "source": "server_log",
+                "serverIssued": True,
+                "sequence": 2,
+                "reason": "same_device_reconnect",
+                "fromJourneyId": result["journeyId"],
+                "fromConnectionId": SOAK_CONNECTION_2,
+                "toJourneyId": result["journeyId"],
+                "toConnectionId": "candidate-soak-websocket-3",
+                "peerIdentityHash": PEER_HASH,
+            }]
+        elif failure == "drift_before" and sequence == 1:
+            result["connectionId"] = SOAK_CONNECTION_2
+            _refresh_execution_contract(result)
+        elif failure == "drift_after" and name == "lesson":
+            result["connectionId"] = SOAK_CONNECTION_1
+            _refresh_execution_contract(result)
+        elif failure == "peer_change" and name == "lesson":
+            result["peerIdentityHash"] = f"sha256:{'e' * 64}"
+            _refresh_execution_contract(result)
+
+    report = _run(journeys=_journeys(mutation=corrupt))
+    codes = {item["code"] for item in report["failures"]}
+
+    assert {
+        "SERVER_CONNECTION_TRANSITION_INVALID",
+        "SERVER_CONNECTION_DRIFT",
+        "EXECUTION_SERVER_ANCHOR_MISMATCH",
+    } & codes
+
+
+def test_candidate_soak_rejects_cleanup_on_pre_reconnect_connection():
+    journeys = _journeys()
+
+    async def stale_cleanup(args, **kwargs):
+        evidence = await _journeys()["cleanup"](args, **kwargs)
+        evidence["serverAnchor"]["connectionId"] = SOAK_CONNECTION_1
+        return evidence
+
+    journeys["cleanup"] = stale_cleanup
+    report = _run(journeys=journeys)
+
+    assert report["cleanupVerdict"]["status"] == "FAIL"
+    assert "CLEANUP_FAILED" in {item["code"] for item in report["failures"]}
+
+
 def test_candidate_soak_rejects_minimal_fabricated_task5_projection():
     def minimize(result, _sequence, name, _index, _label):
         if name == "bargein":
@@ -1030,7 +1164,7 @@ def test_replay_does_not_credit_inter_window_gaps_toward_duration():
             start=window_start.isoformat(),
             end=(window_start + timedelta(seconds=45)).isoformat(),
         )
-        _refresh_execution_contract(execution)
+    _refresh_execution_sequence(manifest["executions"])
     manifest["durationSec"] = 1485
     manifest["cleanup"] = _cleanup_evidence(
         {
@@ -1148,6 +1282,7 @@ def _full_span_manifest(*, padding=None, samples=35):
                 )
                 _refresh_execution_contract(item)
                 executions.append(item)
+        _refresh_execution_sequence(executions)
         return {
             "durationSec": 1800,
             "executions": executions,

@@ -209,6 +209,138 @@ class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ack["evidenceScope"]["failureCode"], "LIVE_SCOPE_UNAVAILABLE")
         self.assertIsNone(conn.google_live_evidence_scope)
 
+    async def test_google_live_hello_emits_trusted_same_peer_connection_transition(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.session_id = "server-connection-2"
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(return_value="live-31")
+        )
+        peer_hash = helloHandle._evidence_peer_identity_hash(conn)
+        conn.google_live_previous_server_connection = {
+            "connectionId": "server-connection-1",
+            "peerIdentityHash": peer_hash,
+            "evidenceScope": {
+                "journeyId": "lesson-journey-30",
+                "connectionId": "server-connection-1",
+                "peerIdentityHash": peer_hash,
+            },
+        }
+
+        await handleHelloMessage(conn, {"evidence_journey_id": "reconnect-journey-31"})
+
+        ack = json.loads(conn.websocket.sent[0])
+        transition = ack["connectionTransition"]
+        self.assertEqual(transition["fromJourneyId"], "lesson-journey-30")
+        self.assertEqual(transition["fromConnectionId"], "server-connection-1")
+        self.assertEqual(transition["toJourneyId"], "reconnect-journey-31")
+        self.assertEqual(transition["toConnectionId"], "server-connection-2")
+        self.assertEqual(transition["peerIdentityHash"], peer_hash)
+        self.assertTrue(transition["serverIssued"])
+        logs = " ".join(conn.logger.infos)
+        self.assertIn("evidence_server_connection_transition", logs)
+        self.assertNotIn(conn.device_id, logs)
+        self.assertNotIn(conn.client_id, logs)
+
+    async def test_google_live_hello_fails_closed_for_untrusted_previous_connection(self):
+        cases = {
+            "missing_scope": {
+                "connectionId": "server-connection-1",
+                "peerIdentityHash": "unused",
+                "evidenceScope": None,
+            },
+            "wrong_peer": {
+                "connectionId": "server-connection-1",
+                "peerIdentityHash": f"sha256:{'f' * 64}",
+                "evidenceScope": {
+                    "journeyId": "lesson-journey-30",
+                    "connectionId": "server-connection-1",
+                },
+            },
+            "same_connection": {
+                "connectionId": "server-connection-2",
+                "peerIdentityHash": None,
+                "evidenceScope": {
+                    "journeyId": "lesson-journey-30",
+                    "connectionId": "server-connection-2",
+                },
+            },
+            "missing_previous_journey": {
+                "connectionId": "server-connection-1",
+                "peerIdentityHash": None,
+                "evidenceScope": {
+                    "connectionId": "server-connection-1",
+                },
+            },
+            "scope_peer_mismatch": {
+                "connectionId": "server-connection-1",
+                "peerIdentityHash": None,
+                "evidenceScope": {
+                    "journeyId": "lesson-journey-30",
+                    "connectionId": "server-connection-1",
+                    "peerIdentityHash": f"sha256:{'e' * 64}",
+                },
+            },
+        }
+        for name, previous in cases.items():
+            with self.subTest(name=name):
+                conn = _Conn()
+                conn.config["voice_mode"] = {"type": "google_live"}
+                conn.session_id = "server-connection-2"
+                conn.voice_provider = SimpleNamespace(
+                    prepare_evidence_scope=AsyncMock(return_value="live-31")
+                )
+                if previous["peerIdentityHash"] is None:
+                    previous["peerIdentityHash"] = (
+                        helloHandle._evidence_peer_identity_hash(conn)
+                    )
+                conn.google_live_previous_server_connection = previous
+
+                await handleHelloMessage(
+                    conn, {"evidence_journey_id": "reconnect-journey-31"}
+                )
+
+                ack = json.loads(conn.websocket.sent[0])
+                self.assertNotIn("connectionTransition", ack)
+                self.assertFalse(
+                    any(
+                        "evidence_server_connection_transition" in message
+                        for message in conn.logger.infos
+                    )
+                )
+
+    async def test_google_live_hello_emits_a_server_transition_only_once(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.session_id = "server-connection-2"
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(side_effect=["live-31", "live-31"])
+        )
+        peer_hash = helloHandle._evidence_peer_identity_hash(conn)
+        conn.google_live_previous_server_connection = {
+            "connectionId": "server-connection-1",
+            "peerIdentityHash": peer_hash,
+            "evidenceScope": {
+                "journeyId": "lesson-journey-30",
+                "connectionId": "server-connection-1",
+                "peerIdentityHash": peer_hash,
+            },
+        }
+
+        await handleHelloMessage(conn, {"evidence_journey_id": "reconnect-journey-31"})
+        await handleHelloMessage(conn, {"evidence_journey_id": "reconnect-journey-31"})
+
+        acks = [json.loads(payload) for payload in conn.websocket.sent]
+        self.assertIn("connectionTransition", acks[0])
+        self.assertNotIn("connectionTransition", acks[1])
+        self.assertEqual(
+            sum(
+                "evidence_server_connection_transition" in message
+                for message in conn.logger.infos
+            ),
+            1,
+        )
+
     async def test_google_live_hello_rejects_unsafe_evidence_journey_without_logging_value(self):
         conn = _Conn()
         conn.config["voice_mode"] = {"type": "google_live"}

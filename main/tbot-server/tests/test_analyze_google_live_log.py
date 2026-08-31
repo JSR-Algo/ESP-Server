@@ -38,6 +38,34 @@ RECONNECT_SCOPE = {
     "liveConnectionId": "l1",
     "initialLiveConnectionId": "l1",
 }
+SERVER_RECONNECT_SCOPE = {
+    **EVIDENCE_SCOPE,
+    "journeyId": "reconnect-journey-31",
+    "connectionId": "candidate-soak-websocket-2",
+}
+
+
+def _server_connection_transition(**overrides):
+    values = {
+        "from_journey_id": "lesson-journey-30",
+        "from_connection_id": "candidate-soak-websocket-1",
+        "to_journey_id": SERVER_RECONNECT_SCOPE["journeyId"],
+        "to_connection_id": SERVER_RECONNECT_SCOPE["connectionId"],
+        "peer_identity_hash": SERVER_RECONNECT_SCOPE["peerIdentityHash"],
+        "sequence": 1,
+        "reason": "same_device_reconnect",
+    }
+    values.update(overrides)
+    return (
+        "2026-08-31 10:00:01 Google Live "
+        "evidence_server_connection_transition "
+        f"from_journey_id={values['from_journey_id']} "
+        f"from_connection_id={values['from_connection_id']} "
+        f"to_journey_id={values['to_journey_id']} "
+        f"to_connection_id={values['to_connection_id']} "
+        f"peer_identity_hash={values['peer_identity_hash']} "
+        f"sequence={values['sequence']} reason={values['reason']}"
+    )
 
 
 def _window_lines(
@@ -243,6 +271,142 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         tmp, path = _write_log(lines)
         self.addCleanup(tmp.cleanup)
         return analyze_reliability_window(path)
+
+    def test_server_connection_transition_is_normalized_from_anchored_log_marker(self):
+        marker = _server_connection_transition()
+        scoped, valid = analyze_google_live_log._scoped_marker_validation(marker)
+        self.assertTrue(scoped)
+        self.assertTrue(valid)
+        verdict = self._analyze(
+            _window_lines(
+                marker,
+                evidence_scope=SERVER_RECONNECT_SCOPE,
+            )
+        )
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+        self.assertEqual(
+            verdict["serverConnectionTransitions"],
+            [
+                {
+                    "status": "PASS",
+                    "source": "server_log",
+                    "serverIssued": True,
+                    "sequence": 1,
+                    "reason": "same_device_reconnect",
+                    "peerIdentityHash": SERVER_RECONNECT_SCOPE["peerIdentityHash"],
+                    "fromJourneyId": "lesson-journey-30",
+                    "fromConnectionId": "candidate-soak-websocket-1",
+                    "toJourneyId": SERVER_RECONNECT_SCOPE["journeyId"],
+                    "toConnectionId": SERVER_RECONNECT_SCOPE["connectionId"],
+                }
+            ],
+        )
+
+    def test_window_without_server_connection_transition_reports_empty_ledger(self):
+        verdict = self._analyze(
+            _window_lines(evidence_scope=SERVER_RECONNECT_SCOPE)
+        )
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+        self.assertEqual(verdict["serverConnectionTransitions"], [])
+
+    def test_server_connection_transition_rejects_scope_and_reason_tampering(self):
+        cases = {
+            "wrong_peer": {"peer_identity_hash": f"sha256:{'e' * 64}"},
+            "wrong_to_connection": {"to_connection_id": "unexpected-connection"},
+            "wrong_to_journey": {"to_journey_id": "unexpected-journey"},
+            "same_connection": {
+                "from_connection_id": SERVER_RECONNECT_SCOPE["connectionId"]
+            },
+            "wrong_reason": {"reason": "network_reconnect"},
+        }
+        for name, overrides in cases.items():
+            with self.subTest(name=name):
+                verdict = self._analyze(
+                    _window_lines(
+                        _server_connection_transition(**overrides),
+                        evidence_scope=SERVER_RECONNECT_SCOPE,
+                    )
+                )
+
+                self.assertEqual(verdict["status"], "FAIL", verdict)
+                self.assertIn(
+                    "SERVER_CONNECTION_TRANSITION_INVALID",
+                    [item["code"] for item in verdict["failures"]],
+                )
+                self.assertEqual(verdict["serverConnectionTransitions"], [])
+
+    def test_server_connection_transition_rejects_duplicate_or_reordered_sequence(self):
+        cases = {
+            "duplicate": [
+                _server_connection_transition(),
+                _server_connection_transition(),
+            ],
+            "reordered": [_server_connection_transition(sequence=2)],
+        }
+        for name, markers in cases.items():
+            with self.subTest(name=name):
+                verdict = self._analyze(
+                    _window_lines(
+                        *markers,
+                        evidence_scope=SERVER_RECONNECT_SCOPE,
+                    )
+                )
+
+                self.assertEqual(verdict["status"], "FAIL", verdict)
+                self.assertIn(
+                    "SERVER_CONNECTION_TRANSITION_INVALID",
+                    [item["code"] for item in verdict["failures"]],
+                )
+
+    def test_server_connection_transition_rejects_malformed_or_regressed_timestamp(self):
+        malformed = _server_connection_transition().replace(
+            "2026-08-31 10:00:01", "not-a-timestamp"
+        )
+        regressed = _server_connection_transition().replace(
+            "2026-08-31 10:00:01", "2026-08-31 10:00:00"
+        )
+        cases = {
+            "malformed": [malformed],
+            "regressed": [
+                "2026-08-31 10:00:02 Google Live receive loop started",
+                regressed,
+            ],
+        }
+        for name, markers in cases.items():
+            with self.subTest(name=name):
+                verdict = self._analyze(
+                    _window_lines(
+                        *markers,
+                        evidence_scope=SERVER_RECONNECT_SCOPE,
+                    )
+                )
+
+                self.assertEqual(verdict["status"], "FAIL", verdict)
+                expected = (
+                    "MALFORMED_RELIABILITY_LOG_LINE"
+                    if name == "malformed"
+                    else "LOG_TIMESTAMP_REGRESSION"
+                )
+                self.assertIn(expected, [item["code"] for item in verdict["failures"]])
+                self.assertEqual(verdict["serverConnectionTransitions"], [])
+
+    def test_server_connection_transition_outside_window_is_not_trusted(self):
+        marker = _server_connection_transition()
+        verdict = self._analyze(
+            [
+                marker,
+                *_window_lines(evidence_scope=SERVER_RECONNECT_SCOPE),
+            ]
+        )
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn(
+            "OUT_OF_WINDOW_RELIABILITY_MARKER",
+            [item["code"] for item in verdict["failures"]],
+        )
+        self.assertEqual(verdict["serverConnectionTransitions"], [])
 
     def test_balanced_window_passes_and_proves_correlated_bargein_lifecycle(self):
         lines = _window_lines(

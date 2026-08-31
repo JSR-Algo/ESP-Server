@@ -336,6 +336,7 @@ class WebSocketServer:
         provider teardown and forwarder drain follow) and is scheduled behind
         that guard rather than in front of it.
         """
+        from core.handle.helloHandle import _evidence_peer_identity_hash
         from core.lesson.liveness_lease import Disposition, emit_disposition
         from core.lesson.runtime_counters import CONNECTION_SUPERSEDED, increment
 
@@ -349,6 +350,11 @@ class WebSocketServer:
 
         try:
             superseded.superseded_by = getattr(winner, "session_id", None) or True
+            winner.google_live_previous_server_connection = {
+                "connectionId": str(getattr(superseded, "session_id", "") or ""),
+                "peerIdentityHash": _evidence_peer_identity_hash(superseded),
+                "evidenceScope": getattr(superseded, "google_live_evidence_scope", None),
+            }
         except Exception:  # pragma: no cover - exotic handler object
             pass
 

@@ -17,8 +17,8 @@ import re
 import statistics
 import sys
 import tempfile
-from collections.abc import Mapping
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -169,6 +169,15 @@ P_RELIABILITY_WINDOW_END = re.compile(
     r"Google Live reliability_window_end window_id=(?P<window_id>[A-Za-z0-9._:-]+)"
     r"(?: server_end_utc=(?P<server_end_utc>\S+))?$"
 )
+P_SERVER_CONNECTION_TRANSITION = re.compile(
+    r"Google Live evidence_server_connection_transition "
+    r"from_journey_id=(?P<from_journey_id>[A-Za-z0-9._:-]+) "
+    r"from_connection_id=(?P<from_connection_id>[A-Za-z0-9._:-]+) "
+    r"to_journey_id=(?P<to_journey_id>[A-Za-z0-9._:-]+) "
+    r"to_connection_id=(?P<to_connection_id>[A-Za-z0-9._:-]+) "
+    r"peer_identity_hash=(?P<peer_identity_hash>sha256:[0-9a-f]{64}) "
+    r"sequence=(?P<sequence>\d+) reason=(?P<reason>[A-Za-z0-9._:-]+)$"
+)
 P_RESPONSE_AUDIO_START = re.compile(
     r"Google Live model_audio_start_hold_input response_id=(?P<response_id>\d+)"
 )
@@ -283,6 +292,7 @@ P_EVIDENCE_HANDOFF_TERMINAL = re.compile(
     r"holder=(?P<holder>\d+) outcome=(?P<outcome>\S+)"
 )
 _SCOPED_EVIDENCE_PATTERNS = (
+    P_SERVER_CONNECTION_TRANSITION,
     P_EVIDENCE_RESPONSE_START,
     P_EVIDENCE_RESPONSE_END,
     P_EVIDENCE_FORWARDED,
@@ -355,6 +365,7 @@ P_CLEAN_CONNECTION_CLOSE = re.compile(
 _RELIABILITY_MARKERS = (
     P_RELIABILITY_WINDOW_START,
     P_RELIABILITY_WINDOW_END,
+    P_SERVER_CONNECTION_TRANSITION,
     P_RECV_START,
     P_RECV_STOP,
     P_RESPONSE_AUDIO_START,
@@ -1425,6 +1436,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     scoped_last_transition_attempt = 0
     scoped_last_started_attempt = 0
     scoped_active_reconnect_key: tuple[str, str, int] | None = None
+    server_connection_transitions: list[dict[str, Any]] = []
 
     def parse_scoped_uint(text: str | None, max_value: int) -> int | None:
         if text is None or len(text) > 10:
@@ -1667,7 +1679,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         )
                     )
                 continue
-            if previous_ts is not None and ts < previous_ts:
+            timestamp_regressed = previous_ts is not None and ts < previous_ts
+            if timestamp_regressed:
                 failures.append(
                     _failure(
                         "LOG_TIMESTAMP_REGRESSION",
@@ -1676,6 +1689,56 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     )
                 )
             previous_ts = ts
+
+            transition_match = P_SERVER_CONNECTION_TRANSITION.search(line)
+            if transition_match and start_anchor is not None:
+                sequence = parse_scoped_uint(transition_match.group("sequence"), 1000)
+                scope = start_anchor.get("evidenceScope") or {}
+                valid_transition = (
+                    sequence is not None
+                    and sequence == len(server_connection_transitions) + 1
+                    and transition_match.group("reason") == "same_device_reconnect"
+                    and transition_match.group("to_journey_id")
+                    == start_anchor.get("journeyId")
+                    and transition_match.group("to_connection_id")
+                    == scope.get("connectionId")
+                    and transition_match.group("peer_identity_hash")
+                    == scope.get("peerIdentityHash")
+                    and transition_match.group("from_connection_id")
+                    != transition_match.group("to_connection_id")
+                )
+                if not valid_transition:
+                    failures.append(
+                        _failure(
+                            "SERVER_CONNECTION_TRANSITION_INVALID",
+                            line_number,
+                            "server reconnect marker does not match anchored scope",
+                        )
+                    )
+                elif not timestamp_regressed:
+                    server_connection_transitions.append(
+                        {
+                            "status": "PASS",
+                            "source": "server_log",
+                            "serverIssued": True,
+                            "sequence": sequence,
+                            "reason": "same_device_reconnect",
+                            "peerIdentityHash": transition_match.group(
+                                "peer_identity_hash"
+                            ),
+                            "fromJourneyId": transition_match.group(
+                                "from_journey_id"
+                            ),
+                            "fromConnectionId": transition_match.group(
+                                "from_connection_id"
+                            ),
+                            "toJourneyId": transition_match.group("to_journey_id"),
+                            "toConnectionId": transition_match.group(
+                                "to_connection_id"
+                            ),
+                        }
+                    )
+                continue
 
             anchor_scope = start_anchor.get("evidenceScope") if start_anchor else None
             exact_scope_active = isinstance(anchor_scope, Mapping)
@@ -3296,6 +3359,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
         "initialLiveConnectionId": scoped_initial_live_connection_id,
         "finalLiveConnectionId": scoped_current_live_connection_id,
         "liveConnectionTransitions": scoped_live_connection_transitions,
+        "serverConnectionTransitions": server_connection_transitions,
         "logWindow": log_window,
         "receiveLoopBalance": receive_loops_active,
         "maxReceiveLoopsActive": max_receive_loops_active,
@@ -3583,6 +3647,31 @@ def _validate_log_reliability_contract(
     for contract_field, expected in required_values.items():
         if contract_field not in report or report.get(contract_field) != expected:
             mismatch(contract_field)
+
+    server_transitions = report.get("serverConnectionTransitions", [])
+    if not isinstance(server_transitions, list) or len(server_transitions) > 1:
+        mismatch("serverConnectionTransitions")
+    elif server_transitions:
+        transition = server_transitions[0]
+        scope = expected_evidence_scope if isinstance(expected_evidence_scope, Mapping) else {}
+        valid_transition = (
+            isinstance(transition, Mapping)
+            and transition.get("status") == "PASS"
+            and transition.get("source") == "server_log"
+            and transition.get("serverIssued") is True
+            and transition.get("sequence") == 1
+            and transition.get("reason") == "same_device_reconnect"
+            and transition.get("toJourneyId") == scope.get("journeyId")
+            and transition.get("toConnectionId") == scope.get("connectionId")
+            and transition.get("peerIdentityHash") == scope.get("peerIdentityHash")
+            and isinstance(transition.get("fromJourneyId"), str)
+            and bool(transition.get("fromJourneyId"))
+            and isinstance(transition.get("fromConnectionId"), str)
+            and bool(transition.get("fromConnectionId"))
+            and transition.get("fromConnectionId") != transition.get("toConnectionId")
+        )
+        if not valid_transition:
+            mismatch("serverConnectionTransitions")
 
     if not _exact_zero_int(report.get("receiveLoopBalance")):
         mismatch("receiveLoopBalance")

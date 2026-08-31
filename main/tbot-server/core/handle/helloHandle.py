@@ -1,22 +1,22 @@
-import time
-import json
-import uuid
-import random
 import asyncio
 import hashlib
+import json
+import random
 import re
+import time
+import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from core.connection import ConnectionHandler
-from core.utils.dialogue import Message
-from core.utils.util import audio_to_data
-from core.providers.tts.dto.dto import SentenceType
-from core.utils.wakeup_word import WakeupWordsConfig
-from core.handle.sendAudioHandle import sendAudioMessage, send_tts_message
-from core.utils.util import remove_punctuation_and_length, opus_datas_to_wav_bytes
+
+from core.handle.sendAudioHandle import send_tts_message, sendAudioMessage
 from core.providers.tools.device_mcp import MCPClient, send_mcp_initialize_message
+from core.providers.tts.dto.dto import SentenceType
+from core.utils.dialogue import Message
+from core.utils.util import audio_to_data, opus_datas_to_wav_bytes, remove_punctuation_and_length
+from core.utils.wakeup_word import WakeupWordsConfig
 
 TAG = __name__
 SAFE_EVIDENCE_JOURNEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
@@ -29,7 +29,7 @@ def _utc_now_iso():
 def _evidence_peer_identity_hash(conn):
     device_id = str(getattr(conn, "device_id", "") or "")
     client_id = str(getattr(conn, "client_id", "") or "")
-    digest = hashlib.sha256(f"{device_id}\0{client_id}".encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(f"{device_id}\0{client_id}".encode()).hexdigest()
     return f"sha256:{digest}"
 
 WAKEUP_CONFIG = {
@@ -147,6 +147,50 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
             }
             conn.google_live_evidence_scope = scope
             hello_ack["evidenceScope"] = scope
+            previous = getattr(conn, "google_live_previous_server_connection", None)
+            previous_scope = (
+                previous.get("evidenceScope") if isinstance(previous, dict) else None
+            )
+            previous_journey_id = (
+                previous_scope.get("journeyId")
+                if isinstance(previous_scope, dict)
+                else None
+            )
+            if (
+                isinstance(previous_scope, dict)
+                and isinstance(previous_journey_id, str)
+                and SAFE_EVIDENCE_JOURNEY_RE.fullmatch(previous_journey_id)
+                and previous.get("peerIdentityHash") == scope["peerIdentityHash"]
+                and previous_scope.get("peerIdentityHash")
+                == scope["peerIdentityHash"]
+                and previous.get("connectionId") == previous_scope.get("connectionId")
+                and previous["connectionId"] != scope["connectionId"]
+            ):
+                transition = {
+                    "schemaVersion": "google-live-reliability.v1",
+                    "status": "PASS",
+                    "source": "server_log",
+                    "serverIssued": True,
+                    "executionSequence": 1,
+                    "reason": "same_device_reconnect",
+                    "peerIdentityHash": scope["peerIdentityHash"],
+                    "fromJourneyId": previous_journey_id,
+                    "fromConnectionId": previous["connectionId"],
+                    "toJourneyId": scope["journeyId"],
+                    "toConnectionId": scope["connectionId"],
+                }
+                conn.google_live_server_connection_transition = transition
+                conn.google_live_previous_server_connection = None
+                hello_ack["connectionTransition"] = transition
+                conn.logger.bind(tag=TAG).info(
+                    "Google Live evidence_server_connection_transition "
+                    f"from_journey_id={transition['fromJourneyId']} "
+                    f"from_connection_id={transition['fromConnectionId']} "
+                    f"to_journey_id={transition['toJourneyId']} "
+                    f"to_connection_id={transition['toConnectionId']} "
+                    f"peer_identity_hash={transition['peerIdentityHash']} "
+                    "sequence=1 reason=same_device_reconnect"
+                )
         else:
             conn.google_live_evidence_journey_id = None
             hello_ack["evidenceScope"] = {

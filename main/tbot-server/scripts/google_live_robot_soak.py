@@ -1872,6 +1872,10 @@ async def _run_candidate_soak_impl(
     maximum_padding_windows = int(getattr(args, "maximum_padding_windows", 60))
     execution_anchors = []
     task5_server_anchor = None
+    current_server_connection = None
+    immutable_peer_identity_hash = None
+    previous_execution_scope = None
+    server_connection_transitions = 0
     expected_correlated_report = getattr(args, "correlated_transport_report", {})
     if isinstance(expected_correlated_report, (str, Path)):
         try:
@@ -1949,6 +1953,51 @@ async def _run_candidate_soak_impl(
                 execution_anchors.append(execution_anchor)
                 if stage_name == "bargein" and task5_server_anchor is None:
                     task5_server_anchor = execution_anchor
+                log_proof = result.get("task5LogEvidence")
+                transitions = (
+                    log_proof.get("serverConnectionTransitions")
+                    if isinstance(log_proof, Mapping)
+                    else None
+                )
+                if current_server_connection is None:
+                    current_server_connection = execution_anchor["connectionId"]
+                    immutable_peer_identity_hash = execution_anchor[
+                        "peerIdentityHash"
+                    ]
+                if execution_anchor["peerIdentityHash"] != immutable_peer_identity_hash:
+                    failures.append(
+                        {"code": "EXECUTION_SERVER_ANCHOR_MISMATCH", "stage": stage_name}
+                    )
+                if stage_name == "reconnect":
+                    expected_transition = {
+                        "status": "PASS",
+                        "source": "server_log",
+                        "serverIssued": True,
+                        "sequence": 1,
+                        "reason": "same_device_reconnect",
+                        "fromJourneyId": previous_execution_scope.get("journeyId"),
+                        "fromConnectionId": current_server_connection,
+                        "toJourneyId": result.get("journeyId"),
+                        "toConnectionId": execution_anchor["connectionId"],
+                        "peerIdentityHash": immutable_peer_identity_hash,
+                    }
+                    if (
+                        not isinstance(transitions, list)
+                        or transitions != [expected_transition]
+                        or server_connection_transitions != 0
+                    ):
+                        failures.append({"code": "SERVER_CONNECTION_TRANSITION_INVALID"})
+                    else:
+                        server_connection_transitions += 1
+                        current_server_connection = expected_transition["toConnectionId"]
+                elif (
+                    transitions != []
+                    or execution_anchor["connectionId"] != current_server_connection
+                ):
+                    failures.append(
+                        {"code": "SERVER_CONNECTION_DRIFT", "stage": stage_name}
+                    )
+                previous_execution_scope = result.get("evidenceScope")
             journey_id = result.get("journeyId")
             window_id = result.get("windowId")
             if not isinstance(journey_id, str) or not journey_id or journey_id in seen_journeys:
@@ -2019,7 +2068,11 @@ async def _run_candidate_soak_impl(
     if (
         task5_server_anchor is None
         or len(execution_anchors) != len(executions)
-        or any(anchor != task5_server_anchor for anchor in execution_anchors)
+        or task5_server_anchor.get("peerIdentityHash")
+        != immutable_peer_identity_hash
+        or task5_server_anchor.get("connectionId")
+        != execution_anchors[0].get("connectionId")
+        or server_connection_transitions != 1
     ):
         failures.append({"code": "EXECUTION_SERVER_ANCHOR_MISMATCH"})
 
@@ -2116,7 +2169,11 @@ async def _run_candidate_soak_impl(
         and cleanup_evidence.get("status") == "PASS"
         and cleanup_evidence.get("candidateIdentity") == identity
         and cleanup_evidence.get("finalScope") == final_scope
-        and cleanup_evidence.get("serverAnchor") == task5_server_anchor
+        and cleanup_evidence.get("serverAnchor")
+        == {
+            "connectionId": current_server_connection,
+            "peerIdentityHash": immutable_peer_identity_hash,
+        }
         and cleanup_evidence.get("websocketClosed") is True
         and cleanup_evidence.get("providerFinalizeStatus") == "PASS"
         and cleanup_evidence.get("providerCloseStatus") == "PASS"
@@ -2401,6 +2458,9 @@ async def _run_candidate_soak_impl(
                 "initialLiveConnectionId": item.get("initialLiveConnectionId"),
                 "finalLiveConnectionId": item.get("finalLiveConnectionId"),
                 "liveConnectionTransitions": item.get("liveConnectionTransitions"),
+                "serverConnectionTransitions": (
+                    item.get("task5LogEvidence") or {}
+                ).get("serverConnectionTransitions"),
                 "logWindow": item.get("logWindow"),
                 "status": item.get("status"),
             }
