@@ -147,6 +147,44 @@ def test_canonical_gate_preserves_empty_and_reserved_optional_production_urls(tm
         assert json.loads(result.stdout) == {"present": True, "value": value}
 
 
+def test_canonical_gate_forwards_only_canonical_operator_attestation(tmp_path: Path) -> None:
+    fixture = _shell_fixture(tmp_path)
+    probe = fixture / "main/tbot-server/scripts/course_mode_release_gate.py"
+    probe.write_text(
+        "import json, os\n"
+        "keys = (\n"
+        "    'COURSE_MODE_OPERATOR_ATTESTATION',\n"
+        "    'OPERATOR_ATTESTATION',\n"
+        "    'COURSE_OPERATOR_CONFIRMATION',\n"
+        "    'TBOT_OPERATOR_ATTESTATION',\n"
+        ")\n"
+        "print(json.dumps({key: os.environ[key] for key in keys if key in os.environ}))\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=fixture, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "operator attestation probe"], cwd=fixture,
+        check=True, capture_output=True,
+    )
+    source = {
+        **os.environ,
+        "COURSE_MODE_OPERATOR_ATTESTATION": "operator-approved-candidate-12",
+        "OPERATOR_ATTESTATION": "legacy-alias-must-not-forward",
+        "COURSE_OPERATOR_CONFIRMATION": "legacy-confirmation-must-not-forward",
+        "TBOT_OPERATOR_ATTESTATION": "tbot-alias-must-not-forward",
+    }
+
+    result = subprocess.run(
+        [str(fixture / "scripts/course_robot_e2e_gates.sh"), "--candidate", "unused.json"],
+        cwd=fixture, env=source, capture_output=True, text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "COURSE_MODE_OPERATOR_ATTESTATION": source["COURSE_MODE_OPERATOR_ATTESTATION"],
+    }
+
+
 def _shell_fixture(tmp_path: Path) -> Path:
     fixture = tmp_path / "repository"
     for relative in (
