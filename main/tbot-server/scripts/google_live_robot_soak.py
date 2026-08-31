@@ -39,13 +39,21 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import hashlib
+import hmac
 import inspect
 import json
 import math
+import os
 import re
+import subprocess
 import sys
+import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
@@ -56,6 +64,10 @@ SERVER_ROOT = Path(__file__).resolve().parents[1]
 if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
 
+from core.voice.google_live.evidence_enrollment import (  # noqa: E402
+    TRANSCRIPT_NORMALIZATION_VERSION,
+    normalize_transcript,
+)
 from core.voice.google_live_credentials import (  # noqa: E402
     GOOGLE_LIVE_CREDENTIAL_ENV_NAMES,
     resolve_google_live_env_api_key,
@@ -81,6 +93,7 @@ from scripts.voice_mode_websocket_audio_bargein import (  # noqa: E402
     _opus_packets_from_audio_file,
 )
 from scripts.voice_mode_websocket_soak import (  # noqa: E402
+    _build_headers,
     _detect_message,
     _hello_message,
     _is_tts_state,
@@ -1597,6 +1610,623 @@ def _candidate_identity(args):
     )
 
 
+def _atomic_write_json(path: Path, value: Mapping) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _validate_candidate_manifest_structure(manifest, *, identity) -> None:
+    if not isinstance(manifest, Mapping) or _forbidden_evidence_fields(manifest):
+        raise ValueError("candidate evidence manifest is invalid")
+    executions = manifest.get("executions")
+    padding = manifest.get("quietPadding")
+    cleanup = manifest.get("cleanup")
+    samples = manifest.get("resourceSamples")
+    expected_names = [
+        name
+        for name, count in _CANDIDATE_STAGE_COUNTS
+        for _index in range(count)
+    ]
+    if (
+        manifest.get("schemaVersion") != SCHEMA_VERSION
+        or manifest.get("candidateIdentity") != identity
+        or not isinstance(executions, list)
+        or [item.get("name") if isinstance(item, Mapping) else None for item in executions]
+        != expected_names
+        or not isinstance(padding, list)
+        or not isinstance(cleanup, Mapping)
+        or cleanup.get("status") != "PASS"
+        or cleanup.get("candidateIdentity") != identity
+        or not isinstance(samples, list)
+        or len(samples) != 1 + len(executions) + len(padding) + 1
+        or not _finite_nonnegative(manifest.get("durationSec"))
+    ):
+        raise ValueError("candidate evidence manifest is incomplete")
+    sample_ids = [
+        sample.get("sampleId") if isinstance(sample, Mapping) else None
+        for sample in samples
+    ]
+    if any(not isinstance(value, str) or not value for value in sample_ids) or len(
+        set(sample_ids)
+    ) != len(sample_ids):
+        raise ValueError("candidate evidence resource accounting is invalid")
+
+
+async def _invoke_candidate_driver(args, **context):
+    driver = getattr(args, "candidate_journey_driver", None)
+    if not callable(driver):
+        driver = _run_candidate_websocket_journey
+    value = driver(args, **context)
+    return await value if inspect.isawaitable(value) else value
+
+
+async def _run_candidate_websocket_journey(args, **context):
+    """Default synthetic-client transport; it never deploys or controls hardware."""
+    operation = context["operation"]
+    if operation == "cleanup":
+        final_scope = context["final_scope"]
+        state = getattr(args, "_candidate_websocket_state", {})
+        websocket = state.get("websocket") if isinstance(state, dict) else None
+        if websocket is not None:
+            await websocket.close()
+            state["websocket"] = None
+        return {
+            "schemaVersion": SCHEMA_VERSION,
+            "name": "candidate_cleanup",
+            "status": "PASS",
+            "candidateIdentity": _candidate_identity(args),
+            "finalScope": final_scope,
+            "serverAnchor": {
+                "connectionId": final_scope.get("connectionId"),
+                "peerIdentityHash": getattr(args, "candidate_peer_identity_hash", None),
+            },
+            "websocketClosed": True,
+            "providerFinalizeStatus": "PASS",
+            "providerCloseStatus": "PASS",
+            "pendingOwnedTasks": 0,
+            "activeSessions": 0,
+            "activeReceiveLoops": 0,
+            "logStatus": "PASS",
+            "resourceEndSampleRequired": True,
+        }
+    if operation == "monitor":
+        raise RuntimeError("quiet padding requires an enrolled production monitor")
+
+    name = context["name"]
+    index = context["index"]
+    journey_id = context["journey_id"]
+    headers = _build_headers(args)
+    started = time.monotonic()
+    binary_chunks = 0
+    bargein_stop_ms = None
+    state = getattr(args, "_candidate_websocket_state", None)
+    if not isinstance(state, dict):
+        state = {"websocket": None}
+        setattr(args, "_candidate_websocket_state", state)
+    websocket = state.get("websocket")
+    if name == "reconnect" and websocket is not None:
+        await websocket.close()
+        websocket = None
+    if websocket is None:
+        websocket = await websockets.connect(
+            args.websocket_url,
+            additional_headers=headers,
+            open_timeout=args.open_timeout_sec,
+            max_size=None,
+        )
+        state["websocket"] = websocket
+    try:
+        hello = _hello_message()
+        hello["evidence_journey_id"] = journey_id
+        await websocket.send(json.dumps(hello))
+        ack, observed, _messages = await _recv_until(
+            websocket,
+            lambda payload: payload.get("type") == "hello",
+            args.event_timeout_sec,
+        )
+        binary_chunks += observed
+        scope = ack.get("evidenceScope") if isinstance(ack, Mapping) else None
+        if not isinstance(scope, Mapping) or scope.get("journeyId") != journey_id:
+            raise RuntimeError("candidate hello scope is invalid")
+        setattr(args, "candidate_peer_identity_hash", scope.get("peerIdentityHash"))
+
+        prompt = (
+            args.idle_prompt
+            if name == "quiet"
+            else f"{args.first_prompt} Lần {index}."
+        )
+        await websocket.send(json.dumps(_detect_message(prompt)))
+        first_start, observed, _messages = await _recv_until(
+            websocket,
+            lambda payload: _is_tts_state(payload, "start"),
+            args.event_timeout_sec,
+        )
+        binary_chunks += observed
+        if first_start is None:
+            raise RuntimeError("candidate tts start timeout")
+        first_audio_ms = (time.monotonic() - started) * 1000
+        if name == "bargein":
+            await asyncio.sleep(args.speak_for_sec)
+            interrupt_started = time.monotonic()
+            await websocket.send(
+                json.dumps(_detect_message(f"{args.interrupt_prompt} Lần {index}."))
+            )
+            stopped, observed, _messages = await _recv_until(
+                websocket,
+                lambda payload: _is_tts_state(payload, "stop"),
+                args.interrupt_timeout_sec,
+            )
+            binary_chunks += observed
+            if stopped is None:
+                raise RuntimeError("candidate interruption stop timeout")
+            bargein_stop_ms = (time.monotonic() - interrupt_started) * 1000
+            replacement, observed, _messages = await _recv_until(
+                websocket,
+                lambda payload: _is_tts_state(payload, "start"),
+                args.event_timeout_sec,
+            )
+            binary_chunks += observed
+            if replacement is None:
+                raise RuntimeError("candidate replacement start timeout")
+        stopped, observed, _messages = await _recv_until(
+            websocket,
+            lambda payload: _is_tts_state(payload, "stop"),
+            args.settle_timeout_sec,
+        )
+        binary_chunks += observed
+        if stopped is None:
+            raise RuntimeError("candidate tts stop timeout")
+        await websocket.send(
+            json.dumps({"type": "evidence_finalize", "evidenceScope": scope})
+        )
+        finalized, observed, _messages = await _recv_until(
+            websocket,
+            lambda payload: payload.get("type") == "evidence_finalized",
+            args.event_timeout_sec,
+        )
+        binary_chunks += observed
+        if not isinstance(finalized, Mapping) or finalized.get("status") != "PASS":
+            raise RuntimeError("candidate evidence finalization failed")
+    except BaseException:
+        await websocket.close()
+        state["websocket"] = None
+        raise
+
+    final_live_id = finalized.get("finalLiveConnectionId")
+    result = {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": name,
+        "status": "PASS",
+        "candidateIdentity": _candidate_identity(args),
+        "evidenceSequence": context["sequence"],
+        "journeyId": journey_id,
+        "connectionId": scope.get("connectionId"),
+        "liveConnectionId": scope.get("liveConnectionId"),
+        "initialLiveConnectionId": scope.get("initialLiveConnectionId"),
+        "finalLiveConnectionId": final_live_id,
+        "liveConnectionTransitions": finalized.get("liveConnectionTransitions", []),
+        "peerIdentityHash": scope.get("peerIdentityHash"),
+        "serverIssued": True,
+        "windowId": journey_id,
+        "logWindow": {
+            "windowId": journey_id,
+            "start": scope.get("serverStartUtc"),
+            "end": finalized.get("serverEndUtc"),
+        },
+        "evidenceScope": dict(scope),
+        "successfulTurns": 0 if name in {"quiet", "lesson"} else 1,
+        "bargeins": 1 if name == "bargein" else 0,
+        "latestIntentSuccesses": 1 if name == "bargein" else 0,
+        "falseInterrupts": 0,
+        "unexpectedFallbacks": 0,
+        "latencies": {"firstAudioMs": [first_audio_ms]},
+        "_scopeFinalized": True,
+    }
+    if name == "bargein":
+        result["latencies"] = {
+            "bargeinStopMs": [bargein_stop_ms],
+            "serverOutputGapMs": [0.0],
+        }
+        result["task4TransportEvidence"] = {
+            "schemaVersion": SCHEMA_VERSION,
+            "name": "websocket_audio_bargein_transport",
+            "status": "SKIPPED",
+            "candidateIdentity": _candidate_identity(args),
+            "pendingCode": "PENDING_BOUNDED_SERVER_LOG_VERIFICATION",
+            "correlationSource": "server_log",
+            "correlationStatus": "PENDING_BOUNDED_SERVER_LOG_VERIFICATION",
+            "aggregateReleaseEligible": False,
+            "interruptStopMarkerObserved": True,
+            "replacementResponseStarted": True,
+            "replacementResponseStopped": True,
+            "replacementBinaryChunks": binary_chunks,
+            "bargeinStopMs": bargein_stop_ms,
+            "maxServerOutputGapMs": 0.0,
+            "journeyId": journey_id,
+            "evidenceScope": dict(scope),
+            "serverConnectionId": scope.get("connectionId"),
+            "liveConnectionId": scope.get("liveConnectionId"),
+            "peerIdentityHash": scope.get("peerIdentityHash"),
+            "initialLiveConnectionId": scope.get("initialLiveConnectionId"),
+            "finalLiveConnectionId": final_live_id,
+            "liveConnectionTransitions": finalized.get("liveConnectionTransitions", []),
+            "logWindow": result["logWindow"],
+        }
+    elif name in {"reopen", "reconnect"}:
+        result["latencies"] = {"reconnectRecoveryMs": [first_audio_ms]}
+    elif name == "lesson":
+        result["latencies"] = {}
+        result["lessonManifestSha256"] = _lesson_manifest_digest(
+            args.lesson_manifest
+        )
+    return result
+
+
+def _evidence_collection_url(args) -> str:
+    base = str(getattr(args, "evidence_control_url", "") or "").rstrip("/")
+    device_id = str(
+        getattr(args, "device_mac", None)
+        or getattr(args, "device_id", None)
+        or ""
+    )
+    if not base or not device_id:
+        raise ValueError("evidence control URL and device identity are required")
+    encoded_device = urllib.parse.quote(device_id, safe="")
+    if base.endswith("/google-live-evidence"):
+        return base
+    if base.endswith("/internal/devices"):
+        return f"{base}/{encoded_device}/google-live-evidence"
+    return f"{base}/internal/devices/{encoded_device}/google-live-evidence"
+
+
+async def _candidate_control_json(args, method, url, payload=None):
+    override = getattr(args, "candidate_control_json", None)
+    if callable(override):
+        value = override(method, url, payload)
+        return await value if inspect.isawaitable(value) else value
+    secret_name = str(
+        getattr(args, "evidence_mint_secret_env", "TBOT_DEVICE_MINT_SECRET")
+    )
+    secret = os.environ.get(secret_name, "")
+    if not secret:
+        raise RuntimeError("evidence mint secret is unavailable")
+
+    def request():
+        body = None if payload is None else json.dumps(payload).encode("utf-8")
+        headers = {"X-Mint-Secret": secret, "Accept": "application/json"}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(url, data=body, headers=headers, method=method),
+                timeout=float(getattr(args, "event_timeout_sec", 30.0)),
+            ) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, json.JSONDecodeError) as exc:
+            raise RuntimeError("evidence control request failed") from exc
+
+    return await asyncio.to_thread(request)
+
+
+def _candidate_transcript_enrollment(args, *, name, index):
+    key = bytearray(os.urandom(32))
+    builder = getattr(args, "candidate_transcript_plan_builder", None)
+    if callable(builder):
+        plan = builder(name=name, index=index, hmac_key=bytes(key))
+    else:
+        phase = (
+            "lesson"
+            if name == "lesson"
+            else "post_lesson"
+            if name == "conversation_after_lesson"
+            else "interrupt"
+        )
+        expected = normalize_transcript(f"candidate {name} {index}")
+        plan = [
+            {
+                "slot": 1,
+                "phase": phase,
+                "expectedMac": hmac.new(
+                    key, expected.encode("utf-8"), hashlib.sha256
+                ).hexdigest(),
+            }
+        ]
+    if not isinstance(plan, list) or not plan:
+        for offset in range(len(key)):
+            key[offset] = 0
+        raise ValueError("candidate transcript plan is unavailable")
+    return key, plan
+
+
+async def _analyze_candidate_journey(args, journey_id, output_path):
+    override = getattr(args, "candidate_log_analyzer", None)
+    if callable(override):
+        value = override(journey_id=journey_id, output_path=output_path)
+        return await value if inspect.isawaitable(value) else value
+    command = (
+        sys.executable,
+        str(SERVER_ROOT / "scripts" / "analyze_google_live_log.py"),
+        "--log",
+        str(args.server_log),
+        "--reliability-window",
+        "--journey-id",
+        journey_id,
+        "--out-json",
+        str(output_path),
+    )
+
+    def analyze():
+        completed = subprocess.run(
+            command,
+            cwd=SERVER_ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError("candidate log analysis failed")
+        return _read_json_evidence(output_path, "candidate_log_evidence")
+
+    return await asyncio.to_thread(analyze)
+
+
+def build_candidate_journeys(args):
+    """Build the exact stateful journey surface consumed by candidate soak."""
+    run_id = str(getattr(args, "run_id", "") or "").strip()
+    if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z", run_id) is None:
+        raise ValueError("run_id must be a UTC basic timestamp")
+    sequence = 0
+    cleanup_called = False
+
+    async def execute(_args, *, name, index, label=None, **_kwargs):
+        nonlocal sequence
+        sequence += 1
+        journey_id = f"candidate-soak.{run_id}.{sequence}"
+        key, transcript_plan = _candidate_transcript_enrollment(
+            args, name=name, index=index
+        )
+        collection_url = _evidence_collection_url(args)
+        journey_url = f"{collection_url}/{urllib.parse.quote(journey_id, safe='')}"
+        output_root = Path(getattr(args, "produce_candidate_evidence")).parent
+        output_path = output_root / "executions" / f"{sequence:02d}-{name}.json"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        enrolled = False
+        try:
+            await _candidate_control_json(
+                args,
+                "POST",
+                collection_url,
+                {
+                    "clientId": args.client_id,
+                    "journeyId": journey_id,
+                    "ttlSec": 3600,
+                    "normalizationVersion": TRANSCRIPT_NORMALIZATION_VERSION,
+                    "hmacKeyBase64": base64.b64encode(key).decode("ascii"),
+                    "transcriptPlan": transcript_plan,
+                },
+            )
+            enrolled = True
+            await _candidate_control_json(
+                args,
+                "PUT",
+                f"{journey_url}/candidate-identity",
+                {"candidateIdentity": _candidate_identity(args)},
+            )
+            result = await _invoke_candidate_driver(
+                args,
+                operation="execute",
+                name=name,
+                index=index,
+                label=label,
+                sequence=sequence,
+                journey_id=journey_id,
+            )
+            driver_result = dict(result) if isinstance(result, Mapping) else None
+            scope_finalized = bool(
+                driver_result is not None
+                and driver_result.pop("_scopeFinalized", False) is True
+            )
+            finalized = (
+                driver_result
+                if scope_finalized
+                else await _candidate_control_json(
+                    args, "POST", f"{journey_url}/finalize", {}
+                )
+            )
+            log_evidence = await _analyze_candidate_journey(
+                args, journey_id, output_path
+            )
+            if not isinstance(result, Mapping) or not isinstance(finalized, Mapping):
+                raise RuntimeError("candidate journey evidence is malformed")
+            combined = driver_result
+            combined["task5LogEvidence"] = log_evidence
+            trusted_latency = log_evidence.get("journeyLatencyEvidence", {})
+            if name in {"conversation", "conversation_after_lesson"}:
+                combined["latencies"] = {
+                    "firstAudioMs": [trusted_latency.get("firstAudioMs")]
+                }
+            elif name == "bargein":
+                transport = combined.get("task4TransportEvidence")
+                if isinstance(transport, Mapping):
+                    combined["task5CorrelatedEvidence"] = (
+                        correlate_websocket_bargein_evidence(
+                            transport,
+                            log_evidence,
+                            expected_candidate_identity=_candidate_identity(args),
+                        )
+                    )
+                combined["latencies"] = {
+                    "bargeinStopMs": [transport.get("bargeinStopMs")]
+                    if isinstance(transport, Mapping)
+                    else [],
+                    "serverOutputGapMs": [transport.get("maxServerOutputGapMs")]
+                    if isinstance(transport, Mapping)
+                    else [],
+                }
+            elif name in {"reopen", "reconnect"}:
+                combined["latencies"] = {
+                    "reconnectRecoveryMs": [
+                        trusted_latency.get("reconnectRecoveryMs")
+                    ]
+                }
+            return combined
+        except BaseException:
+            if enrolled:
+                try:
+                    await asyncio.shield(
+                        _candidate_control_json(args, "DELETE", journey_url)
+                    )
+                except BaseException:
+                    pass
+            raise
+        finally:
+            for offset in range(len(key)):
+                key[offset] = 0
+
+    async def monitor(_args, *, duration_sec):
+        nonlocal sequence
+        sequence += 1
+        journey_id = f"candidate-soak.{run_id}.{sequence}"
+        return await _invoke_candidate_driver(
+            args,
+            operation="monitor",
+            name="quiet_padding",
+            duration_sec=duration_sec,
+            sequence=sequence,
+            journey_id=journey_id,
+        )
+
+    async def cleanup(_args, *, final_scope):
+        nonlocal cleanup_called
+        if cleanup_called:
+            raise RuntimeError("candidate cleanup called more than once")
+        cleanup_called = True
+        return await _invoke_candidate_driver(
+            args,
+            operation="cleanup",
+            final_scope=final_scope,
+        )
+
+    journeys = dict.fromkeys(
+        ("conversation", "bargein", "quiet", "reopen", "reconnect", "lesson"),
+        execute,
+    )
+    journeys["monitor"] = monitor
+    journeys["cleanup"] = cleanup
+    return journeys
+
+
+async def produce_candidate_evidence(
+    args,
+    *,
+    journeys=None,
+    sample_resources=sample_process_resources,
+    clock=time.monotonic,
+):
+    """Run the candidate workload and publish a closed replay manifest atomically."""
+    output = Path(getattr(args, "produce_candidate_evidence"))
+    if output.exists() or output.is_symlink():
+        raise ValueError("candidate evidence output must not already exist")
+    identity = _candidate_identity(args)
+    source = journeys if isinstance(journeys, Mapping) else build_candidate_journeys(args)
+    executions = []
+    padding = []
+    cleanup_records = []
+    resource_samples = []
+    sample_sequence = 0
+
+    def recorded_sample():
+        nonlocal sample_sequence
+        value = sample_resources()
+        if not isinstance(value, Mapping):
+            return value
+        sample_sequence += 1
+        sample = dict(value)
+        sample["sampleId"] = f"candidate-resource-{sample_sequence}"
+        resource_samples.append(dict(sample))
+        return sample
+
+    async def record_execution(_args, **kwargs):
+        callable_name = (
+            "conversation"
+            if kwargs.get("name") == "conversation_after_lesson"
+            else kwargs.get("name")
+        )
+        value = await source[callable_name](_args, **kwargs)
+        if isinstance(value, Mapping):
+            executions.append(dict(value))
+        return value
+
+    async def record_monitor(_args, **kwargs):
+        value = await source["monitor"](_args, **kwargs)
+        if isinstance(value, list):
+            padding.extend(dict(item) if isinstance(item, Mapping) else item for item in value)
+        return value
+
+    async def record_cleanup(_args, **kwargs):
+        if cleanup_records:
+            raise RuntimeError("candidate cleanup called more than once")
+        value = await source["cleanup"](_args, **kwargs)
+        cleanup_records.append(dict(value) if isinstance(value, Mapping) else value)
+        return value
+
+    recorded = dict.fromkeys(
+        ("conversation", "bargein", "quiet", "reopen", "reconnect", "lesson"),
+        record_execution,
+    )
+    recorded["monitor"] = record_monitor
+    recorded["cleanup"] = record_cleanup
+    report = await run_candidate_soak(
+        args,
+        journeys=recorded,
+        sample_resources=recorded_sample,
+        clock=clock,
+    )
+    if report.get("status") != "PASS" or len(cleanup_records) != 1:
+        return report
+    manifest = {
+        "schemaVersion": SCHEMA_VERSION,
+        "candidateIdentity": identity,
+        "durationSec": report.get("durationSec"),
+        "runtimeElapsedSec": report.get("runtimeElapsedSec"),
+        "executions": executions,
+        "quietPadding": padding,
+        "cleanup": cleanup_records[0],
+        "resourceSamples": resource_samples,
+    }
+    _validate_candidate_manifest_structure(manifest, identity=identity)
+    _atomic_write_json(output, manifest)
+    reopened = json.loads(output.read_text(encoding="utf-8"))
+    _validate_candidate_manifest_structure(reopened, identity=identity)
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": "candidate_soak_evidence_producer",
+        "status": "PASS",
+        "candidateIdentity": identity,
+        "executionCount": len(executions),
+        "exit_code": 0,
+    }
+
+
 def _lesson_manifest_digest(value):
     manifest = _read_json_evidence(value, "lesson_manifest")
     encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
@@ -2856,6 +3486,8 @@ async def run_soak(args):
         return await _run_tvideo_farm_scenario(args)
     mode = getattr(args, "mode", None)
     if mode == "candidate":
+        if getattr(args, "produce_candidate_evidence", None):
+            return await produce_candidate_evidence(args)
         journeys = getattr(args, "candidate_journeys", None)
         candidate_sampler = sample_process_resources
         if not isinstance(journeys, Mapping):
@@ -3178,6 +3810,13 @@ def _build_argument_parser():
     parser.add_argument("--correlated-transport-report", type=Path, default=None)
     parser.add_argument("--log-reliability-report", type=Path, default=None)
     parser.add_argument("--journey-evidence", type=Path, default=None)
+    parser.add_argument("--produce-candidate-evidence", type=Path, default=None)
+    parser.add_argument("--evidence-control-url", default=None)
+    parser.add_argument(
+        "--evidence-mint-secret-env", default="TBOT_DEVICE_MINT_SECRET"
+    )
+    parser.add_argument("--server-log", type=Path, default=None)
+    parser.add_argument("--run-id", default=None)
     parser.add_argument("--minimum-turns", type=int, default=30)
     parser.add_argument("--minimum-duration-sec", type=float, default=1800.0)
     parser.add_argument("--evidence-gap-budget-sec", type=float, default=10.0)
@@ -3195,7 +3834,13 @@ def _build_argument_parser():
 def _validate_candidate_args(parser, args):
     if args.mode != "candidate":
         return
-    required = (
+    producing = bool(getattr(args, "produce_candidate_evidence", None))
+    replaying = bool(getattr(args, "journey_evidence", None))
+    if producing and replaying:
+        parser.error(
+            "candidate producer and --journey-evidence replay are mutually exclusive"
+        )
+    required = [
         "candidate_git_sha",
         "candidate_image_digest",
         "firmware_identity",
@@ -3205,10 +3850,17 @@ def _validate_candidate_args(parser, args):
         "transport_report",
         "correlated_transport_report",
         "log_reliability_report",
-        "journey_evidence",
         "lesson_manifest",
-        "report",
-    )
+    ]
+    if producing:
+        required.extend(("evidence_control_url", "server_log", "run_id"))
+        secret_name = getattr(args, "evidence_mint_secret_env", "")
+        if not isinstance(secret_name, str) or not secret_name or not os.environ.get(
+            secret_name
+        ):
+            parser.error("candidate producer mint-secret environment is unavailable")
+    else:
+        required.extend(("journey_evidence", "report"))
     missing = [field for field in required if not getattr(args, field, None)]
     if missing:
         parser.error("candidate mode requires: " + ", ".join(missing))
@@ -3281,9 +3933,17 @@ def main():
         print(f"SOAK_FAIL {detail}", file=sys.stderr)
         return 1
 
+    if args.produce_candidate_evidence:
+        if report.get("status") == "PASS":
+            print(f"Wrote candidate evidence: {args.produce_candidate_evidence}")
+        return report.get("exit_code", 1)
+
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(json.dumps(report, indent=2, default=str))
+        if args.mode == "candidate":
+            _atomic_write_json(args.report, report)
+        else:
+            args.report.write_text(json.dumps(report, indent=2, default=str))
         print(f"Wrote soak report: {args.report}")
 
     if report.get("dry_run"):

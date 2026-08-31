@@ -12,6 +12,8 @@ from scripts.google_live_robot_soak import (
     _build_argument_parser,
     _candidate_failure_report,
     _validate_candidate_args,
+    build_candidate_journeys,
+    produce_candidate_evidence,
     run_candidate_soak,
     run_soak,
 )
@@ -2314,3 +2316,237 @@ def test_candidate_failure_report_never_persists_exception_or_config_secrets():
     ]
     assert "secret" not in encoded
     assert "do-not-persist" not in encoded
+
+
+def test_candidate_producer_writes_closed_manifest_with_exact_accounting(tmp_path):
+    output = tmp_path / "journey-evidence.json"
+    args = _args(
+        produce_candidate_evidence=output,
+        run_id="20260831T100000Z",
+    )
+
+    result = asyncio.run(
+        produce_candidate_evidence(
+            args,
+            journeys=_journeys(),
+            sample_resources=_samples,
+            clock=_Clock(),
+        )
+    )
+    manifest = json.loads(output.read_text(encoding="utf-8"))
+
+    assert result["status"] == "PASS"
+    assert [item["name"] for item in manifest["executions"]] == [
+        *("conversation" for _ in range(17)),
+        *("bargein" for _ in range(10)),
+        *("quiet" for _ in range(2)),
+        "reopen",
+        "reconnect",
+        "lesson",
+        "conversation_after_lesson",
+    ]
+    assert len(manifest["executions"]) == 33
+    assert manifest["cleanup"]["status"] == "PASS"
+    assert len(manifest["resourceSamples"]) == (
+        1 + 33 + len(manifest["quietPadding"]) + 1
+    )
+
+    replay_args = _args(
+        mode="candidate",
+        candidate_journeys=None,
+        journey_evidence=output,
+    )
+    replay = asyncio.run(run_soak(replay_args))
+    assert replay["status"] == "PASS"
+    assert replay["replayCandidateEvidence"] is True
+    assert replay["durationSec"] == 1800.0
+
+
+def test_candidate_producer_failure_leaves_no_partial_manifest(tmp_path):
+    output = tmp_path / "journey-evidence.json"
+    journeys = _journeys()
+
+    async def fail_interrupt(*_args, **_kwargs):
+        raise RuntimeError("Authorization: Bearer private")
+
+    journeys["bargein"] = fail_interrupt
+    result = asyncio.run(
+        produce_candidate_evidence(
+            _args(produce_candidate_evidence=output, run_id="20260831T100000Z"),
+            journeys=journeys,
+            sample_resources=_samples,
+            clock=_Clock(),
+        )
+    )
+
+    assert result["status"] == "FAIL"
+    assert not output.exists()
+    assert "private" not in json.dumps(result)
+
+
+def test_candidate_producer_refuses_to_replace_existing_closed_manifest(tmp_path):
+    output = tmp_path / "journey-evidence.json"
+    output.write_text('{"closed":true}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must not already exist"):
+        asyncio.run(
+            produce_candidate_evidence(
+                _args(
+                    produce_candidate_evidence=output,
+                    run_id="20260831T100000Z",
+                ),
+                journeys=_journeys(),
+                sample_resources=_samples,
+                clock=_Clock(),
+            )
+        )
+
+    assert output.read_text(encoding="utf-8") == '{"closed":true}\n'
+
+
+def test_candidate_producer_cancellation_leaves_no_partial_manifest(tmp_path):
+    output = tmp_path / "journey-evidence.json"
+    journeys = _journeys()
+    started = asyncio.Event()
+
+    async def blocked(*_args, **_kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    journeys["conversation"] = blocked
+
+    async def cancel():
+        task = asyncio.create_task(
+            produce_candidate_evidence(
+                _args(produce_candidate_evidence=output, run_id="20260831T100000Z"),
+                journeys=journeys,
+                sample_resources=_samples,
+                clock=_Clock(),
+            )
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancel())
+    assert not output.exists()
+
+
+def test_candidate_producer_factory_has_only_consumed_journey_keys():
+    args = _args(run_id="20260831T100000Z")
+    args.candidate_journey_driver = lambda *_args, **_kwargs: None
+
+    assert set(build_candidate_journeys(args)) == {
+        "conversation",
+        "bargein",
+        "quiet",
+        "reopen",
+        "reconnect",
+        "lesson",
+        "monitor",
+        "cleanup",
+    }
+
+
+def test_candidate_factory_enrolls_binds_runs_finalizes_then_analyzes(tmp_path):
+    events = []
+
+    async def control(method, url, payload=None):
+        events.append((method, url.rsplit("/", 1)[-1], payload))
+        return {"status": "PASS"}
+
+    async def driver(_args, **context):
+        events.append(("driver", context["journey_id"], None))
+        return {"name": context["name"], "status": "PASS"}
+
+    async def analyzer(*, journey_id, output_path):
+        events.append(("analyzer", journey_id, output_path.name))
+        return {"name": "google_live_log_reliability", "status": "PASS"}
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "journey-evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=control,
+        candidate_journey_driver=driver,
+        candidate_log_analyzer=analyzer,
+    )
+    journey = build_candidate_journeys(args)["bargein"]
+
+    result = asyncio.run(journey(args, name="bargein", index=1))
+
+    journey_id = "candidate-soak.20260831T100000Z.1"
+    assert [event[0] for event in events] == [
+        "POST", "PUT", "driver", "POST", "analyzer"
+    ]
+    assert events[2][1] == journey_id
+    assert result["task5LogEvidence"]["status"] == "PASS"
+    assert "secret" not in json.dumps(events)
+
+
+def test_candidate_factory_cleanup_refuses_second_call():
+    calls = 0
+
+    async def driver(_args, **context):
+        nonlocal calls
+        calls += 1
+        return {"status": "PASS", "operation": context["operation"]}
+
+    args = _args(
+        run_id="20260831T100000Z",
+        candidate_journey_driver=driver,
+    )
+    cleanup = build_candidate_journeys(args)["cleanup"]
+
+    asyncio.run(cleanup(args, final_scope={}))
+    with pytest.raises(RuntimeError, match="more than once"):
+        asyncio.run(cleanup(args, final_scope={}))
+    assert calls == 1
+
+
+def test_candidate_cli_producer_and_replay_are_mutually_exclusive(tmp_path):
+    parser = _build_argument_parser()
+    parsed = parser.parse_args(
+        [
+            "--mode", "candidate",
+            "--journey-evidence", str(tmp_path / "replay.json"),
+            "--produce-candidate-evidence", str(tmp_path / "produce.json"),
+        ]
+    )
+
+    with pytest.raises(SystemExit):
+        _validate_candidate_args(parser, parsed)
+
+
+def test_candidate_cli_producer_reads_only_named_secret_environment(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CUSTOM_MINT_ENV", "never-render-this-value")
+    parser = _build_argument_parser()
+    parsed = parser.parse_args(
+        [
+            "--mode", "candidate",
+            "--candidate-git-sha", "a" * 40,
+            "--candidate-image-digest", f"sha256:{'a' * 64}",
+            "--firmware-identity", "firmware-v1",
+            "--fixture-sha256", "b" * 64,
+            "--baseline-report", "baseline.json",
+            "--real-api-report", "real-api.json",
+            "--transport-report", "transport.json",
+            "--correlated-transport-report", "correlated.json",
+            "--log-reliability-report", "log.json",
+            "--lesson-manifest", "lesson.json",
+            "--produce-candidate-evidence", str(tmp_path / "journeys.json"),
+            "--evidence-control-url", "http://server.test",
+            "--evidence-mint-secret-env", "CUSTOM_MINT_ENV",
+            "--server-log", "server.log",
+            "--run-id", "20260831T100000Z",
+        ]
+    )
+
+    _validate_candidate_args(parser, parsed)
+    assert "never-render-this-value" not in repr(parsed)
+    assert parsed.report is None
