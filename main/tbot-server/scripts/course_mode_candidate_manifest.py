@@ -106,6 +106,7 @@ PYTHON_TEST_RUNTIME_TREE_KEYS = {
 PYTHON_TEST_RUNTIME_TREE_SCHEMA = "sha256-root-mode-path-mode-bytes-v1"
 SECURE_PYTHON_TEST_RUNTIME_ROOT_MODES = {0o555}
 PYTHON_TEST_RUNTIME_DISTRIBUTION = "python-build-standalone"
+BACKEND_SNAPSHOT_TREE_SCHEMA = "sha256-backend-path-mode-bytes-v1"
 PYTHON_RUNTIME_AUTHORITY_PROBE = (
     "import importlib,json,os,sys,sysconfig;"
     "mods=['pytest','pytest_asyncio','aiohttp','httpx','cryptography','numpy'];"
@@ -608,6 +609,35 @@ def secure_browser_bundle_descriptor(root: Path) -> tuple[dict[str, Any] | None,
         return descriptor, None
     except RecursionError:
         return None, "tree"
+    except (OSError, UnicodeEncodeError):
+        return None, "path"
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
+
+
+def secure_backend_snapshot_tree_descriptor(
+    root: Path,
+) -> tuple[dict[str, Any] | None, str | None]:
+    root_fd = None
+    try:
+        if not root.is_absolute() or str(root) != str(root.resolve(strict=True)) or root.is_symlink():
+            return None, "path"
+        metadata = root.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o222:
+            return None, "path"
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+        if _tree_metadata_identity(os.fstat(root_fd)) != _tree_metadata_identity(metadata):
+            return None, "changed"
+        descriptor, error = _secure_browser_bundle_descriptor_fd(
+            root_fd, metadata, require_read_only=True,
+        )
+        if error or descriptor is None:
+            return None, error or "tree"
+        digest = hashlib.sha256()
+        _digest_field(digest, BACKEND_SNAPSHOT_TREE_SCHEMA.encode("ascii"))
+        _digest_field(digest, descriptor["sha256"].encode("ascii"))
+        return {**descriptor, "schema": BACKEND_SNAPSHOT_TREE_SCHEMA, "sha256": digest.hexdigest()}, None
     except (OSError, UnicodeEncodeError):
         return None, "path"
     finally:

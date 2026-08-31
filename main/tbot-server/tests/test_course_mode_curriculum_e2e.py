@@ -62,6 +62,15 @@ def test_backend_source_can_be_bound_to_candidate_sha() -> None:
 def _bind_gitless_snapshot(
     monkeypatch: pytest.MonkeyPatch, stage: Path, root: Path, authority: Path, sha: str,
 ) -> None:
+    for path in sorted(root.rglob("*"), reverse=True):
+        path.chmod(0o555 if path.is_dir() else 0o444)
+    root.chmod(0o555)
+    tree, tree_error = manifest.secure_backend_snapshot_tree_descriptor(root.resolve())
+    assert tree_error is None and tree is not None
+    authority.write_text(json.dumps({
+        "repository": "backend", "root": str(root.resolve()), "sha": sha,
+        "treeDigest": tree, "version": 2,
+    }, sort_keys=True), encoding="utf-8")
     monkeypatch.setattr(simulation, "COURSE_MODE_STAGE_PARENT", stage.parent)
     monkeypatch.setenv("COURSE_MODE_BACKEND_SHA", sha)
     monkeypatch.setenv("COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY", str(authority))
@@ -71,7 +80,6 @@ def _bind_gitless_snapshot(
     )
     authority.chmod(0o444)
     authority.parent.chmod(0o555)
-    root.chmod(0o555)
     root.parent.chmod(0o555)
     stage.chmod(0o555)
 
@@ -88,9 +96,7 @@ def test_backend_source_accepts_candidate_bound_gitless_snapshot(
     authority = stage / ".course-mode-authority/backend.json"
     authority.parent.mkdir()
     authority.write_text(
-        json.dumps({
-            "repository": "backend", "root": str(root.resolve()), "sha": sha, "version": 1,
-        }, sort_keys=True),
+        "{}",
         encoding="utf-8",
     )
     _bind_gitless_snapshot(monkeypatch, stage, root, authority, sha)
@@ -113,9 +119,7 @@ def test_backend_source_rejects_tampered_or_mismatched_gitless_snapshot(
     authority = stage / ".course-mode-authority/backend.json"
     authority.parent.mkdir()
     authority.write_text(
-        json.dumps({
-            "repository": "backend", "root": str(root.resolve()), "sha": sha, "version": 1,
-        }, sort_keys=True),
+        "{}",
         encoding="utf-8",
     )
     _bind_gitless_snapshot(monkeypatch, stage, root, authority, sha)
@@ -229,10 +233,63 @@ def test_backend_contract_load_rechecks_gitless_snapshot_after_command(
     assert error.value.code == "BACKEND_IDENTITY_MISMATCH"
 
 
+def test_backend_source_rejects_forged_immutable_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage = tmp_path / "course-mode-stage-forged-tree"
+    root = stage / "repositories/backend"
+    verifier = root / "scripts/verify-course-mode-curriculum.mjs"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text("original", encoding="utf-8")
+    authority = stage / ".course-mode-authority/backend.json"
+    authority.parent.mkdir()
+    authority.write_text("{}", encoding="utf-8")
+    _bind_gitless_snapshot(monkeypatch, stage, root, authority, "a" * 40)
+    verifier.chmod(0o644)
+    verifier.write_text("forged", encoding="utf-8")
+    verifier.chmod(0o444)
+
+    assert resolve_backend_root(root).error == "BACKEND_IDENTITY_MISMATCH"
+
+
+def test_backend_contract_load_rechecks_gitless_backend_bytes_after_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage = tmp_path / "course-mode-stage-backend-postcheck"
+    root = stage / "repositories/backend"
+    verifier = root / "scripts/verify-course-mode-curriculum.mjs"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text("original", encoding="utf-8")
+    authority = stage / ".course-mode-authority/backend.json"
+    authority.parent.mkdir()
+    authority.write_text("{}", encoding="utf-8")
+    sha = "a" * 40
+    _bind_gitless_snapshot(monkeypatch, stage, root, authority, sha)
+    code = (
+        "import json,pathlib,sys;"
+        "out=pathlib.Path(sys.argv[-1]);"
+        "out.write_text(json.dumps({'status':'pass','lessonCount':26,'contracts':[]}));"
+        f"target=pathlib.Path({str(verifier)!r});"
+        "target.chmod(0o644);target.write_text('mutated');target.chmod(0o444)"
+    )
+
+    with pytest.raises(CourseModeSimulationError) as error:
+        load_backend_contracts(
+            root, expected_sha=sha, backend_command=[sys.executable, "-c", code],
+        )
+
+    assert error.value.code == "BACKEND_IDENTITY_MISMATCH"
+
+
 def test_backend_source_rejects_candidate_identity_mismatch() -> None:
     result = resolve_backend_root(BACKEND_ROOT, expected_sha="f" * 40)
 
     assert result.error == "BACKEND_IDENTITY_MISMATCH"
+
+
+@pytest.mark.parametrize("sha", ["a" * 39, "A" * 40, "not-a-sha"])
+def test_backend_source_rejects_noncanonical_candidate_sha(sha: str) -> None:
+    assert resolve_backend_root(BACKEND_ROOT, expected_sha=sha).error == "BACKEND_IDENTITY_MISMATCH"
 
 
 def test_backend_source_rejects_uncommitted_runtime_authority(tmp_path: Path) -> None:

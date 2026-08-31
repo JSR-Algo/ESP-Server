@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -30,6 +31,7 @@ from scripts.course_mode_candidate_manifest import (
     _git,
     read_secure_regular,
     run_bounded_command,
+    secure_backend_snapshot_tree_descriptor,
     strict_json_loads,
 )
 
@@ -108,6 +110,8 @@ def resolve_backend_root(
     requested: Path | None, *, expected_sha: str | None = None,
 ) -> BackendRootResolution:
     bound_expected_sha = expected_sha or os.environ.get("COURSE_MODE_BACKEND_SHA")
+    if bound_expected_sha is not None and re.fullmatch(r"[0-9a-f]{40}", bound_expected_sha) is None:
+        return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
     configured = requested or (
         Path(value) if (value := os.environ.get("COURSE_MODE_BACKEND_ROOT")) else None
     )
@@ -159,9 +163,16 @@ def resolve_backend_root(
             document = strict_json_loads(raw)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
             return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
-        if document != {
-            "repository": "backend", "root": str(root), "sha": bound_expected_sha, "version": 1,
-        }:
+        observed_tree, tree_error = secure_backend_snapshot_tree_descriptor(root)
+        if (
+            not isinstance(document, dict)
+            or document.get("repository") != "backend"
+            or document.get("root") != str(root)
+            or document.get("sha") != bound_expected_sha
+            or document.get("version") != 2
+            or set(document) != {"repository", "root", "sha", "treeDigest", "version"}
+            or tree_error or observed_tree != document.get("treeDigest")
+        ):
             return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
         return BackendRootResolution(root, None, bound_expected_sha)
     if top_level != root or dirty or (bound_expected_sha is not None and bound_expected_sha != head):

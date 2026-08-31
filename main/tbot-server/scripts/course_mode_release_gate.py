@@ -1123,15 +1123,6 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
                     source, destination, relative, exception["sha256"], state,
                 )
             staged["repositories"][name]["path"] = str(destination)
-        authority_root = root / ".course-mode-authority"
-        authority_root.mkdir()
-        backend_authority = authority_root / "backend.json"
-        backend_authority.write_text(json.dumps({
-            "repository": "backend",
-            "root": staged["repositories"]["backend"]["path"],
-            "sha": staged["repositories"]["backend"]["sha"],
-            "version": 1,
-        }, sort_keys=True), encoding="utf-8")
         tools_root = root / "tools"
         if any(_python_test_runtime_required(lane) for lane in lanes):
             descriptor = candidate["tools"]["pythonTestRuntime"]
@@ -1214,6 +1205,20 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
             if error or observed != browser["treeDigest"]:
                 raise ValueError("staged browser descriptor mismatch")
             staged["tools"]["robotPreviewBrowser"]["root"] = str(browser_target)
+        backend_root = Path(staged["repositories"]["backend"]["path"])
+        _make_tree_read_only(backend_root)
+        backend_tree, backend_tree_error = _manifest.secure_backend_snapshot_tree_descriptor(
+            backend_root,
+        )
+        if backend_tree_error or backend_tree is None:
+            raise ValueError("staged backend snapshot descriptor mismatch")
+        authority_root = root / ".course-mode-authority"
+        authority_root.mkdir()
+        (authority_root / "backend.json").write_text(json.dumps({
+            "repository": "backend", "root": str(backend_root),
+            "sha": staged["repositories"]["backend"]["sha"],
+            "treeDigest": backend_tree, "version": 2,
+        }, sort_keys=True), encoding="utf-8")
         _make_tree_read_only(root)
         stage = ExecutionStage(root, staged, root_identity, root_descriptor)
         root_descriptor = None
@@ -2357,6 +2362,33 @@ def _sandboxed_python_lane_command(
     )
 
 
+def _backend_snapshot_environment(execution_stage: ExecutionStage) -> dict[str, str] | None:
+    try:
+        authority = execution_stage.root / ".course-mode-authority/backend.json"
+        raw = read_secure_regular(authority, 4096)
+        document = strict_json_loads(raw)
+        backend = execution_stage.candidate["repositories"]["backend"]
+        observed_tree, tree_error = _manifest.secure_backend_snapshot_tree_descriptor(
+            Path(backend["path"]),
+        )
+        if (
+            not isinstance(document, dict) or document.get("version") != 2
+            or document.get("repository") != "backend"
+            or document.get("root") != backend["path"] or document.get("sha") != backend["sha"]
+            or set(document) != {"repository", "root", "sha", "treeDigest", "version"}
+            or tree_error or observed_tree != document.get("treeDigest")
+        ):
+            return None
+        return {
+            "COURSE_MODE_BACKEND_ROOT": backend["path"],
+            "COURSE_MODE_BACKEND_SHA": backend["sha"],
+            "COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY": str(authority),
+            "COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY_SHA256": hashlib.sha256(raw).hexdigest(),
+        }
+    except (KeyError, OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
 def _child_environment(candidate: dict, source: Mapping[str, str], lane: Lane) -> dict[str, str]:
     environment = dict(BASE_ENVIRONMENT)
     node_requirement = _node_install_requirement(lane)
@@ -2905,20 +2937,20 @@ def run_gate(
                     child_environment = _child_environment(execution_candidate, lane_source, lane)
                     child_environment.update(lane_execution.environment)
                     if _python_test_runtime_required(lane):
-                        authority = execution_stage.root / ".course-mode-authority/backend.json"
-                        child_environment.update({
-                            "COURSE_MODE_BACKEND_ROOT": execution_stage.candidate["repositories"]["backend"]["path"],
-                            "COURSE_MODE_BACKEND_SHA": execution_stage.candidate["repositories"]["backend"]["sha"],
-                            "COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY": str(authority),
-                            "COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY_SHA256": hashlib.sha256(
-                                read_secure_regular(authority, 4096)
-                            ).hexdigest(),
-                        })
-                    result = run_bounded_command(
-                        list(command), cwd=resolved_cwd, timeout_sec=lane.timeout_sec,
-                        max_output_bytes=max_output_bytes,
-                        env=child_environment,
-                    )
+                        backend_environment = _backend_snapshot_environment(execution_stage)
+                        if backend_environment is None:
+                            result = _manifest.BoundedCommandResult(None, "", "authority")
+                        else:
+                            child_environment.update(backend_environment)
+                            result = run_bounded_command(
+                                list(command), cwd=resolved_cwd, timeout_sec=lane.timeout_sec,
+                                max_output_bytes=max_output_bytes, env=child_environment,
+                            )
+                    else:
+                        result = run_bounded_command(
+                            list(command), cwd=resolved_cwd, timeout_sec=lane.timeout_sec,
+                            max_output_bytes=max_output_bytes, env=child_environment,
+                        )
                     skip_state = pytest_report_has_skips(junit_path) if junit_path else False
                 except BaseException:
                     try:
@@ -2946,7 +2978,7 @@ def run_gate(
                     report["failedLane"] = lane.name
                     break
                 if result.error or result.returncode != 0:
-                    report["verdict"] = "FAIL"
+                    report["verdict"] = "BLOCKED" if result.error == "authority" else "FAIL"
                     report["failedLane"] = lane.name
                     break
                 if skip_state is not False:

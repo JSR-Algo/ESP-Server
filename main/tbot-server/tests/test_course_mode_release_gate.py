@@ -719,6 +719,55 @@ def test_python_runtime_authority_probe_regression_detects_missing_sandbox(
     assert observed == descriptor["treeDigest"]
 
 
+@pytest.mark.parametrize("attack", ["missing", "symlink", "oversize", "read-race"])
+def test_backend_snapshot_authority_read_failure_is_bounded(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, attack: str,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = gate.Lane(
+        name="backend-authority-read", repository="adminEsp", relative_cwd=".",
+        command=("python3", "-m", "pytest", "-q"), timeout_sec=5.0,
+    )
+    stage = gate.stage_execution_candidate(candidate, (lane,))
+    authority = stage.root / ".course-mode-authority/backend.json"
+    try:
+        if attack == "read-race":
+            original = gate.read_secure_regular
+            monkeypatch.setattr(
+                gate, "read_secure_regular",
+                lambda path, limit: (_ for _ in ()).throw(OSError("raced"))
+                if path == authority else original(path, limit),
+            )
+        else:
+            authority.parent.chmod(0o755)
+            authority.chmod(0o644)
+            authority.unlink()
+            if attack == "symlink":
+                authority.symlink_to(stage.root / "repositories/backend")
+            elif attack == "oversize":
+                authority.write_bytes(b"x" * 4097)
+                authority.chmod(0o444)
+        assert gate._backend_snapshot_environment(stage) is None
+    finally:
+        assert stage.cleanup() is True
+
+
+def test_backend_snapshot_authority_failure_blocks_lane_without_spawn(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lane = gate.Lane(
+        name="backend-authority-blocked", repository="adminEsp", relative_cwd=".",
+        command=("python3", "-m", "pytest", "-q"), timeout_sec=5.0,
+    )
+    monkeypatch.setattr(gate, "_backend_snapshot_environment", lambda _stage: None)
+
+    report = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert report["verdict"] == "BLOCKED"
+    assert report["failedLane"] == lane.name
+    assert report["lanes"][0]["exitCode"] is None
+
+
 @pytest.mark.parametrize("attack", ["symlink", "hardlink", "fifo"])
 def test_python_runtime_stage_rejects_tree_attack(candidate_file: Path, attack: str) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
