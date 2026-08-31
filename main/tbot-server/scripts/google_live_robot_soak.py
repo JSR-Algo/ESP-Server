@@ -2589,6 +2589,7 @@ async def _run_candidate_soak_impl(
         "recordedRuntimeElapsedSec": float(claimed_runtime)
         if replay_mode and _finite_nonnegative(claimed_runtime)
         else None,
+        "replayCandidateEvidence": replay_mode,
         "evidenceGapBudgetSec": gap_budget_sec,
         "evidenceAnchors": {
             "serverStartUtc": first_window_start.isoformat()

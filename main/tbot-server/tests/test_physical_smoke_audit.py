@@ -4040,6 +4040,7 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
             "durationSec": 1800.0,
             "runtimeElapsedSec": 1800.0,
             "recordedRuntimeElapsedSec": None,
+            "replayCandidateEvidence": False,
             "evidenceGapBudgetSec": 10.0,
             "evidenceAnchors": {
                 "serverStartUtc": "2026-08-31T11:00:00+00:00",
@@ -4468,6 +4469,7 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
             ("latency_zero", lambda report: report["latencyMetrics"].update(reconnectRecoveryP95Ms=0.0)),
             ("latency_metric", lambda report: report["latencyMetrics"].update(firstAudioP95Ms=1801.0)),
             ("duration", lambda report: report.update(durationSec=1799.0)),
+            ("live_runtime", lambda report: report.update(runtimeElapsedSec=0.0)),
             ("recorded_runtime", lambda report: report.update(recordedRuntimeElapsedSec=1799.0)),
             ("gap_budget", lambda report: report.update(evidenceGapBudgetSec=1000.0)),
             ("anchor", lambda report: report["evidenceAnchors"].update(serverEndUtc="2026-08-31T10:59:00+00:00")),
@@ -4496,6 +4498,19 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
                 )
                 self.assertFalse(result["passed"])
                 self.assertIn("candidate_soak_report_pass", result["missing"])
+
+    def test_candidate_physical_audit_accepts_minimum_latest_intent_rate(self):
+        report = deepcopy(self._candidate_audit_options()["candidate_soak_report"])
+        report["totals"].update(
+            latestIntentSuccesses=8,
+            latestIntentSuccessRate=0.8,
+        )
+
+        result = self._candidate_audit(
+            self._candidate_physical_log(), candidate_soak_report=report
+        )
+
+        self.assertTrue(result["passed"])
 
     def test_candidate_cli_requires_complete_valid_identity(self):
         with tempfile.TemporaryDirectory() as tmp:

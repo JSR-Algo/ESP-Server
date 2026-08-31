@@ -391,17 +391,31 @@ def validate_candidate_soak_report(
     ):
         mismatch("stages")
     totals = report.get("totals")
-    expected_totals = {
+    exact_totals = {
         "successfulTurns": 30,
         "bargeins": 10,
-        "latestIntentSuccesses": 10,
         "falseInterrupts": 0,
         "unexpectedFallbacks": 0,
-        "latestIntentSuccessRate": 1.0,
     }
-    if totals != expected_totals or not isinstance(totals, Mapping) or any(
-        type(totals.get(field)) is not type(expected)
-        for field, expected in expected_totals.items()
+    latest_intent_successes = (
+        totals.get("latestIntentSuccesses") if isinstance(totals, Mapping) else None
+    )
+    latest_intent_rate = (
+        totals.get("latestIntentSuccessRate") if isinstance(totals, Mapping) else None
+    )
+    if (
+        not isinstance(totals, Mapping)
+        or set(totals)
+        != {*exact_totals, "latestIntentSuccesses", "latestIntentSuccessRate"}
+        or any(
+            type(totals.get(field)) is not int or totals.get(field) != expected
+            for field, expected in exact_totals.items()
+        )
+        or type(latest_intent_successes) is not int
+        or not 8 <= latest_intent_successes <= 10
+        or type(latest_intent_rate) is not float
+        or latest_intent_rate != latest_intent_successes / 10
+        or latest_intent_rate < GOOGLE_LIVE_LIMITS["minimumLatestIntentSuccessRate"]
     ):
         mismatch("totals")
 
@@ -516,6 +530,7 @@ def validate_candidate_soak_report(
     duration = report.get("durationSec")
     runtime = report.get("runtimeElapsedSec")
     recorded_runtime = report.get("recordedRuntimeElapsedSec")
+    replay_candidate_evidence = report.get("replayCandidateEvidence")
     gap_budget = report.get("evidenceGapBudgetSec")
     anchors = report.get("evidenceAnchors")
     start = _parse_utc_timestamp((anchors or {}).get("serverStartUtc"))
@@ -531,6 +546,9 @@ def validate_candidate_soak_report(
         not _finite_nonnegative(duration)
         or duration < GOOGLE_LIVE_LIMITS["minimumSoakDurationSec"]
         or not _finite_nonnegative(runtime)
+        or type(replay_candidate_evidence) is not bool
+        or (not replay_candidate_evidence and runtime < duration)
+        or (not replay_candidate_evidence and recorded_runtime is not None)
         or (
             recorded_runtime is not None
             and (not _finite_nonnegative(recorded_runtime) or recorded_runtime < duration)

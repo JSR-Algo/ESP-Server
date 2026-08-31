@@ -530,6 +530,7 @@ def test_candidate_soak_runs_fixed_sequence_and_meets_production_budgets():
     assert report["latencyComparison"]["pass"] is True
     assert report["status"] == "PASS"
     assert report["durationSec"] == 1800.0
+    assert report["replayCandidateEvidence"] is False
     assert report["quietPadding"][0]["durationSec"] == 480.0
     assert report["quietPadding"][0]["resourceVerdict"]["status"] == "PASS"
     assert report["candidateIdentity"] == IDENTITY
@@ -539,6 +540,22 @@ def test_candidate_soak_runs_fixed_sequence_and_meets_production_budgets():
     assert all(item["connectionId"] == item["evidenceScope"]["connectionId"] for item in report["evidenceExecutions"])
     assert report["status"] == "PASS"  # Live IDs are transition-scoped, not globally unique.
     assert "raw child" not in json.dumps(report).lower()
+
+
+def test_candidate_soak_accepts_minimum_latest_intent_rate():
+    report = _run(
+        journeys=_journeys(
+            mutation=lambda result, _sequence, name, index, _label: (
+                result.update(latestIntentSuccesses=0)
+                if name == "bargein" and index in {9, 10}
+                else None
+            )
+        )
+    )
+
+    assert report["status"] == "PASS"
+    assert report["totals"]["latestIntentSuccesses"] == 8
+    assert report["totals"]["latestIntentSuccessRate"] == 0.8
 
 
 @pytest.mark.parametrize(
@@ -1594,6 +1611,7 @@ def test_replay_derives_duration_from_execution_and_padding_windows():
     assert report["status"] == "PASS"
     assert report["durationSec"] == 1800.0
     assert report["runtimeElapsedSec"] < report["durationSec"]
+    assert report["replayCandidateEvidence"] is True
 
 
 def test_replay_does_not_credit_inter_window_gaps_toward_duration():
