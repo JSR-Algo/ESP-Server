@@ -120,11 +120,17 @@ def compare_latency_baseline(
     checks: dict[str, bool] = {}
     regressions: dict[str, float] = {}
     failures: list[dict[str, str]] = []
+    required_set = set(required_metrics)
+    for side, metrics in (("candidate", candidate), ("baseline", baseline)):
+        for key in sorted(set(metrics) - required_set):
+            failures.append(
+                {"code": "LATENCY_METRIC_INVALID", "metric": key, "side": side}
+            )
     for key in required_metrics:
-        candidate_valid = key not in candidate or _valid_latency_metric(
-            candidate[key], positive=False
+        candidate_valid = key in candidate and _valid_latency_metric(
+            candidate[key], positive=True
         )
-        baseline_valid = key not in baseline or _valid_latency_metric(
+        baseline_valid = key in baseline and _valid_latency_metric(
             baseline[key], positive=True
         )
         if not candidate_valid:
@@ -138,8 +144,6 @@ def compare_latency_baseline(
         if (
             not candidate_valid
             or not baseline_valid
-            or key not in candidate
-            or key not in baseline
         ):
             continue
         regression = (
@@ -152,17 +156,10 @@ def compare_latency_baseline(
     result: dict[str, Any] = {
         "checks": checks,
         "regressionPct": regressions,
-        "pass": bool(checks) and all(checks.values()) and not failures,
+        "pass": len(checks) == len(required_metrics) and all(checks.values()) and not failures,
     }
     if failures:
         result["failures"] = failures
-    elif not checks:
-        result["failures"] = [
-            {
-                "code": "BASELINE_METRICS_MISSING",
-                "requiredMetrics": list(required_metrics),
-            }
-        ]
     return result
 
 

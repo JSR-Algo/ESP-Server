@@ -97,6 +97,12 @@ _CANDIDATE_STAGE_COUNTS = (
     ("lesson", 1),
     ("conversation_after_lesson", 1),
 )
+_CANDIDATE_LATENCY_METRICS = (
+    "firstAudioP50Ms",
+    "firstAudioP95Ms",
+    "bargeinP95Ms",
+    "reconnectRecoveryP95Ms",
+)
 _OWNED_CLEANUP_TASKS = set()
 _FORBIDDEN_EVIDENCE_KEYS = frozenset(
     {
@@ -1619,6 +1625,18 @@ def _finite_nonnegative(value):
     return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
 
 
+def _finite_positive(value):
+    return _finite_nonnegative(value) and value > 0
+
+
+def _strict_candidate_latency_metrics(value):
+    return (
+        isinstance(value, Mapping)
+        and set(value) == set(_CANDIDATE_LATENCY_METRICS)
+        and all(_finite_positive(value.get(metric)) for metric in _CANDIDATE_LATENCY_METRICS)
+    )
+
+
 def _release_owned_cleanup_task(task):
     _OWNED_CLEANUP_TASKS.discard(task)
     if not task.cancelled():
@@ -1816,8 +1834,8 @@ def _latency_metrics(executions):
             ("reconnectRecoveryMs", reconnect),
         ):
             values = latencies.get(field, [])
-            if not isinstance(values, list) or any(not _finite_nonnegative(value) for value in values):
-                raise ValueError(f"{field} must contain finite non-negative numbers")
+            if not isinstance(values, list) or any(not _finite_positive(value) for value in values):
+                raise ValueError(f"{field} must contain finite positive numbers")
             target.extend(values)
     return {
         "firstAudioP50Ms": percentile(first_audio, 50),
@@ -2345,13 +2363,21 @@ async def _run_candidate_soak_impl(
             "bargeinP95Ms": None,
             "reconnectRecoveryP95Ms": None,
         }
+    candidate_latency_valid = _strict_candidate_latency_metrics(latency_metrics)
+    if not candidate_latency_valid:
         failures.append({"code": "LATENCY_EVIDENCE_MALFORMED"})
     try:
         baseline = _read_json_evidence(args.baseline_report, "baseline_report")
     except ValueError:
         baseline = {}
-        failures.append({"code": "BASELINE_REPORT_MALFORMED"})
-    latency_comparison = compare_latency_baseline(latency_metrics, baseline.get("latencyMetrics", {}))
+    baseline_metrics = baseline.get("latencyMetrics")
+    baseline_valid = _strict_candidate_latency_metrics(baseline_metrics)
+    if not baseline_valid:
+        failures.append({"code": "BASELINE_EVIDENCE_INVALID"})
+    latency_comparison = compare_latency_baseline(
+        latency_metrics if candidate_latency_valid else {},
+        baseline_metrics if baseline_valid else {},
+    )
     if not latency_comparison["pass"]:
         failures.append({"code": "LATENCY_REGRESSION"})
     hard_latency_pass = (

@@ -568,6 +568,136 @@ def test_candidate_soak_fails_duration_and_latency_regression_budgets():
     assert "LATENCY_REGRESSION" in {item["code"] for item in regressed["failures"]}
 
 
+@pytest.mark.parametrize(
+    "metric",
+    [
+        "firstAudioP50Ms",
+        "firstAudioP95Ms",
+        "bargeinP95Ms",
+        "reconnectRecoveryP95Ms",
+    ],
+)
+def test_candidate_soak_rejects_baseline_missing_any_required_latency_metric(metric):
+    baseline = deepcopy(_args().baseline_report)
+    baseline["latencyMetrics"].pop(metric)
+
+    report = _run(args=_args(baseline_report=baseline))
+
+    assert "BASELINE_EVIDENCE_INVALID" in {
+        item["code"] for item in report["failures"]
+    }
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [None, True, 0, -1, float("nan"), float("inf"), float("-inf"), "1000"],
+    ids=["null", "bool", "zero", "negative", "nan", "inf", "negative-inf", "string"],
+)
+def test_candidate_soak_rejects_malformed_baseline_latency_metric(invalid):
+    baseline = deepcopy(_args().baseline_report)
+    baseline["latencyMetrics"]["reconnectRecoveryP95Ms"] = invalid
+
+    report = _run(args=_args(baseline_report=baseline))
+
+    assert "BASELINE_EVIDENCE_INVALID" in {
+        item["code"] for item in report["failures"]
+    }
+
+
+def test_candidate_soak_rejects_extra_baseline_latency_metric():
+    baseline = deepcopy(_args().baseline_report)
+    baseline["latencyMetrics"]["uncontractedMetricMs"] = 100
+
+    report = _run(args=_args(baseline_report=baseline))
+
+    assert "BASELINE_EVIDENCE_INVALID" in {
+        item["code"] for item in report["failures"]
+    }
+
+
+@pytest.mark.parametrize("metrics", [None, [], "metrics", {}])
+def test_candidate_soak_rejects_missing_or_nonmapping_baseline_metrics(metrics):
+    baseline = deepcopy(_args().baseline_report)
+    if metrics == {}:
+        baseline.pop("latencyMetrics")
+    else:
+        baseline["latencyMetrics"] = metrics
+
+    report = _run(args=_args(baseline_report=baseline))
+
+    assert "BASELINE_EVIDENCE_INVALID" in {
+        item["code"] for item in report["failures"]
+    }
+
+
+def test_candidate_soak_slow_reconnect_cannot_pass_with_omitted_baseline_metric():
+    def slow_reconnect(result, _sequence, name, _index, _label):
+        if name == "reconnect":
+            result["latencies"]["reconnectRecoveryMs"] = [5000]
+
+    baseline = deepcopy(_args().baseline_report)
+    baseline["latencyMetrics"].pop("reconnectRecoveryP95Ms")
+
+    report = _run(
+        args=_args(baseline_report=baseline),
+        journeys=_journeys(mutation=slow_reconnect),
+    )
+
+    assert "BASELINE_EVIDENCE_INVALID" in {
+        item["code"] for item in report["failures"]
+    }
+    assert report["latencyComparison"]["pass"] is False
+
+
+@pytest.mark.parametrize("latency", ["firstAudioMs", "bargeinMs", "reconnectRecoveryMs"])
+def test_candidate_soak_rejects_missing_candidate_latency_samples(latency):
+    def remove_samples(result, _sequence, _name, _index, _label):
+        if latency in result["latencies"]:
+            result["latencies"][latency] = []
+
+    report = _run(journeys=_journeys(mutation=remove_samples))
+
+    assert "LATENCY_EVIDENCE_MALFORMED" in {
+        item["code"] for item in report["failures"]
+    }
+
+
+@pytest.mark.parametrize("latency", ["firstAudioMs", "bargeinMs", "reconnectRecoveryMs"])
+def test_candidate_soak_rejects_nonpositive_candidate_latency_samples(latency):
+    def zero_samples(result, _sequence, _name, _index, _label):
+        if latency in result["latencies"]:
+            result["latencies"][latency] = [0]
+
+    report = _run(journeys=_journeys(mutation=zero_samples))
+
+    assert "LATENCY_EVIDENCE_MALFORMED" in {
+        item["code"] for item in report["failures"]
+    }
+
+
+@pytest.mark.parametrize(
+    ("metric", "baseline_value"),
+    [
+        ("firstAudioP50Ms", 800),
+        ("firstAudioP95Ms", 800),
+        ("bargeinP95Ms", 300),
+        ("reconnectRecoveryP95Ms", 800),
+    ],
+)
+def test_candidate_soak_applies_fifteen_percent_regression_to_every_metric(
+    metric, baseline_value
+):
+    baseline = deepcopy(_args().baseline_report)
+    baseline["latencyMetrics"][metric] = baseline_value
+
+    report = _run(args=_args(baseline_report=baseline))
+
+    assert "LATENCY_REGRESSION" in {item["code"] for item in report["failures"]}
+    assert report["latencyComparison"]["checks"][
+        f"{metric.removesuffix('Ms')}Regression"
+    ] is False
+
+
 @pytest.mark.parametrize("bad_status", ["SKIPPED", "FAIL", None])
 def test_candidate_soak_rejects_missing_or_nonpassing_upstream_layers(bad_status):
     real_api = _layer("real_api")

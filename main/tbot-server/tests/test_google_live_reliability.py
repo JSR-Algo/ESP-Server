@@ -187,26 +187,41 @@ def test_candidate_identity_rejects_malformed_fixture_sha256(fixture_sha256: str
         )
 
 
-def test_latency_baseline_checks_only_shared_nonzero_metrics_at_fifteen_percent() -> None:
+def _complete_latency_metrics(**overrides):
+    metrics = {
+        "firstAudioP50Ms": 1000,
+        "firstAudioP95Ms": 1500,
+        "bargeinP95Ms": 400,
+        "reconnectRecoveryP95Ms": 800,
+    }
+    metrics.update(overrides)
+    return metrics
+
+
+def test_latency_baseline_checks_all_required_metrics_at_fifteen_percent() -> None:
     result = compare_latency_baseline(
-        {
-            "firstAudioP50Ms": 1160,
-            "firstAudioP95Ms": 1700,
-            "bargeinP95Ms": 500,
-            "reconnectRecoveryP95Ms": 900,
-        },
-        {
-            "firstAudioP50Ms": 1000,
-            "firstAudioP95Ms": 1500,
-        },
+        _complete_latency_metrics(
+            firstAudioP50Ms=1160,
+            firstAudioP95Ms=1700,
+            bargeinP95Ms=500,
+            reconnectRecoveryP95Ms=900,
+        ),
+        _complete_latency_metrics(),
     )
 
     assert result == {
         "checks": {
             "firstAudioP50Regression": False,
             "firstAudioP95Regression": True,
+            "bargeinP95Regression": False,
+            "reconnectRecoveryP95Regression": True,
         },
-        "regressionPct": {"firstAudioP50Ms": 16.0, "firstAudioP95Ms": 13.33},
+        "regressionPct": {
+            "firstAudioP50Ms": 16.0,
+            "firstAudioP95Ms": 13.33,
+            "bargeinP95Ms": 25.0,
+            "reconnectRecoveryP95Ms": 12.5,
+        },
         "pass": False,
     }
 
@@ -226,17 +241,8 @@ def test_latency_baseline_fails_closed_without_comparable_metrics(
     assert result["checks"] == {}
     assert result["regressionPct"] == {}
     assert result["pass"] is False
-    assert result["failures"] == [
-        {
-            "code": "BASELINE_METRICS_MISSING",
-            "requiredMetrics": [
-                "firstAudioP50Ms",
-                "firstAudioP95Ms",
-                "bargeinP95Ms",
-                "reconnectRecoveryP95Ms",
-            ],
-        }
-    ]
+    assert result["failures"]
+    assert all(item["code"] == "LATENCY_METRIC_INVALID" for item in result["failures"])
 
 
 @pytest.mark.parametrize("side", ["candidate", "baseline"])
@@ -255,15 +261,13 @@ def test_latency_baseline_fails_closed_without_comparable_metrics(
 def test_latency_baseline_rejects_malformed_supplied_metrics(
     side: str, invalid_value: object
 ) -> None:
-    candidate = {"firstAudioP50Ms": 1000}
-    baseline = {"firstAudioP50Ms": 1000}
+    candidate = _complete_latency_metrics()
+    baseline = _complete_latency_metrics()
     target = candidate if side == "candidate" else baseline
     target["firstAudioP50Ms"] = invalid_value
 
     result = compare_latency_baseline(candidate, baseline)
 
-    assert result["checks"] == {}
-    assert result["regressionPct"] == {}
     assert result["pass"] is False
     assert result["failures"] == [
         {
@@ -272,13 +276,23 @@ def test_latency_baseline_rejects_malformed_supplied_metrics(
             "side": side,
         }
     ]
+    assert len(result["checks"]) == 3
+    assert len(result["regressionPct"]) == 3
 
 
 def test_latency_baseline_rejects_zero_baseline_metric() -> None:
-    result = compare_latency_baseline({"firstAudioP50Ms": 0}, {"firstAudioP50Ms": 0})
+    result = compare_latency_baseline(
+        _complete_latency_metrics(firstAudioP50Ms=0),
+        _complete_latency_metrics(firstAudioP50Ms=0),
+    )
 
     assert result["pass"] is False
     assert result["failures"] == [
+        {
+            "code": "LATENCY_METRIC_INVALID",
+            "metric": "firstAudioP50Ms",
+            "side": "candidate",
+        },
         {
             "code": "LATENCY_METRIC_INVALID",
             "metric": "firstAudioP50Ms",
@@ -287,15 +301,38 @@ def test_latency_baseline_rejects_zero_baseline_metric() -> None:
     ]
 
 
+def test_latency_baseline_rejects_extra_metric_instead_of_skipping_it() -> None:
+    baseline = _complete_latency_metrics(uncontractedMetricMs=100)
+
+    result = compare_latency_baseline(_complete_latency_metrics(), baseline)
+
+    assert result["pass"] is False
+    assert result["failures"] == [
+        {
+            "code": "LATENCY_METRIC_INVALID",
+            "metric": "uncontractedMetricMs",
+            "side": "baseline",
+        }
+    ]
+
+
 def test_latency_baseline_preserves_valid_checks_while_failing_malformed_metric() -> None:
     result = compare_latency_baseline(
-        {"firstAudioP50Ms": True, "firstAudioP95Ms": 1600},
-        {"firstAudioP50Ms": 1000, "firstAudioP95Ms": 1500},
+        _complete_latency_metrics(firstAudioP50Ms=True, firstAudioP95Ms=1600),
+        _complete_latency_metrics(),
     )
 
     assert result == {
-        "checks": {"firstAudioP95Regression": True},
-        "regressionPct": {"firstAudioP95Ms": 6.67},
+        "checks": {
+            "firstAudioP95Regression": True,
+            "bargeinP95Regression": True,
+            "reconnectRecoveryP95Regression": True,
+        },
+        "regressionPct": {
+            "firstAudioP95Ms": 6.67,
+            "bargeinP95Ms": 0.0,
+            "reconnectRecoveryP95Ms": 0.0,
+        },
         "pass": False,
         "failures": [
             {
