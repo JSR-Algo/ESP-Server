@@ -1414,6 +1414,35 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
 
         handler.voice_provider.close.assert_awaited_once()
 
+    async def test_evidence_finalize_drain_propagates_caller_cancellation(self):
+        handler = self._build_handler()
+        release = asyncio.Event()
+
+        async def hanging_finalize():
+            await release.wait()
+
+        finalize_task = handler.schedule_mcp_background_task(hanging_finalize())
+        finalize_task.set_name("google-live-evidence-finalize")
+        handler.google_live_evidence_finalize_task = finalize_task
+        handler.voice_provider = types.SimpleNamespace(
+            request_evidence_finalize_stop=AsyncMock(),
+            force_close_after_evidence_finalize_cancel=AsyncMock(),
+            close=AsyncMock(),
+        )
+        drain = asyncio.create_task(
+            handler._drain_evidence_finalize_task_for_teardown(timeout=1.0)
+        )
+        await asyncio.sleep(0)
+        drain.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await drain
+
+        handler.voice_provider.request_evidence_finalize_stop.assert_awaited_once()
+        handler.voice_provider.force_close_after_evidence_finalize_cancel.assert_awaited_once()
+        self.assertTrue(finalize_task.done())
+        self.assertNotIn(finalize_task, handler.mcp_background_tasks)
+
     async def test_evidence_finalize_rejects_changed_live_id_or_pending_cleanup(self):
         for result in (
             {"status": "PASS", "liveConnectionId": "live-other", "pendingTasks": 0},

@@ -451,6 +451,73 @@ def test_cli_reliability_window_rejects_untrusted_interleaved_anchors(tmp_path):
     assert json.loads(out.read_text(encoding="utf-8"))["status"] == "FAIL"
 
 
+def test_cli_reliability_window_ignores_incomplete_foreign_window(tmp_path):
+    target = {**EVIDENCE_SCOPE, "journeyId": "physical.run-1"}
+    target_lines = _window_lines(
+        journey_id=target["journeyId"], evidence_scope=target,
+        window_id=target["journeyId"], server_issued=True,
+    )
+    foreign_identity = json.dumps(
+        CANDIDATE_IDENTITY, sort_keys=True, separators=(",", ":")
+    )
+    log = tmp_path / "server.log"
+    out = tmp_path / "report.json"
+    log.write_text("\n".join([
+        target_lines[0],
+        "2026-08-31 10:00:01 Google Live reliability_window_start "
+        "window_id=physical.run-2 journey_id=physical.run-2 "
+        "connection_id=conn-2 live_connection_id=live-2 "
+        "initial_live_connection_id=live-2 "
+        f"peer_identity_hash=sha256:{'e' * 64} "
+        "server_start_utc=2026-08-31T10:00:01+00:00 server_issued=true "
+        f"candidate_identity={foreign_identity}",
+        target_lines[-1],
+    ]), encoding="utf-8")
+
+    exit_code = main([
+        "--log", str(log), "--reliability-window",
+        "--journey-id", target["journeyId"], "--out-json", str(out),
+    ])
+
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert report["status"] == "PASS"
+    assert report["evidenceScope"]["journeyId"] == target["journeyId"]
+
+
+def test_cli_reliability_window_rejects_ambiguity_in_incomplete_foreign_window(
+    tmp_path,
+):
+    target = {**EVIDENCE_SCOPE, "journeyId": "physical.run-1"}
+    target_lines = _window_lines(
+        journey_id=target["journeyId"], evidence_scope=target,
+        window_id=target["journeyId"], server_issued=True,
+    )
+    identity = json.dumps(CANDIDATE_IDENTITY, sort_keys=True, separators=(",", ":"))
+    log = tmp_path / "server.log"
+    out = tmp_path / "report.json"
+    log.write_text("\n".join([
+        target_lines[0],
+        "2026-08-31 10:00:01 Google Live reliability_window_start "
+        "window_id=physical.run-2 journey_id=physical.run-2 "
+        "connection_id=conn-2 live_connection_id=live-2 "
+        "initial_live_connection_id=live-2 "
+        f"peer_identity_hash=sha256:{'e' * 64} "
+        "server_start_utc=2026-08-31T10:00:01+00:00 server_issued=true "
+        f"candidate_identity={identity}",
+        "2026-08-31 10:00:02 Google Live receive loop started",
+        target_lines[-1],
+    ]), encoding="utf-8")
+
+    exit_code = main([
+        "--log", str(log), "--reliability-window",
+        "--journey-id", target["journeyId"], "--out-json", str(out),
+    ])
+
+    assert exit_code != 0
+    assert json.loads(out.read_text(encoding="utf-8"))["status"] == "FAIL"
+
+
 def test_cli_reliability_window_reads_opened_inode_after_path_replacement(tmp_path):
     scope = {**EVIDENCE_SCOPE, "journeyId": "physical.run-1"}
     log = tmp_path / "server.log"

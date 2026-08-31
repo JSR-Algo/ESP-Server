@@ -1486,7 +1486,10 @@ def _bounded_server_window(lines: list[str], journey_id: str) -> list[str]:
             intervals.append((start_index, index, start_match))
             if start_match.group("journey_id") == journey_id:
                 matches.append((start_index, index))
-    if active or len(matches) != 1:
+    target_still_open = journey_id in active or any(
+        match.group("journey_id") == journey_id for _index, match in active.values()
+    )
+    if target_still_open or len(matches) != 1:
         raise ValueError("requested reliability window is not unique")
     start_index, end_index = matches[0]
     start = P_RELIABILITY_WINDOW_START.search(lines[start_index])
@@ -1515,6 +1518,16 @@ def _bounded_server_window(lines: list[str], journey_id: str) -> list[str]:
         if foreign_match.group("journey_id") != journey_id
         and foreign_start < end_index
         and foreign_end > start_index
+    ] + [
+        (
+            foreign_start,
+            len(lines),
+            foreign_match.group("journey_id"),
+            foreign_match.group("connection_id"),
+        )
+        for foreign_start, foreign_match in active.values()
+        if foreign_match.group("journey_id") != journey_id
+        and foreign_start < end_index
     ]
     selected = [lines[start_index]]
     for index in range(start_index + 1, end_index):

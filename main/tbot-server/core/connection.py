@@ -3168,24 +3168,32 @@ class ConnectionHandler:
             return
         provider = getattr(self, "voice_provider", None)
         request_stop = getattr(provider, "request_evidence_finalize_stop", None)
-        if callable(request_stop):
-            try:
-                stop_result = request_stop()
-                if inspect.isawaitable(stop_result):
-                    await stop_result
-            except Exception:
-                pass
         try:
+            if callable(request_stop):
+                try:
+                    stop_result = request_stop()
+                    if inspect.isawaitable(stop_result):
+                        await stop_result
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
             await asyncio.wait_for(
                 asyncio.shield(task), timeout=max(0.0, float(timeout))
             )
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            if not task.done():
-                task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            await self._force_close_evidence_provider_for_teardown(timeout)
+        except asyncio.TimeoutError:
+            await self._cancel_and_force_close_evidence_finalize(task, timeout)
+        except asyncio.CancelledError:
+            await self._cancel_and_force_close_evidence_finalize(task, timeout)
+            raise
         except Exception:
             pass
+
+    async def _cancel_and_force_close_evidence_finalize(self, task, timeout):
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await self._force_close_evidence_provider_for_teardown(timeout)
 
     async def _force_close_evidence_provider_for_teardown(self, timeout):
         provider = getattr(self, "voice_provider", None)
