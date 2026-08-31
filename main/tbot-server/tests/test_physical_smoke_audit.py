@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -3863,9 +3864,7 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         physical_bargein = (
             [300.0] * 10 if physical_bargein is None else physical_bargein
         )
-        output_gaps = (
-            [(100.0, "continuous")] * 10 if output_gaps is None else output_gaps
-        )
+        output_gaps = [100.0] * 10 if output_gaps is None else output_gaps
         lines = [
             "260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}",
             "2026-08-31 13:10:00+00:00[GoogleLive]-INFO-Google Live reliability_window_start window_id=physical-1 journey_id=physical-1 connection_id=connection-1 live_connection_id=live-1 initial_live_connection_id=live-1 peer_identity_hash=sha256:"
@@ -3888,11 +3887,39 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
             f"260518 20:13:{index:02d}[GoogleLive]-INFO-Google Live physical_bargein_latency_ms={value}"
             for index, value in enumerate(physical_bargein)
         )
-        lines.extend(
-            f"260518 20:14:{index:02d}[GoogleLive]-INFO-Google Live server_output_gap_ms={value} boundary={boundary}"
-            + (f" boundary_duration_ms={value}" if boundary != "continuous" else "")
-            for index, (value, boundary) in enumerate(output_gaps)
-        )
+        gap_epoch = datetime(2026, 8, 31, 13, 14, tzinfo=timezone.utc)
+        for index, item in enumerate(output_gaps):
+            if isinstance(item, tuple):
+                value, boundary_type, boundary_duration = item
+            else:
+                value, boundary_type, boundary_duration = item, None, None
+            start = gap_epoch + timedelta(seconds=index * 2)
+            end = start + timedelta(milliseconds=value)
+            gap_id = f"gap-{index}"
+            lines.append(
+                "260518 20:14:{:02d}[GoogleLive]-INFO-Google Live server_output_gap "
+                "gap_id={} start_utc={} end_utc={} duration_ms={}".format(
+                    index,
+                    gap_id,
+                    start.isoformat(),
+                    end.isoformat(),
+                    value,
+                )
+            )
+            if boundary_type is not None:
+                boundary_end = start + timedelta(milliseconds=boundary_duration)
+                lines.append(
+                    "260518 20:14:{:02d}[GoogleLive]-INFO-Google Live "
+                    "server_output_gap_boundary gap_id={} type={} start_utc={} "
+                    "end_utc={} duration_ms={}".format(
+                        index,
+                        gap_id,
+                        boundary_type,
+                        start.isoformat(),
+                        boundary_end.isoformat(),
+                        boundary_duration,
+                    )
+                )
         lines.extend(extra_lines or [])
         lines.extend(
             [
@@ -4032,7 +4059,7 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
             ({"first_audio": [600.0] * 9 + [1900.0]}, "first_audio_p95_ms<=1800"),
             ({"interrupt_stop": [25.0] * 9 + [251.0]}, "interrupt_stop_latency_ms<=250"),
             ({"physical_bargein": [300.0] * 9 + [501.0]}, "physical_bargein_p95_ms<=500"),
-            ({"output_gaps": [(100.0, "continuous")] * 9 + [(251.0, "continuous")]}, "server_output_gap_ms<=250"),
+            ({"output_gaps": [100.0] * 9 + [251.0]}, "server_output_gap_ms<=250"),
         )
         for changes, expected_missing in cases:
             with self.subTest(expected_missing=expected_missing):
@@ -4043,13 +4070,17 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
     def test_candidate_physical_audit_excludes_intentional_interrupt_output_gap(self):
         result = self._candidate_audit(
             self._candidate_physical_log(
-                output_gaps=[(100.0, "continuous")] * 9 + [(900.0, "interrupt")]
+                output_gaps=[100.0] * 9 + [(900.0, "interrupt", 700.0)]
             )
         )
 
         self.assertTrue(result["passed"], result["missing"])
         self.assertEqual(result["serverOutputGapMs"]["excludedIntentional"], 1)
-        self.assertEqual(result["serverOutputGapMs"]["max"], 100.0)
+        self.assertEqual(result["serverOutputGapMs"]["excludedDurationMs"], 700.0)
+        self.assertEqual(
+            result["serverOutputGapMs"]["unexplainedResidualMs"]["max"], 200.0
+        )
+        self.assertEqual(result["serverOutputGapMs"]["max"], 200.0)
 
     def test_candidate_physical_audit_fails_closed_on_identity_scope_and_multiplicity(self):
         mismatched = self._candidate_identity()
@@ -4081,7 +4112,7 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
             ("first_audio", 600.0, "first_audio_samples=10"),
             ("interrupt_stop", 25.0, "interrupt_stop_latency_ms=10"),
             ("physical_bargein", 300.0, "physical_bargein_samples=10"),
-            ("output_gaps", (100.0, "continuous"), "server_output_gap_samples=10"),
+            ("output_gaps", 100.0, "server_output_gap_samples=10"),
         )
         for field, sample, expected_missing in cases:
             for count in (9, 11):
@@ -4166,10 +4197,62 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
     def test_candidate_physical_audit_rejects_untyped_gap_exclusion(self):
         result = self._candidate_audit(
             self._candidate_physical_log(
-                output_gaps=[(100.0, "continuous")] * 9
-                + [(900.0, "interrupt_like")]
+                output_gaps=[100.0] * 9
+                + [(900.0, "interrupt_like", 700.0)]
             )
         )
+
+        self.assertFalse(result["passed"])
+        self.assertIn("server_output_gap_boundaries_valid", result["missing"])
+
+    def test_candidate_physical_audit_boundary_is_subtractive_not_whole_gap_mask(self):
+        result = self._candidate_audit(
+            self._candidate_physical_log(
+                output_gaps=[100.0] * 9 + [(900.0, "interrupt", 1.0)]
+            )
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["serverOutputGapMs"]["max"], 899.0)
+        self.assertIn("server_output_gap_ms<=250", result["missing"])
+
+    def test_candidate_physical_audit_rejects_duplicate_or_oversized_boundary(self):
+        log_text = self._candidate_physical_log(
+            output_gaps=[100.0] * 9 + [(900.0, "interrupt", 700.0)]
+        )
+        boundary_line = next(
+            line
+            for line in log_text.splitlines()
+            if "server_output_gap_boundary gap_id=gap-9" in line
+        )
+        duplicate = self._candidate_audit(log_text + "\n" + boundary_line)
+        oversized = self._candidate_audit(
+            self._candidate_physical_log(
+                output_gaps=[100.0] * 9 + [(900.0, "interrupt", 901.0)]
+            )
+        )
+        negative = self._candidate_audit(
+            self._candidate_physical_log(
+                output_gaps=[100.0] * 9 + [(900.0, "interrupt", -1.0)]
+            )
+        )
+
+        self.assertIn("server_output_gap_boundaries_valid", duplicate["missing"])
+        self.assertIn("server_output_gap_boundaries_valid", oversized["missing"])
+        self.assertIn("server_output_gap_boundaries_valid", negative["missing"])
+
+    def test_candidate_physical_audit_rejects_partially_overlapping_boundaries(self):
+        log_text = self._candidate_physical_log(
+            output_gaps=[100.0] * 9 + [(900.0, "interrupt", 700.0)]
+        )
+        overlap = (
+            "260518 20:14:09[GoogleLive]-INFO-Google Live "
+            "server_output_gap_boundary gap_id=gap-9 type=backpressure "
+            "start_utc=2026-08-31T13:14:18.600000+00:00 "
+            "end_utc=2026-08-31T13:14:18.800000+00:00 duration_ms=200.0"
+        )
+
+        result = self._candidate_audit(log_text + "\n" + overlap)
 
         self.assertFalse(result["passed"])
         self.assertIn("server_output_gap_boundaries_valid", result["missing"])

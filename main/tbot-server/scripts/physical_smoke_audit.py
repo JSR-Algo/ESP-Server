@@ -7,6 +7,7 @@ import re
 import sys
 import unicodedata
 from collections import Counter
+from datetime import datetime, timedelta
 from pathlib import Path
 
 _SERVER_ROOT = Path(__file__).resolve().parents[1]
@@ -579,44 +580,104 @@ def _candidate_window_evidence(log_text):
 
 
 def _output_gap_stats(log_text):
-    included = []
-    excluded = Counter()
-    excluded_durations = Counter()
+    gaps = {}
+    boundaries = []
     invalid = 0
-    pattern = re.compile(
-        r"Google Live server_output_gap_ms=(?P<gap>[\d.]+) "
-        r"boundary=(?P<boundary>[A-Za-z_]+)"
-        r"(?: boundary_duration_ms=(?P<duration>[\d.]+))?$"
+    gap_pattern = re.compile(
+        r"Google Live server_output_gap gap_id=(?P<gap_id>[A-Za-z0-9._:-]+) "
+        r"start_utc=(?P<start>\S+) end_utc=(?P<end>\S+) "
+        r"duration_ms=(?P<duration>[\d.]+)$"
     )
-    marker_lines = [
-        line for line in log_text.splitlines() if "Google Live server_output_gap_ms=" in line
-    ]
-    matches = [match for line in marker_lines if (match := pattern.search(line))]
-    invalid += len(marker_lines) - len(matches)
-    for match in matches:
-        gap = float(match.group("gap"))
-        boundary = match.group("boundary")
-        duration_text = match.group("duration")
-        if not math.isfinite(gap) or gap < 0:
-            invalid += 1
-            continue
-        if boundary == "continuous":
-            if duration_text is not None:
+    boundary_pattern = re.compile(
+        r"Google Live server_output_gap_boundary "
+        r"gap_id=(?P<gap_id>[A-Za-z0-9._:-]+) "
+        r"type=(?P<boundary>[A-Za-z_]+) start_utc=(?P<start>\S+) "
+        r"end_utc=(?P<end>\S+) duration_ms=(?P<duration>[\d.]+)$"
+    )
+
+    def parse_interval(match):
+        try:
+            start = datetime.fromisoformat(match.group("start"))
+            end = datetime.fromisoformat(match.group("end"))
+            duration = float(match.group("duration"))
+        except (TypeError, ValueError):
+            return None
+        if (
+            start.tzinfo is None
+            or end.tzinfo is None
+            or start.utcoffset() != timedelta(0)
+            or end.utcoffset() != timedelta(0)
+            or end < start
+            or not math.isfinite(duration)
+            or duration < 0
+            or abs((end - start).total_seconds() * 1000 - duration) > 0.001
+        ):
+            return None
+        return start, end, duration
+
+    for line in log_text.splitlines():
+        if "Google Live server_output_gap " in line:
+            match = gap_pattern.search(line)
+            interval = parse_interval(match) if match is not None else None
+            if match is None or interval is None or match.group("gap_id") in gaps:
                 invalid += 1
                 continue
-            included.append(gap)
-            continue
-        if boundary not in _INTENTIONAL_OUTPUT_GAP_BOUNDARIES or duration_text is None:
+            gaps[match.group("gap_id")] = interval
+        elif "Google Live server_output_gap_boundary " in line:
+            match = boundary_pattern.search(line)
+            interval = parse_interval(match) if match is not None else None
+            if match is None or interval is None:
+                invalid += 1
+                continue
+            boundaries.append(
+                (match.group("gap_id"), match.group("boundary"), *interval)
+            )
+
+    by_gap = {}
+    for gap_id, boundary_type, start, end, duration in boundaries:
+        gap = gaps.get(gap_id)
+        if gap is None or boundary_type not in _INTENTIONAL_OUTPUT_GAP_BOUNDARIES:
             invalid += 1
             continue
-        duration = float(duration_text)
-        if not math.isfinite(duration) or duration <= 0 or duration > gap:
+        gap_start, gap_end, gap_duration = gap
+        if (
+            duration <= 0
+            or start < gap_start
+            or end > gap_end
+            or duration > gap_duration
+        ):
             invalid += 1
             continue
-        excluded[boundary] += 1
-        excluded_durations[boundary] += duration
-    stats = _number_stats(included)
-    stats["observed"] = len(included) + sum(excluded.values()) + invalid
+        by_gap.setdefault(gap_id, []).append(
+            (start, end, duration, boundary_type)
+        )
+
+    residuals = []
+    excluded = Counter()
+    excluded_durations = Counter()
+    for gap_id, (_, _, gap_duration) in gaps.items():
+        intervals = sorted(by_gap.get(gap_id, []), key=lambda item: item[0])
+        previous_end = None
+        explained = 0.0
+        valid_intervals = []
+        for start, end, duration, boundary_type in intervals:
+            if previous_end is not None and start < previous_end:
+                invalid += 1
+                continue
+            previous_end = end
+            explained += duration
+            valid_intervals.append((duration, boundary_type))
+        if explained > gap_duration + 0.001:
+            invalid += 1
+            explained = 0.0
+            valid_intervals = []
+        for duration, boundary_type in valid_intervals:
+            excluded[boundary_type] += 1
+            excluded_durations[boundary_type] += duration
+        residuals.append(max(0.0, round(gap_duration - explained, 3)))
+
+    stats = _number_stats(residuals)
+    stats["observed"] = len(gaps)
     stats["excludedIntentional"] = sum(excluded.values())
     stats["excludedByBoundary"] = dict(sorted(excluded.items()))
     stats["excludedDurationMs"] = round(sum(excluded_durations.values()), 3)
@@ -624,6 +685,12 @@ def _output_gap_stats(log_text):
         key: round(value, 3) for key, value in sorted(excluded_durations.items())
     }
     stats["invalid"] = invalid
+    stats["rawGapDurationMs"] = _number_stats(
+        [duration for _, _, duration in gaps.values()]
+    )
+    stats["unexplainedResidualMs"] = {
+        key: value for key, value in stats.items() if key in {"count", "min", "max", "p50", "p95"}
+    }
     return stats
 
 
