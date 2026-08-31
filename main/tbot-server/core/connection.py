@@ -3154,6 +3154,13 @@ class ConnectionHandler:
             for record in getattr(self, "voice_provider_close_records", {}).values()
             if not record["task"].done()
         }
+        evidence_force_close_tasks = {
+            record["task"]
+            for record in getattr(
+                self, "google_live_evidence_force_close_records", {}
+            ).values()
+            if record["task"] is not None and not record["task"].done()
+        }
         retained = {
             task
             for task in (
@@ -3161,7 +3168,7 @@ class ConnectionHandler:
                 getattr(self, "google_live_evidence_force_close_task", None),
             )
             if task is not None and not task.done()
-        } | provider_close_tasks
+        } | provider_close_tasks | evidence_force_close_tasks
         tasks = tuple(self.mcp_background_tasks - retained)
         for task in tasks:
             if not task.done():
@@ -3229,6 +3236,17 @@ class ConnectionHandler:
 
     async def _force_close_evidence_provider_for_teardown(self, timeout):
         provider = getattr(self, "voice_provider", None)
+        records = getattr(self, "google_live_evidence_force_close_records", None)
+        if records is None:
+            records = {}
+            self.google_live_evidence_force_close_records = records
+        record = records.get(id(provider))
+        if record is not None and record["provider"] is provider:
+            close_task = record["task"]
+            if close_task is not None:
+                self.google_live_evidence_force_close_task = close_task
+            return
+
         force_close = getattr(
             provider, "force_close_after_evidence_finalize_cancel", None
         )
@@ -3236,6 +3254,13 @@ class ConnectionHandler:
             force_close = getattr(provider, "close", None)
         if not callable(force_close):
             return
+        record = {
+            "provider": provider,
+            "task": None,
+            "attempted": True,
+            "completed": False,
+        }
+        records[id(provider)] = record
         try:
             result = force_close()
             if inspect.isawaitable(result):
@@ -3243,6 +3268,7 @@ class ConnectionHandler:
                 if close_task is None:
                     return
                 close_task.set_name("google-live-evidence-force-close")
+                record["task"] = close_task
                 self.google_live_evidence_force_close_task = close_task
                 done, _pending = await asyncio.wait(
                     {close_task}, timeout=max(0.01, float(timeout))
@@ -3252,6 +3278,7 @@ class ConnectionHandler:
                     return
                 if close_task.cancelled() or close_task.exception() is not None:
                     return
+            record["completed"] = True
             self.google_live_evidence_force_close_completed = True
             self.google_live_evidence_force_closed_provider = provider
         except Exception:
