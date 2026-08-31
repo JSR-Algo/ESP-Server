@@ -1,3 +1,4 @@
+import asyncio
 import json
 import unittest
 from types import SimpleNamespace
@@ -245,6 +246,78 @@ class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
         await handleHelloMessage(conn, {"evidence_journey_id": "physical.run-1"})
 
         self.assertEqual(events, ["ack", "start"])
+
+    async def test_google_live_prepare_failure_aborts_claim_and_allows_new_enrollment(self):
+        for failure in (RuntimeError("prepare failed"), asyncio.CancelledError()):
+            with self.subTest(failure=type(failure).__name__):
+                conn = _Conn()
+                conn.config["voice_mode"] = {"type": "google_live"}
+                conn.voice_provider = SimpleNamespace(
+                    prepare_evidence_scope=AsyncMock(side_effect=failure)
+                )
+                registry = self._enroll(conn)
+
+                with self.assertRaises(type(failure)):
+                    await handleHelloMessage(
+                        conn, {"evidence_journey_id": "physical.run-1"}
+                    )
+
+                self.assertEqual(
+                    registry.safe_snapshot("physical.run-1")["status"], "FAIL"
+                )
+                self.assertIsNone(conn.google_live_evidence_journey_id)
+                self.assertIsNone(conn.google_live_evidence_scope)
+                self.assertFalse(
+                    any(
+                        "reliability_window_start" in message
+                        for message in conn.logger.infos
+                    )
+                )
+                replacement = registry.register(
+                    device_id=conn.device_id,
+                    client_id=conn.client_id,
+                    journey_id="physical.run-2",
+                    transcript_plan=(
+                        TranscriptExpectation(1, "interrupt", "a" * 64),
+                    ),
+                    hmac_key=b"r" * 32,
+                    ttl_sec=120,
+                )
+                self.assertEqual(replacement.journey_id, "physical.run-2")
+
+    async def test_google_live_scope_construction_failure_aborts_claim(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(return_value="live-7")
+        )
+        registry = self._enroll(conn)
+
+        with patch.object(
+            helloHandle,
+            "_evidence_peer_identity_hash",
+            side_effect=RuntimeError("scope construction failed"),
+        ), self.assertRaises(RuntimeError):
+            await handleHelloMessage(conn, {"evidence_journey_id": "physical.run-1"})
+
+        self.assertEqual(registry.safe_snapshot("physical.run-1")["status"], "FAIL")
+        self.assertIsNone(conn.google_live_evidence_journey_id)
+        self.assertIsNone(conn.google_live_evidence_scope)
+
+    async def test_google_live_pre_scope_timestamp_failure_aborts_claim(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        registry = self._enroll(conn)
+
+        with patch.object(
+            helloHandle,
+            "_utc_now_iso",
+            side_effect=KeyboardInterrupt(),
+        ), self.assertRaises(KeyboardInterrupt):
+            await handleHelloMessage(conn, {"evidence_journey_id": "physical.run-1"})
+
+        self.assertEqual(registry.safe_snapshot("physical.run-1")["status"], "FAIL")
+        self.assertIsNone(conn.google_live_evidence_journey_id)
     async def test_client_audio_params_update_connection_sample_rate(self):
         conn = _Conn()
 

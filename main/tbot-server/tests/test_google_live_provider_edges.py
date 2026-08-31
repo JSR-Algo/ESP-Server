@@ -4861,6 +4861,29 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(markers), 1)
 
+    async def test_evidence_finalize_fails_safely_when_bridge_close_fails(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "bargein-journey-1"
+        conn.google_live_evidence_scope = {
+            "peerIdentityHash": "sha256:" + "a" * 64,
+        }
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-7")
+        provider._bridge = _FailingBridge()
+        provider._client = _Client()
+
+        await provider._close_live_resources()
+
+        first = await provider.finalize_evidence()
+        second = await provider.finalize_evidence()
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["status"], "FAIL")
+        self.assertEqual(first["failureCode"], "EVIDENCE_BRIDGE_CLOSE_FAILED")
+        self.assertEqual(first["pendingTasks"], 0)
+        self.assertNotIn("bridge close failed", json.dumps(first))
+        self.assertEqual(provider._client, None)
+
     async def test_evidence_live_identity_tracks_ordered_reconnect_transitions(self):
         conn = _Conn()
         conn.google_live_evidence_journey_id = "journey-1"

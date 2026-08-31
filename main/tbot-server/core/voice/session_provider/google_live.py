@@ -439,6 +439,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._lesson_instruction_generation = None
         self._lesson_context_signature = None
         self._evidence_finalize_result = None
+        self._evidence_cleanup_failure_code = None
         self._evidence_initial_live_connection_id = None
         self._evidence_current_live_connection_id = None
         self._evidence_live_connection_transitions = []
@@ -1026,7 +1027,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if evidence_scope is None:
                 return {"status": "FAIL", "failureCode": "EVIDENCE_SCOPE_MISSING"}
             self._ensure_evidence_live_identity()
-            await self._close_live_resources()
+            cleanup_result = await self._close_live_resources()
+            cleanup_failure_code = (
+                cleanup_result
+                if cleanup_result == "EVIDENCE_BRIDGE_CLOSE_FAILED"
+                else self._evidence_cleanup_failure_code
+            )
             if self._fallback_provider is not None:
                 await self._fallback_provider.close()
             pending_tasks = self._pending_evidence_task_count()
@@ -1038,7 +1044,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 pending_tasks,
             )
             self._evidence_finalize_result = {
-                "status": "PASS" if pending_tasks == 0 else "FAIL",
+                "status": (
+                    "PASS"
+                    if pending_tasks == 0 and cleanup_failure_code is None
+                    else "FAIL"
+                ),
                 "journeyId": evidence_scope[0],
                 "connectionId": evidence_scope[1],
                 "peerIdentityHash": str(
@@ -1053,7 +1063,24 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 ],
                 "pendingTasks": pending_tasks,
             }
+            if cleanup_failure_code is not None:
+                self._evidence_finalize_result["failureCode"] = cleanup_failure_code
             return dict(self._evidence_finalize_result)
+
+    def request_evidence_finalize_stop(self):
+        self._closing = True
+        self._lifecycle_generation += 1
+        for task in (self._active_reconnect_task, self._receive_task):
+            if task is not None and not task.done():
+                task.cancel()
+
+    async def force_close_after_evidence_finalize_cancel(self):
+        self._closing = True
+        self._lifecycle_generation += 1
+        async with self._get_lifecycle_lock():
+            await self._close_live_resources()
+            if self._fallback_provider is not None:
+                await self._fallback_provider.close()
 
     async def prepare_for_sample_lesson(self):
         if self._fallback_provider is not None:
@@ -3265,6 +3292,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._fallback_activating = False
 
     async def _close_live_resources(self, *, preserve_live_prewarm=False):
+        cleanup_failure_code = None
         current_task = asyncio.current_task()
         receive_task = self._receive_task
         flush_task = self._input_flush_task
@@ -3406,7 +3434,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             try:
                 await self._bridge.close()
             except Exception:
-                pass
+                cleanup_failure_code = "EVIDENCE_BRIDGE_CLOSE_FAILED"
+                self._evidence_cleanup_failure_code = cleanup_failure_code
 
         await self._record_live_session_usage()
 
@@ -3426,6 +3455,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._start_lesson_asr_fallback_audio.clear()
         if self._has_session_orchestrator():
             self.conn.google_live_audio_out_started_at = None
+        return cleanup_failure_code
 
     async def _close_stale_live_resources_before_open(self):
         receive_task = self._receive_task

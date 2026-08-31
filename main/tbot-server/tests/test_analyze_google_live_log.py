@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -308,6 +309,178 @@ def test_cli_reliability_window_rejects_output_alias(tmp_path):
 
     assert exit_code != 0
     assert log.read_text(encoding="utf-8") == "malformed"
+
+
+def test_cli_reliability_window_selects_target_from_interleaved_windows(tmp_path):
+    target = {**EVIDENCE_SCOPE, "journeyId": "physical.run-1"}
+    foreign = {
+        **EVIDENCE_SCOPE,
+        "journeyId": "physical.run-2",
+        "connectionId": "conn-2",
+        "liveConnectionId": "live-2",
+        "initialLiveConnectionId": "live-2",
+    }
+    target_lines = _window_lines(
+        "2026-08-31 10:00:03 Google Live evidence_connection_close "
+        "journey_id=physical.run-1 connection_id=conn-1 live_connection_id=live-1 "
+        "pending_tasks=0 close_code=1000 reason=evidence_finalize",
+        journey_id=target["journeyId"], evidence_scope=target,
+        window_id=target["journeyId"], server_issued=True,
+    )
+    foreign_lines = _window_lines(
+        "2026-08-31 10:00:02 Google Live evidence_connection_close "
+        "journey_id=physical.run-2 connection_id=conn-2 live_connection_id=live-2 "
+        "pending_tasks=0 close_code=1000 reason=evidence_finalize",
+        journey_id=foreign["journeyId"], evidence_scope=foreign,
+        window_id=foreign["journeyId"], server_issued=True,
+    )
+    log = tmp_path / "server.log"
+    out = tmp_path / "report.json"
+    log.write_text("\n".join([
+        target_lines[0], foreign_lines[0], foreign_lines[1],
+        target_lines[1], foreign_lines[-1], target_lines[-1],
+    ]), encoding="utf-8")
+
+    exit_code = main([
+        "--log", str(log), "--reliability-window",
+        "--journey-id", target["journeyId"], "--out-json", str(out),
+    ])
+
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert report["status"] == "PASS"
+    assert report["evidenceScope"]["journeyId"] == target["journeyId"]
+
+
+def test_cli_reliability_window_rejects_ambiguous_or_false_target_scope(tmp_path):
+    target = {**EVIDENCE_SCOPE, "journeyId": "physical.run-1"}
+    foreign = {
+        **EVIDENCE_SCOPE,
+        "journeyId": "physical.run-2",
+        "connectionId": "conn-2",
+        "liveConnectionId": "live-2",
+        "initialLiveConnectionId": "live-2",
+    }
+    target_lines = _window_lines(
+        journey_id=target["journeyId"], evidence_scope=target,
+        window_id=target["journeyId"], server_issued=True,
+    )
+    foreign_lines = _window_lines(
+        journey_id=foreign["journeyId"], evidence_scope=foreign,
+        window_id=foreign["journeyId"], server_issued=True,
+    )
+    cases = {
+        "ambiguous": "2026-08-31 10:00:02 Google Live receive loop started",
+        "unanchored_foreign_scope": (
+            "2026-08-31 10:00:02 Google Live evidence_connection_close "
+            "journey_id=physical.run-9 connection_id=conn-9 live_connection_id=live-9 "
+            "pending_tasks=0 close_code=1000 reason=evidence_finalize"
+        ),
+        "false_target_scope": (
+            "2026-08-31 10:00:02 Google Live evidence_connection_close "
+            "journey_id=physical.run-1 connection_id=conn-2 live_connection_id=live-2 "
+            "pending_tasks=0 close_code=1000 reason=evidence_finalize"
+        ),
+    }
+    for name, marker in cases.items():
+        log = tmp_path / f"{name}.log"
+        out = tmp_path / f"{name}.json"
+        log.write_text("\n".join([
+            target_lines[0], foreign_lines[0], marker,
+            foreign_lines[-1], target_lines[-1],
+        ]), encoding="utf-8")
+
+        exit_code = main([
+            "--log", str(log), "--reliability-window",
+            "--journey-id", target["journeyId"], "--out-json", str(out),
+        ])
+
+        assert exit_code != 0
+        assert json.loads(out.read_text(encoding="utf-8"))["status"] == "FAIL"
+
+
+def test_cli_reliability_window_rejects_symlink_ancestor(tmp_path):
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    alias_dir = tmp_path / "alias"
+    alias_dir.symlink_to(real_dir, target_is_directory=True)
+    log = real_dir / "server.log"
+    out = tmp_path / "report.json"
+    scope = {**EVIDENCE_SCOPE, "journeyId": "physical.run-1"}
+    log.write_text("\n".join(_window_lines(
+        journey_id=scope["journeyId"], evidence_scope=scope,
+        window_id=scope["journeyId"], server_issued=True,
+    )), encoding="utf-8")
+
+    exit_code = main([
+        "--log", str(alias_dir / "server.log"), "--reliability-window",
+        "--journey-id", "physical.run-1", "--out-json", str(out),
+    ])
+
+    assert exit_code != 0
+    assert json.loads(out.read_text(encoding="utf-8"))["status"] == "FAIL"
+
+
+def test_cli_reliability_window_rejects_untrusted_interleaved_anchors(tmp_path):
+    target = {**EVIDENCE_SCOPE, "journeyId": "physical.run-1"}
+    target_lines = _window_lines(
+        journey_id=target["journeyId"], evidence_scope=target,
+        window_id=target["journeyId"], server_issued=True,
+    )
+    identity = json.dumps(CANDIDATE_IDENTITY, sort_keys=True, separators=(",", ":"))
+    log = tmp_path / "server.log"
+    out = tmp_path / "report.json"
+    log.write_text("\n".join([
+        target_lines[0],
+        "2026-08-31 10:00:01 Google Live reliability_window_start "
+        f"window_id=physical.run-2 journey_id=physical.run-2 candidate_identity={identity}",
+        "2026-08-31 10:00:02 Google Live evidence_connection_close "
+        "journey_id=physical.run-2 connection_id=conn-2 live_connection_id=live-2 "
+        "pending_tasks=0 close_code=1000 reason=evidence_finalize",
+        "2026-08-31 10:00:58 Google Live reliability_window_end "
+        "window_id=physical.run-2",
+        target_lines[-1],
+    ]), encoding="utf-8")
+
+    exit_code = main([
+        "--log", str(log), "--reliability-window",
+        "--journey-id", target["journeyId"], "--out-json", str(out),
+    ])
+
+    assert exit_code != 0
+    assert json.loads(out.read_text(encoding="utf-8"))["status"] == "FAIL"
+
+
+def test_cli_reliability_window_reads_opened_inode_after_path_replacement(tmp_path):
+    scope = {**EVIDENCE_SCOPE, "journeyId": "physical.run-1"}
+    log = tmp_path / "server.log"
+    replacement = tmp_path / "replacement.log"
+    out = tmp_path / "report.json"
+    log.write_text("\n".join(_window_lines(
+        journey_id=scope["journeyId"], evidence_scope=scope,
+        window_id=scope["journeyId"], server_issued=True,
+    )), encoding="utf-8")
+    replacement.write_text("malformed", encoding="utf-8")
+    original_open = os.open
+    replaced = False
+
+    def replace_after_open(path, flags, *args, **kwargs):
+        nonlocal replaced
+        fd = original_open(path, flags, *args, **kwargs)
+        if str(path) == log.name and kwargs.get("dir_fd") is not None and not replaced:
+            replaced = True
+            os.replace(replacement, log)
+        return fd
+
+    with patch.object(analyze_google_live_log.os, "open", side_effect=replace_after_open):
+        exit_code = main([
+            "--log", str(log), "--reliability-window",
+            "--journey-id", scope["journeyId"], "--out-json", str(out),
+        ])
+
+    assert replaced
+    assert exit_code == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["status"] == "PASS"
 
 
 def _valid_log_verdict(**overrides):

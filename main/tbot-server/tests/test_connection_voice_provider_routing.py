@@ -1315,6 +1315,105 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(terminal, [("bargein-1", "PASS", None)])
 
+    async def test_connection_close_drains_tracked_evidence_finalize_task(self):
+        handler = self._build_handler()
+        handler.logger = _RecordingLogger()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.config["google_live"] = {"evidence_finalize_timeout_sec": 0.1}
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        release = asyncio.Event()
+        stop_requested = asyncio.Event()
+
+        async def hanging_cleanup():
+            await release.wait()
+            return {"status": "FAIL", "pendingTasks": 1}
+
+        handler.voice_provider = types.SimpleNamespace(
+            finalize_evidence=hanging_cleanup,
+            request_evidence_finalize_stop=AsyncMock(
+                side_effect=lambda: stop_requested.set()
+            ),
+            close=AsyncMock(),
+        )
+
+        timed_out = await handler.finalize_google_live_evidence(scope)
+        task = handler.google_live_evidence_finalize_task
+        self.assertEqual(timed_out["failureCode"], "EVIDENCE_FINALIZE_TIMEOUT")
+        self.assertIn(task, handler.mcp_background_tasks)
+        self.assertEqual(task.get_name(), "google-live-evidence-finalize")
+
+        await handler._drain_evidence_finalize_task_for_teardown(timeout=0.1)
+
+        self.assertTrue(stop_requested.is_set())
+        self.assertTrue(task.done())
+        self.assertNotIn(task, handler.mcp_background_tasks)
+        retry = await handler.finalize_google_live_evidence(scope)
+        self.assertTrue(retry["retryable"])
+        self.assertEqual(retry["failureCode"], "EVIDENCE_FINALIZE_CANCELLED")
+        self.assertFalse(
+            any("reliability_window_end" in record[1] for record in handler.logger.records)
+        )
+        self.assertIsNone(
+            getattr(handler, "google_live_evidence_finalize_result", None)
+        )
+        await handler._close_voice_provider_for_teardown()
+        handler.voice_provider.close.assert_awaited_once()
+
+    async def test_evidence_finalize_propagates_caller_cancel_during_cleanup_grace(self):
+        handler = self._build_handler()
+        handler.config["google_live"] = {"evidence_finalize_timeout_sec": 0.1}
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        release = asyncio.Event()
+
+        async def hanging_cleanup():
+            await release.wait()
+
+        handler.voice_provider = types.SimpleNamespace(
+            finalize_evidence=hanging_cleanup,
+            request_evidence_finalize_stop=AsyncMock(),
+        )
+        caller = asyncio.create_task(handler.finalize_google_live_evidence(scope))
+        await asyncio.sleep(0.15)
+        caller.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+
+        release.set()
+        await asyncio.gather(
+            handler.google_live_evidence_finalize_task, return_exceptions=True
+        )
+
+    async def test_failed_evidence_force_close_keeps_normal_close_fallback(self):
+        handler = self._build_handler()
+        handler.voice_provider = types.SimpleNamespace(
+            force_close_after_evidence_finalize_cancel=AsyncMock(
+                side_effect=RuntimeError("force close failed")
+            ),
+            close=AsyncMock(),
+        )
+
+        await handler._force_close_evidence_provider_for_teardown(0.1)
+        await handler._close_voice_provider_for_teardown()
+
+        handler.voice_provider.close.assert_awaited_once()
+
     async def test_evidence_finalize_rejects_changed_live_id_or_pending_cleanup(self):
         for result in (
             {"status": "PASS", "liveConnectionId": "live-other", "pendingTasks": 0},

@@ -1242,11 +1242,17 @@ class ConnectionHandler:
                     self, "google_live_evidence_finalize_task", None
                 )
                 if finalize_task is None:
-                    finalize_task = asyncio.create_task(finalize())
+                    finalize_task = self.schedule_mcp_background_task(finalize())
+                    if finalize_task is None:
+                        return {
+                            "type": "evidence_finalized",
+                            "status": "FAIL",
+                            "failureCode": "EVIDENCE_FINALIZE_UNAVAILABLE",
+                            "evidenceScope": scope,
+                            "retryable": True,
+                        }
+                    finalize_task.set_name("google-live-evidence-finalize")
                     self.google_live_evidence_finalize_task = finalize_task
-                    finalize_task.add_done_callback(
-                        lambda task: task.exception() if not task.cancelled() else None
-                    )
                 try:
                     result = await asyncio.wait_for(
                         asyncio.shield(finalize_task),
@@ -1278,9 +1284,29 @@ class ConnectionHandler:
                             "retryable": True,
                         }
                     except asyncio.CancelledError:
-                        failure_code = "EVIDENCE_FINALIZE_TIMEOUT"
+                        current_task = asyncio.current_task()
+                        if current_task is not None and current_task.cancelling():
+                            raise
+                        return {
+                            "type": "evidence_finalized",
+                            "status": "FAIL",
+                            "failureCode": "EVIDENCE_FINALIZE_CANCELLED",
+                            "evidenceScope": scope,
+                            "retryable": True,
+                        }
                     except Exception:
                         failure_code = "EVIDENCE_FINALIZE_FAILED"
+                except asyncio.CancelledError:
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling():
+                        raise
+                    return {
+                        "type": "evidence_finalized",
+                        "status": "FAIL",
+                        "failureCode": "EVIDENCE_FINALIZE_CANCELLED",
+                        "evidenceScope": scope,
+                        "retryable": True,
+                    }
                 except Exception:
                     failure_code = "EVIDENCE_FINALIZE_FAILED"
                 validated_transition_result = self._validated_evidence_transition_result(
@@ -3131,6 +3157,53 @@ class ConnectionHandler:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.mcp_background_tasks.clear()
 
+    async def _drain_evidence_finalize_task_for_teardown(self, timeout=1.0):
+        task = getattr(self, "google_live_evidence_finalize_task", None)
+        if task is None:
+            return
+        if task.cancelled():
+            await self._force_close_evidence_provider_for_teardown(timeout)
+            return
+        if task.done():
+            return
+        provider = getattr(self, "voice_provider", None)
+        request_stop = getattr(provider, "request_evidence_finalize_stop", None)
+        if callable(request_stop):
+            try:
+                stop_result = request_stop()
+                if inspect.isawaitable(stop_result):
+                    await stop_result
+            except Exception:
+                pass
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task), timeout=max(0.0, float(timeout))
+            )
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await self._force_close_evidence_provider_for_teardown(timeout)
+        except Exception:
+            pass
+
+    async def _force_close_evidence_provider_for_teardown(self, timeout):
+        provider = getattr(self, "voice_provider", None)
+        force_close = getattr(
+            provider, "force_close_after_evidence_finalize_cancel", None
+        )
+        if not callable(force_close):
+            force_close = getattr(provider, "close", None)
+        if not callable(force_close):
+            return
+        try:
+            result = force_close()
+            if inspect.isawaitable(result):
+                await asyncio.wait_for(result, timeout=max(0.1, float(timeout)))
+            self.google_live_evidence_force_close_completed = True
+        except Exception:
+            pass
+
     async def _close_connection_owned_mcp_callers(self):
         """Stop every connection-owned path that can use device/server MCP."""
         await self._close_lesson_control_tasks()
@@ -3142,6 +3215,7 @@ class ConnectionHandler:
                 restore_conversation=False,
                 force=True,
             )
+        await self._drain_evidence_finalize_task_for_teardown()
         await self._close_mcp_background_tasks()
 
         tasks = []
@@ -3235,6 +3309,8 @@ class ConnectionHandler:
 
     async def _close_voice_provider_for_teardown(self):
         if self.voice_provider is None:
+            return
+        if getattr(self, "google_live_evidence_force_close_completed", False):
             return
         try:
             await self.voice_provider.close()

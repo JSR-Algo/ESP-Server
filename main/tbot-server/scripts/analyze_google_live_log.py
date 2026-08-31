@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+import stat
 import statistics
 import sys
 import tempfile
@@ -1460,10 +1461,10 @@ def _atomic_write_json(path: Path, report: Mapping[str, Any]) -> None:
             temporary.unlink()
 
 
-def _bounded_server_window(log_path: Path, journey_id: str) -> list[str]:
-    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+def _bounded_server_window(lines: list[str], journey_id: str) -> list[str]:
     matches: list[tuple[int, int]] = []
-    active: tuple[int, re.Match[str]] | None = None
+    active: dict[str, tuple[int, re.Match[str]]] = {}
+    intervals: list[tuple[int, int, re.Match[str]]] = []
     for index, line in enumerate(lines):
         start = P_RELIABILITY_WINDOW_START.search(line)
         end = P_RELIABILITY_WINDOW_END.search(line)
@@ -1472,24 +1473,24 @@ def _bounded_server_window(log_path: Path, journey_id: str) -> list[str]:
         if "Google Live reliability_window_end" in line and end is None:
             raise ValueError("malformed reliability window end")
         if start:
-            if active is not None:
-                raise ValueError("nested reliability window")
-            active = (index, start)
+            window_id = start.group("window_id")
+            if window_id in active:
+                raise ValueError("duplicate reliability window start")
+            active[window_id] = (index, start)
         if end:
-            if active is None:
+            window_id = end.group("window_id")
+            opened = active.pop(window_id, None)
+            if opened is None:
                 raise ValueError("orphan reliability window end")
-            start_index, start_match = active
-            if end.group("window_id") != start_match.group("window_id"):
-                raise ValueError("reliability window mismatch")
+            start_index, start_match = opened
+            intervals.append((start_index, index, start_match))
             if start_match.group("journey_id") == journey_id:
                 matches.append((start_index, index))
-            active = None
-    if active is not None or len(matches) != 1:
+    if active or len(matches) != 1:
         raise ValueError("requested reliability window is not unique")
     start_index, end_index = matches[0]
-    selected = lines[start_index : end_index + 1]
-    start = P_RELIABILITY_WINDOW_START.search(selected[0])
-    end = P_RELIABILITY_WINDOW_END.search(selected[-1])
+    start = P_RELIABILITY_WINDOW_START.search(lines[start_index])
+    end = P_RELIABILITY_WINDOW_END.search(lines[end_index])
     if (
         start is None
         or end is None
@@ -1502,32 +1503,135 @@ def _bounded_server_window(log_path: Path, journey_id: str) -> list[str]:
         or end.group("server_end_utc") is None
     ):
         raise ValueError("requested reliability anchors are not server scoped")
-    for line in selected[1:-1]:
+    target_connection_id = start.group("connection_id")
+    foreign_intervals = [
+        (
+            foreign_start,
+            foreign_end,
+            foreign_match.group("journey_id"),
+            foreign_match.group("connection_id"),
+        )
+        for foreign_start, foreign_end, foreign_match in intervals
+        if foreign_match.group("journey_id") != journey_id
+        and foreign_start < end_index
+        and foreign_end > start_index
+    ]
+    selected = [lines[start_index]]
+    for index in range(start_index + 1, end_index):
+        line = lines[index]
         foreign_start = P_RELIABILITY_WINDOW_START.search(line)
         foreign_end = P_RELIABILITY_WINDOW_END.search(line)
         if foreign_start or foreign_end:
-            raise ValueError("foreign reliability anchor")
+            continue
         scoped_marker, scoped_valid = _scoped_marker_validation(line)
         if scoped_marker and not scoped_valid:
             raise ValueError("malformed scoped evidence marker")
-        if _is_reliability_line(line) or scoped_marker:
-            marker_journey = re.search(r"\bjourney_id=([A-Za-z0-9._:-]+)", line)
-            if marker_journey is not None and marker_journey.group(1) != journey_id:
-                raise ValueError("foreign reliability marker")
+        marker_journey = re.search(r"\bjourney_id=([A-Za-z0-9._:-]+)", line)
+        marker_connection = re.search(r"\bconnection_id=([A-Za-z0-9._:-]+)", line)
+        server_transition = P_SERVER_CONNECTION_TRANSITION.search(line)
+        if server_transition is not None:
+            if server_transition.group("to_journey_id") != journey_id:
+                if any(
+                    foreign_start < index < foreign_end
+                    and foreign_journey == server_transition.group("to_journey_id")
+                    and foreign_connection
+                    == server_transition.group("to_connection_id")
+                    for (
+                        foreign_start,
+                        foreign_end,
+                        foreign_journey,
+                        foreign_connection,
+                    ) in foreign_intervals
+                ):
+                    continue
+                raise ValueError("unanchored foreign reliability marker")
+            if server_transition.group("to_connection_id") != target_connection_id:
+                raise ValueError("target reliability marker scope mismatch")
+        elif scoped_marker and marker_journey is not None:
+            if marker_journey.group(1) != journey_id:
+                if any(
+                    foreign_start < index < foreign_end
+                    and foreign_journey == marker_journey.group(1)
+                    and marker_connection is not None
+                    and foreign_connection == marker_connection.group(1)
+                    for (
+                        foreign_start,
+                        foreign_end,
+                        foreign_journey,
+                        foreign_connection,
+                    ) in foreign_intervals
+                ):
+                    continue
+                raise ValueError("unanchored foreign reliability marker")
+            if (
+                marker_connection is None
+                or marker_connection.group(1) != target_connection_id
+            ):
+                raise ValueError("target reliability marker scope mismatch")
+        elif _is_reliability_line(line) and any(
+            foreign_start < index < foreign_end
+            for foreign_start, foreign_end, _journey, _connection in foreign_intervals
+        ):
+            raise ValueError("ambiguous reliability marker")
+        selected.append(line)
+    selected.append(lines[end_index])
     return selected
+
+
+def _open_log_without_symlinks(path: Path) -> int:
+    absolute = Path(os.path.abspath(path))
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(absolute.anchor, directory_flags)
+    try:
+        for component in absolute.parts[1:-1]:
+            next_fd = os.open(
+                component,
+                directory_flags | nofollow,
+                dir_fd=directory_fd,
+            )
+            os.close(directory_fd)
+            directory_fd = next_fd
+        return os.open(
+            absolute.name,
+            os.O_RDONLY | nofollow,
+            dir_fd=directory_fd,
+        )
+    finally:
+        os.close(directory_fd)
+
+
+def _opened_file_aliases(path: Path, opened_stat: os.stat_result) -> bool:
+    try:
+        candidate = os.stat(path)
+    except FileNotFoundError:
+        return False
+    return (candidate.st_dev, candidate.st_ino) == (
+        opened_stat.st_dev,
+        opened_stat.st_ino,
+    )
 
 
 def _persist_reliability_window(log_path: Path, journey_id: str, out_path: Path) -> int:
     try:
         if SAFE_EVIDENCE_JOURNEY_RE.fullmatch(journey_id) is None:
             raise ValueError("invalid journey")
-        if log_path.is_symlink() or not log_path.is_file():
-            raise ValueError("log file unavailable")
-        if out_path.exists() and os.path.samefile(log_path, out_path):
-            return 1
-        if log_path.resolve() == out_path.resolve():
-            return 1
-        selected = _bounded_server_window(log_path, journey_id)
+        fd = _open_log_without_symlinks(log_path)
+        try:
+            opened_stat = os.fstat(fd)
+            if not stat.S_ISREG(opened_stat.st_mode):
+                raise ValueError("log file unavailable")
+            if _opened_file_aliases(out_path, opened_stat):
+                return 1
+            if log_path.absolute() == out_path.absolute():
+                return 1
+            with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as handle:
+                fd = None
+                lines = handle.read().splitlines()
+        finally:
+            if fd is not None:
+                os.close(fd)
+        selected = _bounded_server_window(lines, journey_id)
         with tempfile.TemporaryDirectory() as directory:
             bounded = Path(directory) / "server-window.log"
             bounded.write_text("\n".join(selected) + "\n", encoding="utf-8")
@@ -1536,9 +1640,7 @@ def _persist_reliability_window(log_path: Path, journey_id: str, out_path: Path)
         return 0 if report.get("status") == "PASS" else 1
     except Exception:
         try:
-            if not (
-                out_path.exists() and os.path.samefile(log_path, out_path)
-            ) and log_path.resolve() != out_path.resolve():
+            if log_path.absolute() != out_path.absolute():
                 _atomic_write_json(out_path, _safe_failure_report("BOUNDED_LOG_INVALID"))
         except Exception:
             pass
