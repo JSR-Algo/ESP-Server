@@ -3838,5 +3838,312 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         self.assertIn("lesson_step_layers_complete", result["missing"])
         self.assertIn("lesson_firmware_rendered>=9", result["missing"])
 
+    def _candidate_identity(self):
+        return {
+            "gitSha": "candidate-sha",
+            "imageDigest": f"sha256:{'a' * 64}",
+            "firmwareIdentity": "esp32-production-2.2.7",
+            "fixtureSha256": "b" * 64,
+            "configFingerprint": f"sha256:{'c' * 64}",
+        }
+
+    def _candidate_physical_log(
+        self,
+        *,
+        first_audio=None,
+        interrupt_stop=None,
+        physical_bargein=None,
+        output_gaps=None,
+        extra_lines=None,
+    ):
+        identity = json.dumps(self._candidate_identity(), separators=(",", ":"))
+        first_audio = [600.0] * 10 if first_audio is None else first_audio
+        interrupt_stop = [25.0] * 10 if interrupt_stop is None else interrupt_stop
+        physical_bargein = (
+            [300.0] * 10 if physical_bargein is None else physical_bargein
+        )
+        output_gaps = (
+            [(100.0, "continuous")] * 10 if output_gaps is None else output_gaps
+        )
+        lines = [
+            "260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}",
+            "260518 20:10:00[GoogleLive]-INFO-Google Live reliability_window_start window_id=physical-1 journey_id=physical-1 connection_id=connection-1 live_connection_id=live-1 candidate_identity=" + identity,
+            "260518 20:10:00[GoogleLive]-INFO-Google Live evidence_receive_loop_started journey_id=physical-1 connection_id=connection-1 live_connection_id=live-1 generation=1",
+            "260518 20:10:01[GoogleLive]-INFO-Google Live input_audio_diag encoded_bytes=80 decoded_bytes=640 rms=921 source_rate=16000 target_rate=16000 sample_width=2",
+            "260518 20:10:02[GoogleLive]-INFO-Google Live transcript source=user chars=8 text='xin chào'",
+        ]
+        lines.extend(
+            f"260518 20:11:{index:02d}[GoogleLive]-INFO-Google Live turn_latency_ms={value} phase=first_audio_out"
+            for index, value in enumerate(first_audio)
+        )
+        lines.extend(
+            f"260518 20:12:{index:02d}[GoogleLive]-INFO-Google Live interruption_stop_latency_ms={value}"
+            for index, value in enumerate(interrupt_stop)
+        )
+        lines.extend(
+            f"260518 20:13:{index:02d}[GoogleLive]-INFO-Google Live physical_bargein_latency_ms={value}"
+            for index, value in enumerate(physical_bargein)
+        )
+        lines.extend(
+            f"260518 20:14:{index:02d}[GoogleLive]-INFO-Google Live server_output_gap_ms={value} boundary={boundary}"
+            + (f" boundary_duration_ms={value}" if boundary != "continuous" else "")
+            for index, (value, boundary) in enumerate(output_gaps)
+        )
+        lines.extend(extra_lines or [])
+        lines.extend(
+            [
+                "260518 20:15:00[GoogleLive]-INFO-Google Live evidence_receive_loop_stopped journey_id=physical-1 connection_id=connection-1 live_connection_id=live-1 generation=1",
+                "260518 20:15:01[GoogleLive]-INFO-Google Live reliability_window_end window_id=physical-1",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _candidate_audit(self, log_text, **overrides):
+        audit = importlib.import_module("scripts.physical_smoke_audit")
+        identity = self._candidate_identity()
+        reliability_report = {
+            "schemaVersion": "google-live-reliability.v1",
+            "name": "google_live_log_reliability",
+            "status": "PASS",
+            "candidateIdentity": identity,
+            "logWindow": {"windowId": "physical-1"},
+            "evidenceScope": {
+                "journeyId": "physical-1",
+                "connectionId": "connection-1",
+                "liveConnectionId": "live-1",
+            },
+            "receiveLoopBalance": 0,
+            "maxReceiveLoopsActive": 1,
+            "staleAudioAfterReplacement": 0,
+            "duplicateResponseIds": [],
+            "unrecoveredTimeouts": [],
+            "unreleasedLessonHandoffs": [],
+            "replayCountsByReopen": {},
+            "correlations": [{"status": "PASS", "journeyId": "physical-1"}],
+            "failures": [],
+            "fatalHits": [],
+        }
+        candidate_soak_report = {
+            "schemaVersion": "google-live-reliability.v1",
+            "name": "candidate_soak",
+            "status": "PASS",
+            "candidateIdentity": identity,
+            "stages": [
+                {"name": name, "executions": count, "status": "PASS"}
+                for name, count in (
+                    ("conversation", 17),
+                    ("bargein", 10),
+                    ("quiet", 2),
+                    ("reopen", 1),
+                    ("reconnect", 1),
+                    ("lesson", 1),
+                    ("conversation_after_lesson", 1),
+                )
+            ],
+            "cleanupVerdict": {"status": "PASS"},
+            "durationSec": 1800.0,
+            "totals": {
+                "successfulTurns": 30,
+                "bargeins": 10,
+                "latestIntentSuccessRate": 1.0,
+            },
+            "latencyMetrics": {
+                "firstAudioP50Ms": 600.0,
+                "firstAudioP95Ms": 900.0,
+                "bargeinP95Ms": 300.0,
+                "reconnectRecoveryP95Ms": 900.0,
+            },
+            "serverOutputGapP95Ms": 100.0,
+            "latencyComparison": {"pass": True},
+            "resourceVerdict": {"status": "PASS"},
+            "failures": [],
+            "rawAudioPersisted": False,
+            "transcriptPersisted": False,
+        }
+        options = {
+            "device_id": "3c:0f:02:de:c2:e0",
+            "client_id": "d16afa54-eb44-4fcb-8cac-cdefdf05f6fc",
+            "min_interrupts": 0,
+            "candidate_identity": self._candidate_identity(),
+            "reliability_report": reliability_report,
+            "candidate_soak_report": candidate_soak_report,
+            "max_first_audio_p50_ms": 1200.0,
+            "max_first_audio_p95_ms": 1800.0,
+            "max_interrupt_stop_latency_ms": 250.0,
+            "max_physical_bargein_p95_ms": 500.0,
+            "max_server_output_gap_ms": 250.0,
+            "min_first_audio_samples": 10,
+            "min_interrupt_stop_samples": 10,
+            "min_physical_bargein_samples": 10,
+            "min_server_output_gap_samples": 10,
+            "require_receive_loop_balance": True,
+        }
+        options.update(overrides)
+        return audit.audit_log(log_text, **options)
+
+    def test_candidate_physical_audit_reports_all_production_budgets(self):
+        result = self._candidate_audit(self._candidate_physical_log())
+
+        self.assertTrue(result["passed"], result["missing"])
+        self.assertLessEqual(result["firstAudioLatencyMs"]["p50"], 1200.0)
+        self.assertLessEqual(result["firstAudioLatencyMs"]["p95"], 1800.0)
+        self.assertLessEqual(result["interruptStopLatencyMs"]["max"], 250.0)
+        self.assertLessEqual(result["physicalBargeinLatencyMs"]["p95"], 500.0)
+        self.assertLessEqual(result["serverOutputGapMs"]["max"], 250.0)
+        self.assertEqual(result["receiveLoopBalance"], 0)
+        self.assertEqual(result["maxReceiveLoopsActive"], 1)
+        self.assertEqual(result["candidateIdentity"], self._candidate_identity())
+
+    def test_candidate_physical_audit_fails_each_latency_bound(self):
+        cases = (
+            ({"first_audio": [1300.0] * 10}, "first_audio_p50_ms<=1200"),
+            ({"first_audio": [600.0] * 9 + [1900.0]}, "first_audio_p95_ms<=1800"),
+            ({"interrupt_stop": [25.0] * 9 + [251.0]}, "interrupt_stop_latency_ms<=250"),
+            ({"physical_bargein": [300.0] * 9 + [501.0]}, "physical_bargein_p95_ms<=500"),
+            ({"output_gaps": [(100.0, "continuous")] * 9 + [(251.0, "continuous")]}, "server_output_gap_ms<=250"),
+        )
+        for changes, expected_missing in cases:
+            with self.subTest(expected_missing=expected_missing):
+                result = self._candidate_audit(self._candidate_physical_log(**changes))
+                self.assertFalse(result["passed"])
+                self.assertIn(expected_missing, result["missing"])
+
+    def test_candidate_physical_audit_excludes_intentional_interrupt_output_gap(self):
+        result = self._candidate_audit(
+            self._candidate_physical_log(
+                output_gaps=[(100.0, "continuous")] * 9 + [(900.0, "interrupt")]
+            )
+        )
+
+        self.assertTrue(result["passed"], result["missing"])
+        self.assertEqual(result["serverOutputGapMs"]["excludedIntentional"], 1)
+        self.assertEqual(result["serverOutputGapMs"]["max"], 100.0)
+
+    def test_candidate_physical_audit_fails_closed_on_identity_scope_and_multiplicity(self):
+        mismatched = self._candidate_identity()
+        mismatched["gitSha"] = "other-sha"
+        result = self._candidate_audit(
+            self._candidate_physical_log(first_audio=[600.0] * 9),
+            candidate_identity=mismatched,
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertIn("candidate_identity_match", result["missing"])
+        self.assertIn("first_audio_samples>=10", result["missing"])
+
+    def test_candidate_physical_audit_rejects_missing_latency_evidence(self):
+        cases = (
+            ({"first_audio": []}, "first_audio_samples>=10"),
+            ({"interrupt_stop": []}, "interrupt_stop_latency_ms>=10"),
+            ({"physical_bargein": []}, "physical_bargein_samples>=10"),
+            ({"output_gaps": []}, "server_output_gap_samples>=10"),
+        )
+        for changes, expected_missing in cases:
+            with self.subTest(expected_missing=expected_missing):
+                result = self._candidate_audit(self._candidate_physical_log(**changes))
+                self.assertFalse(result["passed"])
+                self.assertIn(expected_missing, result["missing"])
+
+    def test_candidate_physical_audit_rejects_malformed_latency_evidence(self):
+        log_text = self._candidate_physical_log() + "\n" + "\n".join(
+            (
+                "260518 20:16:00[GoogleLive]-INFO-Google Live turn_latency_ms=nan phase=first_audio_out",
+                "260518 20:16:01[GoogleLive]-INFO-Google Live interruption_stop_latency_ms=-1",
+                "260518 20:16:02[GoogleLive]-INFO-Google Live physical_bargein_latency_ms=inf",
+                "260518 20:16:03[GoogleLive]-INFO-Google Live server_output_gap_ms=oops boundary=continuous",
+            )
+        )
+
+        result = self._candidate_audit(log_text)
+
+        self.assertFalse(result["passed"])
+        self.assertIn("latency_evidence_valid", result["missing"])
+
+    def test_candidate_physical_audit_rejects_untyped_gap_exclusion(self):
+        result = self._candidate_audit(
+            self._candidate_physical_log(
+                output_gaps=[(100.0, "continuous")] * 9
+                + [(900.0, "interrupt_like")]
+            )
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertIn("server_output_gap_boundaries_valid", result["missing"])
+
+    def test_candidate_physical_audit_rejects_unbalanced_or_overlapping_receive_loops(self):
+        identity = self._candidate_identity()
+        bad_report = {
+            "schemaVersion": "google-live-reliability.v1",
+            "name": "google_live_log_reliability",
+            "status": "PASS",
+            "candidateIdentity": identity,
+            "logWindow": {"windowId": "physical-1"},
+            "evidenceScope": {
+                "journeyId": "physical-1",
+                "connectionId": "connection-1",
+                "liveConnectionId": "live-1",
+            },
+            "receiveLoopBalance": 1,
+            "maxReceiveLoopsActive": 2,
+            "staleAudioAfterReplacement": 0,
+            "duplicateResponseIds": [],
+            "unrecoveredTimeouts": [],
+            "unreleasedLessonHandoffs": [],
+            "replayCountsByReopen": {},
+            "correlations": [{"status": "PASS", "journeyId": "physical-1"}],
+            "failures": [],
+            "fatalHits": [],
+        }
+        result = self._candidate_audit(
+            self._candidate_physical_log(), reliability_report=bad_report
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertIn("receive_loop_balance=0", result["missing"])
+        self.assertIn("max_receive_loops_active=1", result["missing"])
+
+    def test_candidate_physical_audit_rejects_skipped_or_sensitive_upstream_report(self):
+        identity = self._candidate_identity()
+        skipped = {
+            "schemaVersion": "google-live-reliability.v1",
+            "name": "candidate_soak",
+            "status": "SKIPPED",
+            "candidateIdentity": identity,
+            "rawAudio": "forbidden",
+        }
+
+        result = self._candidate_audit(
+            self._candidate_physical_log(), candidate_soak_report=skipped
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertIn("candidate_soak_report_pass", result["missing"])
+        self.assertIn("candidate_soak_report_privacy_safe", result["missing"])
+
+    def test_candidate_cli_requires_complete_valid_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "server.log"
+            log_path.write_text(self._candidate_physical_log(), encoding="utf-8")
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/physical_smoke_audit.py",
+                    str(log_path),
+                    "--device-id",
+                    "3c:0f:02:de:c2:e0",
+                    "--client-id",
+                    "d16afa54-eb44-4fcb-8cac-cdefdf05f6fc",
+                    "--production-google-live-candidate",
+                    "--candidate-git-sha",
+                    "candidate-sha",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                capture_output=True,
+            )
+
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("requires --candidate-image-digest", proc.stderr)
+
 if __name__ == "__main__":
     unittest.main()
