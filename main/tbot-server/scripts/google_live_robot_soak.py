@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import inspect
 import json
 import math
 import re
@@ -94,6 +95,7 @@ _CANDIDATE_STAGE_COUNTS = (
     ("lesson", 1),
     ("conversation_after_lesson", 1),
 )
+_OWNED_CLEANUP_TASKS = set()
 _FORBIDDEN_EVIDENCE_KEYS = frozenset(
     {
         "audio",
@@ -1615,6 +1617,12 @@ def _finite_nonnegative(value):
     return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
 
 
+def _release_owned_cleanup_task(task):
+    _OWNED_CLEANUP_TASKS.discard(task)
+    if not task.cancelled():
+        task.exception()
+
+
 def _evidence_reuse_key(*, journey_id, connection_id, log_window):
     if (
         not isinstance(journey_id, str)
@@ -1747,7 +1755,7 @@ def _latency_metrics(executions):
     }
 
 
-async def run_candidate_soak(
+async def _run_candidate_soak_impl(
     args,
     *,
     journeys,
@@ -1947,13 +1955,61 @@ async def run_candidate_soak(
                 elapsed = clock() - started
         else:
             failures.append({"code": "QUIET_PADDING_INVALID"})
-    cleanup = journeys.get("cleanup")
-    if callable(cleanup):
-        try:
-            await cleanup(args)
-        except Exception as exc:
-            failures.append({"code": "JOURNEY_CLEANUP_FAILED", "errorClass": type(exc).__name__})
+    cleanup = journeys["cleanup"]
+    final_execution = executions[-1] if executions else {}
+    final_evidence = padding_evidence[-1] if padding_evidence else final_execution
+    final_scope = {
+        "journeyId": final_evidence.get("journeyId"),
+        "connectionId": final_evidence.get("connectionId"),
+        "windowId": final_evidence.get("windowId"),
+        "serverEndUtc": last_window_end.isoformat()
+        if last_window_end is not None
+        else None,
+    }
+    cleanup_evidence = await cleanup(args, final_scope=final_scope)
     samples.append(safe_sample())
+    final_sample = samples[-1]
+    required_sample_fields = (
+        "rssBytes",
+        "fdCount",
+        "asyncioTaskCount",
+        "threadCount",
+    )
+    final_sample_accounted = bool(final_sample) and all(
+        field in final_sample
+        and not isinstance(final_sample[field], bool)
+        and isinstance(final_sample[field], (int, float))
+        and math.isfinite(final_sample[field])
+        and final_sample[field] >= 0
+        for field in required_sample_fields
+    )
+    actual_pending_cleanup_tasks = sum(
+        1 for task in _OWNED_CLEANUP_TASKS if not task.done()
+    )
+    cleanup_pass = (
+        isinstance(cleanup_evidence, Mapping)
+        and not _forbidden_evidence_fields(cleanup_evidence)
+        and cleanup_evidence.get("schemaVersion") == SCHEMA_VERSION
+        and cleanup_evidence.get("name") == "candidate_cleanup"
+        and cleanup_evidence.get("status") == "PASS"
+        and cleanup_evidence.get("candidateIdentity") == identity
+        and cleanup_evidence.get("finalScope") == final_scope
+        and cleanup_evidence.get("websocketClosed") is True
+        and cleanup_evidence.get("providerFinalizeStatus") == "PASS"
+        and cleanup_evidence.get("providerCloseStatus") == "PASS"
+        and type(cleanup_evidence.get("pendingOwnedTasks")) is int
+        and cleanup_evidence.get("pendingOwnedTasks") == 0
+        and type(cleanup_evidence.get("activeSessions")) is int
+        and cleanup_evidence.get("activeSessions") == 0
+        and type(cleanup_evidence.get("activeReceiveLoops")) is int
+        and cleanup_evidence.get("activeReceiveLoops") == 0
+        and cleanup_evidence.get("logStatus") == "PASS"
+        and cleanup_evidence.get("resourceEndSampleRequired") is True
+        and final_sample_accounted
+        and actual_pending_cleanup_tasks == 0
+    )
+    if not cleanup_pass:
+        failures.append({"code": "CLEANUP_FAILED"})
     accounting = journeys.get("accounting")
     if callable(accounting):
         try:
@@ -2220,6 +2276,39 @@ async def run_candidate_soak(
         "latencyMetrics": latency_metrics,
         "latencyComparison": latency_comparison,
         "resourceVerdict": resources,
+        "cleanupVerdict": {
+            "status": "PASS" if cleanup_pass else "FAIL",
+            "websocketClosed": isinstance(cleanup_evidence, Mapping)
+            and cleanup_evidence.get("websocketClosed") is True,
+            "pendingOwnedTasks": actual_pending_cleanup_tasks
+            if actual_pending_cleanup_tasks
+            else cleanup_evidence.get("pendingOwnedTasks")
+            if isinstance(cleanup_evidence, Mapping)
+            and type(cleanup_evidence.get("pendingOwnedTasks")) is int
+            else None,
+            "actualPendingCleanupTasks": actual_pending_cleanup_tasks,
+            "activeSessions": cleanup_evidence.get("activeSessions")
+            if isinstance(cleanup_evidence, Mapping)
+            and type(cleanup_evidence.get("activeSessions")) is int
+            else None,
+            "activeReceiveLoops": cleanup_evidence.get("activeReceiveLoops")
+            if isinstance(cleanup_evidence, Mapping)
+            and type(cleanup_evidence.get("activeReceiveLoops")) is int
+            else None,
+            "providerFinalizeStatus": "PASS"
+            if isinstance(cleanup_evidence, Mapping)
+            and cleanup_evidence.get("providerFinalizeStatus") == "PASS"
+            else "FAIL",
+            "providerCloseStatus": "PASS"
+            if isinstance(cleanup_evidence, Mapping)
+            and cleanup_evidence.get("providerCloseStatus") == "PASS"
+            else "FAIL",
+            "logStatus": "PASS"
+            if isinstance(cleanup_evidence, Mapping)
+            and cleanup_evidence.get("logStatus") == "PASS"
+            else "FAIL",
+            "resourceEndSampleAccounted": final_sample_accounted,
+        },
         "upstreamLayers": [
             {
                 "name": layer.get("name"),
@@ -2234,6 +2323,150 @@ async def run_candidate_soak(
         "exit_code": 0 if not failures else 1,
     }
     return redact_mapping(report)
+
+
+async def run_candidate_soak(
+    args,
+    *,
+    journeys,
+    sample_resources=sample_process_resources,
+    clock=time.monotonic,
+):
+    """Run candidate soak with mandatory exactly-once bounded cleanup."""
+    cleanup = journeys.get("cleanup") if isinstance(journeys, Mapping) else None
+    if not callable(cleanup):
+        return {
+            "schemaVersion": SCHEMA_VERSION,
+            "name": "candidate_soak",
+            "status": "FAIL",
+            "candidateIdentity": _candidate_identity(args),
+            "failures": [{"code": "CLEANUP_CALLABLE_MISSING"}],
+            "cleanupVerdict": {"status": "FAIL"},
+            "exit_code": 1,
+        }
+    identity = _candidate_identity(args)
+    cleanup_timeout_invalid = False
+    try:
+        cleanup_timeout = float(getattr(args, "cleanup_timeout_sec", 2.0))
+    except (TypeError, ValueError):
+        cleanup_timeout = 2.0
+        cleanup_timeout_invalid = True
+    if not math.isfinite(cleanup_timeout) or cleanup_timeout <= 0:
+        cleanup_timeout = 2.0
+        cleanup_timeout_invalid = True
+    cleanup_called = False
+    cleanup_result = None
+    cleanup_task = None
+
+    async def guarded_cleanup(_args, *, final_scope):
+        nonlocal cleanup_called, cleanup_result, cleanup_task
+        if cleanup_called:
+            return cleanup_result
+        cleanup_called = True
+
+        async def invoke_cleanup():
+            try:
+                value = cleanup(_args, final_scope=final_scope)
+            except Exception as exc:
+                return {
+                    "schemaVersion": SCHEMA_VERSION,
+                    "name": "candidate_cleanup",
+                    "status": "FAIL",
+                    "candidateIdentity": identity,
+                    "finalScope": final_scope,
+                    "failureCode": "CLEANUP_EXCEPTION",
+                    "errorClass": type(exc).__name__,
+                }
+            if not inspect.isawaitable(value):
+                return {
+                    "schemaVersion": SCHEMA_VERSION,
+                    "name": "candidate_cleanup",
+                    "status": "FAIL",
+                    "candidateIdentity": identity,
+                    "finalScope": final_scope,
+                    "failureCode": "CLEANUP_INVALID_RESULT",
+                }
+            return await value
+
+        cleanup_task = asyncio.create_task(invoke_cleanup())
+        cleanup_task.set_name("google-live-candidate-cleanup")
+        _OWNED_CLEANUP_TASKS.add(cleanup_task)
+        cleanup_task.add_done_callback(_release_owned_cleanup_task)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + cleanup_timeout
+        try:
+            done, _pending = await asyncio.wait(
+                {cleanup_task}, timeout=max(0.0, deadline - loop.time())
+            )
+        except asyncio.CancelledError:
+            done, _pending = await asyncio.shield(
+                asyncio.wait(
+                    {cleanup_task}, timeout=max(0.0, deadline - loop.time())
+                )
+            )
+            if not done:
+                cleanup_task.cancel()
+            raise
+        if not done:
+            cleanup_task.cancel()
+            cleanup_result = {
+                "schemaVersion": SCHEMA_VERSION,
+                "name": "candidate_cleanup",
+                "status": "FAIL",
+                "candidateIdentity": identity,
+                "finalScope": final_scope,
+                "failureCode": "CLEANUP_TIMEOUT",
+                "pendingOwnedTasks": 1,
+            }
+            return cleanup_result
+        try:
+            cleanup_result = cleanup_task.result()
+        except asyncio.CancelledError:
+            cleanup_result = {
+                "schemaVersion": SCHEMA_VERSION,
+                "name": "candidate_cleanup",
+                "status": "FAIL",
+                "candidateIdentity": identity,
+                "finalScope": final_scope,
+                "failureCode": "CLEANUP_CANCELLED",
+            }
+        except Exception as exc:
+            cleanup_result = {
+                "schemaVersion": SCHEMA_VERSION,
+                "name": "candidate_cleanup",
+                "status": "FAIL",
+                "candidateIdentity": identity,
+                "finalScope": final_scope,
+                "failureCode": "CLEANUP_EXCEPTION",
+                "errorClass": type(exc).__name__,
+            }
+        return cleanup_result
+
+    guarded_journeys = dict(journeys)
+    guarded_journeys["cleanup"] = guarded_cleanup
+    try:
+        report = await _run_candidate_soak_impl(
+            args,
+            journeys=guarded_journeys,
+            sample_resources=sample_resources,
+            clock=clock,
+        )
+        if cleanup_timeout_invalid:
+            report["failures"].append({"code": "CLEANUP_TIMEOUT_INVALID"})
+            report["status"] = "FAIL"
+            report["exit_code"] = 1
+        return report
+    finally:
+        if not cleanup_called:
+            await guarded_cleanup(
+                args,
+                final_scope={
+                    "journeyId": None,
+                    "connectionId": None,
+                    "windowId": None,
+                    "serverEndUtc": None,
+                },
+            )
 
 
 async def run_soak(args):
@@ -2263,6 +2496,7 @@ async def run_soak(args):
             recorded_padding = manifest.get("quietPadding", [])
             if not isinstance(recorded_padding, list):
                 raise ValueError("journey evidence quietPadding must be a list")
+            recorded_cleanup_evidence = manifest.get("cleanup")
             recorded_samples = manifest.get("resourceSamples")
             if not isinstance(recorded_samples, list):
                 raise ValueError("journey evidence resourceSamples must be a list")
@@ -2308,9 +2542,16 @@ async def run_soak(args):
                 recorded_journey,
             )
 
-            async def recorded_cleanup(_args):
+            cleanup_consumed = 0
+
+            async def recorded_cleanup(_args, *, final_scope):
+                nonlocal cleanup_consumed
+                cleanup_consumed += 1
                 if cursor != len(recorded):
                     raise ValueError("journey evidence was not fully consumed")
+                if not isinstance(recorded_cleanup_evidence, Mapping):
+                    return recorded_cleanup_evidence
+                return dict(recorded_cleanup_evidence)
 
             journeys["cleanup"] = recorded_cleanup
             padding_consumed = 0
@@ -2329,6 +2570,8 @@ async def run_soak(args):
                 if cursor != len(recorded):
                     accounting_failures.append({"code": "UNEXPECTED_EVIDENCE"})
                 if padding_consumed != len(recorded_padding):
+                    accounting_failures.append({"code": "UNEXPECTED_EVIDENCE"})
+                if cleanup_consumed != 1:
                     accounting_failures.append({"code": "UNEXPECTED_EVIDENCE"})
                 if sample_cursor != len(recorded_samples):
                     accounting_failures.append({"code": "RESOURCE_SAMPLE_UNUSED"})

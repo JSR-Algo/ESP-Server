@@ -69,6 +69,7 @@ def _args(**overrides):
         "minimum_duration_sec": 1800.0,
         "evidence_gap_budget_sec": 10.0,
         "maximum_padding_windows": 60,
+        "cleanup_timeout_sec": 0.05,
         "bargein_cycles": 10,
         "lesson_manifest": {"manifestId": "bounded-lesson-v1"},
         "report": Path("report.json"),
@@ -224,11 +225,29 @@ def _journeys(*, mutation=None):
             }
         ]
 
+    async def cleanup(_args, *, final_scope):
+        return {
+            "schemaVersion": "google-live-reliability.v1",
+            "name": "candidate_cleanup",
+            "status": "PASS",
+            "candidateIdentity": IDENTITY,
+            "finalScope": final_scope,
+            "websocketClosed": True,
+            "providerFinalizeStatus": "PASS",
+            "providerCloseStatus": "PASS",
+            "pendingOwnedTasks": 0,
+            "activeSessions": 0,
+            "activeReceiveLoops": 0,
+            "logStatus": "PASS",
+            "resourceEndSampleRequired": True,
+        }
+
     journeys = dict.fromkeys(
         ("conversation", "bargein", "quiet", "reopen", "reconnect", "lesson"),
         journey,
     )
     journeys["monitor"] = monitor
+    journeys["cleanup"] = cleanup
     return journeys
 
 
@@ -238,6 +257,24 @@ def _samples():
         "fdCount": 3,
         "asyncioTaskCount": 2,
         "threadCount": 1,
+    }
+
+
+def _cleanup_evidence(final_scope):
+    return {
+        "schemaVersion": "google-live-reliability.v1",
+        "name": "candidate_cleanup",
+        "status": "PASS",
+        "candidateIdentity": IDENTITY,
+        "finalScope": final_scope,
+        "websocketClosed": True,
+        "providerFinalizeStatus": "PASS",
+        "providerCloseStatus": "PASS",
+        "pendingOwnedTasks": 0,
+        "activeSessions": 0,
+        "activeReceiveLoops": 0,
+        "logStatus": "PASS",
+        "resourceEndSampleRequired": True,
     }
 
 
@@ -714,10 +751,17 @@ def test_replay_derives_duration_from_execution_and_padding_windows():
                     )
                 )
         padding = await journeys["monitor"](_args(), duration_sec=480)
+        final_scope = {
+            "journeyId": padding[-1]["journeyId"],
+            "connectionId": padding[-1]["connectionId"],
+            "windowId": padding[-1]["windowId"],
+            "serverEndUtc": padding[-1]["logWindow"]["end"],
+        }
         return {
             "durationSec": 1800,
             "executions": executions,
             "quietPadding": padding,
+            "cleanup": _cleanup_evidence(final_scope),
             "resourceSamples": [
                 {**_samples(), "sampleId": f"resource-{index}"}
                 for index in range(1, 37)
@@ -820,6 +864,14 @@ def _full_span_manifest(*, padding=None, samples=35):
             "durationSec": 1847,
             "executions": executions,
             "quietPadding": [] if padding is None else padding,
+            "cleanup": _cleanup_evidence(
+                {
+                    "journeyId": executions[-1]["journeyId"],
+                    "connectionId": executions[-1]["connectionId"],
+                    "windowId": executions[-1]["windowId"],
+                    "serverEndUtc": executions[-1]["logWindow"]["end"],
+                }
+            ),
             "resourceSamples": [
                 {**_samples(), "sampleId": f"resource-{index}"}
                 for index in range(1, samples + 1)
@@ -874,6 +926,28 @@ def test_full_span_rejects_safe_extra_resource_sample():
     assert "RESOURCE_SAMPLE_UNUSED" in {item["code"] for item in report["failures"]}
 
 
+@pytest.mark.parametrize(
+    "failure", ["missing", "malformed", "skipped", "mismatch", "extra"]
+)
+def test_replay_requires_exactly_one_matching_cleanup_artifact(failure):
+    manifest = _full_span_manifest()
+    if failure == "missing":
+        manifest.pop("cleanup")
+    elif failure == "malformed":
+        manifest["cleanup"] = {"name": "candidate_cleanup"}
+    elif failure == "skipped":
+        manifest["cleanup"]["status"] = "SKIPPED"
+    elif failure == "mismatch":
+        manifest["cleanup"]["candidateIdentity"] = {**IDENTITY, "gitSha": "other"}
+    else:
+        manifest["cleanup"] = [manifest["cleanup"], deepcopy(manifest["cleanup"])]
+
+    report = _run_manifest(manifest)
+
+    assert report["status"] == "FAIL"
+    assert "CLEANUP_FAILED" in {item["code"] for item in report["failures"]}
+
+
 def test_needed_padding_rejects_duplicate_resource_sample_id():
     # Reuse the proven 22-minute + padding manifest from the replay test shape.
     async def build():
@@ -901,6 +975,14 @@ def test_needed_padding_rejects_duplicate_resource_sample_id():
             "durationSec": 1800,
             "executions": executions,
             "quietPadding": padding,
+            "cleanup": _cleanup_evidence(
+                {
+                    "journeyId": padding[-1]["journeyId"],
+                    "connectionId": padding[-1]["connectionId"],
+                    "windowId": padding[-1]["windowId"],
+                    "serverEndUtc": padding[-1]["logWindow"]["end"],
+                }
+            ),
             "resourceSamples": samples,
         }
 
@@ -924,13 +1006,376 @@ def test_candidate_soak_runs_cleanup_after_first_journey_failure():
     cleaned = []
     journeys = _journeys(mutation=lambda result, sequence, *_: result.update(status="FAIL") if sequence == 1 else None)
 
-    async def cleanup(_args):
+    async def cleanup(_args, **_kwargs):
         cleaned.append(True)
+        return await _journeys()["cleanup"](_args, **_kwargs)
 
     journeys["cleanup"] = cleanup
     report = _run(journeys=journeys)
     assert report["status"] == "FAIL"
     assert cleaned == [True]
+
+
+def test_candidate_soak_requires_cleanup_callable_before_workload():
+    journeys = _journeys()
+    journeys.pop("cleanup")
+    report = _run(journeys=journeys)
+    assert report["status"] == "FAIL"
+    assert report["failures"] == [{"code": "CLEANUP_CALLABLE_MISSING"}]
+
+
+@pytest.mark.parametrize("failure", ["throws", "hangs", "pending_tasks"])
+def test_candidate_soak_cleanup_failure_overrides_pass_safely(failure):
+    journeys = _journeys()
+    if failure == "throws":
+        async def cleanup(_args, **_kwargs):
+            raise RuntimeError("token=cleanup-secret")
+    elif failure == "hangs":
+        async def cleanup(_args, **_kwargs):
+            await asyncio.Event().wait()
+    else:
+        async def cleanup(args, **kwargs):
+            evidence = await _journeys()["cleanup"](args, **kwargs)
+            evidence["pendingOwnedTasks"] = 1
+            return evidence
+    journeys["cleanup"] = cleanup
+
+    report = _run(journeys=journeys)
+    encoded = json.dumps(report)
+
+    assert report["status"] == "FAIL"
+    assert "CLEANUP_FAILED" in {item["code"] for item in report["failures"]}
+    assert "cleanup-secret" not in encoded
+
+
+def test_candidate_soak_sync_cleanup_failure_is_reported_safely():
+    journeys = _journeys()
+
+    def cleanup(_args, **_kwargs):
+        raise RuntimeError("token=sync-cleanup-secret")
+
+    journeys["cleanup"] = cleanup
+    report = _run(journeys=journeys)
+
+    assert report["status"] == "FAIL"
+    assert "CLEANUP_FAILED" in {item["code"] for item in report["failures"]}
+    assert "sync-cleanup-secret" not in json.dumps(report)
+
+
+def test_candidate_soak_non_awaitable_cleanup_result_fails_safely():
+    journeys = _journeys()
+    journeys["cleanup"] = lambda _args, **_kwargs: "raw log token=invalid-secret"
+
+    report = _run(journeys=journeys)
+
+    assert report["status"] == "FAIL"
+    assert "CLEANUP_FAILED" in {item["code"] for item in report["failures"]}
+    assert "invalid-secret" not in json.dumps(report)
+
+
+def test_candidate_soak_rejects_sensitive_cleanup_evidence_without_leaking():
+    journeys = _journeys()
+
+    async def cleanup(args, **kwargs):
+        evidence = await _journeys()["cleanup"](args, **kwargs)
+        evidence["metadata"] = {
+            "nested": {"Authorization": "Bearer cleanup-private-token"}
+        }
+        return evidence
+
+    journeys["cleanup"] = cleanup
+    report = _run(journeys=journeys)
+    encoded = json.dumps(report)
+
+    assert report["status"] == "FAIL"
+    assert "CLEANUP_FAILED" in {item["code"] for item in report["failures"]}
+    assert "cleanup-private-token" not in encoded
+    assert "Authorization" not in encoded
+
+
+def test_candidate_soak_normalizes_untrusted_cleanup_status_values():
+    journeys = _journeys()
+
+    async def cleanup(args, **kwargs):
+        evidence = await _journeys()["cleanup"](args, **kwargs)
+        evidence["providerFinalizeStatus"] = "Bearer provider-secret"
+        evidence["providerCloseStatus"] = "raw close log token=close-secret"
+        evidence["logStatus"] = "raw server log token=log-secret"
+        return evidence
+
+    journeys["cleanup"] = cleanup
+    report = _run(journeys=journeys)
+    encoded = json.dumps(report)
+
+    assert report["cleanupVerdict"]["providerFinalizeStatus"] == "FAIL"
+    assert report["cleanupVerdict"]["providerCloseStatus"] == "FAIL"
+    assert report["cleanupVerdict"]["logStatus"] == "FAIL"
+    assert "provider-secret" not in encoded
+    assert "close-secret" not in encoded
+    assert "log-secret" not in encoded
+
+
+@pytest.mark.parametrize("field", ["pendingOwnedTasks", "activeSessions", "activeReceiveLoops"])
+@pytest.mark.parametrize("invalid_zero", [False, 0.0])
+def test_candidate_soak_requires_integer_zero_cleanup_counters(field, invalid_zero):
+    journeys = _journeys()
+
+    async def cleanup(args, **kwargs):
+        evidence = await _journeys()["cleanup"](args, **kwargs)
+        evidence[field] = invalid_zero
+        return evidence
+
+    journeys["cleanup"] = cleanup
+    report = _run(journeys=journeys)
+
+    assert report["status"] == "FAIL"
+    assert "CLEANUP_FAILED" in {item["code"] for item in report["failures"]}
+
+
+@pytest.mark.parametrize("bad_sample", [{}, {"rssBytes": 100}])
+def test_candidate_soak_requires_valid_final_resource_sample(bad_sample):
+    journeys = _journeys()
+    cleaned = False
+
+    async def cleanup(args, **kwargs):
+        nonlocal cleaned
+        cleaned = True
+        return await _journeys()["cleanup"](args, **kwargs)
+
+    def sample():
+        return bad_sample if cleaned else _samples()
+
+    journeys["cleanup"] = cleanup
+    report = _run(journeys=journeys, samples=sample)
+
+    assert report["status"] == "FAIL"
+    assert report["cleanupVerdict"]["status"] == "FAIL"
+    assert report["cleanupVerdict"]["resourceEndSampleAccounted"] is False
+
+
+def test_candidate_soak_final_resource_sampler_exception_fails_cleanup_safely():
+    journeys = _journeys()
+    cleaned = False
+
+    async def cleanup(args, **kwargs):
+        nonlocal cleaned
+        cleaned = True
+        return await _journeys()["cleanup"](args, **kwargs)
+
+    def sample():
+        if cleaned:
+            raise RuntimeError("token=resource-secret")
+        return _samples()
+
+    journeys["cleanup"] = cleanup
+    report = _run(journeys=journeys, samples=sample)
+
+    assert report["cleanupVerdict"]["status"] == "FAIL"
+    assert "resource-secret" not in json.dumps(report)
+
+
+@pytest.mark.parametrize("timeout", ["invalid", float("nan"), 0, -1])
+def test_candidate_soak_invalid_cleanup_timeout_still_cleans_and_fails(timeout):
+    calls = []
+    journeys = _journeys()
+
+    async def cleanup(args, **kwargs):
+        calls.append(True)
+        return await _journeys()["cleanup"](args, **kwargs)
+
+    journeys["cleanup"] = cleanup
+    report = _run(args=_args(cleanup_timeout_sec=timeout), journeys=journeys)
+
+    assert calls == [True]
+    assert report["status"] == "FAIL"
+    assert "CLEANUP_TIMEOUT_INVALID" in {item["code"] for item in report["failures"]}
+
+
+def test_candidate_soak_cleanup_timeout_is_hard_when_cancellation_is_suppressed():
+    journeys = _journeys()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def cleanup(_args, **_kwargs):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+        finally:
+            finished.set()
+
+    journeys["cleanup"] = cleanup
+
+    async def run_timeout():
+        started = asyncio.get_running_loop().time()
+        report = await run_candidate_soak(
+            _args(cleanup_timeout_sec=0.01),
+            journeys=journeys,
+            sample_resources=_samples,
+            clock=_Clock(),
+        )
+        elapsed = asyncio.get_running_loop().time() - started
+        assert elapsed < 0.1
+        assert report["cleanupVerdict"]["status"] == "FAIL"
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=0.1)
+
+    asyncio.run(run_timeout())
+
+
+def test_candidate_soak_cancellation_still_runs_cleanup_exactly_once():
+    calls = []
+    journeys = _journeys()
+
+    async def blocked(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    async def cleanup(args, **kwargs):
+        calls.append(True)
+        return await _journeys()["cleanup"](args, **kwargs)
+
+    journeys["conversation"] = blocked
+    journeys["cleanup"] = cleanup
+
+    async def run_and_cancel():
+        task = asyncio.create_task(
+            run_candidate_soak(
+                _args(),
+                journeys=journeys,
+                sample_resources=_samples,
+                clock=_Clock(),
+            )
+        )
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run_and_cancel())
+    assert calls == [True]
+
+
+def test_candidate_soak_cancellation_during_cleanup_keeps_owned_cleanup_alive():
+    journeys = _journeys()
+    cleanup_started = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    async def cleanup(args, **kwargs):
+        cleanup_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_finished.set()
+        return await _journeys()["cleanup"](args, **kwargs)
+
+    journeys["cleanup"] = cleanup
+
+    async def run_and_cancel():
+        task = asyncio.create_task(
+            run_candidate_soak(
+                _args(cleanup_timeout_sec=0.01),
+                journeys=journeys,
+                sample_resources=_samples,
+                clock=_Clock(),
+            )
+        )
+        await cleanup_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(cleanup_finished.wait(), timeout=0.1)
+
+    asyncio.run(run_and_cancel())
+
+
+def test_candidate_soak_tracks_cancel_suppressing_cleanup_until_drained():
+    journeys = _journeys()
+    cleanup_started = asyncio.Event()
+    release = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    async def cleanup(_args, **_kwargs):
+        cleanup_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+        finally:
+            cleanup_finished.set()
+
+    journeys["cleanup"] = cleanup
+
+    async def run_and_cancel():
+        task = asyncio.create_task(
+            run_candidate_soak(
+                _args(cleanup_timeout_sec=0.01),
+                journeys=journeys,
+                sample_resources=_samples,
+                clock=_Clock(),
+            )
+        )
+        await cleanup_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        owned = [
+            item
+            for item in asyncio.all_tasks()
+            if item.get_name() == "google-live-candidate-cleanup" and not item.done()
+        ]
+        assert len(owned) == 1
+        release.set()
+        await asyncio.wait_for(cleanup_finished.wait(), timeout=0.1)
+        await asyncio.sleep(0)
+        assert owned[0].done()
+
+    asyncio.run(run_and_cancel())
+
+
+def test_candidate_soak_blocks_pass_while_prior_owned_cleanup_is_pending():
+    release = asyncio.Event()
+    first_finished = asyncio.Event()
+    first_journeys = _journeys()
+
+    async def stuck_cleanup(_args, **_kwargs):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+        finally:
+            first_finished.set()
+
+    first_journeys["cleanup"] = stuck_cleanup
+
+    async def run_twice():
+        first = await run_candidate_soak(
+            _args(cleanup_timeout_sec=0.01),
+            journeys=first_journeys,
+            sample_resources=_samples,
+            clock=_Clock(),
+        )
+        second = await run_candidate_soak(
+            _args(),
+            journeys=_journeys(),
+            sample_resources=_samples,
+            clock=_Clock(),
+        )
+        assert first["cleanupVerdict"]["actualPendingCleanupTasks"] == 1
+        assert second["status"] == "FAIL"
+        assert second["cleanupVerdict"]["actualPendingCleanupTasks"] == 1
+        release.set()
+        await asyncio.wait_for(first_finished.wait(), timeout=0.1)
+        await asyncio.sleep(0)
+        third = await run_candidate_soak(
+            _args(),
+            journeys=_journeys(),
+            sample_resources=_samples,
+            clock=_Clock(),
+        )
+        assert third["status"] == "PASS"
+        assert third["cleanupVerdict"]["actualPendingCleanupTasks"] == 0
+
+    asyncio.run(run_twice())
 
 
 def test_candidate_mode_cli_requires_identity_and_evidence_inputs():
