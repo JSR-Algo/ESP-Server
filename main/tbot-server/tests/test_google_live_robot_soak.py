@@ -75,6 +75,8 @@ def _refresh_execution_contract(result):
         "unreleasedLessonHandoffs": [],
         "fatalHits": [],
         "failures": [],
+        "journeyType": result["name"],
+        "journeyLatencyEvidence": {},
         "duplicateResponseIds": [],
         "replayCountsByReopen": {},
         "correlation": {"status": "NOT_OBSERVED"},
@@ -86,6 +88,14 @@ def _refresh_execution_contract(result):
         "serverConnectionTransitions": [],
         "logWindow": deepcopy(result["logWindow"]),
     }
+    if result["name"] in {"conversation", "conversation_after_lesson"}:
+        result["task5LogEvidence"]["journeyLatencyEvidence"] = {
+            "firstAudioMs": 1000.0
+        }
+    elif result["name"] in {"reopen", "reconnect"}:
+        result["task5LogEvidence"]["journeyLatencyEvidence"] = {
+            "reconnectRecoveryMs": 1000.0
+        }
     if result["name"] == "bargein":
         result["task5LogEvidence"]["correlation"] = {
             "status": "PASS",
@@ -115,7 +125,7 @@ def _refresh_execution_contract(result):
             "replacementResponseStarted": True,
             "replacementResponseStopped": True,
             "replacementBinaryChunks": 2,
-            "bargeinStopMs": 200.0,
+            "bargeinStopMs": 400.0,
             "maxServerOutputGapMs": 80.0,
             "journeyId": result["journeyId"],
             "evidenceScope": deepcopy(result["evidenceScope"]),
@@ -1437,6 +1447,101 @@ def test_slow_server_output_gap_from_bargein_stage_fails_hard_budget():
     report = _run(journeys=_journeys(mutation=slow))
 
     assert "HARD_LATENCY_BUDGET_FAILED" in {
+        item["code"] for item in report["failures"]
+    }
+
+
+@pytest.mark.parametrize(
+    ("stage", "flat_field", "proof_field"),
+    [
+        ("conversation", "firstAudioMs", "firstAudioMs"),
+        ("bargein", "bargeinStopMs", "bargeinStopMs"),
+        ("bargein", "serverOutputGapMs", "maxServerOutputGapMs"),
+        ("reopen", "reconnectRecoveryMs", "reconnectRecoveryMs"),
+        ("reconnect", "reconnectRecoveryMs", "reconnectRecoveryMs"),
+    ],
+)
+def test_candidate_latency_must_exact_match_trusted_stage_proof(
+    stage, flat_field, proof_field
+):
+    def mismatch(result, _sequence, name, _index, _label):
+        if name != stage:
+            return
+        result["latencies"][flat_field] = [1]
+        if name == "bargein":
+            assert result["task5CorrelatedEvidence"][proof_field] != 1
+        else:
+            assert result["task5LogEvidence"]["journeyLatencyEvidence"][proof_field] != 1
+
+    report = _run(journeys=_journeys(mutation=mismatch))
+
+    assert "EXECUTION_SERVER_SCOPE_INVALID" in {
+        item["code"] for item in report["failures"]
+    }
+
+
+@pytest.mark.parametrize("stage", ["conversation", "reopen", "reconnect"])
+def test_candidate_latency_fails_when_trusted_stage_proof_metric_is_missing(stage):
+    def remove_proof(result, _sequence, name, _index, _label):
+        if name == stage:
+            result["task5LogEvidence"]["journeyLatencyEvidence"] = {}
+
+    report = _run(journeys=_journeys(mutation=remove_proof))
+
+    assert "EXECUTION_SERVER_SCOPE_INVALID" in {
+        item["code"] for item in report["failures"]
+    }
+
+
+@pytest.mark.parametrize(
+    ("stage", "wrong_type"),
+    [
+        ("conversation", "conversation_after_lesson"),
+        ("conversation_after_lesson", "conversation"),
+        ("reopen", "reconnect"),
+        ("reconnect", "reopen"),
+        ("reconnect", None),
+    ],
+)
+def test_candidate_latency_proof_journey_type_must_match_execution_stage(
+    stage, wrong_type
+):
+    def mutate(result, _sequence, name, _index, _label):
+        if name == stage:
+            result["task5LogEvidence"]["journeyType"] = wrong_type
+
+    report = _run(journeys=_journeys(mutation=mutate))
+
+    assert "EXECUTION_SERVER_SCOPE_INVALID" in {
+        item["code"] for item in report["failures"]
+    }
+
+
+@pytest.mark.parametrize("server_issued", [None, False, "true", 1])
+def test_quiet_padding_requires_exact_true_server_issued(server_issued):
+    journeys = _journeys()
+    original = journeys["monitor"]
+
+    async def mutate(args, *, duration_sec):
+        evidence = await original(args, duration_sec=duration_sec)
+        evidence[0]["serverIssued"] = server_issued
+        return evidence
+
+    journeys["monitor"] = mutate
+    report = _run(journeys=journeys)
+
+    assert "QUIET_PADDING_INVALID" in {item["code"] for item in report["failures"]}
+
+
+@pytest.mark.parametrize("server_issued", [None, False, "true", 1])
+def test_primary_execution_requires_exact_true_server_issued(server_issued):
+    def mutate(result, sequence, _name, _index, _label):
+        if sequence == 1:
+            result["serverIssued"] = server_issued
+
+    report = _run(journeys=_journeys(mutation=mutate))
+
+    assert "EXECUTION_SERVER_SCOPE_INVALID" in {
         item["code"] for item in report["failures"]
     }
 

@@ -1437,6 +1437,10 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     scoped_last_started_attempt = 0
     scoped_active_reconnect_key: tuple[str, str, int] | None = None
     server_connection_transitions: list[dict[str, Any]] = []
+    first_response_started_ms: float | None = None
+    reconnect_recovery_ms: list[float] = []
+    reconnect_journey_started_at: dict[tuple[str, str], datetime] = {}
+    completed_reconnect_journeys: set[tuple[str, str]] = set()
 
     def parse_scoped_uint(text: str | None, max_value: int) -> int | None:
         if text is None or len(text) > 10:
@@ -1820,6 +1824,11 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 observed_marker_families[scoped_start.group("journey_id")].add(
                     "response_started"
                 )
+                if first_response_started_ms is None and start_anchor is not None:
+                    first_response_started_ms = round(
+                        (ts - start_anchor["timestamp"]).total_seconds() * 1000,
+                        3,
+                    )
                 response_key = (
                     scoped_start.group("connection_id"),
                     scoped_start.group("live_connection_id"),
@@ -2145,6 +2154,16 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     scoped_reconnect_start.group("connection_id"),
                     attempt,
                 )
+                reconnect_journey_key = (journey_id, key[1])
+                if reconnect_journey_key in completed_reconnect_journeys:
+                    failures.append(
+                        _failure(
+                            "RECONNECT_JOURNEY_BOUNDARY_REQUIRED",
+                            line_number,
+                            str(reconnect_journey_key),
+                        )
+                    )
+                reconnect_journey_started_at.setdefault(reconnect_journey_key, ts)
                 if scoped_active_reconnect_key is not None:
                     failures.append(
                         _failure(
@@ -2166,6 +2185,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     "fromLiveConnectionId": scoped_reconnect_start.group(
                         "from_live_connection_id"
                     ),
+                    "startedAt": ts,
                 }
                 scoped_active_reconnect_key = key
                 if scoped_current_live_connection_id is None:
@@ -2399,6 +2419,20 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         _failure("RECONNECT_SUCCESS_WITHOUT_READY", line_number, str(key))
                     )
                 if state is not None:
+                    journey_started_at = reconnect_journey_started_at.get(
+                        (journey_id, key[1])
+                    )
+                    if outcome == "succeeded" and isinstance(
+                        journey_started_at, datetime
+                    ):
+                        reconnect_recovery_ms.append(
+                            round(
+                                (ts - journey_started_at).total_seconds() * 1000,
+                                3,
+                            )
+                        )
+                        reconnect_journey_started_at.pop((journey_id, key[1]), None)
+                        completed_reconnect_journeys.add((journey_id, key[1]))
                     if (
                         exact_scope_active
                         and outcome == "succeeded"
@@ -3225,11 +3259,21 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     exact_scope_bound = bool(
         start_anchor and isinstance(start_anchor.get("evidenceScope"), Mapping)
     )
-    recognized_journeys = {"bargein", "lesson", "reconnect", "quiet_padding"}
+    recognized_journeys = {
+        "bargein",
+        "conversation",
+        "conversation_after_lesson",
+        "lesson",
+        "reconnect",
+        "reopen",
+        "quiet_padding",
+    }
     if exact_scope_bound:
-        if len(claimed_journey_list) != len(set(claimed_journey_list)) or not set(
-            claimed_journey_list
-        ).issubset(recognized_journeys):
+        if (
+            (claimed_journey_list and len(claimed_journey_list) != 1)
+            or len(claimed_journey_list) != len(set(claimed_journey_list))
+            or not set(claimed_journey_list).issubset(recognized_journeys)
+        ):
             failures.append(
                 _failure(
                     "JOURNEY_CLAIM_INVALID",
@@ -3317,6 +3361,33 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 )
             )
 
+    journey_latency_evidence: dict[str, float] = {}
+    if claimed_journeys & {"conversation", "conversation_after_lesson"}:
+        if first_response_started_ms is None or first_response_started_ms <= 0:
+            failures.append(
+                _failure(
+                    "COVERAGE_MISSING",
+                    start_anchor["line"] if start_anchor else 0,
+                    "first_response_latency",
+                )
+            )
+        else:
+            journey_latency_evidence["firstAudioMs"] = first_response_started_ms
+    if claimed_journeys & {"reopen", "reconnect"}:
+        total_reconnect_recovery_ms = round(sum(reconnect_recovery_ms), 3)
+        if not reconnect_recovery_ms or total_reconnect_recovery_ms <= 0:
+            failures.append(
+                _failure(
+                    "COVERAGE_MISSING",
+                    start_anchor["line"] if start_anchor else 0,
+                    "reconnect_recovery_latency",
+                )
+            )
+        else:
+            journey_latency_evidence["reconnectRecoveryMs"] = (
+                total_reconnect_recovery_ms
+            )
+
     replayed_ledger_owner = scoped_initial_live_connection_id
     for transition in scoped_live_connection_transitions:
         if transition["fromLiveConnectionId"] != replayed_ledger_owner:
@@ -3359,6 +3430,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
         "journeyType": (
             claimed_journey_list[0] if len(claimed_journey_list) == 1 else None
         ),
+        "journeyLatencyEvidence": journey_latency_evidence,
         "initialLiveConnectionId": scoped_initial_live_connection_id,
         "finalLiveConnectionId": scoped_current_live_connection_id,
         "liveConnectionTransitions": scoped_live_connection_transitions,

@@ -1710,11 +1710,77 @@ def _validated_execution_server_scope(value, *, identity):
         )
     ):
         return None
+    stage = value.get("name")
+    if log_proof.get("journeyType") != stage:
+        return None
+    flat_latencies = value.get("latencies")
+    proof_latencies = log_proof.get("journeyLatencyEvidence")
+    expected_flat_latencies = {}
+    expected_proof_latencies = {}
+    if stage in {"conversation", "conversation_after_lesson"}:
+        expected_proof_latencies = dict(proof_latencies) if isinstance(proof_latencies, Mapping) else {}
+        expected_flat_latencies = {
+            "firstAudioMs": [
+                proof_latencies.get("firstAudioMs")
+                if isinstance(proof_latencies, Mapping)
+                else None
+            ]
+        }
+    elif stage in {"reopen", "reconnect"}:
+        expected_proof_latencies = dict(proof_latencies) if isinstance(proof_latencies, Mapping) else {}
+        expected_flat_latencies = {
+            "reconnectRecoveryMs": [
+                proof_latencies.get("reconnectRecoveryMs")
+                if isinstance(proof_latencies, Mapping)
+                else None
+            ]
+        }
+    elif stage == "bargein":
+        transport = value.get("task4TransportEvidence")
+        correlated = value.get("task5CorrelatedEvidence")
+        expected_flat_latencies = {
+            "bargeinStopMs": [
+                correlated.get("bargeinStopMs")
+                if isinstance(correlated, Mapping)
+                else None
+            ],
+            "serverOutputGapMs": [
+                correlated.get("maxServerOutputGapMs")
+                if isinstance(correlated, Mapping)
+                else None
+            ],
+        }
+        if (
+            not isinstance(transport, Mapping)
+            or transport.get("bargeinStopMs")
+            != expected_flat_latencies["bargeinStopMs"][0]
+            or transport.get("maxServerOutputGapMs")
+            != expected_flat_latencies["serverOutputGapMs"][0]
+        ):
+            return None
+    if (
+        not isinstance(flat_latencies, Mapping)
+        or not isinstance(proof_latencies, Mapping)
+        or dict(proof_latencies) != expected_proof_latencies
+        or set(expected_proof_latencies) != (
+            {"firstAudioMs"}
+            if stage in {"conversation", "conversation_after_lesson"}
+            else {"reconnectRecoveryMs"}
+            if stage in {"reopen", "reconnect"}
+            else set()
+        )
+        or dict(flat_latencies) != expected_flat_latencies
+        or any(
+            not _finite_positive(samples[0])
+            for samples in expected_flat_latencies.values()
+        )
+    ):
+        return None
     anchor = {
         "connectionId": scope["connectionId"],
         "peerIdentityHash": scope["peerIdentityHash"],
     }
-    if value.get("name") != "bargein":
+    if stage != "bargein":
         return anchor
     transport = value.get("task4TransportEvidence")
     correlated = value.get("task5CorrelatedEvidence")
@@ -1796,6 +1862,7 @@ def _validated_quiet_padding(
         and value.get("status") == "PASS"
         and value.get("candidateIdentity") == identity
         and value.get("connectionId") == expected_connection_id
+        and value.get("serverIssued") is True
         and value.get("peerIdentityHash") == expected_peer_identity_hash
         and value.get("evidenceScope") == expected_scope
         and value.get("liveConnectionId") == value.get("initialLiveConnectionId")
@@ -1850,7 +1917,9 @@ def _validated_quiet_padding(
         or log_proof.get("serverConnectionTransitions") != []
     ):
         return None
-    return dict(value), end_utc, utc_window
+    normalized = dict(value)
+    normalized["serverIssued"] = True
+    return normalized, end_utc, utc_window
 
 
 def _latency_metrics(executions):
@@ -1860,7 +1929,44 @@ def _latency_metrics(executions):
     reconnect = []
     for execution in executions:
         stage = execution.get("name")
-        latencies = execution.get("latencies", {})
+        log_proof = execution.get("task5LogEvidence")
+        proof_latencies = (
+            log_proof.get("journeyLatencyEvidence")
+            if isinstance(log_proof, Mapping)
+            else None
+        )
+        if stage == "bargein":
+            correlated = execution.get("task5CorrelatedEvidence")
+            latencies = {
+                "bargeinStopMs": [
+                    correlated.get("bargeinStopMs")
+                    if isinstance(correlated, Mapping)
+                    else None
+                ],
+                "serverOutputGapMs": [
+                    correlated.get("maxServerOutputGapMs")
+                    if isinstance(correlated, Mapping)
+                    else None
+                ],
+            }
+        elif stage in {"conversation", "conversation_after_lesson"}:
+            latencies = {
+                "firstAudioMs": [
+                    proof_latencies.get("firstAudioMs")
+                    if isinstance(proof_latencies, Mapping)
+                    else None
+                ]
+            }
+        elif stage in {"reopen", "reconnect"}:
+            latencies = {
+                "reconnectRecoveryMs": [
+                    proof_latencies.get("reconnectRecoveryMs")
+                    if isinstance(proof_latencies, Mapping)
+                    else None
+                ]
+            }
+        else:
+            latencies = {}
         if not isinstance(latencies, Mapping):
             raise ValueError("latencies must be a mapping")
         schema = {

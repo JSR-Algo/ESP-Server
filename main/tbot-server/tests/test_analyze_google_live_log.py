@@ -288,6 +288,22 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         self.assertEqual(verdict["maxReceiveLoopsActive"], 1)
         self.assertEqual(verdict["receiveLoopBalance"], 0)
 
+    def test_conversation_normalizes_first_response_latency_from_server_timestamps(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live evidence_receive_loop_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 generation=1",
+                "2026-08-31 10:00:02 Google Live evidence_response_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=1",
+                "2026-08-31 10:00:03 Google Live evidence_response_ended journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=1",
+                "2026-08-31 10:00:58 Google Live evidence_receive_loop_stopped journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 generation=1",
+                journey_id="bargein-journey-1",
+                journeys="conversation",
+                evidence_scope=EVIDENCE_SCOPE,
+            )
+        )
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+        self.assertEqual(verdict["journeyLatencyEvidence"], {"firstAudioMs": 2000.0})
+
     def test_server_connection_transition_is_normalized_from_anchored_log_marker(self):
         marker = _server_connection_transition()
         scoped, valid = analyze_google_live_log._scoped_marker_validation(marker)
@@ -1222,7 +1238,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
 
         self.assertEqual(combined["status"], "PASS", combined)
 
-    def test_hard_reconnect_bargein_migrates_replacement_owner_and_correlates(self):
+    def test_hard_reconnect_bargein_requires_one_canonical_journey_claim(self):
         body = [
             f"2026-08-31 10:00:{index:02d} {marker}"
             for index, marker in enumerate(_scoped_migrated_bargein_chain(), 1)
@@ -1236,24 +1252,11 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(verdict["status"], "PASS", verdict)
-        self.assertEqual(verdict["correlations"][0]["cancelledLiveConnectionId"], "live-1")
-        self.assertEqual(verdict["correlations"][0]["replacementLiveConnectionId"], "live-2")
-        self.assertEqual(verdict["correlations"][0]["liveConnectionId"], "live-2")
-        transition = {
-            "attempt": 1,
-            "fromLiveConnectionId": "live-1",
-            "toLiveConnectionId": "live-2",
-        }
-        combined = correlate_websocket_bargein_evidence(
-            _transport_observation(
-                finalLiveConnectionId="live-2",
-                liveConnectionTransitions=[transition],
-            ),
-            verdict,
-            expected_candidate_identity=CANDIDATE_IDENTITY,
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn(
+            "JOURNEY_CLAIM_INVALID",
+            [item["code"] for item in verdict["failures"]],
         )
-        self.assertEqual(combined["status"], "PASS", combined)
 
     def test_hard_reconnect_bargein_rejects_post_transition_old_scope(self):
         markers = _scoped_migrated_bargein_chain()
@@ -2567,6 +2570,30 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             [{"attempt": 1, "fromLiveConnectionId": "live-1", "toLiveConnectionId": "live-2"}],
         )
 
+    def test_reconnect_recovery_latency_includes_failed_attempt_and_retry_gap(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live evidence_receive_loop_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 generation=1",
+                "2026-08-31 10:00:02 Google Live evidence_receive_loop_stopped journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 generation=1",
+                "2026-08-31 10:00:03 Google Live evidence_reconnect_started journey_id=bargein-journey-1 connection_id=conn-1 from_live_connection_id=live-1 attempt=1 reason=network",
+                "2026-08-31 10:00:05 Google Live evidence_reconnect_failed journey_id=bargein-journey-1 connection_id=conn-1 attempt=1 from_live_connection_id=live-1 live_connection_id=live-1 error_class=network",
+                "2026-08-31 10:00:09 Google Live evidence_reconnect_started journey_id=bargein-journey-1 connection_id=conn-1 from_live_connection_id=live-1 attempt=2 reason=network",
+                "2026-08-31 10:00:10 Google Live evidence_reopen_ready journey_id=bargein-journey-1 connection_id=conn-1 attempt=2 from_live_connection_id=live-1 to_live_connection_id=live-2",
+                "2026-08-31 10:00:11 Google Live evidence_replayed_buffered_audio journey_id=bargein-journey-1 connection_id=conn-1 attempt=2 from_live_connection_id=live-1 to_live_connection_id=live-2 reason=network frames=0 bytes=0",
+                "2026-08-31 10:00:12 Google Live evidence_reconnect_succeeded journey_id=bargein-journey-1 connection_id=conn-1 attempt=2 from_live_connection_id=live-1 to_live_connection_id=live-2",
+                "2026-08-31 10:00:13 Google Live evidence_receive_loop_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-2 generation=2",
+                "2026-08-31 10:00:14 Google Live evidence_receive_loop_stopped journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-2 generation=2",
+                journey_id="bargein-journey-1",
+                journeys="reconnect",
+                evidence_scope=EVIDENCE_SCOPE,
+            )
+        )
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+        self.assertEqual(
+            verdict["journeyLatencyEvidence"], {"reconnectRecoveryMs": 9000.0}
+        )
+
     def test_scoped_marker_cannot_drift_to_new_live_id_without_transition(self):
         verdict = self._analyze(
             _window_lines(
@@ -2581,7 +2608,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             [item["code"] for item in verdict["failures"]],
         )
 
-    def test_multiple_sequential_scoped_reconnect_transitions_are_valid(self):
+    def test_multiple_sequential_reconnects_require_distinct_journey_boundaries(self):
         verdict = self._analyze(
             _window_lines(
                 "2026-08-31 10:00:01 Google Live evidence_receive_loop_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 generation=1",
@@ -2603,9 +2630,11 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(verdict["status"], "PASS", verdict)
-        self.assertEqual(verdict["finalLiveConnectionId"], "live-3")
-        self.assertEqual(len(verdict["liveConnectionTransitions"]), 2)
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn(
+            "RECONNECT_JOURNEY_BOUNDARY_REQUIRED",
+            [item["code"] for item in verdict["failures"]],
+        )
 
     def test_scoped_reconnect_transition_attempts_must_increase(self):
         verdict = self._analyze(
