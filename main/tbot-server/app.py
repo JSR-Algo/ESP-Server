@@ -29,6 +29,7 @@ from core.lesson.global_generation_sync import GlobalGenerationSync
 from core.lesson.sd_pack_retry_worker import LessonSdOnlineIndex
 from core.utils.gc_manager import get_gc_manager
 from core.utils.util import check_ffmpeg_installed, get_local_ip, validate_mcp_endpoint
+from core.voice.google_live.evidence_enrollment import EvidenceEnrollmentRegistry
 from core.websocket_server import WebSocketServer
 
 # Pre-import Google Live client at server startup. This forces the heavy
@@ -114,6 +115,14 @@ def _generation_enabled(config) -> bool:
     )
 
 
+def _accepts_keyword(factory, keyword: str) -> bool:
+    parameters = inspect.signature(factory).parameters.values()
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == keyword
+        for parameter in parameters
+    )
+
+
 def _build_servers(
     config,
     *,
@@ -129,17 +138,17 @@ def _build_servers(
     websocket_server_factory = websocket_server_factory or WebSocketServer
     http_server_factory = http_server_factory or SimpleHttpServer
     lesson_sd_online_index = LessonSdOnlineIndex(api_base=_lesson_sd_api_base(config))
+    evidence_registry = EvidenceEnrollmentRegistry()
     if _generation_enabled(config):
         raise RuntimeError("enabled generation servers require _build_servers_async")
-    ws_server = websocket_server_factory(
-        config,
-        lesson_sd_online_index=lesson_sd_online_index,
-    )
-    ota_server = http_server_factory(
-        config,
-        ws_server.lesson_connections,
-        lesson_sd_online_index=lesson_sd_online_index,
-    )
+    ws_kwargs = {"lesson_sd_online_index": lesson_sd_online_index}
+    if _accepts_keyword(websocket_server_factory, "evidence_registry"):
+        ws_kwargs["evidence_registry"] = evidence_registry
+    ws_server = websocket_server_factory(config, **ws_kwargs)
+    http_kwargs = {"lesson_sd_online_index": lesson_sd_online_index}
+    if _accepts_keyword(http_server_factory, "evidence_registry"):
+        http_kwargs["evidence_registry"] = evidence_registry
+    ota_server = http_server_factory(config, ws_server.lesson_connections, **http_kwargs)
     return ws_server, ota_server
 
 
@@ -201,22 +210,26 @@ async def _build_servers_async(
         poller = poller_factory(config, store, generation_sync.apply)
         status = status_factory(store, sessions)
         lesson_sd_online_index = LessonSdOnlineIndex(api_base=_lesson_sd_api_base(config))
+        evidence_registry = EvidenceEnrollmentRegistry()
         websocket_server_factory = websocket_server_factory or WebSocketServer
         http_server_factory = http_server_factory or SimpleHttpServer
-        ws_server = websocket_server_factory(
-            config,
-            lesson_sd_online_index=lesson_sd_online_index,
-            global_generation_sessions=sessions,
-        )
-        ota_server = http_server_factory(
-            config,
-            ws_server.lesson_connections,
-            lesson_sd_online_index=lesson_sd_online_index,
-            generation_poller=poller,
-            generation_status=status,
-            generation_redis=redis,
-            owns_generation_redis=True,
-        )
+        ws_kwargs = {
+            "lesson_sd_online_index": lesson_sd_online_index,
+            "global_generation_sessions": sessions,
+        }
+        if _accepts_keyword(websocket_server_factory, "evidence_registry"):
+            ws_kwargs["evidence_registry"] = evidence_registry
+        ws_server = websocket_server_factory(config, **ws_kwargs)
+        http_kwargs = {
+            "lesson_sd_online_index": lesson_sd_online_index,
+            "generation_poller": poller,
+            "generation_status": status,
+            "generation_redis": redis,
+            "owns_generation_redis": True,
+        }
+        if _accepts_keyword(http_server_factory, "evidence_registry"):
+            http_kwargs["evidence_registry"] = evidence_registry
+        ota_server = http_server_factory(config, ws_server.lesson_connections, **http_kwargs)
         return ws_server, ota_server
     except BaseException:
         if poller is not None:

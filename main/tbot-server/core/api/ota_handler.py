@@ -72,8 +72,9 @@ def _split_device_allowlist(value: str) -> set:
     }
 
 class OTAHandler(BaseHandler):
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, *, evidence_registry=None):
         super().__init__(config)
+        self.evidence_registry = evidence_registry
         auth_config = config["server"].get("auth", {})
         self.auth_enable = auth_config.get("enabled", False)
         # Device whitelist
@@ -440,6 +441,10 @@ class OTAHandler(BaseHandler):
                     "url": self._get_websocket_url(local_ip, websocket_port),
                     "token": token,
                 }
+                if self.evidence_registry is not None:
+                    journey_id = self.evidence_registry.ota_journey(device_id, client_id)
+                    if journey_id is not None:
+                        websocket_payload["evidence_journey_id"] = journey_id
                 if (
                     token
                     and (

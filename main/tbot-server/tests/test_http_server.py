@@ -309,6 +309,8 @@ async def test_http_server_start_registers_routes_and_starts_site(monkeypatch):
     assert "/internal/devices/{deviceId}/lesson-nudge" in route_paths
     assert "/internal/devices/{deviceId}/lesson-child-response" in route_paths
     assert "/internal/devices/{deviceId}/mcp-call" in route_paths
+    assert "/internal/devices/{deviceId}/google-live-evidence" in route_paths
+    assert "/internal/devices/{deviceId}/google-live-evidence/{journeyId}" in route_paths
     assert "/internal/lesson-assets/generation/retry" in route_paths
     assert "/internal/lesson-runtime/preload-voice-alarm" in route_paths
     assert "/internal/lesson-runtime/preload-voice-alarm/reset" in route_paths
@@ -992,9 +994,17 @@ async def test_build_servers_enabled_shares_global_stack_and_adapts_positional_f
             captures["status"] = self
 
     class WS:
-        def __init__(self, config, *, lesson_sd_online_index=None, global_generation_sessions=None):
+        def __init__(
+            self,
+            config,
+            *,
+            lesson_sd_online_index=None,
+            global_generation_sessions=None,
+            evidence_registry=None,
+        ):
             assert global_generation_sessions is captures["sessions"]
             self.lesson_connections = {}
+            captures["ws_evidence_registry"] = evidence_registry
 
     class HTTP:
         def __init__(self, config, connections, **kwargs):
@@ -1002,6 +1012,7 @@ async def test_build_servers_enabled_shares_global_stack_and_adapts_positional_f
             assert kwargs["generation_status"] is captures["status"]
             assert kwargs["generation_redis"] is redis
             assert kwargs["owns_generation_redis"] is True
+            captures["http_evidence_registry"] = kwargs["evidence_registry"]
 
     config = {
         "server": {"api_url": "http://backend.test"},
@@ -1032,6 +1043,7 @@ async def test_build_servers_enabled_shares_global_stack_and_adapts_positional_f
         "a" * 64,
         [{"cacheKey": "lesson/v1-checksum"}],
     )
+    assert captures["ws_evidence_registry"] is captures["http_evidence_registry"]
 
 
 @pytest.mark.asyncio

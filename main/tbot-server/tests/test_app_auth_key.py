@@ -59,17 +59,19 @@ def test_build_servers_shares_one_lesson_sd_online_index(monkeypatch):
     captures = {}
 
     class WebSocketServer:
-        def __init__(self, config, *, lesson_sd_online_index=None):
+        def __init__(self, config, *, lesson_sd_online_index=None, evidence_registry=None):
             self.config = config
             self.lesson_sd_online_index = lesson_sd_online_index
             self.lesson_connections = {}
+            self.evidence_registry = evidence_registry
             captures["ws"] = self
 
     class SimpleHttpServer:
-        def __init__(self, config, lesson_connections, *, lesson_sd_online_index=None):
+        def __init__(self, config, lesson_connections, *, lesson_sd_online_index=None, evidence_registry=None):
             self.config = config
             self.lesson_connections = lesson_connections
             self.lesson_sd_online_index = lesson_sd_online_index
+            self.evidence_registry = evidence_registry
             captures["http"] = self
 
     monkeypatch.setattr(app, "WebSocketServer", WebSocketServer)
@@ -83,19 +85,26 @@ def test_build_servers_shares_one_lesson_sd_online_index(monkeypatch):
     assert captures["http"] is http_server
     assert ws_server.lesson_sd_online_index is http_server.lesson_sd_online_index
     assert http_server.lesson_connections is ws_server.lesson_connections
+    assert ws_server.evidence_registry is http_server.evidence_registry
 
 
 @pytest.mark.asyncio
 async def test_http_server_constructor_uses_injected_lesson_sd_online_index():
     from core.http_server import SimpleHttpServer
+    from core.voice.google_live.evidence_enrollment import EvidenceEnrollmentRegistry
 
     shared_index = object()
+    evidence_registry = EvidenceEnrollmentRegistry()
     server = SimpleHttpServer(
         {"server": {"auth_key": "test-key"}},
         lesson_connections={},
         lesson_sd_online_index=shared_index,
+        evidence_registry=evidence_registry,
     )
 
     assert server.lesson_sd_online_index is shared_index
     assert server.lesson_sd_fanout_handler.online_index is shared_index
     assert server.lesson_sd_retry_worker.online_index is shared_index
+    assert server.evidence_registry is evidence_registry
+    assert server.ota_handler.evidence_registry is evidence_registry
+    assert server.google_live_evidence_handler.registry is evidence_registry

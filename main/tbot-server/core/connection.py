@@ -197,12 +197,14 @@ class ConnectionHandler:
             _memory,
             _intent,
             server=None,
+            evidence_registry=None,
     ):
         self.common_config = config
         self.config = copy.deepcopy(config)
         self.session_id = str(uuid.uuid4())
         self.logger = setup_logging()
         self.server = server  # Saveserverinstance reference
+        self.evidence_registry = evidence_registry
 
         self.need_bind = False  # NeedBind device
         self.bind_completed_event = asyncio.Event()
