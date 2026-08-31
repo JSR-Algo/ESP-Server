@@ -30,6 +30,8 @@ from scripts.google_live_reliability import (
     SCHEMA_VERSION,
     redact_mapping,
     reliability_verdict,
+)
+from scripts.google_live_reliability import (
     validate_log_reliability_contract as _shared_validate_log_reliability_contract,
 )
 from scripts.physical_smoke_audit import (
