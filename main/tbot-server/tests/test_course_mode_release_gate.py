@@ -619,6 +619,68 @@ def test_production_gate_accepts_exact_operator_attestation(
     ).hexdigest()
 
 
+def test_production_gate_rejects_report_path_equal_to_operator_attestation(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attestation = _write_operator_attestation(candidate_file)
+    original = attestation.read_bytes()
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(gate, "lanes_for_mode", lambda _mode: ())
+
+    result = gate.run_gate(
+        candidate_file, "quick", runtime_root=_runtime_root(candidate_file),
+        report_path=attestation,
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "report"
+    assert attestation.read_bytes() == original
+
+
+def test_production_gate_replaces_pass_report_if_attestation_changes_during_publish(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attestation = _write_operator_attestation(candidate_file)
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    report_path = Path(candidate["evidenceRoot"]) / "report.json"
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(gate, "lanes_for_mode", lambda _mode: ())
+    original_write = gate._write_report_atomic
+    writes = 0
+
+    def replace_attestation_after_pass(*args, **kwargs):
+        nonlocal writes
+        written = original_write(*args, **kwargs)
+        writes += 1
+        if writes == 1:
+            replacement = attestation.with_name("operator-attestation-publish-race.json")
+            replacement.write_text(
+                json.dumps({
+                    **_operator_attestation_payload(candidate_file),
+                    "createdAt": "2099-01-02T00:00:00Z",
+                }),
+                encoding="utf-8",
+            )
+            replacement.chmod(0o444)
+            replacement.replace(attestation)
+        return written
+
+    monkeypatch.setattr(gate, "_write_report_atomic", replace_attestation_after_pass)
+
+    result = gate.run_gate(
+        candidate_file, "quick", runtime_root=_runtime_root(candidate_file),
+        report_path=report_path,
+    )
+
+    published = json.loads(report_path.read_text(encoding="utf-8"))
+    assert writes == 2
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "operator-precondition"
+    assert published["verdict"] == "BLOCKED"
+    assert published["failedLane"] == "operator-precondition"
+    assert "operatorAttestationSha256" not in published
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

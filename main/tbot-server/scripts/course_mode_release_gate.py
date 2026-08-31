@@ -2960,6 +2960,12 @@ def run_gate(
         operator_binding := _operator_attestation_binding(candidate, source)
     ) is None:
         report = _blocked(candidate_id, "operator-precondition")
+    elif lanes is None and report_path is not None and (
+        Path(os.path.abspath(report_path)) == operator_binding.path
+    ):
+        assert report_parent_fd is not None
+        os.close(report_parent_fd)
+        return _blocked(candidate_id, "report")
     elif lanes is None and not _runtime_matches_candidate(candidate, runtime_root):
         report = _blocked(candidate_id, "candidate-runtime")
     else:
@@ -3189,8 +3195,19 @@ def run_gate(
             _invalidate_report(report_path, report_parent_fd)
             os.close(report_parent_fd)
             return _blocked(report.get("candidateId"), "report")
-        if report["verdict"] == "PASS" and not _candidate_metadata_matches(candidate_path, candidate):
-            report = _blocked(candidate_id, selected[-1].name if selected else "candidate-runtime")
+        post_publish_report = None
+        if report["verdict"] == "PASS" and operator_binding is not None and (
+            _operator_attestation_binding(candidate, source) != operator_binding
+        ):
+            post_publish_report = _blocked(candidate_id, "operator-precondition")
+        elif report["verdict"] == "PASS" and not _candidate_metadata_matches(
+            candidate_path, candidate,
+        ):
+            post_publish_report = _blocked(
+                candidate_id, selected[-1].name if selected else "candidate-runtime",
+            )
+        if post_publish_report is not None:
+            report = post_publish_report
             if not _write_report_atomic(report_path, report, report_parent_fd):
                 _invalidate_report(report_path, report_parent_fd)
                 os.close(report_parent_fd)
