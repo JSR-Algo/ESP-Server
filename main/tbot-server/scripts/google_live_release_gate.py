@@ -16,7 +16,7 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.analyze_google_live_log import _validated_live_connection_transition_chain
+from scripts.analyze_google_live_log import correlate_websocket_bargein_evidence
 from scripts.google_live_reliability import (
     GOOGLE_LIVE_LIMITS,
     SCHEMA_VERSION,
@@ -134,60 +134,29 @@ def _real_api_valid(report: Any) -> bool:
 
 
 def _websocket_valid(report: Any) -> bool:
-    layers = report.get("layers") if isinstance(report, Mapping) else None
-    expected_layers = (
-        "websocket_audio_bargein_transport",
-        "google_live_log_reliability",
+    if not _generic_report_valid(report, "websocket_e2e"):
+        return False
+    transport = report.get("transportEvidence")
+    log_evidence = report.get("logEvidence")
+    stored_correlated = report.get("correlatedEvidence")
+    if not all(
+        isinstance(value, Mapping)
+        for value in (transport, log_evidence, stored_correlated)
+    ):
+        return False
+    expected_identity = report.get("candidateIdentity")
+    recomputed = correlate_websocket_bargein_evidence(
+        transport,
+        log_evidence,
+        expected_candidate_identity=expected_identity,
     )
-    scope = report.get("evidenceScope") if isinstance(report, Mapping) else None
     return (
-        _generic_report_valid(report, "websocket_audio_bargein_correlated")
-        and report.get("aggregateReleaseEligible") is True
-        and report.get("correlationSource") == "server_log"
-        and report.get("correlationStatus") == "PASS"
-        and report.get("oldResponseStopped") is True
-        and report.get("replacementResponseStarted") is True
-        and report.get("replacementResponseStopped") is True
-        and type(report.get("replacementBinaryChunks")) is int
-        and report.get("replacementBinaryChunks") >= 1
-        and _finite_nonnegative(report.get("bargeinStopMs"))
-        and report.get("bargeinStopMs") <= GOOGLE_LIVE_LIMITS["physicalBargeinP95Ms"]
-        and _finite_nonnegative(report.get("maxServerOutputGapMs"))
-        and report.get("maxServerOutputGapMs") <= GOOGLE_LIVE_LIMITS["serverOutputGapMaxMs"]
-        and isinstance(layers, list)
-        and len(layers) == 2
-        and all(
-            isinstance(item, Mapping)
-            and item.get("name") == expected_layers[index]
-            and item.get("status") == "PASS"
-            and item.get("candidateIdentity") == report.get("candidateIdentity")
-            for index, item in enumerate(layers)
-        )
-        and isinstance(scope, Mapping)
-        and scope.get("journeyId") == report.get("journeyId")
-        and all(
-            isinstance(scope.get(field), str) and bool(scope.get(field))
-            for field in (
-                "journeyId",
-                "connectionId",
-                "liveConnectionId",
-                "initialLiveConnectionId",
-                "peerIdentityHash",
-                "serverStartUtc",
-            )
-        )
-        and TAGGED_SHA256.fullmatch(scope.get("peerIdentityHash")) is not None
-        and _validated_live_connection_transition_chain(
-            report.get("initialLiveConnectionId"),
-            report.get("finalLiveConnectionId"),
-            report.get("liveConnectionTransitions"),
-        )
-        == report.get("finalLiveConnectionId")
-        and type(report.get("cancelledResponseId")) is int
-        and report.get("cancelledResponseId") >= 0
-        and type(report.get("replacementResponseId")) is int
-        and report.get("replacementResponseId") >= 0
-        and report.get("cancelledResponseId") != report.get("replacementResponseId")
+        transport.get("candidateIdentity") == expected_identity
+        and log_evidence.get("candidateIdentity") == expected_identity
+        and stored_correlated.get("candidateIdentity") == expected_identity
+        and recomputed.get("status") == "PASS"
+        and recomputed.get("aggregateReleaseEligible") is True
+        and stored_correlated == recomputed
     )
 
 

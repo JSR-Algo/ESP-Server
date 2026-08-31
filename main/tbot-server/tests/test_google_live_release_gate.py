@@ -51,9 +51,19 @@ def _websocket_report() -> dict:
         "liveConnectionTransitions": copy.deepcopy(log_report["liveConnectionTransitions"]),
         "logWindow": copy.deepcopy(log_report["logWindow"]),
     }
-    return correlate_websocket_bargein_evidence(
+    correlated = correlate_websocket_bargein_evidence(
         transport, log_report, expected_candidate_identity=IDENTITY
     )
+    return {
+        "schemaVersion": "google-live-reliability.v1",
+        "name": "websocket_e2e",
+        "status": "PASS",
+        "candidateIdentity": copy.deepcopy(IDENTITY),
+        "transportEvidence": transport,
+        "logEvidence": log_report,
+        "correlatedEvidence": correlated,
+        "failures": [],
+    }
 
 
 def _reports() -> dict[str, dict]:
@@ -266,8 +276,18 @@ def test_checksum_manifest_rejects_path_escape(tmp_path: Path) -> None:
         ("deterministic", lambda report: report["testVerdict"].update(failed=1)),
         ("server_regression", lambda report: report.update(receiveLoopBalance=1)),
         ("real_api", lambda report: report.update(firstAudioMs=1801.0)),
-        ("websocket_e2e", lambda report: report.update(aggregateReleaseEligible=False)),
-        ("websocket_e2e", lambda report: report.update(maxServerOutputGapMs=251.0)),
+        (
+            "websocket_e2e",
+            lambda report: report["correlatedEvidence"].update(
+                aggregateReleaseEligible=False
+            ),
+        ),
+        (
+            "websocket_e2e",
+            lambda report: report["transportEvidence"].update(
+                maxServerOutputGapMs=251.0
+            ),
+        ),
         ("physical", lambda report: report["firstAudioLatencyMs"].update(p95=1801.0)),
         ("physical", lambda report: report.update(receiveLoopBalance=1)),
         ("candidate_soak", lambda report: report["latencyComparison"].update(pass_=False)),
@@ -287,6 +307,52 @@ def test_release_rejects_layer_specific_nested_tampering(tmp_path: Path, layer: 
     verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
     assert verdict["status"] == "FAIL"
     assert any(item["code"] == "LAYER_CONTRACT_INVALID" for item in verdict["failures"])
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        lambda report: report["transportEvidence"].pop("logWindow"),
+        lambda report: report["transportEvidence"]["evidenceScope"].update(
+            connectionId="fabricated"
+        ),
+        lambda report: report["transportEvidence"]["evidenceScope"].update(
+            liveConnectionId="fabricated"
+        ),
+        lambda report: report["transportEvidence"]["evidenceScope"].update(
+            serverStartUtc="not-a-utc-time"
+        ),
+        lambda report: report["logEvidence"].pop("evidenceScope"),
+        lambda report: report["logEvidence"].update(logWindow={}),
+        lambda report: report["transportEvidence"].update(
+            liveConnectionTransitions=[
+                {
+                    "sequence": 2,
+                    "fromLiveConnectionId": "live-1",
+                    "toLiveConnectionId": "live-2",
+                }
+            ]
+        ),
+        lambda report: report["correlatedEvidence"].update(logWindow={}),
+    ],
+)
+def test_websocket_release_recomputes_exact_task4_task5_correlation(
+    tmp_path: Path, tamper
+) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    _rewrite(paths["websocket_e2e"], tamper)
+    checksums["websocket_e2e"] = hashlib.sha256(
+        paths["websocket_e2e"].read_bytes()
+    ).hexdigest()
+
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+
+    assert verdict["status"] == "FAIL"
+    assert any(
+        item["code"] == "LAYER_CONTRACT_INVALID"
+        and item["layer"] == "websocket_e2e"
+        for item in verdict["failures"]
+    )
 
 
 def test_cli_reads_checksum_manifest_and_writes_deterministic_failure(tmp_path: Path) -> None:
