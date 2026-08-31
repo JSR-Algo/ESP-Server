@@ -1686,6 +1686,8 @@ async def run_candidate_soak(
     executions = []
     seen_journeys = set()
     seen_windows = set()
+    seen_connections = set()
+    seen_utc_windows = set()
     seen_evidence_keys = set()
     expected_sequence = 1
 
@@ -1735,10 +1737,36 @@ async def run_candidate_soak(
                 failures.append({"code": "EVIDENCE_WINDOW_REUSED", "stage": stage_name})
             else:
                 seen_windows.add(window_id)
+            connection_id = result.get("connectionId")
+            if (
+                not isinstance(connection_id, str)
+                or not connection_id
+                or connection_id in seen_connections
+            ):
+                failures.append({"code": "EVIDENCE_CONNECTION_REUSED", "stage": stage_name})
+            else:
+                seen_connections.add(connection_id)
+            log_window = result.get("logWindow")
+            utc_window = (
+                (log_window.get("start"), log_window.get("end"))
+                if isinstance(log_window, Mapping)
+                else None
+            )
+            if (
+                not isinstance(log_window, Mapping)
+                or log_window.get("windowId") != window_id
+                or utc_window is None
+                or any(not isinstance(value, str) or not value for value in utc_window)
+            ):
+                failures.append({"code": "EVIDENCE_SCOPE_MALFORMED", "stage": stage_name})
+            elif utc_window in seen_utc_windows:
+                failures.append({"code": "EVIDENCE_UTC_WINDOW_REUSED", "stage": stage_name})
+            else:
+                seen_utc_windows.add(utc_window)
             evidence_key = _evidence_reuse_key(
                 journey_id=journey_id,
-                connection_id=result.get("connectionId"),
-                log_window=result.get("logWindow"),
+                connection_id=connection_id,
+                log_window=log_window,
             )
             if evidence_key is None:
                 failures.append({"code": "EVIDENCE_SCOPE_MALFORMED", "stage": stage_name})
@@ -1848,16 +1876,32 @@ async def run_candidate_soak(
     ):
         failures.append({"code": "TASK5_CORRELATED_EVIDENCE_INVALID"})
     upstream_scope = correlated.get("evidenceScope")
+    upstream_connection = (
+        upstream_scope.get("connectionId") if isinstance(upstream_scope, Mapping) else None
+    )
+    upstream_window = correlated.get("logWindow")
+    upstream_window_id = (
+        upstream_window.get("windowId") if isinstance(upstream_window, Mapping) else None
+    )
+    upstream_utc_window = (
+        (upstream_window.get("start"), upstream_window.get("end"))
+        if isinstance(upstream_window, Mapping)
+        else None
+    )
     upstream_key = _evidence_reuse_key(
         journey_id=correlated.get("journeyId"),
-        connection_id=(upstream_scope or {}).get("connectionId")
-        if isinstance(upstream_scope, Mapping)
-        else None,
-        log_window=correlated.get("logWindow"),
+        connection_id=upstream_connection,
+        log_window=upstream_window,
     )
     if upstream_key is None:
         failures.append({"code": "UPSTREAM_EVIDENCE_SCOPE_MISMATCH"})
-    elif upstream_key in seen_evidence_keys:
+    elif (
+        correlated.get("journeyId") in seen_journeys
+        or upstream_window_id in seen_windows
+        or upstream_connection in seen_connections
+        or upstream_utc_window in seen_utc_windows
+        or upstream_key in seen_evidence_keys
+    ):
         failures.append({"code": "UPSTREAM_EVIDENCE_REUSED"})
 
     total_fields = (

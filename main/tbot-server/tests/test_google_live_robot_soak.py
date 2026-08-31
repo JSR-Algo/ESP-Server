@@ -151,7 +151,10 @@ def _journeys(*, mutation=None):
             "candidateIdentity": IDENTITY,
             "evidenceSequence": sequence,
             "journeyId": f"candidate-{sequence}",
-            "connectionId": "candidate-connection",
+            "connectionId": f"candidate-connection-{sequence}",
+            "initialLiveConnectionId": "live-session-reusable-after-close",
+            "finalLiveConnectionId": "live-session-reusable-after-close",
+            "liveConnectionTransitions": [],
             "windowId": f"window-{sequence}",
             "logWindow": {
                 "windowId": f"window-{sequence}",
@@ -252,6 +255,7 @@ def test_candidate_soak_runs_fixed_sequence_and_meets_production_budgets():
     assert report["candidateIdentity"] == IDENTITY
     assert len(report["evidenceExecutions"]) == 33
     assert len({item["journeyId"] for item in report["evidenceExecutions"]}) == 33
+    assert report["status"] == "PASS"  # Live IDs are transition-scoped, not globally unique.
     assert "raw child" not in json.dumps(report).lower()
 
 
@@ -376,13 +380,13 @@ def test_candidate_soak_rejects_reused_or_mismatched_upstream_window():
     reused_scope = {
         **EVIDENCE_SCOPE,
         "journeyId": "candidate-18",
-        "connectionId": "candidate-connection",
+        "connectionId": "candidate-connection-18",
         "serverStartUtc": reused_window["start"],
     }
     raw.update(
         journeyId="candidate-18",
         evidenceScope=reused_scope,
-        serverConnectionId="candidate-connection",
+        serverConnectionId="candidate-connection-18",
         logWindow=reused_window,
     )
     correlated.update(
@@ -396,7 +400,7 @@ def test_candidate_soak_rejects_reused_or_mismatched_upstream_window():
     )
     log_report["correlations"][0].update(
         journeyId="candidate-18",
-        connectionId="candidate-connection",
+        connectionId="candidate-connection-18",
     )
     reused = _run(
         args=_args(
@@ -508,6 +512,43 @@ def test_candidate_soak_rejects_fabricated_transition_ledger(mutation):
     assert "TASK5_CORRELATED_EVIDENCE_INVALID" in {
         item["code"] for item in report["failures"]
     }
+
+
+@pytest.mark.parametrize(
+    ("reused_component", "expected_code"),
+    [
+        ("journeyId", "EVIDENCE_JOURNEY_REUSED"),
+        ("windowId", "EVIDENCE_WINDOW_REUSED"),
+        ("connectionId", "EVIDENCE_CONNECTION_REUSED"),
+        ("utcWindow", "EVIDENCE_UTC_WINDOW_REUSED"),
+    ],
+)
+def test_candidate_soak_rejects_each_reused_execution_identity_component(
+    reused_component,
+    expected_code,
+):
+    first = {}
+
+    def reuse(result, sequence, _name, _index, _label):
+        if sequence == 1:
+            first.update(deepcopy(result))
+            return
+        if sequence != 2:
+            return
+        if reused_component == "journeyId":
+            result["journeyId"] = first["journeyId"]
+        elif reused_component == "windowId":
+            result["windowId"] = first["windowId"]
+            result["logWindow"]["windowId"] = first["logWindow"]["windowId"]
+        elif reused_component == "connectionId":
+            result["connectionId"] = first["connectionId"]
+        else:
+            result["logWindow"]["start"] = first["logWindow"]["start"]
+            result["logWindow"]["end"] = first["logWindow"]["end"]
+
+    report = _run(journeys=_journeys(mutation=reuse))
+
+    assert expected_code in {item["code"] for item in report["failures"]}
 
 
 def test_candidate_soak_rejects_hard_latency_budget_even_with_matching_baseline():
