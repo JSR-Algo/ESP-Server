@@ -188,6 +188,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if reason is not None:
             pending["reason"] = str(reason)
         self._evidence_pending_reconnect = pending
+        self._evidence_replay_logged_attempts.discard(pending["attempt"])
         self.conn.google_live_evidence_reconnect_attempt = pending["attempt"]
         return dict(pending)
 
@@ -231,6 +232,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._evidence_live_connection_transitions.append(committed)
         self._evidence_current_live_connection_id = pending["toLiveConnectionId"]
         self._evidence_pending_reconnect = None
+        self._evidence_replay_logged_attempts.discard(pending["attempt"])
         return dict(committed)
 
     def _fail_evidence_reconnect(self):
@@ -240,6 +242,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 "fromLiveConnectionId"
             ]
         self._evidence_pending_reconnect = None
+        if pending is not None:
+            self._evidence_replay_logged_attempts.discard(pending["attempt"])
         try:
             self._bind_client_evidence_scope(self._client, self._session_generation)
         except Exception:
@@ -290,6 +294,31 @@ class GoogleLiveProvider(VoiceSessionProvider):
         ):
             return dict(pending)
         return None
+
+    def _log_evidence_reconnect_replay(self, replay_frames, replay_bytes):
+        journey_id = getattr(self.conn, "google_live_evidence_journey_id", None)
+        attempt = getattr(self.conn, "google_live_evidence_reconnect_attempt", None)
+        if not isinstance(journey_id, str) or not journey_id or attempt is None:
+            return
+        transition = self._evidence_transition_for_attempt(attempt)
+        if transition is None:
+            return
+        if attempt in self._evidence_replay_logged_attempts:
+            raise RuntimeError("evidence reconnect replay marker already emitted")
+        self.conn.logger.bind(tag="GoogleLive").info(
+            "Google Live evidence_replayed_buffered_audio journey_id={} "
+            "connection_id={} attempt={} from_live_connection_id={} "
+            "to_live_connection_id={} reason={} frames={} bytes={}",
+            journey_id,
+            str(getattr(self.conn, "session_id", "unknown")),
+            attempt,
+            transition["fromLiveConnectionId"],
+            transition["toLiveConnectionId"],
+            transition["reason"],
+            replay_frames,
+            replay_bytes,
+        )
+        self._evidence_replay_logged_attempts.add(attempt)
 
     def _mark_lesson_asset_audio_activity(self):
         self.conn._lesson_asset_last_audio_at = time.monotonic()
@@ -413,6 +442,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._evidence_live_connection_transitions = []
         self._evidence_pending_reconnect = None
         self._evidence_reconnect_attempt_serial = 0
+        self._evidence_replay_logged_attempts = set()
 
     async def start_session(self):
         async with self._get_lifecycle_lock():
@@ -4012,68 +4042,48 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._reconnecting = False
 
     async def _forward_pending_reconnect_audio(self):
-        if self._bridge is None or not self._pending_reconnect_audio:
-            self._pending_reconnect_audio.clear()
-            return
         replay_frames = 0
         replay_bytes = 0
-        while self._pending_reconnect_audio:
-            item = self._pending_reconnect_audio.popleft()
-            if isinstance(item, tuple) and len(item) == 2:
-                buffered_response_id, packet = item
-                if buffered_response_id != self._response_generation:
-                    self.conn.logger.bind(tag="GoogleLive").info(
-                        "reconnect_replay_skipped reason=stale_turn buffered_response_id={} current_response_id={}",
-                        buffered_response_id,
-                        self._response_generation,
-                    )
+        if self._bridge is None or not self._pending_reconnect_audio:
+            self._pending_reconnect_audio.clear()
+        else:
+            while self._pending_reconnect_audio:
+                item = self._pending_reconnect_audio.popleft()
+                if isinstance(item, tuple) and len(item) == 2:
+                    buffered_response_id, packet = item
+                    if buffered_response_id != self._response_generation:
+                        self.conn.logger.bind(tag="GoogleLive").info(
+                            "reconnect_replay_skipped reason=stale_turn buffered_response_id={} current_response_id={}",
+                            buffered_response_id,
+                            self._response_generation,
+                        )
+                        continue
+                else:
+                    packet = item
+                if not packet:
                     continue
-            else:
-                packet = item
-            if not packet:
-                continue
-            replay_frames += 1
-            replay_bytes += len(packet)
-            decoded_audio = None
-            if hasattr(self._bridge, "decode_input_audio_async"):
-                decoded_audio = await self._bridge.decode_input_audio_async(packet)
-            elif hasattr(self._bridge, "decode_input_audio"):
-                decoded_audio = self._bridge.decode_input_audio(packet)
-            if decoded_audio is not None and hasattr(
-                self._bridge, "forward_decoded_input_audio"
-            ):
-                await self._bridge.forward_decoded_input_audio(decoded_audio)
-                continue
-            await self._bridge.forward_input_audio(packet)
+                replay_frames += 1
+                replay_bytes += len(packet)
+                decoded_audio = None
+                if hasattr(self._bridge, "decode_input_audio_async"):
+                    decoded_audio = await self._bridge.decode_input_audio_async(packet)
+                elif hasattr(self._bridge, "decode_input_audio"):
+                    decoded_audio = self._bridge.decode_input_audio(packet)
+                if decoded_audio is not None and hasattr(
+                    self._bridge, "forward_decoded_input_audio"
+                ):
+                    await self._bridge.forward_decoded_input_audio(decoded_audio)
+                    continue
+                await self._bridge.forward_input_audio(packet)
         if replay_frames:
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live replayed_buffered_audio frames={} bytes={}",
                 replay_frames,
                 replay_bytes,
             )
-            journey_id = getattr(
-                self.conn, "google_live_evidence_journey_id", None
-            )
-            attempt = getattr(
-                self.conn, "google_live_evidence_reconnect_attempt", None
-            )
-            if isinstance(journey_id, str) and journey_id and attempt is not None:
-                transition = self._evidence_transition_for_attempt(attempt)
-                if transition is not None:
-                    self.conn.logger.bind(tag="GoogleLive").info(
-                        "Google Live evidence_replayed_buffered_audio journey_id={} "
-                        "connection_id={} attempt={} from_live_connection_id={} "
-                        "to_live_connection_id={} reason={} frames={} bytes={}",
-                        journey_id,
-                        str(getattr(self.conn, "session_id", "unknown")),
-                        attempt,
-                        transition["fromLiveConnectionId"],
-                        transition["toLiveConnectionId"],
-                        transition.get("reason", "unknown"),
-                        replay_frames,
-                        replay_bytes,
-                    )
-        self._schedule_input_flush()
+        self._log_evidence_reconnect_replay(replay_frames, replay_bytes)
+        if replay_frames:
+            self._schedule_input_flush()
 
     def _get_interrupt_replay_buffer_capacity(self):
         config = self._get_live_config()
@@ -7358,6 +7368,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     ),
                     reason,
                 )
+                await self._forward_pending_reconnect_audio()
                 committed_transition = self._commit_evidence_reconnect(
                     evidence_transition
                 )
@@ -7500,6 +7511,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 reason,
                 self._response_generation,
             )
+            await self._forward_pending_reconnect_audio()
             committed_transition = self._commit_evidence_reconnect(evidence_transition)
             if evidence_transition is not None and committed_transition is None:
                 raise RuntimeError("evidence reconnect commit mismatch")

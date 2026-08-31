@@ -3958,6 +3958,8 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
                 if level == "info"
             )
         )
+        with self.assertRaisesRegex(RuntimeError, "already emitted"):
+            await provider._forward_pending_reconnect_audio()
         provider._commit_evidence_reconnect(transition)
         self.assertIsNone(provider._evidence_transition_for_attempt(1))
         conn.logger.messages.clear()
@@ -3968,6 +3970,29 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             any(
                 args and "evidence_replayed_buffered_audio" in str(args[0])
+                for level, args, _kwargs in conn.logger.messages
+                if level == "info"
+            )
+        )
+
+    async def test_buffered_replay_marker_emits_zero_batch_for_pending_transition(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._begin_evidence_reconnect("network")
+        provider._accept_evidence_reconnect_ready("live-2")
+
+        await provider._forward_pending_reconnect_audio()
+
+        self.assertTrue(
+            any(
+                args
+                and "evidence_replayed_buffered_audio" in str(args[0])
+                and args[3:] == (1, "live-1", "live-2", "network", 0, 0)
                 for level, args, _kwargs in conn.logger.messages
                 if level == "info"
             )
@@ -5179,6 +5204,9 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
 
                 async def open_new_owner(*_args, **_kwargs):
                     provider._interaction.start_live_connection("live-2")
+                    provider._pending_reconnect_audio.append(
+                        (provider._response_generation, b"audio")
+                    )
 
                 provider._open_live_session = AsyncMock(side_effect=open_new_owner)
 
@@ -5201,6 +5229,24 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
                         }
                     ],
                 )
+                replay_index = next(
+                    index
+                    for index, (level, args, _kwargs) in enumerate(conn.logger.messages)
+                    if level == "info"
+                    and args
+                    and "evidence_replayed_buffered_audio" in str(args[0])
+                )
+                success_index = next(
+                    index
+                    for index, (level, args, _kwargs) in enumerate(conn.logger.messages)
+                    if level == "info"
+                    and args
+                    and "evidence_reconnect_succeeded" in str(args[0])
+                )
+                self.assertLess(replay_index, success_index)
+                self.assertEqual(conn.logger.messages[replay_index][1][7:], (1, 5))
+                self.assertEqual(provider._bridge.forwarded, [b"pcm:audio"])
+                self.assertEqual(list(provider._pending_reconnect_audio), [])
 
     async def test_reconnect_closing_during_backoff_terminates_evidence_attempt(self):
         conn = _Conn()

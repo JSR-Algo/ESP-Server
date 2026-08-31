@@ -31,6 +31,13 @@ EVIDENCE_SCOPE = {
     "peerIdentityHash": f"sha256:{'d' * 64}",
     "serverStartUtc": "2026-08-31T10:00:00+00:00",
 }
+RECONNECT_SCOPE = {
+    **EVIDENCE_SCOPE,
+    "journeyId": "j1",
+    "connectionId": "c1",
+    "liveConnectionId": "l1",
+    "initialLiveConnectionId": "l1",
+}
 
 
 def _window_lines(
@@ -76,6 +83,18 @@ def _write_log(lines):
     path = Path(tmp.name) / "server.log"
     path.write_text("\n".join(lines), encoding="utf-8")
     return tmp, path
+
+
+def _exact_reconnect_window(*markers):
+    return _window_lines(
+        "2026-08-31 10:00:00 Google Live evidence_receive_loop_started journey_id=j1 connection_id=c1 live_connection_id=l1 generation=1",
+        *markers,
+        "2026-08-31 10:00:50 Google Live evidence_receive_loop_stopped journey_id=j1 connection_id=c1 live_connection_id=l2 generation=1",
+        "2026-08-31 10:00:51 Google Live evidence_connection_close journey_id=j1 connection_id=c1 live_connection_id=l2 pending_tasks=0 close_code=1000 reason=evidence_finalize",
+        journey_id="j1",
+        journeys="reconnect",
+        evidence_scope=RECONNECT_SCOPE,
+    )
 
 
 def _transport_observation(**overrides):
@@ -204,6 +223,7 @@ def _scoped_migrated_bargein_chain(*, replacement_live_id="live-2"):
         f"Google Live evidence_receive_loop_stopped {old_scope} generation=1",
         "Google Live evidence_reconnect_started journey_id=bargein-journey-1 connection_id=conn-1 from_live_connection_id=live-1 attempt=1 reason=hard_interrupt",
         f"Google Live evidence_reopen_ready journey_id=bargein-journey-1 connection_id=conn-1 attempt=1 from_live_connection_id=live-1 to_live_connection_id={replacement_live_id}",
+        f"Google Live evidence_replayed_buffered_audio journey_id=bargein-journey-1 connection_id=conn-1 attempt=1 from_live_connection_id=live-1 to_live_connection_id={replacement_live_id} reason=hard_interrupt frames=0 bytes=0",
         f"Google Live evidence_reconnect_succeeded journey_id=bargein-journey-1 connection_id=conn-1 attempt=1 from_live_connection_id=live-1 to_live_connection_id={replacement_live_id}",
         f"Google Live evidence_receive_loop_started {new_scope} generation=2",
         f"Google Live evidence_user_interrupted {new_scope} {ownership} reason=vad cancelled_response_id=7 next_response_id=8",
@@ -588,6 +608,21 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                 "2026-08-31 10:00:01 reconnect_started reason=network attempt=1 state=RECONNECTING",
                 "2026-08-31 10:00:02 Google Live reopen_ready reason=network attempt=1 live_connection_id=live-2",
                 "2026-08-31 10:00:03 Google Live replayed_buffered_audio frames=2 bytes=20",
+                "2026-08-31 10:00:03 Google Live evidence_replayed_buffered_audio journey_id=legacy connection_id=legacy attempt=99 from_live_connection_id=foreign-1 to_live_connection_id=foreign-2 reason=foreign frames=9 bytes=90",
+                "2026-08-31 10:00:04 reconnect_succeeded attempt=1 live_connection_id=live-2",
+            )
+        )
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+        self.assertEqual(verdict["replayCountsByReopen"], {"attempt-1": 1})
+
+    def test_malformed_scoped_replay_does_not_poison_legacy_replay(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 reconnect_started reason=network attempt=1 state=RECONNECTING",
+                "2026-08-31 10:00:02 Google Live reopen_ready reason=network attempt=1 live_connection_id=live-2",
+                "2026-08-31 10:00:03 Google Live replayed_buffered_audio frames=2 bytes=20",
+                "2026-08-31 10:00:03 Google Live evidence_replayed_buffered_audio journey_id=foreign connection_id=foreign attempt=9 from_live_connection_id=x to_live_connection_id=y reason=network frames=9",
                 "2026-08-31 10:00:04 reconnect_succeeded attempt=1 live_connection_id=live-2",
             )
         )
@@ -1042,7 +1077,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
 
     def test_hard_reconnect_bargein_rejects_post_transition_old_scope(self):
         markers = _scoped_migrated_bargein_chain()
-        markers[9] = markers[9].replace("live_connection_id=live-2", "live_connection_id=live-1").replace(
+        markers[10] = markers[10].replace("live_connection_id=live-2", "live_connection_id=live-1").replace(
             "replacement_live_connection_id=live-2",
             "replacement_live_connection_id=live-1",
         )
@@ -1110,7 +1145,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
 
     def test_hard_reconnect_bargein_does_not_commit_owner_when_reopen_fails(self):
         markers = _scoped_migrated_bargein_chain()
-        markers[7] = (
+        markers[8] = (
             "Google Live evidence_reconnect_failed journey_id=bargein-journey-1 "
             "connection_id=conn-1 attempt=1 from_live_connection_id=live-1 "
             "live_connection_id=live-2 error_class=network"
@@ -1141,7 +1176,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
     def test_hard_reconnect_bargein_detects_old_audio_after_new_replacement(self):
         markers = _scoped_migrated_bargein_chain()
         markers.insert(
-            15,
+            16,
             "Google Live model_output_chunk_forwarded journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 response_id=7",
         )
         verdict = self._analyze(
@@ -1541,156 +1576,117 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
 
     def test_scoped_reconnect_attempts_are_owned_by_connection(self):
         verdict = self._analyze(
-            _window_lines(
+            _exact_reconnect_window(
                 "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=1 reason=network",
                 "2026-08-31 10:00:02 Google Live evidence_reopen_ready journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
                 "2026-08-31 10:00:03 Google Live replayed_buffered_audio frames=1 bytes=10",
-                "2026-08-31 10:00:04 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
+                "2026-08-31 10:00:04 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2 reason=network frames=1 bytes=10",
                 "2026-08-31 10:00:05 Google Live evidence_reconnect_succeeded journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                journey_id="j1",
-                journeys="reconnect",
             )
         )
         wrong_owner = self._analyze(
-            _window_lines(
+            _exact_reconnect_window(
                 "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=1 reason=network",
                 "2026-08-31 10:00:02 Google Live evidence_reopen_ready journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
                 "2026-08-31 10:00:03 Google Live replayed_buffered_audio frames=1 bytes=10",
-                "2026-08-31 10:00:04 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c2 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
+                "2026-08-31 10:00:04 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c2 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2 reason=network frames=1 bytes=10",
                 "2026-08-31 10:00:05 Google Live evidence_reconnect_succeeded journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                journey_id="j1",
-                journeys="reconnect",
             )
         )
 
         self.assertEqual(verdict["status"], "PASS", verdict)
         self.assertEqual(wrong_owner["status"], "FAIL", wrong_owner)
         self.assertIn(
-            "BUFFER_REPLAY_WITHOUT_SUCCESSFUL_REOPEN",
+            "EVIDENCE_SCOPE_MISMATCH",
             [item["code"] for item in wrong_owner["failures"]],
         )
 
-    def test_scoped_provisional_replay_requires_marker_before_success(self):
-        success = self._analyze(
-            _window_lines(
+    def test_exact_scoped_replay_ignores_foreign_generic_lines(self):
+        verdict = self._analyze(
+            _exact_reconnect_window(
                 "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=1 reason=network",
                 "2026-08-31 10:00:02 Google Live evidence_reopen_ready journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                "2026-08-31 10:00:03 Google Live replayed_buffered_audio frames=1 bytes=10",
-                "2026-08-31 10:00:04 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2 reason=network",
-                "2026-08-31 10:00:05 Google Live evidence_reconnect_succeeded journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                journey_id="j1",
-                journeys="reconnect",
-            )
-        )
-        missing = self._analyze(
-            _window_lines(
-                "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=1 reason=network",
-                "2026-08-31 10:00:02 Google Live evidence_reopen_ready journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                "2026-08-31 10:00:03 Google Live replayed_buffered_audio frames=1 bytes=10",
-                "2026-08-31 10:00:04 Google Live evidence_reconnect_succeeded journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                journey_id="j1",
-                journeys="reconnect",
-            )
-        )
-        wrong_reason = self._analyze(
-            _window_lines(
-                "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=1 reason=network",
-                "2026-08-31 10:00:02 Google Live evidence_reopen_ready journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                "2026-08-31 10:00:03 Google Live replayed_buffered_audio frames=1 bytes=10",
-                "2026-08-31 10:00:04 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2 reason=hard_interrupt",
-                "2026-08-31 10:00:05 Google Live evidence_reconnect_succeeded journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                journey_id="j1",
-                journeys="reconnect",
-            )
-        )
-
-        self.assertEqual(success["status"], "PASS", success)
-        self.assertIn(
-            "COVERAGE_MISSING",
-            [item["code"] for item in missing["failures"]],
-        )
-        self.assertIn(
-            "BUFFER_REPLAY_WITHOUT_SUCCESSFUL_REOPEN",
-            [item["code"] for item in wrong_reason["failures"]],
-        )
-
-    def test_scoped_provisional_replay_rejects_unpaired_and_duplicate_markers(self):
-        scoped_only = self._analyze(
-            _window_lines(
-                "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=1 reason=network",
-                "2026-08-31 10:00:02 Google Live evidence_reopen_ready journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                "2026-08-31 10:00:03 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2 reason=network",
-                "2026-08-31 10:00:04 Google Live evidence_reconnect_succeeded journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                journey_id="j1",
-                journeys="reconnect",
-            )
-        )
-        duplicate = self._analyze(
-            _window_lines(
-                "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=1 reason=network",
-                "2026-08-31 10:00:02 Google Live evidence_reopen_ready journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                "2026-08-31 10:00:03 Google Live replayed_buffered_audio frames=1 bytes=10",
-                "2026-08-31 10:00:04 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2 reason=network",
-                "2026-08-31 10:00:05 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2 reason=network",
-                "2026-08-31 10:00:06 Google Live evidence_reconnect_succeeded journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                journey_id="j1",
-                journeys="reconnect",
-            )
-        )
-
-        for verdict in (scoped_only, duplicate):
-            self.assertIn(
-                "BUFFER_REPLAY_WITHOUT_BUFFERED_BATCH",
-                [item["code"] for item in verdict["failures"]],
-            )
-
-    def test_scoped_provisional_replay_rejects_duplicate_or_mismatched_batch(self):
-        duplicate_generic = self._analyze(
-            _window_lines(
-                "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=1 reason=network",
-                "2026-08-31 10:00:02 Google Live evidence_reopen_ready journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                "2026-08-31 10:00:03 Google Live replayed_buffered_audio frames=1 bytes=10",
-                "2026-08-31 10:00:04 Google Live replayed_buffered_audio frames=2 bytes=20",
+                "2026-08-31 10:00:03 Google Live replayed_buffered_audio frames=99 bytes=999",
+                "2026-08-31 10:00:04 Google Live replayed_buffered_audio frames=88 bytes=888",
+                "2026-08-31 10:00:04 Google Live evidence_reopen_ready journey_id=foreign connection_id=foreign attempt=99999999999 from_live_connection_id=x to_live_connection_id=y",
                 "2026-08-31 10:00:05 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2 reason=network frames=1 bytes=10",
                 "2026-08-31 10:00:06 Google Live evidence_reconnect_succeeded journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                journey_id="j1",
-                journeys="reconnect",
-            )
-        )
-        mismatched = self._analyze(
-            _window_lines(
-                "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=1 reason=network",
-                "2026-08-31 10:00:02 Google Live evidence_reopen_ready journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                "2026-08-31 10:00:03 Google Live replayed_buffered_audio frames=1 bytes=10",
-                "2026-08-31 10:00:04 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2 reason=network frames=2 bytes=20",
-                "2026-08-31 10:00:05 Google Live evidence_reconnect_succeeded journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                journey_id="j1",
-                journeys="reconnect",
             )
         )
 
-        self.assertIn(
-            "DUPLICATE_BUFFER_REPLAY",
-            [item["code"] for item in duplicate_generic["failures"]],
+        self.assertEqual(verdict["status"], "PASS", verdict)
+
+    def test_exact_scoped_replay_rejects_missing_duplicate_and_malformed_marker(self):
+        prefix = (
+            "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=1 reason=network",
+            "2026-08-31 10:00:02 Google Live evidence_reopen_ready journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
         )
-        self.assertIn(
-            "BUFFER_REPLAY_BATCH_MISMATCH",
-            [item["code"] for item in mismatched["failures"]],
+        success = "2026-08-31 10:00:06 Google Live evidence_reconnect_succeeded journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2"
+        scoped = "2026-08-31 10:00:03 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2 reason=network frames=1 bytes=10"
+        missing = self._analyze(_exact_reconnect_window(*prefix, success))
+        duplicate = self._analyze(
+            _exact_reconnect_window(*prefix, scoped, scoped.replace("10:00:03", "10:00:04"), success)
+        )
+        malformed = self._analyze(
+            _exact_reconnect_window(*prefix, scoped.rsplit(" bytes=10", 1)[0], success)
         )
 
-    def test_scoped_provisional_replay_rejects_partial_batch_tuple(self):
+        self.assertIn("COVERAGE_MISSING", [item["code"] for item in missing["failures"]])
+        self.assertIn("DUPLICATE_BUFFER_REPLAY", [item["code"] for item in duplicate["failures"]])
+        self.assertIn("MALFORMED_RELIABILITY_LOG_LINE", [item["code"] for item in malformed["failures"]])
+
+    def test_exact_scoped_replay_rejects_wrong_attempt_transition_or_reason(self):
+        prefix = (
+            "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=1 reason=network",
+            "2026-08-31 10:00:02 Google Live evidence_reopen_ready journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
+        )
+        success = "2026-08-31 10:00:06 Google Live evidence_reconnect_succeeded journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2"
+        scoped = "2026-08-31 10:00:03 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2 reason=network frames=1 bytes=10"
+        mutations = {
+            "attempt": scoped.replace("attempt=1", "attempt=2"),
+            "from": scoped.replace("from_live_connection_id=l1", "from_live_connection_id=l0"),
+            "to": scoped.replace("to_live_connection_id=l2", "to_live_connection_id=l3"),
+            "reason": scoped.replace("reason=network", "reason=hard_interrupt"),
+        }
+
+        for field, marker in mutations.items():
+            with self.subTest(field=field):
+                verdict = self._analyze(
+                    _exact_reconnect_window(*prefix, marker, success)
+                )
+                self.assertIn(
+                    "BUFFER_REPLAY_WITHOUT_SUCCESSFUL_REOPEN",
+                    [item["code"] for item in verdict["failures"]],
+                )
+
+    def test_exact_scoped_replay_rejects_inconsistent_zero_counts(self):
+        prefix = (
+            "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=1 reason=network",
+            "2026-08-31 10:00:02 Google Live evidence_reopen_ready journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
+        )
+        success = "2026-08-31 10:00:06 Google Live evidence_reconnect_succeeded journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2"
+        marker = "2026-08-31 10:00:03 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2 reason=network frames={} bytes={}"
+
+        for frames, byte_count in ((0, 10), (1, 0), ("9" * 5000, 1)):
+            with self.subTest(frames=frames, bytes=byte_count):
+                verdict = self._analyze(
+                    _exact_reconnect_window(
+                        *prefix,
+                        marker.format(frames, byte_count),
+                        success,
+                    )
+                )
+                self.assertIn(
+                    "MALFORMED_RELIABILITY_LOG_LINE",
+                    [item["code"] for item in verdict["failures"]],
+                )
+
+        huge_attempt = marker.format(1, 10).replace(
+            "attempt=1", f"attempt={'9' * 5000}"
+        )
         verdict = self._analyze(
-            _window_lines(
-                "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=1 reason=network",
-                "2026-08-31 10:00:02 Google Live evidence_reopen_ready journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                "2026-08-31 10:00:03 Google Live replayed_buffered_audio frames=1 bytes=10",
-                "2026-08-31 10:00:04 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2 reason=network frames=999",
-                "2026-08-31 10:00:05 Google Live evidence_reconnect_succeeded journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                journey_id="j1",
-                journeys="reconnect",
-            )
+            _exact_reconnect_window(*prefix, huge_attempt, success)
         )
-
         self.assertIn(
             "MALFORMED_RELIABILITY_LOG_LINE",
             [item["code"] for item in verdict["failures"]],
@@ -2191,13 +2187,12 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             )
         )
         replay_failed = self._analyze(
-            _window_lines(
+            _exact_reconnect_window(
                 "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=1 reason=network",
                 "2026-08-31 10:00:02 Google Live evidence_reopen_ready journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
                 "2026-08-31 10:00:03 Google Live replayed_buffered_audio frames=1 bytes=10",
-                "2026-08-31 10:00:04 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2 frames=1 bytes=10",
+                "2026-08-31 10:00:04 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2 reason=network frames=1 bytes=10",
                 "2026-08-31 10:00:05 Google Live evidence_reconnect_failed journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 live_connection_id=l2 error_class=network",
-                journey_id="j1",
             )
         )
 
@@ -2235,12 +2230,12 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
 
     def test_scoped_reconnect_rejects_replay_after_terminal(self):
         verdict = self._analyze(
-            _window_lines(
+            _exact_reconnect_window(
                 "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=1 reason=network",
                 "2026-08-31 10:00:02 Google Live evidence_reopen_ready journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
+                "2026-08-31 10:00:02 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2 reason=network frames=0 bytes=0",
                 "2026-08-31 10:00:03 Google Live evidence_reconnect_succeeded journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                "2026-08-31 10:00:04 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2",
-                journey_id="j1",
+                "2026-08-31 10:00:04 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 to_live_connection_id=l2 reason=network frames=0 bytes=0",
             )
         )
         self.assertIn("RECONNECT_MARKER_AFTER_TERMINAL", [item["code"] for item in verdict["failures"]])
@@ -2252,10 +2247,11 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                 "2026-08-31 10:00:02 Google Live evidence_receive_loop_stopped journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 generation=1",
                 "2026-08-31 10:00:03 Google Live evidence_reconnect_started journey_id=bargein-journey-1 connection_id=conn-1 from_live_connection_id=live-1 attempt=1 reason=network",
                 "2026-08-31 10:00:04 Google Live evidence_reopen_ready journey_id=bargein-journey-1 connection_id=conn-1 attempt=1 from_live_connection_id=live-1 to_live_connection_id=live-2",
-                "2026-08-31 10:00:05 Google Live evidence_receive_loop_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-2 generation=2",
-                "2026-08-31 10:00:06 Google Live evidence_reconnect_succeeded journey_id=bargein-journey-1 connection_id=conn-1 attempt=1 from_live_connection_id=live-1 to_live_connection_id=live-2",
-                "2026-08-31 10:00:07 Google Live evidence_receive_loop_stopped journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-2 generation=2",
-                "2026-08-31 10:00:08 Google Live evidence_connection_close journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-2 pending_tasks=0 close_code=1000 reason=evidence_finalize",
+                "2026-08-31 10:00:05 Google Live evidence_replayed_buffered_audio journey_id=bargein-journey-1 connection_id=conn-1 attempt=1 from_live_connection_id=live-1 to_live_connection_id=live-2 reason=network frames=0 bytes=0",
+                "2026-08-31 10:00:06 Google Live evidence_receive_loop_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-2 generation=2",
+                "2026-08-31 10:00:07 Google Live evidence_reconnect_succeeded journey_id=bargein-journey-1 connection_id=conn-1 attempt=1 from_live_connection_id=live-1 to_live_connection_id=live-2",
+                "2026-08-31 10:00:08 Google Live evidence_receive_loop_stopped journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-2 generation=2",
+                "2026-08-31 10:00:09 Google Live evidence_connection_close journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-2 pending_tasks=0 close_code=1000 reason=evidence_finalize",
                 journey_id="bargein-journey-1",
                 journeys="reconnect",
                 evidence_scope=EVIDENCE_SCOPE,
@@ -2291,13 +2287,15 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                 "2026-08-31 10:00:02 Google Live evidence_receive_loop_stopped journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 generation=1",
                 "2026-08-31 10:00:03 Google Live evidence_reconnect_started journey_id=bargein-journey-1 connection_id=conn-1 from_live_connection_id=live-1 attempt=1 reason=network",
                 "2026-08-31 10:00:04 Google Live evidence_reopen_ready journey_id=bargein-journey-1 connection_id=conn-1 attempt=1 from_live_connection_id=live-1 to_live_connection_id=live-2",
-                "2026-08-31 10:00:05 Google Live evidence_reconnect_succeeded journey_id=bargein-journey-1 connection_id=conn-1 attempt=1 from_live_connection_id=live-1 to_live_connection_id=live-2",
-                "2026-08-31 10:00:06 Google Live evidence_reconnect_started journey_id=bargein-journey-1 connection_id=conn-1 from_live_connection_id=live-2 attempt=2 reason=network",
-                "2026-08-31 10:00:07 Google Live evidence_reopen_ready journey_id=bargein-journey-1 connection_id=conn-1 attempt=2 from_live_connection_id=live-2 to_live_connection_id=live-3",
-                "2026-08-31 10:00:08 Google Live evidence_reconnect_succeeded journey_id=bargein-journey-1 connection_id=conn-1 attempt=2 from_live_connection_id=live-2 to_live_connection_id=live-3",
-                "2026-08-31 10:00:09 Google Live evidence_receive_loop_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-3 generation=3",
-                "2026-08-31 10:00:10 Google Live evidence_receive_loop_stopped journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-3 generation=3",
-                "2026-08-31 10:00:11 Google Live evidence_connection_close journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-3 pending_tasks=0 close_code=1000 reason=evidence_finalize",
+                "2026-08-31 10:00:05 Google Live evidence_replayed_buffered_audio journey_id=bargein-journey-1 connection_id=conn-1 attempt=1 from_live_connection_id=live-1 to_live_connection_id=live-2 reason=network frames=0 bytes=0",
+                "2026-08-31 10:00:06 Google Live evidence_reconnect_succeeded journey_id=bargein-journey-1 connection_id=conn-1 attempt=1 from_live_connection_id=live-1 to_live_connection_id=live-2",
+                "2026-08-31 10:00:07 Google Live evidence_reconnect_started journey_id=bargein-journey-1 connection_id=conn-1 from_live_connection_id=live-2 attempt=2 reason=network",
+                "2026-08-31 10:00:08 Google Live evidence_reopen_ready journey_id=bargein-journey-1 connection_id=conn-1 attempt=2 from_live_connection_id=live-2 to_live_connection_id=live-3",
+                "2026-08-31 10:00:09 Google Live evidence_replayed_buffered_audio journey_id=bargein-journey-1 connection_id=conn-1 attempt=2 from_live_connection_id=live-2 to_live_connection_id=live-3 reason=network frames=0 bytes=0",
+                "2026-08-31 10:00:10 Google Live evidence_reconnect_succeeded journey_id=bargein-journey-1 connection_id=conn-1 attempt=2 from_live_connection_id=live-2 to_live_connection_id=live-3",
+                "2026-08-31 10:00:11 Google Live evidence_receive_loop_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-3 generation=3",
+                "2026-08-31 10:00:12 Google Live evidence_receive_loop_stopped journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-3 generation=3",
+                "2026-08-31 10:00:13 Google Live evidence_connection_close journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-3 pending_tasks=0 close_code=1000 reason=evidence_finalize",
                 journey_id="bargein-journey-1",
                 journeys="reconnect",
                 evidence_scope=EVIDENCE_SCOPE,
