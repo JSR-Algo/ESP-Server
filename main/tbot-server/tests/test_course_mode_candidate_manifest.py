@@ -258,6 +258,49 @@ def test_candidate_accepts_exact_committed_repository_identity(candidate: dict) 
     assert validate_candidate(candidate, now=NOW) == []
 
 
+def test_candidate_rejects_group_or_other_writable_repository_root(candidate: dict) -> None:
+    backend = Path(candidate["repositories"]["backend"]["path"])
+    backend.chmod(0o777)
+
+    assert "repositories.backend.path" in validate_candidate(candidate, now=NOW)
+
+
+def test_candidate_rejects_group_or_other_writable_repository_ancestor(candidate: dict) -> None:
+    backend = Path(candidate["repositories"]["backend"]["path"])
+    backend.parent.chmod(0o777)
+
+    assert "repositories.backend.path" in validate_candidate(candidate, now=NOW)
+
+
+def test_candidate_rejects_repository_root_owned_by_another_uid(
+    candidate: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = Path(candidate["repositories"]["backend"]["path"])
+    backend_inode = backend.stat().st_ino
+    original_fstat = os.fstat
+
+    def wrong_owner_for_backend(fd: int) -> os.stat_result:
+        observed = original_fstat(fd)
+        if observed.st_ino == backend_inode:
+            values = list(observed)
+            values[4] = os.geteuid() + 1
+            return os.stat_result(values)
+        return observed
+
+    monkeypatch.setattr(os, "fstat", wrong_owner_for_backend)
+
+    assert "repositories.backend.path" in validate_candidate(candidate, now=NOW)
+
+
+def test_candidate_rejects_symlink_repository_root(candidate: dict, tmp_path: Path) -> None:
+    backend = Path(candidate["repositories"]["backend"]["path"])
+    link = tmp_path / "backend-link"
+    link.symlink_to(backend, target_is_directory=True)
+    candidate["repositories"]["backend"]["path"] = str(link)
+
+    assert "repositories.backend.path" in validate_candidate(candidate, now=NOW)
+
+
 @pytest.mark.parametrize("mutation", ["content", "mode", "symlink", "hardlink"])
 def test_candidate_rejects_python_test_runtime_tree_drift(candidate: dict, mutation: str) -> None:
     descriptor = candidate["tools"]["pythonTestRuntime"]
@@ -470,6 +513,42 @@ def test_node_package_tree_descriptor_binds_secure_root_mode(candidate: dict) ->
 
     package_root.chmod(0o777)
     assert manifest.secure_node_package_tree_descriptor(package_root) is None
+
+
+def test_node_package_tree_descriptor_rejects_writable_parent(candidate: dict) -> None:
+    package_root = Path(candidate["tools"]["node"]["backend"]["packageRoot"])
+    package_root.parent.chmod(0o777)
+
+    assert manifest.secure_node_package_tree_descriptor(package_root) is None
+
+
+def test_node_package_tree_descriptor_closes_component_fd_when_identity_read_fails(
+    candidate: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_root = Path(candidate["tools"]["node"]["backend"]["packageRoot"])
+    original_open = os.open
+    original_fstat = os.fstat
+    package_fd: int | None = None
+
+    def capture_package_fd(path, flags, *args, **kwargs):
+        nonlocal package_fd
+        fd = original_open(path, flags, *args, **kwargs)
+        if path == package_root.name:
+            package_fd = fd
+        return fd
+
+    def fail_package_identity(fd: int) -> os.stat_result:
+        if fd == package_fd:
+            raise OSError("identity read failed")
+        return original_fstat(fd)
+
+    monkeypatch.setattr(os, "open", capture_package_fd)
+    monkeypatch.setattr(os, "fstat", fail_package_identity)
+
+    assert manifest.secure_node_package_tree_descriptor(package_root) is None
+    assert package_fd is not None
+    with pytest.raises(OSError):
+        original_fstat(package_fd)
 
 
 def test_node_package_tree_descriptor_rejects_root_mode_race(

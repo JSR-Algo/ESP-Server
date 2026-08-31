@@ -273,6 +273,78 @@ def _open_directory_secure(path: Path) -> int:
         raise
 
 
+def _source_directory_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (*_tree_metadata_identity(metadata), metadata.st_uid, metadata.st_gid)
+
+
+def _open_trusted_source_directory(path: Path) -> tuple[int, os.stat_result]:
+    if not path.is_absolute() or ".." in path.parts:
+        raise OSError("absolute path required")
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    effective_uid = os.geteuid()
+    current = os.open("/", flags)
+    try:
+        root_metadata = os.fstat(current)
+        if (
+            not stat.S_ISDIR(root_metadata.st_mode)
+            or root_metadata.st_uid not in {0, effective_uid}
+            or stat.S_IMODE(root_metadata.st_mode) & 0o022
+        ):
+            raise OSError("untrusted source directory")
+        metadata = root_metadata
+        for component in path.parts[1:]:
+            named = os.stat(component, dir_fd=current, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(named.st_mode)
+                or named.st_uid not in {0, effective_uid}
+                or stat.S_IMODE(named.st_mode) & 0o022
+            ):
+                raise OSError("untrusted source directory")
+            next_fd: int | None = None
+            try:
+                next_fd = os.open(component, flags, dir_fd=current)
+                opened = os.fstat(next_fd)
+                current_named = os.stat(component, dir_fd=current, follow_symlinks=False)
+                if (
+                    _source_directory_identity(opened) != _source_directory_identity(named)
+                    or _source_directory_identity(current_named)
+                    != _source_directory_identity(opened)
+                ):
+                    raise OSError("source directory changed")
+            except Exception:
+                if next_fd is not None:
+                    os.close(next_fd)
+                raise
+            os.close(current)
+            assert next_fd is not None
+            current = next_fd
+            metadata = opened
+        if metadata.st_uid != effective_uid:
+            raise OSError("source root owner")
+        return current, metadata
+    except Exception:
+        os.close(current)
+        raise
+
+
+def _trusted_source_directory_still_named(
+    path: Path, directory_fd: int, metadata: os.stat_result,
+) -> bool:
+    verification_fd: int | None = None
+    try:
+        verification_fd, verification = _open_trusted_source_directory(path)
+        return (
+            _source_directory_identity(os.fstat(directory_fd))
+            == _source_directory_identity(metadata)
+            == _source_directory_identity(verification)
+        )
+    except (OSError, UnicodeEncodeError):
+        return False
+    finally:
+        if verification_fd is not None:
+            os.close(verification_fd)
+
+
 def read_secure_regular(path: Path, max_bytes: int) -> bytes:
     absolute = path if path.is_absolute() else Path.cwd() / path
     parent_fd = _open_directory_secure(absolute.parent)
@@ -719,30 +791,26 @@ def secure_backend_execution_tree_descriptor(
 def secure_node_package_tree_descriptor(root: Path) -> dict[str, Any] | None:
     root_fd = None
     try:
-        metadata = root.lstat()
+        root_fd, metadata = _open_trusted_source_directory(root)
     except (OSError, UnicodeEncodeError):
         return None
     root_mode = stat.S_IMODE(metadata.st_mode)
     if (
-        not stat.S_ISDIR(metadata.st_mode) or root.is_symlink()
-        or root_mode not in SECURE_NODE_PACKAGE_ROOT_MODES
+        root_mode not in SECURE_NODE_PACKAGE_ROOT_MODES
     ):
+        os.close(root_fd)
         return None
     try:
-        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
-        if _tree_metadata_identity(os.fstat(root_fd)) != _tree_metadata_identity(metadata):
-            return None
         descriptor, error = _secure_browser_bundle_descriptor_fd(root_fd, metadata)
         if error is not None or descriptor is None:
             return None
-        final_metadata = root.lstat()
+        if not _trusted_source_directory_still_named(root, root_fd, metadata):
+            return None
     except (OSError, UnicodeEncodeError):
         return None
     finally:
         if root_fd is not None:
             os.close(root_fd)
-    if _tree_metadata_identity(final_metadata) != _tree_metadata_identity(metadata):
-        return None
     digest = hashlib.sha256()
     _digest_field(digest, NODE_PACKAGE_TREE_SCHEMA.encode("ascii"))
     _digest_field(digest, str(root_mode).encode("ascii"))
@@ -1142,12 +1210,11 @@ def _validate_repository(name: str, value: Any, reasons: set[str]) -> Path | Non
     if not isinstance(path_value, str) or not Path(path_value).is_absolute():
         reasons.add(f"{prefix}.path")
         return None
+    root = Path(path_value)
+    root_fd: int | None = None
     try:
-        root = Path(path_value).resolve(strict=True)
-    except OSError:
-        reasons.add(f"{prefix}.path")
-        return None
-    if not root.is_dir() or str(root) != path_value:
+        root_fd, root_metadata = _open_trusted_source_directory(root)
+    except (OSError, UnicodeEncodeError):
         reasons.add(f"{prefix}.path")
         return None
     try:
@@ -1157,6 +1224,13 @@ def _validate_repository(name: str, value: Any, reasons: set[str]) -> Path | Non
         dirty_paths = _dirty_paths(root)
     except RuntimeError:
         reasons.add(f"{prefix}.git")
+        return None
+    finally:
+        if root_fd is not None:
+            if not _trusted_source_directory_still_named(root, root_fd, root_metadata):
+                reasons.add(f"{prefix}.path")
+            os.close(root_fd)
+    if f"{prefix}.path" in reasons:
         return None
     sha = value.get("sha")
     if not isinstance(sha, str) or SHA_RE.fullmatch(sha) is None or sha != actual_sha:
