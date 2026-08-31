@@ -5,7 +5,7 @@ import unittest
 from collections import deque
 from contextvars import ContextVar
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from core.activity_lease import (
     ActivityLeaseCoordinator,
@@ -355,6 +355,126 @@ class _EmptyAuthFailingASR:
         return "", None
 
 class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_evidence_transcript_is_observed_before_normal_dispatch_without_changing_result(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.next_transcript_phase.return_value = "interrupt"
+        conn.evidence_registry.observe_transcript.return_value = {
+            "slot": 1,
+            "phase": "interrupt",
+            "chars": 5,
+            "matched": True,
+            "observedAt": 10.0,
+        }
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._has_active_output = MagicMock(return_value=True)
+        order = []
+
+        def observe(*args, **kwargs):
+            order.append("observe")
+            return {
+                "slot": 1, "phase": "interrupt", "chars": 5,
+                "matched": True, "observedAt": 10.0,
+            }
+
+        async def dispatch(_text):
+            order.append("dispatch")
+            return True
+
+        conn.evidence_registry.observe_transcript.side_effect = observe
+        provider._dispatch_lesson_child_response = dispatch
+
+        handled = await provider._on_user_transcript("hello")
+
+        self.assertTrue(handled)
+        self.assertEqual(order, ["observe", "dispatch"])
+        conn.evidence_registry.observe_transcript.assert_called_once_with(
+            "physical.run-1",
+            "hello",
+            phase="interrupt",
+            response_generation=0,
+        )
+        self.assertTrue(
+            any(
+                "evidence_transcript_match" in str(args[0])
+                and "hello" not in str(args)
+                for _, args, _ in conn.logger.messages
+            )
+        )
+
+    async def test_evidence_barge_in_observes_interactive_lesson_before_dispatch(self):
+        conn = _Conn()
+        conn.session_mode = SessionMode.LESSON
+        conn.lesson_runtime = SimpleNamespace(
+            state="RUNNING", _step_passive=False, _step_completed=False
+        )
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.next_transcript_phase.return_value = "lesson"
+        conn.evidence_registry.observe_transcript.return_value = {
+            "slot": 2, "phase": "lesson", "chars": 6,
+            "matched": True, "observedAt": 11.0,
+        }
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        order = []
+        conn.evidence_registry.observe_transcript.side_effect = lambda *args, **kwargs: (
+            order.append("observe")
+            or {"slot": 2, "phase": "lesson", "chars": 6, "matched": True, "observedAt": 11.0}
+        )
+        provider._dispatch_lesson_child_response = AsyncMock(
+            side_effect=lambda _text: order.append("dispatch") or True
+        )
+
+        await provider._on_user_transcript_barge_in("answer")
+
+        self.assertEqual(order, ["observe", "dispatch"])
+        self.assertEqual(
+            conn.evidence_registry.observe_transcript.call_args.kwargs["phase"],
+            "lesson",
+        )
+
+    async def test_evidence_output_idle_marks_only_current_final_response_generation(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.mark_output_idle.return_value = True
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._response_generation = 4
+
+        await provider._handle_live_event(
+            {"type": "audio_end", "response_generation": 4}
+        )
+
+        conn.evidence_registry.mark_output_idle.assert_called_once_with(
+            "physical.run-1", response_generation=4
+        )
+
+    async def test_evidence_post_lesson_phase_requires_durable_lesson_release(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.next_transcript_phase.return_value = "post_lesson"
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+
+        self.assertIsNone(provider._evidence_transcript_phase())
+        conn.google_live_evidence_lesson_released = True
+        self.assertEqual(provider._evidence_transcript_phase(), "post_lesson")
+
+    async def test_evidence_does_not_match_transcript_suppressed_as_model_echo(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.next_transcript_phase.return_value = "interrupt"
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._has_active_output = MagicMock(return_value=True)
+        provider._bridge = SimpleNamespace(looks_like_model_echo=lambda _text: True)
+
+        handled = await provider._on_user_transcript("model echo")
+
+        self.assertTrue(handled)
+        conn.evidence_registry.observe_transcript.assert_not_called()
+
     async def test_activity_lease_covers_live_open_connect_task(self):
         conn = _Conn()
         connect_entered = asyncio.Event()

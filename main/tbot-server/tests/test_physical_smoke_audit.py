@@ -3857,6 +3857,7 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         physical_bargein=None,
         output_gaps=None,
         extra_lines=None,
+        include_transcript_proofs=True,
     ):
         identity = json.dumps(self._candidate_identity(), separators=(",", ":"))
         first_audio = [600.0] * 10 if first_audio is None else first_audio
@@ -3921,6 +3922,18 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
                     )
                 )
         lines.extend(extra_lines or [])
+        if include_transcript_proofs:
+            lines.extend(
+                f"260518 20:14:{index:02d}[GoogleLive]-INFO-Google Live "
+                f"evidence_transcript_match journey_id=physical-1 slot={index + 1} "
+                "phase=interrupt chars=8 matched=true"
+                for index in range(10)
+            )
+            lines.append(
+                "260518 20:14:20[GoogleLive]-INFO-Google Live "
+                "evidence_transcript_match journey_id=physical-1 slot=11 "
+                "phase=post_lesson chars=12 matched=true"
+            )
         lines.extend(
             [
                 "260518 20:15:00[GoogleLive]-INFO-Google Live evidence_receive_loop_stopped journey_id=physical-1 connection_id=connection-1 live_connection_id=live-1 generation=1",
@@ -4228,6 +4241,40 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
 
         self.assertTrue(result["passed"], result["missing"])
         self.assertLessEqual(result["firstAudioLatencyMs"]["p50"], 1200.0)
+
+    def test_candidate_physical_audit_requires_exact_safe_transcript_proof_slots(self):
+        missing = self._candidate_audit(
+            self._candidate_physical_log(include_transcript_proofs=False)
+        )
+        duplicate = self._candidate_audit(
+            self._candidate_physical_log(
+                extra_lines=[
+                    "260518 20:14:21[GoogleLive]-INFO-Google Live "
+                    "evidence_transcript_match journey_id=physical-1 slot=1 "
+                    "phase=interrupt chars=8 matched=true"
+                ]
+            )
+        )
+
+        self.assertFalse(missing["passed"])
+        self.assertIn("transcript_proof_exact_slots", missing["missing"])
+        self.assertFalse(duplicate["passed"])
+        self.assertIn("transcript_proof_exact_slots", duplicate["missing"])
+
+    def test_candidate_physical_audit_legacy_raw_text_cannot_replace_safe_proof(self):
+        result = self._candidate_audit(
+            self._candidate_physical_log(
+                include_transcript_proofs=False,
+                extra_lines=[
+                    "260518 20:14:21[GoogleLive]-INFO-Google Live transcript "
+                    "source=user chars=17 text='private expected phrase'"
+                ],
+            ),
+            expected_user_transcripts=["private expected phrase"],
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertIn("transcript_proof_exact_slots", result["missing"])
         self.assertLessEqual(result["firstAudioLatencyMs"]["p95"], 1800.0)
         self.assertLessEqual(result["interruptStopLatencyMs"]["max"], 250.0)
         self.assertLessEqual(result["physicalBargeinLatencyMs"]["p95"], 500.0)

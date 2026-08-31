@@ -2,14 +2,26 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import threading
 import time
+import unicodedata
 from collections import OrderedDict
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from functools import wraps
-from typing import Callable, Literal, Mapping
+from typing import Literal
+
+TRANSCRIPT_NORMALIZATION_VERSION = "google-live-transcript-nfkc-casefold.v1"
+
+
+def normalize_transcript(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return " ".join(
+        "".join(character if character.isalnum() else " " for character in normalized).split()
+    )
 
 
 def normalize_peer_id(value: str) -> str:
@@ -63,6 +75,10 @@ class _EvidenceEnrollmentState:
     connected: bool = False
     finalized: bool = False
     candidate_identity: dict[str, str] | None = field(default=None, repr=False)
+    transcript_proofs: list[dict[str, object]] = field(default_factory=list, repr=False)
+    transcript_matched_count: int = 0
+    final_response_generation: int | None = field(default=None, repr=False)
+    output_idle_generation: int | None = field(default=None, repr=False)
 
 
 class EvidenceEnrollmentRegistry:
@@ -261,6 +277,89 @@ class EvidenceEnrollmentRegistry:
         )
 
     @_synchronized
+    def next_transcript_phase(self, journey_id: str) -> str | None:
+        self._prepare()
+        enrollment = self._active.get(journey_id)
+        if enrollment is None or enrollment.transcript_matched_count >= len(
+            enrollment.transcript_plan
+        ):
+            return None
+        return enrollment.transcript_plan[enrollment.transcript_matched_count].phase
+
+    @_synchronized
+    def observe_transcript(
+        self,
+        journey_id: str,
+        value: str,
+        *,
+        phase: Literal["interrupt", "lesson", "post_lesson"],
+        observed_at: float | None = None,
+        response_generation: int | None = None,
+    ) -> dict[str, object]:
+        wall_now = self._prepare()
+        now = wall_now if observed_at is None else float(observed_at)
+        enrollment = self._active.get(journey_id)
+        if enrollment is None or not enrollment.connected:
+            raise EnrollmentError("JOURNEY_NOT_FOUND")
+        if phase not in ("interrupt", "lesson", "post_lesson"):
+            raise EnrollmentError("INVALID_TRANSCRIPT_PHASE")
+        next_index = enrollment.transcript_matched_count
+        expectation = (
+            enrollment.transcript_plan[next_index]
+            if next_index < len(enrollment.transcript_plan)
+            else None
+        )
+        observed_mac = hmac.new(
+            enrollment.hmac_key,
+            normalize_transcript(value).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        matched = bool(
+            expectation is not None
+            and expectation.phase == phase
+            and hmac.compare_digest(observed_mac, expectation.expected_mac)
+        )
+        slot = (
+            expectation.slot
+            if expectation is not None
+            else len(enrollment.transcript_plan) + 1
+        )
+        proof: dict[str, object] = {
+            "slot": slot,
+            "phase": phase,
+            "chars": len(str(value or "")),
+            "matched": matched,
+            "observedAt": now,
+        }
+        if len(enrollment.transcript_proofs) < 128:
+            enrollment.transcript_proofs.append(dict(proof))
+        if matched:
+            enrollment.transcript_matched_count += 1
+            if (
+                enrollment.transcript_matched_count == len(enrollment.transcript_plan)
+                and expectation.phase == "post_lesson"
+                and isinstance(response_generation, int)
+                and not isinstance(response_generation, bool)
+            ):
+                enrollment.final_response_generation = response_generation
+        return proof
+
+    @_synchronized
+    def mark_output_idle(self, journey_id: str, *, response_generation: int) -> bool:
+        self._prepare()
+        enrollment = self._active.get(journey_id)
+        if enrollment is None or not enrollment.connected:
+            raise EnrollmentError("JOURNEY_NOT_FOUND")
+        if (
+            not isinstance(response_generation, int)
+            or isinstance(response_generation, bool)
+            or response_generation != enrollment.final_response_generation
+        ):
+            return False
+        enrollment.output_idle_generation = response_generation
+        return self._ready_to_finalize(enrollment)
+
+    @_synchronized
     def abort_claim(
         self,
         *,
@@ -326,6 +425,7 @@ class EvidenceEnrollmentRegistry:
             "expiresAt": enrollment.expires_at,
             "connected": enrollment.connected,
             "transcriptCount": len(enrollment.transcript_plan),
+            **self._safe_transcript_report(enrollment),
         }
 
     @_synchronized
@@ -379,6 +479,29 @@ class EvidenceEnrollmentRegistry:
             "expiresAt": enrollment.expires_at,
             "finalizedAt": terminal_at,
             "transcriptCount": len(enrollment.transcript_plan),
+            **self._safe_transcript_report(enrollment),
+        }
+
+    @staticmethod
+    def _ready_to_finalize(enrollment: _EvidenceEnrollmentState) -> bool:
+        return bool(
+            enrollment.transcript_plan
+            and enrollment.transcript_matched_count == len(enrollment.transcript_plan)
+            and enrollment.transcript_plan[-1].phase == "post_lesson"
+            and enrollment.final_response_generation is not None
+            and enrollment.output_idle_generation == enrollment.final_response_generation
+        )
+
+    def _safe_transcript_report(self, enrollment: _EvidenceEnrollmentState) -> dict:
+        matched = [proof for proof in enrollment.transcript_proofs if proof["matched"]]
+        return {
+            "transcriptObservedCount": len(enrollment.transcript_proofs),
+            "transcriptMatchedCount": enrollment.transcript_matched_count,
+            "transcriptMatchedSlots": [proof["slot"] for proof in matched],
+            "transcriptMatchedPhases": [proof["phase"] for proof in matched],
+            "transcriptProofs": [dict(proof) for proof in enrollment.transcript_proofs],
+            "outputIdleObserved": enrollment.output_idle_generation is not None,
+            "readyToFinalize": self._ready_to_finalize(enrollment),
         }
 
     @staticmethod
@@ -387,7 +510,10 @@ class EvidenceEnrollmentRegistry:
             device_id=enrollment.device_id,
             client_id=enrollment.client_id,
             journey_id=enrollment.journey_id,
-            transcript_plan=enrollment.transcript_plan,
+            transcript_plan=tuple(
+                TranscriptExpectation(item.slot, item.phase, "")
+                for item in enrollment.transcript_plan
+            ),
             hmac_key=bytearray(),
             expires_at=enrollment.expires_at,
             connected=enrollment.connected,

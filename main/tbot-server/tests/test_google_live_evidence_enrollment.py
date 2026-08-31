@@ -1,4 +1,6 @@
 import base64
+import hashlib
+import hmac
 import json
 from dataclasses import FrozenInstanceError
 
@@ -6,9 +8,11 @@ import pytest
 
 from core.api.google_live_evidence_handler import GoogleLiveEvidenceHandler
 from core.voice.google_live.evidence_enrollment import (
+    TRANSCRIPT_NORMALIZATION_VERSION,
     EnrollmentError,
     EvidenceEnrollmentRegistry,
     TranscriptExpectation,
+    normalize_transcript,
 )
 
 
@@ -22,6 +26,191 @@ class Clock:
 
 def _plan(mac="a" * 64):
     return (TranscriptExpectation(slot=1, phase="interrupt", expected_mac=mac),)
+
+
+def _mac(key, value):
+    return hmac.new(
+        key,
+        normalize_transcript(value).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def test_transcript_normalization_is_versioned_nfkc_casefold_and_space_collapsed():
+    assert TRANSCRIPT_NORMALIZATION_VERSION == "google-live-transcript-nfkc-casefold.v1"
+    assert normalize_transcript("  ＨÉLLO—Con!!  ") == "héllo con"
+
+
+def test_registry_records_ordered_boolean_transcript_proof_without_private_material():
+    key = b"k" * 32
+    first = "  BẮT đầu bài học!  "
+    final = "Con nói tiếp nhé"
+    registry = EvidenceEnrollmentRegistry()
+    _register(
+        registry,
+        hmac_key=key,
+        transcript_plan=(
+            TranscriptExpectation(1, "interrupt", _mac(key, first)),
+            TranscriptExpectation(2, "post_lesson", _mac(key, final)),
+        ),
+    )
+    registry.claim(device_id="aa:bb", client_id="robot-client", journey_id="physical.run-1")
+
+    proof = registry.observe_transcript(
+        "physical.run-1", first, phase="interrupt", observed_at=1234.5,
+        response_generation=7,
+    )
+    report = registry.safe_snapshot("physical.run-1")
+
+    assert proof == {
+        "slot": 1,
+        "phase": "interrupt",
+        "chars": len(first),
+        "matched": True,
+        "observedAt": 1234.5,
+    }
+    assert report["transcriptMatchedCount"] == 1
+    assert report["transcriptProofs"] == [proof]
+    assert report["readyToFinalize"] is False
+    encoded = json.dumps(report, ensure_ascii=False)
+    assert normalize_transcript(first) not in encoded.casefold()
+    assert _mac(key, first) not in encoded
+    assert key.hex() not in encoded
+
+
+def test_registry_accepts_unicode_equivalent_transcript_and_rejects_wrong_phase_or_order():
+    key = b"u" * 32
+    registry = EvidenceEnrollmentRegistry()
+    _register(
+        registry,
+        hmac_key=key,
+        transcript_plan=(
+            TranscriptExpectation(1, "interrupt", _mac(key, "Café")),
+            TranscriptExpectation(2, "lesson", _mac(key, "two")),
+        ),
+    )
+    registry.claim(device_id="aa:bb", client_id="robot-client", journey_id="physical.run-1")
+
+    wrong_phase = registry.observe_transcript(
+        "physical.run-1", "Cafe\u0301", phase="lesson", observed_at=1.0,
+        response_generation=1,
+    )
+    matched = registry.observe_transcript(
+        "physical.run-1", "Cafe\u0301", phase="interrupt", observed_at=2.0,
+        response_generation=1,
+    )
+    duplicate = registry.observe_transcript(
+        "physical.run-1", "Café", phase="interrupt", observed_at=3.0,
+        response_generation=1,
+    )
+    reordered = registry.observe_transcript(
+        "physical.run-1", "one", phase="lesson", observed_at=4.0,
+        response_generation=1,
+    )
+
+    assert wrong_phase["matched"] is False
+    assert matched["matched"] is True
+    assert duplicate["matched"] is False
+    assert reordered["matched"] is False
+    assert registry.safe_snapshot("physical.run-1")["transcriptMatchedSlots"] == [1]
+
+
+def test_registry_requires_final_post_lesson_generation_output_idle_before_ready():
+    key = b"f" * 32
+    registry = EvidenceEnrollmentRegistry()
+    _register(
+        registry,
+        hmac_key=key,
+        transcript_plan=(
+            TranscriptExpectation(1, "post_lesson", _mac(key, "finished")),
+        ),
+    )
+    registry.claim(device_id="aa:bb", client_id="robot-client", journey_id="physical.run-1")
+
+    proof = registry.observe_transcript(
+        "physical.run-1", "finished", phase="post_lesson", observed_at=10.0,
+        response_generation=9,
+    )
+    assert proof["matched"] is True
+    assert registry.mark_output_idle("physical.run-1", response_generation=8) is False
+    assert registry.safe_snapshot("physical.run-1")["readyToFinalize"] is False
+    assert registry.mark_output_idle("physical.run-1", response_generation=9) is True
+    assert registry.safe_snapshot("physical.run-1")["readyToFinalize"] is True
+
+
+def test_output_idle_before_final_transcript_cannot_authorize_cleanup():
+    key = b"p" * 32
+    registry = EvidenceEnrollmentRegistry()
+    _register(
+        registry,
+        hmac_key=key,
+        transcript_plan=(
+            TranscriptExpectation(1, "post_lesson", _mac(key, "finished")),
+        ),
+    )
+    registry.claim(device_id="aa:bb", client_id="robot-client", journey_id="physical.run-1")
+
+    assert registry.mark_output_idle("physical.run-1", response_generation=9) is False
+    registry.observe_transcript(
+        "physical.run-1", "finished", phase="post_lesson", observed_at=10.0,
+        response_generation=9,
+    )
+
+    assert registry.safe_snapshot("physical.run-1")["readyToFinalize"] is False
+
+
+def test_registry_mismatch_and_cancellation_never_expose_or_retain_transcript_secrets():
+    key = bytearray(b"z" * 32)
+    registry = EvidenceEnrollmentRegistry()
+    _register(
+        registry,
+        hmac_key=key,
+        transcript_plan=(
+            TranscriptExpectation(1, "interrupt", _mac(key, "private phrase")),
+        ),
+    )
+    registry.claim(device_id="aa:bb", client_id="robot-client", journey_id="physical.run-1")
+    owned_key = registry._active["physical.run-1"].hmac_key
+
+    proof = registry.observe_transcript(
+        "physical.run-1", "different secret", phase="interrupt", observed_at=20.0,
+        response_generation=2,
+    )
+    cancelled = registry.finalize(
+        "physical.run-1", status="FAIL", failure_code="OPERATOR_CANCELLED"
+    )
+
+    assert proof["matched"] is False
+    assert owned_key == bytearray(32)
+    encoded = json.dumps(cancelled)
+    assert "private phrase" not in encoded
+    assert "different secret" not in encoded
+    assert "expectedMac" not in encoded
+
+
+def test_transcript_observation_cannot_bypass_expiry_with_explicit_timestamp():
+    clock = Clock()
+    key = b"e" * 32
+    registry = EvidenceEnrollmentRegistry(clock=clock)
+    _register(
+        registry,
+        hmac_key=key,
+        ttl_sec=30,
+        transcript_plan=(
+            TranscriptExpectation(1, "interrupt", _mac(key, "hello")),
+        ),
+    )
+    registry.claim(device_id="aa:bb", client_id="robot-client", journey_id="physical.run-1")
+    clock.now += 31
+
+    with pytest.raises(EnrollmentError, match="JOURNEY_NOT_FOUND"):
+        registry.observe_transcript(
+            "physical.run-1",
+            "hello",
+            phase="interrupt",
+            observed_at=1000.0,
+            response_generation=1,
+        )
 
 
 def _register(registry, **overrides):
@@ -82,6 +271,7 @@ def test_registry_detaches_input_key_and_returned_enrollments_from_internal_stat
 
     input_key[:] = b"x" * 32
     assert returned.hmac_key == bytearray()
+    assert returned.transcript_plan[0].expected_mac == ""
     for field_name, value in (
         ("device_id", "mutated-device"),
         ("client_id", "mutated-client"),
@@ -109,6 +299,7 @@ def test_registry_detaches_input_key_and_returned_enrollments_from_internal_stat
     )
     assert claimed is not None
     assert claimed.hmac_key == bytearray()
+    assert claimed.transcript_plan[0].expected_mac == ""
     with pytest.raises(FrozenInstanceError):
         claimed.device_id = "other"
     with pytest.raises(FrozenInstanceError):

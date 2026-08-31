@@ -1109,6 +1109,32 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ack["liveConnectionTransitions"]), 1)
         self.assertEqual(ack["serverEndUtc"], "2026-08-31T03:00:10+00:00")
 
+    async def test_evidence_finalize_refuses_cleanup_until_transcript_proof_is_ready(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.google_live_evidence_scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.evidence_registry = types.SimpleNamespace(
+            safe_snapshot=lambda _journey: {"readyToFinalize": False}
+        )
+        provider = types.SimpleNamespace(finalize_evidence=AsyncMock())
+        handler.voice_provider = provider
+
+        ack = await handler.finalize_google_live_evidence(
+            handler.google_live_evidence_scope
+        )
+
+        self.assertEqual(ack["status"], "FAIL")
+        self.assertEqual(ack["failureCode"], "EVIDENCE_TRANSCRIPT_NOT_READY")
+        self.assertTrue(ack["retryable"])
+        provider.finalize_evidence.assert_not_awaited()
+
     async def test_evidence_finalize_exposes_shared_idempotent_lifecycle_method(self):
         handler = self._build_handler()
         handler.config["voice_mode"] = {"type": "google_live"}

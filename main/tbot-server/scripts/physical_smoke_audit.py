@@ -276,6 +276,39 @@ def _expected_user_transcript_match_count(transcript_texts, expected_transcripts
     return matches
 
 
+_TRANSCRIPT_PROOF_MARKER_RE = re.compile(
+    r"Google Live evidence_transcript_match "
+    r"journey_id=([A-Za-z0-9._:-]{1,64}) slot=(\d+) "
+    r"phase=(interrupt|lesson|post_lesson) chars=(\d+) matched=(true|false)\b"
+)
+
+
+def _transcript_proof_markers(lines, *, journey_id):
+    markers = []
+    malformed = 0
+    for line in lines:
+        if "Google Live evidence_transcript_match" not in line:
+            continue
+        match = _TRANSCRIPT_PROOF_MARKER_RE.search(line)
+        if match is None:
+            malformed += 1
+            continue
+        if match.group(1) != journey_id:
+            malformed += 1
+            continue
+        if match.group(5) != "true":
+            continue
+        markers.append(
+            {
+                "slot": int(match.group(2)),
+                "phase": match.group(3),
+                "chars": int(match.group(4)),
+                "matched": True,
+            }
+        )
+    return markers, malformed
+
+
 def _post_lesson_response_chain_count(lines, expected_transcripts):
     expected_transcripts = [
         str(text).strip()
@@ -1828,6 +1861,20 @@ def audit_log(
     user_transcripts = len(
         re.findall(r"Google Live transcript source=user chars=\d+", evidence_log_text)
     )
+    transcript_proof_markers = []
+    malformed_transcript_proof_markers = 0
+    if candidate_identity is not None:
+        evidence_scope = (
+            reliability_report.get("evidenceScope", {})
+            if isinstance(reliability_report, dict)
+            else {}
+        )
+        transcript_proof_markers, malformed_transcript_proof_markers = (
+            _transcript_proof_markers(
+                lines,
+                journey_id=str(evidence_scope.get("journeyId") or ""),
+            )
+        )
     allowed_fatal_patterns = set(allowed_fatal_patterns or [])
     fatal_hits = [
         pattern
@@ -1857,6 +1904,20 @@ def audit_log(
                 ends=candidate_window_ends,
             )
         )
+    if candidate_identity is not None:
+        required_transcript_proofs = [
+            *({"slot": slot, "phase": "interrupt"} for slot in range(1, 11)),
+            {"slot": 11, "phase": "post_lesson"},
+        ]
+        observed_transcript_proofs = [
+            {"slot": marker["slot"], "phase": marker["phase"]}
+            for marker in transcript_proof_markers
+        ]
+        if (
+            observed_transcript_proofs != required_transcript_proofs
+            or malformed_transcript_proof_markers
+        ):
+            missing.append("transcript_proof_exact_slots")
     if not physical_ws_connected:
         missing.append("physical_ws_connected")
     if input_audio_diag < 1:
@@ -2110,6 +2171,14 @@ def audit_log(
             post_interrupt_user_transcript_expected_matches
         ),
         "model_echo_user_transcripts": model_echo_user_transcripts,
+        "transcript_proof_matches": len(transcript_proof_markers),
+        "transcript_proof_phases": [
+            marker["phase"] for marker in transcript_proof_markers
+        ],
+        "transcript_proof_slots": [
+            marker["slot"] for marker in transcript_proof_markers
+        ],
+        "malformed_transcript_proof_markers": malformed_transcript_proof_markers,
         "audio_interrupts": audio_interrupts,
         "fatal_hits": fatal_hits,
         "missing": missing,
@@ -2440,7 +2509,11 @@ def main():
                     _proof_text(getattr(args, flag))
             except ValueError as exc:
                 parser.error(f"--{flag.replace('_', '-')} {exc}")
-    if production_voice_strict and not args.expected_user_transcript:
+    if (
+        production_voice_strict
+        and not args.production_google_live_candidate
+        and not args.expected_user_transcript
+    ):
         strict_flag = "--production-strict" if args.production_strict else "--production-voice-strict"
         parser.error(f"{strict_flag} requires --expected-user-transcript")
     if production_course_strict and lesson_manifest is None:
@@ -2586,8 +2659,16 @@ def main():
         require_lesson_live_text=require_lesson_live_text,
         min_lesson_live_text_chars=args.min_lesson_live_text_chars,
         lesson_manifest=lesson_manifest,
-        expected_user_transcripts=args.expected_user_transcript,
-        expected_post_lesson_transcripts=args.expected_post_lesson_transcript,
+        expected_user_transcripts=(
+            None
+            if args.production_google_live_candidate
+            else args.expected_user_transcript
+        ),
+        expected_post_lesson_transcripts=(
+            None
+            if args.production_google_live_candidate
+            else args.expected_post_lesson_transcript
+        ),
         allowed_fatal_patterns=allowed_fatal_patterns,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))

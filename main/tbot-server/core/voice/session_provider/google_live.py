@@ -1908,10 +1908,80 @@ class GoogleLiveProvider(VoiceSessionProvider):
         )
         return True
 
+    def _evidence_transcript_phase(self):
+        registry = getattr(self.conn, "evidence_registry", None)
+        journey_id = getattr(self.conn, "google_live_evidence_journey_id", None)
+        if registry is None or not isinstance(journey_id, str) or not journey_id:
+            return None
+        try:
+            expected_phase = registry.next_transcript_phase(journey_id)
+        except Exception:
+            return None
+        if self._has_active_output():
+            actual_phase = "interrupt"
+        elif self._active_lesson_step_is_interactive():
+            actual_phase = "lesson"
+        elif (
+            expected_phase == "post_lesson"
+            and bool(getattr(self.conn, "google_live_evidence_lesson_released", False))
+            and not self._lesson_runtime_active()
+        ):
+            actual_phase = "post_lesson"
+        else:
+            return None
+        return actual_phase if actual_phase == expected_phase else None
+
+    def _observe_evidence_transcript(self, transcript_text):
+        phase = self._evidence_transcript_phase()
+        if phase is None:
+            return None
+        registry = getattr(self.conn, "evidence_registry", None)
+        journey_id = getattr(self.conn, "google_live_evidence_journey_id", None)
+        try:
+            proof = registry.observe_transcript(
+                journey_id,
+                transcript_text,
+                phase=phase,
+                response_generation=self._response_generation,
+            )
+        except Exception:
+            return None
+        self.conn.logger.bind(tag="GoogleLive").info(
+            "Google Live evidence_transcript_match journey_id={} slot={} "
+            "phase={} chars={} matched={}",
+            journey_id,
+            proof["slot"],
+            proof["phase"],
+            proof["chars"],
+            str(bool(proof["matched"])).lower(),
+        )
+        return proof
+
+    def _mark_evidence_output_idle(self, response_generation):
+        registry = getattr(self.conn, "evidence_registry", None)
+        journey_id = getattr(self.conn, "google_live_evidence_journey_id", None)
+        if (
+            registry is None
+            or not isinstance(journey_id, str)
+            or not journey_id
+            or not isinstance(response_generation, int)
+        ):
+            return False
+        try:
+            return bool(
+                registry.mark_output_idle(
+                    journey_id,
+                    response_generation=response_generation,
+                )
+            )
+        except Exception:
+            return False
+
     async def _on_user_transcript(self, transcript_text):
         self._cancel_start_lesson_asr_fallback_task()
         self._start_lesson_asr_fallback_audio.clear()
         if self._lesson_conversation_tool_path_active():
+            self._observe_evidence_transcript(transcript_text)
             self._lesson_child_audio_pending_transcript = False
             self._cancel_lesson_child_transcript_timeout_task()
             self._record_lesson_conversation_recognized_text(transcript_text)
@@ -1925,6 +1995,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return True
         if self._suppress_user_transcript_as_model_echo(transcript_text):
             return True
+        self._observe_evidence_transcript(transcript_text)
         if await self._dispatch_lesson_child_response(transcript_text):
             return True
         if self._is_live_wake_transcript_only(transcript_text):
@@ -5196,6 +5267,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     *evidence_scope,
                     self._response_generation,
                 )
+            self._mark_evidence_output_idle(
+                event_generation
+                if isinstance(event_generation, int)
+                else self._response_generation
+            )
 
     def _is_model_output_event(self, event_type, event):
         if event_type in {"audio_start", "audio", "audio_chunk", "audio_end", "tool_call"}:
@@ -5836,6 +5912,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._clear_user_stream()
 
     async def _on_user_transcript_barge_in(self, transcript_text):
+        self._observe_evidence_transcript(transcript_text)
         if self._lesson_conversation_tool_path_active():
             self._lesson_child_audio_pending_transcript = False
             self._cancel_lesson_child_transcript_timeout_task()

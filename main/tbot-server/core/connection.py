@@ -233,6 +233,7 @@ class ConnectionHandler:
         self.client_audio_input_authorized = False
         self.google_live_audio_out_started_at = None
         self.google_live_turn_started_at = None
+        self.google_live_evidence_lesson_released = False
         self.voice_metric_samples = deque(maxlen=100)
         self._lesson_asset_audio_inflight = 0
         self._lesson_asset_last_audio_at = 0.0
@@ -821,6 +822,7 @@ class ConnectionHandler:
         # channel. Closing it here races with in-flight mic frames and forces a
         # reconnect flicker just as the device starts rendering the lesson.
         await self._persist_live_resumption_handle()
+        self.google_live_evidence_lesson_released = False
         self._set_session_mode(SessionMode.LESSON, reason=reason)
 
     async def request_lesson_preload_reset(
@@ -888,6 +890,7 @@ class ConnectionHandler:
         if normalize_session_mode(self.session_mode) == SessionMode.LESSON:
             await self._deactivate_live_lesson_context()
             await self.enter_dormant_mode(reason=reason)
+            self.google_live_evidence_lesson_released = True
 
     async def finish_lesson_mode(self, *, reason: str = "lesson_completed") -> None:
         if normalize_session_mode(self.session_mode) != SessionMode.LESSON:
@@ -935,6 +938,7 @@ class ConnectionHandler:
         else:
             await self.enter_dormant_mode(reason=reason)
         await self._deactivate_live_lesson_context()
+        self.google_live_evidence_lesson_released = True
         await self._send_lesson_emotion(self._lesson_terminal_emotion(reason))
 
     async def _deactivate_live_lesson_context(self) -> None:
@@ -1225,6 +1229,24 @@ class ConnectionHandler:
         if not isinstance(scope, dict) or expected_scope != scope:
             failure_code = "EVIDENCE_SCOPE_MISMATCH"
         else:
+            registry = getattr(self, "evidence_registry", None)
+            journey_id = scope.get("journeyId")
+            snapshot = getattr(registry, "safe_snapshot", None)
+            if callable(snapshot) and isinstance(journey_id, str):
+                try:
+                    proof_snapshot = snapshot(journey_id)
+                except Exception:
+                    proof_snapshot = None
+                if not isinstance(proof_snapshot, dict) or not proof_snapshot.get(
+                    "readyToFinalize"
+                ):
+                    return {
+                        "type": "evidence_finalized",
+                        "status": "FAIL",
+                        "failureCode": "EVIDENCE_TRANSCRIPT_NOT_READY",
+                        "evidenceScope": scope,
+                        "retryable": True,
+                    }
             provider = getattr(self, "voice_provider", None)
             finalize = getattr(provider, "finalize_evidence", None)
             if not callable(finalize):
