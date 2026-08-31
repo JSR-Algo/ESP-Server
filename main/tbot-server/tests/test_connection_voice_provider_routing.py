@@ -1692,6 +1692,89 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(finalize_accounted)
         await asyncio.wait_for(handler.voice_provider_close_task, timeout=0.3)
 
+    async def test_full_close_closes_provider_replaced_during_voice_task_drain(self):
+        handler = self._build_handler()
+        handler.config["google_live"] = {
+            "evidence_provider_close_timeout_sec": 0.05,
+        }
+        events = []
+        provider_replaced = asyncio.Event()
+
+        class Provider:
+            def __init__(self, name):
+                self.name = name
+                self.close_calls = 0
+
+            async def close(self):
+                self.close_calls += 1
+                if self.name == "old":
+                    while not provider_replaced.is_set():
+                        try:
+                            await provider_replaced.wait()
+                        except asyncio.CancelledError:
+                            pass
+                events.append(f"close-{self.name}")
+
+        old_provider = Provider("old")
+        replacement_provider = Provider("replacement")
+        handler.voice_provider = old_provider
+
+        async def replace_during_drain():
+            try:
+                await asyncio.Event().wait()
+            finally:
+                handler.voice_provider = replacement_provider
+                events.append("provider-replaced")
+                provider_replaced.set()
+
+        handler.voice_provider_task = asyncio.create_task(replace_during_drain())
+
+        await asyncio.wait_for(handler.close(), timeout=0.3)
+        await asyncio.wait_for(handler.close(), timeout=0.3)
+
+        self.assertEqual(events, [
+            "provider-replaced",
+            "close-old",
+            "close-replacement",
+        ])
+        self.assertEqual(old_provider.close_calls, 1)
+        self.assertEqual(replacement_provider.close_calls, 1)
+
+    async def test_repeated_full_close_retains_resistant_provider_close_task(self):
+        handler = self._build_handler()
+        handler.voice_provider_task = None
+        handler.config["google_live"] = {
+            "evidence_provider_close_timeout_sec": 0.05,
+        }
+        release = asyncio.Event()
+        close_calls = 0
+
+        async def resistant_close():
+            nonlocal close_calls
+            close_calls += 1
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    pass
+
+        handler.voice_provider = types.SimpleNamespace(close=resistant_close)
+
+        await asyncio.wait_for(handler.close(), timeout=0.3)
+        close_task = handler.voice_provider_close_task
+        self.assertFalse(close_task.done())
+        self.assertIn(close_task, handler.mcp_background_tasks)
+
+        await asyncio.wait_for(handler.close(), timeout=0.3)
+
+        self.assertEqual(close_calls, 1)
+        self.assertFalse(close_task.done())
+        self.assertIn(close_task, handler.mcp_background_tasks)
+        release.set()
+        await asyncio.wait_for(close_task, timeout=0.3)
+        await asyncio.sleep(0)
+        self.assertNotIn(close_task, handler.mcp_background_tasks)
+
     async def test_evidence_finalize_rejects_changed_live_id_or_pending_cleanup(self):
         for result in (
             {"status": "PASS", "liveConnectionId": "live-other", "pendingTasks": 0},

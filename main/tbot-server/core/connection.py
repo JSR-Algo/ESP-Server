@@ -3149,6 +3149,11 @@ class ConnectionHandler:
 
     async def _close_mcp_background_tasks(self):
         self.mcp_tasks_closed = True
+        provider_close_tasks = {
+            record["task"]
+            for record in getattr(self, "voice_provider_close_records", {}).values()
+            if not record["task"].done()
+        }
         retained = {
             task
             for task in (
@@ -3156,7 +3161,7 @@ class ConnectionHandler:
                 getattr(self, "google_live_evidence_force_close_task", None),
             )
             if task is not None and not task.done()
-        }
+        } | provider_close_tasks
         tasks = tuple(self.mcp_background_tasks - retained)
         for task in tasks:
             if not task.done():
@@ -3248,6 +3253,7 @@ class ConnectionHandler:
                 if close_task.cancelled() or close_task.exception() is not None:
                     return
             self.google_live_evidence_force_close_completed = True
+            self.google_live_evidence_force_closed_provider = provider
         except Exception:
             pass
 
@@ -3355,20 +3361,37 @@ class ConnectionHandler:
             return {"state": "failed", "errorCode": "cached_sd_sync_failed"}
 
     async def _close_voice_provider_for_teardown(self):
-        if self.voice_provider is None:
+        provider = self.voice_provider
+        if provider is None:
             return
-        if getattr(self, "google_live_evidence_force_close_completed", False):
+        if (
+            getattr(self, "google_live_evidence_force_close_completed", False)
+            and getattr(self, "google_live_evidence_force_closed_provider", None)
+            is provider
+        ):
             return
-        close_task = getattr(self, "voice_provider_close_task", None)
-        if close_task is None:
-            close_task = asyncio.create_task(self.voice_provider.close())
+        records = getattr(self, "voice_provider_close_records", None)
+        if records is None:
+            records = {}
+            self.voice_provider_close_records = records
+        record = records.get(id(provider))
+        if record is None or record["provider"] is not provider:
+            close_task = asyncio.create_task(provider.close())
             close_task.set_name("voice-provider-close")
-            self.voice_provider_close_task = close_task
             self.mcp_background_tasks.add(close_task)
             close_task.add_done_callback(self._mcp_background_task_done)
-        elif getattr(self, "voice_provider_close_teardown_attempted", False):
+            record = {
+                "provider": provider,
+                "task": close_task,
+                "attempted": False,
+            }
+            records[id(provider)] = record
+        else:
+            close_task = record["task"]
+        self.voice_provider_close_task = close_task
+        if record["attempted"]:
             return
-        self.voice_provider_close_teardown_attempted = True
+        record["attempted"] = True
         google_live = (self.config or {}).get("google_live") or {}
         try:
             timeout = float(
@@ -3484,10 +3507,13 @@ class ConnectionHandler:
                     )
 
             await self._close_voice_provider_for_teardown()
-            voice_provider_closed = True
 
             await self._drain_voice_provider_task_for_teardown()
             voice_provider_task_drained = True
+
+            # Initialization may replace the provider while its task is drained.
+            await self._close_voice_provider_for_teardown()
+            voice_provider_closed = True
 
             # Clear task queue
             self.clear_queues()
@@ -3548,7 +3574,10 @@ class ConnectionHandler:
             finally:
                 try:
                     if not voice_provider_task_drained:
-                        await self._drain_voice_provider_task_for_teardown()
+                        try:
+                            await self._drain_voice_provider_task_for_teardown()
+                        finally:
+                            await self._close_voice_provider_for_teardown()
                 finally:
                     try:
                         self._shutdown_executor_for_teardown()
