@@ -1224,6 +1224,7 @@ class ConnectionHandler:
     ) -> dict[str, object]:
         scope = getattr(self, "google_live_evidence_scope", None)
         failure_code = None
+        proof_failure_code = None
         result = None
         validated_transition_result = None
         if not isinstance(scope, dict) or expected_scope != scope:
@@ -1240,7 +1241,7 @@ class ConnectionHandler:
                 if isinstance(proof_snapshot, dict) and proof_snapshot.get(
                     "transcriptProofEligible"
                 ) is False:
-                    failure_code = "EVIDENCE_TRANSCRIPT_INVALID"
+                    proof_failure_code = "EVIDENCE_TRANSCRIPT_INVALID"
                 elif not isinstance(proof_snapshot, dict) or not proof_snapshot.get(
                     "readyToFinalize"
                 ):
@@ -1273,7 +1274,11 @@ class ConnectionHandler:
                         return {
                             "type": "evidence_finalized",
                             "status": "FAIL",
-                            "failureCode": "EVIDENCE_FINALIZE_UNAVAILABLE",
+                            "failureCode": (
+                                "EVIDENCE_CLEANUP_INCOMPLETE"
+                                if proof_failure_code
+                                else "EVIDENCE_FINALIZE_UNAVAILABLE"
+                            ),
                             "evidenceScope": scope,
                             "retryable": True,
                         }
@@ -1338,13 +1343,50 @@ class ConnectionHandler:
                 validated_transition_result = self._validated_evidence_transition_result(
                     scope, result
                 )
-                if failure_code is None and (
-                    not isinstance(result, dict)
-                    or result.get("status") != "PASS"
-                    or result.get("pendingTasks") != 0
-                    or validated_transition_result is None
-                ):
+                cleanup_verified = (
+                    isinstance(result, dict)
+                    and result.get("status") == "PASS"
+                    and result.get("pendingTasks") == 0
+                    and validated_transition_result is not None
+                )
+                if proof_failure_code and not cleanup_verified:
+                    if finalize_task.done():
+                        prepare_retry = getattr(
+                            provider, "prepare_evidence_finalize_retry", None
+                        )
+                        retry_prepared = not callable(prepare_retry)
+                        if callable(prepare_retry):
+                            try:
+                                prepare_result = prepare_retry()
+                                if inspect.isawaitable(prepare_result):
+                                    close = getattr(prepare_result, "close", None)
+                                    if callable(close):
+                                        close()
+                                else:
+                                    retry_prepared = prepare_result is True
+                            except Exception:
+                                pass
+                        if retry_prepared:
+                            self.google_live_evidence_finalize_task = None
+                    return {
+                        "type": "evidence_finalized",
+                        "status": "FAIL",
+                        "failureCode": "EVIDENCE_CLEANUP_INCOMPLETE",
+                        "evidenceScope": scope,
+                        "retryable": True,
+                    }
+                if proof_failure_code:
+                    failure_code = proof_failure_code
+                elif failure_code is None and not cleanup_verified:
                     failure_code = "EVIDENCE_CLEANUP_INCOMPLETE"
+            if proof_failure_code and not callable(finalize):
+                return {
+                    "type": "evidence_finalized",
+                    "status": "FAIL",
+                    "failureCode": "EVIDENCE_CLEANUP_INCOMPLETE",
+                    "evidenceScope": scope,
+                    "retryable": True,
+                }
         ack = {
             "type": "evidence_finalized",
             "status": "FAIL" if failure_code else "PASS",

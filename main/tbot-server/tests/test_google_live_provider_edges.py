@@ -5095,6 +5095,30 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(markers), 1)
 
+    async def test_incomplete_evidence_finalize_can_be_prepared_for_retry(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "bargein-journey-1"
+        conn.google_live_evidence_scope = {
+            "peerIdentityHash": "sha256:" + "a" * 64,
+        }
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-7")
+        provider._close_live_resources = AsyncMock()
+        provider._pending_evidence_task_count = MagicMock(side_effect=(1, 0))
+
+        first = await provider.finalize_evidence()
+        prepared = provider.prepare_evidence_finalize_retry()
+        second = await provider.finalize_evidence()
+        third = await provider.finalize_evidence()
+
+        self.assertEqual(first["status"], "FAIL")
+        self.assertEqual(first["pendingTasks"], 1)
+        self.assertTrue(prepared)
+        self.assertEqual(second["status"], "PASS")
+        self.assertEqual(second["pendingTasks"], 0)
+        self.assertEqual(second, third)
+        self.assertEqual(provider._close_live_resources.await_count, 2)
+
     async def test_evidence_finalize_fails_safely_when_bridge_close_fails(self):
         conn = _Conn()
         conn.google_live_evidence_journey_id = "bargein-journey-1"
@@ -5117,6 +5141,38 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first["pendingTasks"], 0)
         self.assertNotIn("bridge close failed", json.dumps(first))
         self.assertEqual(provider._client, None)
+
+    async def test_evidence_finalize_retries_bridge_close_after_transient_failure(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "bargein-journey-1"
+        conn.google_live_evidence_scope = {
+            "peerIdentityHash": "sha256:" + "a" * 64,
+        }
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-7")
+
+        class FailOnceBridge(_Bridge):
+            async def close(self):
+                self.closed += 1
+                if self.closed == 1:
+                    raise RuntimeError("transient bridge close failure")
+
+        bridge = FailOnceBridge()
+        provider._bridge = bridge
+        provider._client = _Client()
+
+        first = await provider.finalize_evidence()
+        prepared = provider.prepare_evidence_finalize_retry()
+        second = await provider.finalize_evidence()
+
+        self.assertEqual(first["status"], "FAIL")
+        self.assertEqual(first["failureCode"], "EVIDENCE_BRIDGE_CLOSE_FAILED")
+        self.assertTrue(prepared)
+        self.assertEqual(second["status"], "PASS")
+        self.assertEqual(second["pendingTasks"], 0)
+        self.assertEqual(bridge.closed, 2)
+        self.assertIsNone(provider._bridge)
+        self.assertIsNone(provider._evidence_cleanup_failure_code)
 
     async def test_evidence_live_identity_tracks_ordered_reconnect_transitions(self):
         conn = _Conn()

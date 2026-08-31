@@ -1183,6 +1183,267 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             [("bargein-1", "FAIL", "EVIDENCE_TRANSCRIPT_INVALID")],
         )
 
+    async def test_invalid_transcript_proof_stays_nonterminal_until_cleanup_verifies(self):
+        invalid_cleanup_results = (
+            {
+                "status": "FAIL",
+                "journeyId": "bargein-1",
+                "connectionId": "server-conn-1",
+                "peerIdentityHash": "sha256:" + "a" * 64,
+                "initialLiveConnectionId": "live-7",
+                "finalLiveConnectionId": "live-7",
+                "liveConnectionTransitions": [],
+                "pendingTasks": 0,
+            },
+            {
+                "status": "PASS",
+                "journeyId": "bargein-1",
+                "connectionId": "server-conn-1",
+                "peerIdentityHash": "sha256:" + "a" * 64,
+                "initialLiveConnectionId": "live-7",
+                "finalLiveConnectionId": "live-7",
+                "liveConnectionTransitions": [],
+                "pendingTasks": 1,
+            },
+            {
+                "status": "PASS",
+                "journeyId": "bargein-1",
+                "connectionId": "server-conn-1",
+                "peerIdentityHash": "sha256:" + "a" * 64,
+                "initialLiveConnectionId": "live-7",
+                "finalLiveConnectionId": "live-8",
+                "liveConnectionTransitions": [],
+                "pendingTasks": 0,
+            },
+            RuntimeError("cleanup secret detail"),
+        )
+        for invalid_result in invalid_cleanup_results:
+            with self.subTest(invalid_result=type(invalid_result).__name__):
+                handler = self._build_handler()
+                handler.config["voice_mode"] = {"type": "google_live"}
+                handler.logger = _RecordingLogger()
+                scope = {
+                    "journeyId": "bargein-1",
+                    "connectionId": "server-conn-1",
+                    "liveConnectionId": "live-7",
+                    "initialLiveConnectionId": "live-7",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "serverStartUtc": "2026-08-31T03:00:00+00:00",
+                }
+                handler.google_live_evidence_scope = scope
+                terminal = []
+                handler.evidence_registry = types.SimpleNamespace(
+                    safe_snapshot=lambda _journey: {
+                        "transcriptProofEligible": False,
+                        "readyToFinalize": False,
+                    },
+                    finalize=lambda journey_id, status, failure_code=None: terminal.append(
+                        (journey_id, status, failure_code)
+                    ),
+                )
+                valid_cleanup = {
+                    "status": "PASS",
+                    "journeyId": "bargein-1",
+                    "connectionId": "server-conn-1",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "initialLiveConnectionId": "live-7",
+                    "finalLiveConnectionId": "live-7",
+                    "liveConnectionTransitions": [],
+                    "pendingTasks": 0,
+                }
+                class CachedFinalizeProvider:
+                    def __init__(self):
+                        self.results = [invalid_result, valid_cleanup]
+                        self.cached_result = None
+                        self.finalize_calls = 0
+                        self.retry_preparations = 0
+
+                    async def finalize_evidence(self):
+                        self.finalize_calls += 1
+                        if isinstance(self.cached_result, dict):
+                            return dict(self.cached_result)
+                        outcome = self.results.pop(0)
+                        if isinstance(outcome, Exception):
+                            raise outcome
+                        self.cached_result = dict(outcome)
+                        return dict(outcome)
+
+                    def prepare_evidence_finalize_retry(self):
+                        self.retry_preparations += 1
+                        self.cached_result = None
+                        return True
+
+                provider = CachedFinalizeProvider()
+                handler.voice_provider = provider
+
+                first = await handler.finalize_google_live_evidence(scope)
+
+                self.assertEqual(first["status"], "FAIL")
+                self.assertEqual(first["failureCode"], "EVIDENCE_CLEANUP_INCOMPLETE")
+                self.assertTrue(first["retryable"])
+                self.assertEqual(terminal, [])
+                self.assertFalse(
+                    any(
+                        "reliability_window_end" in record[1]
+                        for record in handler.logger.records
+                    )
+                )
+                self.assertFalse(
+                    hasattr(handler, "google_live_evidence_finalize_result")
+                    and isinstance(handler.google_live_evidence_finalize_result, dict)
+                )
+
+                second = await handler.finalize_google_live_evidence(scope)
+
+                self.assertEqual(second["status"], "FAIL")
+                self.assertEqual(second["failureCode"], "EVIDENCE_TRANSCRIPT_INVALID")
+                self.assertEqual(
+                    terminal,
+                    [("bargein-1", "FAIL", "EVIDENCE_TRANSCRIPT_INVALID")],
+                )
+                self.assertEqual(provider.finalize_calls, 2)
+                self.assertEqual(provider.retry_preparations, 1)
+
+    async def test_invalid_transcript_proof_maps_unavailable_cleanup_to_incomplete(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.logger = _RecordingLogger()
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        terminal = []
+        handler.evidence_registry = types.SimpleNamespace(
+            safe_snapshot=lambda _journey: {
+                "transcriptProofEligible": False,
+                "readyToFinalize": False,
+            },
+            finalize=lambda *args, **kwargs: terminal.append((args, kwargs)),
+        )
+        handler.voice_provider = types.SimpleNamespace(
+            finalize_evidence=AsyncMock()
+        )
+        handler.mcp_tasks_closed = True
+
+        result = await handler.finalize_google_live_evidence(scope)
+
+        self.assertEqual(result["failureCode"], "EVIDENCE_CLEANUP_INCOMPLETE")
+        self.assertTrue(result["retryable"])
+        self.assertEqual(terminal, [])
+        self.assertFalse(
+            any("reliability_window_end" in record[1] for record in handler.logger.records)
+        )
+        self.assertIsNone(
+            getattr(handler, "google_live_evidence_finalize_result", None)
+        )
+
+    async def test_invalid_proof_retries_cache_preparation_before_rerunning_cleanup(self):
+        handler = self._build_handler()
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        handler.evidence_registry = types.SimpleNamespace(
+            safe_snapshot=lambda _journey: {
+                "transcriptProofEligible": False,
+                "readyToFinalize": False,
+            },
+            finalize=lambda *_args, **_kwargs: None,
+        )
+        invalid_cleanup = {
+            "status": "FAIL",
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "initialLiveConnectionId": "live-7",
+            "finalLiveConnectionId": "live-7",
+            "liveConnectionTransitions": [],
+            "pendingTasks": 1,
+        }
+        valid_cleanup = {**invalid_cleanup, "status": "PASS", "pendingTasks": 0}
+
+        class Provider:
+            def __init__(self):
+                self.cached = invalid_cleanup
+                self.finalize_calls = 0
+                self.prepare_calls = 0
+
+            async def finalize_evidence(self):
+                self.finalize_calls += 1
+                return dict(self.cached)
+
+            def prepare_evidence_finalize_retry(self):
+                self.prepare_calls += 1
+                if self.prepare_calls == 1:
+                    raise RuntimeError("cache remains owned")
+                self.cached = valid_cleanup
+                return True
+
+        provider = Provider()
+        handler.voice_provider = provider
+
+        first = await handler.finalize_google_live_evidence(scope)
+        retained_task = handler.google_live_evidence_finalize_task
+        self.assertIsNotNone(retained_task)
+        second = await handler.finalize_google_live_evidence(scope)
+        self.assertIsNone(handler.google_live_evidence_finalize_task)
+        third = await handler.finalize_google_live_evidence(scope)
+
+        self.assertEqual(first["failureCode"], "EVIDENCE_CLEANUP_INCOMPLETE")
+        self.assertEqual(second["failureCode"], "EVIDENCE_CLEANUP_INCOMPLETE")
+        self.assertEqual(third["failureCode"], "EVIDENCE_TRANSCRIPT_INVALID")
+        self.assertEqual(provider.prepare_calls, 2)
+        self.assertEqual(provider.finalize_calls, 2)
+
+    async def test_invalid_proof_does_not_await_async_retry_preparation(self):
+        handler = self._build_handler()
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        handler.evidence_registry = types.SimpleNamespace(
+            safe_snapshot=lambda _journey: {
+                "transcriptProofEligible": False,
+                "readyToFinalize": False,
+            },
+            finalize=lambda *_args, **_kwargs: None,
+        )
+        prepare_started = asyncio.Event()
+
+        async def stalled_prepare():
+            prepare_started.set()
+            await asyncio.Event().wait()
+
+        handler.voice_provider = types.SimpleNamespace(
+            finalize_evidence=AsyncMock(
+                return_value={"status": "FAIL", "pendingTasks": 1}
+            ),
+            prepare_evidence_finalize_retry=stalled_prepare,
+        )
+
+        result = await asyncio.wait_for(
+            handler.finalize_google_live_evidence(scope), timeout=0.1
+        )
+
+        self.assertEqual(result["failureCode"], "EVIDENCE_CLEANUP_INCOMPLETE")
+        self.assertFalse(prepare_started.is_set())
+        self.assertIsNotNone(handler.google_live_evidence_finalize_task)
+
     async def test_evidence_finalize_exposes_shared_idempotent_lifecycle_method(self):
         handler = self._build_handler()
         handler.config["voice_mode"] = {"type": "google_live"}

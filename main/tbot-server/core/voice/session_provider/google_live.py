@@ -1070,6 +1070,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self._evidence_finalize_result["failureCode"] = cleanup_failure_code
             return dict(self._evidence_finalize_result)
 
+    def prepare_evidence_finalize_retry(self):
+        if self._evidence_finalize_result is None:
+            return True
+        self._evidence_finalize_result = None
+        return True
+
     def request_evidence_finalize_stop(self):
         self._closing = True
         self._lifecycle_generation += 1
@@ -3550,6 +3556,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
             except Exception:
                 cleanup_failure_code = "EVIDENCE_BRIDGE_CLOSE_FAILED"
                 self._evidence_cleanup_failure_code = cleanup_failure_code
+                if self._evidence_scope() is None:
+                    self._bridge = None
+            else:
+                self._evidence_cleanup_failure_code = None
+                self._bridge = None
+        elif self._bridge is not None:
+            self._bridge = None
 
         await self._record_live_session_usage()
 
@@ -3565,7 +3578,6 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 )
         self._client = None
 
-        self._bridge = None
         self._start_lesson_asr_fallback_audio.clear()
         if self._has_session_orchestrator():
             self.conn.google_live_audio_out_started_at = None
