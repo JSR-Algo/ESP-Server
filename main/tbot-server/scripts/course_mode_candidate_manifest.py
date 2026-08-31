@@ -1392,7 +1392,7 @@ def _validate_firmware(
         or evidence_created is None
         or (
             candidate_created is not None and candidate_expires is not None
-            and not candidate_created <= evidence_created < candidate_expires
+            and not evidence_created <= candidate_created < candidate_expires
         )
         or not isinstance(free_percent, (int, float)) or type(free_percent) is bool
         or expected_free_percent is None or abs(float(free_percent) - expected_free_percent) > 0.000001

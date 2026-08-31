@@ -586,10 +586,32 @@ def test_candidate_rejects_image_role_and_oci_provenance_mutation(candidate: dic
     assert "images.lessonStudioBackend.reference" in validate_candidate(candidate, now=NOW)
 
 
+@pytest.mark.parametrize(
+    ("evidence_created_at", "accepted"),
+    [
+        ("2026-08-28T23:59:59Z", True),
+        ("2026-08-29T00:00:00Z", True),
+        ("2026-08-29T00:00:01Z", False),
+    ],
+    ids=["before-candidate", "equal-to-candidate", "after-candidate"],
+)
+def test_firmware_evidence_creation_is_not_after_candidate(
+    candidate: dict, evidence_created_at: str, accepted: bool,
+) -> None:
+    path = Path(candidate["firmware"]["evidenceManifestPath"])
+    evidence = json.loads(path.read_text(encoding="utf-8"))
+    evidence["createdAt"] = evidence_created_at
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+    candidate["firmware"]["evidenceManifestSha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    reasons = validate_candidate(candidate, now=NOW)
+    assert ("firmware.evidenceManifestPath" not in reasons) is accepted
+
+
 @pytest.mark.parametrize("field,value", [
-    ("board", "wrong"), ("target", "esp32"), ("createdAt", "2000-01-01T00:00:00Z"),
+    ("board", "wrong"), ("target", "esp32"),
 ])
-def test_candidate_rejects_firmware_platform_or_stale_evidence(
+def test_candidate_rejects_firmware_platform_mismatch(
     candidate: dict, field: str, value: str,
 ) -> None:
     path = Path(candidate["firmware"]["evidenceManifestPath"])
