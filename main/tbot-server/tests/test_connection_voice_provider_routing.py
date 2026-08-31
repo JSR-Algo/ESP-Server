@@ -1109,6 +1109,75 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ack["liveConnectionTransitions"]), 1)
         self.assertEqual(ack["serverEndUtc"], "2026-08-31T03:00:10+00:00")
 
+    async def test_evidence_finalize_exposes_shared_idempotent_lifecycle_method(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        handler.voice_provider = types.SimpleNamespace(
+            finalize_evidence=AsyncMock(return_value={
+                "status": "PASS",
+                "journeyId": "bargein-1",
+                "connectionId": "server-conn-1",
+                "peerIdentityHash": "sha256:" + "a" * 64,
+                "initialLiveConnectionId": "live-7",
+                "finalLiveConnectionId": "live-7",
+                "liveConnectionTransitions": [],
+                "pendingTasks": 0,
+            })
+        )
+
+        first = await handler.finalize_google_live_evidence(scope)
+        second = await handler.finalize_google_live_evidence(scope)
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["status"], "PASS")
+        handler.voice_provider.finalize_evidence.assert_awaited_once()
+
+    async def test_evidence_finalize_concurrent_callers_emit_one_terminal_boundary(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.logger = _RecordingLogger()
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        handler.voice_provider = types.SimpleNamespace(
+            finalize_evidence=AsyncMock(return_value={
+                "status": "PASS",
+                "journeyId": "bargein-1",
+                "connectionId": "server-conn-1",
+                "peerIdentityHash": "sha256:" + "a" * 64,
+                "initialLiveConnectionId": "live-7",
+                "finalLiveConnectionId": "live-7",
+                "liveConnectionTransitions": [],
+                "pendingTasks": 0,
+            })
+        )
+
+        first, second = await asyncio.gather(
+            handler.finalize_google_live_evidence(scope),
+            handler.finalize_google_live_evidence(scope),
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            sum("reliability_window_end" in record[1] for record in handler.logger.records),
+            1,
+        )
+
     async def test_evidence_finalize_rejects_scope_mismatch_without_cleanup(self):
         handler = self._build_handler()
         handler.config["voice_mode"] = {"type": "google_live"}

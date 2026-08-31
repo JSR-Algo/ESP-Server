@@ -6,6 +6,10 @@ from unittest.mock import AsyncMock, patch
 from core.handle import helloHandle
 from core.handle.helloHandle import handleHelloMessage
 from core.voice.google_live.audio_bridge import GoogleLiveAudioBridge
+from core.voice.google_live.evidence_enrollment import (
+    EvidenceEnrollmentRegistry,
+    TranscriptExpectation,
+)
 
 
 class _Logger:
@@ -48,6 +52,8 @@ class _Conn:
         self.session_id = "server-connection-1"
         self.device_id = "device-secret-1"
         self.client_id = "client-secret-1"
+        self.headers = {"client-id": self.client_id}
+        self.evidence_registry = None
         self.voice_provider = None
         self.config = {
             "voice_mode": {"type": "classic_pipeline"},
@@ -74,6 +80,63 @@ class _Conn:
 
 
 class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _enroll(conn, journey_id="physical.run-1"):
+        registry = EvidenceEnrollmentRegistry()
+        registry.register(
+            device_id=conn.device_id,
+            client_id=conn.client_id,
+            journey_id=journey_id,
+            transcript_plan=(TranscriptExpectation(1, "interrupt", "a" * 64),),
+            hmac_key=b"k" * 32,
+            ttl_sec=120,
+        )
+        conn.evidence_registry = registry
+        return registry
+
+    async def test_google_live_hello_claims_injected_enrollment_before_scope(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(return_value="live-7")
+        )
+        registry = self._enroll(conn)
+
+        await handleHelloMessage(conn, {"evidence_journey_id": "physical.run-1"})
+
+        ack = json.loads(conn.websocket.sent[0])
+        self.assertEqual(ack["evidenceScope"]["journeyId"], "physical.run-1")
+        self.assertTrue(registry.safe_snapshot("physical.run-1")["connected"])
+        self.assertTrue(
+            any("reliability_window_start" in message for message in conn.logger.infos)
+        )
+
+    async def test_google_live_hello_fails_closed_for_invalid_or_reused_enrollment(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(return_value="live-7")
+        )
+        registry = self._enroll(conn)
+        registry.claim_once(
+            device_id=conn.device_id,
+            client_id=conn.client_id,
+            journey_id="physical.run-1",
+        )
+
+        await handleHelloMessage(conn, {"evidence_journey_id": "physical.run-1"})
+
+        ack = json.loads(conn.websocket.sent[0])
+        self.assertEqual(ack["evidenceScope"], {
+            "status": "FAIL",
+            "failureCode": "EVIDENCE_ENROLLMENT_INVALID",
+        })
+        self.assertIsNone(conn.google_live_evidence_journey_id)
+        self.assertIsNone(conn.google_live_evidence_scope)
+        conn.voice_provider.prepare_evidence_scope.assert_not_awaited()
+        self.assertFalse(
+            any("reliability_window_start" in message for message in conn.logger.infos)
+        )
     async def test_client_audio_params_update_connection_sample_rate(self):
         conn = _Conn()
 

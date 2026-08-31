@@ -3,6 +3,7 @@ import json
 import re
 import types
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from aiohttp.test_utils import make_mocked_request
@@ -10,12 +11,13 @@ from aiohttp.test_utils import make_mocked_request
 from core import http_server as http_module
 from core.api import lesson_sd_fanout_handler as lesson_sd_fanout_handler_module
 from core.api.lesson_sd_fanout_handler import LessonSdFanoutHandler
+from core.connection_registry import ConnectionRegistry
 from core.http_server import SimpleHttpServer
 from core.lesson.global_generation_status import (
     GlobalGenerationStatus,
     GlobalGenerationStatusError,
 )
-
+from core.voice.google_live.evidence_enrollment import TranscriptExpectation
 
 # T6.4 — /internal/lesson-runtime/* now share the X-Mint-Secret gate that every
 # other /internal/ route already used, so these tests must authenticate.
@@ -311,12 +313,71 @@ async def test_http_server_start_registers_routes_and_starts_site(monkeypatch):
     assert "/internal/devices/{deviceId}/mcp-call" in route_paths
     assert "/internal/devices/{deviceId}/google-live-evidence" in route_paths
     assert "/internal/devices/{deviceId}/google-live-evidence/{journeyId}" in route_paths
+    assert any(
+        route.method == "POST"
+        and route.resource.canonical
+        == "/internal/devices/{deviceId}/google-live-evidence/{journeyId}/finalize"
+        for route in runner_apps[0].router.routes()
+    )
     assert "/internal/lesson-assets/generation/retry" in route_paths
     assert "/internal/lesson-runtime/preload-voice-alarm" in route_paths
     assert "/internal/lesson-runtime/preload-voice-alarm/reset" in route_paths
     assert "/internal/lesson-runtime/metrics" in route_paths
     assert "/tbot/lesson-assets/{cacheToken}/{assetKey}" in route_paths
     assert "/tbot/assign/" in route_paths
+
+
+@pytest.mark.asyncio
+async def test_google_live_evidence_http_finalize_reserves_exact_current_connection():
+    connections = ConnectionRegistry()
+    server = SimpleHttpServer(_config(), lesson_connections=connections)
+    registry = server.evidence_registry
+    registry.register(
+        device_id="device-1",
+        client_id="client-1",
+        journey_id="physical.run-1",
+        transcript_plan=(TranscriptExpectation(1, "interrupt", "a" * 64),),
+        hmac_key=b"k" * 32,
+        ttl_sec=120,
+    )
+    registry.claim_once(
+        device_id="device-1", client_id="client-1", journey_id="physical.run-1"
+    )
+    scope = {"journeyId": "physical.run-1", "connectionId": "session-1"}
+
+    async def finalize(expected_scope):
+        registry.finalize("physical.run-1", status="PASS")
+        return {
+            "type": "evidence_finalized",
+            "status": "PASS",
+            "evidenceScope": expected_scope,
+        }
+
+    finalize_mock = AsyncMock(side_effect=finalize)
+    connection = types.SimpleNamespace(
+        session_id="session-1",
+        client_id="client-1",
+        google_live_evidence_scope=scope,
+        finalize_google_live_evidence=finalize_mock,
+    )
+    connections["device-1"] = connection
+    request = make_mocked_request(
+        "POST",
+        "/internal/devices/device-1/google-live-evidence/physical.run-1/finalize",
+        headers={"X-Mint-Secret": INTERNAL_MINT_SECRET},
+        match_info={"deviceId": "device-1", "journeyId": "physical.run-1"},
+    )
+
+    response = await server.google_live_evidence_handler.handle_finalize(request)
+
+    assert response.status == 200
+    connection.finalize_google_live_evidence.assert_awaited_once_with(scope)
+    assert registry.safe_snapshot("physical.run-1")["status"] == "PASS"
+
+    retry = await server.google_live_evidence_handler.handle_finalize(request)
+    assert retry.status == 200
+    assert retry.text == response.text
+    assert connection.finalize_google_live_evidence.await_count == 2
 
 
 @pytest.mark.asyncio

@@ -83,6 +83,7 @@ class EvidenceEnrollmentRegistry:
         self._active: dict[str, _EvidenceEnrollmentState] = {}
         self._tombstones: OrderedDict[str, dict] = OrderedDict()
         self._terminal_peer_digests: dict[str, bytes] = {}
+        self._terminal_client_digests: dict[str, bytes] = {}
         self._peer_digest_key = os.urandom(32)
 
     @_synchronized
@@ -152,6 +153,42 @@ class EvidenceEnrollmentRegistry:
         return self._view(enrollment)
 
     @_synchronized
+    def claim_once(
+        self, *, device_id: str, client_id: str, journey_id: str
+    ) -> EvidenceEnrollment | None:
+        self._prepare()
+        enrollment = self._active.get(journey_id)
+        if enrollment is None or enrollment.connected:
+            return None
+        if (
+            enrollment.device_id != normalize_peer_id(device_id)
+            or enrollment.client_id != normalize_peer_id(client_id)
+        ):
+            return None
+        enrollment.connected = True
+        return self._view(enrollment)
+
+    @_synchronized
+    def claimed_peer_matches(
+        self, *, device_id: str, client_id: str, journey_id: str
+    ) -> bool:
+        self._prepare()
+        enrollment = self._active.get(journey_id)
+        if enrollment is not None:
+            return bool(
+                enrollment.connected
+                and enrollment.device_id == normalize_peer_id(device_id)
+                and enrollment.client_id == normalize_peer_id(client_id)
+            )
+        return bool(
+            journey_id in self._tombstones
+            and self._terminal_peer_digests.get(journey_id)
+            == self._peer_digest(device_id)
+            and self._terminal_client_digests.get(journey_id)
+            == self._peer_digest(client_id)
+        )
+
+    @_synchronized
     def finalize(
         self,
         journey_id: str,
@@ -171,6 +208,7 @@ class EvidenceEnrollmentRegistry:
         if enrollment is None:
             raise EnrollmentError("JOURNEY_NOT_FOUND")
         self._terminal_peer_digests[journey_id] = self._peer_digest(enrollment.device_id)
+        self._terminal_client_digests[journey_id] = self._peer_digest(enrollment.client_id)
         self._active.pop(journey_id)
         enrollment.finalized = True
         self._zeroize(enrollment.hmac_key)
@@ -220,6 +258,7 @@ class EvidenceEnrollmentRegistry:
         for journey_id in expired:
             enrollment = self._active[journey_id]
             self._terminal_peer_digests[journey_id] = self._peer_digest(enrollment.device_id)
+            self._terminal_client_digests[journey_id] = self._peer_digest(enrollment.client_id)
             self._active.pop(journey_id)
             self._zeroize(enrollment.hmac_key)
             self._add_tombstone(
@@ -268,6 +307,7 @@ class EvidenceEnrollmentRegistry:
         while len(self._tombstones) > self._max_tombstones:
             evicted, _snapshot = self._tombstones.popitem(last=False)
             self._terminal_peer_digests.pop(evicted, None)
+            self._terminal_client_digests.pop(evicted, None)
 
     def _peer_digest(self, device_id: str) -> bytes:
         return hashlib.blake2b(

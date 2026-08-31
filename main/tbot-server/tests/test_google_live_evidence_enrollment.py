@@ -56,6 +56,25 @@ def test_registry_binds_exact_normalized_peer_and_rejects_replacement():
     assert replacement_key == bytearray(32)
 
 
+def test_registry_strict_claim_is_exact_and_single_use():
+    registry = EvidenceEnrollmentRegistry()
+    _register(registry)
+
+    claimed = registry.claim_once(
+        device_id="AA:BB",
+        client_id="ROBOT-CLIENT",
+        journey_id="physical.run-1",
+    )
+
+    assert claimed is not None
+    assert claimed.connected is True
+    assert registry.claim_once(
+        device_id="aa:bb",
+        client_id="robot-client",
+        journey_id="physical.run-1",
+    ) is None
+
+
 def test_registry_detaches_input_key_and_returned_enrollments_from_internal_state():
     registry = EvidenceEnrollmentRegistry()
     input_key = bytearray(b"k" * 32)

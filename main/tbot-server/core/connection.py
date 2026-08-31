@@ -1182,12 +1182,46 @@ class ConnectionHandler:
             payload = json.loads(message)
         except (TypeError, json.JSONDecodeError):
             payload = None
-        scope = getattr(self, "google_live_evidence_scope", None)
         received_scope = payload.get("evidenceScope") if isinstance(payload, dict) else None
+        ack = await self.finalize_google_live_evidence(received_scope)
+        await self.websocket.send(json.dumps(ack))
+
+    async def finalize_google_live_evidence(
+        self, expected_scope
+    ) -> dict[str, object]:
+        cached = getattr(self, "google_live_evidence_finalize_result", None)
+        if isinstance(cached, dict):
+            if cached.get("evidenceScope") == expected_scope:
+                return dict(cached)
+            return {
+                "type": "evidence_finalized",
+                "status": "FAIL",
+                "failureCode": "EVIDENCE_SCOPE_MISMATCH",
+            }
+        lock = getattr(self, "google_live_evidence_finalize_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.google_live_evidence_finalize_lock = lock
+        async with lock:
+            cached = getattr(self, "google_live_evidence_finalize_result", None)
+            if isinstance(cached, dict):
+                if cached.get("evidenceScope") == expected_scope:
+                    return dict(cached)
+                return {
+                    "type": "evidence_finalized",
+                    "status": "FAIL",
+                    "failureCode": "EVIDENCE_SCOPE_MISMATCH",
+                }
+            return await self._finalize_google_live_evidence_once(expected_scope)
+
+    async def _finalize_google_live_evidence_once(
+        self, expected_scope
+    ) -> dict[str, object]:
+        scope = getattr(self, "google_live_evidence_scope", None)
         failure_code = None
         result = None
         validated_transition_result = None
-        if not isinstance(scope, dict) or received_scope != scope:
+        if not isinstance(scope, dict) or expected_scope != scope:
             failure_code = "EVIDENCE_SCOPE_MISMATCH"
         else:
             provider = getattr(self, "voice_provider", None)
@@ -1242,7 +1276,34 @@ class ConnectionHandler:
         if not failure_code:
             ack.update(validated_transition_result)
             ack["serverEndUtc"] = _utc_now_iso()
-        await self.websocket.send(json.dumps(ack))
+        registry = getattr(self, "evidence_registry", None)
+        journey_id = scope.get("journeyId") if isinstance(scope, dict) else None
+        scope_matched = isinstance(scope, dict) and expected_scope == scope
+        if scope_matched and ack.get("status") in ("PASS", "FAIL"):
+            server_end_utc = ack.get("serverEndUtc") or _utc_now_iso()
+            self.logger.bind(tag=TAG).info(
+                "Google Live reliability_window_end window_id={} server_end_utc={}",
+                journey_id,
+                server_end_utc,
+            )
+        if registry is not None and isinstance(journey_id, str) and scope_matched:
+            try:
+                registry.finalize(
+                    journey_id,
+                    status="FAIL" if failure_code else "PASS",
+                    failure_code=failure_code,
+                )
+            except Exception:
+                if not failure_code:
+                    ack = {
+                        "type": "evidence_finalized",
+                        "status": "FAIL",
+                        "failureCode": "EVIDENCE_ENROLLMENT_INVALID",
+                        "evidenceScope": scope,
+                    }
+        if scope_matched:
+            self.google_live_evidence_finalize_result = dict(ack)
+        return dict(ack)
 
     async def _wait_for_voice_provider_ready(self):
         """In manager mode, keep early user input on the selected voice provider path."""

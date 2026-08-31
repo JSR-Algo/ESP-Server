@@ -9,6 +9,7 @@ from core.voice.google_live.evidence_enrollment import (
     EnrollmentError,
     EvidenceEnrollmentRegistry,
     TranscriptExpectation,
+    normalize_peer_id,
 )
 
 NORMALIZATION_VERSION = "google-live-transcript-nfkc-casefold.v1"
@@ -26,8 +27,9 @@ _PLAN_FIELDS = {"slot", "phase", "expectedMac"}
 
 
 class GoogleLiveEvidenceHandler:
-    def __init__(self, registry: EvidenceEnrollmentRegistry):
+    def __init__(self, registry: EvidenceEnrollmentRegistry, connections=None):
         self.registry = registry
+        self.connections = connections
 
     def _authorize(self, request: web.Request):
         expected = os.environ.get("TBOT_DEVICE_MINT_SECRET", "")
@@ -103,6 +105,64 @@ class GoogleLiveEvidenceHandler:
                 return self._error(409, "FINAL_STATUS_CONFLICT", "Evidence journey already finalized")
             return self._error(404, "JOURNEY_NOT_FOUND", "Evidence journey not found")
         return web.json_response(snapshot, headers={"Cache-Control": "no-store"})
+
+    async def handle_finalize(self, request: web.Request) -> web.Response:
+        auth_error = self._authorize(request)
+        if auth_error is not None:
+            return auth_error
+        try:
+            device_id, journey_id = self._path_ids(request)
+        except ValueError:
+            return self._invalid_path()
+        device_key = normalize_peer_id(device_id)
+        connections = self.connections
+        matching_connections = (
+            [
+                (key, candidate)
+                for key, candidate in connections.items()
+                if normalize_peer_id(key) == device_key
+            ]
+            if connections is not None
+            else []
+        )
+        if len(matching_connections) != 1:
+            return self._error(404, "EVIDENCE_CONNECTION_NOT_FOUND", "Evidence connection not found")
+        connection_key, connection = matching_connections[0]
+        if connection is None:
+            return self._error(404, "EVIDENCE_CONNECTION_NOT_FOUND", "Evidence connection not found")
+        session_id = str(getattr(connection, "session_id", "") or "")
+        reserve_current = getattr(connections, "reserve_current", None)
+        if not session_id or not callable(reserve_current):
+            return self._error(409, "EVIDENCE_CONNECTION_STALE", "Evidence connection is not current")
+        async with reserve_current(connection_key, connection, session_id) as current:
+            scope = getattr(connection, "google_live_evidence_scope", None)
+            client_id = str(getattr(connection, "client_id", "") or "")
+            if (
+                not current
+                or not isinstance(scope, dict)
+                or scope.get("journeyId") != journey_id
+                or scope.get("connectionId") != session_id
+                or not self.registry.claimed_peer_matches(
+                    device_id=device_id, client_id=client_id, journey_id=journey_id
+                )
+            ):
+                return self._error(409, "EVIDENCE_SCOPE_INVALID", "Evidence scope is not active")
+            finalize = getattr(connection, "finalize_google_live_evidence", None)
+            if not callable(finalize):
+                return self._error(503, "EVIDENCE_FINALIZE_UNAVAILABLE", "Evidence finalization is unavailable")
+            try:
+                result = await finalize(scope)
+                snapshot = self.registry.safe_snapshot(journey_id)
+                expected_status = "PASS" if result.get("status") == "PASS" else "FAIL"
+                if snapshot.get("status") != expected_status:
+                    return self._error(503, "EVIDENCE_FINALIZE_FAILED", "Evidence finalization failed")
+            except EnrollmentError as exc:
+                if str(exc) == "FINAL_STATUS_CONFLICT":
+                    return self._error(409, "FINAL_STATUS_CONFLICT", "Evidence journey already finalized")
+                return self._error(409, "EVIDENCE_ENROLLMENT_INVALID", "Evidence enrollment is invalid")
+            except Exception:
+                return self._error(503, "EVIDENCE_FINALIZE_FAILED", "Evidence finalization failed")
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
 
     def _device_matches(self, device_id: str, journey_id: str) -> bool:
         return self.registry.device_matches(device_id=device_id, journey_id=journey_id)

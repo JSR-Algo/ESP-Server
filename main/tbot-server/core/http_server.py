@@ -79,15 +79,18 @@ class SimpleHttpServer:
             if evidence_registry is not None
             else EvidenceEnrollmentRegistry()
         )
+        self.lesson_connections = lesson_connections if lesson_connections is not None else {}
         self.ota_handler = OTAHandler(config, evidence_registry=self.evidence_registry)
-        self.google_live_evidence_handler = GoogleLiveEvidenceHandler(self.evidence_registry)
+        self.google_live_evidence_handler = GoogleLiveEvidenceHandler(
+            self.evidence_registry,
+            self.lesson_connections,
+        )
         self.vision_handler = VisionHandler(config)
         self.lesson_asset_handler = LessonAssetHandler(config)
         self.lesson_assignment_console_handler = LessonAssignmentConsoleHandler(
             config,
             lesson_connections if lesson_connections is not None else {},
         )
-        self.lesson_connections = lesson_connections if lesson_connections is not None else {}
         self.lesson_sd_pending_store = get_pending_store()
         lesson_cfg = config.get("lesson", {}) if isinstance(config, dict) else {}
         server_cfg = config.get("server", {}) if isinstance(config, dict) else {}
@@ -223,6 +226,10 @@ class SimpleHttpServer:
                         web.delete(
                             "/internal/devices/{deviceId}/google-live-evidence/{journeyId}",
                             self.google_live_evidence_handler.handle_delete,
+                        ),
+                        web.post(
+                            "/internal/devices/{deviceId}/google-live-evidence/{journeyId}/finalize",
+                            self.google_live_evidence_handler.handle_finalize,
                         ),
                         web.post(
                             "/internal/devices/{deviceId}/remote-unpair",

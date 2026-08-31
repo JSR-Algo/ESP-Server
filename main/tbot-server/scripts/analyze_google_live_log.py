@@ -42,6 +42,7 @@ from scripts.physical_smoke_audit import (
 )
 
 TS_RE = re.compile(r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+SAFE_EVIDENCE_JOURNEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 
 P_INPUT_DIAG = re.compile(
     r"input_audio_diag encoded_bytes=(?P<enc>\d+|unknown) "
@@ -166,6 +167,7 @@ P_RELIABILITY_WINDOW_START = re.compile(
     r"(?:initial_live_connection_id=(?P<initial_live_connection_id>[A-Za-z0-9._:-]+) )?"
     r"(?:peer_identity_hash=(?P<peer_identity_hash>sha256:[0-9a-f]{64}) )?"
     r"(?:server_start_utc=(?P<server_start_utc>\S+) )?"
+    r"(?:server_issued=(?P<server_issued>true) )?"
     r"candidate_identity=(?P<candidate_identity>\{.*\})$"
 )
 P_RELIABILITY_WINDOW_END = re.compile(
@@ -1400,6 +1402,144 @@ def _is_reliability_line(line: str) -> bool:
         or any(pattern.search(line) for pattern in _RELIABILITY_MARKERS)
         or any(pattern.search(line) for _label, pattern in _FORBIDDEN_LOG_MARKERS)
     )
+
+
+def _safe_failure_report(code: str) -> dict[str, Any]:
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": "google_live_log_reliability",
+        "status": "FAIL",
+        "candidateIdentity": None,
+        "evidenceScope": None,
+        "journeyType": None,
+        "journeyLatencyEvidence": {},
+        "initialLiveConnectionId": None,
+        "finalLiveConnectionId": None,
+        "liveConnectionTransitions": [],
+        "serverConnectionTransitions": [],
+        "logWindow": None,
+        "receiveLoopBalance": 0,
+        "maxReceiveLoopsActive": 0,
+        "replayCountsByReopen": {},
+        "duplicateResponseIds": [],
+        "staleAudioAfterReplacement": 0,
+        "unrecoveredTimeouts": [],
+        "unreleasedLessonHandoffs": [],
+        "fatalHits": [],
+        "correlation": None,
+        "correlations": [],
+        "failures": [{"code": code}],
+    }
+
+
+def _atomic_write_json(path: Path, report: Mapping[str, Any]) -> None:
+    parent = path.parent
+    if (
+        not parent.exists()
+        or not parent.is_dir()
+        or parent.resolve() != parent.absolute()
+        or path.is_symlink()
+    ):
+        raise ValueError("unsafe output path")
+    encoded = json.dumps(redact_mapping(dict(report)), indent=2, sort_keys=True) + "\n"
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _bounded_server_window(log_path: Path, journey_id: str) -> list[str]:
+    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    matches: list[tuple[int, int]] = []
+    active: tuple[int, re.Match[str]] | None = None
+    for index, line in enumerate(lines):
+        start = P_RELIABILITY_WINDOW_START.search(line)
+        end = P_RELIABILITY_WINDOW_END.search(line)
+        if "Google Live reliability_window_start" in line and start is None:
+            raise ValueError("malformed reliability window start")
+        if "Google Live reliability_window_end" in line and end is None:
+            raise ValueError("malformed reliability window end")
+        if start:
+            if active is not None:
+                raise ValueError("nested reliability window")
+            active = (index, start)
+        if end:
+            if active is None:
+                raise ValueError("orphan reliability window end")
+            start_index, start_match = active
+            if end.group("window_id") != start_match.group("window_id"):
+                raise ValueError("reliability window mismatch")
+            if start_match.group("journey_id") == journey_id:
+                matches.append((start_index, index))
+            active = None
+    if active is not None or len(matches) != 1:
+        raise ValueError("requested reliability window is not unique")
+    start_index, end_index = matches[0]
+    selected = lines[start_index : end_index + 1]
+    start = P_RELIABILITY_WINDOW_START.search(selected[0])
+    end = P_RELIABILITY_WINDOW_END.search(selected[-1])
+    if (
+        start is None
+        or end is None
+        or start.group("window_id") != journey_id
+        or start.group("journey_id") != journey_id
+        or start.group("connection_id") is None
+        or start.group("live_connection_id") is None
+        or start.group("server_start_utc") is None
+        or start.group("server_issued") != "true"
+        or end.group("server_end_utc") is None
+    ):
+        raise ValueError("requested reliability anchors are not server scoped")
+    for line in selected[1:-1]:
+        foreign_start = P_RELIABILITY_WINDOW_START.search(line)
+        foreign_end = P_RELIABILITY_WINDOW_END.search(line)
+        if foreign_start or foreign_end:
+            raise ValueError("foreign reliability anchor")
+        if _is_reliability_line(line):
+            marker_journey = re.search(r"\bjourney_id=([A-Za-z0-9._:-]+)", line)
+            if marker_journey is not None and marker_journey.group(1) != journey_id:
+                raise ValueError("foreign reliability marker")
+    return selected
+
+
+def _persist_reliability_window(log_path: Path, journey_id: str, out_path: Path) -> int:
+    try:
+        if SAFE_EVIDENCE_JOURNEY_RE.fullmatch(journey_id) is None:
+            raise ValueError("invalid journey")
+        if not log_path.is_file():
+            raise ValueError("log file unavailable")
+        if out_path.exists() and os.path.samefile(log_path, out_path):
+            return 1
+        if log_path.resolve() == out_path.resolve():
+            return 1
+        selected = _bounded_server_window(log_path, journey_id)
+        with tempfile.TemporaryDirectory() as directory:
+            bounded = Path(directory) / "server-window.log"
+            bounded.write_text("\n".join(selected) + "\n", encoding="utf-8")
+            report = analyze_reliability_window(bounded)
+        _atomic_write_json(out_path, report)
+        return 0 if report.get("status") == "PASS" else 1
+    except Exception:
+        try:
+            if not (
+                out_path.exists() and os.path.samefile(log_path, out_path)
+            ) and log_path.resolve() != out_path.resolve():
+                _atomic_write_json(out_path, _safe_failure_report("BOUNDED_LOG_INVALID"))
+        except Exception:
+            pass
+        return 1
 
 
 def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
@@ -3949,7 +4089,7 @@ def _correlate_transport_cli(
     )
 
 
-def main():
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--log", required=True, type=Path, help="Path to server.log")
     parser.add_argument(
@@ -3991,7 +4131,14 @@ def main():
     )
     parser.add_argument("--correlate-transport", type=Path)
     parser.add_argument("--expected-candidate-json", type=Path)
-    args = parser.parse_args()
+    parser.add_argument("--reliability-window", action="store_true")
+    parser.add_argument("--journey-id")
+    args = parser.parse_args(argv)
+
+    if args.reliability_window:
+        if not args.journey_id or args.out_json is None:
+            return 1
+        return _persist_reliability_window(args.log, args.journey_id, args.out_json)
 
     if not args.log.exists():
         raise SystemExit(f"Log file not found: {args.log}")
@@ -4014,7 +4161,7 @@ def main():
         )
         if correlated.get("status") != "PASS":
             raise SystemExit(1)
-        return
+        return 0
 
     if getattr(args, "check_chain", False):
         chain_report = check_chain(args.log)
@@ -4026,12 +4173,12 @@ def main():
                 file=sys.stderr,
             )
             raise SystemExit(1)
-        return
+        return 0
 
     if getattr(args, "pain_summary", False):
         pain_report = summarize_pains(args.log)
         print(json.dumps(pain_report, indent=2, default=str))
-        return
+        return 0
 
     report = analyze(args.log)
     reliability = None
@@ -4051,7 +4198,8 @@ def main():
         print(json.dumps(report, indent=2, default=str))
     if reliability is not None and reliability["status"] != "PASS":
         raise SystemExit(1)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

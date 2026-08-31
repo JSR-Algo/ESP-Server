@@ -12,6 +12,7 @@ from scripts.analyze_google_live_log import (
     analyze,
     analyze_reliability_window,
     correlate_websocket_bargein_evidence,
+    main,
     summarize_pains,
 )
 
@@ -75,6 +76,7 @@ def _window_lines(
     journey_id=None,
     journeys=None,
     evidence_scope=None,
+    server_issued=False,
 ):
     identity = json.dumps(candidate_identity, sort_keys=True, separators=(",", ":"))
     evidence = ""
@@ -97,9 +99,10 @@ def _window_lines(
         if evidence_scope is not None
         else ""
     )
+    server_marker = "server_issued=true " if server_issued else ""
     return [
         "2026-08-31 10:00:00 Google Live reliability_window_start "
-        f"window_id={window_id} {evidence}candidate_identity={identity}",
+        f"window_id={window_id} {evidence}{server_marker}candidate_identity={identity}",
         *body,
         "2026-08-31 10:00:59 Google Live reliability_window_end "
         f"window_id={window_id}{end_scope}",
@@ -157,6 +160,74 @@ def _transport_observation(**overrides):
     }
     observation.update(overrides)
     return observation
+
+
+def test_cli_persists_exact_single_server_window(tmp_path):
+    scope = {**EVIDENCE_SCOPE, "journeyId": "physical.run-1"}
+    log = tmp_path / "server.log"
+    out = tmp_path / "report.json"
+    log.write_text(
+        "\n".join(
+            _window_lines(
+                journey_id="physical.run-1",
+                evidence_scope=scope,
+                window_id="physical.run-1",
+                server_issued=True,
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main([
+        "--log", str(log), "--reliability-window",
+        "--journey-id", "physical.run-1", "--out-json", str(out),
+    ])
+
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert report["logWindow"] == {
+        "windowId": "physical.run-1",
+        "start": scope["serverStartUtc"],
+        "end": "2026-08-31T10:00:59+00:00",
+    }
+    assert report["evidenceScope"]["journeyId"] == "physical.run-1"
+
+
+def test_cli_reliability_window_rejects_synthetic_anchors(tmp_path):
+    scope = {**EVIDENCE_SCOPE, "journeyId": "physical.run-1"}
+    log = tmp_path / "server.log"
+    out = tmp_path / "report.json"
+    log.write_text(
+        "\n".join(
+            _window_lines(
+                journey_id="physical.run-1",
+                evidence_scope=scope,
+                window_id="physical.run-1",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main([
+        "--log", str(log), "--reliability-window",
+        "--journey-id", "physical.run-1", "--out-json", str(out),
+    ])
+
+    assert exit_code != 0
+    assert json.loads(out.read_text(encoding="utf-8"))["status"] == "FAIL"
+
+
+def test_cli_reliability_window_rejects_output_alias(tmp_path):
+    log = tmp_path / "server.log"
+    log.write_text("malformed", encoding="utf-8")
+
+    exit_code = main([
+        "--log", str(log), "--reliability-window",
+        "--journey-id", "physical.run-1", "--out-json", str(log),
+    ])
+
+    assert exit_code != 0
+    assert log.read_text(encoding="utf-8") == "malformed"
 
 
 def _valid_log_verdict(**overrides):
