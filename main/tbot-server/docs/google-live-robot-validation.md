@@ -48,14 +48,13 @@ remediation, each analyzer input must contain exactly one reliability start/end
 anchor. The top-level `timeline.log` must be a privacy-safe index of the
 separate window paths, window IDs, and UTC bounds; it must never concatenate raw
 journey logs.
-`commands.txt` records sanitized invocation templates through the
-`record_command` helper from `google-live-smoke.md`, with `$GOOGLE_API_KEY`,
-device/client identifiers, and protected paths left as literal variable names
-or placeholders, never expanded values. Continue in the same shell so that
-helper and strict shell settings remain active. This manual record is not
-cryptographic command provenance; release remains blocked until one checked-in
-wrapper both executes structured arguments and writes their canonical redacted
-representation.
+`commands.txt` contains partial operator notes and selected sanitized invocation
+templates from the `record_command` helper in `google-live-smoke.md`. It is not
+a complete ledger or cryptographic command provenance. Values written there
+must keep `$GOOGLE_API_KEY`, device/client identifiers, and protected paths as
+literal variable names or placeholders, never expanded values. Release remains
+blocked until one checked-in wrapper both executes structured arguments and
+writes their canonical redacted representation.
 
 Raw child audio is not stored by default. Use synthetic or consenting-adult
 fixtures only. Reports and retained logs must contain no raw/base64 audio, raw
@@ -389,7 +388,6 @@ PY
 (
   cd "$EVIDENCE_ROOT"
   test -s commands.txt
-  <checked-in-command-provenance-validator> commands.txt
   shasum -a 256 \
     deterministic/report.json \
     deterministic/pytest.xml deterministic/node-manifest.txt \
@@ -441,7 +439,7 @@ reports no failures, and every checksum is verified.
 | Physical expected-match proof unavailable | Metadata-only transcript logs and repeated flag semantics | Software release blocker; implement privacy-safe proof, never enable/store raw transcripts |
 | Candidate manifest producer unavailable | `--journey-evidence` replay-only CLI path | Software release blocker; implement a trusted operator producer, never hand-author evidence |
 | Deterministic matrix proof not release-bound | `coverageProof`, `deterministic/node-manifest.txt`, JUnit, and `_deterministic_valid()` | Software release blocker; make the checked-in gate validate the exact node manifest/hash/count and checksum both supporting artifacts |
-| Command provenance unavailable | Manual `record_command` templates and privacy scan | Software release blocker; implement one structured wrapper that executes and canonically records the same redacted argv without secret/path expansion |
+| Command provenance unavailable | Partial manual `record_command` operator notes | Software release blocker; implement one structured wrapper that executes and canonically records the same redacted argv without secret/path expansion |
 | Soak duration/resource/cleanup failure | `candidate-soak/report.json` | Stop; do not synthesize duration, drop samples, or reuse another candidate's evidence |
 | Identity/checksum mismatch | `checksums.sha256` and each `candidateIdentity` | Rebuild the evidence set; never edit identity or regenerate checksums to force PASS |
 

@@ -70,10 +70,10 @@ generated `CONFIG_JSON` matches the smoke script's effective round-trip config;
 its API-key placeholder is redacted by the shared identity builder before the
 fingerprint is calculated.
 
-Run the whole evidence sequence in this same shell. Before every
-evidence-producing or evidence-checking command below, append its sanitized
-invocation template with the `record_command` heredoc pattern shown below. The
-heredoc delimiter must be single-quoted so
+Run the whole evidence sequence in this same shell. The shown `record_command`
+entries add selected sanitized invocation templates to partial operator notes;
+they are examples and are not a complete command ledger. The heredoc delimiter
+must be single-quoted so
 `$GOOGLE_API_KEY`, device/client variables, and protected paths are recorded as
 literal names rather than expanded values. Use `<robot-device-id>`-style
 placeholders for operator identifiers; never pass a command containing a real
@@ -352,12 +352,12 @@ The analyzer still requires the exact journey, connection, peer hash, Live
 connection transition ledger, candidate identity, and UTC window. Foreign or
 unscoped log markers cannot satisfy the journey.
 
-The `record_command` helper records a sanitized operator template before each
-command, but it does not execute the command itself and cannot prove that the
-recorded template equals the process argv. Until a checked-in structured
-execute-and-record wrapper exists, `commands.txt` is useful diagnostic context
-only and command provenance remains a software release blocker. Never claim
-the privacy scan or checksum upgrades manual transcription into provenance.
+The `record_command` helper records selected sanitized operator templates, but
+it does not execute commands, capture every invocation, or prove that a template
+equals process argv. Until a checked-in structured execute-and-record wrapper
+exists, `commands.txt` is partial diagnostic context only and command provenance
+remains a software release blocker. A checksum upgrades neither completeness
+nor manual transcription into provenance.
 
 ## 5. Historical compatibility matrix
 
