@@ -116,6 +116,60 @@ def forbidden_report_fields(value: Any, path: str = "") -> list[str]:
     return hits
 
 
+def validate_real_api_pass_report(
+    report: Any, *, expected_candidate_identity: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Validate the exact privacy-safe PASS schema emitted by google_live_smoke."""
+    failures = []
+
+    def mismatch(field: str) -> None:
+        failures.append({"code": "REAL_API_CONTRACT_MISMATCH", "field": field})
+
+    expected_fields = {
+        "schemaVersion",
+        "name",
+        "candidateIdentity",
+        "status",
+        "connectionMs",
+        "firstServerEventMs",
+        "firstAudioMs",
+        "audioChunks",
+        "attempts",
+    }
+    if not isinstance(report, Mapping):
+        mismatch("report")
+        return failures
+    if set(report) != expected_fields:
+        mismatch("fields")
+    for field, expected in (
+        ("schemaVersion", SCHEMA_VERSION),
+        ("name", "real_api"),
+        ("candidateIdentity", dict(expected_candidate_identity)),
+        ("status", "PASS"),
+    ):
+        if report.get(field) != expected or type(report.get(field)) is not type(expected):
+            mismatch(field)
+    attempts = report.get("attempts")
+    if type(attempts) is not int or attempts not in {1, 2}:
+        mismatch("attempts")
+    audio_chunks = report.get("audioChunks")
+    if type(audio_chunks) is not int or audio_chunks < 1:
+        mismatch("audioChunks")
+    timing_fields = ("connectionMs", "firstServerEventMs", "firstAudioMs")
+    timings = [report.get(field) for field in timing_fields]
+    for field, value in zip(timing_fields, timings, strict=True):
+        if type(value) is not float or not math.isfinite(value) or value < 0:
+            mismatch(field)
+    if all(type(value) is float and math.isfinite(value) for value in timings):
+        if not timings[0] <= timings[1] <= timings[2]:
+            mismatch("timingOrder")
+        if timings[2] > GOOGLE_LIVE_LIMITS["firstAudioP95Ms"]:
+            mismatch("firstAudioBudget")
+    if forbidden_report_fields(report):
+        mismatch("privacy")
+    return failures
+
+
 def percentile(values: Sequence[int | float], percentile_value: float) -> float | None:
     """Return the rounded nearest-rank percentile, clamped to the sample bounds."""
     if not 0 <= percentile_value <= 100:

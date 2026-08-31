@@ -23,6 +23,7 @@ from scripts.google_live_reliability import (
     forbidden_report_fields,
     validate_candidate_soak_report,
     validate_log_reliability_contract,
+    validate_real_api_pass_report,
 )
 
 RELEASE_SCHEMA_VERSION = "google-live-release-verdict.v1"
@@ -113,26 +114,6 @@ def _server_regression_valid(report: Any) -> bool:
     )
 
 
-def _real_api_valid(report: Any) -> bool:
-    return (
-        isinstance(report, Mapping)
-        and report.get("schemaVersion") == SCHEMA_VERSION
-        and report.get("name") == "real_api"
-        and report.get("status") == "PASS"
-        and type(report.get("status")) is str
-        and "error" not in report
-        and report.get("attempts") in {1, 2}
-        and type(report.get("attempts")) is int
-        and type(report.get("audioChunks")) is int
-        and report.get("audioChunks") >= 1
-        and all(
-            _finite_nonnegative(report.get(field))
-            for field in ("connectionMs", "firstServerEventMs", "firstAudioMs")
-        )
-        and report.get("firstAudioMs") <= GOOGLE_LIVE_LIMITS["firstAudioP95Ms"]
-    )
-
-
 def _websocket_valid(report: Any) -> bool:
     if not _generic_report_valid(report, "websocket_e2e"):
         return False
@@ -197,7 +178,9 @@ def _layer_valid(layer: str, report: Any, expected_identity: Mapping[str, Any]) 
     validators = {
         "deterministic": _deterministic_valid,
         "server_regression": _server_regression_valid,
-        "real_api": _real_api_valid,
+        "real_api": lambda value: not validate_real_api_pass_report(
+            value, expected_candidate_identity=expected_identity
+        ),
         "websocket_e2e": _websocket_valid,
         "physical": _physical_valid,
         "candidate_soak": lambda value: not validate_candidate_soak_report(

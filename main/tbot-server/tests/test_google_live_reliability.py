@@ -16,6 +16,7 @@ from scripts.google_live_reliability import (
     reliability_verdict,
     resource_verdict,
     sample_process_resources,
+    validate_real_api_pass_report,
 )
 
 
@@ -31,6 +32,31 @@ def test_forbidden_report_fields_is_recursive_normalized_and_value_safe() -> Non
         "safe[0].Raw-Transcript",
         "nested.set_cookie",
     ]
+
+
+def test_real_api_pass_validator_accepts_only_exact_ordered_schema() -> None:
+    identity = {
+        "gitSha": "candidate-sha",
+        "imageDigest": f"sha256:{'a' * 64}",
+        "firmwareIdentity": "firmware-v1",
+        "fixtureSha256": "b" * 64,
+        "configFingerprint": f"sha256:{'c' * 64}",
+    }
+    report = {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": "real_api",
+        "candidateIdentity": identity,
+        "status": "PASS",
+        "connectionMs": 100.0,
+        "firstServerEventMs": 200.0,
+        "firstAudioMs": 400.0,
+        "audioChunks": 1,
+        "attempts": 1,
+    }
+
+    assert validate_real_api_pass_report(
+        report, expected_candidate_identity=identity
+    ) == []
 
 
 def _resource_sample(index: int, *, rss: int, fds: int, tasks: int, threads: int) -> dict:

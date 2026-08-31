@@ -174,6 +174,61 @@ def test_release_rejects_corrupt_json_without_leaking_contents(tmp_path: Path) -
     assert any(item["code"] == "LAYER_JSON_INVALID" for item in verdict["failures"])
 
 
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        {"failures": [{"code": "FAILED_ATTEMPT"}]},
+        {"errorClass": "network_or_transport"},
+        {"error": {"class": "network_or_transport"}},
+        {"errorMessage": "must-never-leak"},
+        {"exception": "must-never-leak"},
+        {"unexpected": True},
+    ],
+)
+def test_real_api_pass_rejects_failure_only_or_unsupported_fields(
+    tmp_path: Path, unsupported: dict
+) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    _rewrite(paths["real_api"], lambda report: report.update(unsupported))
+    checksums["real_api"] = hashlib.sha256(paths["real_api"].read_bytes()).hexdigest()
+
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+
+    assert verdict["status"] == "FAIL"
+    assert "must-never-leak" not in json.dumps(verdict)
+    assert any(
+        item["code"] == "LAYER_CONTRACT_INVALID" and item["layer"] == "real_api"
+        for item in verdict["failures"]
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"status": "FAIL", "attempts": 1},
+        {"status": "PASS", "attempts": 0},
+        {"attempts": True},
+        {"audioChunks": 0},
+        {"audioChunks": 1.5},
+        {"connectionMs": None},
+        {"firstServerEventMs": -1.0},
+        {"firstAudioMs": float("nan")},
+        {"connectionMs": 400.0, "firstServerEventMs": 300.0},
+        {"firstServerEventMs": 800.0, "firstAudioMs": 700.0},
+    ],
+)
+def test_real_api_pass_rejects_malformed_or_contradictory_evidence(
+    tmp_path: Path, changes: dict
+) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    _rewrite(paths["real_api"], lambda report: report.update(changes))
+    checksums["real_api"] = hashlib.sha256(paths["real_api"].read_bytes()).hexdigest()
+
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+
+    assert verdict["status"] == "FAIL"
+
+
 def test_release_rejects_missing_and_mismatched_trusted_checksum(tmp_path: Path) -> None:
     paths, checksums, _ = _write_evidence(tmp_path)
     checksums.pop("deterministic")
