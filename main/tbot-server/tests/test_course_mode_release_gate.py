@@ -1827,6 +1827,70 @@ def test_report_serialization_escapes_surrogate_retained_paths(tmp_path: Path) -
     assert json.loads(payload) == report
 
 
+def test_corrective_report_race_does_not_overwrite_foreign_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report_path = tmp_path / "report.json"
+    parent_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    destination = gate.ReportDestination(parent_fd)
+    assert gate._write_report_atomic(report_path, {"verdict": "PASS"}, destination) is True
+    foreign = b'{"owner":"foreign"}\n'
+    real_stat = gate.os.stat
+    real_replace = gate.os.replace
+    armed = True
+
+    def install_foreign() -> None:
+        nonlocal armed
+        armed = False
+        replacement = tmp_path / "foreign.json"
+        replacement.write_bytes(foreign)
+        real_replace(replacement, report_path)
+
+    def replace_after_identity_check(path, *args, **kwargs):
+        current = real_stat(path, *args, **kwargs)
+        if armed and path == report_path.name and kwargs.get("dir_fd") == parent_fd:
+            install_foreign()
+        return current
+
+    monkeypatch.setattr(gate.os, "stat", replace_after_identity_check)
+    try:
+        assert gate._write_report_atomic(
+            report_path, {"verdict": "BLOCKED"}, destination,
+        ) is False
+        assert report_path.read_bytes() == foreign
+    finally:
+        gate._close_report_destination(destination)
+
+
+def test_report_invalidation_race_does_not_unlink_foreign_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report_path = tmp_path / "report.json"
+    parent_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    destination = gate.ReportDestination(parent_fd)
+    assert gate._write_report_atomic(report_path, {"verdict": "PASS"}, destination) is True
+    foreign = b'{"owner":"foreign"}\n'
+    real_ftruncate = gate.os.ftruncate
+    real_replace = gate.os.replace
+    armed = True
+
+    def replace_before_fd_invalidation(descriptor, length):
+        nonlocal armed
+        if armed and descriptor == destination.report_fd:
+            armed = False
+            replacement = tmp_path / "foreign.json"
+            replacement.write_bytes(foreign)
+            real_replace(replacement, report_path)
+        return real_ftruncate(descriptor, length)
+
+    monkeypatch.setattr(gate.os, "ftruncate", replace_before_fd_invalidation)
+    try:
+        gate._invalidate_report(report_path, destination)
+        assert report_path.read_bytes() == foreign
+    finally:
+        gate._close_report_destination(destination)
+
+
 def test_gate_reports_retained_snapshot_when_owned_cleanup_cannot_finish(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3658,6 +3722,50 @@ def test_unsafe_report_destination_fails_closed(candidate_file: Path, tmp_path: 
     assert result["verdict"] == "BLOCKED"
     assert result["failedLane"] == "report"
     assert target.read_text(encoding="utf-8") == "preserve"
+
+
+@pytest.mark.parametrize("insecure_component", ["evidence", "nested"])
+def test_report_destination_rejects_group_or_other_writable_parent_chain(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    insecure_component: str,
+) -> None:
+    evidence = tmp_path / "evidence"
+    nested = evidence / "nested"
+    nested.mkdir()
+    (evidence if insecure_component == "evidence" else nested).chmod(0o777)
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *_args, **_kwargs: pytest.fail("lane must not run with an insecure report parent"),
+    )
+
+    result = gate.run_gate(
+        candidate_file,
+        "quick",
+        lanes=(_lane("must-not-run", "raise SystemExit(0)"),),
+        report_path=nested / "report.json",
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "report"
+    assert not (nested / "report.json").exists()
+
+
+def test_report_destination_rejects_parent_chain_not_owned_by_effective_uid(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    evidence = tmp_path / "evidence"
+    nested = evidence / "nested"
+    nested.mkdir()
+    monkeypatch.setattr(gate.os, "geteuid", lambda: os.getuid() + 1)
+
+    destination = gate._prepare_report_destination(
+        candidate_file, candidate, nested / "report.json",
+    )
+
+    if destination is not None:
+        os.close(destination.parent_fd)
+    assert destination is None
 
 
 def test_tracked_report_target_is_blocked_and_preserved(candidate_file: Path) -> None:

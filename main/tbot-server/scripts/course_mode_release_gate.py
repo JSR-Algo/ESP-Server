@@ -263,6 +263,7 @@ class OperatorAttestationBinding:
 class ReportDestination:
     parent_fd: int
     identity: tuple[int, int] | None = None
+    report_fd: int | None = None
 
 
 class RetainedStagingError(RuntimeError):
@@ -2804,6 +2805,7 @@ def _write_report_atomic(
         return False
     owned_destination = destination is None
     temporary = None
+    descriptor = None
     try:
         if destination is None:
             parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -2827,8 +2829,36 @@ def _write_report_atomic(
                 not stat.S_ISREG(current.st_mode)
                 or current.st_nlink != 1
                 or (current.st_dev, current.st_ino) != destination.identity
+                or destination.report_fd is None
             ):
                 return False
+            owned = os.fstat(destination.report_fd)
+            if (
+                not stat.S_ISREG(owned.st_mode)
+                or owned.st_nlink != 1
+                or (owned.st_dev, owned.st_ino) != destination.identity
+            ):
+                return False
+            os.ftruncate(destination.report_fd, 0)
+            os.lseek(destination.report_fd, 0, os.SEEK_SET)
+            remaining = memoryview(payload)
+            while remaining:
+                written = os.write(destination.report_fd, remaining)
+                if written <= 0:
+                    return False
+                remaining = remaining[written:]
+            os.fsync(destination.report_fd)
+            published = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            os.fsync(parent_fd)
+            named_parent = os.stat(path.parent, follow_symlinks=False)
+            return (
+                stat.S_ISREG(published.st_mode)
+                and published.st_nlink == 1
+                and (published.st_dev, published.st_ino) == destination.identity
+                and (named_parent.st_dev, named_parent.st_ino) == (
+                    descriptor_parent.st_dev, descriptor_parent.st_ino,
+                )
+            )
         for _ in range(32):
             temporary = f".{path.name}.{secrets.token_hex(8)}"
             try:
@@ -2841,31 +2871,25 @@ def _write_report_atomic(
                 continue
         else:
             return False
-        try:
-            remaining = memoryview(payload)
-            while remaining:
-                written = os.write(descriptor, remaining)
-                if written <= 0:
-                    return False
-                remaining = remaining[written:]
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                return False
+            remaining = remaining[written:]
+        os.fsync(descriptor)
         temporary_stat = os.stat(temporary, dir_fd=parent_fd, follow_symlinks=False)
         if not stat.S_ISREG(temporary_stat.st_mode) or temporary_stat.st_nlink != 1:
             return False
-        if destination.identity is None:
-            os.link(
-                temporary, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
-                follow_symlinks=False,
-            )
-            destination.identity = (temporary_stat.st_dev, temporary_stat.st_ino)
-            os.unlink(temporary, dir_fd=parent_fd)
-            temporary = None
-        else:
-            os.replace(temporary, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-            temporary = None
+        os.link(
+            temporary, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
         destination.identity = (temporary_stat.st_dev, temporary_stat.st_ino)
+        destination.report_fd = descriptor
+        descriptor = None
+        os.unlink(temporary, dir_fd=parent_fd)
+        temporary = None
         published = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
         if (
             not stat.S_ISREG(published.st_mode)
@@ -2887,7 +2911,11 @@ def _write_report_atomic(
         if temporary is not None and destination is not None:
             with contextlib.suppress(OSError):
                 os.unlink(temporary, dir_fd=destination.parent_fd)
+        if descriptor is not None:
+            os.close(descriptor)
         if owned_destination and destination is not None:
+            if destination.report_fd is not None:
+                os.close(destination.report_fd)
             os.close(destination.parent_fd)
 
 
@@ -2939,12 +2967,18 @@ def _prepare_report_destination(
             expected_evidence.st_dev, expected_evidence.st_ino,
         ):
             return None
+        effective_uid = os.geteuid()
+        if opened_evidence.st_uid != effective_uid or stat.S_IMODE(opened_evidence.st_mode) & 0o022:
+            return None
         for component in parent.relative_to(evidence_root).parts:
             next_fd = os.open(
                 component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd,
             )
             os.close(parent_fd)
             parent_fd = next_fd
+            opened_component = os.fstat(parent_fd)
+            if opened_component.st_uid != effective_uid or stat.S_IMODE(opened_component.st_mode) & 0o022:
+                return None
         expected_parent = parent.stat()
         actual_parent = os.fstat(parent_fd)
         if (actual_parent.st_dev, actual_parent.st_ino) != (expected_parent.st_dev, expected_parent.st_ino):
@@ -2970,15 +3004,18 @@ def _prepare_report_destination(
 
 
 def _invalidate_report(path: Path, destination: ReportDestination) -> None:
-    if destination.identity is None:
+    if destination.identity is None or destination.report_fd is None:
         return
     with contextlib.suppress(OSError):
-        current = os.stat(path.name, dir_fd=destination.parent_fd, follow_symlinks=False)
-        if (current.st_dev, current.st_ino) != destination.identity:
-            return
-        os.unlink(path.name, dir_fd=destination.parent_fd)
-        os.fsync(destination.parent_fd)
-        destination.identity = None
+        os.ftruncate(destination.report_fd, 0)
+        os.fsync(destination.report_fd)
+
+
+def _close_report_destination(destination: ReportDestination) -> None:
+    if destination.report_fd is not None:
+        os.close(destination.report_fd)
+        destination.report_fd = None
+    os.close(destination.parent_fd)
 
 
 def run_gate(
@@ -3015,7 +3052,7 @@ def run_gate(
         report_path, operator_binding.path,
     ):
         assert report_destination is not None
-        os.close(report_destination.parent_fd)
+        _close_report_destination(report_destination)
         return _blocked(candidate_id, "report")
     elif lanes is None and not _runtime_matches_candidate(candidate, runtime_root):
         report = _blocked(candidate_id, "candidate-runtime")
@@ -3244,7 +3281,7 @@ def run_gate(
             report = _blocked(candidate_id, "operator-precondition")
         if not _write_report_atomic(report_path, report, report_destination):
             _invalidate_report(report_path, report_destination)
-            os.close(report_destination.parent_fd)
+            _close_report_destination(report_destination)
             return _blocked(report.get("candidateId"), "report")
         post_publish_report = None
         if report["verdict"] == "PASS" and operator_binding is not None and (
@@ -3261,9 +3298,9 @@ def run_gate(
             report = post_publish_report
             if not _write_report_atomic(report_path, report, report_destination):
                 _invalidate_report(report_path, report_destination)
-                os.close(report_destination.parent_fd)
+                _close_report_destination(report_destination)
                 return _blocked(candidate_id, "report")
-        os.close(report_destination.parent_fd)
+        _close_report_destination(report_destination)
     return report
 
 
