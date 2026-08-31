@@ -284,7 +284,11 @@ def _create(candidate_path: Path, output: Path) -> None:
                     _close_after_failure(file_fd)
             finally:
                 if parent_fd is not None:
-                    _close_after_failure(parent_fd)
+                    try:
+                        _close_after_failure(parent_fd)
+                    except OSError:
+                        if not complete:
+                            raise
 
 
 def _parser() -> argparse.ArgumentParser:

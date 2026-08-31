@@ -411,6 +411,37 @@ def test_cleanup_stat_permission_failure_invalidates_owned_artifact(
     assert _fd_count() == before
 
 
+def test_committed_artifact_survives_parent_close_error_without_false_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_path, candidate = _candidate(tmp_path)
+    output = Path(candidate["evidenceRoot"]) / "operator-attestation.json"
+    original_close_after_failure = attestation._close_after_failure
+    triggered = False
+
+    def close_then_raise(fd: int) -> None:
+        nonlocal triggered
+        if not triggered:
+            triggered = True
+            attestation.os.close(fd)
+            raise OSError("injected parent close error")
+        original_close_after_failure(fd)
+
+    monkeypatch.setattr(attestation, "_close_after_failure", close_then_raise)
+
+    before = _fd_count()
+    result = _run(
+        candidate_path, output,
+        "--confirm-trusted-operator-account",
+        "--confirm-untrusted-automation-stopped",
+    )
+
+    assert triggered is True
+    assert result == 0
+    assert _is_gate_valid(candidate, output)
+    assert _fd_count() == before
+
+
 def test_help_is_limited_to_public_cli_contract() -> None:
     script = Path(attestation.__file__)
     result = subprocess.run(
