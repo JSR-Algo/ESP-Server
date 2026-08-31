@@ -439,6 +439,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._lesson_instruction_generation = None
         self._lesson_context_signature = None
         self._evidence_finalize_result = None
+        self._evidence_response_token_serial = 0
+        self._evidence_final_response_reservation = None
+        self._evidence_last_transcript_event_token = None
         self._evidence_cleanup_failure_code = None
         self._evidence_initial_live_connection_id = None
         self._evidence_current_live_connection_id = None
@@ -1913,39 +1916,62 @@ class GoogleLiveProvider(VoiceSessionProvider):
         journey_id = getattr(self.conn, "google_live_evidence_journey_id", None)
         if registry is None or not isinstance(journey_id, str) or not journey_id:
             return None
-        try:
-            expected_phase = registry.next_transcript_phase(journey_id)
-        except Exception:
-            return None
         if self._has_active_output():
-            actual_phase = "interrupt"
-        elif self._active_lesson_step_is_interactive():
-            actual_phase = "lesson"
-        elif (
-            expected_phase == "post_lesson"
-            and bool(getattr(self.conn, "google_live_evidence_lesson_released", False))
+            return "interrupt"
+        if self._active_lesson_step_is_interactive():
+            return "lesson"
+        if (
+            bool(getattr(self.conn, "google_live_evidence_lesson_released", False))
             and not self._lesson_runtime_active()
         ):
-            actual_phase = "post_lesson"
-        else:
-            return None
-        return actual_phase if actual_phase == expected_phase else None
+            return "post_lesson"
+        return None
+
+    def _reserve_evidence_response_token(self):
+        self._evidence_response_token_serial += 1
+        return (1 << 48) + self._evidence_response_token_serial
 
     def _observe_evidence_transcript(self, transcript_text):
+        event_token = getattr(self.conn, "google_live_transcript_event_token", None)
+        if (
+            event_token is not None
+            and event_token is self._evidence_last_transcript_event_token
+        ):
+            return None
         phase = self._evidence_transcript_phase()
         if phase is None:
             return None
         registry = getattr(self.conn, "evidence_registry", None)
         journey_id = getattr(self.conn, "google_live_evidence_journey_id", None)
+        response_token = (
+            self._reserve_evidence_response_token()
+            if phase == "post_lesson"
+            else self._response_generation
+        )
         try:
             proof = registry.observe_transcript(
                 journey_id,
                 transcript_text,
                 phase=phase,
-                response_generation=self._response_generation,
+                response_generation=response_token,
             )
         except Exception:
             return None
+        if event_token is not None:
+            self._evidence_last_transcript_event_token = event_token
+        if phase == "post_lesson" and proof["matched"]:
+            try:
+                final_slot_matched = registry.next_transcript_phase(journey_id) is None
+            except Exception:
+                final_slot_matched = False
+            if final_slot_matched:
+                self._evidence_final_response_reservation = {
+                    "token": response_token,
+                    "providerGeneration": self._response_generation,
+                    "outputStarted": False,
+                }
+        elif not proof["matched"]:
+            self._evidence_final_response_reservation = None
         self.conn.logger.bind(tag="GoogleLive").info(
             "Google Live evidence_transcript_match journey_id={} slot={} "
             "phase={} chars={} matched={}",
@@ -1960,22 +1986,39 @@ class GoogleLiveProvider(VoiceSessionProvider):
     def _mark_evidence_output_idle(self, response_generation):
         registry = getattr(self.conn, "evidence_registry", None)
         journey_id = getattr(self.conn, "google_live_evidence_journey_id", None)
+        reservation = self._evidence_final_response_reservation
         if (
             registry is None
             or not isinstance(journey_id, str)
             or not journey_id
             or not isinstance(response_generation, int)
+            or not isinstance(reservation, dict)
+            or not reservation.get("outputStarted")
+            or response_generation != reservation.get("providerGeneration")
         ):
             return False
         try:
-            return bool(
+            ready = bool(
                 registry.mark_output_idle(
                     journey_id,
-                    response_generation=response_generation,
+                    response_generation=reservation["token"],
                 )
             )
+            if ready:
+                self._evidence_final_response_reservation = None
+            return ready
         except Exception:
             return False
+
+    def _mark_evidence_output_started(self, response_generation):
+        reservation = self._evidence_final_response_reservation
+        if (
+            isinstance(reservation, dict)
+            and isinstance(response_generation, int)
+            and response_generation == reservation.get("providerGeneration")
+            and not self.is_response_cancelled(response_generation)
+        ):
+            reservation["outputStarted"] = True
 
     async def _on_user_transcript(self, transcript_text):
         self._cancel_start_lesson_asr_fallback_task()
@@ -5210,6 +5253,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if self._is_model_output_event(event_type, event):
             self._consecutive_waiting_model_timeouts = 0
         if event_type == "audio_start":
+            self._mark_evidence_output_started(
+                event_generation
+                if isinstance(event_generation, int)
+                else self._response_generation
+            )
             self._cancel_start_lesson_asr_fallback_task()
             self._start_lesson_asr_fallback_audio.clear()
             self._cancel_waiting_model_timeout_task()
@@ -5935,6 +5983,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return
         if await self._dispatch_music_control_intent(transcript_text):
             return
+        reservation = self._evidence_final_response_reservation
+        if isinstance(reservation, dict) and not reservation.get("outputStarted"):
+            reservation["bargeInPending"] = True
         await self._begin_user_interrupt("transcript_barge_in")
 
     def _active_lesson_step_is_interactive(self):
@@ -7238,6 +7289,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
             and debounce_sec > 0
             and now - self._last_interrupt_at < debounce_sec
         ):
+            reservation = self._evidence_final_response_reservation
+            if isinstance(reservation, dict):
+                reservation.pop("bargeInPending", None)
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live interrupt_debounced reason={} age_ms={:.0f}",
                 reason,
@@ -7248,6 +7302,14 @@ class GoogleLiveProvider(VoiceSessionProvider):
 
         previous_response_id = self._response_generation
         self._response_generation += 1
+        reservation = self._evidence_final_response_reservation
+        if (
+            isinstance(reservation, dict)
+            and not reservation.get("outputStarted")
+            and reservation.pop("bargeInPending", False)
+            and reservation.get("providerGeneration") == previous_response_id
+        ):
+            reservation["providerGeneration"] = self._response_generation
         self._cancelled_response_ids.add(previous_response_id)
         self._interaction.begin_interrupt(
             reason=reason,

@@ -1135,6 +1135,54 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ack["retryable"])
         provider.finalize_evidence.assert_not_awaited()
 
+    async def test_evidence_finalize_cleans_up_and_terminally_fails_invalid_proof(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        finalized = []
+        handler.evidence_registry = types.SimpleNamespace(
+            safe_snapshot=lambda _journey: {
+                "transcriptProofEligible": False,
+                "readyToFinalize": False,
+            },
+            finalize=lambda journey_id, status, failure_code=None: finalized.append(
+                (journey_id, status, failure_code)
+            ),
+        )
+        provider = types.SimpleNamespace(
+            finalize_evidence=AsyncMock(
+                return_value={
+                    "status": "PASS",
+                    "journeyId": "bargein-1",
+                    "connectionId": "server-conn-1",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "initialLiveConnectionId": "live-7",
+                    "finalLiveConnectionId": "live-7",
+                    "liveConnectionTransitions": [],
+                    "pendingTasks": 0,
+                }
+            )
+        )
+        handler.voice_provider = provider
+
+        ack = await handler.finalize_google_live_evidence(scope)
+
+        self.assertEqual(ack["status"], "FAIL")
+        self.assertEqual(ack["failureCode"], "EVIDENCE_TRANSCRIPT_INVALID")
+        provider.finalize_evidence.assert_awaited_once()
+        self.assertEqual(
+            finalized,
+            [("bargein-1", "FAIL", "EVIDENCE_TRANSCRIPT_INVALID")],
+        )
+
     async def test_evidence_finalize_exposes_shared_idempotent_lifecycle_method(self):
         handler = self._build_handler()
         handler.config["voice_mode"] = {"type": "google_live"}

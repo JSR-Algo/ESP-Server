@@ -1237,7 +1237,11 @@ class ConnectionHandler:
                     proof_snapshot = snapshot(journey_id)
                 except Exception:
                     proof_snapshot = None
-                if not isinstance(proof_snapshot, dict) or not proof_snapshot.get(
+                if isinstance(proof_snapshot, dict) and proof_snapshot.get(
+                    "transcriptProofEligible"
+                ) is False:
+                    failure_code = "EVIDENCE_TRANSCRIPT_INVALID"
+                elif not isinstance(proof_snapshot, dict) or not proof_snapshot.get(
                     "readyToFinalize"
                 ):
                     return {
@@ -1250,7 +1254,7 @@ class ConnectionHandler:
             provider = getattr(self, "voice_provider", None)
             finalize = getattr(provider, "finalize_evidence", None)
             if not callable(finalize):
-                failure_code = "EVIDENCE_PROVIDER_UNAVAILABLE"
+                failure_code = failure_code or "EVIDENCE_PROVIDER_UNAVAILABLE"
             else:
                 timeout = 5.0
                 google_live = (self.config or {}).get("google_live") or {}
@@ -1317,7 +1321,7 @@ class ConnectionHandler:
                             "retryable": True,
                         }
                     except Exception:
-                        failure_code = "EVIDENCE_FINALIZE_FAILED"
+                        failure_code = failure_code or "EVIDENCE_FINALIZE_FAILED"
                 except asyncio.CancelledError:
                     current_task = asyncio.current_task()
                     if current_task is not None and current_task.cancelling():
@@ -1330,7 +1334,7 @@ class ConnectionHandler:
                         "retryable": True,
                     }
                 except Exception:
-                    failure_code = "EVIDENCE_FINALIZE_FAILED"
+                    failure_code = failure_code or "EVIDENCE_FINALIZE_FAILED"
                 validated_transition_result = self._validated_evidence_transition_result(
                     scope, result
                 )

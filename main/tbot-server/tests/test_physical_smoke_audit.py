@@ -4275,6 +4275,34 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
 
         self.assertFalse(result["passed"])
         self.assertIn("transcript_proof_exact_slots", result["missing"])
+
+    def test_candidate_physical_audit_rejects_scoped_mismatch_before_valid_sequence(self):
+        result = self._candidate_audit(
+            self._candidate_physical_log(
+                extra_lines=[
+                    "260518 20:10:30[GoogleLive]-INFO-Google Live "
+                    "evidence_transcript_match journey_id=physical-1 slot=1 "
+                    "phase=lesson chars=5 matched=false"
+                ]
+            )
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertIn("transcript_proof_exact_slots", result["missing"])
+        self.assertEqual(result["transcript_proof_mismatches"], 1)
+
+    def test_candidate_physical_audit_rejects_reordered_matched_proofs(self):
+        log_text = self._candidate_physical_log()
+        first = "slot=1 phase=interrupt"
+        second = "slot=2 phase=interrupt"
+        log_text = log_text.replace(first, "slot=99 phase=interrupt", 1)
+        log_text = log_text.replace(second, first, 1)
+        log_text = log_text.replace("slot=99 phase=interrupt", second, 1)
+
+        result = self._candidate_audit(log_text)
+
+        self.assertFalse(result["passed"])
+        self.assertIn("transcript_proof_exact_slots", result["missing"])
         self.assertLessEqual(result["firstAudioLatencyMs"]["p95"], 1800.0)
         self.assertLessEqual(result["interruptStopLatencyMs"]["max"], 250.0)
         self.assertLessEqual(result["physicalBargeinLatencyMs"]["p95"], 500.0)

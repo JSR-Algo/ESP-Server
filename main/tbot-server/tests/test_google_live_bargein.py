@@ -764,6 +764,35 @@ class TranscriptBargeInTest(unittest.IsolatedAsyncioTestCase):
         await bridge.close()
         self.assertEqual(captured, ["stop"])
 
+    async def test_normal_and_barge_callbacks_share_one_physical_event_token(self):
+        conn = _Conn()
+        conn.config["google_live"]["barge_in_via_transcript"] = True
+        conn.google_live_audio_out_started_at = time.monotonic() - 5
+        observed_tokens = []
+
+        async def normal(_text):
+            observed_tokens.append(conn.google_live_transcript_event_token)
+            return False
+
+        async def barge(_text):
+            observed_tokens.append(conn.google_live_transcript_event_token)
+
+        bridge = GoogleLiveAudioBridge(
+            conn,
+            _Client(),
+            _Logger(),
+            user_transcript_handler=normal,
+            user_transcript_barge_in_handler=barge,
+        )
+        await bridge.handle_event(
+            {"type": "transcript", "source": "user", "text": "stop"}
+        )
+        await bridge.close()
+
+        self.assertEqual(len(observed_tokens), 2)
+        self.assertIs(observed_tokens[0], observed_tokens[1])
+        self.assertIsNone(conn.google_live_transcript_event_token)
+
     async def test_no_fire_when_feature_flag_off(self):
         conn = _Conn()
         # barge_in_via_transcript NOT set -> defaults False

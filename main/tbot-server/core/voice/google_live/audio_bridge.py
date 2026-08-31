@@ -189,9 +189,20 @@ class GoogleLiveAudioBridge:
                 len(transcript_text),
             )
             if event.get("source") == "user":
-                if await self._maybe_handle_user_transcript_intent(transcript_text):
-                    return True
-                await self._maybe_trigger_transcript_barge_in(transcript_text)
+                transcript_event_token = object()
+                self.conn.google_live_transcript_event_token = transcript_event_token
+                try:
+                    if await self._maybe_handle_user_transcript_intent(transcript_text):
+                        return True
+                    await self._maybe_trigger_transcript_barge_in(transcript_text)
+                finally:
+                    if (
+                        getattr(
+                            self.conn, "google_live_transcript_event_token", None
+                        )
+                        is transcript_event_token
+                    ):
+                        self.conn.google_live_transcript_event_token = None
             if event.get("source") == "model":
                 if self._should_drop_lesson_model_output(event_type):
                     return True

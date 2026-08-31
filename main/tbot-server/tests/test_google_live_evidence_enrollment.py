@@ -70,6 +70,13 @@ def test_registry_records_ordered_boolean_transcript_proof_without_private_mater
         "observedAt": 1234.5,
     }
     assert report["transcriptMatchedCount"] == 1
+    assert report["transcriptExpectedCount"] == 2
+    assert report["transcriptObservedCount"] == 1
+    assert report["transcriptMismatchCount"] == 0
+    assert report["transcriptMissingCount"] == 1
+    assert report["transcriptOrderingProof"] is True
+    assert report["postInterruptVerdict"] is True
+    assert report["postLessonVerdict"] is False
     assert report["transcriptProofs"] == [proof]
     assert report["readyToFinalize"] is False
     encoded = json.dumps(report, ensure_ascii=False)
@@ -78,7 +85,7 @@ def test_registry_records_ordered_boolean_transcript_proof_without_private_mater
     assert key.hex() not in encoded
 
 
-def test_registry_accepts_unicode_equivalent_transcript_and_rejects_wrong_phase_or_order():
+def test_registry_wrong_phase_terminally_invalidates_proof_even_if_later_sequence_matches():
     key = b"u" * 32
     registry = EvidenceEnrollmentRegistry()
     _register(
@@ -95,24 +102,78 @@ def test_registry_accepts_unicode_equivalent_transcript_and_rejects_wrong_phase_
         "physical.run-1", "Cafe\u0301", phase="lesson", observed_at=1.0,
         response_generation=1,
     )
-    matched = registry.observe_transcript(
+    later = registry.observe_transcript(
         "physical.run-1", "Cafe\u0301", phase="interrupt", observed_at=2.0,
-        response_generation=1,
-    )
-    duplicate = registry.observe_transcript(
-        "physical.run-1", "Café", phase="interrupt", observed_at=3.0,
-        response_generation=1,
-    )
-    reordered = registry.observe_transcript(
-        "physical.run-1", "one", phase="lesson", observed_at=4.0,
         response_generation=1,
     )
 
     assert wrong_phase["matched"] is False
-    assert matched["matched"] is True
-    assert duplicate["matched"] is False
-    assert reordered["matched"] is False
-    assert registry.safe_snapshot("physical.run-1")["transcriptMatchedSlots"] == [1]
+    assert later["matched"] is False
+    report = registry.safe_snapshot("physical.run-1")
+    assert report["transcriptMatchedSlots"] == []
+    assert report["transcriptMismatchCount"] == 2
+    assert report["transcriptOrderingProof"] is False
+    assert report["readyToFinalize"] is False
+
+
+def test_registry_accepts_unicode_equivalent_transcript_without_prior_mismatch():
+    key = b"u" * 32
+    registry = EvidenceEnrollmentRegistry()
+    _register(
+        registry,
+        hmac_key=key,
+        transcript_plan=(
+            TranscriptExpectation(1, "interrupt", _mac(key, "Café")),
+        ),
+    )
+    registry.claim(device_id="aa:bb", client_id="robot-client", journey_id="physical.run-1")
+
+    proof = registry.observe_transcript(
+        "physical.run-1", "Cafe\u0301", phase="interrupt", observed_at=2.0,
+        response_generation=1,
+    )
+
+    assert proof["matched"] is True
+
+
+@pytest.mark.parametrize("extra_value", ["first", "unexpected"])
+def test_duplicate_or_extra_observation_terminally_invalidates_completed_sequence(extra_value):
+    key = b"d" * 32
+    registry = EvidenceEnrollmentRegistry()
+    _register(
+        registry,
+        hmac_key=key,
+        transcript_plan=(
+            TranscriptExpectation(1, "interrupt", _mac(key, "first")),
+            TranscriptExpectation(2, "post_lesson", _mac(key, "final")),
+        ),
+    )
+    registry.claim(device_id="aa:bb", client_id="robot-client", journey_id="physical.run-1")
+    registry.observe_transcript(
+        "physical.run-1", "first", phase="interrupt", observed_at=1.0,
+        response_generation=1,
+    )
+    registry.observe_transcript(
+        "physical.run-1", "final", phase="post_lesson", observed_at=2.0,
+        response_generation=77,
+    )
+
+    extra = registry.observe_transcript(
+        "physical.run-1", extra_value, phase="interrupt", observed_at=3.0,
+        response_generation=2,
+    )
+
+    assert extra["matched"] is False
+    assert registry.mark_output_idle("physical.run-1", response_generation=77) is False
+    report = registry.safe_snapshot("physical.run-1")
+    assert report["transcriptExpectedCount"] == 2
+    assert report["transcriptObservedCount"] == 3
+    assert report["transcriptMatchedCount"] == 2
+    assert report["transcriptMismatchCount"] == 1
+    assert report["transcriptOrderingProof"] is False
+    assert report["postInterruptVerdict"] is False
+    assert report["postLessonVerdict"] is False
+    assert report["readyToFinalize"] is False
 
 
 def test_registry_requires_final_post_lesson_generation_output_idle_before_ready():

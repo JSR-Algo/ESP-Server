@@ -286,6 +286,7 @@ _TRANSCRIPT_PROOF_MARKER_RE = re.compile(
 def _transcript_proof_markers(lines, *, journey_id):
     markers = []
     malformed = 0
+    mismatches = 0
     for line in lines:
         if "Google Live evidence_transcript_match" not in line:
             continue
@@ -297,6 +298,7 @@ def _transcript_proof_markers(lines, *, journey_id):
             malformed += 1
             continue
         if match.group(5) != "true":
+            mismatches += 1
             continue
         markers.append(
             {
@@ -306,7 +308,7 @@ def _transcript_proof_markers(lines, *, journey_id):
                 "matched": True,
             }
         )
-    return markers, malformed
+    return markers, malformed, mismatches
 
 
 def _post_lesson_response_chain_count(lines, expected_transcripts):
@@ -1863,13 +1865,18 @@ def audit_log(
     )
     transcript_proof_markers = []
     malformed_transcript_proof_markers = 0
+    transcript_proof_mismatches = 0
     if candidate_identity is not None:
         evidence_scope = (
             reliability_report.get("evidenceScope", {})
             if isinstance(reliability_report, dict)
             else {}
         )
-        transcript_proof_markers, malformed_transcript_proof_markers = (
+        (
+            transcript_proof_markers,
+            malformed_transcript_proof_markers,
+            transcript_proof_mismatches,
+        ) = (
             _transcript_proof_markers(
                 lines,
                 journey_id=str(evidence_scope.get("journeyId") or ""),
@@ -1916,6 +1923,7 @@ def audit_log(
         if (
             observed_transcript_proofs != required_transcript_proofs
             or malformed_transcript_proof_markers
+            or transcript_proof_mismatches
         ):
             missing.append("transcript_proof_exact_slots")
     if not physical_ws_connected:
@@ -2179,6 +2187,7 @@ def audit_log(
             marker["slot"] for marker in transcript_proof_markers
         ],
         "malformed_transcript_proof_markers": malformed_transcript_proof_markers,
+        "transcript_proof_mismatches": transcript_proof_mismatches,
         "audio_interrupts": audio_interrupts,
         "fatal_hits": fatal_hits,
         "missing": missing,

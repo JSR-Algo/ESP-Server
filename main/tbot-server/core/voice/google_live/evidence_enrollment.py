@@ -79,6 +79,9 @@ class _EvidenceEnrollmentState:
     transcript_matched_count: int = 0
     final_response_generation: int | None = field(default=None, repr=False)
     output_idle_generation: int | None = field(default=None, repr=False)
+    transcript_proof_eligible: bool = True
+    transcript_observed_count: int = 0
+    transcript_mismatch_count: int = 0
 
 
 class EvidenceEnrollmentRegistry:
@@ -314,11 +317,12 @@ class EvidenceEnrollmentRegistry:
             normalize_transcript(value).encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
-        matched = bool(
+        cryptographic_match = bool(
             expectation is not None
             and expectation.phase == phase
             and hmac.compare_digest(observed_mac, expectation.expected_mac)
         )
+        matched = bool(enrollment.transcript_proof_eligible and cryptographic_match)
         slot = (
             expectation.slot
             if expectation is not None
@@ -331,6 +335,7 @@ class EvidenceEnrollmentRegistry:
             "matched": matched,
             "observedAt": now,
         }
+        enrollment.transcript_observed_count += 1
         if len(enrollment.transcript_proofs) < 128:
             enrollment.transcript_proofs.append(dict(proof))
         if matched:
@@ -342,6 +347,11 @@ class EvidenceEnrollmentRegistry:
                 and not isinstance(response_generation, bool)
             ):
                 enrollment.final_response_generation = response_generation
+        else:
+            enrollment.transcript_proof_eligible = False
+            enrollment.transcript_mismatch_count += 1
+            enrollment.final_response_generation = None
+            enrollment.output_idle_generation = None
         return proof
 
     @_synchronized
@@ -353,6 +363,7 @@ class EvidenceEnrollmentRegistry:
         if (
             not isinstance(response_generation, int)
             or isinstance(response_generation, bool)
+            or not enrollment.transcript_proof_eligible
             or response_generation != enrollment.final_response_generation
         ):
             return False
@@ -486,6 +497,7 @@ class EvidenceEnrollmentRegistry:
     def _ready_to_finalize(enrollment: _EvidenceEnrollmentState) -> bool:
         return bool(
             enrollment.transcript_plan
+            and enrollment.transcript_proof_eligible
             and enrollment.transcript_matched_count == len(enrollment.transcript_plan)
             and enrollment.transcript_plan[-1].phase == "post_lesson"
             and enrollment.final_response_generation is not None
@@ -494,12 +506,39 @@ class EvidenceEnrollmentRegistry:
 
     def _safe_transcript_report(self, enrollment: _EvidenceEnrollmentState) -> dict:
         matched = [proof for proof in enrollment.transcript_proofs if proof["matched"]]
+        expected_interrupts = sum(
+            item.phase == "interrupt" for item in enrollment.transcript_plan
+        )
+        matched_interrupts = sum(proof["phase"] == "interrupt" for proof in matched)
+        expected_post_lesson = sum(
+            item.phase == "post_lesson" for item in enrollment.transcript_plan
+        )
+        matched_post_lesson = sum(
+            proof["phase"] == "post_lesson" for proof in matched
+        )
         return {
-            "transcriptObservedCount": len(enrollment.transcript_proofs),
+            "transcriptExpectedCount": len(enrollment.transcript_plan),
+            "transcriptObservedCount": enrollment.transcript_observed_count,
             "transcriptMatchedCount": enrollment.transcript_matched_count,
+            "transcriptMismatchCount": enrollment.transcript_mismatch_count,
+            "transcriptMissingCount": max(
+                0, len(enrollment.transcript_plan) - enrollment.transcript_matched_count
+            ),
             "transcriptMatchedSlots": [proof["slot"] for proof in matched],
             "transcriptMatchedPhases": [proof["phase"] for proof in matched],
             "transcriptProofs": [dict(proof) for proof in enrollment.transcript_proofs],
+            "transcriptOrderingProof": enrollment.transcript_proof_eligible,
+            "transcriptProofEligible": enrollment.transcript_proof_eligible,
+            "postInterruptVerdict": bool(
+                enrollment.transcript_proof_eligible
+                and expected_interrupts
+                and matched_interrupts == expected_interrupts
+            ),
+            "postLessonVerdict": bool(
+                enrollment.transcript_proof_eligible
+                and expected_post_lesson
+                and matched_post_lesson == expected_post_lesson
+            ),
             "outputIdleObserved": enrollment.output_idle_generation is not None,
             "readyToFinalize": self._ready_to_finalize(enrollment),
         }

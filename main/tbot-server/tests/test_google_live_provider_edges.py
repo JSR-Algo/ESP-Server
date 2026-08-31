@@ -441,13 +441,18 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         conn.evidence_registry.mark_output_idle.return_value = True
         provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
         provider._response_generation = 4
+        provider._evidence_final_response_reservation = {
+            "token": 12,
+            "providerGeneration": 4,
+            "outputStarted": True,
+        }
 
         await provider._handle_live_event(
             {"type": "audio_end", "response_generation": 4}
         )
 
         conn.evidence_registry.mark_output_idle.assert_called_once_with(
-            "physical.run-1", response_generation=4
+            "physical.run-1", response_generation=12
         )
 
     async def test_evidence_post_lesson_phase_requires_durable_lesson_release(self):
@@ -460,6 +465,115 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(provider._evidence_transcript_phase())
         conn.google_live_evidence_lesson_released = True
         self.assertEqual(provider._evidence_transcript_phase(), "post_lesson")
+
+    async def test_wrong_phase_is_observed_and_fails_closed_before_lesson_dispatch(self):
+        conn = _Conn()
+        conn.session_mode = SessionMode.LESSON
+        conn.lesson_runtime = SimpleNamespace(
+            state="RUNNING", _step_passive=False, _step_completed=False
+        )
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.next_transcript_phase.return_value = "interrupt"
+        conn.evidence_registry.observe_transcript.return_value = {
+            "slot": 1, "phase": "lesson", "chars": 5,
+            "matched": False, "observedAt": 10.0,
+        }
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=True)
+
+        self.assertTrue(await provider._on_user_transcript("wrong"))
+
+        conn.evidence_registry.observe_transcript.assert_called_once()
+        self.assertEqual(
+            conn.evidence_registry.observe_transcript.call_args.kwargs["phase"],
+            "lesson",
+        )
+
+    async def test_final_post_lesson_normal_callback_reserves_causal_output_token(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.google_live_evidence_lesson_released = True
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.next_transcript_phase.return_value = None
+        conn.evidence_registry.observe_transcript.return_value = {
+            "slot": 11, "phase": "post_lesson", "chars": 5,
+            "matched": True, "observedAt": 10.0,
+        }
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._response_generation = 4
+
+        self.assertFalse(await provider._on_user_transcript("final"))
+        token = conn.evidence_registry.observe_transcript.call_args.kwargs[
+            "response_generation"
+        ]
+        self.assertNotEqual(token, 4)
+        await provider._handle_live_event({"type": "audio_end", "response_generation": 4})
+        conn.evidence_registry.mark_output_idle.assert_not_called()
+        await provider._handle_live_event({"type": "audio_start", "response_generation": 4})
+        await provider._handle_live_event({"type": "audio_end", "response_generation": 4})
+        conn.evidence_registry.mark_output_idle.assert_called_once_with(
+            "physical.run-1", response_generation=token
+        )
+
+    async def test_final_post_lesson_direct_barge_callback_reserves_same_causal_contract(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.google_live_evidence_lesson_released = True
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.next_transcript_phase.return_value = None
+        conn.evidence_registry.observe_transcript.return_value = {
+            "slot": 11, "phase": "post_lesson", "chars": 5,
+            "matched": True, "observedAt": 10.0,
+        }
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._bridge = SimpleNamespace(stop_output=AsyncMock())
+        provider._client = _Client()
+
+        await provider._on_user_transcript_barge_in("final")
+
+        token = conn.evidence_registry.observe_transcript.call_args.kwargs[
+            "response_generation"
+        ]
+        self.assertIsNotNone(provider._evidence_final_response_reservation)
+        self.assertEqual(
+            provider._evidence_final_response_reservation["token"], token
+        )
+        self.assertEqual(
+            provider._evidence_final_response_reservation["providerGeneration"],
+            provider._response_generation,
+        )
+        await provider._handle_live_event(
+            {"type": "audio_start", "response_generation": provider._response_generation}
+        )
+        await provider._handle_live_event(
+            {"type": "audio_end", "response_generation": provider._response_generation}
+        )
+        conn.evidence_registry.mark_output_idle.assert_called_once_with(
+            "physical.run-1", response_generation=token
+        )
+
+    async def test_normal_then_barge_callbacks_observe_same_utterance_exactly_once(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.observe_transcript.return_value = {
+            "slot": 1, "phase": "interrupt", "chars": 5,
+            "matched": True, "observedAt": 10.0,
+        }
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._has_active_output = MagicMock(return_value=True)
+        provider._begin_user_interrupt = AsyncMock()
+        utterance = "hello"
+        conn.google_live_transcript_event_token = object()
+
+        self.assertFalse(await provider._on_user_transcript(utterance))
+        await provider._on_user_transcript_barge_in(utterance)
+
+        conn.evidence_registry.observe_transcript.assert_called_once()
+        provider._begin_user_interrupt.assert_awaited_once_with("transcript_barge_in")
 
     async def test_evidence_does_not_match_transcript_suppressed_as_model_echo(self):
         conn = _Conn()
