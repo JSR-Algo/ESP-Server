@@ -2250,7 +2250,17 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 continue
             scoped_reconnect_outcome = P_EVIDENCE_RECONNECT_OUTCOME.search(line)
             if scoped_reconnect_outcome:
-                if not scoped_marker_targets_anchor(scoped_reconnect_outcome, line_number):
+                outcome = scoped_reconnect_outcome.group("outcome")
+                scope_matches = (
+                    scoped_marker_targets_immutable_anchor(
+                        scoped_reconnect_outcome, line_number
+                    )
+                    if outcome == "failed"
+                    else scoped_marker_targets_anchor(
+                        scoped_reconnect_outcome, line_number
+                    )
+                )
+                if not scope_matches:
                     continue
                 journey_id = scoped_reconnect_outcome.group("journey_id")
                 attempt = parse_scoped_uint(
@@ -2275,7 +2285,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     failures.append(
                         _failure("RECONNECT_OUTCOME_WITHOUT_ATTEMPT", line_number, str(key))
                     )
-                elif scoped_reconnect_outcome.group("outcome") == "succeeded" and (
+                elif outcome == "succeeded" and (
                     not state.get("ready")
                     or state.get("fromLiveConnectionId")
                     != scoped_reconnect_outcome.group("from_live_connection_id")
@@ -2286,7 +2296,6 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         _failure("RECONNECT_SUCCESS_WITHOUT_READY", line_number, str(key))
                     )
                 if state is not None:
-                    outcome = scoped_reconnect_outcome.group("outcome")
                     if (
                         exact_scope_active
                         and outcome == "succeeded"
@@ -2345,13 +2354,20 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                                 str(key),
                             )
                         )
+                    if outcome == "failed":
+                        rollback_owner = state.get("fromLiveConnectionId")
                         if (
-                            scoped_current_live_connection_id
-                            == state.get("toLiveConnectionId")
+                            scoped_reconnect_outcome.group("live_connection_id")
+                            != rollback_owner
                         ):
-                            scoped_current_live_connection_id = state.get(
-                                "fromLiveConnectionId"
+                            failures.append(
+                                _failure(
+                                    "RECONNECT_FAILURE_ROLLBACK_OWNER_MISMATCH",
+                                    line_number,
+                                    str(key),
+                                )
                             )
+                        scoped_current_live_connection_id = rollback_owner
                     if (
                         outcome == "failed"
                         and scoped_reconnect_outcome.group("from_live_connection_id")
