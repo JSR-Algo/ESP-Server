@@ -3948,13 +3948,48 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         evidence_executions = []
         for sequence, stage in enumerate(stage_names, start=1):
             end = cursor + timedelta(seconds=40 if sequence == len(stage_names) else 55)
+            connection_id = "connection-2" if sequence >= 31 else "connection-1"
+            journey_id = f"journey-{sequence}"
+            window_id = f"window-{sequence}"
+            evidence_scope = {
+                "journeyId": journey_id,
+                "connectionId": connection_id,
+                "liveConnectionId": "live-1",
+                "initialLiveConnectionId": "live-1",
+                "peerIdentityHash": f"sha256:{'d' * 64}",
+                "serverStartUtc": cursor.isoformat(),
+            }
+            server_transitions = []
+            if stage == "reconnect":
+                server_transitions = [
+                    {
+                        "status": "PASS",
+                        "source": "server_log",
+                        "serverIssued": True,
+                        "sequence": 1,
+                        "reason": "same_device_reconnect",
+                        "fromJourneyId": f"journey-{sequence - 1}",
+                        "fromConnectionId": "connection-1",
+                        "toJourneyId": journey_id,
+                        "toConnectionId": connection_id,
+                        "peerIdentityHash": evidence_scope["peerIdentityHash"],
+                    }
+                ]
             evidence_executions.append(
                 {
                     "sequence": sequence,
                     "stage": stage,
+                    "journeyId": journey_id,
+                    "connectionId": connection_id,
+                    "windowId": window_id,
+                    "evidenceScope": evidence_scope,
+                    "initialLiveConnectionId": "live-1",
+                    "finalLiveConnectionId": "live-1",
+                    "liveConnectionTransitions": [],
+                    "serverConnectionTransitions": server_transitions,
                     "status": "PASS",
                     "logWindow": {
-                        "windowId": f"window-{sequence}",
+                        "windowId": window_id,
                         "start": cursor.isoformat(),
                         "end": end.isoformat(),
                     },
@@ -4299,6 +4334,7 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
                 "260518 20:16:01[GoogleLive]-INFO-Google Live interruption_stop_latency_ms=-1",
                 "260518 20:16:02[GoogleLive]-INFO-Google Live physical_bargein_latency_ms=inf",
                 "260518 20:16:03[GoogleLive]-INFO-Google Live server_output_gap_ms=oops boundary=continuous",
+                "260518 20:16:04[GoogleLive]-INFO-Google Live turn_latency_ms=1.2.3 phase=first_audio_out",
             )
         )
 
@@ -4461,11 +4497,29 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
             ("false_interrupt", lambda report: report["totals"].update(falseInterrupts=1)),
             ("unexpected_fallback", lambda report: report["totals"].update(unexpectedFallbacks=1)),
             ("resource_status", lambda report: report["resourceVerdict"].update(status="FAIL")),
+            (
+                "resource_checks_list",
+                lambda report: report["resourceVerdict"].update(
+                    checks=list(report["resourceVerdict"]["checks"])
+                ),
+            ),
             ("resource_check_int", lambda report: report["resourceVerdict"]["checks"].update(rssDeltaBounded=1)),
             ("resource_leak", lambda report: report["resourceVerdict"]["deltas"].update(rssBytes=33554433)),
             ("latency_comparison", lambda report: report["latencyComparison"].update(pass_=False)),
             ("latency_check_int", lambda report: report["latencyComparison"]["checks"].update(firstAudioP50Regression=1)),
             ("latency_failures", lambda report: report["latencyComparison"].update(failures=[{"code": "FAIL"}])),
+            (
+                "latency_checks_list",
+                lambda report: report["latencyComparison"].update(
+                    checks=list(report["latencyComparison"]["checks"])
+                ),
+            ),
+            (
+                "latency_metrics_list",
+                lambda report: report.update(
+                    latencyMetrics=list(report["latencyMetrics"])
+                ),
+            ),
             ("latency_zero", lambda report: report["latencyMetrics"].update(reconnectRecoveryP95Ms=0.0)),
             ("latency_metric", lambda report: report["latencyMetrics"].update(firstAudioP95Ms=1801.0)),
             ("duration", lambda report: report.update(durationSec=1799.0)),
@@ -4473,7 +4527,29 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
             ("recorded_runtime", lambda report: report.update(recordedRuntimeElapsedSec=1799.0)),
             ("gap_budget", lambda report: report.update(evidenceGapBudgetSec=1000.0)),
             ("anchor", lambda report: report["evidenceAnchors"].update(serverEndUtc="2026-08-31T10:59:00+00:00")),
+            ("anchors_list", lambda report: report.update(evidenceAnchors=[])),
             ("execution_fail", lambda report: report["evidenceExecutions"][0].update(status="FAIL")),
+            (
+                "execution_journey_duplicate",
+                lambda report: report["evidenceExecutions"][1].update(
+                    journeyId=report["evidenceExecutions"][0]["journeyId"],
+                    evidenceScope={
+                        **report["evidenceExecutions"][1]["evidenceScope"],
+                        "journeyId": report["evidenceExecutions"][0]["journeyId"],
+                    },
+                ),
+            ),
+            ("execution_scope_missing", lambda report: report["evidenceExecutions"][0].pop("evidenceScope")),
+            ("execution_connection_fabricated", lambda report: report["evidenceExecutions"][0].update(connectionId="fabricated")),
+            ("execution_peer_fabricated", lambda report: report["evidenceExecutions"][0]["evidenceScope"].update(peerIdentityHash=f"sha256:{'e' * 64}")),
+            ("execution_live_owner_stripped", lambda report: report["evidenceExecutions"][0].pop("liveConnectionTransitions")),
+            (
+                "execution_live_final_fabricated",
+                lambda report: report["evidenceExecutions"][0].update(
+                    finalLiveConnectionId="fabricated-live"
+                ),
+            ),
+            ("execution_server_transition_stripped", lambda report: report["evidenceExecutions"][30].update(serverConnectionTransitions=[])),
             ("fake_padding", lambda report: report["quietPadding"].append({"status": "PASS"})),
             ("raw_audio_flag_int", lambda report: report.update(rawAudioPersisted=0)),
             (

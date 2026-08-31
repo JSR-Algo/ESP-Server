@@ -462,7 +462,15 @@ def _format_budget(value):
 
 
 def _number_stats(values):
-    values = [float(value) for value in values]
+    converted = []
+    for value in values:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            converted.append(number)
+    values = converted
     if not values:
         return {"count": 0}
     ordered = sorted(values)
@@ -700,19 +708,19 @@ def _malformed_latency_marker_count(log_text):
         (
             lambda line: "phase=first_audio_out" in line
             and "Google Live turn_latency_ms=" in line,
-            re.compile(r"Google Live turn_latency_ms=[\d.]+ phase=first_audio_out$"),
+            re.compile(r"Google Live turn_latency_ms=\d+(?:\.\d+)? phase=first_audio_out$"),
         ),
         (
             lambda line: "Google Live first_audio_out_latency_ms=" in line,
-            re.compile(r"Google Live first_audio_out_latency_ms=[\d.]+$"),
+            re.compile(r"Google Live first_audio_out_latency_ms=\d+(?:\.\d+)?$"),
         ),
         (
             lambda line: "Google Live interruption_stop_latency_ms=" in line,
-            re.compile(r"Google Live interruption_stop_latency_ms=[\d.]+$"),
+            re.compile(r"Google Live interruption_stop_latency_ms=\d+(?:\.\d+)?$"),
         ),
         (
             lambda line: "Google Live physical_bargein_latency_ms=" in line,
-            re.compile(r"Google Live physical_bargein_latency_ms=[\d.]+$"),
+            re.compile(r"Google Live physical_bargein_latency_ms=\d+(?:\.\d+)?$"),
         ),
     )
     invalid = 0

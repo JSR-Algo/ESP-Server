@@ -494,6 +494,10 @@ def validate_candidate_soak_report(
         "bargeinP95Ms": GOOGLE_LIVE_LIMITS["physicalBargeinP95Ms"],
     }
     comparison = report.get("latencyComparison")
+    comparison_checks = comparison.get("checks") if isinstance(comparison, Mapping) else None
+    comparison_regressions = (
+        comparison.get("regressionPct") if isinstance(comparison, Mapping) else None
+    )
     expected_checks = {
         "firstAudioP50Regression",
         "firstAudioP95Regression",
@@ -515,14 +519,16 @@ def validate_candidate_soak_report(
         or report.get("serverOutputGapP95Ms") > GOOGLE_LIVE_LIMITS["serverOutputGapMaxMs"]
         or not isinstance(comparison, Mapping)
         or comparison.get("pass") is not True
-        or set((comparison.get("checks") or {})) != expected_checks
-        or any(value is not True for value in (comparison.get("checks") or {}).values())
-        or set((comparison.get("regressionPct") or {})) != expected_regressions
+        or not isinstance(comparison_checks, Mapping)
+        or set(comparison_checks) != expected_checks
+        or any(value is not True for value in comparison_checks.values())
+        or not isinstance(comparison_regressions, Mapping)
+        or set(comparison_regressions) != expected_regressions
         or comparison.get("failures", []) != []
         or any(
             not _finite_number(value)
             or value > GOOGLE_LIVE_LIMITS["relativeLatencyRegressionPct"]
-            for value in (comparison.get("regressionPct") or {}).values()
+            for value in comparison_regressions.values()
         )
     ):
         mismatch("latencyVerdict")
@@ -533,8 +539,12 @@ def validate_candidate_soak_report(
     replay_candidate_evidence = report.get("replayCandidateEvidence")
     gap_budget = report.get("evidenceGapBudgetSec")
     anchors = report.get("evidenceAnchors")
-    start = _parse_utc_timestamp((anchors or {}).get("serverStartUtc"))
-    end = _parse_utc_timestamp((anchors or {}).get("serverEndUtc"))
+    start = _parse_utc_timestamp(
+        anchors.get("serverStartUtc") if isinstance(anchors, Mapping) else None
+    )
+    end = _parse_utc_timestamp(
+        anchors.get("serverEndUtc") if isinstance(anchors, Mapping) else None
+    )
     monitored_duration = _candidate_monitored_duration(
         report,
         expected_stage_names=[name for name, count in stage_specs for _ in range(count)],
@@ -621,16 +631,90 @@ def _candidate_monitored_duration(
         return None
 
     windows = []
+    previous_execution = None
+    peer_identity_hash = None
+    seen_journey_ids = set()
+    execution_fields = {
+        "sequence",
+        "stage",
+        "journeyId",
+        "connectionId",
+        "windowId",
+        "evidenceScope",
+        "initialLiveConnectionId",
+        "finalLiveConnectionId",
+        "liveConnectionTransitions",
+        "serverConnectionTransitions",
+        "logWindow",
+        "status",
+    }
     for sequence, (item, stage) in enumerate(zip(executions, expected_stage_names), start=1):
+        scope = item.get("evidenceScope") if isinstance(item, Mapping) else None
+        window = item.get("logWindow") if isinstance(item, Mapping) else None
+        initial_live_id = item.get("initialLiveConnectionId") if isinstance(item, Mapping) else None
+        final_live_id = item.get("finalLiveConnectionId") if isinstance(item, Mapping) else None
+        transitions = item.get("liveConnectionTransitions") if isinstance(item, Mapping) else None
+        expected_scope = {
+            "journeyId": item.get("journeyId") if isinstance(item, Mapping) else None,
+            "connectionId": item.get("connectionId") if isinstance(item, Mapping) else None,
+            "liveConnectionId": initial_live_id,
+            "initialLiveConnectionId": initial_live_id,
+            "peerIdentityHash": scope.get("peerIdentityHash") if isinstance(scope, Mapping) else None,
+            "serverStartUtc": window.get("start") if isinstance(window, Mapping) else None,
+        }
+        server_transitions = item.get("serverConnectionTransitions") if isinstance(item, Mapping) else None
+        expected_server_transitions = []
+        if stage == "reconnect" and isinstance(previous_execution, Mapping):
+            expected_server_transitions = [
+                {
+                    "status": "PASS",
+                    "source": "server_log",
+                    "serverIssued": True,
+                    "sequence": 1,
+                    "reason": "same_device_reconnect",
+                    "fromJourneyId": previous_execution.get("journeyId"),
+                    "fromConnectionId": previous_execution.get("connectionId"),
+                    "toJourneyId": item.get("journeyId"),
+                    "toConnectionId": item.get("connectionId"),
+                    "peerIdentityHash": expected_scope["peerIdentityHash"],
+                }
+            ]
         if (
             not isinstance(item, Mapping)
+            or set(item) != execution_fields
             or type(item.get("sequence")) is not int
             or item.get("sequence") != sequence
             or item.get("stage") != stage
             or item.get("status") != "PASS"
+            or not isinstance(item.get("journeyId"), str)
+            or not item.get("journeyId")
+            or item.get("journeyId") in seen_journey_ids
+            or not isinstance(item.get("connectionId"), str)
+            or not item.get("connectionId")
+            or not isinstance(item.get("windowId"), str)
+            or not item.get("windowId")
+            or not isinstance(scope, Mapping)
+            or dict(scope) != expected_scope
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", expected_scope["peerIdentityHash"] or "") is None
+            or (peer_identity_hash is not None and expected_scope["peerIdentityHash"] != peer_identity_hash)
+            or _live_transition_final(initial_live_id, transitions) != final_live_id
+            or server_transitions != expected_server_transitions
+            or (
+                previous_execution is not None
+                and stage != "reconnect"
+                and item.get("connectionId") != previous_execution.get("connectionId")
+            )
+            or (
+                previous_execution is not None
+                and stage == "reconnect"
+                and item.get("connectionId") == previous_execution.get("connectionId")
+            )
         ):
             return None
-        windows.append(item.get("logWindow"))
+        peer_identity_hash = expected_scope["peerIdentityHash"]
+        seen_journey_ids.add(item["journeyId"])
+        previous_execution = item
+        windows.append(window)
     for item in padding:
         if (
             not isinstance(item, Mapping)
@@ -649,9 +733,13 @@ def _candidate_monitored_duration(
     parsed_windows = []
     seen_window_ids = set()
     for index, window in enumerate(windows):
-        start = _parse_utc_timestamp((window or {}).get("start"))
-        end = _parse_utc_timestamp((window or {}).get("end"))
-        window_id = (window or {}).get("windowId")
+        start = _parse_utc_timestamp(
+            window.get("start") if isinstance(window, Mapping) else None
+        )
+        end = _parse_utc_timestamp(
+            window.get("end") if isinstance(window, Mapping) else None
+        )
+        window_id = window.get("windowId") if isinstance(window, Mapping) else None
         if (
             not isinstance(window, Mapping)
             or not isinstance(window_id, str)
@@ -660,6 +748,10 @@ def _candidate_monitored_duration(
             or start is None
             or end is None
             or end <= start
+            or (
+                index < len(executions)
+                and window_id != executions[index].get("windowId")
+            )
         ):
             return None
         if index >= len(executions) and (
