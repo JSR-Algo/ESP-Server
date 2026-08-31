@@ -1,135 +1,301 @@
-# Google Live robot validation (PR5)
+# Google Live robot validation and release gate
 
-Step-by-step playbook for validating PR2 + PR4 stability and barge-in
-changes on a real TBOT robot. Output is a JSON report that maps onto the
-acceptance criteria defined in [.omc/plans/google-live-stability-bargein-v2.md](../../../.omc/plans/google-live-stability-bargein-v2.md).
+Run this after the deterministic and real-API gates in `google-live-smoke.md`
+pass. Physical execution is operator-controlled: this runbook does not deploy,
+flash, reset, or control a robot automatically.
 
----
+Use the exact `RUN_ID`, `EVIDENCE_ROOT`, candidate identity, configuration
+fingerprint, and fixture checksum exported by the smoke runbook.
 
-## 1. Pre-flight checklist (must all be PASS before soak)
+## 1. Evidence layout and privacy
 
-| Check | Command | Pass criteria |
-|---|---|---|
-| Server reachable | `curl -sI http://<server-ip>:8000` | HTTP 1xx/2xx |
-| Robot ARP present | `arp -a \| grep <robot-mac>` | One match |
-| Network preflight | `python scripts/voice_mode_preflight.py --device-ip <robot-ip> --max-loss-pct 0` | 0 packet loss |
-| Google Live key reachable | `GOOGLE_API_KEY=... python scripts/google_live_smoke.py` | `SMOKE_CONNECT_OK` + `SMOKE_CLOSE_OK` |
-| Firmware audio mode | `cat TBOT-Firmware/sdkconfig.defaults.local \| grep AEC` | confirm what AEC mode is compiled |
-| Voice mode config | manager-web > role config > Voice Mode | `google_live` selected |
-| `tmp/server.log` writable & rotating | `ls -lah tmp/server.log` | non-zero size, last-mod within minutes |
+`RUN_ID` must be UTC, for example `20260830T140500Z`:
 
-If any pre-flight fails, fix before running soak — failures here are
-network/config bias, not server defect.
+```text
+task-artifacts/google-live/$RUN_ID/
+  deterministic/report.json
+  server-regression/report.json
+  real-api/report.json
+  websocket-e2e/report.json
+  physical/report.json
+  candidate-soak/report.json
+  timeline.log
+  commands.txt
+  checksums.sha256
+  release-verdict.json
+```
 
----
+Additional bounded intermediates such as `transport.json`, `correlated.json`,
+`audit.json`, `pytest.xml`, and operator notes may live below the same root.
+`timeline.log` must cover only the recorded UTC test window. `commands.txt`
+records commands with `$GOOGLE_API_KEY`, `$OTA_TOKEN`, device IDs, and protected
+paths left as redacted variable names, never expanded secret values.
 
-## 2. Run the soak harness
+Raw child audio is not stored by default. Use synthetic or consenting-adult
+fixtures only. Reports and retained logs must contain no raw/base64 audio, raw
+transcripts or prompts, cookies, credentials, tokens, keys, session-resumption
+handles, or raw exception text. Session-resumption handles may exist in runtime
+memory but their values must never enter artifacts.
+
+## 2. Preflight and bounded log capture
+
+All checks must pass before judging audio behavior:
 
 ```bash
-cd esp32-server/main/tbot-server
-./.venv311/bin/python scripts/google_live_robot_soak.py \
-    --websocket-url ws://<server-ip>:8000/tbot/v1/ \
-    --device-id <robot-mac> \
-    --client-id <robot-client-uuid> \
-    --bargein-cycles 5 \
-    --idle-cycles 1 \
-    --idle-duration-sec 120 \
-    --log-path tmp/server.log \
-    --report .omc/research/soak-$(date +%Y%m%d-%H%M%S).json
+curl -fsSI "http://<server-ip>:8000"
+python3 scripts/voice_mode_preflight.py \
+  --device-ip "<robot-ip>" \
+  --max-loss-pct 0 --max-avg-ms 1000 --max-max-ms 1500 \
+  --max-jitter-ms 500 --max-duplicates 0
+test -s tmp/server.log
 ```
 
-The script reuses helpers from [`voice_mode_websocket_soak.py`](../scripts/voice_mode_websocket_soak.py)
-(hello, detect, recv predicates) and tails [`server.log`](../tmp/server.log)
-for deterministic AC3/AC4 signals.
+Start the bounded capture immediately before the first WebSocket/physical
+journey. Record the UTC boundaries without copying environment secrets:
 
-### Per-cycle output
-
-For each barge-in cycle you should see one line:
-```
-BARGEIN_CYCLE outcome=PASS first_audio_ms=632.4 bargein_latency_ms=312.0 \
-    transcript=True new_id=17 cancelled_id=16
+```bash
+date -u +%Y-%m-%dT%H:%M:%SZ | tee "$EVIDENCE_ROOT/server-start-utc.txt"
+tail -n 0 -F tmp/server.log > "$EVIDENCE_ROOT/timeline.log" &
+LOG_CAPTURE_PID=$!
 ```
 
-For the idle cycle:
+After the final bounded journey:
+
+```bash
+kill "$LOG_CAPTURE_PID"
+wait "$LOG_CAPTURE_PID" 2>/dev/null || true
+date -u +%Y-%m-%dT%H:%M:%SZ | tee "$EVIDENCE_ROOT/server-end-utc.txt"
 ```
-IDLE_CYCLE outcome=PASS false_positives=0
+
+The journey-generated reliability anchors inside `timeline.log`, not unrelated
+lines outside the window, are authoritative for Task 5 correlation.
+
+## 3. Physical Vietnamese journey
+
+Use the real production-equivalent firmware microphone, speaker, AEC posture,
+and LAN. During every opened listening window, stand near the robot and speak
+Vietnamese naturally. Do not inject a text substitute for the physical gate.
+
+1. Complete ten ordinary Vietnamese conversation turns.
+2. For each turn, wait for the listening window, speak close to the robot, and
+   confirm the response starts promptly and answers the latest intent.
+3. Complete ten barge-in turns. While robot audio is actively playing, interrupt mid-output
+   with a new Vietnamese request near the microphone.
+4. Confirm old audio stops, no stale audio resumes, and the new request is served.
+5. Hold one quiet interval and one robot-speaking interval; there must be no
+   false interruption or echo-driven request.
+6. Disconnect and reconnect the same robot, then complete two more turns.
+7. Say the approved Vietnamese lesson-start intent, finish one interactive Live
+   lesson step, exit/complete the bounded lesson, then make one final ordinary
+   Vietnamese request.
+
+Record only verdicts, timings, response/session IDs already safe for logs, and
+operator timestamps. Do not transcribe the child's or operator's speech into
+the evidence bundle.
+
+## 4. Server lifecycle report and WebSocket composite
+
+Create the exact Task 5 report from the bounded timeline. This calls the same
+validator used by tests and writes only its redacted contract:
+
+```bash
+EVIDENCE_ROOT="$EVIDENCE_ROOT" PYTHONPATH=. python3 - <<'PY'
+import json, os
+from pathlib import Path
+from scripts.analyze_google_live_log import analyze_reliability_window
+
+root = Path(os.environ["EVIDENCE_ROOT"])
+report = analyze_reliability_window(root / "timeline.log")
+(root / "server-regression/report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+raise SystemExit(0 if report.get("status") == "PASS" else 1)
+PY
 ```
 
-Then the script prints the AC summary and writes the JSON report.
+The standalone WebSocket transport remains `SKIPPED/PENDING`. Build the release
+layer only from raw transport plus the correlated Task 5 PASS:
 
----
+```bash
+EVIDENCE_ROOT="$EVIDENCE_ROOT" python3 - <<'PY'
+import json, os
+from pathlib import Path
 
-## 3. AC interpretation guide
+root = Path(os.environ["EVIDENCE_ROOT"])
+transport = json.loads((root / "websocket-e2e/transport.json").read_text())
+log_evidence = json.loads((root / "server-regression/report.json").read_text())
+correlated = json.loads((root / "websocket-e2e/correlated.json").read_text())
+ok = correlated.get("status") == "PASS" and correlated.get("aggregateReleaseEligible") is True
+report = {
+    "schemaVersion": "google-live-reliability.v1", "name": "websocket_e2e",
+    "status": "PASS" if ok else "FAIL", "candidateIdentity": transport.get("candidateIdentity"),
+    "transportEvidence": transport, "logEvidence": log_evidence,
+    "correlatedEvidence": correlated,
+    "failures": [] if ok else [{"code": "WEBSOCKET_CORRELATION_FAILED"}],
+}
+(root / "websocket-e2e/report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+```
 
-| AC | Definition | Where measured | Pass rule |
-|---|---|---|---|
-| AC1 | Stability over the soak window | `LOG_GOAWAY_RE`, `LOG_RECONNECT_RE`, `LOG_FALLBACK_RE` | `goaway_seen <= --ac1-goaway-budget` AND `fallback_triggered == 0` |
-| AC2 | Barge-in latency (p95) | wall clock from interrupt-send to `tts.state=stop` | `p95 <= --bargein-latency-budget-ms` (default 500) |
-| AC3 | Post-interrupt: model serves the NEW request | Log: `transcript source=user` + `user_interrupted` with `next_response_id > cancelled_response_id` | `>= 80%` bargein cycles match |
-| AC4 | No false-positive interrupts during long monologue | Log: `user_interrupted` count between `tts.state=start` and `tts.state=stop` of the idle cycle | `false_positive_interrupts == 0` for every idle cycle |
-| AC5 | No regression: no fallback during soak | Log: `fallback_triggered` count | `== 0` |
+## 5. Production-candidate soak
 
-AC6 and AC7 are separate workstreams:
-- **AC6 (test coverage)** is gated by `python -m unittest discover -s tests`
-  in CI — not part of the soak.
-- **AC7 (AEC-forward evidence)** is gated in physical robot logs by
-  `scripts/physical_smoke_audit.py --require-aec-live-vad-forward`, which
-  requires `Google Live aec_live_vad_forward reason=robot_speaking`. Quantitative
-  AEC effectiveness remains covered by `scripts/aec_loopback_eval.py`.
-- **First-audio response speed** is gated by
-  `scripts/physical_smoke_audit.py --max-first-audio-ms 1800`, using
-  `Google Live first_audio_out_latency_ms=...` log markers.
-- **Expected user speech recognition** is gated by
-  `scripts/physical_smoke_audit.py --expected-user-transcript "bắt đầu bài học"`,
-  which requires the expected phrase to appear in a user transcript after
-  case/punctuation/whitespace normalization. The flag is repeatable.
-- **Lesson Live voice path** is gated by
-  `scripts/physical_smoke_audit.py --require-lesson --require-lesson-live-text`,
-  which requires each expected lesson prompt to be queued through Live text.
-  Add `--lesson-manifest <lesson-manifest.json>` so the audit derives expected
-  step count, interactive step count, prompt char lower bound, and per-prompt
-  SHA-256 hashes from the selected lesson to catch truncated or changed
-  payloads without logging content.
+Candidate mode consumes the exact 33 recorded executions in
+`candidate-soak/journey-evidence.json`: 17 ordinary turns, 10 audio barge-ins,
+two controlled quiet windows, one Live reopen, one same-device reconnect, one
+lesson entry/interactive/exit, and one ordinary turn after lesson. The summed
+monitored UTC windows must be at least 1800 seconds; gaps do not count.
 
----
+```bash
+python3 scripts/google_live_robot_soak.py \
+  --mode candidate \
+  --ws-url "wss://<server>/tbot/v1/" \
+  --device-mac "<robot-device-id>" \
+  --client-id "<robot-client-id>" \
+  --cycles 10 \
+  --inject-audio "$AUDIO_FIXTURE" \
+  --audio-source adult \
+  --server-has-google-live-credentials \
+  --candidate-git-sha "$CANDIDATE_SHA" \
+  --candidate-image-digest "$CANDIDATE_IMAGE_DIGEST" \
+  --firmware-identity "$FIRMWARE_IDENTITY" \
+  --fixture-sha256 "$FIXTURE_SHA256" \
+  --config-json "$CONFIG_JSON" \
+  --baseline-report "<b07038b8-same-environment-baseline.json>" \
+  --real-api-report "$EVIDENCE_ROOT/real-api/report.json" \
+  --transport-report "$EVIDENCE_ROOT/websocket-e2e/transport.json" \
+  --correlated-transport-report "$EVIDENCE_ROOT/websocket-e2e/correlated.json" \
+  --log-reliability-report "$EVIDENCE_ROOT/server-regression/report.json" \
+  --journey-evidence "$EVIDENCE_ROOT/candidate-soak/journey-evidence.json" \
+  --lesson-manifest "<exact-lesson-manifest.json>" \
+  --minimum-turns 30 \
+  --minimum-duration-sec 1800 \
+  --report "$EVIDENCE_ROOT/candidate-soak/report.json"
+```
 
-## 4. Common failure modes
+The soak fails on latency regression above 15%, insufficient turns/duration,
+fewer than ten barge-ins, newest-intent success below 80%, any false interrupt,
+fallback, stale response, lifecycle imbalance, resource leak, or incomplete
+exactly-once cleanup. Synthetic waiting cannot be counted as a turn or latency.
 
-| Symptom in report | Likely root cause | Action |
+## 6. Physical production-candidate audit
+
+Audit the captured physical window after the Task 5 and candidate-soak reports
+exist. The production profile automatically requires strict voice and lesson
+markers plus the exact latency, lifecycle, cleanup, and candidate identity.
+
+```bash
+python3 scripts/physical_smoke_audit.py "$EVIDENCE_ROOT/timeline.log" \
+  --device-id "<robot-device-id>" \
+  --client-id "<robot-client-id>" \
+  --server-ip "<server-ip>" \
+  --min-interrupts 10 \
+  --expected-user-transcript "<approved-Vietnamese-test-phrase>" \
+  --expected-post-lesson-transcript "<approved-Vietnamese-post-lesson-phrase>" \
+  --production-google-live-candidate \
+  --candidate-git-sha "$CANDIDATE_SHA" \
+  --candidate-image-digest "$CANDIDATE_IMAGE_DIGEST" \
+  --firmware-identity "$FIRMWARE_IDENTITY" \
+  --config-fingerprint "$CONFIG_FINGERPRINT" \
+  --fixture-sha256 "$FIXTURE_SHA256" \
+  --google-live-reliability-report "$EVIDENCE_ROOT/server-regression/report.json" \
+  --candidate-soak-report "$EVIDENCE_ROOT/candidate-soak/report.json" \
+  --lesson-manifest "<exact-lesson-manifest.json>" \
+  > "$EVIDENCE_ROOT/physical/audit.json"
+```
+
+The expected phrases are runtime assertions only. Before retaining artifacts,
+confirm `physical/audit.json` contains counts/hashes but no transcript text.
+
+Wrap the raw audit with the exact upstream evidence required by the release gate:
+
+```bash
+EVIDENCE_ROOT="$EVIDENCE_ROOT" python3 - <<'PY'
+import json, os
+from pathlib import Path
+
+root = Path(os.environ["EVIDENCE_ROOT"])
+audit = json.loads((root / "physical/audit.json").read_text())
+log_evidence = json.loads((root / "server-regression/report.json").read_text())
+soak = json.loads((root / "candidate-soak/report.json").read_text())
+report = {
+    "schemaVersion": "google-live-reliability.v1", "name": "physical",
+    "status": "PASS" if audit.get("passed") is True else "FAIL",
+    "candidateIdentity": audit.get("candidateIdentity"), "auditReport": audit,
+    "productionProfile": {
+        "strictMarkersValidated": True, "lessonValidated": True,
+        "postLessonValidated": True, "receiveLoopBalanceRequired": True,
+        "sampleCounts": {"firstAudio": 10, "interruptStop": 10, "physicalBargein": 10, "serverOutputGap": 10},
+        "budgetsMs": {"firstAudioP50": 1200.0, "firstAudioP95": 1800.0, "interruptStopMax": 250.0, "physicalBargeinP95": 500.0, "serverOutputGapMax": 250.0},
+    },
+    "logEvidence": log_evidence, "candidateSoakEvidence": soak,
+    "failures": [] if audit.get("passed") is True else [{"code": "PHYSICAL_AUDIT_FAILED"}],
+}
+(root / "physical/report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+```
+
+## 7. External checksums and release aggregation
+
+All six layers are mandatory and must be `PASS` for the exact same candidate.
+No layer may be missing, `SKIPPED`, or `PENDING`. In particular, the WebSocket
+layer passes only as the Task 4 + Task 5 correlated composite.
+
+Create `checksums.sha256` from outside the reports. A checksum embedded inside a
+report is not trusted. Each exact required report path must appear once, relative
+to `EVIDENCE_ROOT`; unrelated bounded artifacts may also be listed. Generate the
+manifest only after reports are final, and never regenerate it to bless a
+modified report.
+
+```bash
+(
+  cd "$EVIDENCE_ROOT"
+  test -s commands.txt
+  shasum -a 256 \
+    deterministic/report.json \
+    server-regression/report.json \
+    real-api/report.json \
+    websocket-e2e/report.json \
+    physical/report.json \
+    candidate-soak/report.json \
+    timeline.log commands.txt \
+    > checksums.sha256
+)
+```
+
+Run the read-only aggregator. It does not start a server, call Google, open a
+WebSocket, deploy, flash, reset, or operate hardware:
+
+```bash
+python3 scripts/google_live_release_gate.py \
+  --expected-git-sha "$CANDIDATE_SHA" \
+  --expected-image-digest "$CANDIDATE_IMAGE_DIGEST" \
+  --expected-firmware-identity "$FIRMWARE_IDENTITY" \
+  --expected-config-fingerprint "$CONFIG_FINGERPRINT" \
+  --expected-fixture-sha256 "$FIXTURE_SHA256" \
+  --layer "deterministic=$EVIDENCE_ROOT/deterministic/report.json" \
+  --layer "server_regression=$EVIDENCE_ROOT/server-regression/report.json" \
+  --layer "real_api=$EVIDENCE_ROOT/real-api/report.json" \
+  --layer "websocket_e2e=$EVIDENCE_ROOT/websocket-e2e/report.json" \
+  --layer "physical=$EVIDENCE_ROOT/physical/report.json" \
+  --layer "candidate_soak=$EVIDENCE_ROOT/candidate-soak/report.json" \
+  --checksums-file "$EVIDENCE_ROOT/checksums.sha256" \
+  --out "$EVIDENCE_ROOT/release-verdict.json"
+```
+
+Release only when `release-verdict.json` is `PASS`, contains all six layers,
+reports no failures, and every checksum is verified.
+
+## 8. Triage and rollback boundary
+
+| Failure | First evidence to inspect | Required action |
 |---|---|---|
-| `first_tts_start_timeout` on every cycle | Server not running or wrong voice_mode | check Docker `docker ps`, agent config |
-| `bargein_latency_ms > 500` but `transcript=True` | network jitter or model still on cold start | rerun, retain only steady-state cycles |
-| `transcript=False` but `bargein_latency_ms` good | Live interruption reached the server, but the captured user turn was too short or got suppressed before turn close | check `activity_handling=START_OF_ACTIVITY_INTERRUPTS`, `input_live_chunk_ms=20`, `input_flush_delay_sec=1.0`, and `model_output_unblock_timeout_sec` |
-| `goaway_seen > 0` and PR2 deployed | confirm `recv_timeout_sec=60`, `reconnect_buffer_ms=2000` are active in container, restart server | |
-| Repeated `IDLE_CYCLE false_positives > 0` | echo (no AEC) is exceeding `barge_in_rms_threshold`. Pause and run controlled measurement: silent room vs talking-robot, compare RMS in `tmp/server.log` `input_audio_diag` lines | |
-| `fallback_triggered > 0` | non-retriable error class — open `server.log`, find `reason=...`. Most often `auth` (bad key) or `quota` (429) |
+| Deterministic or historical contract | `deterministic/pytest.xml` and compatibility matrix | Stop; fix code/tests before any physical rerun |
+| Real API auth/quota/config | `real-api/report.json` classified failure | Fix credential/service/config; do not retry as transport recovery |
+| Raw WebSocket `SKIPPED/PENDING` | `websocket-e2e/transport.json` and Task 5 correlation | Expected until exact bounded correlation; never waive it |
+| Lifecycle/replay/ownership failure | `server-regression/report.json` and matching `timeline.log` scope | Stop; preserve the window and fix the invariant |
+| Physical latency/self-interrupt/stale audio | `physical/audit.json` plus operator timestamps | Check LAN/AEC/firmware posture, then reproduce on the same candidate |
+| Soak duration/resource/cleanup failure | `candidate-soak/report.json` | Stop; do not pad duration, drop samples, or reuse another candidate's evidence |
+| Identity/checksum mismatch | `checksums.sha256` and each `candidateIdentity` | Rebuild the evidence set; never edit identity or regenerate checksums to force PASS |
 
----
-
-## 5. Evidence file
-
-After every run, capture:
-1. Soak JSON report → `.omc/research/soak-<timestamp>.json`
-2. Tail of `tmp/server.log` covering the soak window
-3. Verification-matrix row in
-   [`docs/qa/ad-hoc/2026-05-19-google-live-robot-validation.md`](qa/ad-hoc/2026-05-19-google-live-robot-validation.md)
-
-Two passes (before-deploy / after-deploy) lets reviewers compare deltas.
-
----
-
-## 6. Known limitations of this harness
-
-- **Audio injection is NOT yet wired here** — barge-in is triggered via
-  the existing text-message path (`type=listen state=detect`). For true
-  voice barge-in injection see
-  [`scripts/voice_mode_websocket_audio_bargein.py`](../scripts/voice_mode_websocket_audio_bargein.py).
-  Extending this script with Opus injection is a follow-up; the current
-  text path exercises the same server-side `_begin_user_interrupt`
-  pipeline so AC1/AC3/AC5 are still meaningful.
-- The AC3 transcript signal is `transcript source=user`, which the Live
-  API emits when its input transcription detects user speech. With
-  text-message bargein this comes from `handle_text_message` instead;
-  the log pattern still fires.
-- Soak does NOT spoof firmware AEC capability — pre-flight should
-  confirm the firmware's AEC mode separately.
+Rollback or hold the release at the first failed layer. A network or hardware
+availability issue remains blocking `SKIPPED`, not product PASS. Do not change
+the model, prompt, voice, language, timeout, reconnect, fallback, lesson
+ownership, or firmware protocol merely to make the gate pass.
