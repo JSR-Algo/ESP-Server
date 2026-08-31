@@ -20,6 +20,20 @@ IDENTITY = {
     "fixtureSha256": "b" * 64,
     "configFingerprint": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
 }
+PEER_HASH = f"sha256:{'d' * 64}"
+EVIDENCE_SCOPE = {
+    "journeyId": "transport-journey",
+    "connectionId": "connection-transport",
+    "liveConnectionId": "live-1",
+    "initialLiveConnectionId": "live-1",
+    "peerIdentityHash": PEER_HASH,
+    "serverStartUtc": "2026-08-31T10:00:00+00:00",
+}
+LOG_WINDOW = {
+    "windowId": "transport-window",
+    "start": EVIDENCE_SCOPE["serverStartUtc"],
+    "end": "2026-08-31T10:01:00+00:00",
+}
 
 
 def _layer(name):
@@ -57,15 +71,35 @@ def _args(**overrides):
             "status": "SKIPPED",
             "pendingCode": "PENDING_BOUNDED_SERVER_LOG_VERIFICATION",
             "aggregateReleaseEligible": False,
+            "correlationSource": "server_log",
+            "correlationStatus": "PENDING_BOUNDED_SERVER_LOG_VERIFICATION",
+            "interruptStopMarkerObserved": True,
+            "replacementResponseStarted": True,
+            "replacementResponseStopped": True,
+            "replacementBinaryChunks": 2,
+            "bargeinStopMs": 200.0,
+            "maxServerOutputGapMs": 80.0,
             "journeyId": "transport-journey",
-            "logWindow": {"windowId": "transport-window"},
+            "evidenceScope": EVIDENCE_SCOPE,
+            "serverConnectionId": EVIDENCE_SCOPE["connectionId"],
+            "liveConnectionId": EVIDENCE_SCOPE["liveConnectionId"],
+            "initialLiveConnectionId": "live-1",
+            "finalLiveConnectionId": "live-1",
+            "liveConnectionTransitions": [],
+            "peerIdentityHash": PEER_HASH,
+            "logWindow": LOG_WINDOW,
         },
         "correlated_transport_report": {
             **_layer("websocket_audio_bargein_correlated"),
             "aggregateReleaseEligible": True,
+            "correlationSource": "server_log",
             "correlationStatus": "PASS",
             "journeyId": "transport-journey",
-            "logWindow": {"windowId": "transport-window"},
+            "evidenceScope": EVIDENCE_SCOPE,
+            "initialLiveConnectionId": "live-1",
+            "finalLiveConnectionId": "live-1",
+            "liveConnectionTransitions": [],
+            "logWindow": LOG_WINDOW,
         },
         "log_reliability_report": {
             **_layer("google_live_log_reliability"),
@@ -76,8 +110,28 @@ def _args(**overrides):
             "unreleasedLessonHandoffs": [],
             "fatalHits": [],
             "failures": [],
-            "evidenceScope": {"journeyId": "transport-journey"},
-            "logWindow": {"windowId": "transport-window"},
+            "duplicateResponseIds": [],
+            "replayCountsByReopen": {},
+            "correlation": {
+                "status": "PASS",
+                "cancelledResponseId": 7,
+                "replacementResponseId": 8,
+            },
+            "correlations": [
+                {
+                    "status": "PASS",
+                    "journeyId": "transport-journey",
+                    "connectionId": EVIDENCE_SCOPE["connectionId"],
+                    "liveConnectionId": "live-1",
+                    "cancelledResponseId": 7,
+                    "replacementResponseId": 8,
+                }
+            ],
+            "evidenceScope": EVIDENCE_SCOPE,
+            "initialLiveConnectionId": "live-1",
+            "finalLiveConnectionId": "live-1",
+            "liveConnectionTransitions": [],
+            "logWindow": LOG_WINDOW,
         },
     }
     values.update(overrides)
@@ -97,7 +151,13 @@ def _journeys(*, mutation=None):
             "candidateIdentity": IDENTITY,
             "evidenceSequence": sequence,
             "journeyId": f"candidate-{sequence}",
+            "connectionId": "candidate-connection",
             "windowId": f"window-{sequence}",
+            "logWindow": {
+                "windowId": f"window-{sequence}",
+                "start": f"2026-08-31T11:{sequence:02d}:00+00:00",
+                "end": f"2026-08-31T11:{sequence:02d}:30+00:00",
+            },
             "successfulTurns": 0 if name in {"quiet", "lesson"} else 1,
             "bargeins": 1 if name == "bargein" else 0,
             "latestIntentSuccesses": 1 if name == "bargein" else 0,
@@ -149,6 +209,25 @@ def _run(args=None, journeys=None, clock=None, samples=_samples):
             clock=clock or _Clock(),
         )
     )
+
+
+def _args_with_transition():
+    args = _args()
+    transition = {
+        "attempt": 1,
+        "fromLiveConnectionId": "live-1",
+        "toLiveConnectionId": "live-2",
+        "reason": "receive_timeout",
+    }
+    for report in (
+        args.transport_report,
+        args.correlated_transport_report,
+        args.log_reliability_report,
+    ):
+        report["finalLiveConnectionId"] = "live-2"
+        report["liveConnectionTransitions"] = [deepcopy(transition)]
+    args.log_reliability_report["correlations"][0]["liveConnectionId"] = "live-2"
+    return args
 
 
 def test_candidate_soak_runs_fixed_sequence_and_meets_production_budgets():
@@ -289,11 +368,35 @@ def test_candidate_soak_rejects_reused_or_mismatched_upstream_window():
     raw = deepcopy(_args().transport_report)
     correlated = deepcopy(_args().correlated_transport_report)
     log_report = deepcopy(_args().log_reliability_report)
-    raw.update(journeyId="candidate-18", logWindow={"windowId": "window-18"})
-    correlated.update(journeyId="candidate-18", logWindow={"windowId": "window-18"})
+    reused_window = {
+        "windowId": "window-18",
+        "start": "2026-08-31T11:18:00+00:00",
+        "end": "2026-08-31T11:18:30+00:00",
+    }
+    reused_scope = {
+        **EVIDENCE_SCOPE,
+        "journeyId": "candidate-18",
+        "connectionId": "candidate-connection",
+        "serverStartUtc": reused_window["start"],
+    }
+    raw.update(
+        journeyId="candidate-18",
+        evidenceScope=reused_scope,
+        serverConnectionId="candidate-connection",
+        logWindow=reused_window,
+    )
+    correlated.update(
+        journeyId="candidate-18",
+        evidenceScope=reused_scope,
+        logWindow=reused_window,
+    )
     log_report.update(
-        evidenceScope={"journeyId": "candidate-18"},
-        logWindow={"windowId": "window-18"},
+        evidenceScope=reused_scope,
+        logWindow=reused_window,
+    )
+    log_report["correlations"][0].update(
+        journeyId="candidate-18",
+        connectionId="candidate-connection",
     )
     reused = _run(
         args=_args(
@@ -319,6 +422,90 @@ def test_candidate_soak_rejects_log_layer_with_unrecovered_timeout():
     log_report["unrecoveredTimeouts"] = [{"line": 7}]
     report = _run(args=_args(log_reliability_report=log_report))
     assert "LOG_RELIABILITY_CONTRACT_INVALID" in {
+        item["code"] for item in report["failures"]
+    }
+
+
+@pytest.mark.parametrize(
+    ("layer", "field", "value"),
+    [
+        ("transport", "serverConnectionId", "other-connection"),
+        ("transport", "peerIdentityHash", f"sha256:{'e' * 64}"),
+        ("transport", "finalLiveConnectionId", "fabricated-final"),
+        ("correlated", "finalLiveConnectionId", "other-final"),
+        ("log", "initialLiveConnectionId", "other-initial"),
+        ("log", "logWindow", {**LOG_WINDOW, "end": "2026-08-31T10:02:00+00:00"}),
+        (
+            "transport",
+            "liveConnectionTransitions",
+            [
+                {
+                    "attempt": 2,
+                    "fromLiveConnectionId": "live-1",
+                    "toLiveConnectionId": "live-2",
+                    "reason": "timeout",
+                },
+                {
+                    "attempt": 1,
+                    "fromLiveConnectionId": "live-2",
+                    "toLiveConnectionId": "live-3",
+                    "reason": "timeout",
+                },
+            ],
+        ),
+    ],
+)
+def test_candidate_soak_requires_full_task5_normalized_scope(layer, field, value):
+    args = _args()
+    target = {
+        "transport": args.transport_report,
+        "correlated": args.correlated_transport_report,
+        "log": args.log_reliability_report,
+    }[layer]
+    target = deepcopy(target)
+    target[field] = value
+    overrides = {
+        "transport": {"transport_report": target},
+        "correlated": {"correlated_transport_report": target},
+        "log": {"log_reliability_report": target},
+    }[layer]
+
+    report = _run(args=_args(**overrides))
+
+    assert "TASK5_CORRELATED_EVIDENCE_INVALID" in {
+        item["code"] for item in report["failures"]
+    }
+
+
+@pytest.mark.parametrize("mutation", ["reason", "extra", "reordered"])
+def test_candidate_soak_rejects_fabricated_transition_ledger(mutation):
+    args = _args_with_transition()
+    if mutation == "reason":
+        args.correlated_transport_report["liveConnectionTransitions"][0]["reason"] = "goaway"
+    elif mutation == "extra":
+        args.log_reliability_report["liveConnectionTransitions"].append(
+            {
+                "attempt": 2,
+                "fromLiveConnectionId": "live-2",
+                "toLiveConnectionId": "live-3",
+                "reason": "goaway",
+            }
+        )
+        args.log_reliability_report["finalLiveConnectionId"] = "live-3"
+    else:
+        extra = {
+            "attempt": 2,
+            "fromLiveConnectionId": "live-2",
+            "toLiveConnectionId": "live-3",
+            "reason": "goaway",
+        }
+        args.transport_report["liveConnectionTransitions"].append(extra)
+        args.transport_report["liveConnectionTransitions"].reverse()
+        args.transport_report["finalLiveConnectionId"] = "live-3"
+
+    report = _run(args=args)
+
+    assert "TASK5_CORRELATED_EVIDENCE_INVALID" in {
         item["code"] for item in report["failures"]
     }
 

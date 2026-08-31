@@ -59,6 +59,9 @@ from core.voice.google_live_credentials import (  # noqa: E402
     GOOGLE_LIVE_CREDENTIAL_ENV_NAMES,
     resolve_google_live_env_api_key,
 )
+from scripts.analyze_google_live_log import (  # noqa: E402
+    correlate_websocket_bargein_evidence,
+)
 from scripts.google_live_reliability import (  # noqa: E402
     GOOGLE_LIVE_LIMITS,
     SCHEMA_VERSION,
@@ -1599,6 +1602,21 @@ def _finite_nonnegative(value):
     return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
 
 
+def _evidence_reuse_key(*, journey_id, connection_id, log_window):
+    if (
+        not isinstance(journey_id, str)
+        or not journey_id
+        or not isinstance(connection_id, str)
+        or not connection_id
+        or not isinstance(log_window, Mapping)
+    ):
+        return None
+    window_values = tuple(log_window.get(field) for field in ("windowId", "start", "end"))
+    if any(not isinstance(value, str) or not value for value in window_values):
+        return None
+    return (journey_id, connection_id, *window_values)
+
+
 def _validate_upstream_layer(report, *, name, identity, failures, status="PASS"):
     if not isinstance(report, Mapping):
         failures.append({"code": "UPSTREAM_LAYER_MALFORMED", "layer": name})
@@ -1668,6 +1686,7 @@ async def run_candidate_soak(
     executions = []
     seen_journeys = set()
     seen_windows = set()
+    seen_evidence_keys = set()
     expected_sequence = 1
 
     for stage_name, count in _CANDIDATE_STAGE_COUNTS:
@@ -1716,6 +1735,17 @@ async def run_candidate_soak(
                 failures.append({"code": "EVIDENCE_WINDOW_REUSED", "stage": stage_name})
             else:
                 seen_windows.add(window_id)
+            evidence_key = _evidence_reuse_key(
+                journey_id=journey_id,
+                connection_id=result.get("connectionId"),
+                log_window=result.get("logWindow"),
+            )
+            if evidence_key is None:
+                failures.append({"code": "EVIDENCE_SCOPE_MALFORMED", "stage": stage_name})
+            elif evidence_key in seen_evidence_keys:
+                failures.append({"code": "EVIDENCE_SCOPE_REUSED", "stage": stage_name})
+            else:
+                seen_evidence_keys.add(evidence_key)
             if stage_name == "lesson" and result.get("lessonManifestSha256") != lesson_manifest_sha256:
                 failures.append({"code": "LESSON_MANIFEST_MISMATCH"})
             executions.append(result)
@@ -1792,31 +1822,42 @@ async def run_candidate_soak(
         "maxReceiveLoopsActive"
     ) not in {0, 1}:
         failures.append({"code": "LOG_RELIABILITY_CONTRACT_INVALID"})
-    transport_scope = (
-        transport.get("journeyId"),
-        (transport.get("logWindow") or {}).get("windowId") if isinstance(transport.get("logWindow"), Mapping) else None,
+    normalized_correlation = correlate_websocket_bargein_evidence(
+        transport,
+        log_report,
+        expected_candidate_identity=identity,
     )
-    correlated_scope = (
-        correlated.get("journeyId"),
-        (correlated.get("logWindow") or {}).get("windowId")
-        if isinstance(correlated.get("logWindow"), Mapping)
-        else None,
+    correlated_contract_fields = (
+        "schemaVersion",
+        "name",
+        "status",
+        "candidateIdentity",
+        "journeyId",
+        "evidenceScope",
+        "initialLiveConnectionId",
+        "finalLiveConnectionId",
+        "liveConnectionTransitions",
+        "logWindow",
+        "correlationSource",
+        "correlationStatus",
+        "aggregateReleaseEligible",
     )
-    log_scope = (
-        (log_report.get("evidenceScope") or {}).get("journeyId")
-        if isinstance(log_report.get("evidenceScope"), Mapping)
-        else None,
-        (log_report.get("logWindow") or {}).get("windowId")
-        if isinstance(log_report.get("logWindow"), Mapping)
-        else None,
-    )
-    if (
-        not all(isinstance(value, str) and value for value in transport_scope)
-        or transport_scope != correlated_scope
-        or transport_scope != log_scope
+    if normalized_correlation.get("status") != "PASS" or any(
+        correlated.get(field) != normalized_correlation.get(field)
+        for field in correlated_contract_fields
     ):
+        failures.append({"code": "TASK5_CORRELATED_EVIDENCE_INVALID"})
+    upstream_scope = correlated.get("evidenceScope")
+    upstream_key = _evidence_reuse_key(
+        journey_id=correlated.get("journeyId"),
+        connection_id=(upstream_scope or {}).get("connectionId")
+        if isinstance(upstream_scope, Mapping)
+        else None,
+        log_window=correlated.get("logWindow"),
+    )
+    if upstream_key is None:
         failures.append({"code": "UPSTREAM_EVIDENCE_SCOPE_MISMATCH"})
-    elif transport_scope[0] in seen_journeys or transport_scope[1] in seen_windows:
+    elif upstream_key in seen_evidence_keys:
         failures.append({"code": "UPSTREAM_EVIDENCE_REUSED"})
 
     total_fields = (
