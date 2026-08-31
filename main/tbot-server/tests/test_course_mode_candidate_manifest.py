@@ -587,17 +587,19 @@ def test_candidate_rejects_image_role_and_oci_provenance_mutation(candidate: dic
 
 
 @pytest.mark.parametrize(
-    ("evidence_created_at", "accepted"),
+    ("candidate_created_at", "evidence_created_at", "accepted"),
     [
-        ("2026-08-28T23:59:59Z", True),
-        ("2026-08-29T00:00:00Z", True),
-        ("2026-08-29T00:00:01Z", False),
+        ("2026-08-29T00:00:00Z", "2026-08-28T23:59:59.999999Z", True),
+        ("2026-08-29T00:00:00.123456Z", "2026-08-29T00:00:00.123456Z", True),
+        ("2026-08-29T00:00:00.123456Z", "2026-08-29T00:00:00.123457Z", False),
+        ("2026-08-29T00:00:00.000000Z", "2026-08-29T00:00:00.0000001Z", False),
     ],
-    ids=["before-candidate", "equal-to-candidate", "after-candidate"],
+    ids=["fractional-before", "fractional-equal", "fractional-after", "submicro-after"],
 )
 def test_firmware_evidence_creation_is_not_after_candidate(
-    candidate: dict, evidence_created_at: str, accepted: bool,
+    candidate: dict, candidate_created_at: str, evidence_created_at: str, accepted: bool,
 ) -> None:
+    candidate["createdAt"] = candidate_created_at
     path = Path(candidate["firmware"]["evidenceManifestPath"])
     evidence = json.loads(path.read_text(encoding="utf-8"))
     evidence["createdAt"] = evidence_created_at
@@ -947,7 +949,9 @@ def test_candidate_id_has_a_canonical_format(candidate: dict, candidate_id: str)
 @pytest.mark.parametrize("field, value", [
     ("createdAt", "2026-08-29T00:00:00+00:00"),
     ("createdAt", "2026-08-29 00:00:00Z"),
+    ("createdAt", "2026-08-29T00:00:00.0000000Z"),
     ("expiresAt", "2026-09-05T00:00:00z"),
+    ("expiresAt", "2026-09-05T00:00:00.1234567Z"),
     ("expiresAt", "not-a-time"),
 ])
 def test_candidate_times_require_canonical_rfc3339_utc(
