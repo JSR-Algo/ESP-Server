@@ -259,6 +259,12 @@ class OperatorAttestationBinding:
     sha256: str
 
 
+@dataclass
+class ReportDestination:
+    parent_fd: int
+    identity: tuple[int, int] | None = None
+
+
 class RetainedStagingError(RuntimeError):
     def __init__(self, *paths: Path):
         self.paths = tuple(sorted({str(path) for path in paths}))
@@ -2788,29 +2794,41 @@ def _command_for_lane(lane: Lane, candidate: dict) -> tuple[str, ...] | None:
     return lane.command
 
 
-def _write_report_atomic(path: Path, report: dict, parent_fd: int | None = None) -> bool:
+def _write_report_atomic(
+    path: Path, report: dict, destination: ReportDestination | None = None,
+) -> bool:
     payload = json.dumps(
         report, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False,
     ).encode("utf-8") + b"\n"
     if len(payload) > MAX_REPORT_BYTES or not path.is_absolute():
         return False
-    owned_fd = parent_fd is None
+    owned_destination = destination is None
     temporary = None
     try:
-        if parent_fd is None:
+        if destination is None:
             parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            destination = ReportDestination(parent_fd)
+        parent_fd = destination.parent_fd
         descriptor_parent = os.fstat(parent_fd)
         named_parent = os.stat(path.parent, follow_symlinks=False)
         if (descriptor_parent.st_dev, descriptor_parent.st_ino) != (
             named_parent.st_dev, named_parent.st_ino,
         ):
             return False
-        try:
-            current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
-            if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
+        if destination.identity is None:
+            try:
+                os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
                 return False
-        except FileNotFoundError:
-            pass
+            except FileNotFoundError:
+                pass
+        else:
+            current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(current.st_mode)
+                or current.st_nlink != 1
+                or (current.st_dev, current.st_ino) != destination.identity
+            ):
+                return False
         for _ in range(32):
             temporary = f".{path.name}.{secrets.token_hex(8)}"
             try:
@@ -2836,24 +2854,41 @@ def _write_report_atomic(path: Path, report: dict, parent_fd: int | None = None)
         temporary_stat = os.stat(temporary, dir_fd=parent_fd, follow_symlinks=False)
         if not stat.S_ISREG(temporary_stat.st_mode) or temporary_stat.st_nlink != 1:
             return False
-        os.replace(temporary, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-        temporary = None
+        if destination.identity is None:
+            os.link(
+                temporary, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            destination.identity = (temporary_stat.st_dev, temporary_stat.st_ino)
+            os.unlink(temporary, dir_fd=parent_fd)
+            temporary = None
+        else:
+            os.replace(temporary, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            temporary = None
+        destination.identity = (temporary_stat.st_dev, temporary_stat.st_ino)
+        published = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(published.st_mode)
+            or published.st_nlink != 1
+            or (published.st_dev, published.st_ino) != destination.identity
+        ):
+            return False
         os.fsync(parent_fd)
         named_parent = os.stat(path.parent, follow_symlinks=False)
         if (descriptor_parent.st_dev, descriptor_parent.st_ino) != (
             named_parent.st_dev, named_parent.st_ino,
         ):
-            _invalidate_report(path, parent_fd)
+            _invalidate_report(path, destination)
             return False
         return True
     except OSError:
         return False
     finally:
-        if temporary is not None and parent_fd is not None:
+        if temporary is not None and destination is not None:
             with contextlib.suppress(OSError):
-                os.unlink(temporary, dir_fd=parent_fd)
-        if owned_fd and parent_fd is not None:
-            os.close(parent_fd)
+                os.unlink(temporary, dir_fd=destination.parent_fd)
+        if owned_destination and destination is not None:
+            os.close(destination.parent_fd)
 
 
 def _path_overlaps(left: Path, right: Path) -> bool:
@@ -2870,7 +2905,7 @@ def _path_overlaps(left: Path, right: Path) -> bool:
 
 def _prepare_report_destination(
     candidate_path: Path, candidate: dict, report_path: Path,
-) -> int | None:
+) -> ReportDestination | None:
     if not report_path.is_absolute():
         return None
     parent_fd = None
@@ -2915,9 +2950,8 @@ def _prepare_report_destination(
         if (actual_parent.st_dev, actual_parent.st_ino) != (expected_parent.st_dev, expected_parent.st_ino):
             return None
         try:
-            metadata = os.stat(report_path.name, dir_fd=parent_fd, follow_symlinks=False)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-                return None
+            os.stat(report_path.name, dir_fd=parent_fd, follow_symlinks=False)
+            return None
         except FileNotFoundError:
             pass
         if any(
@@ -2925,7 +2959,7 @@ def _prepare_report_destination(
             for protected in (candidate_input, *repository_roots)
         ):
             return None
-        prepared = parent_fd
+        prepared = ReportDestination(parent_fd)
         parent_fd = None
         return prepared
     except (KeyError, OSError, TypeError, ValueError):
@@ -2935,10 +2969,16 @@ def _prepare_report_destination(
             os.close(parent_fd)
 
 
-def _invalidate_report(path: Path, parent_fd: int) -> None:
+def _invalidate_report(path: Path, destination: ReportDestination) -> None:
+    if destination.identity is None:
+        return
     with contextlib.suppress(OSError):
-        os.unlink(path.name, dir_fd=parent_fd)
-        os.fsync(parent_fd)
+        current = os.stat(path.name, dir_fd=destination.parent_fd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != destination.identity:
+            return
+        os.unlink(path.name, dir_fd=destination.parent_fd)
+        os.fsync(destination.parent_fd)
+        destination.identity = None
 
 
 def run_gate(
@@ -2957,11 +2997,11 @@ def run_gate(
     require_runtime = False
     operator_binding: OperatorAttestationBinding | None = None
     source = source_environment if source_environment is not None else os.environ
-    report_parent_fd = None
+    report_destination = None
     if report_path is not None:
         if candidate is not None:
-            report_parent_fd = _prepare_report_destination(candidate_path, candidate, report_path)
-        if report_parent_fd is None:
+            report_destination = _prepare_report_destination(candidate_path, candidate, report_path)
+        if report_destination is None:
             return _blocked(candidate_id if isinstance(candidate_id, str) else None, "report")
     if candidate is None or validate_candidate(candidate):
         report = _blocked(candidate_id if isinstance(candidate_id, str) else None, "candidate")
@@ -2974,8 +3014,8 @@ def run_gate(
     elif lanes is None and report_path is not None and _paths_alias(
         report_path, operator_binding.path,
     ):
-        assert report_parent_fd is not None
-        os.close(report_parent_fd)
+        assert report_destination is not None
+        os.close(report_destination.parent_fd)
         return _blocked(candidate_id, "report")
     elif lanes is None and not _runtime_matches_candidate(candidate, runtime_root):
         report = _blocked(candidate_id, "candidate-runtime")
@@ -3197,14 +3237,14 @@ def run_gate(
     ) != operator_binding:
         report = _blocked(candidate_id, "operator-precondition")
     if report_path is not None:
-        assert report_parent_fd is not None
+        assert report_destination is not None
         if operator_binding is not None and (
             _operator_attestation_binding(candidate, source) != operator_binding
         ):
             report = _blocked(candidate_id, "operator-precondition")
-        if not _write_report_atomic(report_path, report, report_parent_fd):
-            _invalidate_report(report_path, report_parent_fd)
-            os.close(report_parent_fd)
+        if not _write_report_atomic(report_path, report, report_destination):
+            _invalidate_report(report_path, report_destination)
+            os.close(report_destination.parent_fd)
             return _blocked(report.get("candidateId"), "report")
         post_publish_report = None
         if report["verdict"] == "PASS" and operator_binding is not None and (
@@ -3219,11 +3259,11 @@ def run_gate(
             )
         if post_publish_report is not None:
             report = post_publish_report
-            if not _write_report_atomic(report_path, report, report_parent_fd):
-                _invalidate_report(report_path, report_parent_fd)
-                os.close(report_parent_fd)
+            if not _write_report_atomic(report_path, report, report_destination):
+                _invalidate_report(report_path, report_destination)
+                os.close(report_destination.parent_fd)
                 return _blocked(candidate_id, "report")
-        os.close(report_parent_fd)
+        os.close(report_destination.parent_fd)
     return report
 
 

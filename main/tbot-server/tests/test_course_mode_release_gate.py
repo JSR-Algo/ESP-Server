@@ -718,6 +718,51 @@ def test_production_gate_replaces_pass_report_if_attestation_changes_during_publ
     assert "operatorAttestationSha256" not in published
 
 
+def test_corrective_report_does_not_replace_or_unlink_foreign_target(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attestation = _write_operator_attestation(candidate_file)
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    report_path = Path(candidate["evidenceRoot"]) / "report.json"
+    foreign = b'{"owner":"other-run"}\n'
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(gate, "lanes_for_mode", lambda _mode: ())
+    original_write = gate._write_report_atomic
+    writes = 0
+
+    def replace_owned_report_after_pass(*args, **kwargs):
+        nonlocal writes
+        written = original_write(*args, **kwargs)
+        writes += 1
+        if writes == 1:
+            replacement_attestation = attestation.with_name("operator-attestation-race.json")
+            replacement_attestation.write_text(
+                json.dumps({
+                    **_operator_attestation_payload(candidate_file),
+                    "createdAt": "2099-01-02T00:00:00Z",
+                }),
+                encoding="utf-8",
+            )
+            replacement_attestation.chmod(0o444)
+            replacement_attestation.replace(attestation)
+            replacement_report = report_path.with_name("foreign-report.json")
+            replacement_report.write_bytes(foreign)
+            replacement_report.replace(report_path)
+        return written
+
+    monkeypatch.setattr(gate, "_write_report_atomic", replace_owned_report_after_pass)
+
+    result = gate.run_gate(
+        candidate_file, "quick", runtime_root=_runtime_root(candidate_file),
+        report_path=report_path,
+    )
+
+    assert writes == 2
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "report"
+    assert report_path.read_bytes() == foreign
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -3535,18 +3580,59 @@ def test_original_repository_drift_does_not_require_corrective_report(
     assert report.exists()
 
 
-def test_failed_initial_report_write_removes_preexisting_stale_pass(
+@pytest.mark.parametrize("name", ["00-candidate-validator.json", "01-quick-gate.json"])
+def test_preexisting_evidence_target_is_rejected_before_lane_and_preserved(
     candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    name: str,
 ) -> None:
-    report = tmp_path / "evidence/report.json"
-    report.write_text('{"verdict":"PASS"}\n', encoding="utf-8")
-    monkeypatch.setattr(gate, "_write_report_atomic", lambda *_args: False)
+    report = tmp_path / "evidence" / name
+    original = b'{"validator":"existing"}\n'
+    report.write_bytes(original)
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *_args, **_kwargs: pytest.fail("lane must not run for an existing report target"),
+    )
 
-    result = gate.run_gate(candidate_file, "quick", lanes=(), report_path=report)
+    result = gate.run_gate(
+        candidate_file,
+        "quick",
+        lanes=(_lane("must-not-run", "raise SystemExit(0)"),),
+        report_path=report,
+    )
 
     assert result["verdict"] == "BLOCKED"
     assert result["failedLane"] == "report"
-    assert not report.exists()
+    assert report.read_bytes() == original
+
+
+def test_case_variant_existing_evidence_target_is_rejected_before_lane_and_preserved(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing = tmp_path / "evidence/01-QUICK-GATE.json"
+    report_alias = existing.with_name(existing.name.swapcase())
+    original = b'{"verdict":"PASS"}\n'
+    existing.write_bytes(original)
+    try:
+        aliases_existing = os.path.samefile(report_alias, existing)
+    except FileNotFoundError:
+        aliases_existing = False
+    if not aliases_existing:
+        pytest.skip("filesystem is case-sensitive")
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *_args, **_kwargs: pytest.fail("lane must not run for an existing report alias"),
+    )
+
+    result = gate.run_gate(
+        candidate_file,
+        "quick",
+        lanes=(_lane("must-not-run", "raise SystemExit(0)"),),
+        report_path=report_alias,
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "report"
+    assert existing.read_bytes() == original
 
 
 def test_last_lane_candidate_manifest_drift_is_revalidated(candidate_file: Path) -> None:
