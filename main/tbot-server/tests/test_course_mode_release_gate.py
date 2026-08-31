@@ -560,6 +560,242 @@ def _lane(name: str, code: str, *, timeout: float = 5.0, required: str | None = 
     )
 
 
+def _runtime_root(candidate_file: Path) -> Path:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    return Path(candidate["repositories"]["adminEsp"]["path"])
+
+
+def _operator_attestation_payload(candidate_file: Path) -> dict:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    return {
+        "candidateId": candidate["candidateId"],
+        "createdAt": "2099-01-01T00:00:00Z",
+        "effectiveUid": os.geteuid(),
+        "gateSha": candidate["repositories"]["adminEsp"]["sha"],
+        "hostName": socket.gethostname(),
+        "sameUidThreatModel": "malicious-process-excluded",
+        "schemaVersion": 1,
+        "trustedOperatorAccountConfirmed": True,
+        "untrustedAutomationStoppedConfirmed": True,
+    }
+
+
+def _write_operator_attestation(
+    candidate_file: Path, payload: dict | None = None, *, path: Path | None = None,
+) -> Path:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    attestation = path or Path(candidate["evidenceRoot"]) / "operator-attestation.json"
+    attestation.parent.mkdir(parents=True, exist_ok=True)
+    attestation.write_text(
+        json.dumps(payload or _operator_attestation_payload(candidate_file)), encoding="utf-8",
+    )
+    attestation.chmod(0o444)
+    return attestation
+
+
+def test_production_gate_blocks_without_operator_attestation(candidate_file: Path) -> None:
+    result = gate.run_gate(
+        candidate_file, "quick", runtime_root=_runtime_root(candidate_file),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "operator-precondition"
+
+
+def test_production_gate_accepts_exact_operator_attestation(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(gate, "lanes_for_mode", lambda _mode: ())
+
+    result = gate.run_gate(
+        candidate_file, "quick", runtime_root=_runtime_root(candidate_file),
+    )
+
+    assert result["verdict"] == "PASS"
+    assert result["operatorAttestationSha256"] == hashlib.sha256(
+        attestation.read_bytes(),
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("candidateId", "course-mode-2099-01-01.2"),
+        ("createdAt", "not-a-timestamp"),
+        ("effectiveUid", -1),
+        ("gateSha", "0" * 40),
+        ("hostName", "other-host.invalid"),
+        ("sameUidThreatModel", "malicious-process-covered"),
+        ("schemaVersion", 2),
+        ("trustedOperatorAccountConfirmed", False),
+        ("untrustedAutomationStoppedConfirmed", False),
+    ],
+)
+def test_production_gate_blocks_wrong_operator_attestation_field(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: object,
+) -> None:
+    payload = _operator_attestation_payload(candidate_file)
+    payload[field] = value
+    attestation = _write_operator_attestation(candidate_file, payload)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+
+    result = gate.run_gate(
+        candidate_file, "quick", runtime_root=_runtime_root(candidate_file),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "operator-precondition"
+
+
+@pytest.mark.parametrize("mutation", ["extra", "missing"])
+def test_production_gate_requires_exact_operator_attestation_keys(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, mutation: str,
+) -> None:
+    payload = _operator_attestation_payload(candidate_file)
+    if mutation == "extra":
+        payload["unexpected"] = True
+    else:
+        del payload["createdAt"]
+    attestation = _write_operator_attestation(candidate_file, payload)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+
+    result = gate.run_gate(
+        candidate_file, "quick", runtime_root=_runtime_root(candidate_file),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "operator-precondition"
+
+
+def test_production_gate_rejects_operator_attestation_symlink(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = _write_operator_attestation(candidate_file)
+    symlink = target.with_name("operator-attestation-link.json")
+    symlink.symlink_to(target)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(symlink))
+
+    result = gate.run_gate(
+        candidate_file, "quick", runtime_root=_runtime_root(candidate_file),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "operator-precondition"
+
+
+def test_production_gate_rejects_hardlinked_operator_attestation(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attestation = _write_operator_attestation(candidate_file)
+    os.link(attestation, attestation.with_name("operator-attestation-hardlink.json"))
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+
+    result = gate.run_gate(
+        candidate_file, "quick", runtime_root=_runtime_root(candidate_file),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "operator-precondition"
+
+
+def test_production_gate_rejects_operator_attestation_outside_evidence_root(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attestation = _write_operator_attestation(
+        candidate_file, path=tmp_path / "outside-attestation.json",
+    )
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+
+    result = gate.run_gate(
+        candidate_file, "quick", runtime_root=_runtime_root(candidate_file),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "operator-precondition"
+
+
+def test_production_gate_rejects_writable_operator_attestation(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attestation = _write_operator_attestation(candidate_file)
+    attestation.chmod(0o664)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+
+    result = gate.run_gate(
+        candidate_file, "quick", runtime_root=_runtime_root(candidate_file),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "operator-precondition"
+
+
+def test_production_gate_rejects_operator_attestation_beneath_writable_directory(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attestation = _write_operator_attestation(candidate_file)
+    attestation.parent.chmod(0o775)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+
+    result = gate.run_gate(
+        candidate_file, "quick", runtime_root=_runtime_root(candidate_file),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "operator-precondition"
+
+
+def test_operator_attestation_binding_requires_evidence_root_owned_by_effective_uid(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attestation = _write_operator_attestation(candidate_file)
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    effective_uid = os.geteuid()
+    monkeypatch.setattr(gate.os, "geteuid", lambda: effective_uid + 1)
+
+    binding = gate._operator_attestation_binding(
+        candidate, {"COURSE_MODE_OPERATOR_ATTESTATION": str(attestation)},
+    )
+
+    assert binding is None
+
+
+def test_production_gate_revalidates_operator_attestation_after_each_lane(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    lanes = (_lane("one", "raise SystemExit(0)"), _lane("two", "raise SystemExit(0)"))
+    monkeypatch.setattr(gate, "lanes_for_mode", lambda _mode: lanes)
+    original_run = gate.run_bounded_command
+    calls = 0
+
+    def replace_after_first_lane(*args, **kwargs):
+        nonlocal calls
+        result = original_run(*args, **kwargs)
+        calls += 1
+        if calls == 1:
+            replacement = attestation.with_name("operator-attestation-replacement.json")
+            replacement.write_text(
+                json.dumps({**_operator_attestation_payload(candidate_file), "createdAt": "2099-01-02T00:00:00Z"}),
+                encoding="utf-8",
+            )
+            replacement.chmod(0o444)
+            replacement.replace(attestation)
+        return result
+
+    monkeypatch.setattr(gate, "run_bounded_command", replace_after_first_lane)
+
+    result = gate.run_gate(
+        candidate_file, "quick", runtime_root=_runtime_root(candidate_file),
+    )
+
+    assert calls == 1
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "operator-precondition"
+
+
 def test_success_report_is_stable_and_machine_readable(candidate_file: Path) -> None:
     result = gate.run_gate(
         candidate_file, "quick", lanes=(_lane("one", "raise SystemExit(0)"),),

@@ -92,6 +92,13 @@ ROBOT_PREVIEW_BROWSER_ENVIRONMENT = {
     "treeTotalBytes": "TBOT_ROBOT_PREVIEW_BROWSER_TREE_TOTAL_BYTES",
 }
 MODES = ("quick", "full", "live-db", "physical-preflight")
+OPERATOR_ATTESTATION_ENV = "COURSE_MODE_OPERATOR_ATTESTATION"
+OPERATOR_ATTESTATION_KEYS = {
+    "candidateId", "createdAt", "effectiveUid", "gateSha", "hostName",
+    "sameUidThreatModel", "schemaVersion", "trustedOperatorAccountConfirmed",
+    "untrustedAutomationStoppedConfirmed",
+}
+MAX_OPERATOR_ATTESTATION_BYTES = 64 * 1024
 COURSE_MODE_SOFTWARE_TESTS = "@course-mode-software-tests"
 PLAYWRIGHT_CONTRACT_PATH = "main/manager-web/course-mode.playwright.contract.json"
 PLAYWRIGHT_SOURCE_PATHS = (
@@ -244,6 +251,12 @@ class Lane:
     fixed_environment: tuple[tuple[str, str], ...] = ()
     required_source_contract: str | None = None
     reject_pytest_skips: bool = False
+
+
+@dataclass(frozen=True)
+class OperatorAttestationBinding:
+    path: Path
+    sha256: str
 
 
 class RetainedStagingError(RuntimeError):
@@ -2659,6 +2672,99 @@ def _candidate_metadata_matches(candidate_path: Path, candidate: dict) -> bool:
     return observed is not None and _json_exact_equal(observed, candidate)
 
 
+def _operator_attestation_binding(
+    candidate: dict, source: Mapping[str, str],
+) -> OperatorAttestationBinding | None:
+    value = source.get(OPERATOR_ATTESTATION_ENV)
+    if not isinstance(value, str) or not value:
+        return None
+    parent_fd: int | None = None
+    try:
+        path = Path(value)
+        evidence_value = Path(candidate["evidenceRoot"])
+        if not path.is_absolute() or not evidence_value.is_absolute():
+            return None
+        absolute = Path(os.path.abspath(path))
+        evidence_root = Path(os.path.abspath(evidence_value))
+        relative = absolute.relative_to(evidence_root)
+        if not relative.parts:
+            return None
+
+        effective_uid = os.geteuid()
+        parent_fd = _manifest._open_directory_secure(evidence_root)
+        evidence_metadata = os.fstat(parent_fd)
+        if (
+            not stat.S_ISDIR(evidence_metadata.st_mode)
+            or evidence_metadata.st_uid != effective_uid
+            or evidence_metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            return None
+        for component in relative.parts[:-1]:
+            next_fd = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+            os.close(parent_fd)
+            parent_fd = next_fd
+            metadata = os.fstat(parent_fd)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid != effective_uid
+                or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            ):
+                return None
+
+        before = os.stat(relative.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_uid != effective_uid
+            or before.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            return None
+        raw = read_secure_regular(absolute, MAX_OPERATOR_ATTESTATION_BYTES)
+        after = os.stat(relative.name, dir_fd=parent_fd, follow_symlinks=False)
+        identity = (
+            before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+            before.st_mode, before.st_nlink, before.st_uid,
+        )
+        if identity != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+            after.st_mode, after.st_nlink, after.st_uid,
+        ):
+            return None
+        payload = strict_json_loads(raw)
+        repositories = candidate["repositories"]
+        expected = {
+            "candidateId": candidate["candidateId"],
+            "effectiveUid": os.geteuid(),
+            "gateSha": repositories["adminEsp"]["sha"],
+            "hostName": socket.gethostname(),
+            "sameUidThreatModel": "malicious-process-excluded",
+            "schemaVersion": 1,
+            "trustedOperatorAccountConfirmed": True,
+            "untrustedAutomationStoppedConfirmed": True,
+        }
+        if not isinstance(payload, dict) or set(payload) != OPERATOR_ATTESTATION_KEYS:
+            return None
+        if _manifest._parse_rfc3339_utc(payload.get("createdAt")) is None:
+            return None
+        if any(
+            not _json_exact_equal(payload.get(key), expected_value)
+            for key, expected_value in expected.items()
+        ):
+            return None
+        return OperatorAttestationBinding(
+            path=absolute, sha256=hashlib.sha256(raw).hexdigest(),
+        )
+    except (KeyError, OSError, TypeError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        return None
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
 def _command_for_lane(lane: Lane, candidate: dict) -> tuple[str, ...] | None:
     if lane.command == (COURSE_MODE_SOFTWARE_TESTS,):
         repository = candidate["repositories"]["adminEsp"]
@@ -2838,6 +2944,8 @@ def run_gate(
     candidate_id = candidate.get("candidateId") if isinstance(candidate, dict) else None
     selected: tuple[Lane, ...] = ()
     require_runtime = False
+    operator_binding: OperatorAttestationBinding | None = None
+    source = source_environment if source_environment is not None else os.environ
     report_parent_fd = None
     if report_path is not None:
         if candidate is not None:
@@ -2848,6 +2956,10 @@ def run_gate(
         report = _blocked(candidate_id if isinstance(candidate_id, str) else None, "candidate")
     elif mode not in MODES or type(max_output_bytes) is not int or max_output_bytes <= 0:
         report = _blocked(candidate_id, "configuration")
+    elif lanes is None and (
+        operator_binding := _operator_attestation_binding(candidate, source)
+    ) is None:
+        report = _blocked(candidate_id, "operator-precondition")
     elif lanes is None and not _runtime_matches_candidate(candidate, runtime_root):
         report = _blocked(candidate_id, "candidate-runtime")
     else:
@@ -2872,7 +2984,6 @@ def run_gate(
                     report["lanes"].append({
                         "name": selected[0].name, "exitCode": None, "durationMs": 0,
                     })
-            source = source_environment if source_environment is not None else os.environ
             for lane in selected if report["verdict"] == "PASS" else ():
                 execution_stage = None
                 lane_execution = None
@@ -3037,6 +3148,12 @@ def run_gate(
                 })
                 if not _cleanup_gate_owned(report, lane_execution, execution_stage):
                     break
+                if operator_binding is not None and _operator_attestation_binding(
+                    candidate, source,
+                ) != operator_binding:
+                    report["verdict"] = "BLOCKED"
+                    report["failedLane"] = "operator-precondition"
+                    break
                 if not _candidate_metadata_matches(candidate_path, candidate):
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
@@ -3049,10 +3166,25 @@ def run_gate(
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
                     break
-            if report["verdict"] == "PASS" and not _candidate_metadata_matches(candidate_path, candidate):
-                report = _blocked(candidate_id, selected[-1].name if selected else "candidate-runtime")
+            if report["verdict"] == "PASS":
+                if operator_binding is not None and _operator_attestation_binding(
+                    candidate, source,
+                ) != operator_binding:
+                    report = _blocked(candidate_id, "operator-precondition")
+                elif not _candidate_metadata_matches(candidate_path, candidate):
+                    report = _blocked(candidate_id, selected[-1].name if selected else "candidate-runtime")
+                elif operator_binding is not None:
+                    report["operatorAttestationSha256"] = operator_binding.sha256
+    if operator_binding is not None and _operator_attestation_binding(
+        candidate, source,
+    ) != operator_binding:
+        report = _blocked(candidate_id, "operator-precondition")
     if report_path is not None:
         assert report_parent_fd is not None
+        if operator_binding is not None and (
+            _operator_attestation_binding(candidate, source) != operator_binding
+        ):
+            report = _blocked(candidate_id, "operator-precondition")
         if not _write_report_atomic(report_path, report, report_parent_fd):
             _invalidate_report(report_path, report_parent_fd)
             os.close(report_parent_fd)
