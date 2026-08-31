@@ -139,20 +139,52 @@ def _parent_still_bound(path: Path, parent_fd: int) -> bool:
 
 
 def _remove_owned_output(
-    parent_fd: int, name: str, identity: tuple[int, int, int],
+    parent_fd: int, name: str, file_fd: int, identity: tuple[int, int, int],
 ) -> None:
+    descriptor_open = True
+    try:
+        descriptor = os.fstat(file_fd)
+    except OSError:
+        descriptor_open = False
+    else:
+        if (descriptor.st_dev, descriptor.st_ino, descriptor.st_uid) != identity:
+            raise OSError("created output descriptor changed")
     try:
         metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        if (
-            (metadata.st_dev, metadata.st_ino, metadata.st_uid) != identity
-            or not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_nlink != 1
-        ):
-            return
-        os.unlink(name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        metadata = None
+    if metadata is not None and (
+        (metadata.st_dev, metadata.st_ino, metadata.st_uid) == identity
+        and stat.S_ISREG(metadata.st_mode)
+        and metadata.st_nlink == 1
+    ):
+        try:
+            os.unlink(name, dir_fd=parent_fd)
+        except OSError as unlink_error:
+            if descriptor_open:
+                _invalidate_owned_descriptor(file_fd)
+            raise OSError("could not remove failed output") from unlink_error
         os.fsync(parent_fd)
-    except OSError:
-        pass
+        return
+    if descriptor_open:
+        _invalidate_owned_descriptor(file_fd)
+        return
+    raise OSError("could not identify failed output")
+
+
+def _invalidate_owned_descriptor(file_fd: int) -> None:
+    os.ftruncate(file_fd, 0)
+    os.fsync(file_fd)
+
+
+def _close_after_failure(fd: int) -> None:
+    try:
+        os.close(fd)
+    except OSError as first_error:
+        try:
+            os.close(fd)
+        except OSError:
+            raise first_error
 
 
 def _output_still_bound(file_fd: int, parent_fd: int, name: str) -> bool:
@@ -193,6 +225,7 @@ def _create(candidate_path: Path, output: Path) -> None:
     parent_fd: int | None = None
     file_fd: int | None = None
     created_identity: tuple[int, int, int] | None = None
+    complete = False
     name = ""
     try:
         parent_fd, name = _secure_output_parent(Path(candidate["evidenceRoot"]), output)
@@ -228,14 +261,26 @@ def _create(candidate_path: Path, output: Path) -> None:
             raise OSError("output changed")
         if not _candidate_unchanged(candidate_path, candidate_raw, candidate_identity):
             raise OSError("candidate changed")
-        created_identity = None
-    finally:
-        if file_fd is not None:
+        try:
             os.close(file_fd)
-        if parent_fd is not None:
-            if created_identity is not None:
-                _remove_owned_output(parent_fd, name, created_identity)
-            os.close(parent_fd)
+        except OSError:
+            raise OSError("output close failed")
+        file_fd = None
+        complete = True
+    finally:
+        try:
+            if (
+                not complete and parent_fd is not None and file_fd is not None
+                and created_identity is not None
+            ):
+                _remove_owned_output(parent_fd, name, file_fd, created_identity)
+        finally:
+            try:
+                if file_fd is not None:
+                    _close_after_failure(file_fd)
+            finally:
+                if parent_fd is not None:
+                    _close_after_failure(parent_fd)
 
 
 def _parser() -> argparse.ArgumentParser:
