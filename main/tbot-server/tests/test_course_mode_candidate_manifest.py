@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -270,6 +271,22 @@ def test_candidate_rejects_group_or_other_writable_repository_ancestor(candidate
     backend.parent.chmod(0o777)
 
     assert "repositories.backend.path" in validate_candidate(candidate, now=NOW)
+
+
+def test_root_owned_sticky_directory_is_a_trusted_source_ancestor() -> None:
+    values = list(Path("/").stat())
+    values[0] = stat.S_IFDIR | 0o1777
+    values[4] = 0
+
+    assert manifest._trusted_source_ancestor(os.stat_result(values), os.geteuid()) is True
+
+
+def test_non_root_sticky_directory_is_not_a_trusted_source_ancestor() -> None:
+    values = list(Path("/").stat())
+    values[0] = stat.S_IFDIR | 0o1777
+    values[4] = os.geteuid()
+
+    assert manifest._trusted_source_ancestor(os.stat_result(values), os.geteuid()) is False
 
 
 def test_candidate_rejects_repository_root_owned_by_another_uid(

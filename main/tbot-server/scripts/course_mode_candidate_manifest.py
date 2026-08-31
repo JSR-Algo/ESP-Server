@@ -284,6 +284,18 @@ def _source_directory_authority_identity(metadata: os.stat_result) -> tuple[int,
     )
 
 
+def _trusted_source_ancestor(metadata: os.stat_result, effective_uid: int) -> bool:
+    mode = stat.S_IMODE(metadata.st_mode)
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and metadata.st_uid in {0, effective_uid}
+        and (
+            not mode & 0o022
+            or (metadata.st_uid == 0 and bool(mode & stat.S_ISVTX))
+        )
+    )
+
+
 def _open_trusted_source_directory(
     path: Path,
 ) -> tuple[int, os.stat_result, tuple[tuple[int, ...], ...]]:
@@ -294,21 +306,13 @@ def _open_trusted_source_directory(
     current = os.open("/", flags)
     try:
         root_metadata = os.fstat(current)
-        if (
-            not stat.S_ISDIR(root_metadata.st_mode)
-            or root_metadata.st_uid not in {0, effective_uid}
-            or stat.S_IMODE(root_metadata.st_mode) & 0o022
-        ):
+        if not _trusted_source_ancestor(root_metadata, effective_uid):
             raise OSError("untrusted source directory")
         metadata = root_metadata
         ancestry = [_source_directory_authority_identity(root_metadata)]
         for component in path.parts[1:]:
             named = os.stat(component, dir_fd=current, follow_symlinks=False)
-            if (
-                not stat.S_ISDIR(named.st_mode)
-                or named.st_uid not in {0, effective_uid}
-                or stat.S_IMODE(named.st_mode) & 0o022
-            ):
+            if not _trusted_source_ancestor(named, effective_uid):
                 raise OSError("untrusted source directory")
             next_fd: int | None = None
             try:
