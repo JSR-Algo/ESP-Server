@@ -2258,6 +2258,68 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             [item["code"] for item in wrong_connection["failures"]],
         )
 
+    def test_scoped_reconnect_start_attempts_are_monotonic_across_failures(self):
+        verdict = self._analyze(
+            _exact_reconnect_window(
+                "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=2 reason=network",
+                "2026-08-31 10:00:02 Google Live evidence_reconnect_failed journey_id=j1 connection_id=c1 attempt=2 from_live_connection_id=l1 live_connection_id=l1 error_class=network",
+                "2026-08-31 10:00:03 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=1 reason=network",
+                final_live_connection_id="l1",
+            )
+        )
+
+        self.assertIn(
+            "RECONNECT_ATTEMPT_ORDER_INVALID",
+            [item["code"] for item in verdict["failures"]],
+        )
+
+    def test_scoped_reconnect_rejects_overlapping_attempts(self):
+        verdict = self._analyze(
+            _exact_reconnect_window(
+                "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=1 reason=network",
+                "2026-08-31 10:00:02 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=2 reason=network",
+                "2026-08-31 10:00:03 Google Live evidence_reconnect_failed journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 live_connection_id=l1 error_class=network",
+                final_live_connection_id="l1",
+            )
+        )
+
+        codes = [item["code"] for item in verdict["failures"]]
+        self.assertIn("RECONNECT_ATTEMPT_OVERLAP", codes)
+        self.assertNotIn("RECONNECT_ATTEMPT_UNFINISHED", codes)
+
+    def test_scoped_late_terminal_cannot_rollback_later_commit(self):
+        verdict = self._analyze(
+            _exact_reconnect_window(
+                "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=2 reason=network",
+                "2026-08-31 10:00:02 Google Live evidence_reopen_ready journey_id=j1 connection_id=c1 attempt=2 from_live_connection_id=l1 to_live_connection_id=l2",
+                "2026-08-31 10:00:03 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=2 from_live_connection_id=l1 to_live_connection_id=l2 reason=network frames=0 bytes=0",
+                "2026-08-31 10:00:04 Google Live evidence_reconnect_succeeded journey_id=j1 connection_id=c1 attempt=2 from_live_connection_id=l1 to_live_connection_id=l2",
+                "2026-08-31 10:00:05 Google Live evidence_reconnect_failed journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 live_connection_id=l1 error_class=network",
+            )
+        )
+
+        codes = [item["code"] for item in verdict["failures"]]
+        self.assertIn("RECONNECT_OUTCOME_WITHOUT_ACTIVE_ATTEMPT", codes)
+        self.assertEqual(verdict["finalLiveConnectionId"], "l2")
+        self.assertEqual(
+            verdict["liveConnectionTransitions"],
+            [{"attempt": 2, "fromLiveConnectionId": "l1", "toLiveConnectionId": "l2"}],
+        )
+
+    def test_scoped_failed_attempt_then_later_success_passes(self):
+        verdict = self._analyze(
+            _exact_reconnect_window(
+                "2026-08-31 10:00:01 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=1 reason=network",
+                "2026-08-31 10:00:02 Google Live evidence_reconnect_failed journey_id=j1 connection_id=c1 attempt=1 from_live_connection_id=l1 live_connection_id=l1 error_class=network",
+                "2026-08-31 10:00:03 Google Live evidence_reconnect_started journey_id=j1 connection_id=c1 from_live_connection_id=l1 attempt=2 reason=network",
+                "2026-08-31 10:00:04 Google Live evidence_reopen_ready journey_id=j1 connection_id=c1 attempt=2 from_live_connection_id=l1 to_live_connection_id=l2",
+                "2026-08-31 10:00:05 Google Live evidence_replayed_buffered_audio journey_id=j1 connection_id=c1 attempt=2 from_live_connection_id=l1 to_live_connection_id=l2 reason=network frames=0 bytes=0",
+                "2026-08-31 10:00:06 Google Live evidence_reconnect_succeeded journey_id=j1 connection_id=c1 attempt=2 from_live_connection_id=l1 to_live_connection_id=l2",
+            )
+        )
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+
     def test_scoped_reconnect_requires_exact_anchor_live_id(self):
         wrong_live = self._analyze(
             _window_lines(

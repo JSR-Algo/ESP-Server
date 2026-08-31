@@ -1423,6 +1423,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     scoped_current_live_connection_id = None
     scoped_live_connection_transitions: list[dict[str, Any]] = []
     scoped_last_transition_attempt = 0
+    scoped_last_started_attempt = 0
+    scoped_active_reconnect_key: tuple[str, str, int] | None = None
 
     def parse_scoped_uint(text: str | None, max_value: int) -> int | None:
         if text is None or len(text) > 10:
@@ -2056,7 +2058,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 attempt = parse_scoped_uint(
                     scoped_reconnect_start.group("attempt"), 1_000_000
                 )
-                if attempt is None:
+                if attempt is None or attempt == 0:
                     failures.append(
                         _failure(
                             "MALFORMED_RELIABILITY_LOG_LINE",
@@ -2065,11 +2067,30 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         )
                     )
                     continue
+                if attempt <= scoped_last_started_attempt:
+                    failures.append(
+                        _failure(
+                            "RECONNECT_ATTEMPT_ORDER_INVALID",
+                            line_number,
+                            f"attempt {attempt} is not greater than {scoped_last_started_attempt}",
+                        )
+                    )
+                    continue
+                scoped_last_started_attempt = attempt
                 key = (
                     journey_id,
                     scoped_reconnect_start.group("connection_id"),
                     attempt,
                 )
+                if scoped_active_reconnect_key is not None:
+                    failures.append(
+                        _failure(
+                            "RECONNECT_ATTEMPT_OVERLAP",
+                            line_number,
+                            f"active={scoped_active_reconnect_key} new={key}",
+                        )
+                    )
+                    continue
                 if key in scoped_reconnects:
                     failures.append(
                         _failure("DUPLICATE_RECONNECT_ATTEMPT", line_number, str(key))
@@ -2083,6 +2104,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         "from_live_connection_id"
                     ),
                 }
+                scoped_active_reconnect_key = key
                 if scoped_current_live_connection_id is None:
                     scoped_initial_live_connection_id = (
                         scoped_reconnect_start.group("from_live_connection_id")
@@ -2121,6 +2143,15 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     scoped_reopen_ready.group("connection_id"),
                     attempt,
                 )
+                if scoped_active_reconnect_key != key:
+                    failures.append(
+                        _failure(
+                            "REOPEN_READY_WITHOUT_ATTEMPT",
+                            line_number,
+                            str(key),
+                        )
+                    )
+                    continue
                 state = scoped_reconnects.get(key)
                 if state is None:
                     failures.append(
@@ -2280,6 +2311,15 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     scoped_reconnect_outcome.group("connection_id"),
                     attempt,
                 )
+                if scoped_active_reconnect_key != key:
+                    failures.append(
+                        _failure(
+                            "RECONNECT_OUTCOME_WITHOUT_ACTIVE_ATTEMPT",
+                            line_number,
+                            str(key),
+                        )
+                    )
+                    continue
                 state = scoped_reconnects.get(key)
                 if state is None:
                     failures.append(
@@ -2395,6 +2435,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                                 str(key),
                             )
                         )
+                    scoped_active_reconnect_key = None
                 observed_marker_families[journey_id].add("reconnect_outcome")
                 continue
             scoped_stale = P_EVIDENCE_STALE_DROP.search(line)
@@ -3212,6 +3253,27 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     ",".join(missing_families),
                 )
             )
+
+    replayed_ledger_owner = scoped_initial_live_connection_id
+    for transition in scoped_live_connection_transitions:
+        if transition["fromLiveConnectionId"] != replayed_ledger_owner:
+            failures.append(
+                _failure(
+                    "LIVE_CONNECTION_TRANSITION_STATE_MISMATCH",
+                    0,
+                    str(transition),
+                )
+            )
+            break
+        replayed_ledger_owner = transition["toLiveConnectionId"]
+    if replayed_ledger_owner != scoped_current_live_connection_id:
+        failures.append(
+            _failure(
+                "LIVE_CONNECTION_TRANSITION_STATE_MISMATCH",
+                0,
+                "final owner does not equal replayed committed transition ledger",
+            )
+        )
 
     candidate_identity = (
         start_anchor.get("candidateIdentity") if start_anchor is not None else None
