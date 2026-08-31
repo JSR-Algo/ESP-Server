@@ -1,69 +1,69 @@
-import os
-import sys
+import asyncio
 import copy
 import hashlib
 import json
-import re
-import uuid
-import time
+import os
 import queue
-import asyncio
-import threading
-import traceback
+import re
 import subprocess
+import sys
+import threading
+import time
+import traceback
+import uuid
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from typing import Any, Dict
+
 import websockets
 
-from core.utils.util import (
-    extract_json_from_string,
-    check_vad_update,
-    check_asr_update,
-    filter_sensitive_info,
-)
-from typing import Dict, Any
-from collections import deque
-from core.utils.modules_initialize import (
-    initialize_modules,
-    initialize_tts,
-    initialize_asr,
-)
-from core.handle.reportHandle import report, enqueue_tool_report
-from core.lesson.log_context import with_lesson_log_context
-from core.lesson import runtime_counters as lesson_runtime_counters
-from core.providers.tts.default import DefaultTTS
-from concurrent.futures import ThreadPoolExecutor
-from core.utils.dialogue import Message, Dialogue
-from core.providers.asr.dto.dto import InterfaceType
-from core.handle.textHandle import handleTextMessage
-from core.providers.tools.unified_tool_handler import UnifiedToolHandler
-from plugins_func.loadplugins import auto_import_modules
-from plugins_func.register import Action, ActionResponse
-from core.auth import AuthenticationError
 from config.config_loader import (
     get_private_config_from_api,
     merge_configs,
     normalize_voice_config,
 )
-from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
-from config.logger import setup_logging, build_module_string, create_connection_logger
-from config.manage_api_client import DeviceNotFoundException, DeviceBindException, generate_and_save_chat_title
-from core.utils.prompt_manager import PromptManager
-from core.utils.voiceprint_provider import VoiceprintProvider
-from core.voice.session_provider.factory import create_voice_session_provider
-from core.utils.util import get_system_error_response
-from core.utils import textUtils
-from core.voice.live_admission import LiveAdmissionGate, create_live_state_store
-from core.voice.session_orchestrator import SessionMode, normalize_session_mode
+from config.logger import build_module_string, create_connection_logger, setup_logging
+from config.manage_api_client import DeviceBindException, DeviceNotFoundException, generate_and_save_chat_title
 from core.activity_lease import ActivityLeaseCoordinator, ActivityOperation
+from core.auth import AuthenticationError
 from core.connection_headers import (
     preserve_request_headers,
     sanitize_headers_for_log,
     single_header,
 )
-
+from core.handle.reportHandle import enqueue_tool_report, report
+from core.handle.textHandle import handleTextMessage
+from core.lesson import runtime_counters as lesson_runtime_counters
+from core.lesson.log_context import with_lesson_log_context
+from core.providers.asr.dto.dto import InterfaceType
+from core.providers.tools.unified_tool_handler import UnifiedToolHandler
+from core.providers.tts.default import DefaultTTS
+from core.providers.tts.dto.dto import ContentType, SentenceType, TTSMessageDTO
+from core.utils import textUtils
+from core.utils.dialogue import Dialogue, Message
+from core.utils.modules_initialize import (
+    initialize_asr,
+    initialize_modules,
+    initialize_tts,
+)
+from core.utils.prompt_manager import PromptManager
+from core.utils.util import (
+    check_asr_update,
+    check_vad_update,
+    extract_json_from_string,
+    filter_sensitive_info,
+    get_system_error_response,
+)
+from core.utils.voiceprint_provider import VoiceprintProvider
+from core.voice.live_admission import LiveAdmissionGate, create_live_state_store
+from core.voice.session_orchestrator import SessionMode, normalize_session_mode
+from core.voice.session_provider.factory import create_voice_session_provider
+from plugins_func.loadplugins import auto_import_modules
+from plugins_func.register import Action, ActionResponse
 
 TAG = __name__
 

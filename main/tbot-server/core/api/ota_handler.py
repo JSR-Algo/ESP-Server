@@ -1,18 +1,19 @@
-import json
-import time
 import base64
+import glob
 import hashlib
 import hmac
+import json
 import os
 import re
-import glob
+import time
 from typing import Dict, List, Tuple
 from urllib.parse import urlsplit, urlunsplit
+
 from aiohttp import web
 
+from core.api.base_handler import BaseHandler
 from core.auth import AuthManager
 from core.utils.util import get_local_ip, get_vision_url
-from core.api.base_handler import BaseHandler
 
 TAG = __name__
 
