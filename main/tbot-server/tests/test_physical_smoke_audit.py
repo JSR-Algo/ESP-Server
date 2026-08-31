@@ -4482,6 +4482,29 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
                     candidateIdentity={**self._candidate_identity(), "gitSha": "other"}
                 ),
             ),
+            ("upstream_missing", lambda report: report.pop("upstreamLayers")),
+            ("upstream_malformed", lambda report: report.update(upstreamLayers={})),
+            ("upstream_reordered", lambda report: report["upstreamLayers"].reverse()),
+            (
+                "upstream_extra",
+                lambda report: report["upstreamLayers"].append(
+                    deepcopy(report["upstreamLayers"][0])
+                ),
+            ),
+            (
+                "upstream_duplicate",
+                lambda report: report["upstreamLayers"].__setitem__(
+                    1, deepcopy(report["upstreamLayers"][0])
+                ),
+            ),
+            (
+                "upstream_wrong_status",
+                lambda report: report["upstreamLayers"][0].update(status="SKIPPED"),
+            ),
+            (
+                "upstream_extra_field",
+                lambda report: report["upstreamLayers"][0].update(extra=True),
+            ),
         )
         for label, mutate in mutations:
             with self.subTest(label=label):

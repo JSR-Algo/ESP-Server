@@ -561,23 +561,20 @@ def validate_candidate_soak_report(
         mismatch("monitoredDurationProof")
 
     upstream = report.get("upstreamLayers")
-    expected_upstream = (
-        ("real_api", "PASS"),
-        ("websocket_audio_bargein_transport", "SKIPPED"),
-        ("websocket_audio_bargein_correlated", "PASS"),
-        ("google_live_log_reliability", "PASS"),
-    )
-    if upstream is not None and (
-        not isinstance(upstream, list)
-        or len(upstream) != len(expected_upstream)
-        or any(
-            not isinstance(layer, Mapping)
-            or layer.get("name") != name
-            or layer.get("status") != status
-            or layer.get("candidateIdentity") != dict(expected_candidate_identity)
-            for layer, (name, status) in zip(upstream, expected_upstream)
+    expected_upstream = [
+        {
+            "name": name,
+            "status": status,
+            "candidateIdentity": dict(expected_candidate_identity),
+        }
+        for name, status in (
+            ("real_api", "PASS"),
+            ("websocket_audio_bargein_transport", "SKIPPED"),
+            ("websocket_audio_bargein_correlated", "PASS"),
+            ("google_live_log_reliability", "PASS"),
         )
-    ):
+    ]
+    if upstream != expected_upstream:
         mismatch("upstreamLayers")
     return failures
 
