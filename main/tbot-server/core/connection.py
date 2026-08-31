@@ -3165,7 +3165,16 @@ class ConnectionHandler:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.mcp_background_tasks.difference_update(tasks)
 
-    async def _drain_evidence_finalize_task_for_teardown(self, timeout=1.0):
+    async def _drain_evidence_finalize_task_for_teardown(self, timeout=None):
+        if timeout is None:
+            google_live = (self.config or {}).get("google_live") or {}
+            try:
+                timeout = float(
+                    google_live.get("evidence_finalize_teardown_timeout_sec", 1.0)
+                )
+            except (TypeError, ValueError):
+                timeout = 1.0
+        timeout = max(0.01, min(float(timeout), 5.0))
         task = getattr(self, "google_live_evidence_finalize_task", None)
         if task is None:
             return
@@ -3350,9 +3359,39 @@ class ConnectionHandler:
             return
         if getattr(self, "google_live_evidence_force_close_completed", False):
             return
+        close_task = getattr(self, "voice_provider_close_task", None)
+        if close_task is None:
+            close_task = asyncio.create_task(self.voice_provider.close())
+            close_task.set_name("voice-provider-close")
+            self.voice_provider_close_task = close_task
+            self.mcp_background_tasks.add(close_task)
+            close_task.add_done_callback(self._mcp_background_task_done)
+        elif getattr(self, "voice_provider_close_teardown_attempted", False):
+            return
+        self.voice_provider_close_teardown_attempted = True
+        google_live = (self.config or {}).get("google_live") or {}
         try:
-            await self.voice_provider.close()
-        except Exception as provider_cleanup_error:
+            timeout = float(
+                google_live.get("evidence_provider_close_timeout_sec", 1.0)
+            )
+        except (TypeError, ValueError):
+            timeout = 1.0
+        timeout = max(0.01, min(timeout, 5.0))
+        try:
+            done, _pending = await asyncio.wait({close_task}, timeout=timeout)
+        except asyncio.CancelledError:
+            if not close_task.done():
+                close_task.cancel()
+            await asyncio.wait({close_task}, timeout=timeout)
+            raise
+        if close_task not in done:
+            close_task.cancel()
+            await asyncio.wait({close_task}, timeout=timeout)
+            return
+        if close_task.cancelled():
+            return
+        provider_cleanup_error = close_task.exception()
+        if provider_cleanup_error is not None:
             self.logger.bind(tag=TAG).error(
                 f"Error cleaning voice provider: {provider_cleanup_error}"
             )

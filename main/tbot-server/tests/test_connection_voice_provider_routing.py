@@ -1553,6 +1553,145 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertNotIn(finalize_task, handler.mcp_background_tasks)
 
+    async def test_full_close_bounds_reentrant_provider_close_after_evidence_detach(self):
+        handler = self._build_handler()
+        handler.logger = _RecordingLogger()
+        handler.voice_provider_task = None
+        handler.config["google_live"] = {
+            "evidence_finalize_cancel_grace_sec": 0.05,
+            "evidence_finalize_teardown_timeout_sec": 0.05,
+            "evidence_provider_close_timeout_sec": 0.05,
+        }
+        release_finalize = asyncio.Event()
+        release_force_close = asyncio.Event()
+        close_calls = 0
+        terminal = []
+        handler.evidence_registry = types.SimpleNamespace(
+            finalize=lambda *args, **kwargs: terminal.append((args, kwargs))
+        )
+
+        async def cancellation_resistant(event):
+            while not event.is_set():
+                try:
+                    await event.wait()
+                except asyncio.CancelledError:
+                    pass
+
+        finalize_task = handler.schedule_mcp_background_task(
+            cancellation_resistant(release_finalize)
+        )
+        finalize_task.set_name("google-live-evidence-finalize")
+        handler.google_live_evidence_finalize_task = finalize_task
+
+        async def force_close():
+            await cancellation_resistant(release_force_close)
+
+        async def provider_close():
+            nonlocal close_calls
+            close_calls += 1
+            await finalize_task
+
+        handler.voice_provider = types.SimpleNamespace(
+            request_evidence_finalize_stop=AsyncMock(),
+            force_close_after_evidence_finalize_cancel=force_close,
+            close=provider_close,
+        )
+        close_task = asyncio.create_task(handler.close())
+        done, _pending = await asyncio.wait({close_task}, timeout=0.3)
+        bounded = close_task in done
+        finalize_pending = not finalize_task.done()
+        finalize_accounted = finalize_task in handler.mcp_background_tasks
+        release_finalize.set()
+        release_force_close.set()
+        await asyncio.wait_for(finalize_task, timeout=0.3)
+        if not close_task.done():
+            await asyncio.wait_for(close_task, timeout=0.3)
+
+        self.assertTrue(bounded)
+        self.assertEqual(close_calls, 1)
+        self.assertTrue(finalize_pending)
+        self.assertTrue(finalize_accounted)
+        self.assertEqual(terminal, [])
+        self.assertFalse(
+            any("reliability_window_end" in record[1] for record in handler.logger.records)
+        )
+        force_task = handler.google_live_evidence_force_close_task
+        provider_close_task = handler.voice_provider_close_task
+        await asyncio.wait_for(force_task, timeout=0.3)
+        await asyncio.wait_for(provider_close_task, timeout=0.3)
+        await asyncio.sleep(0)
+        self.assertNotIn(finalize_task, handler.mcp_background_tasks)
+        self.assertNotIn(force_task, handler.mcp_background_tasks)
+        self.assertNotIn(provider_close_task, handler.mcp_background_tasks)
+
+    async def test_full_close_propagates_cancel_with_reentrant_provider_close(self):
+        handler = self._build_handler()
+        handler.voice_provider_task = None
+        handler.config["google_live"] = {
+            "evidence_finalize_cancel_grace_sec": 0.05,
+            "evidence_finalize_teardown_timeout_sec": 0.05,
+            "evidence_provider_close_timeout_sec": 0.05,
+        }
+        release = asyncio.Event()
+        release_force_close = asyncio.Event()
+        stop_requested = asyncio.Event()
+        close_calls = 0
+
+        async def cancellation_resistant():
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    pass
+
+        finalize_task = handler.schedule_mcp_background_task(
+            cancellation_resistant()
+        )
+        finalize_task.set_name("google-live-evidence-finalize")
+        handler.google_live_evidence_finalize_task = finalize_task
+
+        async def request_stop():
+            stop_requested.set()
+
+        async def provider_close():
+            nonlocal close_calls
+            close_calls += 1
+            await finalize_task
+
+        handler.voice_provider = types.SimpleNamespace(
+            request_evidence_finalize_stop=request_stop,
+            force_close_after_evidence_finalize_cancel=lambda: cancellation_resistant_force_close(),
+            close=provider_close,
+        )
+
+        async def cancellation_resistant_force_close():
+            while not release_force_close.is_set():
+                try:
+                    await release_force_close.wait()
+                except asyncio.CancelledError:
+                    pass
+        close_task = asyncio.create_task(handler.close())
+        await asyncio.wait_for(stop_requested.wait(), timeout=0.2)
+        close_task.cancel()
+        done, _pending = await asyncio.wait({close_task}, timeout=0.3)
+        propagated_in_bound = close_task in done
+        finalize_pending = not finalize_task.done()
+        finalize_accounted = finalize_task in handler.mcp_background_tasks
+        release.set()
+        release_force_close.set()
+        await asyncio.wait_for(finalize_task, timeout=0.3)
+        if not close_task.done():
+            close_task.cancel()
+            await asyncio.gather(close_task, return_exceptions=True)
+
+        self.assertTrue(propagated_in_bound)
+        with self.assertRaises(asyncio.CancelledError):
+            await close_task
+        self.assertEqual(close_calls, 1)
+        self.assertTrue(finalize_pending)
+        self.assertTrue(finalize_accounted)
+        await asyncio.wait_for(handler.voice_provider_close_task, timeout=0.3)
+
     async def test_evidence_finalize_rejects_changed_live_id_or_pending_cleanup(self):
         for result in (
             {"status": "PASS", "liveConnectionId": "live-other", "pendingTasks": 0},
