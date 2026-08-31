@@ -153,6 +153,10 @@ def _remove_owned_output(
         metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
         metadata = None
+    except OSError:
+        if descriptor_open:
+            _invalidate_owned_descriptor(file_fd)
+        raise
     if metadata is not None and (
         (metadata.st_dev, metadata.st_ino, metadata.st_uid) == identity
         and stat.S_ISREG(metadata.st_mode)

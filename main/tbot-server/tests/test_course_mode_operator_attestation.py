@@ -383,6 +383,34 @@ def test_cleanup_preserves_unrelated_replacement_and_invalidates_created_inode(
     assert _fd_count() == before
 
 
+def test_cleanup_stat_permission_failure_invalidates_owned_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_path, candidate = _candidate(tmp_path)
+    evidence_root = Path(candidate["evidenceRoot"])
+    output = evidence_root / "operator-attestation.json"
+
+    def remove_directory_access_then_fail(*_args: object) -> bool:
+        evidence_root.chmod(0o000)
+        return False
+
+    monkeypatch.setattr(attestation, "_candidate_unchanged", remove_directory_access_then_fail)
+
+    before = _fd_count()
+    try:
+        result = _run(
+            candidate_path, output,
+            "--confirm-trusted-operator-account",
+            "--confirm-untrusted-automation-stopped",
+        )
+    finally:
+        evidence_root.chmod(0o700)
+
+    assert result != 0
+    assert not _is_gate_valid(candidate, output)
+    assert _fd_count() == before
+
+
 def test_help_is_limited_to_public_cli_contract() -> None:
     script = Path(attestation.__file__)
     result = subprocess.run(
