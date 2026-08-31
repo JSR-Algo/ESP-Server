@@ -1640,7 +1640,7 @@ def _evidence_reuse_key(*, journey_id, connection_id, log_window):
     return (journey_id, connection_id, *window_values)
 
 
-def _validated_execution_server_scope(value, *, identity, allowed_live_connection_ids):
+def _validated_execution_server_scope(value, *, identity):
     scope = value.get("evidenceScope")
     log_window = value.get("logWindow")
     transitions = value.get("liveConnectionTransitions")
@@ -1665,8 +1665,6 @@ def _validated_execution_server_scope(value, *, identity, allowed_live_connectio
         and bool(expected_scope["liveConnectionId"])
         and expected_scope["initialLiveConnectionId"]
         == expected_scope["liveConnectionId"]
-        and expected_scope["initialLiveConnectionId"] in allowed_live_connection_ids
-        and value.get("finalLiveConnectionId") in allowed_live_connection_ids
         and isinstance(expected_scope["peerIdentityHash"], str)
         and re.fullmatch(r"sha256:[0-9a-f]{64}", expected_scope["peerIdentityHash"])
         is not None
@@ -1876,34 +1874,6 @@ async def _run_candidate_soak_impl(
     immutable_peer_identity_hash = None
     previous_execution_scope = None
     server_connection_transitions = 0
-    expected_correlated_report = getattr(args, "correlated_transport_report", {})
-    if isinstance(expected_correlated_report, (str, Path)):
-        try:
-            expected_correlated_report = _read_json_evidence(
-                expected_correlated_report, "correlated_transport_report"
-            )
-        except ValueError:
-            expected_correlated_report = {}
-    expected_transitions = (
-        expected_correlated_report.get("liveConnectionTransitions", [])
-        if isinstance(expected_correlated_report, Mapping)
-        else []
-    )
-    allowed_live_connection_ids = {
-        expected_correlated_report.get("initialLiveConnectionId"),
-        expected_correlated_report.get("finalLiveConnectionId"),
-    }
-    if isinstance(expected_transitions, list):
-        for transition in expected_transitions:
-            if isinstance(transition, Mapping):
-                allowed_live_connection_ids.update(
-                    {
-                        transition.get("fromLiveConnectionId"),
-                        transition.get("toLiveConnectionId"),
-                    }
-                )
-    allowed_live_connection_ids.discard(None)
-
     for stage_name, count in _CANDIDATE_STAGE_COUNTS:
         callable_name = "conversation" if stage_name == "conversation_after_lesson" else stage_name
         journey = journeys.get(callable_name)
@@ -1943,7 +1913,6 @@ async def _run_candidate_soak_impl(
             execution_anchor = _validated_execution_server_scope(
                 result,
                 identity=identity,
-                allowed_live_connection_ids=allowed_live_connection_ids,
             )
             if execution_anchor is None:
                 failures.append(

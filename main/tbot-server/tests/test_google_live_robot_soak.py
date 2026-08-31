@@ -842,7 +842,7 @@ def test_candidate_soak_binds_execution_scope_to_independent_server_identity(mut
     } & {item["code"] for item in report["failures"]}
 
 
-def test_candidate_soak_rejects_three_sided_fabricated_live_owner():
+def test_candidate_soak_rejects_three_sided_inconsistent_live_owner_chain():
     def corrupt(result, sequence, _name, _index, _label):
         if sequence != 1:
             return
@@ -850,8 +850,10 @@ def test_candidate_soak_rejects_three_sided_fabricated_live_owner():
             if "liveConnectionId" in target:
                 target["liveConnectionId"] = "fabricated-live"
             target["initialLiveConnectionId"] = "fabricated-live"
-        result["finalLiveConnectionId"] = "fabricated-live"
-        result["task5LogEvidence"]["finalLiveConnectionId"] = "fabricated-live"
+        result["finalLiveConnectionId"] = "fabricated-live-final"
+        result["task5LogEvidence"]["finalLiveConnectionId"] = (
+            "fabricated-live-final"
+        )
         result["task5LogEvidence"]["evidenceScope"]["liveConnectionId"] = (
             "fabricated-live"
         )
@@ -895,6 +897,70 @@ def test_candidate_soak_accepts_full_task5_correlated_artifact_fields():
     report = _run()
 
     assert report["status"] == "PASS"
+
+
+def test_candidate_soak_accepts_per_execution_live_owners_independent_of_upstream_task5():
+    def use_execution_live_owner(result, sequence, name, _index, _label):
+        initial_id = f"execution-live-{sequence}-initial"
+        final_id = initial_id
+        transitions = []
+        if name == "reopen":
+            final_id = f"execution-live-{sequence}-reopened"
+            transitions = [
+                {
+                    "attempt": 1,
+                    "fromLiveConnectionId": initial_id,
+                    "toLiveConnectionId": final_id,
+                }
+            ]
+        result["liveConnectionId"] = initial_id
+        result["initialLiveConnectionId"] = initial_id
+        result["finalLiveConnectionId"] = final_id
+        result["liveConnectionTransitions"] = transitions
+        _refresh_execution_contract(result)
+        if name == "reconnect":
+            result["task5LogEvidence"]["serverConnectionTransitions"] = [
+                {
+                    "status": "PASS",
+                    "source": "server_log",
+                    "serverIssued": True,
+                    "sequence": 1,
+                    "reason": "same_device_reconnect",
+                    "fromJourneyId": "candidate-30",
+                    "fromConnectionId": SOAK_CONNECTION_1,
+                    "toJourneyId": result["journeyId"],
+                    "toConnectionId": SOAK_CONNECTION_2,
+                    "peerIdentityHash": PEER_HASH,
+                }
+            ]
+
+    report = _run(journeys=_journeys(mutation=use_execution_live_owner))
+
+    assert report["status"] == "PASS", report
+    executions = report["evidenceExecutions"]
+    assert all(item["initialLiveConnectionId"] != "live-1" for item in executions)
+    reopen = next(item for item in executions if item["stage"] == "reopen")
+    assert reopen["initialLiveConnectionId"] != reopen["finalLiveConnectionId"]
+    assert len(reopen["liveConnectionTransitions"]) == 1
+
+
+def test_candidate_soak_rejects_live_owner_inconsistent_with_its_own_log_proof():
+    def fabricate_flat_owner(result, sequence, _name, _index, _label):
+        if sequence != 1:
+            return
+        fabricated = "fabricated-execution-live"
+        result["liveConnectionId"] = fabricated
+        result["initialLiveConnectionId"] = fabricated
+        result["finalLiveConnectionId"] = fabricated
+        result["liveConnectionTransitions"] = []
+        result["evidenceScope"]["liveConnectionId"] = fabricated
+        result["evidenceScope"]["initialLiveConnectionId"] = fabricated
+
+    report = _run(journeys=_journeys(mutation=fabricate_flat_owner))
+
+    assert "EXECUTION_SERVER_SCOPE_INVALID" in {
+        item["code"] for item in report["failures"]
+    }
 
 
 def test_candidate_soak_accepts_single_server_connection_reconnect():
