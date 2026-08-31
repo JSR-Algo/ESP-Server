@@ -41,10 +41,12 @@ import argparse
 import asyncio
 import hashlib
 import json
+import math
 import re
 import sys
 import time
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 
 import websockets
@@ -57,6 +59,16 @@ from core.voice.google_live_credentials import (  # noqa: E402
     GOOGLE_LIVE_CREDENTIAL_ENV_NAMES,
     resolve_google_live_env_api_key,
 )
+from scripts.google_live_reliability import (  # noqa: E402
+    GOOGLE_LIVE_LIMITS,
+    SCHEMA_VERSION,
+    build_candidate_identity,
+    compare_latency_baseline,
+    percentile,
+    redact_mapping,
+    resource_verdict,
+    sample_process_resources,
+)
 from scripts.voice_mode_websocket_audio_bargein import (  # noqa: E402
     _opus_packets_from_audio_file,
 )
@@ -68,6 +80,34 @@ from scripts.voice_mode_websocket_soak import (  # noqa: E402
 )
 
 __all__ = ["GOOGLE_LIVE_CREDENTIAL_ENV_NAMES"]
+
+_CANDIDATE_STAGE_COUNTS = (
+    ("conversation", 17),
+    ("bargein", 10),
+    ("quiet", 2),
+    ("reopen", 1),
+    ("reconnect", 1),
+    ("lesson", 1),
+    ("conversation_after_lesson", 1),
+)
+_FORBIDDEN_EVIDENCE_KEYS = frozenset(
+    {
+        "audio",
+        "audiochunk",
+        "audiobytes",
+        "rawaudio",
+        "transcript",
+        "rawtranscript",
+        "prompt",
+        "modeltext",
+        "rawlog",
+        "loglines",
+        "authorization",
+        "apikey",
+        "token",
+        "sessionresumptionhandle",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Latency-chain patterns for PR5 modes (also used by analyze_google_live_log)
@@ -1502,12 +1542,472 @@ def _dry_run_report(args):
     }
 
 
+def _read_json_evidence(value, field):
+    if isinstance(value, Mapping):
+        return dict(value)
+    try:
+        result = json.loads(Path(value).read_text(encoding="utf-8"))
+    except (OSError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{field} must be a readable JSON object") from exc
+    if not isinstance(result, dict):
+        raise ValueError(f"{field} must contain a JSON object")
+    return result
+
+
+def _candidate_identity(args):
+    try:
+        config = json.loads(args.config_json)
+    except (AttributeError, json.JSONDecodeError) as exc:
+        raise ValueError("config_json must contain a JSON object") from exc
+    if not isinstance(config, dict):
+        raise ValueError("config_json must contain a JSON object")
+    return build_candidate_identity(
+        args.candidate_git_sha,
+        args.candidate_image_digest,
+        args.firmware_identity,
+        config,
+        args.fixture_sha256,
+    )
+
+
+def _lesson_manifest_digest(value):
+    manifest = _read_json_evidence(value, "lesson_manifest")
+    encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _normalized_key(value):
+    return re.sub(r"[^a-zA-Z0-9]", "", str(value)).lower()
+
+
+def _forbidden_evidence_fields(value, path=""):
+    hits = []
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            item_path = f"{path}.{key}" if path else str(key)
+            if _normalized_key(key) in _FORBIDDEN_EVIDENCE_KEYS:
+                hits.append(item_path)
+            else:
+                hits.extend(_forbidden_evidence_fields(item, item_path))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            hits.extend(_forbidden_evidence_fields(item, f"{path}[{index}]"))
+    return hits
+
+
+def _finite_nonnegative(value):
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
+
+
+def _validate_upstream_layer(report, *, name, identity, failures, status="PASS"):
+    if not isinstance(report, Mapping):
+        failures.append({"code": "UPSTREAM_LAYER_MALFORMED", "layer": name})
+        return
+    if report.get("schemaVersion") != SCHEMA_VERSION or report.get("name") != name:
+        failures.append({"code": "UPSTREAM_LAYER_MALFORMED", "layer": name})
+    if report.get("status") != status:
+        failures.append({"code": "UPSTREAM_LAYER_NOT_PASSING", "layer": name})
+    if report.get("candidateIdentity") != identity:
+        failures.append({"code": "CANDIDATE_IDENTITY_MISMATCH", "layer": name})
+    if _forbidden_evidence_fields(report):
+        failures.append({"code": "FORBIDDEN_EVIDENCE_FIELD", "layer": name})
+
+
+def _latency_metrics(executions):
+    first_audio = []
+    bargein = []
+    reconnect = []
+    for execution in executions:
+        latencies = execution.get("latencies", {})
+        if not isinstance(latencies, Mapping):
+            continue
+        for field, target in (
+            ("firstAudioMs", first_audio),
+            ("bargeinMs", bargein),
+            ("reconnectRecoveryMs", reconnect),
+        ):
+            values = latencies.get(field, [])
+            if not isinstance(values, list) or any(not _finite_nonnegative(value) for value in values):
+                raise ValueError(f"{field} must contain finite non-negative numbers")
+            target.extend(values)
+    return {
+        "firstAudioP50Ms": percentile(first_audio, 50),
+        "firstAudioP95Ms": percentile(first_audio, 95),
+        "bargeinP95Ms": percentile(bargein, 95),
+        "reconnectRecoveryP95Ms": percentile(reconnect, 95),
+    }
+
+
+async def run_candidate_soak(
+    args,
+    *,
+    journeys,
+    sample_resources=sample_process_resources,
+    clock=time.monotonic,
+):
+    """Run the fixed candidate workload and aggregate only bounded safe evidence."""
+    identity = _candidate_identity(args)
+    lesson_manifest_sha256 = _lesson_manifest_digest(args.lesson_manifest)
+    failures = []
+
+    def safe_sample():
+        try:
+            sample = sample_resources()
+        except Exception as exc:
+            failures.append(
+                {"code": "RESOURCE_EVIDENCE_MALFORMED", "errorClass": type(exc).__name__}
+            )
+            return {}
+        if not isinstance(sample, Mapping):
+            failures.append({"code": "RESOURCE_EVIDENCE_MALFORMED"})
+            return {}
+        return dict(sample)
+
+    started = clock()
+    samples = [safe_sample()]
+    executions = []
+    seen_journeys = set()
+    seen_windows = set()
+    expected_sequence = 1
+
+    for stage_name, count in _CANDIDATE_STAGE_COUNTS:
+        callable_name = "conversation" if stage_name == "conversation_after_lesson" else stage_name
+        journey = journeys.get(callable_name)
+        if not callable(journey):
+            failures.append({"code": "JOURNEY_CALLABLE_MISSING", "stage": stage_name})
+            break
+        for index in range(1, count + 1):
+            try:
+                result = await journey(
+                    args,
+                    name=stage_name,
+                    index=index,
+                    label="conversation_after_lesson" if stage_name == "conversation_after_lesson" else None,
+                )
+            except Exception as exc:
+                failures.append(
+                    {"code": "JOURNEY_EXECUTION_FAILED", "stage": stage_name, "errorClass": type(exc).__name__}
+                )
+                break
+            samples.append(safe_sample())
+            if not isinstance(result, Mapping):
+                failures.append({"code": "JOURNEY_EVIDENCE_MALFORMED", "stage": stage_name})
+                break
+            result = dict(result)
+            forbidden = _forbidden_evidence_fields(result)
+            if forbidden:
+                failures.append({"code": "FORBIDDEN_EVIDENCE_FIELD", "stage": stage_name, "fields": forbidden})
+            if result.get("schemaVersion") != SCHEMA_VERSION or result.get("name") != stage_name:
+                failures.append({"code": "JOURNEY_EVIDENCE_MALFORMED", "stage": stage_name})
+            if result.get("status") != "PASS":
+                failures.append({"code": "JOURNEY_NOT_PASSING", "stage": stage_name})
+            if result.get("candidateIdentity") != identity:
+                failures.append({"code": "CANDIDATE_IDENTITY_MISMATCH", "stage": stage_name})
+            if result.get("evidenceSequence") != expected_sequence:
+                failures.append({"code": "EVIDENCE_SEQUENCE_INVALID", "stage": stage_name})
+            expected_sequence += 1
+            journey_id = result.get("journeyId")
+            window_id = result.get("windowId")
+            if not isinstance(journey_id, str) or not journey_id or journey_id in seen_journeys:
+                failures.append({"code": "EVIDENCE_JOURNEY_REUSED", "stage": stage_name})
+            else:
+                seen_journeys.add(journey_id)
+            if not isinstance(window_id, str) or not window_id or window_id in seen_windows:
+                failures.append({"code": "EVIDENCE_WINDOW_REUSED", "stage": stage_name})
+            else:
+                seen_windows.add(window_id)
+            if stage_name == "lesson" and result.get("lessonManifestSha256") != lesson_manifest_sha256:
+                failures.append({"code": "LESSON_MANIFEST_MISMATCH"})
+            executions.append(result)
+        if failures:
+            break
+
+    elapsed = clock() - started
+    evidence_duration = getattr(args, "candidate_evidence_duration_sec", None)
+    if _finite_nonnegative(evidence_duration):
+        elapsed = max(elapsed, float(evidence_duration))
+    minimum_duration = float(args.minimum_duration_sec)
+    if elapsed < minimum_duration and not failures:
+        monitor = journeys.get("monitor")
+        if callable(monitor):
+            try:
+                await monitor(args, duration_sec=minimum_duration - elapsed)
+            except Exception as exc:
+                failures.append({"code": "MONITORED_DURATION_FAILED", "errorClass": type(exc).__name__})
+            elapsed = clock() - started
+        else:
+            failures.append({"code": "MONITORED_DURATION_MISSING"})
+    cleanup = journeys.get("cleanup")
+    if callable(cleanup):
+        try:
+            await cleanup(args)
+        except Exception as exc:
+            failures.append({"code": "JOURNEY_CLEANUP_FAILED", "errorClass": type(exc).__name__})
+    samples.append(safe_sample())
+
+    upstream = {}
+    for field in (
+        "real_api_report",
+        "transport_report",
+        "correlated_transport_report",
+        "log_reliability_report",
+    ):
+        try:
+            upstream[field] = _read_json_evidence(getattr(args, field), field)
+        except ValueError:
+            failures.append({"code": "UPSTREAM_LAYER_MALFORMED", "layer": field})
+            upstream[field] = {}
+    real_api = upstream["real_api_report"]
+    transport = upstream["transport_report"]
+    correlated = upstream["correlated_transport_report"]
+    log_report = upstream["log_reliability_report"]
+    _validate_upstream_layer(real_api, name="real_api", identity=identity, failures=failures)
+    _validate_upstream_layer(
+        transport,
+        name="websocket_audio_bargein_transport",
+        identity=identity,
+        failures=failures,
+        status="SKIPPED",
+    )
+    if (
+        transport.get("pendingCode") != "PENDING_BOUNDED_SERVER_LOG_VERIFICATION"
+        or transport.get("aggregateReleaseEligible") is not False
+    ):
+        failures.append({"code": "RAW_TRANSPORT_CONTRACT_INVALID"})
+    _validate_upstream_layer(
+        correlated, name="websocket_audio_bargein_correlated", identity=identity, failures=failures
+    )
+    if correlated.get("aggregateReleaseEligible") is not True or correlated.get("correlationStatus") != "PASS":
+        failures.append({"code": "CORRELATED_TRANSPORT_NOT_ELIGIBLE"})
+    _validate_upstream_layer(log_report, name="google_live_log_reliability", identity=identity, failures=failures)
+    log_contract = {
+        "receiveLoopBalance": 0,
+        "staleAudioAfterReplacement": 0,
+        "unrecoveredTimeouts": [],
+        "unreleasedLessonHandoffs": [],
+        "fatalHits": [],
+        "failures": [],
+    }
+    if any(log_report.get(key) != expected for key, expected in log_contract.items()) or log_report.get(
+        "maxReceiveLoopsActive"
+    ) not in {0, 1}:
+        failures.append({"code": "LOG_RELIABILITY_CONTRACT_INVALID"})
+    transport_scope = (
+        transport.get("journeyId"),
+        (transport.get("logWindow") or {}).get("windowId") if isinstance(transport.get("logWindow"), Mapping) else None,
+    )
+    correlated_scope = (
+        correlated.get("journeyId"),
+        (correlated.get("logWindow") or {}).get("windowId")
+        if isinstance(correlated.get("logWindow"), Mapping)
+        else None,
+    )
+    log_scope = (
+        (log_report.get("evidenceScope") or {}).get("journeyId")
+        if isinstance(log_report.get("evidenceScope"), Mapping)
+        else None,
+        (log_report.get("logWindow") or {}).get("windowId")
+        if isinstance(log_report.get("logWindow"), Mapping)
+        else None,
+    )
+    if (
+        not all(isinstance(value, str) and value for value in transport_scope)
+        or transport_scope != correlated_scope
+        or transport_scope != log_scope
+    ):
+        failures.append({"code": "UPSTREAM_EVIDENCE_SCOPE_MISMATCH"})
+    elif transport_scope[0] in seen_journeys or transport_scope[1] in seen_windows:
+        failures.append({"code": "UPSTREAM_EVIDENCE_REUSED"})
+
+    total_fields = (
+        "successfulTurns",
+        "bargeins",
+        "latestIntentSuccesses",
+        "falseInterrupts",
+        "unexpectedFallbacks",
+    )
+    totals = dict.fromkeys(total_fields, 0)
+    for item in executions:
+        for key in total_fields:
+            value = item.get(key, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                failures.append({"code": "JOURNEY_EVIDENCE_MALFORMED", "field": key})
+                continue
+            totals[key] += value
+        expected_counts = {
+            "successfulTurns": 0 if item.get("name") in {"quiet", "lesson"} else 1,
+            "bargeins": 1 if item.get("name") == "bargein" else 0,
+            "falseInterrupts": 0,
+            "unexpectedFallbacks": 0,
+        }
+        latest_intent = item.get("latestIntentSuccesses", 0)
+        if any(
+            item.get(key, 0) != value for key, value in expected_counts.items()
+        ) or latest_intent not in ({0, 1} if item.get("name") == "bargein" else {0}):
+            failures.append(
+                {"code": "JOURNEY_MULTIPLICITY_INVALID", "stage": item.get("name")}
+            )
+    totals["latestIntentSuccessRate"] = (
+        round(totals["latestIntentSuccesses"] / totals["bargeins"], 3) if totals["bargeins"] else 0.0
+    )
+    if totals["successfulTurns"] < int(args.minimum_turns):
+        failures.append({"code": "MINIMUM_TURNS_NOT_MET"})
+    if totals["bargeins"] < int(args.bargein_cycles):
+        failures.append({"code": "MINIMUM_BARGEINS_NOT_MET"})
+    if totals["latestIntentSuccessRate"] < GOOGLE_LIVE_LIMITS["minimumLatestIntentSuccessRate"]:
+        failures.append({"code": "LATEST_INTENT_RATE_BELOW_BUDGET"})
+    if totals["falseInterrupts"]:
+        failures.append({"code": "FALSE_INTERRUPT_OBSERVED"})
+    if totals["unexpectedFallbacks"]:
+        failures.append({"code": "UNEXPECTED_FALLBACK_OBSERVED"})
+    if elapsed < minimum_duration:
+        failures.append({"code": "MINIMUM_DURATION_NOT_MET"})
+
+    try:
+        latency_metrics = _latency_metrics(executions)
+    except ValueError:
+        latency_metrics = {
+            "firstAudioP50Ms": None,
+            "firstAudioP95Ms": None,
+            "bargeinP95Ms": None,
+            "reconnectRecoveryP95Ms": None,
+        }
+        failures.append({"code": "LATENCY_EVIDENCE_MALFORMED"})
+    try:
+        baseline = _read_json_evidence(args.baseline_report, "baseline_report")
+    except ValueError:
+        baseline = {}
+        failures.append({"code": "BASELINE_REPORT_MALFORMED"})
+    latency_comparison = compare_latency_baseline(latency_metrics, baseline.get("latencyMetrics", {}))
+    if not latency_comparison["pass"]:
+        failures.append({"code": "LATENCY_REGRESSION"})
+    hard_latency_pass = (
+        _finite_nonnegative(latency_metrics["firstAudioP50Ms"])
+        and latency_metrics["firstAudioP50Ms"] <= GOOGLE_LIVE_LIMITS["firstAudioP50Ms"]
+        and _finite_nonnegative(latency_metrics["firstAudioP95Ms"])
+        and latency_metrics["firstAudioP95Ms"] <= GOOGLE_LIVE_LIMITS["firstAudioP95Ms"]
+        and _finite_nonnegative(latency_metrics["bargeinP95Ms"])
+        and latency_metrics["bargeinP95Ms"] <= GOOGLE_LIVE_LIMITS["physicalBargeinP95Ms"]
+    )
+    if not hard_latency_pass:
+        failures.append({"code": "HARD_LATENCY_BUDGET_FAILED"})
+    try:
+        resources = resource_verdict(samples)
+    except (KeyError, TypeError, ValueError):
+        resources = {"status": "FAIL", "failures": [{"code": "RESOURCE_EVIDENCE_MALFORMED"}]}
+    if resources["status"] != "PASS":
+        failures.append({"code": "RESOURCE_BUDGET_FAILED"})
+
+    stages = [
+        {
+            "name": name,
+            "executions": count,
+            "status": "PASS" if sum(1 for item in executions if item.get("name") == name) == count else "FAIL",
+        }
+        for name, count in _CANDIDATE_STAGE_COUNTS
+    ]
+    report = {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": "candidate_soak",
+        "status": "PASS" if not failures else "FAIL",
+        "candidateIdentity": identity,
+        "durationSec": round(elapsed, 3),
+        "stages": stages,
+        "evidenceExecutions": [
+            {
+                "sequence": item.get("evidenceSequence"),
+                "stage": item.get("name"),
+                "journeyId": item.get("journeyId"),
+                "windowId": item.get("windowId"),
+                "status": item.get("status"),
+            }
+            for item in executions
+        ],
+        "totals": totals,
+        "latencyMetrics": latency_metrics,
+        "latencyComparison": latency_comparison,
+        "resourceVerdict": resources,
+        "upstreamLayers": [
+            {
+                "name": layer.get("name"),
+                "status": layer.get("status"),
+                "candidateIdentity": layer.get("candidateIdentity"),
+            }
+            for layer in (real_api, transport, correlated, log_report)
+        ],
+        "failures": failures,
+        "rawAudioPersisted": False,
+        "transcriptPersisted": False,
+        "exit_code": 0 if not failures else 1,
+    }
+    return redact_mapping(report)
+
+
 async def run_soak(args):
     if getattr(args, "scenario", None) == "tvideo-farm":
         if getattr(args, "dry_run", False):
             return _dry_run_tvideo_farm_report(args)
         return await _run_tvideo_farm_scenario(args)
     mode = getattr(args, "mode", None)
+    if mode == "candidate":
+        journeys = getattr(args, "candidate_journeys", None)
+        candidate_sampler = sample_process_resources
+        if not isinstance(journeys, Mapping):
+            manifest = _read_json_evidence(args.journey_evidence, "journey_evidence")
+            recorded = manifest.get("executions")
+            if not isinstance(recorded, list):
+                raise ValueError("journey_evidence executions must be a list")
+            expected_count = sum(count for _name, count in _CANDIDATE_STAGE_COUNTS)
+            if len(recorded) != expected_count:
+                raise ValueError("journey evidence must contain exactly 33 executions")
+            evidence_duration = manifest.get("durationSec")
+            if not _finite_nonnegative(evidence_duration):
+                raise ValueError("journey evidence durationSec must be finite and non-negative")
+            args.candidate_evidence_duration_sec = evidence_duration
+            recorded_samples = manifest.get("resourceSamples")
+            if not isinstance(recorded_samples, list) or len(recorded_samples) != expected_count + 2:
+                raise ValueError("journey evidence must contain exactly 35 resource samples")
+            sample_cursor = 0
+
+            def recorded_sample():
+                nonlocal sample_cursor
+                if sample_cursor >= len(recorded_samples):
+                    raise ValueError("resource evidence was over-consumed")
+                sample = recorded_samples[sample_cursor]
+                sample_cursor += 1
+                if not isinstance(sample, Mapping):
+                    raise ValueError("resource evidence sample must be an object")
+                return dict(sample)
+
+            candidate_sampler = recorded_sample
+
+            cursor = 0
+
+            async def recorded_journey(_args, *, name, **_kwargs):
+                nonlocal cursor
+                if cursor >= len(recorded):
+                    raise ValueError("journey evidence is incomplete")
+                evidence = recorded[cursor]
+                cursor += 1
+                if not isinstance(evidence, Mapping) or evidence.get("name") != name:
+                    raise ValueError("journey evidence order does not match candidate sequence")
+                return dict(evidence)
+
+            journeys = dict.fromkeys(
+                ("conversation", "bargein", "quiet", "reopen", "reconnect", "lesson"),
+                recorded_journey,
+            )
+
+            async def recorded_cleanup(_args):
+                if cursor != len(recorded):
+                    raise ValueError("journey evidence was not fully consumed")
+
+            journeys["cleanup"] = recorded_cleanup
+        return await run_candidate_soak(
+            args,
+            journeys=journeys,
+            sample_resources=candidate_sampler,
+        )
     if mode == "false_positive":
         return await _run_false_positive_mode(args)
     if mode == "bargein_latency":
@@ -1608,7 +2108,7 @@ def _build_argument_parser():
     # Mode selector for PR5 §6.4 modes
     parser.add_argument(
         "--mode",
-        choices=["false_positive", "bargein_latency", "rapid_interrupt"],
+        choices=["false_positive", "bargein_latency", "rapid_interrupt", "candidate"],
         default=None,
         help=(
             "false_positive: AC1 soliloquy false-positive count; "
@@ -1704,6 +2204,20 @@ def _build_argument_parser():
     parser.add_argument("--settle-timeout-sec", type=float, default=30.0)
     parser.add_argument("--bargein-latency-budget-ms", type=float, default=500.0)
     parser.add_argument("--ac1-goaway-budget", type=int, default=0)
+    parser.add_argument("--candidate-git-sha", default=None)
+    parser.add_argument("--candidate-image-digest", default=None)
+    parser.add_argument("--firmware-identity", default=None)
+    parser.add_argument("--fixture-sha256", default=None)
+    parser.add_argument("--config-json", default="{}")
+    parser.add_argument("--baseline-report", type=Path, default=None)
+    parser.add_argument("--real-api-report", type=Path, default=None)
+    parser.add_argument("--transport-report", type=Path, default=None)
+    parser.add_argument("--correlated-transport-report", type=Path, default=None)
+    parser.add_argument("--log-reliability-report", type=Path, default=None)
+    parser.add_argument("--journey-evidence", type=Path, default=None)
+    parser.add_argument("--minimum-turns", type=int, default=30)
+    parser.add_argument("--minimum-duration-sec", type=float, default=1800.0)
+    parser.add_argument("--lesson-manifest", type=Path, default=None)
     # Output
     parser.add_argument("--report", type=Path, default=None, help="write JSON report to this path (required for CI)")
     # Dry-run: validate args + emit placeholder report, no websocket connect
@@ -1713,9 +2227,60 @@ def _build_argument_parser():
     return parser
 
 
+def _validate_candidate_args(parser, args):
+    if args.mode != "candidate":
+        return
+    required = (
+        "candidate_git_sha",
+        "candidate_image_digest",
+        "firmware_identity",
+        "fixture_sha256",
+        "baseline_report",
+        "real_api_report",
+        "transport_report",
+        "correlated_transport_report",
+        "log_reliability_report",
+        "journey_evidence",
+        "lesson_manifest",
+        "report",
+    )
+    missing = [field for field in required if not getattr(args, field, None)]
+    if missing:
+        parser.error("candidate mode requires: " + ", ".join(missing))
+    if args.minimum_turns < GOOGLE_LIVE_LIMITS["minimumSoakTurns"]:
+        parser.error("candidate mode minimum-turns cannot be below 30")
+    if args.minimum_duration_sec < GOOGLE_LIVE_LIMITS["minimumSoakDurationSec"]:
+        parser.error("candidate mode minimum-duration-sec cannot be below 1800")
+    if args.bargein_cycles != GOOGLE_LIVE_LIMITS["minimumBargeins"]:
+        parser.error("candidate mode requires exactly 10 barge-in cycles")
+
+
+def _candidate_failure_report(args, error):
+    try:
+        identity = _candidate_identity(args)
+    except (AttributeError, TypeError, ValueError):
+        identity = {}
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": "candidate_soak",
+        "status": "FAIL",
+        "candidateIdentity": identity,
+        "failures": [
+            {
+                "code": "CANDIDATE_SOAK_EXECUTION_FAILED",
+                "errorClass": type(error).__name__,
+            }
+        ],
+        "rawAudioPersisted": False,
+        "transcriptPersisted": False,
+        "exit_code": 1,
+    }
+
+
 def main():
     parser = _build_argument_parser()
     args = parser.parse_args()
+    _validate_candidate_args(parser, args)
 
     # --inject-text overrides --interrupt-prompt when provided
     if args.inject_text:
@@ -1736,7 +2301,15 @@ def main():
     try:
         report = asyncio.run(run_soak(args))
     except Exception as exc:
-        print(f"SOAK_FAIL {exc}", file=sys.stderr)
+        if args.mode == "candidate" and args.report:
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            args.report.write_text(
+                json.dumps(redact_mapping(_candidate_failure_report(args, exc)), indent=2)
+                + "\n",
+                encoding="utf-8",
+            )
+        detail = type(exc).__name__ if args.mode == "candidate" else str(exc)
+        print(f"SOAK_FAIL {detail}", file=sys.stderr)
         return 1
 
     if args.report:
