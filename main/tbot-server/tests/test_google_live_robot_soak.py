@@ -733,6 +733,60 @@ def test_replay_derives_duration_from_execution_and_padding_windows():
     assert report["runtimeElapsedSec"] < report["durationSec"]
 
 
+@pytest.mark.parametrize(
+    ("field", "secret"),
+    [
+        ("transcript", "raw child words"),
+        ("Authorization", "Bearer private-token"),
+        ("apiKey", "google-secret"),
+        ("raw_audio_base64", "UklGRlNFQ1JFVA=="),
+        ("exception", "token=exception-secret"),
+        ("sessionResumptionHandle", "session-private"),
+        ("Cookie", "session-cookie-secret"),
+        ("xGoogleApiKey", "variant-secret"),
+    ],
+)
+def test_quiet_padding_rejects_nested_sensitive_evidence_without_leaking(
+    field, secret
+):
+    journeys = _journeys()
+    original = journeys["monitor"]
+
+    async def sensitive(args, *, duration_sec):
+        evidence = await original(args, duration_sec=duration_sec)
+        evidence[0]["metadata"] = {"nested": {field: secret}}
+        return evidence
+
+    journeys["monitor"] = sensitive
+    report = _run(journeys=journeys)
+    encoded = json.dumps(report)
+
+    assert "QUIET_PADDING_INVALID" in {item["code"] for item in report["failures"]}
+    assert secret not in encoded
+    assert json.dumps(field) + ":" not in encoded
+
+
+def test_candidate_manifest_is_scanned_centrally_before_artifact_sections():
+    args = _args(
+        mode="candidate",
+        candidate_journeys=None,
+        journey_evidence={
+            "durationSec": 1800,
+            "executions": [],
+            "quietPadding": [],
+            "resourceSamples": [],
+            "futureSection": {"xGoogleApiKey": "manifest-secret"},
+        },
+    )
+
+    with pytest.raises(ValueError) as captured:
+        asyncio.run(run_soak(args))
+
+    assert str(captured.value) == "candidate evidence contains forbidden fields"
+    assert "manifest-secret" not in str(captured.value)
+    assert "xGoogleApiKey" not in str(captured.value)
+
+
 def test_candidate_soak_rejects_hard_latency_budget_even_with_matching_baseline():
     def slow(result, _sequence, name, _index, _label):
         if name in {"conversation", "conversation_after_lesson", "bargein"}:

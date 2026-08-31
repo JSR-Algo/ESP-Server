@@ -100,6 +100,8 @@ _FORBIDDEN_EVIDENCE_KEYS = frozenset(
         "audiochunk",
         "audiobytes",
         "rawaudio",
+        "rawaudiobase64",
+        "audiobase64",
         "transcript",
         "rawtranscript",
         "prompt",
@@ -108,7 +110,17 @@ _FORBIDDEN_EVIDENCE_KEYS = frozenset(
         "loglines",
         "authorization",
         "apikey",
+        "xgoogapikey",
+        "xgoogleapikey",
+        "xapikey",
         "token",
+        "bearertoken",
+        "cookie",
+        "setcookie",
+        "credential",
+        "credentials",
+        "secret",
+        "exception",
         "sessionresumptionhandle",
     }
 )
@@ -1643,7 +1655,7 @@ def _validated_quiet_padding(
     seen_windows,
     seen_utc_windows,
 ):
-    if not isinstance(value, Mapping):
+    if not isinstance(value, Mapping) or _forbidden_evidence_fields(value):
         return None
     log_window = value.get("logWindow")
     start_utc = (
@@ -2221,6 +2233,8 @@ async def run_soak(args):
         candidate_sampler = sample_process_resources
         if not isinstance(journeys, Mapping):
             manifest = _read_json_evidence(args.journey_evidence, "journey_evidence")
+            if _forbidden_evidence_fields(manifest):
+                raise ValueError("candidate evidence contains forbidden fields")
             recorded = manifest.get("executions")
             if not isinstance(recorded, list):
                 raise ValueError("journey_evidence executions must be a list")
