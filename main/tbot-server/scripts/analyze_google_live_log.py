@@ -3225,7 +3225,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     exact_scope_bound = bool(
         start_anchor and isinstance(start_anchor.get("evidenceScope"), Mapping)
     )
-    recognized_journeys = {"bargein", "lesson", "reconnect"}
+    recognized_journeys = {"bargein", "lesson", "reconnect", "quiet_padding"}
     if exact_scope_bound:
         if len(claimed_journey_list) != len(set(claimed_journey_list)) or not set(
             claimed_journey_list
@@ -3356,6 +3356,9 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
         "status": "PASS" if not failures else "FAIL",
         "candidateIdentity": candidate_identity,
         "evidenceScope": start_anchor.get("evidenceScope") if start_anchor else None,
+        "journeyType": (
+            claimed_journey_list[0] if len(claimed_journey_list) == 1 else None
+        ),
         "initialLiveConnectionId": scoped_initial_live_connection_id,
         "finalLiveConnectionId": scoped_current_live_connection_id,
         "liveConnectionTransitions": scoped_live_connection_transitions,

@@ -1747,6 +1747,7 @@ def _validated_quiet_padding(
     *,
     identity,
     expected_connection_id,
+    expected_peer_identity_hash,
     previous_end,
     gap_budget_sec,
     seen_journeys,
@@ -1782,6 +1783,9 @@ def _validated_quiet_padding(
     expected_scope = {
         "journeyId": journey_id,
         "connectionId": expected_connection_id,
+        "liveConnectionId": value.get("liveConnectionId"),
+        "initialLiveConnectionId": value.get("initialLiveConnectionId"),
+        "peerIdentityHash": expected_peer_identity_hash,
         "serverStartUtc": log_window.get("start")
         if isinstance(log_window, Mapping)
         else None,
@@ -1792,13 +1796,20 @@ def _validated_quiet_padding(
         and value.get("status") == "PASS"
         and value.get("candidateIdentity") == identity
         and value.get("connectionId") == expected_connection_id
-        and value.get("serverIssued") is True
+        and value.get("peerIdentityHash") == expected_peer_identity_hash
         and value.get("evidenceScope") == expected_scope
+        and value.get("liveConnectionId") == value.get("initialLiveConnectionId")
+        and _validated_live_connection_transition_chain(
+            value.get("initialLiveConnectionId"),
+            value.get("finalLiveConnectionId"),
+            value.get("liveConnectionTransitions"),
+        )
+        == value.get("finalLiveConnectionId")
         and value.get("falseInterrupts") == 0
         and value.get("unexpectedFallbacks") == 0
+        and value.get("latencies", {}) == {}
         and isinstance(value.get("resourceVerdict"), Mapping)
         and value["resourceVerdict"].get("status") == "PASS"
-        and value.get("logStatus") == "PASS"
         and duration is not None
         and duration > 0
         and _finite_nonnegative(value.get("durationSec"))
@@ -1817,32 +1828,84 @@ def _validated_quiet_padding(
     )
     if not valid:
         return None
+    log_proof = value.get("task5LogEvidence")
+    if (
+        not isinstance(log_proof, Mapping)
+        or log_proof.get("journeyType") != "quiet_padding"
+        or log_proof.get("maxReceiveLoopsActive") != 1
+        or _validate_log_reliability_contract(
+            log_proof,
+            expected_candidate_identity=identity,
+            expected_log_window=dict(log_window),
+            expected_evidence_scope=dict(expected_scope),
+        )
+        or any(
+            log_proof.get(field) != value.get(field)
+            for field in (
+                "initialLiveConnectionId",
+                "finalLiveConnectionId",
+                "liveConnectionTransitions",
+            )
+        )
+        or log_proof.get("serverConnectionTransitions") != []
+    ):
+        return None
     return dict(value), end_utc, utc_window
 
 
 def _latency_metrics(executions):
     first_audio = []
     bargein = []
+    server_output_gap = []
     reconnect = []
     for execution in executions:
+        stage = execution.get("name")
         latencies = execution.get("latencies", {})
         if not isinstance(latencies, Mapping):
-            continue
-        for field, target in (
-            ("firstAudioMs", first_audio),
-            ("bargeinMs", bargein),
-            ("reconnectRecoveryMs", reconnect),
-        ):
-            values = latencies.get(field, [])
-            if not isinstance(values, list) or any(not _finite_positive(value) for value in values):
-                raise ValueError(f"{field} must contain finite positive numbers")
+            raise ValueError("latencies must be a mapping")
+        schema = {
+            "conversation": (("firstAudioMs", first_audio),),
+            "conversation_after_lesson": (("firstAudioMs", first_audio),),
+            "bargein": (
+                ("bargeinStopMs", bargein),
+                ("serverOutputGapMs", server_output_gap),
+            ),
+            "reopen": (("reconnectRecoveryMs", reconnect),),
+            "reconnect": (("reconnectRecoveryMs", reconnect),),
+            "quiet": (),
+            "lesson": (),
+        }.get(stage)
+        if schema is None or set(latencies) != {field for field, _target in schema}:
+            raise ValueError("latency fields do not match stage schema")
+        for field, target in schema:
+            values = latencies[field]
+            if (
+                not isinstance(values, list)
+                or len(values) != 1
+                or not _finite_positive(values[0])
+            ):
+                raise ValueError(f"{field} must contain exactly one positive sample")
             target.extend(values)
-    return {
+    metrics = {
         "firstAudioP50Ms": percentile(first_audio, 50),
         "firstAudioP95Ms": percentile(first_audio, 95),
         "bargeinP95Ms": percentile(bargein, 95),
         "reconnectRecoveryP95Ms": percentile(reconnect, 95),
     }
+    expected_counts = {
+        "firstAudioMs": 18,
+        "bargeinStopMs": 10,
+        "serverOutputGapMs": 10,
+        "reconnectRecoveryMs": 2,
+    }
+    if (
+        len(first_audio) != expected_counts["firstAudioMs"]
+        or len(bargein) != expected_counts["bargeinStopMs"]
+        or len(server_output_gap) != expected_counts["serverOutputGapMs"]
+        or len(reconnect) != expected_counts["reconnectRecoveryMs"]
+    ):
+        raise ValueError("latency sample counts do not match candidate workload")
+    return metrics, percentile(server_output_gap, 95)
 
 
 async def _run_candidate_soak_impl(
@@ -2098,6 +2161,7 @@ async def _run_candidate_soak_impl(
                         padding,
                         identity=identity,
                         expected_connection_id=expected_connection,
+                        expected_peer_identity_hash=immutable_peer_identity_hash,
                         previous_end=last_window_end,
                         gap_budget_sec=gap_budget_sec,
                         seen_journeys=seen_journeys,
@@ -2355,7 +2419,7 @@ async def _run_candidate_soak_impl(
         failures.append({"code": "CLAIMED_RUNTIME_MISMATCH"})
 
     try:
-        latency_metrics = _latency_metrics(executions)
+        latency_metrics, server_output_gap_p95_ms = _latency_metrics(executions)
     except ValueError:
         latency_metrics = {
             "firstAudioP50Ms": None,
@@ -2363,6 +2427,7 @@ async def _run_candidate_soak_impl(
             "bargeinP95Ms": None,
             "reconnectRecoveryP95Ms": None,
         }
+        server_output_gap_p95_ms = None
     candidate_latency_valid = _strict_candidate_latency_metrics(latency_metrics)
     if not candidate_latency_valid:
         failures.append({"code": "LATENCY_EVIDENCE_MALFORMED"})
@@ -2387,6 +2452,8 @@ async def _run_candidate_soak_impl(
         and latency_metrics["firstAudioP95Ms"] <= GOOGLE_LIVE_LIMITS["firstAudioP95Ms"]
         and _finite_nonnegative(latency_metrics["bargeinP95Ms"])
         and latency_metrics["bargeinP95Ms"] <= GOOGLE_LIVE_LIMITS["physicalBargeinP95Ms"]
+        and _finite_positive(server_output_gap_p95_ms)
+        and server_output_gap_p95_ms <= GOOGLE_LIVE_LIMITS["serverOutputGapMaxMs"]
     )
     if not hard_latency_pass:
         failures.append({"code": "HARD_LATENCY_BUDGET_FAILED"})
@@ -2463,6 +2530,7 @@ async def _run_candidate_soak_impl(
         ],
         "totals": totals,
         "latencyMetrics": latency_metrics,
+        "serverOutputGapP95Ms": server_output_gap_p95_ms,
         "latencyComparison": latency_comparison,
         "resourceVerdict": resources,
         "cleanupVerdict": {

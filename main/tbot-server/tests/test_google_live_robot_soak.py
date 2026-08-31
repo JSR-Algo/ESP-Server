@@ -300,7 +300,10 @@ def _journeys(*, mutation=None):
         if name in {"conversation", "conversation_after_lesson"}:
             result["latencies"] = {"firstAudioMs": [1000]}
         elif name == "bargein":
-            result["latencies"] = {"firstAudioMs": [1000], "bargeinMs": [400]}
+            result["latencies"] = {
+                "bargeinStopMs": [400],
+                "serverOutputGapMs": [80],
+            }
             _refresh_execution_contract(result)
         elif name in {"reopen", "reconnect"}:
             result["latencies"] = {"reconnectRecoveryMs": [1000]}
@@ -346,13 +349,55 @@ def _journeys(*, mutation=None):
                 "evidenceScope": {
                     "journeyId": "quiet-padding-1",
                     "connectionId": SOAK_CONNECTION_2,
+                    "liveConnectionId": "quiet-padding-live-1",
+                    "initialLiveConnectionId": "quiet-padding-live-1",
+                    "peerIdentityHash": PEER_HASH,
                     "serverStartUtc": start.isoformat(),
                 },
+                "liveConnectionId": "quiet-padding-live-1",
+                "initialLiveConnectionId": "quiet-padding-live-1",
+                "finalLiveConnectionId": "quiet-padding-live-1",
+                "liveConnectionTransitions": [],
+                "peerIdentityHash": PEER_HASH,
                 "durationSec": (end - start).total_seconds(),
                 "falseInterrupts": 0,
                 "unexpectedFallbacks": 0,
                 "resourceVerdict": {"status": "PASS"},
-                "logStatus": "PASS",
+                "task5LogEvidence": {
+                    "schemaVersion": "google-live-reliability.v1",
+                    "name": "google_live_log_reliability",
+                    "status": "PASS",
+                    "candidateIdentity": IDENTITY,
+                    "journeyType": "quiet_padding",
+                    "evidenceScope": {
+                        "journeyId": "quiet-padding-1",
+                        "connectionId": SOAK_CONNECTION_2,
+                        "liveConnectionId": "quiet-padding-live-1",
+                        "initialLiveConnectionId": "quiet-padding-live-1",
+                        "peerIdentityHash": PEER_HASH,
+                        "serverStartUtc": start.isoformat(),
+                    },
+                    "initialLiveConnectionId": "quiet-padding-live-1",
+                    "finalLiveConnectionId": "quiet-padding-live-1",
+                    "liveConnectionTransitions": [],
+                    "serverConnectionTransitions": [],
+                    "logWindow": {
+                        "windowId": "quiet-padding-window-1",
+                        "start": start.isoformat(),
+                        "end": end.isoformat(),
+                    },
+                    "receiveLoopBalance": 0,
+                    "maxReceiveLoopsActive": 1,
+                    "replayCountsByReopen": {},
+                    "duplicateResponseIds": [],
+                    "staleAudioAfterReplacement": 0,
+                    "unrecoveredTimeouts": [],
+                    "unreleasedLessonHandoffs": [],
+                    "fatalHits": [],
+                    "correlation": {"status": "NOT_OBSERVED"},
+                    "correlations": [],
+                    "failures": [],
+                },
             }
         ]
 
@@ -649,7 +694,7 @@ def test_candidate_soak_slow_reconnect_cannot_pass_with_omitted_baseline_metric(
     assert report["latencyComparison"]["pass"] is False
 
 
-@pytest.mark.parametrize("latency", ["firstAudioMs", "bargeinMs", "reconnectRecoveryMs"])
+@pytest.mark.parametrize("latency", ["firstAudioMs", "bargeinStopMs", "reconnectRecoveryMs"])
 def test_candidate_soak_rejects_missing_candidate_latency_samples(latency):
     def remove_samples(result, _sequence, _name, _index, _label):
         if latency in result["latencies"]:
@@ -662,7 +707,7 @@ def test_candidate_soak_rejects_missing_candidate_latency_samples(latency):
     }
 
 
-@pytest.mark.parametrize("latency", ["firstAudioMs", "bargeinMs", "reconnectRecoveryMs"])
+@pytest.mark.parametrize("latency", ["firstAudioMs", "bargeinStopMs", "reconnectRecoveryMs"])
 def test_candidate_soak_rejects_nonpositive_candidate_latency_samples(latency):
     def zero_samples(result, _sequence, _name, _index, _label):
         if latency in result["latencies"]:
@@ -1299,6 +1344,101 @@ def test_quiet_padding_must_prove_bounded_healthy_coverage(failure):
 
     assert report["status"] == "FAIL"
     assert "QUIET_PADDING_INVALID" in {item["code"] for item in report["failures"]}
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_log_proof",
+        "wrong_peer",
+        "wrong_connection",
+        "live_proof_mismatch",
+        "misplaced_latency",
+    ],
+)
+def test_quiet_padding_requires_trusted_full_server_log_proof(mutation):
+    journeys = _journeys()
+    original = journeys["monitor"]
+
+    async def corrupt(args, *, duration_sec):
+        evidence = await original(args, duration_sec=duration_sec)
+        padding = evidence[0]
+        if mutation == "missing_log_proof":
+            padding.pop("task5LogEvidence")
+        elif mutation == "wrong_peer":
+            padding["peerIdentityHash"] = f"sha256:{'e' * 64}"
+            padding["evidenceScope"]["peerIdentityHash"] = padding[
+                "peerIdentityHash"
+            ]
+        elif mutation == "wrong_connection":
+            padding["connectionId"] = SOAK_CONNECTION_1
+            padding["evidenceScope"]["connectionId"] = SOAK_CONNECTION_1
+        elif mutation == "live_proof_mismatch":
+            padding["finalLiveConnectionId"] = "fabricated-padding-live"
+        else:
+            padding["latencies"] = {"firstAudioMs": [1]}
+        return evidence
+
+    journeys["monitor"] = corrupt
+    report = _run(journeys=journeys)
+
+    assert "QUIET_PADDING_INVALID" in {item["code"] for item in report["failures"]}
+
+
+def test_conversation_latency_cannot_spoof_bargein_or_reconnect_metrics():
+    def spoof(result, _sequence, name, _index, _label):
+        if name == "conversation":
+            result["latencies"] = {
+                "firstAudioMs": [1000],
+                "bargeinStopMs": [1],
+                "serverOutputGapMs": [1],
+                "reconnectRecoveryMs": [1],
+            }
+        elif name in {"bargein", "reconnect"}:
+            result["latencies"] = {}
+
+    report = _run(journeys=_journeys(mutation=spoof))
+
+    assert "LATENCY_EVIDENCE_MALFORMED" in {
+        item["code"] for item in report["failures"]
+    }
+
+
+def test_missing_one_of_ten_bargein_latency_samples_fails():
+    def omit(result, _sequence, name, index, _label):
+        if name == "bargein" and index == 10:
+            result["latencies"].pop("serverOutputGapMs")
+
+    report = _run(journeys=_journeys(mutation=omit))
+
+    assert "LATENCY_EVIDENCE_MALFORMED" in {
+        item["code"] for item in report["failures"]
+    }
+
+
+@pytest.mark.parametrize("stage", ["quiet", "lesson"])
+def test_non_latency_stage_rejects_misplaced_latency_fields(stage):
+    def misplaced(result, _sequence, name, _index, _label):
+        if name == stage:
+            result["latencies"] = {"firstAudioMs": [1]}
+
+    report = _run(journeys=_journeys(mutation=misplaced))
+
+    assert "LATENCY_EVIDENCE_MALFORMED" in {
+        item["code"] for item in report["failures"]
+    }
+
+
+def test_slow_server_output_gap_from_bargein_stage_fails_hard_budget():
+    def slow(result, _sequence, name, _index, _label):
+        if name == "bargein":
+            result["latencies"]["serverOutputGapMs"] = [500]
+
+    report = _run(journeys=_journeys(mutation=slow))
+
+    assert "HARD_LATENCY_BUDGET_FAILED" in {
+        item["code"] for item in report["failures"]
+    }
 
 
 def test_replay_derives_duration_from_execution_and_padding_windows():

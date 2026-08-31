@@ -272,6 +272,22 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         return analyze_reliability_window(path)
 
+    def test_quiet_padding_normalizes_non_vacuous_receive_loop_coverage(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live evidence_receive_loop_started journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 generation=1",
+                "2026-08-31 10:00:58 Google Live evidence_receive_loop_stopped journey_id=bargein-journey-1 connection_id=conn-1 live_connection_id=live-1 generation=1",
+                journey_id="bargein-journey-1",
+                journeys="quiet_padding",
+                evidence_scope=EVIDENCE_SCOPE,
+            )
+        )
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+        self.assertEqual(verdict["journeyType"], "quiet_padding")
+        self.assertEqual(verdict["maxReceiveLoopsActive"], 1)
+        self.assertEqual(verdict["receiveLoopBalance"], 0)
+
     def test_server_connection_transition_is_normalized_from_anchored_log_marker(self):
         marker = _server_connection_transition()
         scoped, valid = analyze_google_live_log._scoped_marker_validation(marker)
