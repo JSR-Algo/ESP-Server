@@ -289,6 +289,37 @@ def test_python_test_runtime_descriptor_accepts_immutable_root(candidate: dict) 
     assert descriptor["rootMode"] == 0o555
 
 
+def test_backend_snapshot_descriptor_rejects_named_root_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "backend"
+    root.mkdir()
+    source = root / "source.txt"
+    source.write_text("original", encoding="utf-8")
+    source.chmod(0o444)
+    root.chmod(0o555)
+    original_lstat = Path.lstat
+    calls = 0
+
+    def replaced_lstat(path: Path):
+        nonlocal calls
+        observed = original_lstat(path)
+        if path == root:
+            calls += 1
+            if calls > 1:
+                values = list(observed)
+                values[1] += 1
+                return os.stat_result(values)
+        return observed
+
+    monkeypatch.setattr(Path, "lstat", replaced_lstat)
+
+    descriptor, error = manifest.secure_backend_snapshot_tree_descriptor(root)
+
+    assert descriptor is None
+    assert error == "changed"
+
+
 def test_python_runtime_authority_probe_requires_write_denying_sandbox(
     candidate: dict, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

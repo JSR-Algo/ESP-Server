@@ -634,6 +634,8 @@ def secure_backend_snapshot_tree_descriptor(
         )
         if error or descriptor is None:
             return None, error or "tree"
+        if _tree_metadata_identity(root.lstat()) != _tree_metadata_identity(metadata):
+            return None, "changed"
         digest = hashlib.sha256()
         _digest_field(digest, BACKEND_SNAPSHOT_TREE_SCHEMA.encode("ascii"))
         _digest_field(digest, descriptor["sha256"].encode("ascii"))

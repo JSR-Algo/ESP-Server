@@ -109,7 +109,9 @@ class BackendRootResolution:
 def resolve_backend_root(
     requested: Path | None, *, expected_sha: str | None = None,
 ) -> BackendRootResolution:
-    bound_expected_sha = expected_sha or os.environ.get("COURSE_MODE_BACKEND_SHA")
+    bound_expected_sha = (
+        expected_sha if expected_sha is not None else os.environ.get("COURSE_MODE_BACKEND_SHA")
+    )
     if bound_expected_sha is not None and re.fullmatch(r"[0-9a-f]{40}", bound_expected_sha) is None:
         return BackendRootResolution(None, "BACKEND_IDENTITY_MISMATCH")
     configured = requested or (

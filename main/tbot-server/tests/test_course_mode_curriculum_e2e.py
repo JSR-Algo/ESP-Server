@@ -287,7 +287,7 @@ def test_backend_source_rejects_candidate_identity_mismatch() -> None:
     assert result.error == "BACKEND_IDENTITY_MISMATCH"
 
 
-@pytest.mark.parametrize("sha", ["a" * 39, "A" * 40, "not-a-sha"])
+@pytest.mark.parametrize("sha", ["", "a" * 39, "A" * 40, "not-a-sha"])
 def test_backend_source_rejects_noncanonical_candidate_sha(sha: str) -> None:
     assert resolve_backend_root(BACKEND_ROOT, expected_sha=sha).error == "BACKEND_IDENTITY_MISMATCH"
 
