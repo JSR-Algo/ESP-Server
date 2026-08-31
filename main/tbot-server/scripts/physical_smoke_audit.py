@@ -17,11 +17,11 @@ if str(_SERVER_ROOT) not in sys.path:
 from scripts.google_live_reliability import (  # noqa: E402
     GOOGLE_LIVE_LIMITS,
     SCHEMA_VERSION,
+    forbidden_report_fields,
     percentile,
     validate_candidate_soak_report,
     validate_log_reliability_contract,
 )
-
 
 FATAL_PATTERNS = (
     "Traceback",
@@ -120,35 +120,6 @@ _PHYSICAL_AUDIT_SAMPLE_COUNTS = {
 }
 _INTENTIONAL_OUTPUT_GAP_BOUNDARIES = frozenset(
     {"interrupt", "turn_completion", "backpressure", "transport_recovery"}
-)
-_FORBIDDEN_REPORT_KEYS = frozenset(
-    {
-        "audio",
-        "audiochunk",
-        "audiobytes",
-        "rawaudio",
-        "rawaudiobase64",
-        "transcript",
-        "rawtranscript",
-        "prompt",
-        "modeltext",
-        "rawlog",
-        "loglines",
-        "authorization",
-        "apikey",
-        "xgoogapikey",
-        "xgoogleapikey",
-        "xapikey",
-        "token",
-        "bearertoken",
-        "cookie",
-        "setcookie",
-        "credential",
-        "credentials",
-        "secret",
-        "exception",
-        "sessionresumptionhandle",
-    }
 )
 
 
@@ -493,23 +464,8 @@ def _first_audio_out_ms_stats(log_text):
     return _number_stats(values)
 
 
-def _normalized_key(value):
-    return re.sub(r"[^a-zA-Z0-9]", "", str(value)).lower()
-
-
 def _forbidden_report_fields(value, path=""):
-    hits = []
-    if isinstance(value, dict):
-        for key, item in value.items():
-            item_path = f"{path}.{key}" if path else str(key)
-            if _normalized_key(key) in _FORBIDDEN_REPORT_KEYS:
-                hits.append(item_path)
-            else:
-                hits.extend(_forbidden_report_fields(item, item_path))
-    elif isinstance(value, list):
-        for index, item in enumerate(value):
-            hits.extend(_forbidden_report_fields(item, f"{path}[{index}]"))
-    return hits
+    return forbidden_report_fields(value, path)
 
 
 def _candidate_identity_valid(identity):

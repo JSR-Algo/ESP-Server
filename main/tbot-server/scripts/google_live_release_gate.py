@@ -20,6 +20,7 @@ from scripts.analyze_google_live_log import _validated_live_connection_transitio
 from scripts.google_live_reliability import (
     GOOGLE_LIVE_LIMITS,
     SCHEMA_VERSION,
+    forbidden_report_fields,
     validate_candidate_soak_report,
     validate_log_reliability_contract,
 )
@@ -42,23 +43,6 @@ IDENTITY_FIELDS = (
 )
 SHA256 = re.compile(r"[0-9a-f]{64}")
 TAGGED_SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
-FORBIDDEN_KEYS = frozenset(
-    {
-        "apikey",
-        "authorization",
-        "token",
-        "accesstoken",
-        "refreshtoken",
-        "sessionresumptionhandle",
-        "handle",
-        "clientsecret",
-        "xgoogapikey",
-        "xapikey",
-        "transcript",
-        "rawaudio",
-        "base64audio",
-    }
-)
 
 
 def _failure(code: str, layer: str | None = None, field: str | None = None) -> dict:
@@ -77,18 +61,6 @@ def _finite_nonnegative(value: Any) -> bool:
         and math.isfinite(value)
         and value >= 0
     )
-
-
-def _contains_forbidden_data(value: Any) -> bool:
-    if isinstance(value, Mapping):
-        return any(
-            re.sub(r"[^a-zA-Z0-9]", "", str(key)).lower() in FORBIDDEN_KEYS
-            or _contains_forbidden_data(item)
-            for key, item in value.items()
-        )
-    if isinstance(value, list):
-        return any(_contains_forbidden_data(item) for item in value)
-    return False
 
 
 def _identity_failures(identity: Any, expected: Mapping[str, Any], layer: str) -> list[dict]:
@@ -263,7 +235,7 @@ def _layer_valid(layer: str, report: Any, expected_identity: Mapping[str, Any]) 
             value, expected_candidate_identity=expected_identity
         ),
     }
-    return validators[layer](report) and not _contains_forbidden_data(report)
+    return validators[layer](report) and not forbidden_report_fields(report)
 
 
 def validate_expected_identity(identity: Mapping[str, Any]) -> None:

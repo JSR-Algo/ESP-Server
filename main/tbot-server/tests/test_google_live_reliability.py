@@ -10,12 +10,27 @@ from scripts.google_live_reliability import (
     SCHEMA_VERSION,
     build_candidate_identity,
     compare_latency_baseline,
+    forbidden_report_fields,
     percentile,
     redact_mapping,
     reliability_verdict,
     resource_verdict,
     sample_process_resources,
 )
+
+
+def test_forbidden_report_fields_is_recursive_normalized_and_value_safe() -> None:
+    report = {
+        "safe": [{"Raw-Transcript": "private words"}],
+        "nested": {"set_cookie": "private cookie"},
+        "exceptionCount": 0,
+        "transcriptPersisted": False,
+    }
+
+    assert forbidden_report_fields(report) == [
+        "safe[0].Raw-Transcript",
+        "nested.set_cookie",
+    ]
 
 
 def _resource_sample(index: int, *, rss: int, fds: int, tasks: int, threads: int) -> dict:

@@ -186,6 +186,54 @@ def test_self_embedded_checksum_cannot_authorize_tampering(tmp_path: Path) -> No
     assert any(item["code"] == "CHECKSUM_MISMATCH" for item in verdict["failures"])
 
 
+@pytest.mark.parametrize(
+    ("layer", "forbidden_key", "container"),
+    [
+        ("deterministic", "rawTranscript", "nested"),
+        ("server_regression", "Cookie", "list"),
+        ("real_api", "set-cookie", "nested"),
+        ("websocket_e2e", "credential", "list"),
+        ("physical", "SECRET", "nested"),
+        ("candidate_soak", "exception", "list"),
+        ("deterministic", "audioChunk", "nested"),
+        ("real_api", "session_resumption_handle", "list"),
+    ],
+)
+def test_release_rejects_canonical_forbidden_fields_anywhere(
+    tmp_path: Path, layer: str, forbidden_key: str, container: str
+) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+
+    def tamper(report: dict) -> None:
+        value = {forbidden_key: "must-never-leak"}
+        report["releaseMetadata"] = value if container == "nested" else [{"safe": value}]
+
+    _rewrite(paths[layer], tamper)
+    checksums[layer] = hashlib.sha256(paths[layer].read_bytes()).hexdigest()
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+    encoded = json.dumps(verdict)
+
+    assert verdict["status"] == "FAIL"
+    assert "must-never-leak" not in encoded
+    assert any(item["code"] == "LAYER_CONTRACT_INVALID" for item in verdict["failures"])
+
+
+@pytest.mark.parametrize(
+    "safe_key",
+    ["exceptionCount", "transcriptPersisted", "rawAudioPersisted", "tokenCount"],
+)
+def test_release_allows_safe_near_miss_metadata_keys(tmp_path: Path, safe_key: str) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    _rewrite(paths["deterministic"], lambda report: report.update({safe_key: 0}))
+    checksums["deterministic"] = hashlib.sha256(
+        paths["deterministic"].read_bytes()
+    ).hexdigest()
+
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+
+    assert verdict["status"] == "PASS"
+
+
 def test_checksum_manifest_maps_exact_files_and_allows_other_bounded_artifacts(tmp_path: Path) -> None:
     paths, checksums, manifest = _write_evidence(tmp_path)
     manifest.write_text(

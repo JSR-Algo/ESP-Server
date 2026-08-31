@@ -29,6 +29,40 @@ NORMALIZED_SECRET_KEYS = frozenset(
         "xapikey",
     }
 )
+FORBIDDEN_REPORT_KEYS = frozenset(
+    {
+        "audio",
+        "audiochunk",
+        "audiobytes",
+        "rawaudio",
+        "rawaudiobase64",
+        "base64audio",
+        "transcript",
+        "rawtranscript",
+        "prompt",
+        "modeltext",
+        "rawlog",
+        "loglines",
+        "authorization",
+        "apikey",
+        "xgoogapikey",
+        "xgoogleapikey",
+        "xapikey",
+        "token",
+        "accesstoken",
+        "refreshtoken",
+        "bearertoken",
+        "cookie",
+        "setcookie",
+        "credential",
+        "credentials",
+        "secret",
+        "clientsecret",
+        "exception",
+        "handle",
+        "sessionresumptionhandle",
+    }
+)
 GOOGLE_LIVE_LIMITS = {
     "firstAudioP50Ms": 1200.0,
     "firstAudioP95Ms": 1800.0,
@@ -63,6 +97,23 @@ def redact_mapping(value: Any) -> Any:
     if isinstance(value, list):
         return [redact_mapping(item) for item in value]
     return value
+
+
+def forbidden_report_fields(value: Any, path: str = "") -> list[str]:
+    """Return privacy-forbidden key paths without reading or returning their values."""
+    hits = []
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            item_path = f"{path}.{key}" if path else str(key)
+            normalized = re.sub(r"[^a-zA-Z0-9]", "", str(key)).lower()
+            if normalized in FORBIDDEN_REPORT_KEYS:
+                hits.append(item_path)
+            else:
+                hits.extend(forbidden_report_fields(item, item_path))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            hits.extend(forbidden_report_fields(item, f"{path}[{index}]"))
+    return hits
 
 
 def percentile(values: Sequence[int | float], percentile_value: float) -> float | None:
