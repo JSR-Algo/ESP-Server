@@ -7,13 +7,15 @@ flash, reset, or control a robot automatically.
 Use the exact `RUN_ID`, `EVIDENCE_ROOT`, candidate identity, configuration
 fingerprint, and fixture checksum exported by the smoke runbook.
 
-Production release is currently blocked by four software gaps documented below:
+Production release is currently blocked by six software gaps documented below:
 there is no standalone bounded log-report producer, production firmware does
 not establish a candidate-bound physical journey scope, there is no operator
-producer for the 33-execution soak manifest, and metadata-only transcript logs
-cannot provide the physical expected-match proof. The preflight and physical
+producer for the 33-execution soak manifest, metadata-only transcript logs
+cannot provide the physical expected-match proof, the release gate does not
+validate the deterministic matrix proof, and there is no structured
+execute-and-record command provenance wrapper. The preflight and physical
 sequence remain useful for diagnosis, but they are not a complete release gate
-until all four gaps are fixed.
+until all six gaps are fixed.
 
 ## 1. Target evidence layout and privacy
 
@@ -38,15 +40,22 @@ task-artifacts/google-live/$RUN_ID/
 
 Currently capturable intermediates include `websocket-e2e/timeline.log`,
 `websocket-e2e/transport.json`, `websocket-e2e/correlated.json`,
-`physical/timeline.log`, `pytest.xml`, and operator notes. The standalone
+`physical/timeline.log`, `deterministic/pytest.xml`,
+`deterministic/node-manifest.txt`, and operator notes. The standalone
 `websocket-e2e/log-report.json`, physical candidate audit, soak report, and
 release reports remain unavailable until the documented producers exist. After
 remediation, each analyzer input must contain exactly one reliability start/end
 anchor. The top-level `timeline.log` must be a privacy-safe index of the
 separate window paths, window IDs, and UTC bounds; it must never concatenate raw
 journey logs.
-`commands.txt` records commands with `$GOOGLE_API_KEY`, `$OTA_TOKEN`, device IDs,
-and protected paths left as redacted variable names, never expanded values.
+`commands.txt` records sanitized invocation templates through the
+`record_command` helper from `google-live-smoke.md`, with `$GOOGLE_API_KEY`,
+device/client identifiers, and protected paths left as literal variable names
+or placeholders, never expanded values. Continue in the same shell so that
+helper and strict shell settings remain active. This manual record is not
+cryptographic command provenance; release remains blocked until one checked-in
+wrapper both executes structured arguments and writes their canonical redacted
+representation.
 
 Raw child audio is not stored by default. Use synthetic or consenting-adult
 fixtures only. Reports and retained logs must contain no raw/base64 audio, raw
@@ -59,11 +68,20 @@ memory but their values must never enter artifacts.
 All checks must pass before judging audio behavior:
 
 ```bash
+record_command <<'CMD'
 curl -fsSI "http://<server-ip>:8000"
+CMD
+curl -fsSI "http://<server-ip>:8000"
+record_command <<'CMD'
+python3 scripts/voice_mode_preflight.py --device-ip "<robot-ip>" --max-loss-pct 0 --max-avg-ms 1000 --max-max-ms 1500 --max-jitter-ms 500 --max-duplicates 0
+CMD
 python3 scripts/voice_mode_preflight.py \
   --device-ip "<robot-ip>" \
   --max-loss-pct 0 --max-avg-ms 1000 --max-max-ms 1500 \
   --max-jitter-ms 500 --max-duplicates 0
+record_command <<'CMD'
+test -s tmp/server.log
+CMD
 test -s tmp/server.log
 ```
 
@@ -71,7 +89,22 @@ The WebSocket window is captured separately by `google-live-smoke.md`. Start a
 new physical-only capture immediately before the physical journey:
 
 ```bash
+PHYSICAL_LOG_PID=""
+cleanup_physical_capture() {
+  if test -n "${PHYSICAL_LOG_PID:-}"; then
+    kill "$PHYSICAL_LOG_PID" 2>/dev/null || true
+    wait "$PHYSICAL_LOG_PID" 2>/dev/null || true
+  fi
+  PHYSICAL_LOG_PID=""
+}
+trap cleanup_physical_capture EXIT INT TERM
+record_command <<'CMD'
 date -u +%Y-%m-%dT%H:%M:%SZ | tee "$EVIDENCE_ROOT/physical/server-start-utc.txt"
+CMD
+date -u +%Y-%m-%dT%H:%M:%SZ | tee "$EVIDENCE_ROOT/physical/server-start-utc.txt"
+record_command <<'CMD'
+tail -n 0 -F tmp/server.log > "$EVIDENCE_ROOT/physical/timeline.log" &
+CMD
 tail -n 0 -F tmp/server.log > "$EVIDENCE_ROOT/physical/timeline.log" &
 PHYSICAL_LOG_PID=$!
 ```
@@ -79,8 +112,11 @@ PHYSICAL_LOG_PID=$!
 After the final bounded journey:
 
 ```bash
-kill "$PHYSICAL_LOG_PID"
-wait "$PHYSICAL_LOG_PID" 2>/dev/null || true
+cleanup_physical_capture
+trap - EXIT INT TERM
+record_command <<'CMD'
+date -u +%Y-%m-%dT%H:%M:%SZ | tee "$EVIDENCE_ROOT/physical/server-end-utc.txt"
+CMD
 date -u +%Y-%m-%dT%H:%M:%SZ | tee "$EVIDENCE_ROOT/physical/server-end-utc.txt"
 ```
 
@@ -173,6 +209,9 @@ After both the journey-manifest and standalone log-report producers exist,
 validate the manifest with the current replay CLI:
 
 ```bash
+record_command <<'CMD'
+python3 scripts/google_live_robot_soak.py --mode candidate --cycles 10 --candidate-git-sha "$CANDIDATE_SHA" --candidate-image-digest "$CANDIDATE_IMAGE_DIGEST" --firmware-identity "$FIRMWARE_IDENTITY" --fixture-sha256 "$FIXTURE_SHA256" --config-json "$CONFIG_JSON" --baseline-report "<b07038b8-same-environment-baseline.json>" --real-api-report "$EVIDENCE_ROOT/real-api/report.json" --transport-report "$EVIDENCE_ROOT/websocket-e2e/transport.json" --correlated-transport-report "$EVIDENCE_ROOT/websocket-e2e/correlated.json" --log-reliability-report "$EVIDENCE_ROOT/websocket-e2e/log-report.json" --journey-evidence "$EVIDENCE_ROOT/candidate-soak/journey-evidence.json" --lesson-manifest "<exact-lesson-manifest.json>" --minimum-turns 30 --minimum-duration-sec 1800 --report "$EVIDENCE_ROOT/candidate-soak/report.json"
+CMD
 python3 scripts/google_live_robot_soak.py \
   --mode candidate --cycles 10 \
   --candidate-git-sha "$CANDIDATE_SHA" \
@@ -222,6 +261,9 @@ runnable or release-eligible. The interface below is retained only to show the
 remaining validator inputs after remediation:
 
 ```bash
+record_command <<'CMD'
+python3 scripts/physical_smoke_audit.py "$EVIDENCE_ROOT/physical/timeline.log" --device-id "<robot-device-id>" --client-id "<robot-client-id>" --server-ip "<server-ip>" --min-interrupts 10 --expected-user-transcript "<expected-utterance-01>" --expected-user-transcript "<expected-utterance-02>" --expected-user-transcript "<expected-utterance-03>" --expected-user-transcript "<expected-utterance-04>" --expected-user-transcript "<expected-utterance-05>" --expected-user-transcript "<expected-utterance-06>" --expected-user-transcript "<expected-utterance-07>" --expected-user-transcript "<expected-utterance-08>" --expected-user-transcript "<expected-utterance-09>" --expected-user-transcript "<expected-utterance-10>" --expected-post-lesson-transcript "<approved-Vietnamese-post-lesson-phrase>" --production-google-live-candidate --candidate-git-sha "$CANDIDATE_SHA" --candidate-image-digest "$CANDIDATE_IMAGE_DIGEST" --firmware-identity "$FIRMWARE_IDENTITY" --config-fingerprint "$CONFIG_FINGERPRINT" --fixture-sha256 "$FIXTURE_SHA256" --google-live-reliability-report "$EVIDENCE_ROOT/server-regression/report.json" --candidate-soak-report "$EVIDENCE_ROOT/candidate-soak/report.json" --lesson-manifest "<exact-lesson-manifest.json>" > "$EVIDENCE_ROOT/physical/audit.json"
+CMD
 python3 scripts/physical_smoke_audit.py "$EVIDENCE_ROOT/physical/timeline.log" \
   --device-id "<robot-device-id>" \
   --client-id "<robot-client-id>" \
@@ -259,7 +301,7 @@ Only after all required producers exist and the raw audit genuinely passes,
 wrap it with the exact upstream evidence required by the release gate. This is
 a future, non-runnable interface while any blocker remains:
 
-```bash
+```text
 EVIDENCE_ROOT="$EVIDENCE_ROOT" python3 - <<'PY'
 import json, os
 from pathlib import Path
@@ -291,12 +333,12 @@ All six layers are mandatory and must be `PASS` for the exact same candidate.
 No layer may be missing, `SKIPPED`, or `PENDING`. In particular, the WebSocket
 layer passes only as the Task 4 + Task 5 correlated composite.
 
-After all four blockers are implemented and all reports exist, create the
+After all six blockers are implemented and all reports exist, create the
 top-level timeline as an index of bounded windows. The following commands in
 this section are future release steps and are not currently runnable. The index
 contains references and UTC metadata only; no raw log lines are concatenated:
 
-```bash
+```text
 EVIDENCE_ROOT="$EVIDENCE_ROOT" python3 - <<'PY'
 import json, os
 from pathlib import Path
@@ -327,12 +369,30 @@ to `EVIDENCE_ROOT`; unrelated bounded artifacts may also be listed. Generate the
 manifest only after reports are final, and never regenerate it to bless a
 modified report.
 
-```bash
+```text
+EVIDENCE_ROOT="$EVIDENCE_ROOT" python3 - <<'PY'
+import hashlib, json, os, xml.etree.ElementTree as ET
+from pathlib import Path
+
+root = Path(os.environ["EVIDENCE_ROOT"])
+report = json.loads((root / "deterministic/report.json").read_text())
+collection_path = root / "deterministic/node-manifest.txt"
+collection = collection_path.read_text().splitlines()
+xml_root = ET.parse(root / "deterministic/pytest.xml").getroot()
+junit_total = len(list(xml_root.iter("testcase")))
+proof = report.get("coverageProof", {})
+assert report.get("status") == "PASS"
+assert junit_total == report["testVerdict"]["total"] == len(collection) > 0
+assert proof.get("collectedNodeCount") == len(collection)
+assert proof.get("collectionSha256") == hashlib.sha256(collection_path.read_bytes()).hexdigest()
+PY
 (
   cd "$EVIDENCE_ROOT"
   test -s commands.txt
+  <checked-in-command-provenance-validator> commands.txt
   shasum -a 256 \
     deterministic/report.json \
+    deterministic/pytest.xml deterministic/node-manifest.txt \
     server-regression/report.json \
     real-api/report.json \
     websocket-e2e/report.json \
@@ -347,7 +407,7 @@ modified report.
 Run the read-only aggregator. It does not start a server, call Google, open a
 WebSocket, deploy, flash, reset, or operate hardware:
 
-```bash
+```text
 python3 scripts/google_live_release_gate.py \
   --expected-git-sha "$CANDIDATE_SHA" \
   --expected-image-digest "$CANDIDATE_IMAGE_DIGEST" \
@@ -380,6 +440,8 @@ reports no failures, and every checksum is verified.
 | Physical latency/self-interrupt/stale audio | `physical/audit.json` plus operator timestamps | Check LAN/AEC/firmware posture, then reproduce on the same candidate |
 | Physical expected-match proof unavailable | Metadata-only transcript logs and repeated flag semantics | Software release blocker; implement privacy-safe proof, never enable/store raw transcripts |
 | Candidate manifest producer unavailable | `--journey-evidence` replay-only CLI path | Software release blocker; implement a trusted operator producer, never hand-author evidence |
+| Deterministic matrix proof not release-bound | `coverageProof`, `deterministic/node-manifest.txt`, JUnit, and `_deterministic_valid()` | Software release blocker; make the checked-in gate validate the exact node manifest/hash/count and checksum both supporting artifacts |
+| Command provenance unavailable | Manual `record_command` templates and privacy scan | Software release blocker; implement one structured wrapper that executes and canonically records the same redacted argv without secret/path expansion |
 | Soak duration/resource/cleanup failure | `candidate-soak/report.json` | Stop; do not synthesize duration, drop samples, or reuse another candidate's evidence |
 | Identity/checksum mismatch | `checksums.sha256` and each `candidateIdentity` | Rebuild the evidence set; never edit identity or regenerate checksums to force PASS |
 
