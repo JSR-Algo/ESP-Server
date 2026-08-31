@@ -3393,6 +3393,7 @@ def test_esp_python_lane_stages_attested_backend_node_runtime(candidate_file: Pa
     vite_node = install / ".bin/vite-node"
     vite_node.write_text("#!/usr/bin/env node\n", encoding="utf-8")
     vite_node.chmod(0o755)
+    (install / "fixture-link").symlink_to("fixture-package", target_is_directory=True)
     candidate["tools"]["nodeInstalls"]["backend"] = gate.describe_node_install(
         install, install.parent / "package-lock.json",
     )

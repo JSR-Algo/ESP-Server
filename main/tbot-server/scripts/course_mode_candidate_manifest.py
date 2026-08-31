@@ -506,6 +506,7 @@ def _tree_metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
 
 def _secure_browser_bundle_descriptor_fd(
     root_fd: int, root_metadata: os.stat_result, *, require_read_only: bool = False,
+    excluded_root_names: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, Any] | None, str | None]:
     digest = hashlib.sha256()
     state = {"entryCount": 0, "totalBytes": 0}
@@ -514,6 +515,8 @@ def _secure_browser_bundle_descriptor_fd(
         if depth > MAX_BROWSER_BUNDLE_DEPTH:
             return False
         for name in sorted(entry.name for entry in os.scandir(directory_fd)):
+            if depth == 0 and name in excluded_root_names:
+                continue
             relative = relative_parent / name
             metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
             state["entryCount"] += 1
@@ -631,6 +634,7 @@ def secure_backend_snapshot_tree_descriptor(
             return None, "changed"
         descriptor, error = _secure_browser_bundle_descriptor_fd(
             root_fd, metadata, require_read_only=True,
+            excluded_root_names=frozenset({"node_modules"}),
         )
         if error or descriptor is None:
             return None, error or "tree"
