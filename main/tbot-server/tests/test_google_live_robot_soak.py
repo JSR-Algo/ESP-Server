@@ -12,6 +12,7 @@ from scripts.google_live_robot_soak import (
     _candidate_failure_report,
     _validate_candidate_args,
     run_candidate_soak,
+    run_soak,
 )
 
 IDENTITY = {
@@ -66,6 +67,8 @@ def _args(**overrides):
         "config_json": "{}",
         "minimum_turns": 30,
         "minimum_duration_sec": 1800.0,
+        "evidence_gap_budget_sec": 10.0,
+        "maximum_padding_windows": 60,
         "bargein_cycles": 10,
         "lesson_manifest": {"manifestId": "bounded-lesson-v1"},
         "report": Path("report.json"),
@@ -152,9 +155,10 @@ def _args(**overrides):
 
 def _journeys(*, mutation=None):
     sequence = 0
+    last_window = None
 
     async def journey(_args, *, name, index, label=None, **_kwargs):
-        nonlocal sequence
+        nonlocal sequence, last_window
         sequence += 1
         result = {
             "schemaVersion": "google-live-reliability.v1",
@@ -186,12 +190,46 @@ def _journeys(*, mutation=None):
             result["lessonManifestSha256"] = "sha256:006c27e334a18ca85cdaf3a6e8ff2718219aab2004caf8233417ea6b80fd5652"
         if mutation is not None:
             mutation(result, sequence, name, index, label)
+        last_window = deepcopy(result["logWindow"])
         return result
 
-    return dict.fromkeys(
+    async def monitor(_args, *, duration_sec):
+        start = datetime.fromisoformat(last_window["end"]) + timedelta(seconds=10)
+        end = datetime(2026, 8, 31, 11, 30, tzinfo=timezone.utc)
+        return [
+            {
+                "schemaVersion": "google-live-reliability.v1",
+                "name": "quiet_padding",
+                "status": "PASS",
+                "candidateIdentity": IDENTITY,
+                "journeyId": "quiet-padding-1",
+                "connectionId": "candidate-soak-websocket",
+                "serverIssued": True,
+                "windowId": "quiet-padding-window-1",
+                "logWindow": {
+                    "windowId": "quiet-padding-window-1",
+                    "start": start.isoformat(),
+                    "end": end.isoformat(),
+                },
+                "evidenceScope": {
+                    "journeyId": "quiet-padding-1",
+                    "connectionId": "candidate-soak-websocket",
+                    "serverStartUtc": start.isoformat(),
+                },
+                "durationSec": (end - start).total_seconds(),
+                "falseInterrupts": 0,
+                "unexpectedFallbacks": 0,
+                "resourceVerdict": {"status": "PASS"},
+                "logStatus": "PASS",
+            }
+        ]
+
+    journeys = dict.fromkeys(
         ("conversation", "bargein", "quiet", "reopen", "reconnect", "lesson"),
         journey,
     )
+    journeys["monitor"] = monitor
+    return journeys
 
 
 def _samples():
@@ -204,7 +242,7 @@ def _samples():
 
 
 class _Clock:
-    def __init__(self, values=(0.0, 1800.0)):
+    def __init__(self, values=(0.0, 1800.0, 1800.0)):
         self.values = iter(values)
 
     def __call__(self):
@@ -260,6 +298,9 @@ def test_candidate_soak_runs_fixed_sequence_and_meets_production_budgets():
     assert report["resourceVerdict"]["status"] == "PASS"
     assert report["latencyComparison"]["pass"] is True
     assert report["status"] == "PASS"
+    assert report["durationSec"] == 1800.0
+    assert report["quietPadding"][0]["durationSec"] == 480.0
+    assert report["quietPadding"][0]["resourceVerdict"]["status"] == "PASS"
     assert report["candidateIdentity"] == IDENTITY
     assert len(report["evidenceExecutions"]) == 33
     assert len({item["journeyId"] for item in report["evidenceExecutions"]}) == 33
@@ -339,7 +380,9 @@ def test_candidate_soak_fails_resource_leak():
 
 def test_candidate_soak_fails_duration_and_latency_regression_budgets():
     short = _run(clock=_Clock((0.0, 1799.0, 1799.0)))
-    assert "MINIMUM_DURATION_NOT_MET" in {item["code"] for item in short["failures"]}
+    assert short["status"] == "FAIL"
+    assert short["durationSec"] == 1800.0
+    assert "ACTUAL_DURATION_NOT_MET" in {item["code"] for item in short["failures"]}
 
     baseline = deepcopy(_args().baseline_report)
     baseline["latencyMetrics"]["firstAudioP50Ms"] = 800
@@ -588,11 +631,106 @@ def test_candidate_soak_rejects_utc_window_span_beyond_soak_duration():
         if sequence == 33:
             result["logWindow"]["end"] = "2026-08-31T12:00:00+00:00"
 
-    report = _run(journeys=_journeys(mutation=mutate))
+    report = _run(
+        args=_args(candidate_evidence_duration_sec=1800),
+        journeys=_journeys(mutation=mutate),
+    )
 
-    assert "EVIDENCE_UTC_SPAN_EXCEEDS_SOAK" in {
+    assert "CLAIMED_DURATION_MISMATCH" in {
         item["code"] for item in report["failures"]
     }
+
+
+def test_claimed_duration_cannot_replace_zero_actual_or_proven_duration():
+    def short_windows(result, sequence, _name, _index, _label):
+        start = datetime(2026, 8, 31, 11, 0, tzinfo=timezone.utc) + timedelta(
+            seconds=sequence
+        )
+        result["logWindow"].update(
+            start=start.isoformat(),
+            end=(start + timedelta(milliseconds=100)).isoformat(),
+        )
+
+    journeys = _journeys(mutation=short_windows)
+    journeys.pop("monitor")
+    report = _run(
+        args=_args(candidate_evidence_duration_sec=1800),
+        journeys=journeys,
+        clock=_Clock((0.0, 0.0)),
+    )
+
+    assert report["status"] == "FAIL"
+    assert "PROVEN_DURATION_NOT_MET" in {item["code"] for item in report["failures"]}
+
+
+@pytest.mark.parametrize("failure", ["missing", "malformed", "gapped", "overlap"])
+def test_quiet_padding_must_prove_bounded_healthy_coverage(failure):
+    journeys = _journeys()
+    if failure == "missing":
+        journeys.pop("monitor")
+    elif failure == "malformed":
+        async def malformed(_args, *, duration_sec):
+            return [{"name": "quiet_padding", "status": "PASS"}]
+
+        journeys["monitor"] = malformed
+    else:
+        original = journeys["monitor"]
+
+        async def gapped(args, *, duration_sec):
+            evidence = await original(args, duration_sec=duration_sec)
+            start = datetime.fromisoformat(evidence[0]["logWindow"]["start"])
+            evidence[0]["logWindow"]["start"] = (
+                start
+                + timedelta(seconds=1 if failure == "gapped" else -20)
+            ).isoformat()
+            return evidence
+
+        journeys["monitor"] = gapped
+
+    report = _run(journeys=journeys)
+
+    assert report["status"] == "FAIL"
+    assert "QUIET_PADDING_INVALID" in {item["code"] for item in report["failures"]}
+
+
+def test_replay_derives_duration_from_execution_and_padding_windows():
+    async def build_manifest():
+        journeys = _journeys()
+        executions = []
+        for name, count in (
+            ("conversation", 17),
+            ("bargein", 10),
+            ("quiet", 2),
+            ("reopen", 1),
+            ("reconnect", 1),
+            ("lesson", 1),
+            ("conversation_after_lesson", 1),
+        ):
+            callable_name = "conversation" if name == "conversation_after_lesson" else name
+            for index in range(1, count + 1):
+                executions.append(
+                    await journeys[callable_name](
+                        _args(), name=name, index=index, label=None
+                    )
+                )
+        padding = await journeys["monitor"](_args(), duration_sec=480)
+        return {
+            "durationSec": 1800,
+            "executions": executions,
+            "quietPadding": padding,
+            "resourceSamples": [_samples() for _ in range(36)],
+        }
+
+    args = _args(
+        mode="candidate",
+        candidate_journeys=None,
+        journey_evidence=asyncio.run(build_manifest()),
+    )
+    report = asyncio.run(run_soak(args))
+
+    assert report["status"] == "PASS"
+    assert report["durationSec"] == 1800.0
+    assert report["runtimeElapsedSec"] < report["durationSec"]
 
 
 def test_candidate_soak_rejects_hard_latency_budget_even_with_matching_baseline():

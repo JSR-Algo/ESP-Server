@@ -1632,6 +1632,84 @@ def _validate_upstream_layer(report, *, name, identity, failures, status="PASS")
         failures.append({"code": "FORBIDDEN_EVIDENCE_FIELD", "layer": name})
 
 
+def _validated_quiet_padding(
+    value,
+    *,
+    identity,
+    expected_connection_id,
+    previous_end,
+    gap_budget_sec,
+    seen_journeys,
+    seen_windows,
+    seen_utc_windows,
+):
+    if not isinstance(value, Mapping):
+        return None
+    log_window = value.get("logWindow")
+    start_utc = (
+        _parse_utc_iso(log_window.get("start"))
+        if isinstance(log_window, Mapping)
+        else None
+    )
+    end_utc = (
+        _parse_utc_iso(log_window.get("end"))
+        if isinstance(log_window, Mapping)
+        else None
+    )
+    duration = (
+        (end_utc - start_utc).total_seconds()
+        if start_utc is not None and end_utc is not None
+        else None
+    )
+    gap = (
+        (start_utc - previous_end).total_seconds()
+        if start_utc is not None and previous_end is not None
+        else None
+    )
+    journey_id = value.get("journeyId")
+    window_id = value.get("windowId")
+    utc_window = (start_utc, end_utc)
+    expected_scope = {
+        "journeyId": journey_id,
+        "connectionId": expected_connection_id,
+        "serverStartUtc": log_window.get("start")
+        if isinstance(log_window, Mapping)
+        else None,
+    }
+    valid = (
+        value.get("schemaVersion") == SCHEMA_VERSION
+        and value.get("name") == "quiet_padding"
+        and value.get("status") == "PASS"
+        and value.get("candidateIdentity") == identity
+        and value.get("connectionId") == expected_connection_id
+        and value.get("serverIssued") is True
+        and value.get("evidenceScope") == expected_scope
+        and value.get("falseInterrupts") == 0
+        and value.get("unexpectedFallbacks") == 0
+        and isinstance(value.get("resourceVerdict"), Mapping)
+        and value["resourceVerdict"].get("status") == "PASS"
+        and value.get("logStatus") == "PASS"
+        and duration is not None
+        and duration > 0
+        and _finite_nonnegative(value.get("durationSec"))
+        and abs(float(value["durationSec"]) - duration) <= 1.0
+        and gap is not None
+        and 0 < gap <= gap_budget_sec
+        and isinstance(journey_id, str)
+        and bool(journey_id)
+        and journey_id not in seen_journeys
+        and isinstance(window_id, str)
+        and bool(window_id)
+        and isinstance(log_window, Mapping)
+        and log_window.get("windowId") == window_id
+        and window_id not in seen_windows
+        and utc_window not in seen_utc_windows
+    )
+    if not valid:
+        return None
+    return dict(value), end_utc, utc_window
+
+
 def _latency_metrics(executions):
     first_audio = []
     bargein = []
@@ -1693,6 +1771,10 @@ async def run_candidate_soak(
     first_window_start = None
     previous_window_end = None
     last_window_end = None
+    gap_budget_sec = float(getattr(args, "evidence_gap_budget_sec", 10.0))
+    if not math.isfinite(gap_budget_sec) or not 0 < gap_budget_sec <= 10.0:
+        failures.append({"code": "EVIDENCE_GAP_BUDGET_INVALID"})
+    maximum_padding_windows = int(getattr(args, "maximum_padding_windows", 60))
 
     for stage_name, count in _CANDIDATE_STAGE_COUNTS:
         callable_name = "conversation" if stage_name == "conversation_after_lesson" else stage_name
@@ -1766,7 +1848,14 @@ async def run_candidate_soak(
                     failures.append({"code": "EVIDENCE_UTC_WINDOW_REUSED", "stage": stage_name})
                 else:
                     seen_utc_windows.add(utc_window)
-                if previous_window_end is not None and start_utc <= previous_window_end:
+                gap_sec = (
+                    (start_utc - previous_window_end).total_seconds()
+                    if previous_window_end is not None
+                    else 0.0
+                )
+                if previous_window_end is not None and (
+                    gap_sec <= 0 or gap_sec > gap_budget_sec
+                ):
                     failures.append({"code": "EVIDENCE_UTC_WINDOW_INVALID", "stage": stage_name})
                 else:
                     first_window_start = first_window_start or start_utc
@@ -1790,20 +1879,62 @@ async def run_candidate_soak(
             break
 
     elapsed = clock() - started
-    evidence_duration = getattr(args, "candidate_evidence_duration_sec", None)
-    if _finite_nonnegative(evidence_duration):
-        elapsed = max(elapsed, float(evidence_duration))
     minimum_duration = float(args.minimum_duration_sec)
-    if elapsed < minimum_duration and not failures:
+    padding_evidence = []
+    proven_duration = (
+        (last_window_end - first_window_start).total_seconds()
+        if first_window_start is not None and last_window_end is not None
+        else 0.0
+    )
+    replay_mode = bool(getattr(args, "replay_candidate_evidence", False))
+    if (proven_duration < minimum_duration or (elapsed < minimum_duration and not replay_mode)) and not failures:
         monitor = journeys.get("monitor")
         if callable(monitor):
             try:
-                await monitor(args, duration_sec=minimum_duration - elapsed)
+                observed_padding = await monitor(
+                    args,
+                    duration_sec=max(
+                        0.0,
+                        minimum_duration - proven_duration,
+                        minimum_duration - elapsed,
+                    ),
+                )
             except Exception as exc:
-                failures.append({"code": "MONITORED_DURATION_FAILED", "errorClass": type(exc).__name__})
-            elapsed = clock() - started
+                failures.append(
+                    {"code": "MONITORED_DURATION_FAILED", "errorClass": type(exc).__name__}
+                )
+                observed_padding = []
+            if (
+                not isinstance(observed_padding, list)
+                or not observed_padding
+                or len(observed_padding) > maximum_padding_windows
+            ):
+                failures.append({"code": "QUIET_PADDING_INVALID"})
+            else:
+                expected_connection = executions[-1].get("connectionId")
+                for padding in observed_padding:
+                    validated = _validated_quiet_padding(
+                        padding,
+                        identity=identity,
+                        expected_connection_id=expected_connection,
+                        previous_end=last_window_end,
+                        gap_budget_sec=gap_budget_sec,
+                        seen_journeys=seen_journeys,
+                        seen_windows=seen_windows,
+                        seen_utc_windows=seen_utc_windows,
+                    )
+                    if validated is None:
+                        failures.append({"code": "QUIET_PADDING_INVALID"})
+                        continue
+                    safe_padding, last_window_end, utc_window = validated
+                    seen_journeys.add(safe_padding["journeyId"])
+                    seen_windows.add(safe_padding["windowId"])
+                    seen_utc_windows.add(utc_window)
+                    padding_evidence.append(safe_padding)
+                    samples.append(safe_sample())
+                elapsed = clock() - started
         else:
-            failures.append({"code": "MONITORED_DURATION_MISSING"})
+            failures.append({"code": "QUIET_PADDING_INVALID"})
     cleanup = journeys.get("cleanup")
     if callable(cleanup):
         try:
@@ -1956,14 +2087,21 @@ async def run_candidate_soak(
         failures.append({"code": "FALSE_INTERRUPT_OBSERVED"})
     if totals["unexpectedFallbacks"]:
         failures.append({"code": "UNEXPECTED_FALLBACK_OBSERVED"})
-    if elapsed < minimum_duration:
-        failures.append({"code": "MINIMUM_DURATION_NOT_MET"})
-    if (
-        first_window_start is None
-        or last_window_end is None
-        or (last_window_end - first_window_start).total_seconds() > elapsed
+    proven_duration = (
+        (last_window_end - first_window_start).total_seconds()
+        if first_window_start is not None and last_window_end is not None
+        else 0.0
+    )
+    claimed_duration = getattr(args, "candidate_evidence_duration_sec", None)
+    if proven_duration < minimum_duration:
+        failures.append({"code": "PROVEN_DURATION_NOT_MET"})
+    if not replay_mode and elapsed < minimum_duration:
+        failures.append({"code": "ACTUAL_DURATION_NOT_MET"})
+    if claimed_duration is not None and (
+        not _finite_nonnegative(claimed_duration)
+        or abs(float(claimed_duration) - proven_duration) > 1.0
     ):
-        failures.append({"code": "EVIDENCE_UTC_SPAN_EXCEEDS_SOAK"})
+        failures.append({"code": "CLAIMED_DURATION_MISMATCH"})
 
     try:
         latency_metrics = _latency_metrics(executions)
@@ -2013,7 +2151,34 @@ async def run_candidate_soak(
         "name": "candidate_soak",
         "status": "PASS" if not failures else "FAIL",
         "candidateIdentity": identity,
-        "durationSec": round(elapsed, 3),
+        "durationSec": round(proven_duration, 3),
+        "runtimeElapsedSec": round(elapsed, 3),
+        "evidenceGapBudgetSec": gap_budget_sec,
+        "evidenceAnchors": {
+            "serverStartUtc": first_window_start.isoformat()
+            if first_window_start is not None
+            else None,
+            "serverEndUtc": last_window_end.isoformat()
+            if last_window_end is not None
+            else None,
+        },
+        "quietPadding": [
+            {
+                "journeyId": item.get("journeyId"),
+                "connectionId": item.get("connectionId"),
+                "windowId": item.get("windowId"),
+                "logWindow": item.get("logWindow"),
+                "durationSec": item.get("durationSec"),
+                "status": item.get("status"),
+                "serverIssued": item.get("serverIssued"),
+                "evidenceScope": item.get("evidenceScope"),
+                "falseInterrupts": item.get("falseInterrupts"),
+                "unexpectedFallbacks": item.get("unexpectedFallbacks"),
+                "resourceVerdict": item.get("resourceVerdict"),
+                "logStatus": item.get("logStatus"),
+            }
+            for item in padding_evidence
+        ],
         "stages": stages,
         "evidenceExecutions": [
             {
@@ -2066,9 +2231,16 @@ async def run_soak(args):
             if not _finite_nonnegative(evidence_duration):
                 raise ValueError("journey evidence durationSec must be finite and non-negative")
             args.candidate_evidence_duration_sec = evidence_duration
+            args.replay_candidate_evidence = True
+            recorded_padding = manifest.get("quietPadding", [])
+            if not isinstance(recorded_padding, list):
+                raise ValueError("journey evidence quietPadding must be a list")
             recorded_samples = manifest.get("resourceSamples")
-            if not isinstance(recorded_samples, list) or len(recorded_samples) != expected_count + 2:
-                raise ValueError("journey evidence must contain exactly 35 resource samples")
+            expected_samples = expected_count + len(recorded_padding) + 2
+            if not isinstance(recorded_samples, list) or len(recorded_samples) != expected_samples:
+                raise ValueError(
+                    f"journey evidence must contain exactly {expected_samples} resource samples"
+                )
             sample_cursor = 0
 
             def recorded_sample():
@@ -2105,6 +2277,11 @@ async def run_soak(args):
                     raise ValueError("journey evidence was not fully consumed")
 
             journeys["cleanup"] = recorded_cleanup
+
+            async def recorded_monitor(_args, *, duration_sec):
+                return [dict(item) if isinstance(item, Mapping) else item for item in recorded_padding]
+
+            journeys["monitor"] = recorded_monitor
         return await run_candidate_soak(
             args,
             journeys=journeys,
@@ -2319,6 +2496,8 @@ def _build_argument_parser():
     parser.add_argument("--journey-evidence", type=Path, default=None)
     parser.add_argument("--minimum-turns", type=int, default=30)
     parser.add_argument("--minimum-duration-sec", type=float, default=1800.0)
+    parser.add_argument("--evidence-gap-budget-sec", type=float, default=10.0)
+    parser.add_argument("--maximum-padding-windows", type=int, default=60)
     parser.add_argument("--lesson-manifest", type=Path, default=None)
     # Output
     parser.add_argument("--report", type=Path, default=None, help="write JSON report to this path (required for CI)")
@@ -2355,6 +2534,10 @@ def _validate_candidate_args(parser, args):
         parser.error("candidate mode minimum-duration-sec cannot be below 1800")
     if args.bargein_cycles != GOOGLE_LIVE_LIMITS["minimumBargeins"]:
         parser.error("candidate mode requires exactly 10 barge-in cycles")
+    if not math.isfinite(args.evidence_gap_budget_sec) or not 0 < args.evidence_gap_budget_sec <= 10.0:
+        parser.error("candidate mode evidence-gap-budget-sec must be in (0, 10]")
+    if args.maximum_padding_windows < 1 or args.maximum_padding_windows > 60:
+        parser.error("candidate mode maximum-padding-windows must be in [1, 60]")
 
 
 def _candidate_failure_report(args, error):
