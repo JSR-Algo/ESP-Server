@@ -134,6 +134,8 @@ OTA flow or secret store. Store it in a mode-600 file outside the evidence tree,
 then source it without copying the value into artifacts:
 
 ```bash
+tail -n 0 -F tmp/server.log > "$EVIDENCE_ROOT/websocket-e2e/timeline.log" &
+WEBSOCKET_LOG_PID=$!
 OTA_TOKEN_FILE="<protected-token-file>"
 test "$(stat -f '%Lp' "$OTA_TOKEN_FILE")" = "600"
 IFS= read -r OTA_TOKEN < "$OTA_TOKEN_FILE"
@@ -153,6 +155,8 @@ python3 scripts/voice_mode_websocket_audio_bargein.py \
   --fixture-sha256 "$FIXTURE_SHA256" \
   --report "$EVIDENCE_ROOT/websocket-e2e/transport.json"
 unset OTA_TOKEN
+kill "$WEBSOCKET_LOG_PID"
+wait "$WEBSOCKET_LOG_PID" 2>/dev/null || true
 ```
 
 The transport command intentionally exits non-zero with `SKIPPED` and
@@ -160,7 +164,11 @@ The transport command intentionally exits non-zero with `SKIPPED` and
 evidence can never be a standalone PASS. Only Task 5 correlation with the exact
 bounded server log can upgrade the composite WebSocket layer.
 
-Capture only the matching UTC server window into `timeline.log`, then correlate:
+Capture only this WebSocket journey into its own bounded log. Never append a
+physical or soak journey to this file: `analyze_reliability_window()` rejects a
+second start/end anchor as `DUPLICATE_WINDOW_START`/`DUPLICATE_WINDOW_END`.
+
+Then correlate the exact WebSocket window:
 
 ```bash
 EVIDENCE_ROOT="$EVIDENCE_ROOT" CANDIDATE_SHA="$CANDIDATE_SHA" \
@@ -173,10 +181,19 @@ identity = {"gitSha": os.environ["CANDIDATE_SHA"], "imageDigest": os.environ["CA
 (root / "candidate.json").write_text(json.dumps(identity, indent=2, sort_keys=True) + "\n")
 PY
 PYTHONPATH=. python3 scripts/analyze_google_live_log.py \
-  --log "$EVIDENCE_ROOT/timeline.log" \
+  --log "$EVIDENCE_ROOT/websocket-e2e/timeline.log" \
   --correlate-transport "$EVIDENCE_ROOT/websocket-e2e/transport.json" \
   --expected-candidate-json "$EVIDENCE_ROOT/candidate.json" \
   --out-json "$EVIDENCE_ROOT/websocket-e2e/correlated.json"
+EVIDENCE_ROOT="$EVIDENCE_ROOT" PYTHONPATH=. python3 - <<'PY'
+import json, os
+from pathlib import Path
+from scripts.analyze_google_live_log import analyze_reliability_window
+root = Path(os.environ["EVIDENCE_ROOT"])
+report = analyze_reliability_window(root / "websocket-e2e/timeline.log")
+(root / "websocket-e2e/log-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+raise SystemExit(0 if report.get("status") == "PASS" else 1)
+PY
 ```
 
 The analyzer requires the exact journey, connection, peer hash, Live connection
