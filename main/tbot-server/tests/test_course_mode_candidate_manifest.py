@@ -292,6 +292,67 @@ def test_candidate_rejects_repository_root_owned_by_another_uid(
     assert "repositories.backend.path" in validate_candidate(candidate, now=NOW)
 
 
+@pytest.mark.parametrize("relative", [".git", "src/lessons/course-mode"])
+def test_candidate_rejects_writable_repository_internal_directory(
+    candidate: dict, relative: str,
+) -> None:
+    backend = Path(candidate["repositories"]["backend"]["path"])
+    (backend / relative).chmod(0o777)
+
+    assert "repositories.backend.path" in validate_candidate(candidate, now=NOW)
+
+
+def test_candidate_rejects_foreign_owned_repository_internal_file(
+    candidate: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = Path(candidate["repositories"]["backend"]["path"])
+    target = backend / "tracked.txt"
+    target_identity = (target.stat().st_dev, target.stat().st_ino)
+    original_stat = os.stat
+    original_fstat = os.fstat
+
+    def foreign_owner(observed: os.stat_result) -> os.stat_result:
+        if (observed.st_dev, observed.st_ino) == target_identity:
+            values = list(observed)
+            values[4] = os.geteuid() + 1
+            return os.stat_result(values)
+        return observed
+
+    monkeypatch.setattr(os, "stat", lambda *args, **kwargs: foreign_owner(original_stat(*args, **kwargs)))
+    monkeypatch.setattr(os, "fstat", lambda fd: foreign_owner(original_fstat(fd)))
+
+    assert "repositories.backend.path" in validate_candidate(candidate, now=NOW)
+
+
+def test_candidate_rejects_repository_ancestor_aba_during_git_identity(
+    candidate: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = Path(candidate["repositories"]["backend"]["path"])
+    ancestor = backend.parent
+    moved = ancestor.with_name(ancestor.name + "-moved")
+    original_git = manifest._git
+    swapped = False
+
+    def swap_then_restore(root: Path, *args: str) -> str:
+        nonlocal swapped
+        if root == backend and not swapped:
+            swapped = True
+            ancestor.rename(moved)
+            replacement = ancestor / backend.relative_to(ancestor)
+            replacement.mkdir(parents=True)
+            try:
+                return original_git(moved / backend.relative_to(ancestor), *args)
+            finally:
+                shutil.rmtree(ancestor)
+                moved.rename(ancestor)
+        return original_git(root, *args)
+
+    monkeypatch.setattr(manifest, "_git", swap_then_restore)
+
+    assert "repositories.backend.path" in validate_candidate(candidate, now=NOW)
+    assert swapped is True
+
+
 def test_candidate_rejects_symlink_repository_root(candidate: dict, tmp_path: Path) -> None:
     backend = Path(candidate["repositories"]["backend"]["path"])
     link = tmp_path / "backend-link"
@@ -522,6 +583,64 @@ def test_node_package_tree_descriptor_rejects_writable_parent(candidate: dict) -
     assert manifest.secure_node_package_tree_descriptor(package_root) is None
 
 
+@pytest.mark.parametrize(("relative", "mode"), [
+    ("bin", 0o777),
+    ("bin/npm-cli.js", 0o666),
+])
+def test_node_package_tree_descriptor_rejects_writable_descendant(
+    candidate: dict, relative: str, mode: int,
+) -> None:
+    package_root = Path(candidate["tools"]["node"]["backend"]["packageRoot"])
+    (package_root / relative).chmod(mode)
+
+    assert manifest.secure_node_package_tree_descriptor(package_root) is None
+
+
+@pytest.mark.parametrize("relative", ["bin", "bin/npm-cli.js"])
+def test_node_package_tree_descriptor_rejects_foreign_owned_descendant(
+    candidate: dict, monkeypatch: pytest.MonkeyPatch, relative: str,
+) -> None:
+    package_root = Path(candidate["tools"]["node"]["backend"]["packageRoot"])
+    target = package_root / relative
+    target_identity = (target.stat().st_dev, target.stat().st_ino)
+    original_stat = os.stat
+    original_fstat = os.fstat
+
+    def foreign_owner(observed: os.stat_result) -> os.stat_result:
+        if (observed.st_dev, observed.st_ino) == target_identity:
+            values = list(observed)
+            values[4] = os.geteuid() + 1
+            return os.stat_result(values)
+        return observed
+
+    monkeypatch.setattr(os, "stat", lambda *args, **kwargs: foreign_owner(original_stat(*args, **kwargs)))
+    monkeypatch.setattr(os, "fstat", lambda fd: foreign_owner(original_fstat(fd)))
+
+    assert manifest.secure_node_package_tree_descriptor(package_root) is None
+
+
+def test_source_authority_scan_does_not_consume_descriptor_directory_offset(
+    candidate: dict,
+) -> None:
+    package_root = Path(candidate["tools"]["node"]["backend"]["packageRoot"])
+    root_fd, metadata, _ancestry = manifest._open_trusted_source_directory(package_root)
+    try:
+        assert manifest._secure_source_authority_fd(
+            root_fd, metadata, allow_safe_symlinks=False,
+        ) is True
+        first, first_error = manifest._secure_browser_bundle_descriptor_fd(root_fd, metadata)
+        assert manifest._secure_source_authority_fd(
+            root_fd, metadata, allow_safe_symlinks=False,
+        ) is True
+        second, second_error = manifest._secure_browser_bundle_descriptor_fd(root_fd, metadata)
+    finally:
+        os.close(root_fd)
+
+    assert first_error is None and second_error is None
+    assert first == second
+    assert first is not None and first["entryCount"] > 0
+
+
 def test_node_package_tree_descriptor_closes_component_fd_when_identity_read_fails(
     candidate: dict, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -567,7 +686,7 @@ def test_node_package_tree_descriptor_rejects_root_mode_race(
     assert manifest.secure_node_package_tree_descriptor(package_root) is None
 
 
-def test_node_package_tree_descriptor_binds_open_root_across_ancestor_aba(
+def test_node_package_tree_descriptor_rejects_ancestor_aba(
     candidate: dict, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     package_root = Path(candidate["tools"]["node"]["backend"]["packageRoot"])
@@ -594,7 +713,7 @@ def test_node_package_tree_descriptor_binds_open_root_across_ancestor_aba(
 
     monkeypatch.setattr(manifest, "_secure_browser_bundle_descriptor_fd", swap_ancestor_during_scan)
 
-    assert manifest.secure_node_package_tree_descriptor(package_root) == expected
+    assert manifest.secure_node_package_tree_descriptor(package_root) is None
     assert swapped is True
 
 
@@ -1126,9 +1245,7 @@ def test_candidate_rejects_symlink_dirty_exception_escape(
         "path": "external-link", "sha256": hashlib.sha256(external.read_bytes()).hexdigest(),
     }]
 
-    assert validate_candidate(candidate, now=NOW) == [
-        "repositories.adminEsp.dirtyExceptions.path",
-    ]
+    assert validate_candidate(candidate, now=NOW) == ["repositories.adminEsp.path"]
 
 
 def test_secure_dirty_read_detects_path_replacement(tmp_path: Path, monkeypatch) -> None:

@@ -277,7 +277,9 @@ def _source_directory_identity(metadata: os.stat_result) -> tuple[int, ...]:
     return (*_tree_metadata_identity(metadata), metadata.st_uid, metadata.st_gid)
 
 
-def _open_trusted_source_directory(path: Path) -> tuple[int, os.stat_result]:
+def _open_trusted_source_directory(
+    path: Path,
+) -> tuple[int, os.stat_result, tuple[tuple[int, ...], ...]]:
     if not path.is_absolute() or ".." in path.parts:
         raise OSError("absolute path required")
     flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
@@ -292,6 +294,7 @@ def _open_trusted_source_directory(path: Path) -> tuple[int, os.stat_result]:
         ):
             raise OSError("untrusted source directory")
         metadata = root_metadata
+        ancestry = [_source_directory_identity(root_metadata)]
         for component in path.parts[1:]:
             named = os.stat(component, dir_fd=current, follow_symlinks=False)
             if (
@@ -319,9 +322,10 @@ def _open_trusted_source_directory(path: Path) -> tuple[int, os.stat_result]:
             assert next_fd is not None
             current = next_fd
             metadata = opened
+            ancestry.append(_source_directory_identity(opened))
         if metadata.st_uid != effective_uid:
             raise OSError("source root owner")
-        return current, metadata
+        return current, metadata, tuple(ancestry)
     except Exception:
         os.close(current)
         raise
@@ -329,14 +333,16 @@ def _open_trusted_source_directory(path: Path) -> tuple[int, os.stat_result]:
 
 def _trusted_source_directory_still_named(
     path: Path, directory_fd: int, metadata: os.stat_result,
+    ancestry: tuple[tuple[int, ...], ...],
 ) -> bool:
     verification_fd: int | None = None
     try:
-        verification_fd, verification = _open_trusted_source_directory(path)
+        verification_fd, verification, verification_ancestry = _open_trusted_source_directory(path)
         return (
             _source_directory_identity(os.fstat(directory_fd))
             == _source_directory_identity(metadata)
             == _source_directory_identity(verification)
+            and verification_ancestry == ancestry
         )
     except (OSError, UnicodeEncodeError):
         return False
@@ -579,6 +585,104 @@ def _tree_metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def _directory_entry_names(directory_fd: int) -> list[str]:
+    scan_fd = os.open(
+        ".", os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=directory_fd,
+    )
+    try:
+        return sorted(entry.name for entry in os.scandir(scan_fd))
+    finally:
+        os.close(scan_fd)
+
+
+def _secure_source_authority_fd(
+    root_fd: int, root_metadata: os.stat_result, *, allow_safe_symlinks: bool,
+    max_entries: int = MAX_BACKEND_SNAPSHOT_ENTRIES,
+) -> bool:
+    effective_uid = os.geteuid()
+    trusted_uids = {0, effective_uid}
+    state = {"entries": 0}
+
+    def authorized(metadata: os.stat_result) -> bool:
+        return metadata.st_uid in trusted_uids and not stat.S_IMODE(metadata.st_mode) & 0o022
+
+    def visit(directory_fd: int, relative_parent: Path, depth: int) -> bool:
+        if depth > MAX_BROWSER_BUNDLE_DEPTH:
+            return False
+        for name in _directory_entry_names(directory_fd):
+            metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            state["entries"] += 1
+            if state["entries"] > max_entries or metadata.st_uid not in trusted_uids:
+                return False
+            relative = relative_parent / name
+            if stat.S_ISDIR(metadata.st_mode):
+                if not authorized(metadata):
+                    return False
+                child_fd = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=directory_fd,
+                )
+                try:
+                    identity = _source_directory_identity(metadata)
+                    if _source_directory_identity(os.fstat(child_fd)) != identity:
+                        return False
+                    if not visit(child_fd, relative, depth + 1):
+                        return False
+                    if (
+                        _source_directory_identity(os.fstat(child_fd)) != identity
+                        or _source_directory_identity(
+                            os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                        ) != identity
+                    ):
+                        return False
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(metadata.st_mode):
+                if not authorized(metadata):
+                    return False
+                file_fd = os.open(
+                    name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd,
+                )
+                try:
+                    identity = _source_directory_identity(metadata)
+                    if (
+                        _source_directory_identity(os.fstat(file_fd)) != identity
+                        or _source_directory_identity(
+                            os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                        ) != identity
+                    ):
+                        return False
+                finally:
+                    os.close(file_fd)
+            elif stat.S_ISLNK(metadata.st_mode):
+                if not allow_safe_symlinks:
+                    return False
+                try:
+                    target = os.readlink(name, dir_fd=directory_fd)
+                    normalized = posixpath.normpath(posixpath.join(relative_parent.as_posix(), target))
+                    if (
+                        not target or "\0" in target or posixpath.isabs(target)
+                        or normalized == ".." or normalized.startswith("../")
+                        or os.readlink(name, dir_fd=directory_fd) != target
+                        or _source_directory_identity(
+                            os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                        ) != _source_directory_identity(metadata)
+                    ):
+                        return False
+                except (OSError, UnicodeEncodeError):
+                    return False
+        return True
+
+    return (
+        stat.S_ISDIR(root_metadata.st_mode)
+        and authorized(root_metadata)
+        and visit(root_fd, Path(), 0)
+        and _source_directory_identity(os.fstat(root_fd))
+        == _source_directory_identity(root_metadata)
+    )
+
+
 def _secure_browser_bundle_descriptor_fd(
     root_fd: int, root_metadata: os.stat_result, *, require_read_only: bool = False,
     allow_safe_symlinks: bool = False, max_entries: int = 10_000,
@@ -591,7 +695,7 @@ def _secure_browser_bundle_descriptor_fd(
     def visit(directory_fd: int, relative_parent: Path, depth: int) -> bool:
         if depth > MAX_BROWSER_BUNDLE_DEPTH:
             return False
-        for name in sorted(entry.name for entry in os.scandir(directory_fd)):
+        for name in _directory_entry_names(directory_fd):
             relative = relative_parent / name
             metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
             state["entryCount"] += 1
@@ -791,7 +895,7 @@ def secure_backend_execution_tree_descriptor(
 def secure_node_package_tree_descriptor(root: Path) -> dict[str, Any] | None:
     root_fd = None
     try:
-        root_fd, metadata = _open_trusted_source_directory(root)
+        root_fd, metadata, ancestry = _open_trusted_source_directory(root)
     except (OSError, UnicodeEncodeError):
         return None
     root_mode = stat.S_IMODE(metadata.st_mode)
@@ -801,10 +905,15 @@ def secure_node_package_tree_descriptor(root: Path) -> dict[str, Any] | None:
         os.close(root_fd)
         return None
     try:
+        if not _secure_source_authority_fd(root_fd, metadata, allow_safe_symlinks=False):
+            return None
         descriptor, error = _secure_browser_bundle_descriptor_fd(root_fd, metadata)
         if error is not None or descriptor is None:
             return None
-        if not _trusted_source_directory_still_named(root, root_fd, metadata):
+        if (
+            not _secure_source_authority_fd(root_fd, metadata, allow_safe_symlinks=False)
+            or not _trusted_source_directory_still_named(root, root_fd, metadata, ancestry)
+        ):
             return None
     except (OSError, UnicodeEncodeError):
         return None
@@ -1213,7 +1322,9 @@ def _validate_repository(name: str, value: Any, reasons: set[str]) -> Path | Non
     root = Path(path_value)
     root_fd: int | None = None
     try:
-        root_fd, root_metadata = _open_trusted_source_directory(root)
+        root_fd, root_metadata, root_ancestry = _open_trusted_source_directory(root)
+        if not _secure_source_authority_fd(root_fd, root_metadata, allow_safe_symlinks=True):
+            raise OSError("untrusted repository authority")
     except (OSError, UnicodeEncodeError):
         reasons.add(f"{prefix}.path")
         return None
@@ -1227,7 +1338,14 @@ def _validate_repository(name: str, value: Any, reasons: set[str]) -> Path | Non
         return None
     finally:
         if root_fd is not None:
-            if not _trusted_source_directory_still_named(root, root_fd, root_metadata):
+            if (
+                not _secure_source_authority_fd(
+                    root_fd, root_metadata, allow_safe_symlinks=True,
+                )
+                or not _trusted_source_directory_still_named(
+                    root, root_fd, root_metadata, root_ancestry,
+                )
+            ):
                 reasons.add(f"{prefix}.path")
             os.close(root_fd)
     if f"{prefix}.path" in reasons:
