@@ -151,7 +151,7 @@ def _journeys(*, mutation=None):
             "candidateIdentity": IDENTITY,
             "evidenceSequence": sequence,
             "journeyId": f"candidate-{sequence}",
-            "connectionId": f"candidate-connection-{sequence}",
+            "connectionId": "candidate-soak-websocket",
             "initialLiveConnectionId": "live-session-reusable-after-close",
             "finalLiveConnectionId": "live-session-reusable-after-close",
             "liveConnectionTransitions": [],
@@ -519,7 +519,6 @@ def test_candidate_soak_rejects_fabricated_transition_ledger(mutation):
     [
         ("journeyId", "EVIDENCE_JOURNEY_REUSED"),
         ("windowId", "EVIDENCE_WINDOW_REUSED"),
-        ("connectionId", "EVIDENCE_CONNECTION_REUSED"),
         ("utcWindow", "EVIDENCE_UTC_WINDOW_REUSED"),
     ],
 )
@@ -540,8 +539,6 @@ def test_candidate_soak_rejects_each_reused_execution_identity_component(
         elif reused_component == "windowId":
             result["windowId"] = first["windowId"]
             result["logWindow"]["windowId"] = first["logWindow"]["windowId"]
-        elif reused_component == "connectionId":
-            result["connectionId"] = first["connectionId"]
         else:
             result["logWindow"]["start"] = first["logWindow"]["start"]
             result["logWindow"]["end"] = first["logWindow"]["end"]

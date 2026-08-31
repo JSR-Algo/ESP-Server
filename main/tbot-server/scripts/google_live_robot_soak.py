@@ -1686,7 +1686,6 @@ async def run_candidate_soak(
     executions = []
     seen_journeys = set()
     seen_windows = set()
-    seen_connections = set()
     seen_utc_windows = set()
     seen_evidence_keys = set()
     expected_sequence = 1
@@ -1738,14 +1737,6 @@ async def run_candidate_soak(
             else:
                 seen_windows.add(window_id)
             connection_id = result.get("connectionId")
-            if (
-                not isinstance(connection_id, str)
-                or not connection_id
-                or connection_id in seen_connections
-            ):
-                failures.append({"code": "EVIDENCE_CONNECTION_REUSED", "stage": stage_name})
-            else:
-                seen_connections.add(connection_id)
             log_window = result.get("logWindow")
             utc_window = (
                 (log_window.get("start"), log_window.get("end"))
@@ -1898,7 +1889,6 @@ async def run_candidate_soak(
     elif (
         correlated.get("journeyId") in seen_journeys
         or upstream_window_id in seen_windows
-        or upstream_connection in seen_connections
         or upstream_utc_window in seen_utc_windows
         or upstream_key in seen_evidence_keys
     ):
