@@ -1184,6 +1184,52 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_aec_live_vad_forward_does_not_admit_clean_user_turn(self):
+        conn = _Conn()
+        conn.client_is_speaking = True
+        conn.google_live_audio_out_started_at = time.monotonic() - 1.0
+        conn.config["google_live"].update(
+            {
+                "interrupt_on_input_while_speaking": True,
+                "disable_server_side_interruptions": False,
+                "server_side_vad_enabled": True,
+                "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
+            }
+        )
+
+        class BoundClient(_Client):
+            def __init__(self):
+                super().__init__()
+                self.bound_generations = []
+
+            def bind_response_generation(self, generation):
+                self.bound_generations.append(generation)
+                return True
+
+        client = BoundClient()
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        provider._client = client
+        provider._bridge = _AecPassthroughBridge(rms=300)
+        provider._response_generation = 7
+        provider._interaction.response_id = 7
+        provider._should_suppress_robot_output_echo = lambda _audio: False
+        provider._should_hold_interrupt_audio = lambda _audio: False
+        provider._can_forward_aec_audio_for_live_vad = lambda _config: True
+        provider._should_interrupt_for_input = lambda _audio: False
+        provider._should_drop_input_during_output = lambda: False
+        provider._should_drop_conversation_start_noise = lambda _audio: False
+
+        handled = await provider.handle_audio_bytes(b"\x01\x02" * 320)
+
+        self.assertTrue(handled)
+        self.assertEqual(provider._bridge.forwarded, [b"\x01\x02" * 320])
+        self.assertEqual(provider.current_response_id(), 7)
+        self.assertEqual(provider._cancelled_response_ids, set())
+        self.assertEqual(client.bound_generations, [])
+        self.assertIsNone(provider._user_stream_started_at)
+        self.assertIsNone(provider._input_flush_task)
+        self.assertIsNone(conn.google_live_turn_started_at)
+
     async def test_moderate_user_audio_interrupts_immediately_while_robot_speaks(self):
         conn = _Conn()
         conn.client_is_speaking = True

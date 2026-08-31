@@ -838,6 +838,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 self.conn.client_abort = False
                 return True
             self.conn.client_abort = False
+            if aec_live_vad_only and not interrupted:
+                await self._bridge.forward_decoded_input_audio(decoded_audio)
+                self._mark_lesson_asset_audio_activity()
+                self._log_audio_decision("forward_input", "accepted", decoded_audio)
+                return True
             self._mark_clean_user_turn_opened("audio_input")
             if decoded_audio is not None and hasattr(
                 self._bridge, "forward_decoded_input_audio"
@@ -847,8 +852,6 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 await self._bridge.forward_input_audio(audio_bytes)
             self._mark_lesson_asset_audio_activity()
             self._log_audio_decision("forward_input", "accepted", decoded_audio)
-            if aec_live_vad_only and not interrupted:
-                return True
             if self._interrupt_capture_response_id == self._response_generation:
                 self._interrupt_forwarded_once = True
             if not buffered_current_frame:
