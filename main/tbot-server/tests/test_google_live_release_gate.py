@@ -70,6 +70,39 @@ def _reports() -> dict[str, dict]:
     physical_audit = _PHYSICAL_CASE._candidate_audit(
         _PHYSICAL_CASE._candidate_physical_log()
     )
+    physical_audit.update(
+        {
+            "live_identity": True,
+            "live_identity_first_audio_chains": 1,
+            "audio_interrupts": 10,
+            "aec_live_vad_forward": 10,
+            "aec_interruption_chains": 10,
+            "live_server_interruption": 10,
+            "interrupt_tts_stops": 10,
+            "interrupt_stop_chains": 10,
+            "interrupt_user_chains": 10,
+            "interrupt_relisten_chains": 10,
+            "post_interrupt_user_transcripts": 10,
+            "realtime_tts_stops": 10,
+            "output_relisten_chains": 1,
+            "expected_user_transcripts": 10,
+            "user_transcripts": 10,
+            "user_transcript_expected_matches": 10,
+            "post_interrupt_user_transcript_expected_matches": 10,
+            "expected_post_lesson_transcripts": 1,
+            "post_lesson_response_chains": 1,
+            "lesson_prepare": 1,
+            "lesson_start": 1,
+            "lesson_steps": 1,
+            "lesson_step_layers_complete": 1,
+            "lesson_prompt_tts": 1,
+            "lesson_prompt_after_render": 1,
+            "lesson_firmware_rendered": 1,
+            "lesson_step_layers_drawn_by_step": 1,
+            "lesson_stop": 1,
+            "lesson_completed": 1,
+        }
+    )
     return {
         "deterministic": {
             "schemaVersion": "google-live-reliability.v1",
@@ -452,11 +485,27 @@ def test_websocket_release_recomputes_exact_task4_task5_correlation(
     [
         lambda report: report["auditReport"].update(malformedLatencyMarkers=1),
         lambda report: report["auditReport"].update(live_identity_mismatches=1),
+        lambda report: report["auditReport"].update(live_identity=False),
+        lambda report: report["auditReport"].update(audio_interrupts=11),
+        lambda report: report["auditReport"].pop("lesson_completed"),
+        lambda report: report["auditReport"].update(lesson_stop=0),
         lambda report: report["auditReport"]["serverOutputGapMs"].update(observed=0),
         lambda report: report["auditReport"]["serverOutputGapMs"].update(invalid=1),
         lambda report: report["auditReport"]["serverOutputGapMs"][
             "unexplainedResidualMs"
         ].update(max=251.0),
+        lambda report: report["auditReport"]["serverOutputGapMs"].update(
+            excludedIntentional=1
+        ),
+        lambda report: report["auditReport"]["serverOutputGapMs"].update(
+            excludedDurationMs=-1
+        ),
+        lambda report: report["auditReport"]["serverOutputGapMs"][
+            "rawGapDurationMs"
+        ].update(min=200.0, max=100.0),
+        lambda report: report["auditReport"].update(
+            first_audio_out_ms={"count": 10, "min": 1.0, "max": 1.0, "p50": 1.0, "p95": 1.0}
+        ),
         lambda report: report["auditReport"].update(input_audio_diag=0),
         lambda report: report["auditReport"].update(user_transcripts=0),
         lambda report: report["productionProfile"].update(
@@ -468,6 +517,10 @@ def test_websocket_release_recomputes_exact_task4_task5_correlation(
         ),
         lambda report: report["candidateSoakEvidence"].update(
             candidateIdentity={**IDENTITY, "gitSha": "other"}
+        ),
+        lambda report: report["logEvidence"].update(alternateValidEvidence=True),
+        lambda report: report["candidateSoakEvidence"].update(
+            alternateValidEvidence=True
         ),
     ],
 )
@@ -482,7 +535,9 @@ def test_physical_release_revalidates_full_task7_and_upstream_bindings(
 
     assert verdict["status"] == "FAIL"
     assert any(
-        item["code"] == "LAYER_CONTRACT_INVALID" and item["layer"] == "physical"
+        item["code"]
+        in {"LAYER_CONTRACT_INVALID", "PHYSICAL_UPSTREAM_BINDING_MISMATCH"}
+        and item["layer"] == "physical"
         for item in verdict["failures"]
     )
 
@@ -531,6 +586,90 @@ def test_cli_never_overwrites_checksum_manifest(tmp_path: Path) -> None:
 
     assert completed.returncode == 1
     assert manifest.read_bytes() == original
+
+
+def test_cli_writes_failure_atomically_for_malformed_checksum_manifest(
+    tmp_path: Path,
+) -> None:
+    paths, _, manifest = _write_evidence(tmp_path)
+    manifest.write_text("malformed checksum row\n", encoding="utf-8")
+    out = tmp_path / "release-verdict.json"
+
+    completed = _run_cli(paths, manifest, out)
+
+    assert completed.returncode == 1
+    verdict = json.loads(out.read_text(encoding="utf-8"))
+    assert verdict["status"] == "FAIL"
+    assert json.loads(completed.stdout) == verdict
+    assert not list(tmp_path.glob(".release-verdict.json.*.tmp"))
+
+
+def test_cli_writes_failure_atomically_for_malformed_layer_argument(
+    tmp_path: Path,
+) -> None:
+    _, _, manifest = _write_evidence(tmp_path)
+    out = tmp_path / "release-verdict.json"
+    script = Path(__file__).parents[1] / "scripts" / "google_live_release_gate.py"
+    command = [
+        sys.executable,
+        str(script),
+        "--expected-git-sha",
+        IDENTITY["gitSha"],
+        "--expected-image-digest",
+        IDENTITY["imageDigest"],
+        "--expected-firmware-identity",
+        IDENTITY["firmwareIdentity"],
+        "--expected-config-fingerprint",
+        IDENTITY["configFingerprint"],
+        "--expected-fixture-sha256",
+        IDENTITY["fixtureSha256"],
+        "--checksums-file",
+        str(manifest),
+        "--layer",
+        "malformed-layer-argument",
+        "--out",
+        str(out),
+    ]
+
+    completed = subprocess.run(command, text=True, capture_output=True, check=False)
+
+    assert completed.returncode == 1
+    assert json.loads(out.read_text(encoding="utf-8"))["status"] == "FAIL"
+    assert not list(tmp_path.glob(".release-verdict.json.*.tmp"))
+
+
+def test_malformed_duplicate_layers_cannot_hide_output_alias(tmp_path: Path) -> None:
+    paths, _, manifest = _write_evidence(tmp_path)
+    target = paths["real_api"]
+    original = target.read_bytes()
+    script = Path(__file__).parents[1] / "scripts" / "google_live_release_gate.py"
+    command = [
+        sys.executable,
+        str(script),
+        "--expected-git-sha",
+        IDENTITY["gitSha"],
+        "--expected-image-digest",
+        IDENTITY["imageDigest"],
+        "--expected-firmware-identity",
+        IDENTITY["firmwareIdentity"],
+        "--expected-config-fingerprint",
+        IDENTITY["configFingerprint"],
+        "--expected-fixture-sha256",
+        IDENTITY["fixtureSha256"],
+        "--checksums-file",
+        str(manifest),
+        "--layer",
+        f"real_api={target}",
+        "--layer",
+        f"real_api={target}",
+        "--out",
+        str(target),
+    ]
+
+    completed = subprocess.run(command, text=True, capture_output=True, check=False)
+
+    assert completed.returncode == 1
+    assert target.read_bytes() == original
 
 
 def _run_cli(paths: dict[str, Path], manifest: Path, out: Path) -> subprocess.CompletedProcess:

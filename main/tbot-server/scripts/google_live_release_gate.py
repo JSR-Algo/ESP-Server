@@ -223,6 +223,7 @@ def aggregate_release_evidence(
     """Read and validate all required reports without executing any journey."""
     failures = []
     layers = []
+    loaded_reports = {}
     try:
         validate_expected_identity(expected_identity)
     except ValueError:
@@ -264,6 +265,7 @@ def aggregate_release_evidence(
         )
         if report is None or not _layer_valid(layer, report, expected_identity):
             layer_failures.append(_failure("LAYER_CONTRACT_INVALID", layer))
+        loaded_reports[layer] = report
         failures.extend(layer_failures)
         layers.append(
             {
@@ -275,6 +277,17 @@ def aggregate_release_evidence(
                 ),
             }
         )
+    physical = loaded_reports.get("physical")
+    if isinstance(physical, Mapping) and (
+        physical.get("logEvidence") != loaded_reports.get("server_regression")
+        or physical.get("candidateSoakEvidence") != loaded_reports.get("candidate_soak")
+    ):
+        binding_failure = _failure("PHYSICAL_UPSTREAM_BINDING_MISMATCH", "physical")
+        failures.append(binding_failure)
+        for item in layers:
+            if item["name"] == "physical":
+                item["status"] = "FAIL"
+                break
     return {
         "schemaVersion": RELEASE_SCHEMA_VERSION,
         "status": "PASS" if not failures else "FAIL",
@@ -294,6 +307,15 @@ def _parse_layers(values: list[str]) -> dict[str, Path]:
     return result
 
 
+def _layer_path_candidates(values: list[str]) -> list[Path]:
+    candidates = []
+    for value in values:
+        _name, separator, path = value.partition("=")
+        if separator and path:
+            candidates.append(Path(path))
+    return candidates
+
+
 def _same_file(left: Path, right: Path) -> bool:
     if left.resolve(strict=False) == right.resolve(strict=False):
         return True
@@ -304,13 +326,13 @@ def _same_file(left: Path, right: Path) -> bool:
 
 
 def _output_aliases_evidence(
-    output: Path, layer_paths: Mapping[str, Path], checksum_path: Path
+    output: Path, layer_paths: list[Path], checksum_path: Path
 ) -> bool:
     if output.is_symlink():
         return True
     return any(
         _same_file(output, evidence)
-        for evidence in (*layer_paths.values(), checksum_path)
+        for evidence in (*layer_paths, checksum_path)
     )
 
 
@@ -351,15 +373,25 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         paths = _parse_layers(args.layer)
-        if _output_aliases_evidence(args.out, paths, args.checksums_file):
+        parse_valid = True
+    except ValueError:
+        paths = {}
+        parse_valid = False
+    output_safe = not _output_aliases_evidence(
+        args.out, _layer_path_candidates(args.layer), args.checksums_file
+    )
+    try:
+        if not output_safe:
             raise ValueError("output aliases release evidence")
+        if not parse_valid:
+            raise ValueError("layer arguments are malformed")
         checksums = load_checksum_manifest(args.checksums_file, paths)
     except (OSError, UnicodeError, ValueError):
         paths = {}
         checksums = {}
     verdict = aggregate_release_evidence(identity, paths, checksums)
     rendered = json.dumps(verdict, indent=2, sort_keys=True) + "\n"
-    if paths:
+    if output_safe:
         _atomic_write(args.out, rendered)
     print(rendered, end="")
     return 0 if verdict["status"] == "PASS" else 1

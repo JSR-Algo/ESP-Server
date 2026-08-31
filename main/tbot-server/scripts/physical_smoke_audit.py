@@ -496,12 +496,51 @@ def validate_physical_candidate_report(
         "receiveLoopBalance": 0,
         "maxReceiveLoopsActive": 1,
         "physical_ws_connected": True,
+        "live_identity": True,
+        "listen_start_interrupts": 0,
+        "expected_user_transcripts": 10,
+        "user_transcript_expected_matches": 10,
+        "post_interrupt_user_transcript_expected_matches": 10,
     }
     for field, expected in exact.items():
         if report.get(field) != expected or type(report.get(field)) is not type(expected):
             mismatch(field)
-    for field in ("input_audio_diag", "user_transcripts"):
-        if type(report.get(field)) is not int or report.get(field) < 1:
+    for field, minimum in (("input_audio_diag", 1), ("user_transcripts", 10)):
+        if type(report.get(field)) is not int or report.get(field) < minimum:
+            mismatch(field)
+    exact_count_fields = {
+        "audio_interrupts": 10,
+        "aec_live_vad_forward": 10,
+        "aec_interruption_chains": 10,
+        "live_server_interruption": 10,
+        "interrupt_tts_stops": 10,
+        "interrupt_stop_chains": 10,
+        "interrupt_user_chains": 10,
+        "interrupt_relisten_chains": 10,
+        "post_interrupt_user_transcripts": 10,
+        "realtime_tts_stops": 10,
+    }
+    for field, expected in exact_count_fields.items():
+        if type(report.get(field)) is not int or report.get(field) != expected:
+            mismatch(field)
+    minimum_fields = {
+        "live_identity_first_audio_chains": 1,
+        "output_relisten_chains": 1,
+        "expected_post_lesson_transcripts": 1,
+        "post_lesson_response_chains": 1,
+        "lesson_prepare": 1,
+        "lesson_start": 1,
+        "lesson_steps": 1,
+        "lesson_step_layers_complete": 1,
+        "lesson_prompt_tts": 1,
+        "lesson_prompt_after_render": 1,
+        "lesson_firmware_rendered": 1,
+        "lesson_step_layers_drawn_by_step": 1,
+        "lesson_stop": 1,
+        "lesson_completed": 1,
+    }
+    for field, minimum in minimum_fields.items():
+        if type(report.get(field)) is not int or report.get(field) < minimum:
             mismatch(field)
 
     expected_profile = {
@@ -552,6 +591,13 @@ def validate_physical_candidate_report(
             or value.get(statistic) > limit
         ):
             mismatch(field)
+    mirrored_metrics = {
+        "first_audio_out_ms": "firstAudioLatencyMs",
+        "interrupt_stop_latency_ms": "interruptStopLatencyMs",
+    }
+    for legacy, canonical in mirrored_metrics.items():
+        if report.get(legacy) != report.get(canonical):
+            mismatch(legacy)
 
     gaps = report.get("serverOutputGapMs")
     if not isinstance(gaps, dict):
@@ -579,6 +625,14 @@ def validate_physical_candidate_report(
                 or value < 0
                 for value in durations.values()
             )
+            or sum(boundaries.values()) != gaps.get("excludedIntentional")
+            or isinstance(gaps.get("excludedDurationMs"), bool)
+            or not isinstance(gaps.get("excludedDurationMs"), (int, float))
+            or not math.isfinite(gaps.get("excludedDurationMs"))
+            or gaps.get("excludedDurationMs") < 0
+            or abs(sum(durations.values()) - gaps.get("excludedDurationMs")) > 0.001
+            or gaps.get("observed")
+            != gaps.get("count") + gaps.get("excludedIntentional")
         ):
             mismatch("serverOutputGapEvidence")
         for nested in ("rawGapDurationMs", "unexplainedResidualMs"):
@@ -586,13 +640,21 @@ def validate_physical_candidate_report(
             if (
                 not isinstance(value, dict)
                 or type(value.get("count")) is not int
-                or value.get("count") != gaps.get("observed")
                 or any(
                     isinstance(value.get(name), bool)
                     or not isinstance(value.get(name), (int, float))
                     or not math.isfinite(value.get(name))
                     or value.get(name) < 0
                     for name in ("min", "max", "p50", "p95")
+                )
+                or not value["min"] <= value["p50"] <= value["p95"] <= value["max"]
+                or (
+                    nested == "rawGapDurationMs"
+                    and value.get("count") != gaps.get("observed")
+                )
+                or (
+                    nested == "unexplainedResidualMs"
+                    and value.get("count") != gaps.get("count")
                 )
                 or (nested == "unexplainedResidualMs" and value.get("max") > 250.0)
             ):
