@@ -1677,8 +1677,21 @@ def _validate_candidate_manifest_structure(manifest, *, identity) -> None:
         for name, count in _CANDIDATE_STAGE_COUNTS
         for _index in range(count)
     ]
+    expected_fields = {
+        "schemaVersion",
+        "name",
+        "candidateIdentity",
+        "durationSec",
+        "runtimeElapsedSec",
+        "executions",
+        "quietPadding",
+        "cleanup",
+        "resourceSamples",
+    }
     if (
-        manifest.get("schemaVersion") != SCHEMA_VERSION
+        set(manifest) != expected_fields
+        or manifest.get("schemaVersion") != SCHEMA_VERSION
+        or manifest.get("name") != "candidate_soak_evidence_manifest"
         or manifest.get("candidateIdentity") != identity
         or not isinstance(executions, list)
         or [item.get("name") if isinstance(item, Mapping) else None for item in executions]
@@ -1690,6 +1703,7 @@ def _validate_candidate_manifest_structure(manifest, *, identity) -> None:
         or not isinstance(samples, list)
         or len(samples) != 1 + len(executions) + len(padding) + 1
         or not _finite_nonnegative(manifest.get("durationSec"))
+        or not _finite_nonnegative(manifest.get("runtimeElapsedSec"))
     ):
         raise ValueError("candidate evidence manifest is incomplete")
     sample_ids = [
@@ -1950,6 +1964,7 @@ async def _run_candidate_websocket_journey(args, **context):
         "unexpectedFallbacks": 0,
         "latencies": {} if operation == "monitor" else {"firstAudioMs": [first_audio_ms]},
         "_scopeFinalized": True,
+        "_finalizeResult": dict(finalized),
     }
     if operation == "monitor":
         start_utc = _parse_utc_iso(result["logWindow"]["start"])
@@ -2079,6 +2094,55 @@ async def _analyze_candidate_journey(args, journey_id, output_path):
     return await asyncio.to_thread(analyze)
 
 
+def _validate_candidate_finalization(finalized, *, result, journey_id, stage):
+    if not isinstance(finalized, Mapping) or not isinstance(result, Mapping):
+        raise RuntimeError("candidate evidence finalization is malformed")
+    scope = finalized.get("evidenceScope")
+    result_scope = result.get("evidenceScope")
+    transitions = finalized.get("liveConnectionTransitions")
+    server_start = (
+        _parse_utc_iso(scope.get("serverStartUtc"))
+        if isinstance(scope, Mapping)
+        else None
+    )
+    server_end = _parse_utc_iso(finalized.get("serverEndUtc"))
+    initial_live_id = (
+        scope.get("initialLiveConnectionId")
+        if isinstance(scope, Mapping)
+        else None
+    )
+    final_live_id = finalized.get("finalLiveConnectionId")
+    if (
+        set(finalized)
+        != {
+            "type",
+            "status",
+            "evidenceScope",
+            "serverEndUtc",
+            "finalLiveConnectionId",
+            "liveConnectionTransitions",
+        }
+        or finalized.get("type") != "evidence_finalized"
+        or finalized.get("status") != "PASS"
+        or not isinstance(scope, Mapping)
+        or dict(scope) != result_scope
+        or scope.get("journeyId") != journey_id
+        or scope.get("journeyType") != stage
+        or scope.get("proofProfile") != "candidate-lifecycle"
+        or server_start is None
+        or server_end is None
+        or server_end < server_start
+        or _validated_live_connection_transition_chain(
+            initial_live_id,
+            final_live_id,
+            transitions,
+        )
+        != final_live_id
+    ):
+        raise RuntimeError("candidate evidence finalization is invalid")
+    return dict(finalized)
+
+
 def build_candidate_journeys(args):
     """Build the exact stateful journey surface consumed by candidate soak."""
     run_id = str(getattr(args, "run_id", "") or "").strip()
@@ -2135,21 +2199,32 @@ def build_candidate_journeys(args):
                 duration_sec=duration_sec,
             )
             driver_result = dict(result) if isinstance(result, Mapping) else None
+            embedded_finalize = (
+                driver_result.pop("_finalizeResult", None)
+                if driver_result is not None
+                else None
+            )
             scope_finalized = bool(
                 driver_result is not None
                 and driver_result.pop("_scopeFinalized", False) is True
             )
             finalized = (
-                driver_result
+                embedded_finalize
                 if scope_finalized
                 else await _candidate_control_json(
                     args, "POST", f"{journey_url}/finalize", {}
                 )
             )
+            finalized = _validate_candidate_finalization(
+                finalized,
+                result=driver_result,
+                journey_id=journey_id,
+                stage=name,
+            )
             log_evidence = await _analyze_candidate_journey(
                 args, journey_id, output_path
             )
-            if not isinstance(result, Mapping) or not isinstance(finalized, Mapping):
+            if not isinstance(result, Mapping):
                 raise RuntimeError("candidate journey evidence is malformed")
             analyzer_scope = log_evidence.get("evidenceScope")
             if (
@@ -2307,6 +2382,7 @@ async def produce_candidate_evidence(
         return report
     manifest = {
         "schemaVersion": SCHEMA_VERSION,
+        "name": "candidate_soak_evidence_manifest",
         "candidateIdentity": identity,
         "durationSec": report.get("durationSec"),
         "runtimeElapsedSec": report.get("runtimeElapsedSec"),
@@ -3600,6 +3676,10 @@ async def run_soak(args):
             manifest = _read_json_evidence(args.journey_evidence, "journey_evidence")
             if _forbidden_evidence_fields(manifest):
                 raise ValueError("candidate evidence contains forbidden fields")
+            _validate_candidate_manifest_structure(
+                manifest,
+                identity=_candidate_identity(args),
+            )
             recorded = manifest.get("executions")
             if not isinstance(recorded, list):
                 raise ValueError("journey_evidence executions must be a list")

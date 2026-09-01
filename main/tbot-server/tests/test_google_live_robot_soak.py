@@ -55,6 +55,30 @@ def _execution_window(sequence):
     }
 
 
+def _candidate_scope(journey_id, stage):
+    return {
+        "journeyId": journey_id,
+        "connectionId": "connection-1",
+        "liveConnectionId": "live-1",
+        "initialLiveConnectionId": "live-1",
+        "peerIdentityHash": PEER_HASH,
+        "serverStartUtc": "2026-08-31T10:00:00+00:00",
+        "journeyType": stage,
+        "proofProfile": "candidate-lifecycle",
+    }
+
+
+def _candidate_finalize(scope):
+    return {
+        "type": "evidence_finalized",
+        "status": "PASS",
+        "evidenceScope": scope,
+        "serverEndUtc": "2026-08-31T10:01:00+00:00",
+        "finalLiveConnectionId": "live-1",
+        "liveConnectionTransitions": [],
+    }
+
+
 def _refresh_execution_contract(result):
     result["evidenceScope"] = {
         "journeyId": result["journeyId"],
@@ -1600,7 +1624,11 @@ def test_replay_derives_duration_from_execution_and_padding_windows():
             "serverEndUtc": padding[-1]["logWindow"]["end"],
         }
         return {
+            "schemaVersion": "google-live-reliability.v1",
+            "name": "candidate_soak_evidence_manifest",
+            "candidateIdentity": IDENTITY,
             "durationSec": 1800,
+            "runtimeElapsedSec": 1800,
             "executions": executions,
             "quietPadding": padding,
             "cleanup": _cleanup_evidence(final_scope),
@@ -1752,7 +1780,11 @@ def _full_span_manifest(*, padding=None, samples=35):
                 executions.append(item)
         _refresh_execution_sequence(executions)
         return {
+            "schemaVersion": "google-live-reliability.v1",
+            "name": "candidate_soak_evidence_manifest",
+            "candidateIdentity": IDENTITY,
             "durationSec": 1800,
+            "runtimeElapsedSec": 1800,
             "executions": executions,
             "quietPadding": [] if padding is None else padding,
             "cleanup": _cleanup_evidence(
@@ -1813,8 +1845,8 @@ def test_full_span_rejects_unused_or_leaking_resource_sample():
 
 
 def test_full_span_rejects_safe_extra_resource_sample():
-    report = _run_manifest(_full_span_manifest(samples=36))
-    assert "RESOURCE_SAMPLE_UNUSED" in {item["code"] for item in report["failures"]}
+    with pytest.raises(ValueError, match="manifest is incomplete"):
+        _run_manifest(_full_span_manifest(samples=36))
 
 
 @pytest.mark.parametrize(
@@ -1833,10 +1865,8 @@ def test_replay_requires_exactly_one_matching_cleanup_artifact(failure):
     else:
         manifest["cleanup"] = [manifest["cleanup"], deepcopy(manifest["cleanup"])]
 
-    report = _run_manifest(manifest)
-
-    assert report["status"] == "FAIL"
-    assert "CLEANUP_FAILED" in {item["code"] for item in report["failures"]}
+    with pytest.raises(ValueError, match="manifest"):
+        _run_manifest(manifest)
 
 
 def test_needed_padding_rejects_duplicate_resource_sample_id():
@@ -1863,7 +1893,11 @@ def test_needed_padding_rejects_duplicate_resource_sample_id():
         ]
         samples[-1]["sampleId"] = samples[-2]["sampleId"]
         return {
+            "schemaVersion": "google-live-reliability.v1",
+            "name": "candidate_soak_evidence_manifest",
+            "candidateIdentity": IDENTITY,
             "durationSec": 1800,
+            "runtimeElapsedSec": 1800,
             "executions": executions,
             "quietPadding": padding,
             "cleanup": _cleanup_evidence(
@@ -1877,8 +1911,8 @@ def test_needed_padding_rejects_duplicate_resource_sample_id():
             "resourceSamples": samples,
         }
 
-    report = _run_manifest(asyncio.run(build()))
-    assert "RESOURCE_SAMPLE_UNUSED" in {item["code"] for item in report["failures"]}
+    with pytest.raises(ValueError, match="resource accounting"):
+        _run_manifest(asyncio.run(build()))
 
 
 def test_candidate_soak_rejects_hard_latency_budget_even_with_matching_baseline():
@@ -2343,6 +2377,7 @@ def test_candidate_producer_writes_closed_manifest_with_exact_accounting(tmp_pat
     manifest = json.loads(output.read_text(encoding="utf-8"))
 
     assert result["status"] == "PASS"
+    assert manifest["name"] == "candidate_soak_evidence_manifest"
     assert [item["name"] for item in manifest["executions"]] == [
         *("conversation" for _ in range(17)),
         *("bargein" for _ in range(10)),
@@ -2409,6 +2444,59 @@ def test_candidate_producer_refuses_to_replace_existing_closed_manifest(tmp_path
         )
 
     assert output.read_text(encoding="utf-8") == '{"closed":true}\n'
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["candidate_identity", "schema", "name", "extra", "missing"],
+)
+def test_candidate_replay_rejects_mutated_top_level_manifest(tmp_path, mutation):
+    output = tmp_path / "journey-evidence.json"
+    args = _args(
+        produce_candidate_evidence=output,
+        run_id="20260831T100000Z",
+    )
+    result = asyncio.run(
+        produce_candidate_evidence(
+            args,
+            journeys=_journeys(),
+            sample_resources=_samples,
+            clock=_Clock(),
+        )
+    )
+    assert result["status"] == "PASS"
+    manifest = json.loads(output.read_text(encoding="utf-8"))
+    if mutation == "candidate_identity":
+        manifest["candidateIdentity"] = {**IDENTITY, "gitSha": "mutated"}
+    elif mutation == "schema":
+        manifest["schemaVersion"] = "mutated.v1"
+    elif mutation == "name":
+        manifest["name"] = "mutated"
+    elif mutation == "extra":
+        manifest["unexpected"] = True
+    else:
+        manifest.pop("name")
+
+    with pytest.raises(ValueError, match="manifest"):
+        asyncio.run(
+            run_soak(
+                _args(
+                    mode="candidate",
+                    candidate_journeys=None,
+                    journey_evidence=manifest,
+                )
+            )
+        )
+
+    report_path = tmp_path / "candidate-soak" / "report.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text('{"status":"PASS","closed":true}\n', encoding="utf-8")
+    assert robot_soak._publish_candidate_report(
+        report_path, {"status": "FAIL"}
+    ) is False
+    assert report_path.read_text(encoding="utf-8") == (
+        '{"status":"PASS","closed":true}\n'
+    )
 
 
 def test_candidate_replay_report_is_atomic_and_never_overwritten_on_failure(tmp_path):
@@ -2496,13 +2584,21 @@ def test_candidate_producer_factory_has_only_consumed_journey_keys():
 def test_candidate_factory_enrolls_binds_runs_finalizes_then_analyzes(tmp_path):
     events = []
 
+    scope = _candidate_scope("candidate-soak.20260831T100000Z.1", "bargein")
+
     async def control(method, url, payload=None):
         events.append((method, url.rsplit("/", 1)[-1], payload))
+        if url.endswith("/finalize"):
+            return _candidate_finalize(scope)
         return {"status": "PASS"}
 
     async def driver(_args, **context):
         events.append(("driver", context["journey_id"], None))
-        return {"name": context["name"], "status": "PASS"}
+        return {
+            "name": context["name"],
+            "status": "PASS",
+            "evidenceScope": scope,
+        }
 
     async def analyzer(*, journey_id, output_path):
         events.append(("analyzer", journey_id, output_path.name))
@@ -2546,18 +2642,101 @@ def test_candidate_factory_enrolls_binds_runs_finalizes_then_analyzes(tmp_path):
     assert "secret" not in json.dumps(events)
 
 
+@pytest.mark.parametrize(
+    "case",
+    [
+        "fail",
+        "missing_status",
+        "wrong_type",
+        "wrong_scope",
+        "wrong_profile",
+        "wrong_journey_type",
+        "retryable",
+        "malformed",
+    ],
+)
+def test_candidate_factory_rejects_incomplete_finalize_before_analyzer(
+    tmp_path, case
+):
+    analyzer_calls = 0
+    journey_id = "candidate-soak.20260831T100000Z.1"
+    scope = _candidate_scope(journey_id, "bargein")
+    finalized = _candidate_finalize(scope)
+    if case == "fail":
+        finalized.update(status="FAIL", failureCode="EVIDENCE_CLEANUP_INCOMPLETE")
+    elif case == "missing_status":
+        finalized.pop("status")
+    elif case == "wrong_type":
+        finalized["type"] = "evidence_pending"
+    elif case == "wrong_scope":
+        finalized["evidenceScope"] = {**scope, "journeyId": "other"}
+    elif case == "wrong_profile":
+        finalized["evidenceScope"] = {**scope, "proofProfile": "physical-transcript"}
+    elif case == "wrong_journey_type":
+        finalized["evidenceScope"] = {**scope, "journeyType": "quiet"}
+    elif case == "retryable":
+        finalized["retryable"] = True
+    elif case == "malformed":
+        finalized = "malformed"
+
+    async def control(_method, url, _payload=None):
+        if url.endswith("/finalize"):
+            return finalized
+        return {"status": "PASS"}
+
+    async def analyzer(**_kwargs):
+        nonlocal analyzer_calls
+        analyzer_calls += 1
+        return {}
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "journey-evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=control,
+        candidate_journey_driver=lambda *_args, **_kwargs: {
+            "name": "bargein",
+            "status": "PASS",
+            "evidenceScope": scope,
+        },
+        candidate_log_analyzer=analyzer,
+    )
+
+    with pytest.raises(RuntimeError, match="finalization"):
+        asyncio.run(
+            build_candidate_journeys(args)["bargein"](
+                args, name="bargein", index=1
+            )
+        )
+    assert analyzer_calls == 0
+    assert not args.produce_candidate_evidence.exists()
+
+
 def test_candidate_factory_posts_exact_lifecycle_claims_for_all_33_executions(
     tmp_path,
 ):
     posts = []
 
-    async def control(method, _url, payload=None):
+    async def control(method, url, payload=None):
         if method == "POST" and isinstance(payload, dict) and "clientId" in payload:
             posts.append(deepcopy(payload))
+        if url.endswith("/finalize"):
+            body = posts[-1]
+            return _candidate_finalize(
+                _candidate_scope(body["journeyId"], body["journeyType"])
+            )
         return {"status": "PASS"}
 
     async def driver(_args, **context):
-        return {"name": context["name"], "status": "PASS"}
+        return {
+            "name": context["name"],
+            "status": "PASS",
+            "evidenceScope": _candidate_scope(
+                context["journey_id"], context["name"]
+            ),
+        }
 
     async def analyzer(*, journey_id, **_kwargs):
         stage = posts[-1]["journeyType"]
@@ -2631,6 +2810,8 @@ def test_candidate_factory_posts_exact_lifecycle_claims_for_all_33_executions(
 
 def test_candidate_factory_monitor_uses_enrolled_lifecycle_window(tmp_path):
     events = []
+    journey_id = "candidate-soak.20260831T100000Z.1"
+    scope = _candidate_scope(journey_id, "quiet_padding")
 
     async def control(method, url, payload=None):
         events.append((method, url, payload))
@@ -2642,7 +2823,9 @@ def test_candidate_factory_monitor_uses_enrolled_lifecycle_window(tmp_path):
             "name": "quiet_padding",
             "status": "PASS",
             "journeyId": context["journey_id"],
+            "evidenceScope": scope,
             "_scopeFinalized": True,
+            "_finalizeResult": _candidate_finalize(scope),
         }
 
     async def analyzer(*, journey_id, output_path):
@@ -2670,7 +2853,6 @@ def test_candidate_factory_monitor_uses_enrolled_lifecycle_window(tmp_path):
 
     result = asyncio.run(build_candidate_journeys(args)["monitor"](args, duration_sec=37.5))
 
-    journey_id = "candidate-soak.20260831T100000Z.1"
     assert events[0][2] == {
         "clientId": "robot-client",
         "journeyId": journey_id,
