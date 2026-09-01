@@ -134,6 +134,134 @@ def _write_log(lines):
     return tmp, path
 
 
+def _provider_info(second, message, *, level="INFO", module="core.voice.session_provider.google_live"):
+    return (
+        f"2026-08-31 10:00:{second:02d} - 0.9.3_test - {module} - {level} - "
+        f"GoogleLive - {message}"
+    )
+
+
+def _candidate_semantic_bargein_window(*semantic_overrides):
+    semantic = [
+        _provider_info(
+            2,
+            "Google Live evidence_candidate_intent_match "
+            "journey_id=bargein-journey-1 slot=1 role=initial chars=12 "
+            "matched=true response_generation=0",
+        ),
+        _provider_info(
+            4,
+            "Google Live evidence_candidate_intent_match "
+            "journey_id=bargein-journey-1 slot=2 role=newest chars=9 "
+            "matched=true response_generation=1",
+        ),
+        _provider_info(
+            16,
+            "Google Live evidence_candidate_intent_replacement "
+            "journey_id=bargein-journey-1 old_generation=1 new_generation=2 "
+            "old_stopped=true replacement_started=true replacement_completed=true "
+            "stale_old_audio=0",
+        ),
+        _provider_info(
+            17,
+            "Google Live evidence_candidate_fallback "
+            "journey_id=bargein-journey-1 fallbacks=0",
+        ),
+    ]
+    for index, replacement in semantic_overrides:
+        semantic[index] = replacement
+    lifecycle = _scoped_bargein_chain(
+        journey_id="bargein-journey-1",
+        connection_id="conn-1",
+        live_connection_id="live-1",
+        old=7,
+        new=8,
+        include_stale=False,
+    )
+    body = [
+        f"2026-08-31 10:00:01 {lifecycle[0]}",
+        semantic[0],
+        f"2026-08-31 10:00:03 {lifecycle[1]}",
+        semantic[1],
+        *(f"2026-08-31 10:00:{index:02d} {marker}" for index, marker in enumerate(lifecycle[2:-2], 5)),
+        semantic[2],
+        semantic[3],
+        f"2026-08-31 10:00:18 {lifecycle[-2]}",
+        "2026-08-31 10:00:19 Google Live evidence_connection_close "
+        "journey_id=bargein-journey-1 connection_id=conn-1 "
+        "live_connection_id=live-1 pending_tasks=0 active_sessions=0 "
+        "close_code=1000 reason=evidence_finalize",
+    ]
+    return _window_lines(
+        *body,
+        window_id="bargein-journey-1",
+        journey_id="bargein-journey-1",
+        journeys="bargein",
+        proof_profile="candidate-lifecycle",
+        evidence_scope=EVIDENCE_SCOPE,
+        server_issued=True,
+    )
+
+
+def _candidate_semantic_quiet_window(mode="silence", **counts):
+    expected = {
+        "user_turns": 0,
+        "response_starts": 0 if mode == "silence" else 1,
+        "response_ends": 0 if mode == "silence" else 1,
+        "interrupts": 0,
+        "replacements": 0,
+        "reconnects": 0,
+        "fallbacks": 0,
+        "stale_audio": 0,
+    }
+    expected.update(counts)
+    scope = {**EVIDENCE_SCOPE, "journeyId": "quiet-journey-1"}
+    body = [
+        "2026-08-31 10:00:01 Google Live evidence_receive_loop_started "
+        "journey_id=quiet-journey-1 connection_id=conn-1 "
+        "live_connection_id=live-1 generation=1",
+        *(
+            [
+                "2026-08-31 10:00:01 Google Live evidence_response_started "
+                "journey_id=quiet-journey-1 connection_id=conn-1 "
+                "live_connection_id=live-1 response_id=1",
+                "2026-08-31 10:00:02 Google Live evidence_response_ended "
+                "journey_id=quiet-journey-1 connection_id=conn-1 "
+                "live_connection_id=live-1 response_id=1",
+            ]
+            if mode == "robot_speaking"
+            else []
+        ),
+        _provider_info(
+            2,
+            "Google Live evidence_candidate_fallback "
+            "journey_id=quiet-journey-1 fallbacks=0",
+        ),
+        _provider_info(
+            3,
+            "Google Live evidence_candidate_quiet journey_id=quiet-journey-1 "
+            f"mode={mode} duration_ms=1500 "
+            + " ".join(f"{key}={value}" for key, value in expected.items()),
+        ),
+        "2026-08-31 10:00:04 Google Live evidence_receive_loop_stopped "
+        "journey_id=quiet-journey-1 connection_id=conn-1 "
+        "live_connection_id=live-1 generation=1",
+        "2026-08-31 10:00:05 Google Live evidence_connection_close "
+        "journey_id=quiet-journey-1 connection_id=conn-1 "
+        "live_connection_id=live-1 pending_tasks=0 active_sessions=0 "
+        "close_code=1000 reason=evidence_finalize",
+    ]
+    return _window_lines(
+        *body,
+        window_id="quiet-journey-1",
+        journey_id="quiet-journey-1",
+        journeys="quiet",
+        proof_profile="candidate-lifecycle",
+        evidence_scope=scope,
+        server_issued=True,
+    )
+
+
 def _exact_reconnect_window(*markers, final_live_connection_id="l2"):
     return _window_lines(
         "2026-08-31 10:00:00 Google Live evidence_receive_loop_started journey_id=j1 connection_id=c1 live_connection_id=l1 generation=1",
@@ -679,6 +807,224 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         tmp, path = _write_log(lines)
         self.addCleanup(tmp.cleanup)
         return analyze_reliability_window(path)
+
+    def test_candidate_bargein_semantic_evidence_passes_only_with_owned_newest_intent(self):
+        verdict = self._analyze(_candidate_semantic_bargein_window())
+
+        self.assertEqual(verdict["status"], "PASS", verdict)
+        self.assertEqual(
+            verdict["candidateSemanticEvidence"],
+            {
+                "status": "PASS",
+                "kind": "bargein-intent",
+                "initialSlotMatched": True,
+                "newestSlotMatched": True,
+                "orderingValid": True,
+                "latestIntentMatched": True,
+                "replacementOwnedByNewestGeneration": True,
+            },
+        )
+
+    def test_authenticated_candidate_stages_fail_closed_without_semantic_markers(self):
+        for journey_type in ("bargein", "quiet"):
+            with self.subTest(journey_type=journey_type):
+                scope = {**EVIDENCE_SCOPE, "journeyId": f"{journey_type}-missing"}
+                verdict = self._analyze(
+                    _window_lines(
+                        "2026-08-31 10:00:01 Google Live evidence_receive_loop_started "
+                        f"journey_id={scope['journeyId']} connection_id=conn-1 "
+                        "live_connection_id=live-1 generation=1",
+                        "2026-08-31 10:00:02 Google Live evidence_receive_loop_stopped "
+                        f"journey_id={scope['journeyId']} connection_id=conn-1 "
+                        "live_connection_id=live-1 generation=1",
+                        "2026-08-31 10:00:03 Google Live evidence_connection_close "
+                        f"journey_id={scope['journeyId']} connection_id=conn-1 "
+                        "live_connection_id=live-1 pending_tasks=0 active_sessions=0 "
+                        "close_code=1000 reason=evidence_finalize",
+                        window_id=scope["journeyId"],
+                        journey_id=scope["journeyId"],
+                        journeys=journey_type,
+                        proof_profile="candidate-lifecycle",
+                        evidence_scope=scope,
+                        server_issued=True,
+                    )
+                )
+                self.assertEqual(verdict["status"], "FAIL", verdict)
+                self.assertEqual(
+                    verdict["candidateSemanticEvidence"]["status"], "FAIL"
+                )
+
+    def test_candidate_semantic_marker_outside_bounded_scope_fails(self):
+        lines = _candidate_semantic_quiet_window()
+        lines.append(lines[3].replace("10:00:03", "10:01:00"))
+
+        verdict = self._analyze(lines)
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn(
+            "OUT_OF_WINDOW_RELIABILITY_MARKER",
+            [item["code"] for item in verdict["failures"]],
+        )
+
+    def test_candidate_bargein_semantic_marker_requires_canonical_info_record(self):
+        valid = _provider_info(
+            2,
+            "Google Live evidence_candidate_intent_match "
+            "journey_id=bargein-journey-1 slot=1 role=initial chars=12 "
+            "matched=true response_generation=0",
+        )
+        cases = {
+            "warning-prefix": valid.replace(" - INFO - ", " - WARNING - "),
+            "wrong-module": valid.replace(
+                "core.voice.session_provider.google_live", "core.connection"
+            ),
+            "suffix": valid + " extra=true",
+            "prefix": valid.replace(
+                "Google Live evidence_candidate_intent_match",
+                "spoof Google Live evidence_candidate_intent_match",
+            ),
+            "malformed-bool": valid.replace("matched=true", "matched=yes"),
+            "huge-count": valid.replace("chars=12", f"chars={'9' * 100}"),
+        }
+
+        for name, marker in cases.items():
+            with self.subTest(name=name):
+                verdict = self._analyze(
+                    _candidate_semantic_bargein_window((0, marker))
+                )
+                self.assertEqual(verdict["status"], "FAIL", verdict)
+                self.assertIn(
+                    "MALFORMED_CANDIDATE_SEMANTIC_MARKER",
+                    [item["code"] for item in verdict["failures"]],
+                )
+
+    def test_candidate_bargein_semantic_rejects_duplicates_order_and_foreign_scope(self):
+        initial = _provider_info(
+            2,
+            "Google Live evidence_candidate_intent_match "
+            "journey_id=bargein-journey-1 slot=1 role=initial chars=12 "
+            "matched=true response_generation=0",
+        )
+        cases = {
+            "duplicate": initial + "\n" + initial,
+            "wrong-slot-role": initial.replace("slot=1 role=initial", "slot=2 role=initial"),
+            "foreign": initial.replace(
+                "journey_id=bargein-journey-1", "journey_id=foreign-journey"
+            ),
+        }
+        for name, marker in cases.items():
+            with self.subTest(name=name):
+                verdict = self._analyze(
+                    _candidate_semantic_bargein_window((0, marker))
+                )
+                self.assertEqual(verdict["status"], "FAIL", verdict)
+                self.assertEqual(
+                    verdict["candidateSemanticEvidence"]["status"], "FAIL"
+                )
+
+    def test_candidate_bargein_semantic_requires_generation_ownership_and_no_stale_audio(self):
+        replacement = _provider_info(
+            16,
+            "Google Live evidence_candidate_intent_replacement "
+            "journey_id=bargein-journey-1 old_generation=1 new_generation=2 "
+            "old_stopped=true replacement_started=true replacement_completed=true "
+            "stale_old_audio=0",
+        )
+        newest = _provider_info(
+            4,
+            "Google Live evidence_candidate_intent_match "
+            "journey_id=bargein-journey-1 slot=2 role=newest chars=9 "
+            "matched=true response_generation=1",
+        )
+        cases = {
+            "newest-not-during-old": newest.replace("response_generation=1", "response_generation=0"),
+            "wrong-new-generation": replacement.replace("new_generation=2", "new_generation=1"),
+            "old-not-stopped": replacement.replace("old_stopped=true", "old_stopped=false"),
+            "replacement-incomplete": replacement.replace("replacement_completed=true", "replacement_completed=false"),
+            "stale-audio": replacement.replace("stale_old_audio=0", "stale_old_audio=1"),
+        }
+        for name, marker in cases.items():
+            with self.subTest(name=name):
+                index = 1 if name == "newest-not-during-old" else 2
+                verdict = self._analyze(
+                    _candidate_semantic_bargein_window((index, marker))
+                )
+                self.assertEqual(verdict["status"], "FAIL", verdict)
+                self.assertFalse(
+                    verdict["candidateSemanticEvidence"]["latestIntentMatched"]
+                    if name == "newest-not-during-old"
+                    else verdict["candidateSemanticEvidence"][
+                        "replacementOwnedByNewestGeneration"
+                    ]
+                )
+
+    def test_candidate_quiet_semantic_evidence_passes_for_both_exact_modes(self):
+        for mode, response_count in (("silence", 0), ("robot_speaking", 1)):
+            with self.subTest(mode=mode):
+                verdict = self._analyze(_candidate_semantic_quiet_window(mode))
+                self.assertEqual(verdict["status"], "PASS", verdict)
+                self.assertEqual(
+                    verdict["candidateSemanticEvidence"],
+                    {
+                        "status": "PASS",
+                        "kind": "quiet",
+                        "mode": mode,
+                        "falseInterrupts": 0,
+                        "responseStarts": response_count,
+                        "responseEnds": response_count,
+                        "replacements": 0,
+                        "fallbacks": 0,
+                    },
+                )
+
+    def test_candidate_quiet_semantic_rejects_nonpositive_duration_and_forbidden_counts(self):
+        cases = {
+            "user-turn": {"user_turns": 1},
+            "interrupt": {"interrupts": 1},
+            "replacement": {"replacements": 1},
+            "reconnect": {"reconnects": 1},
+            "fallback": {"fallbacks": 1},
+            "stale": {"stale_audio": 1},
+            "response": {"response_starts": 1},
+        }
+        for name, counts in cases.items():
+            with self.subTest(name=name):
+                verdict = self._analyze(
+                    _candidate_semantic_quiet_window("silence", **counts)
+                )
+                self.assertEqual(verdict["status"], "FAIL", verdict)
+                self.assertEqual(
+                    verdict["candidateSemanticEvidence"]["status"], "FAIL"
+                )
+
+        duration_zero = _candidate_semantic_quiet_window()
+        duration_zero[3] = duration_zero[3].replace("duration_ms=1500", "duration_ms=0")
+        verdict = self._analyze(duration_zero)
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+
+    def test_candidate_quiet_semantic_counters_must_match_scoped_response_lifecycle(self):
+        lines = _candidate_semantic_quiet_window("robot_speaking")
+        missing_end = [line for line in lines if "evidence_response_ended" not in line]
+
+        verdict = self._analyze(missing_end)
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertEqual(verdict["candidateSemanticEvidence"]["status"], "FAIL")
+
+    def test_candidate_quiet_semantic_requires_exact_marker_and_fallback_agreement(self):
+        lines = _candidate_semantic_quiet_window()
+        cases = {
+            "extra": lines[3] + " secret=value",
+            "duplicate": lines[3] + "\n" + lines[3],
+            "bad-mode": lines[3].replace("mode=silence", "mode=unknown"),
+            "fallback-disagreement": lines[2].replace("fallbacks=0", "fallbacks=1"),
+        }
+        for name, marker in cases.items():
+            with self.subTest(name=name):
+                changed = list(lines)
+                changed[2 if name == "fallback-disagreement" else 3] = marker
+                verdict = self._analyze(changed)
+                self.assertEqual(verdict["status"], "FAIL", verdict)
 
     def test_quiet_padding_normalizes_non_vacuous_receive_loop_coverage(self):
         verdict = self._analyze(

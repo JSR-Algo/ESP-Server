@@ -300,6 +300,54 @@ P_EVIDENCE_HANDOFF_TERMINAL = re.compile(
     r"live_connection_id=(?P<live_connection_id>\S+) generation=(?P<generation>\d+) "
     r"holder=(?P<holder>\d+) outcome=(?P<outcome>\S+)"
 )
+_CANDIDATE_PROVIDER_INFO_PREFIX = (
+    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} - [^\r\n]+ - "
+    r"core\.voice\.session_provider\.google_live - INFO - "
+    r"GoogleLive - "
+)
+P_EVIDENCE_CANDIDATE_INTENT_MATCH = re.compile(
+    _CANDIDATE_PROVIDER_INFO_PREFIX
+    + r"Google Live evidence_candidate_intent_match "
+    r"journey_id=(?P<journey_id>[A-Za-z0-9._:-]{1,64}) "
+    r"slot=(?P<slot>\d+) role=(?P<role>initial|newest) "
+    r"chars=(?P<chars>\d+) matched=(?P<matched>true|false) "
+    r"response_generation=(?P<response_generation>\d+)$"
+)
+P_EVIDENCE_CANDIDATE_INTENT_REPLACEMENT = re.compile(
+    _CANDIDATE_PROVIDER_INFO_PREFIX
+    + r"Google Live evidence_candidate_intent_replacement "
+    r"journey_id=(?P<journey_id>[A-Za-z0-9._:-]{1,64}) "
+    r"old_generation=(?P<old_generation>\d+) new_generation=(?P<new_generation>\d+) "
+    r"old_stopped=(?P<old_stopped>true|false) "
+    r"replacement_started=(?P<replacement_started>true|false) "
+    r"replacement_completed=(?P<replacement_completed>true|false) "
+    r"stale_old_audio=(?P<stale_old_audio>\d+)$"
+)
+P_EVIDENCE_CANDIDATE_QUIET = re.compile(
+    _CANDIDATE_PROVIDER_INFO_PREFIX
+    + r"Google Live evidence_candidate_quiet "
+    r"journey_id=(?P<journey_id>[A-Za-z0-9._:-]{1,64}) "
+    r"mode=(?P<mode>silence|robot_speaking) duration_ms=(?P<duration_ms>\d+) "
+    r"user_turns=(?P<user_turns>\d+) response_starts=(?P<response_starts>\d+) "
+    r"response_ends=(?P<response_ends>\d+) interrupts=(?P<interrupts>\d+) "
+    r"replacements=(?P<replacements>\d+) reconnects=(?P<reconnects>\d+) "
+    r"fallbacks=(?P<fallbacks>\d+) stale_audio=(?P<stale_audio>\d+)$"
+)
+P_EVIDENCE_CANDIDATE_FALLBACK = re.compile(
+    _CANDIDATE_PROVIDER_INFO_PREFIX
+    + r"Google Live evidence_candidate_fallback "
+    r"journey_id=(?P<journey_id>[A-Za-z0-9._:-]{1,64}) "
+    r"fallbacks=(?P<fallbacks>\d+)$"
+)
+_CANDIDATE_SEMANTIC_HINT = re.compile(
+    r"Google Live evidence_candidate_(?:intent_match|intent_replacement|quiet|fallback)\b"
+)
+_CANDIDATE_SEMANTIC_PATTERNS = (
+    P_EVIDENCE_CANDIDATE_INTENT_MATCH,
+    P_EVIDENCE_CANDIDATE_INTENT_REPLACEMENT,
+    P_EVIDENCE_CANDIDATE_QUIET,
+    P_EVIDENCE_CANDIDATE_FALLBACK,
+)
 _SCOPED_EVIDENCE_PATTERNS = (
     P_SERVER_CONNECTION_TRANSITION,
     P_EVIDENCE_RESPONSE_START,
@@ -321,6 +369,7 @@ _SCOPED_EVIDENCE_PATTERNS = (
     P_EVIDENCE_RECV_TIMEOUT_OUTCOME,
     P_EVIDENCE_HANDOFF_ACQUIRED,
     P_EVIDENCE_HANDOFF_TERMINAL,
+    *_CANDIDATE_SEMANTIC_PATTERNS,
 )
 P_STALE_MODEL_DROP_IDS = re.compile(
     r"Google Live stale_model_event_dropped type=(?P<type>\w+) reason=(?P<reason>\w+) "
@@ -424,9 +473,11 @@ _RELIABILITY_MARKERS = (
     P_LESSON_STEP_END,
     P_FIRMWARE_LESSON_PING,
     P_CLEAN_CONNECTION_CLOSE,
+    *_CANDIDATE_SEMANTIC_PATTERNS,
 )
 
 _SCOPED_MARKER_FAMILIES = (
+    (_CANDIDATE_SEMANTIC_HINT, _CANDIDATE_SEMANTIC_PATTERNS),
     (re.compile(r"Google Live evidence_"), _SCOPED_EVIDENCE_PATTERNS),
     (re.compile(r"Google Live user_interrupt_started\b"), (P_EVIDENCE_INTERRUPT_STARTED,)),
     (re.compile(r"Google Live interrupt_output_stopped\b"), (P_EVIDENCE_INTERRUPT_STOPPED,)),
@@ -1403,6 +1454,7 @@ def _parse_utc_iso(value: Any) -> datetime | None:
 def _is_reliability_line(line: str) -> bool:
     return (
         "Google Live reliability_window_" in line
+        or _CANDIDATE_SEMANTIC_HINT.search(line) is not None
         or any(pattern.search(line) for pattern in _RELIABILITY_MARKERS)
         or any(pattern.search(line) for _label, pattern in _FORBIDDEN_LOG_MARKERS)
     )
@@ -1544,6 +1596,14 @@ def _bounded_server_window(lines: list[str], journey_id: str) -> list[str]:
             raise ValueError("malformed scoped evidence marker")
         marker_journey = re.search(r"\bjourney_id=([A-Za-z0-9._:-]+)", line)
         marker_connection = re.search(r"\bconnection_id=([A-Za-z0-9._:-]+)", line)
+        semantic_marker = next(
+            (
+                match
+                for pattern in _CANDIDATE_SEMANTIC_PATTERNS
+                if (match := pattern.fullmatch(line)) is not None
+            ),
+            None,
+        )
         server_transition = P_SERVER_CONNECTION_TRANSITION.search(line)
         if server_transition is not None:
             if server_transition.group("to_journey_id") != journey_id:
@@ -1563,6 +1623,9 @@ def _bounded_server_window(lines: list[str], journey_id: str) -> list[str]:
                 raise ValueError("unanchored foreign reliability marker")
             if server_transition.group("to_connection_id") != target_connection_id:
                 raise ValueError("target reliability marker scope mismatch")
+        elif semantic_marker is not None:
+            if semantic_marker.group("journey_id") != journey_id:
+                raise ValueError("foreign candidate semantic marker")
         elif scoped_marker and marker_journey is not None:
             if marker_journey.group(1) != journey_id:
                 if any(
@@ -1694,6 +1757,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     scoped_receive_generations: set[int] = set()
     scoped_receive_start_count = 0
     scoped_receive_stop_count = 0
+    scoped_response_start_count = 0
+    scoped_response_end_count = 0
     scoped_timeout_generations: dict[int, list[int]] = defaultdict(list)
     scoped_handoff_generations: dict[tuple[int, int], list[int]] = defaultdict(list)
     scoped_initial_live_connection_id = None
@@ -1707,12 +1772,23 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     reconnect_recovery_ms: list[float] = []
     reconnect_journey_started_at: dict[tuple[str, str], datetime] = {}
     completed_reconnect_journeys: set[tuple[str, str]] = set()
+    candidate_intent_matches: list[dict[str, Any]] = []
+    candidate_intent_replacements: list[dict[str, Any]] = []
+    candidate_quiet_observations: list[dict[str, Any]] = []
+    candidate_fallback_observations: list[dict[str, Any]] = []
 
     def parse_scoped_uint(text: str | None, max_value: int) -> int | None:
         if text is None or len(text) > 10:
             return None
         value = int(text)
         return value if value <= max_value else None
+
+    def parse_semantic_uint(
+        groups: Mapping[str, str | None],
+        name: str,
+        max_value: int = 1_000_000_000,
+    ) -> int | None:
+        return parse_scoped_uint(groups.get(name), max_value)
 
     def interrupt_owner_ids(match: re.Match[str]) -> tuple[str, str]:
         live_id = match.group("live_connection_id")
@@ -2021,6 +2097,150 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             anchor_scope = start_anchor.get("evidenceScope") if start_anchor else None
             exact_scope_active = isinstance(anchor_scope, Mapping)
 
+            if _CANDIDATE_SEMANTIC_HINT.search(line) is not None:
+                semantic_match = next(
+                    (
+                        match
+                        for pattern in _CANDIDATE_SEMANTIC_PATTERNS
+                        if (match := pattern.fullmatch(line)) is not None
+                    ),
+                    None,
+                )
+                if semantic_match is None:
+                    failures.append(
+                        _failure(
+                            "MALFORMED_CANDIDATE_SEMANTIC_MARKER",
+                            line_number,
+                            "candidate semantic marker is not a canonical provider INFO record",
+                        )
+                    )
+                    continue
+                groups = semantic_match.groupdict()
+                anchored_journey = (
+                    anchor_scope.get("journeyId")
+                    if isinstance(anchor_scope, Mapping)
+                    else None
+                )
+                if (
+                    not exact_scope_active
+                    or not start_anchor.get("serverIssued")
+                    or (anchor_scope or {}).get("proofProfile")
+                    != "candidate-lifecycle"
+                    or groups["journey_id"] != anchored_journey
+                ):
+                    failures.append(
+                        _failure(
+                            "CANDIDATE_SEMANTIC_SCOPE_MISMATCH",
+                            line_number,
+                            "candidate semantic marker does not match the authenticated scope",
+                        )
+                    )
+                    continue
+
+                if semantic_match.re is P_EVIDENCE_CANDIDATE_INTENT_MATCH:
+                    chars = parse_semantic_uint(groups, "chars")
+                    generation = parse_semantic_uint(groups, "response_generation")
+                    if chars is None or chars == 0 or generation is None:
+                        failures.append(
+                            _failure(
+                                "MALFORMED_CANDIDATE_SEMANTIC_MARKER",
+                                line_number,
+                                "intent marker counters are out of bounds",
+                            )
+                        )
+                        continue
+                    candidate_intent_matches.append(
+                        {
+                            "line": line_number,
+                            "slot": int(groups["slot"]),
+                            "role": groups["role"],
+                            "chars": chars,
+                            "matched": groups["matched"] == "true",
+                            "responseGeneration": generation,
+                            "duringActiveResponse": bool(scoped_active_responses),
+                        }
+                    )
+                elif semantic_match.re is P_EVIDENCE_CANDIDATE_INTENT_REPLACEMENT:
+                    numeric = {
+                        name: parse_semantic_uint(groups, name)
+                        for name in (
+                            "old_generation",
+                            "new_generation",
+                            "stale_old_audio",
+                        )
+                    }
+                    if any(value is None for value in numeric.values()):
+                        failures.append(
+                            _failure(
+                                "MALFORMED_CANDIDATE_SEMANTIC_MARKER",
+                                line_number,
+                                "replacement marker counters are out of bounds",
+                            )
+                        )
+                        continue
+                    candidate_intent_replacements.append(
+                        {
+                            "line": line_number,
+                            "oldGeneration": numeric["old_generation"],
+                            "newGeneration": numeric["new_generation"],
+                            "oldStopped": groups["old_stopped"] == "true",
+                            "replacementStarted": groups["replacement_started"]
+                            == "true",
+                            "replacementCompleted": groups[
+                                "replacement_completed"
+                            ]
+                            == "true",
+                            "staleOldAudio": numeric["stale_old_audio"],
+                        }
+                    )
+                elif semantic_match.re is P_EVIDENCE_CANDIDATE_QUIET:
+                    numeric_names = (
+                        "duration_ms",
+                        "user_turns",
+                        "response_starts",
+                        "response_ends",
+                        "interrupts",
+                        "replacements",
+                        "reconnects",
+                        "fallbacks",
+                        "stale_audio",
+                    )
+                    numeric = {
+                        name: parse_semantic_uint(groups, name)
+                        for name in numeric_names
+                    }
+                    if any(value is None for value in numeric.values()):
+                        failures.append(
+                            _failure(
+                                "MALFORMED_CANDIDATE_SEMANTIC_MARKER",
+                                line_number,
+                                "quiet marker counters are out of bounds",
+                            )
+                        )
+                        continue
+                    candidate_quiet_observations.append(
+                        {
+                            "line": line_number,
+                            "mode": groups["mode"],
+                            **numeric,
+                        }
+                    )
+                else:
+                    fallbacks = parse_semantic_uint(groups, "fallbacks")
+                    if fallbacks is None:
+                        failures.append(
+                            _failure(
+                                "MALFORMED_CANDIDATE_SEMANTIC_MARKER",
+                                line_number,
+                                "fallback marker count is out of bounds",
+                            )
+                        )
+                        continue
+                    candidate_fallback_observations.append(
+                        {"line": line_number, "fallbacks": fallbacks}
+                    )
+                continue
+
             if (
                 exact_scope_active
                 and "Google Live evidence_replayed_buffered_audio" in line
@@ -2095,6 +2315,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             if scoped_start:
                 if not scoped_marker_targets_anchor(scoped_start, line_number):
                     continue
+                scoped_response_start_count += 1
                 observed_marker_families[scoped_start.group("journey_id")].add(
                     "response_started"
                 )
@@ -2137,6 +2358,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             if scoped_end:
                 if not scoped_marker_targets_anchor(scoped_end, line_number):
                     continue
+                scoped_response_end_count += 1
                 observed_marker_families[scoped_end.group("journey_id")].add(
                     "response_ended"
                 )
@@ -3603,6 +3825,152 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     "bargein",
                 )
             )
+
+    candidate_semantic: dict[str, Any] | None = None
+    semantic_cleanup_valid = (
+        scoped_cleanup_pending_tasks == 0
+        and scoped_cleanup_active_sessions == 0
+        and receive_loops_active == 0
+    )
+    semantic_required = bool(
+        exact_scope_bound
+        and start_anchor
+        and start_anchor.get("serverIssued")
+        and (start_anchor.get("evidenceScope") or {}).get("proofProfile")
+        == "candidate-lifecycle"
+    )
+    if (
+        semantic_required
+        and trusted_journey_type == "bargein"
+    ):
+        exact_matches = (
+            len(candidate_intent_matches) == 2
+            and [(item["slot"], item["role"]) for item in candidate_intent_matches]
+            == [(1, "initial"), (2, "newest")]
+        )
+        initial = candidate_intent_matches[0] if exact_matches else None
+        newest = candidate_intent_matches[1] if exact_matches else None
+        replacement = (
+            candidate_intent_replacements[0]
+            if len(candidate_intent_replacements) == 1
+            else None
+        )
+        ordering_valid = bool(
+            initial
+            and newest
+            and replacement
+            and initial["line"] < newest["line"] < replacement["line"]
+        )
+        initial_matched = bool(initial and initial["matched"])
+        newest_matched = bool(
+            newest and newest["matched"] and newest["duringActiveResponse"]
+        )
+        replacement_owned = bool(
+            newest_matched
+            and replacement
+            and replacement["oldGeneration"] == newest["responseGeneration"]
+            and replacement["newGeneration"] != replacement["oldGeneration"]
+            and replacement["oldStopped"]
+            and replacement["replacementStarted"]
+            and replacement["replacementCompleted"]
+            and replacement["staleOldAudio"] == 0
+            and stale_audio_after_replacement == 0
+        )
+        semantic_pass = bool(
+            ordering_valid
+            and initial_matched
+            and newest_matched
+            and replacement_owned
+            and len(candidate_fallback_observations) == 1
+            and candidate_fallback_observations[0]["fallbacks"] == 0
+            and semantic_cleanup_valid
+            and correlation.get("status") == "PASS"
+            and not candidate_quiet_observations
+        )
+        candidate_semantic = {
+            "status": "PASS" if semantic_pass else "FAIL",
+            "kind": "bargein-intent",
+            "initialSlotMatched": initial_matched,
+            "newestSlotMatched": newest_matched,
+            "orderingValid": ordering_valid,
+            "latestIntentMatched": newest_matched and replacement_owned,
+            "replacementOwnedByNewestGeneration": replacement_owned,
+        }
+        if not semantic_pass:
+            failures.append(
+                _failure(
+                    "CANDIDATE_SEMANTIC_EVIDENCE_INVALID",
+                    start_anchor["line"] if start_anchor else 0,
+                    "barge-in semantic evidence is incomplete or not owned",
+                )
+            )
+    elif semantic_required and trusted_journey_type == "quiet":
+        quiet = (
+            candidate_quiet_observations[0]
+            if len(candidate_quiet_observations) == 1
+            else None
+        )
+        mode = quiet["mode"] if quiet else None
+        expected_response_count = 0 if mode == "silence" else 1
+        quiet_pass = bool(
+            quiet
+            and quiet["duration_ms"] > 0
+            and quiet["user_turns"] == 0
+            and quiet["response_starts"] == expected_response_count
+            and quiet["response_ends"] == expected_response_count
+            and scoped_response_start_count == expected_response_count
+            and scoped_response_end_count == expected_response_count
+            and quiet["interrupts"] == 0
+            and quiet["replacements"] == 0
+            and quiet["reconnects"] == 0
+            and quiet["fallbacks"] == 0
+            and quiet["stale_audio"] == 0
+            and len(candidate_fallback_observations) == 1
+            and candidate_fallback_observations[0]["fallbacks"] == 0
+            and semantic_cleanup_valid
+            and not scoped_interrupts
+            and not scoped_reconnects
+            and stale_audio_after_replacement == 0
+            and not candidate_intent_matches
+            and not candidate_intent_replacements
+        )
+        candidate_semantic = {
+            "status": "PASS" if quiet_pass else "FAIL",
+            "kind": "quiet",
+            "mode": mode,
+            "falseInterrupts": 0 if quiet_pass else None,
+            "responseStarts": quiet["response_starts"] if quiet else 0,
+            "responseEnds": quiet["response_ends"] if quiet else 0,
+            "replacements": quiet["replacements"] if quiet else 0,
+            "fallbacks": quiet["fallbacks"] if quiet else 0,
+        }
+        if not quiet_pass:
+            failures.append(
+                _failure(
+                    "CANDIDATE_SEMANTIC_EVIDENCE_INVALID",
+                    start_anchor["line"] if start_anchor else 0,
+                    "quiet semantic evidence is incomplete or violates its mode",
+                )
+            )
+    elif candidate_intent_matches or candidate_intent_replacements or candidate_quiet_observations:
+        failures.append(
+            _failure(
+                "CANDIDATE_SEMANTIC_SCOPE_MISMATCH",
+                start_anchor["line"] if start_anchor else 0,
+                "semantic evidence is incompatible with the trusted journey type",
+            )
+        )
+    elif candidate_fallback_observations and (
+        len(candidate_fallback_observations) != 1
+        or candidate_fallback_observations[0]["fallbacks"] != 0
+    ):
+        failures.append(
+            _failure(
+                "CANDIDATE_SEMANTIC_EVIDENCE_INVALID",
+                candidate_fallback_observations[0]["line"],
+                "candidate fallback evidence must be exactly one zero-count marker",
+            )
+        )
     candidate_journeys = claimed_journeys - {"physical"}
     if candidate_journeys and exact_scope_bound:
         if scoped_receive_start_count == 0 or scoped_receive_stop_count == 0:
@@ -3744,6 +4112,11 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
         "evidenceScope": start_anchor.get("evidenceScope") if start_anchor else None,
         "journeyType": trusted_journey_type,
         "journeyLatencyEvidence": journey_latency_evidence,
+        **(
+            {"candidateSemanticEvidence": candidate_semantic}
+            if candidate_semantic is not None
+            else {}
+        ),
         "initialLiveConnectionId": scoped_initial_live_connection_id,
         "finalLiveConnectionId": scoped_current_live_connection_id,
         "liveConnectionTransitions": scoped_live_connection_transitions,
