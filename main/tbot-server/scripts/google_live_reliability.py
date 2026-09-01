@@ -768,6 +768,8 @@ def _candidate_monitored_duration(
             "initialLiveConnectionId": initial_live_id,
             "peerIdentityHash": scope.get("peerIdentityHash") if isinstance(scope, Mapping) else None,
             "serverStartUtc": window.get("start") if isinstance(window, Mapping) else None,
+            "journeyType": stage,
+            "proofProfile": "candidate-lifecycle",
         }
         server_transitions = item.get("serverConnectionTransitions") if isinstance(item, Mapping) else None
         expected_server_transitions = []
@@ -853,6 +855,8 @@ def _candidate_monitored_duration(
             "initialLiveConnectionId": item.get("initialLiveConnectionId") if isinstance(item, Mapping) else None,
             "peerIdentityHash": item.get("peerIdentityHash") if isinstance(item, Mapping) else None,
             "serverStartUtc": window.get("start") if isinstance(window, Mapping) else None,
+            "journeyType": "quiet_padding",
+            "proofProfile": "candidate-lifecycle",
         }
         if (
             not isinstance(item, Mapping)

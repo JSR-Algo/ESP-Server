@@ -39,9 +39,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import hashlib
-import hmac
 import inspect
 import json
 import math
@@ -64,10 +62,6 @@ SERVER_ROOT = Path(__file__).resolve().parents[1]
 if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
 
-from core.voice.google_live.evidence_enrollment import (  # noqa: E402
-    TRANSCRIPT_NORMALIZATION_VERSION,
-    normalize_transcript,
-)
 from core.voice.google_live_credentials import (  # noqa: E402
     GOOGLE_LIVE_CREDENTIAL_ENV_NAMES,
     resolve_google_live_env_api_key,
@@ -90,6 +84,10 @@ from scripts.google_live_reliability import (  # noqa: E402
     validate_candidate_soak_report,
 )
 from scripts.voice_mode_websocket_audio_bargein import (  # noqa: E402
+    _collect_replacement_response,
+    _drain_preflight_terminal,
+    _observe_interrupt_stop,
+    _opus_packets,
     _opus_packets_from_audio_file,
 )
 from scripts.voice_mode_websocket_soak import (  # noqa: E402
@@ -1633,6 +1631,40 @@ def _atomic_write_json(path: Path, value: Mapping) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _atomic_write_json_exclusive(path: Path, value: Mapping) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _publish_candidate_report(path: Path, report: Mapping) -> bool:
+    path = Path(path)
+    if report.get("status") != "PASS" or path.exists() or path.is_symlink():
+        return False
+    try:
+        _atomic_write_json_exclusive(path, report)
+    except FileExistsError:
+        return False
+    return True
+
+
 def _validate_candidate_manifest_structure(manifest, *, identity) -> None:
     if not isinstance(manifest, Mapping) or _forbidden_evidence_fields(manifest):
         raise ValueError("candidate evidence manifest is invalid")
@@ -1678,6 +1710,82 @@ async def _invoke_candidate_driver(args, **context):
     return await value if inspect.isawaitable(value) else value
 
 
+def _candidate_audio_packets(args):
+    audio_file = str(getattr(args, "inject_audio", "") or "")
+    sample_rate = int(getattr(args, "sample_rate", 24000))
+    frame_duration_ms = int(getattr(args, "frame_duration_ms", 60))
+    if audio_file:
+        return _opus_packets_from_audio_file(
+            audio_file,
+            sample_rate,
+            frame_duration_ms,
+        )
+    return _opus_packets(
+        sample_rate,
+        frame_duration_ms,
+        float(getattr(args, "audio_duration_sec", 0.6)),
+        int(getattr(args, "audio_rms", 9000)),
+    )
+
+
+async def _run_candidate_audio_bargein(args, websocket, *, clock=time.monotonic):
+    packets = _candidate_audio_packets(args)
+    if not packets:
+        raise RuntimeError("candidate audio barge-in has no opus packets")
+    frame_duration_ms = int(getattr(args, "frame_duration_ms", 60))
+    preflight_failure = await _drain_preflight_terminal(
+        websocket,
+        timeout_sec=args.interrupt_timeout_sec,
+    )
+    if preflight_failure is not None:
+        raise RuntimeError("candidate audio barge-in preflight failed")
+    first_packet_sent = asyncio.Event()
+    stop_task = asyncio.create_task(
+        _observe_interrupt_stop(
+            websocket,
+            timeout_sec=args.interrupt_timeout_sec,
+            clock=clock,
+            first_packet_sent=first_packet_sent,
+        )
+    )
+    try:
+        first_packet_sent_at = None
+        for packet in packets:
+            await websocket.send(packet)
+            if first_packet_sent_at is None:
+                first_packet_sent_at = clock()
+                first_packet_sent.set()
+            await asyncio.sleep(frame_duration_ms / 1000)
+        stop_result = await stop_task
+    finally:
+        if not stop_task.done():
+            stop_task.cancel()
+            await asyncio.gather(stop_task, return_exceptions=True)
+    if stop_result.get("failureCode") or stop_result.get("stop") is None:
+        raise RuntimeError("candidate audio interruption stop failed")
+    replacement = await _collect_replacement_response(
+        websocket,
+        timeout_sec=args.event_timeout_sec,
+        clock=clock,
+    )
+    if (
+        not replacement["replacementResponseStarted"]
+        or replacement["replacementBinaryChunks"] < 1
+        or not replacement["replacementResponseStopped"]
+    ):
+        raise RuntimeError("candidate audio replacement response is incomplete")
+    return {
+        **replacement,
+        "interruptStopMarkerObserved": True,
+        "bargeinStopMs": round(
+            (stop_result["observedAt"] - first_packet_sent_at) * 1000,
+            1,
+        ),
+        "binaryChunks": stop_result["binaryCount"]
+        + replacement["replacementBinaryChunks"],
+    }
+
+
 async def _run_candidate_websocket_journey(args, **context):
     """Default synthetic-client transport; it never deploys or controls hardware."""
     operation = context["operation"]
@@ -1707,11 +1815,8 @@ async def _run_candidate_websocket_journey(args, **context):
             "logStatus": "PASS",
             "resourceEndSampleRequired": True,
         }
-    if operation == "monitor":
-        raise RuntimeError("quiet padding requires an enrolled production monitor")
-
     name = context["name"]
-    index = context["index"]
+    index = context.get("index", context["sequence"])
     journey_id = context["journey_id"]
     headers = _build_headers(args)
     started = time.monotonic()
@@ -1748,52 +1853,58 @@ async def _run_candidate_websocket_journey(args, **context):
             raise RuntimeError("candidate hello scope is invalid")
         setattr(args, "candidate_peer_identity_hash", scope.get("peerIdentityHash"))
 
-        prompt = (
-            args.idle_prompt
-            if name == "quiet"
-            else f"{args.first_prompt} Lần {index}."
-        )
-        await websocket.send(json.dumps(_detect_message(prompt)))
-        first_start, observed, _messages = await _recv_until(
-            websocket,
-            lambda payload: _is_tts_state(payload, "start"),
-            args.event_timeout_sec,
-        )
-        binary_chunks += observed
-        if first_start is None:
-            raise RuntimeError("candidate tts start timeout")
-        first_audio_ms = (time.monotonic() - started) * 1000
-        if name == "bargein":
-            await asyncio.sleep(args.speak_for_sec)
-            interrupt_started = time.monotonic()
-            await websocket.send(
-                json.dumps(_detect_message(f"{args.interrupt_prompt} Lần {index}."))
+        first_audio_ms = None
+        audio_bargein = None
+        monitor_resources = None
+        if operation == "monitor":
+            duration_sec = float(context["duration_sec"])
+            if not math.isfinite(duration_sec) or duration_sec <= 0:
+                raise RuntimeError("candidate quiet padding duration is invalid")
+            resource_start = sample_process_resources()
+            try:
+                unexpected = await asyncio.wait_for(
+                    websocket.recv(),
+                    timeout=duration_sec,
+                )
+            except asyncio.TimeoutError:
+                unexpected = None
+            if unexpected is not None:
+                raise RuntimeError("candidate quiet padding observed unexpected output")
+            monitor_resources = resource_verdict(
+                [resource_start, sample_process_resources()]
             )
-            stopped, observed, _messages = await _recv_until(
-                websocket,
-                lambda payload: _is_tts_state(payload, "stop"),
-                args.interrupt_timeout_sec,
+            if monitor_resources.get("status") != "PASS":
+                raise RuntimeError("candidate quiet padding resource budget failed")
+        else:
+            prompt = (
+                args.idle_prompt
+                if name == "quiet"
+                else f"{args.first_prompt} Lần {index}."
             )
-            binary_chunks += observed
-            if stopped is None:
-                raise RuntimeError("candidate interruption stop timeout")
-            bargein_stop_ms = (time.monotonic() - interrupt_started) * 1000
-            replacement, observed, _messages = await _recv_until(
+            await websocket.send(json.dumps(_detect_message(prompt)))
+            first_start, observed, _messages = await _recv_until(
                 websocket,
                 lambda payload: _is_tts_state(payload, "start"),
                 args.event_timeout_sec,
             )
             binary_chunks += observed
-            if replacement is None:
-                raise RuntimeError("candidate replacement start timeout")
-        stopped, observed, _messages = await _recv_until(
-            websocket,
-            lambda payload: _is_tts_state(payload, "stop"),
-            args.settle_timeout_sec,
-        )
-        binary_chunks += observed
-        if stopped is None:
-            raise RuntimeError("candidate tts stop timeout")
+            if first_start is None:
+                raise RuntimeError("candidate tts start timeout")
+            first_audio_ms = (time.monotonic() - started) * 1000
+            if name == "bargein":
+                await asyncio.sleep(args.speak_for_sec)
+                audio_bargein = await _run_candidate_audio_bargein(args, websocket)
+                bargein_stop_ms = audio_bargein["bargeinStopMs"]
+                binary_chunks += audio_bargein["binaryChunks"]
+            else:
+                stopped, observed, _messages = await _recv_until(
+                    websocket,
+                    lambda payload: _is_tts_state(payload, "stop"),
+                    args.settle_timeout_sec,
+                )
+                binary_chunks += observed
+                if stopped is None:
+                    raise RuntimeError("candidate tts stop timeout")
         await websocket.send(
             json.dumps({"type": "evidence_finalize", "evidenceScope": scope})
         )
@@ -1832,14 +1943,23 @@ async def _run_candidate_websocket_journey(args, **context):
             "end": finalized.get("serverEndUtc"),
         },
         "evidenceScope": dict(scope),
-        "successfulTurns": 0 if name in {"quiet", "lesson"} else 1,
+        "successfulTurns": 0 if name in {"quiet", "quiet_padding", "lesson"} else 1,
         "bargeins": 1 if name == "bargein" else 0,
         "latestIntentSuccesses": 1 if name == "bargein" else 0,
         "falseInterrupts": 0,
         "unexpectedFallbacks": 0,
-        "latencies": {"firstAudioMs": [first_audio_ms]},
+        "latencies": {} if operation == "monitor" else {"firstAudioMs": [first_audio_ms]},
         "_scopeFinalized": True,
     }
+    if operation == "monitor":
+        start_utc = _parse_utc_iso(result["logWindow"]["start"])
+        end_utc = _parse_utc_iso(result["logWindow"]["end"])
+        result.update(
+            {
+                "durationSec": (end_utc - start_utc).total_seconds(),
+                "resourceVerdict": monitor_resources,
+            }
+        )
     if name == "bargein":
         result["latencies"] = {
             "bargeinStopMs": [bargein_stop_ms],
@@ -1855,11 +1975,11 @@ async def _run_candidate_websocket_journey(args, **context):
             "correlationStatus": "PENDING_BOUNDED_SERVER_LOG_VERIFICATION",
             "aggregateReleaseEligible": False,
             "interruptStopMarkerObserved": True,
-            "replacementResponseStarted": True,
-            "replacementResponseStopped": True,
-            "replacementBinaryChunks": binary_chunks,
+            "replacementResponseStarted": audio_bargein["replacementResponseStarted"],
+            "replacementResponseStopped": audio_bargein["replacementResponseStopped"],
+            "replacementBinaryChunks": audio_bargein["replacementBinaryChunks"],
             "bargeinStopMs": bargein_stop_ms,
-            "maxServerOutputGapMs": 0.0,
+            "maxServerOutputGapMs": audio_bargein["maxServerOutputGapMs"],
             "journeyId": journey_id,
             "evidenceScope": dict(scope),
             "serverConnectionId": scope.get("connectionId"),
@@ -1926,36 +2046,6 @@ async def _candidate_control_json(args, method, url, payload=None):
     return await asyncio.to_thread(request)
 
 
-def _candidate_transcript_enrollment(args, *, name, index):
-    key = bytearray(os.urandom(32))
-    builder = getattr(args, "candidate_transcript_plan_builder", None)
-    if callable(builder):
-        plan = builder(name=name, index=index, hmac_key=bytes(key))
-    else:
-        phase = (
-            "lesson"
-            if name == "lesson"
-            else "post_lesson"
-            if name == "conversation_after_lesson"
-            else "interrupt"
-        )
-        expected = normalize_transcript(f"candidate {name} {index}")
-        plan = [
-            {
-                "slot": 1,
-                "phase": phase,
-                "expectedMac": hmac.new(
-                    key, expected.encode("utf-8"), hashlib.sha256
-                ).hexdigest(),
-            }
-        ]
-    if not isinstance(plan, list) or not plan:
-        for offset in range(len(key)):
-            key[offset] = 0
-        raise ValueError("candidate transcript plan is unavailable")
-    return key, plan
-
-
 async def _analyze_candidate_journey(args, journey_id, output_path):
     override = getattr(args, "candidate_log_analyzer", None)
     if callable(override):
@@ -1997,13 +2087,17 @@ def build_candidate_journeys(args):
     sequence = 0
     cleanup_called = False
 
-    async def execute(_args, *, name, index, label=None, **_kwargs):
+    async def run_lifecycle(
+        _args,
+        *,
+        name,
+        index,
+        label=None,
+        duration_sec=None,
+    ):
         nonlocal sequence
         sequence += 1
         journey_id = f"candidate-soak.{run_id}.{sequence}"
-        key, transcript_plan = _candidate_transcript_enrollment(
-            args, name=name, index=index
-        )
         collection_url = _evidence_collection_url(args)
         journey_url = f"{collection_url}/{urllib.parse.quote(journey_id, safe='')}"
         output_root = Path(getattr(args, "produce_candidate_evidence")).parent
@@ -2019,9 +2113,8 @@ def build_candidate_journeys(args):
                     "clientId": args.client_id,
                     "journeyId": journey_id,
                     "ttlSec": 3600,
-                    "normalizationVersion": TRANSCRIPT_NORMALIZATION_VERSION,
-                    "hmacKeyBase64": base64.b64encode(key).decode("ascii"),
-                    "transcriptPlan": transcript_plan,
+                    "journeyType": name,
+                    "proofProfile": "candidate-lifecycle",
                 },
             )
             enrolled = True
@@ -2033,12 +2126,13 @@ def build_candidate_journeys(args):
             )
             result = await _invoke_candidate_driver(
                 args,
-                operation="execute",
+                operation="monitor" if name == "quiet_padding" else "execute",
                 name=name,
                 index=index,
                 label=label,
                 sequence=sequence,
                 journey_id=journey_id,
+                duration_sec=duration_sec,
             )
             driver_result = dict(result) if isinstance(result, Mapping) else None
             scope_finalized = bool(
@@ -2057,6 +2151,14 @@ def build_candidate_journeys(args):
             )
             if not isinstance(result, Mapping) or not isinstance(finalized, Mapping):
                 raise RuntimeError("candidate journey evidence is malformed")
+            analyzer_scope = log_evidence.get("evidenceScope")
+            if (
+                log_evidence.get("journeyType") != name
+                or not isinstance(analyzer_scope, Mapping)
+                or analyzer_scope.get("journeyType") != name
+                or analyzer_scope.get("proofProfile") != "candidate-lifecycle"
+            ):
+                raise RuntimeError("candidate log claims are invalid")
             combined = driver_result
             combined["task5LogEvidence"] = log_evidence
             trusted_latency = log_evidence.get("journeyLatencyEvidence", {})
@@ -2088,7 +2190,7 @@ def build_candidate_journeys(args):
                         trusted_latency.get("reconnectRecoveryMs")
                     ]
                 }
-            return combined
+            return [combined] if name == "quiet_padding" else combined
         except BaseException:
             if enrolled:
                 try:
@@ -2098,21 +2200,21 @@ def build_candidate_journeys(args):
                 except BaseException:
                     pass
             raise
-        finally:
-            for offset in range(len(key)):
-                key[offset] = 0
+
+    async def execute(_args, *, name, index, label=None, **_kwargs):
+        return await run_lifecycle(
+            _args,
+            name=name,
+            index=index,
+            label=label,
+        )
 
     async def monitor(_args, *, duration_sec):
-        nonlocal sequence
-        sequence += 1
-        journey_id = f"candidate-soak.{run_id}.{sequence}"
-        return await _invoke_candidate_driver(
-            args,
-            operation="monitor",
+        return await run_lifecycle(
+            _args,
             name="quiet_padding",
+            index=1,
             duration_sec=duration_sec,
-            sequence=sequence,
-            journey_id=journey_id,
         )
 
     async def cleanup(_args, *, final_scope):
@@ -2214,7 +2316,7 @@ async def produce_candidate_evidence(
         "resourceSamples": resource_samples,
     }
     _validate_candidate_manifest_structure(manifest, identity=identity)
-    _atomic_write_json(output, manifest)
+    _atomic_write_json_exclusive(output, manifest)
     reopened = json.loads(output.read_text(encoding="utf-8"))
     _validate_candidate_manifest_structure(reopened, identity=identity)
     return {
@@ -2302,6 +2404,8 @@ def _validated_execution_server_scope(value, *, identity):
         "initialLiveConnectionId": value.get("initialLiveConnectionId"),
         "peerIdentityHash": value.get("peerIdentityHash"),
         "serverStartUtc": log_window.get("start"),
+        "journeyType": value.get("name"),
+        "proofProfile": "candidate-lifecycle",
     }
     valid = (
         value.get("serverIssued") is True
@@ -2486,6 +2590,8 @@ def _validated_quiet_padding(
         "serverStartUtc": log_window.get("start")
         if isinstance(log_window, Mapping)
         else None,
+        "journeyType": "quiet_padding",
+        "proofProfile": "candidate-lifecycle",
     }
     valid = (
         value.get("schemaVersion") == SCHEMA_VERSION
@@ -3922,13 +4028,6 @@ def main():
     try:
         report = asyncio.run(run_soak(args))
     except Exception as exc:
-        if args.mode == "candidate" and args.report:
-            args.report.parent.mkdir(parents=True, exist_ok=True)
-            args.report.write_text(
-                json.dumps(redact_mapping(_candidate_failure_report(args, exc)), indent=2)
-                + "\n",
-                encoding="utf-8",
-            )
         detail = type(exc).__name__ if args.mode == "candidate" else str(exc)
         print(f"SOAK_FAIL {detail}", file=sys.stderr)
         return 1
@@ -3941,7 +4040,8 @@ def main():
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         if args.mode == "candidate":
-            _atomic_write_json(args.report, report)
+            if not _publish_candidate_report(args.report, report):
+                return 1
         else:
             args.report.write_text(json.dumps(report, indent=2, default=str))
         print(f"Wrote soak report: {args.report}")

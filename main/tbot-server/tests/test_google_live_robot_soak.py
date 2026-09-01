@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import scripts.google_live_robot_soak as robot_soak
 from scripts.analyze_google_live_log import correlate_websocket_bargein_evidence
 from scripts.google_live_robot_soak import (
     _build_argument_parser,
@@ -62,6 +63,8 @@ def _refresh_execution_contract(result):
         "initialLiveConnectionId": result["initialLiveConnectionId"],
         "peerIdentityHash": result["peerIdentityHash"],
         "serverStartUtc": result["logWindow"]["start"],
+        "journeyType": result["name"],
+        "proofProfile": "candidate-lifecycle",
     }
     cancelled_id = result["evidenceSequence"] * 2 - 1
     replacement_id = result["evidenceSequence"] * 2
@@ -365,6 +368,8 @@ def _journeys(*, mutation=None):
                     "initialLiveConnectionId": "quiet-padding-live-1",
                     "peerIdentityHash": PEER_HASH,
                     "serverStartUtc": start.isoformat(),
+                    "journeyType": "quiet_padding",
+                    "proofProfile": "candidate-lifecycle",
                 },
                 "liveConnectionId": "quiet-padding-live-1",
                 "initialLiveConnectionId": "quiet-padding-live-1",
@@ -388,6 +393,8 @@ def _journeys(*, mutation=None):
                         "initialLiveConnectionId": "quiet-padding-live-1",
                         "peerIdentityHash": PEER_HASH,
                         "serverStartUtc": start.isoformat(),
+                        "journeyType": "quiet_padding",
+                        "proofProfile": "candidate-lifecycle",
                     },
                     "initialLiveConnectionId": "quiet-padding-live-1",
                     "finalLiveConnectionId": "quiet-padding-live-1",
@@ -2404,6 +2411,43 @@ def test_candidate_producer_refuses_to_replace_existing_closed_manifest(tmp_path
     assert output.read_text(encoding="utf-8") == '{"closed":true}\n'
 
 
+def test_candidate_replay_report_is_atomic_and_never_overwritten_on_failure(tmp_path):
+    report_path = tmp_path / "candidate-soak" / "report.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text('{"status":"PASS","closed":true}\n', encoding="utf-8")
+
+    published = robot_soak._publish_candidate_report(
+        report_path,
+        {"status": "FAIL", "failures": [{"code": "MUTATED_EVIDENCE"}]},
+    )
+
+    assert published is False
+    assert report_path.read_text(encoding="utf-8") == (
+        '{"status":"PASS","closed":true}\n'
+    )
+
+    fresh = tmp_path / "fresh" / "report.json"
+    assert robot_soak._publish_candidate_report(fresh, {"status": "PASS"}) is True
+    assert json.loads(fresh.read_text(encoding="utf-8")) == {"status": "PASS"}
+
+
+def test_candidate_report_publish_loses_atomic_create_race_without_overwrite(
+    tmp_path, monkeypatch
+):
+    report_path = tmp_path / "report.json"
+
+    def raced_publish(_path, _value):
+        report_path.write_text('{"winner":true}\n', encoding="utf-8")
+        raise FileExistsError
+
+    monkeypatch.setattr(robot_soak, "_atomic_write_json_exclusive", raced_publish)
+
+    assert robot_soak._publish_candidate_report(
+        report_path, {"status": "PASS"}
+    ) is False
+    assert report_path.read_text(encoding="utf-8") == '{"winner":true}\n'
+
+
 def test_candidate_producer_cancellation_leaves_no_partial_manifest(tmp_path):
     output = tmp_path / "journey-evidence.json"
     journeys = _journeys()
@@ -2462,7 +2506,15 @@ def test_candidate_factory_enrolls_binds_runs_finalizes_then_analyzes(tmp_path):
 
     async def analyzer(*, journey_id, output_path):
         events.append(("analyzer", journey_id, output_path.name))
-        return {"name": "google_live_log_reliability", "status": "PASS"}
+        return {
+            "name": "google_live_log_reliability",
+            "status": "PASS",
+            "journeyType": "bargein",
+            "evidenceScope": {
+                "journeyType": "bargein",
+                "proofProfile": "candidate-lifecycle",
+            },
+        }
 
     args = _args(
         run_id="20260831T100000Z",
@@ -2483,8 +2535,194 @@ def test_candidate_factory_enrolls_binds_runs_finalizes_then_analyzes(tmp_path):
         "POST", "PUT", "driver", "POST", "analyzer"
     ]
     assert events[2][1] == journey_id
+    assert events[0][2] == {
+        "clientId": "robot-client",
+        "journeyId": journey_id,
+        "ttlSec": 3600,
+        "journeyType": "bargein",
+        "proofProfile": "candidate-lifecycle",
+    }
     assert result["task5LogEvidence"]["status"] == "PASS"
     assert "secret" not in json.dumps(events)
+
+
+def test_candidate_factory_posts_exact_lifecycle_claims_for_all_33_executions(
+    tmp_path,
+):
+    posts = []
+
+    async def control(method, _url, payload=None):
+        if method == "POST" and isinstance(payload, dict) and "clientId" in payload:
+            posts.append(deepcopy(payload))
+        return {"status": "PASS"}
+
+    async def driver(_args, **context):
+        return {"name": context["name"], "status": "PASS"}
+
+    async def analyzer(*, journey_id, **_kwargs):
+        stage = posts[-1]["journeyType"]
+        return {
+            "name": "google_live_log_reliability",
+            "status": "PASS",
+            "journeyType": stage,
+            "evidenceScope": {
+                "journeyId": journey_id,
+                "journeyType": stage,
+                "proofProfile": "candidate-lifecycle",
+            },
+            "journeyLatencyEvidence": {},
+        }
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "journey-evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=control,
+        candidate_journey_driver=driver,
+        candidate_log_analyzer=analyzer,
+    )
+    journeys = build_candidate_journeys(args)
+
+    async def run_all():
+        for stage, count in (
+            ("conversation", 17),
+            ("bargein", 10),
+            ("quiet", 2),
+            ("reopen", 1),
+            ("reconnect", 1),
+            ("lesson", 1),
+            ("conversation_after_lesson", 1),
+        ):
+            callable_name = (
+                "conversation" if stage == "conversation_after_lesson" else stage
+            )
+            for index in range(1, count + 1):
+                await journeys[callable_name](args, name=stage, index=index)
+
+    asyncio.run(run_all())
+
+    expected_stages = [
+        *(["conversation"] * 17),
+        *(["bargein"] * 10),
+        *(["quiet"] * 2),
+        "reopen",
+        "reconnect",
+        "lesson",
+        "conversation_after_lesson",
+    ]
+    assert posts == [
+        {
+            "clientId": "robot-client",
+            "journeyId": f"candidate-soak.20260831T100000Z.{sequence}",
+            "ttlSec": 3600,
+            "journeyType": stage,
+            "proofProfile": "candidate-lifecycle",
+        }
+        for sequence, stage in enumerate(expected_stages, start=1)
+    ]
+    encoded = json.dumps(posts).lower()
+    assert "transcript" not in encoded
+    assert "hmac" not in encoded
+    assert "key" not in encoded
+    assert "mac" not in encoded
+
+
+def test_candidate_factory_monitor_uses_enrolled_lifecycle_window(tmp_path):
+    events = []
+
+    async def control(method, url, payload=None):
+        events.append((method, url, payload))
+        return {"status": "PASS"}
+
+    async def driver(_args, **context):
+        events.append(("driver", context["journey_id"], context["duration_sec"]))
+        return {
+            "name": "quiet_padding",
+            "status": "PASS",
+            "journeyId": context["journey_id"],
+            "_scopeFinalized": True,
+        }
+
+    async def analyzer(*, journey_id, output_path):
+        events.append(("analyzer", journey_id, output_path.name))
+        return {
+            "name": "google_live_log_reliability",
+            "status": "PASS",
+            "journeyType": "quiet_padding",
+            "evidenceScope": {
+                "journeyType": "quiet_padding",
+                "proofProfile": "candidate-lifecycle",
+            },
+        }
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "journey-evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=control,
+        candidate_journey_driver=driver,
+        candidate_log_analyzer=analyzer,
+    )
+
+    result = asyncio.run(build_candidate_journeys(args)["monitor"](args, duration_sec=37.5))
+
+    journey_id = "candidate-soak.20260831T100000Z.1"
+    assert events[0][2] == {
+        "clientId": "robot-client",
+        "journeyId": journey_id,
+        "ttlSec": 3600,
+        "journeyType": "quiet_padding",
+        "proofProfile": "candidate-lifecycle",
+    }
+    assert [event[0] for event in events] == ["POST", "PUT", "driver", "analyzer"]
+    assert events[2] == ("driver", journey_id, 37.5)
+    assert result[0]["task5LogEvidence"]["journeyType"] == "quiet_padding"
+
+
+def test_default_candidate_bargein_sends_opus_audio_not_text(monkeypatch):
+    sent = []
+
+    class Websocket:
+        async def send(self, value):
+            sent.append(value)
+
+    async def no_preflight(*_args, **_kwargs):
+        return None
+
+    async def stopped(*_args, **_kwargs):
+        return {"stop": {"reason": "interrupt"}, "binaryCount": 0, "observedAt": 2.0}
+
+    async def replacement(*_args, **_kwargs):
+        return {
+            "replacementResponseStarted": True,
+            "replacementResponseStopped": True,
+            "replacementBinaryChunks": 2,
+            "maxServerOutputGapMs": 80.0,
+        }
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(robot_soak, "_candidate_audio_packets", lambda _args: [b"opus"])
+    monkeypatch.setattr(robot_soak, "_drain_preflight_terminal", no_preflight)
+    monkeypatch.setattr(robot_soak, "_observe_interrupt_stop", stopped)
+    monkeypatch.setattr(robot_soak, "_collect_replacement_response", replacement)
+    monkeypatch.setattr(robot_soak.asyncio, "sleep", no_sleep)
+
+    result = asyncio.run(
+        robot_soak._run_candidate_audio_bargein(
+            _args(interrupt_timeout_sec=3.0, event_timeout_sec=20.0),
+            Websocket(),
+            clock=lambda: 1.6,
+        )
+    )
+
+    assert sent == [b"opus"]
+    assert result["bargeinStopMs"] == 400.0
 
 
 def test_candidate_factory_cleanup_refuses_second_call():
