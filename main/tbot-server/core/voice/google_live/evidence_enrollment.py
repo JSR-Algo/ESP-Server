@@ -15,6 +15,9 @@ from functools import wraps
 from typing import Literal
 
 TRANSCRIPT_NORMALIZATION_VERSION = "google-live-transcript-nfkc-casefold.v1"
+CANDIDATE_INTENT_NORMALIZATION_VERSION = (
+    "google-live-candidate-intent-nfkc-casefold.v1"
+)
 PHYSICAL_TRANSCRIPT_PROFILE = "physical-transcript"
 CANDIDATE_LIFECYCLE_PROFILE = "candidate-lifecycle"
 PHYSICAL_JOURNEY_TYPES = frozenset({"physical"})
@@ -81,6 +84,18 @@ class TranscriptExpectation:
 
 
 @dataclass(frozen=True, slots=True)
+class CandidateIntentExpectation:
+    slot: int
+    role: Literal["initial", "newest"]
+    expected_mac: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateQuietProof:
+    mode: Literal["silence", "robot_speaking"]
+
+
+@dataclass(frozen=True, slots=True)
 class EvidenceEnrollment:
     """Detached public enrollment view; ``hmac_key`` is always redacted."""
 
@@ -92,6 +107,10 @@ class EvidenceEnrollment:
     transcript_plan: tuple[TranscriptExpectation, ...]
     hmac_key: bytearray = field(repr=False)
     expires_at: float
+    semantic_kind: Literal["none", "bargein-intent", "quiet"] = "none"
+    intent_plan: tuple[CandidateIntentExpectation, ...] = ()
+    quiet_mode: str | None = None
+    semantic_hmac_key: bytearray = field(default_factory=bytearray, repr=False)
     connected: bool = False
     finalized: bool = False
 
@@ -108,6 +127,10 @@ class _EvidenceEnrollmentState:
     created_at: float
     expires_at: float
     monotonic_deadline: float = field(repr=False)
+    semantic_kind: Literal["none", "bargein-intent", "quiet"] = "none"
+    intent_plan: tuple[CandidateIntentExpectation, ...] = ()
+    quiet_mode: str | None = None
+    semantic_hmac_key: bytearray = field(default_factory=bytearray, repr=False)
     connected: bool = False
     finalized: bool = False
     candidate_identity: dict[str, str] | None = field(default=None, repr=False)
@@ -118,6 +141,10 @@ class _EvidenceEnrollmentState:
     transcript_proof_eligible: bool = True
     transcript_observed_count: int = 0
     transcript_mismatch_count: int = 0
+    semantic_matched_count: int = 0
+    semantic_observed_count: int = 0
+    semantic_mismatch_count: int = 0
+    semantic_eligible: bool = True
 
 
 class EvidenceEnrollmentRegistry:
@@ -156,8 +183,13 @@ class EvidenceEnrollmentRegistry:
         ttl_sec: int,
         journey_type: str = "physical",
         proof_profile: str = PHYSICAL_TRANSCRIPT_PROFILE,
+        semantic_kind: Literal["none", "bargein-intent", "quiet"] = "none",
+        intent_plan: tuple[CandidateIntentExpectation, ...] = (),
+        quiet_mode: str | None = None,
+        semantic_hmac_key: bytes | bytearray = b"",
     ) -> EvidenceEnrollment:
         owned_key: bytearray | None = None
+        owned_semantic_key: bytearray | None = None
         try:
             wall_now = self._prepare()
             monotonic_now = self._monotonic_clock()
@@ -171,11 +203,23 @@ class EvidenceEnrollmentRegistry:
                         "INVALID_EVIDENCE_PROFILE_PAYLOAD"
                     ) from exc
                 raise
+            try:
+                intent_plan = tuple(intent_plan)
+            except TypeError as exc:
+                if not hasattr(intent_plan, "__iter__"):
+                    raise EnrollmentError(
+                        "INVALID_EVIDENCE_PROFILE_PAYLOAD"
+                    ) from exc
+                raise
             self._validate_profile_payload(
                 journey_type=journey_type,
                 proof_profile=proof_profile,
                 transcript_plan=transcript_plan,
                 hmac_key=hmac_key,
+                semantic_kind=semantic_kind,
+                intent_plan=intent_plan,
+                quiet_mode=quiet_mode,
+                semantic_hmac_key=semantic_hmac_key,
             )
             error = None
             if journey_id in self._active or journey_id in self._tombstones:
@@ -190,6 +234,7 @@ class EvidenceEnrollmentRegistry:
             if error is not None:
                 raise EnrollmentError(error)
             owned_key = bytearray(hmac_key)
+            owned_semantic_key = bytearray(semantic_hmac_key)
             enrollment = _EvidenceEnrollmentState(
                 device_id=device_id,
                 client_id=client_id,
@@ -201,6 +246,10 @@ class EvidenceEnrollmentRegistry:
                 created_at=wall_now,
                 expires_at=wall_now + ttl_sec,
                 monotonic_deadline=monotonic_now + ttl_sec,
+                semantic_kind=semantic_kind,
+                intent_plan=intent_plan,
+                quiet_mode=quiet_mode,
+                semantic_hmac_key=owned_semantic_key,
             )
             view = self._view(enrollment)
         except Exception:
@@ -208,6 +257,10 @@ class EvidenceEnrollmentRegistry:
                 self._zeroize(hmac_key)
             if owned_key is not None:
                 self._zeroize(owned_key)
+            if isinstance(semantic_hmac_key, bytearray):
+                self._zeroize(semantic_hmac_key)
+            if owned_semantic_key is not None:
+                self._zeroize(owned_semantic_key)
             raise
         self._active[journey_id] = enrollment
         return view
@@ -272,6 +325,9 @@ class EvidenceEnrollmentRegistry:
             enrollment.hmac_key.hex(),
             base64.b64encode(enrollment.hmac_key).decode("ascii"),
             *(item.expected_mac for item in enrollment.transcript_plan),
+            enrollment.semantic_hmac_key.hex(),
+            base64.b64encode(enrollment.semantic_hmac_key).decode("ascii"),
+            *(item.expected_mac for item in enrollment.intent_plan),
         )
         if any(value and value.casefold() in rendered for value in private_values) or any(
             token in rendered
@@ -435,6 +491,56 @@ class EvidenceEnrollmentRegistry:
         return proof
 
     @_synchronized
+    def observe_candidate_intent(
+        self,
+        journey_id: str,
+        value: str,
+        *,
+        role: Literal["initial", "newest"],
+    ) -> dict[str, object]:
+        self._prepare()
+        enrollment = self._active.get(journey_id)
+        if enrollment is None or not enrollment.connected:
+            raise EnrollmentError("JOURNEY_NOT_FOUND")
+        if enrollment.semantic_kind != "bargein-intent":
+            raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
+        safe_role = role if role in ("initial", "newest") else "invalid"
+        next_index = enrollment.semantic_matched_count
+        expectation = (
+            enrollment.intent_plan[next_index]
+            if next_index < len(enrollment.intent_plan)
+            else None
+        )
+        observed_mac = hmac.new(
+            enrollment.semantic_hmac_key,
+            normalize_transcript(value).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        cryptographic_match = bool(
+            expectation is not None
+            and expectation.role == safe_role
+            and hmac.compare_digest(observed_mac, expectation.expected_mac)
+        )
+        matched = bool(enrollment.semantic_eligible and cryptographic_match)
+        proof: dict[str, object] = {
+            "slot": (
+                expectation.slot
+                if expectation is not None
+                else len(enrollment.intent_plan) + 1
+            ),
+            "role": safe_role,
+            "chars": len(str(value or "")),
+            "matched": matched,
+        }
+        enrollment.semantic_observed_count += 1
+        if matched:
+            enrollment.semantic_matched_count += 1
+        else:
+            enrollment.semantic_eligible = False
+            enrollment.semantic_mismatch_count += 1
+        return proof
+
+    @_synchronized
     def mark_output_idle(self, journey_id: str, *, response_generation: int) -> bool:
         self._prepare()
         enrollment = self._active.get(journey_id)
@@ -494,6 +600,7 @@ class EvidenceEnrollmentRegistry:
         self._active.pop(journey_id)
         enrollment.finalized = True
         self._zeroize(enrollment.hmac_key)
+        self._zeroize(enrollment.semantic_hmac_key)
         snapshot = self._terminal_snapshot(enrollment, status=status, timestamp=now)
         if failure_code is not None:
             snapshot["failureCode"] = failure_code
@@ -519,6 +626,7 @@ class EvidenceEnrollmentRegistry:
             "connected": enrollment.connected,
             "transcriptCount": len(enrollment.transcript_plan),
             **self._safe_transcript_report(enrollment),
+            **self._safe_semantic_report(enrollment),
         }
 
     @_synchronized
@@ -546,6 +654,7 @@ class EvidenceEnrollmentRegistry:
             self._terminal_client_digests[journey_id] = self._peer_digest(enrollment.client_id)
             self._active.pop(journey_id)
             self._zeroize(enrollment.hmac_key)
+            self._zeroize(enrollment.semantic_hmac_key)
             self._add_tombstone(
                 self._terminal_snapshot(
                     enrollment,
@@ -575,6 +684,7 @@ class EvidenceEnrollmentRegistry:
             "finalizedAt": terminal_at,
             "transcriptCount": len(enrollment.transcript_plan),
             **self._safe_transcript_report(enrollment),
+            **self._safe_semantic_report(enrollment),
         }
 
     @staticmethod
@@ -631,6 +741,30 @@ class EvidenceEnrollmentRegistry:
         }
 
     @staticmethod
+    def _safe_semantic_report(enrollment: _EvidenceEnrollmentState) -> dict:
+        if enrollment.semantic_kind == "bargein-intent":
+            return {
+                "semanticProofKind": "bargein-intent",
+                "semanticExpectedCount": len(enrollment.intent_plan),
+                "semanticObservedCount": enrollment.semantic_observed_count,
+                "semanticMatchCount": enrollment.semantic_matched_count,
+                "semanticMismatchCount": enrollment.semantic_mismatch_count,
+                "semanticOrderingValid": enrollment.semantic_eligible,
+                "semanticEligible": enrollment.semantic_eligible,
+                "latestIntentMatched": bool(
+                    enrollment.semantic_eligible
+                    and enrollment.semantic_matched_count == len(enrollment.intent_plan)
+                    and enrollment.intent_plan[-1].role == "newest"
+                ),
+            }
+        if enrollment.semantic_kind == "quiet":
+            return {
+                "semanticProofKind": "quiet",
+                "quietMode": enrollment.quiet_mode,
+            }
+        return {}
+
+    @staticmethod
     def _view(enrollment: _EvidenceEnrollmentState) -> EvidenceEnrollment:
         return EvidenceEnrollment(
             device_id=enrollment.device_id,
@@ -644,6 +778,13 @@ class EvidenceEnrollmentRegistry:
             ),
             hmac_key=bytearray(),
             expires_at=enrollment.expires_at,
+            semantic_kind=enrollment.semantic_kind,
+            intent_plan=tuple(
+                CandidateIntentExpectation(item.slot, item.role, "")
+                for item in enrollment.intent_plan
+            ),
+            quiet_mode=enrollment.quiet_mode,
+            semantic_hmac_key=bytearray(),
             connected=enrollment.connected,
             finalized=enrollment.finalized,
         )
@@ -655,14 +796,29 @@ class EvidenceEnrollmentRegistry:
         proof_profile: str,
         transcript_plan: tuple[TranscriptExpectation, ...],
         hmac_key: bytes | bytearray,
+        semantic_kind: str,
+        intent_plan: tuple[CandidateIntentExpectation, ...],
+        quiet_mode: str | None,
+        semantic_hmac_key: bytes | bytearray,
     ) -> None:
         validate_evidence_claims(journey_type, proof_profile)
-        if not isinstance(hmac_key, (bytes, bytearray)):
+        if not isinstance(hmac_key, (bytes, bytearray)) or not isinstance(
+            semantic_hmac_key, (bytes, bytearray)
+        ):
             raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
         if proof_profile == CANDIDATE_LIFECYCLE_PROFILE:
             if transcript_plan or hmac_key:
                 raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
+            EvidenceEnrollmentRegistry._validate_candidate_semantic_payload(
+                journey_type=journey_type,
+                semantic_kind=semantic_kind,
+                intent_plan=intent_plan,
+                quiet_mode=quiet_mode,
+                semantic_hmac_key=semantic_hmac_key,
+            )
             return
+        if semantic_kind != "none" or intent_plan or quiet_mode is not None or semantic_hmac_key:
+            raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
         if len(hmac_key) != 32 or not 1 <= len(transcript_plan) <= 64:
             raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
         for expected_slot, expectation in enumerate(transcript_plan, start=1):
@@ -679,6 +835,54 @@ class EvidenceEnrollmentRegistry:
             ):
                 raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
         if transcript_plan[-1].phase != "post_lesson":
+            raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
+
+    @staticmethod
+    def _validate_candidate_semantic_payload(
+        *,
+        journey_type: str,
+        semantic_kind: str,
+        intent_plan: tuple[CandidateIntentExpectation, ...],
+        quiet_mode: str | None,
+        semantic_hmac_key: bytes | bytearray,
+    ) -> None:
+        if journey_type == "bargein":
+            if (
+                semantic_kind != "bargein-intent"
+                or quiet_mode is not None
+                or len(semantic_hmac_key) != 32
+                or len(intent_plan) != 2
+            ):
+                raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
+            expected_roles = ("initial", "newest")
+            for expected_slot, (expectation, expected_role) in enumerate(
+                zip(intent_plan, expected_roles, strict=True), start=1
+            ):
+                if (
+                    not isinstance(expectation, CandidateIntentExpectation)
+                    or not isinstance(expectation.slot, int)
+                    or isinstance(expectation.slot, bool)
+                    or expectation.slot != expected_slot
+                    or expectation.role != expected_role
+                    or not isinstance(expectation.expected_mac, str)
+                    or len(expectation.expected_mac) != 64
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in expectation.expected_mac
+                    )
+                ):
+                    raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
+            return
+        if journey_type == "quiet":
+            if (
+                semantic_kind != "quiet"
+                or quiet_mode not in ("silence", "robot_speaking")
+                or intent_plan
+                or semantic_hmac_key
+            ):
+                raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
+            return
+        if semantic_kind != "none" or intent_plan or quiet_mode is not None or semantic_hmac_key:
             raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
 
     def _add_tombstone(self, snapshot: dict) -> None:

@@ -7,8 +7,10 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from core.api.google_live_evidence_handler import GoogleLiveEvidenceHandler
+from core.voice.google_live import evidence_enrollment
 from core.voice.google_live.evidence_enrollment import (
     TRANSCRIPT_NORMALIZATION_VERSION,
+    CandidateIntentExpectation,
     EnrollmentError,
     EvidenceEnrollmentRegistry,
     TranscriptExpectation,
@@ -303,6 +305,246 @@ def _register_candidate(registry, **overrides):
     }
     values.update(overrides)
     return registry.register(**values)
+
+
+def _register_bargein_semantic(registry, *, key=None, **overrides):
+    key = bytearray(b"s" * 32) if key is None else key
+    values = {
+        "journey_id": "candidate-soak.20260902T010203Z.18",
+        "journey_type": "bargein",
+        "semantic_kind": "bargein-intent",
+        "intent_plan": (
+            CandidateIntentExpectation(1, "initial", _mac(key, "First intent")),
+            CandidateIntentExpectation(2, "newest", _mac(key, "Newest intent")),
+        ),
+        "semantic_hmac_key": key,
+    }
+    values.update(overrides)
+    return _register_candidate(registry, **values)
+
+
+def test_candidate_intent_normalization_reuses_versioned_nfkc_casefold_contract():
+    assert (
+        getattr(evidence_enrollment, "CANDIDATE_INTENT_NORMALIZATION_VERSION", None)
+        == "google-live-candidate-intent-nfkc-casefold.v1"
+    )
+    assert normalize_transcript("  ＦＩＲＳＴ—Intent!!  ") == "first intent"
+
+
+def test_registry_matches_exact_ordered_candidate_intents_without_exposing_secrets():
+    registry = EvidenceEnrollmentRegistry()
+    enrollment = _register_bargein_semantic(registry)
+    registry.claim(
+        device_id="aa:bb",
+        client_id="robot-client",
+        journey_id=enrollment.journey_id,
+    )
+
+    initial = registry.observe_candidate_intent(
+        enrollment.journey_id, "ＦＩＲＳＴ intent", role="initial"
+    )
+    newest = registry.observe_candidate_intent(
+        enrollment.journey_id, "Newest intent", role="newest"
+    )
+    snapshot = registry.safe_snapshot(enrollment.journey_id)
+
+    assert initial == {
+        "slot": 1,
+        "role": "initial",
+        "chars": len("ＦＩＲＳＴ intent"),
+        "matched": True,
+    }
+    assert newest == {
+        "slot": 2,
+        "role": "newest",
+        "chars": len("Newest intent"),
+        "matched": True,
+    }
+    assert snapshot["semanticProofKind"] == "bargein-intent"
+    assert snapshot["semanticExpectedCount"] == 2
+    assert snapshot["semanticObservedCount"] == 2
+    assert snapshot["semanticMatchCount"] == 2
+    assert snapshot["semanticMismatchCount"] == 0
+    assert snapshot["semanticOrderingValid"] is True
+    assert snapshot["semanticEligible"] is True
+    assert snapshot["latestIntentMatched"] is True
+    encoded = json.dumps(snapshot).casefold()
+    for private in ("expectedmac", "hmackey", "first intent", "newest intent"):
+        assert private not in encoded
+
+
+def test_candidate_intent_matching_uses_constant_time_digest_comparison(monkeypatch):
+    compared = []
+    real_compare = hmac.compare_digest
+
+    def recording_compare(left, right):
+        compared.append((left, right))
+        return real_compare(left, right)
+
+    monkeypatch.setattr(evidence_enrollment.hmac, "compare_digest", recording_compare)
+    registry = EvidenceEnrollmentRegistry()
+    enrollment = _register_bargein_semantic(registry)
+    registry.claim(
+        device_id="aa:bb",
+        client_id="robot-client",
+        journey_id=enrollment.journey_id,
+    )
+
+    proof = registry.observe_candidate_intent(
+        enrollment.journey_id, "First intent", role="initial"
+    )
+
+    assert proof["matched"] is True
+    assert len(compared) == 1
+    assert all(isinstance(value, str) and len(value) == 64 for value in compared[0])
+
+
+def test_registry_detaches_semantic_key_and_plan_then_zeroizes_owned_key_on_finalize():
+    registry = EvidenceEnrollmentRegistry()
+    input_key = bytearray(b"s" * 32)
+    enrollment = _register_bargein_semantic(registry, key=input_key)
+    owned_key = registry._active[enrollment.journey_id].semantic_hmac_key
+
+    input_key[:] = b"x" * 32
+    assert enrollment.semantic_hmac_key == bytearray()
+    assert [item.expected_mac for item in enrollment.intent_plan] == ["", ""]
+    assert owned_key == bytearray(b"s" * 32)
+
+    terminal = registry.finalize(enrollment.journey_id, status="FAIL")
+
+    assert owned_key == bytearray(32)
+    encoded = json.dumps(terminal).casefold()
+    assert "expectedmac" not in encoded and "hmackey" not in encoded
+
+
+def test_semantic_match_remains_nonterminal_and_does_not_change_lifecycle_readiness():
+    registry = EvidenceEnrollmentRegistry()
+    enrollment = _register_bargein_semantic(registry)
+    registry.claim(
+        device_id="aa:bb",
+        client_id="robot-client",
+        journey_id=enrollment.journey_id,
+    )
+    before = registry.safe_snapshot(enrollment.journey_id)
+
+    registry.observe_candidate_intent(
+        enrollment.journey_id, "First intent", role="initial"
+    )
+    registry.observe_candidate_intent(
+        enrollment.journey_id, "Newest intent", role="newest"
+    )
+    after = registry.safe_snapshot(enrollment.journey_id)
+
+    assert before["status"] == after["status"] == "ACTIVE"
+    assert before["readyToFinalize"] is after["readyToFinalize"]
+    assert after["latestIntentMatched"] is True
+
+
+@pytest.mark.parametrize(
+    "observations",
+    [
+        [("newest", "Newest intent")],
+        [("initial", "wrong"), ("initial", "First intent")],
+        [("initial", "First intent"), ("initial", "First intent")],
+        [
+            ("initial", "First intent"),
+            ("newest", "Newest intent"),
+            ("newest", "Newest intent"),
+        ],
+    ],
+)
+def test_candidate_intent_mismatch_duplicate_reorder_and_extra_are_sticky_fail_closed(
+    observations,
+):
+    registry = EvidenceEnrollmentRegistry()
+    enrollment = _register_bargein_semantic(registry)
+    registry.claim(
+        device_id="aa:bb",
+        client_id="robot-client",
+        journey_id=enrollment.journey_id,
+    )
+
+    proofs = [
+        registry.observe_candidate_intent(enrollment.journey_id, value, role=role)
+        for role, value in observations
+    ]
+    snapshot = registry.safe_snapshot(enrollment.journey_id)
+
+    assert proofs[-1]["matched"] is False
+    assert snapshot["semanticEligible"] is False
+    assert snapshot["semanticOrderingValid"] is False
+    assert snapshot["semanticMismatchCount"] >= 1
+    assert snapshot["latestIntentMatched"] is False
+
+
+def test_quiet_semantic_claim_is_safe_and_survives_tombstoning_without_key_material():
+    registry = EvidenceEnrollmentRegistry()
+    enrollment = _register_candidate(
+        registry,
+        journey_type="quiet",
+        semantic_kind="quiet",
+        quiet_mode="robot_speaking",
+    )
+
+    active = registry.safe_snapshot(enrollment.journey_id)
+    terminal = registry.finalize(enrollment.journey_id, status="FAIL")
+
+    assert active["semanticProofKind"] == "quiet"
+    assert active["quietMode"] == "robot_speaking"
+    assert terminal["semanticProofKind"] == "quiet"
+    assert terminal["quietMode"] == "robot_speaking"
+    encoded = json.dumps(terminal).casefold()
+    assert "hmackey" not in encoded and "expectedmac" not in encoded
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"semantic_kind": "bargein-intent"},
+        {"journey_type": "quiet", "semantic_kind": "none"},
+        {
+            "journey_type": "quiet",
+            "semantic_kind": "quiet",
+            "quiet_mode": "invalid",
+        },
+        {"journey_type": "quiet", "semantic_kind": "quiet", "quiet_mode": "silence", "semantic_hmac_key": bytearray(b"s" * 32)},
+        {"journey_type": "bargein", "semantic_kind": "quiet", "quiet_mode": "silence"},
+        {"journey_type": "conversation", "semantic_kind": "quiet", "quiet_mode": "silence"},
+    ],
+)
+def test_registry_rejects_incompatible_candidate_semantic_shapes(overrides):
+    registry = EvidenceEnrollmentRegistry()
+
+    with pytest.raises(EnrollmentError, match="INVALID_EVIDENCE_PROFILE_PAYLOAD"):
+        _register_candidate(registry, **overrides)
+
+
+def test_registry_zeroizes_semantic_key_on_validation_and_iterator_failures():
+    class ExplodingPlan:
+        def __iter__(self):
+            raise RuntimeError("unexpected semantic iterator failure")
+
+    invalid_key = bytearray(b"i" * 32)
+    with pytest.raises(EnrollmentError, match="INVALID_EVIDENCE_PROFILE_PAYLOAD"):
+        _register_candidate(
+            EvidenceEnrollmentRegistry(),
+            journey_type="bargein",
+            semantic_kind="bargein-intent",
+            intent_plan=((2, "initial", "a" * 64),),
+            semantic_hmac_key=invalid_key,
+        )
+    assert invalid_key == bytearray(32)
+
+    exploding_key = bytearray(b"e" * 32)
+    with pytest.raises(RuntimeError, match="unexpected semantic iterator failure"):
+        _register_candidate(
+            EvidenceEnrollmentRegistry(),
+            journey_type="bargein",
+            semantic_kind="bargein-intent",
+            intent_plan=ExplodingPlan(),
+            semantic_hmac_key=exploding_key,
+        )
+    assert exploding_key == bytearray(32)
 
 
 def test_registry_stores_immutable_candidate_lifecycle_claims_without_transcript_gate():

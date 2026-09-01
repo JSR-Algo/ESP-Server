@@ -6,8 +6,10 @@ import re
 from aiohttp import web
 
 from core.voice.google_live.evidence_enrollment import (
+    CANDIDATE_INTENT_NORMALIZATION_VERSION,
     CANDIDATE_LIFECYCLE_PROFILE,
     PHYSICAL_TRANSCRIPT_PROFILE,
+    CandidateIntentExpectation,
     EnrollmentError,
     EvidenceEnrollmentRegistry,
     TranscriptExpectation,
@@ -36,6 +38,11 @@ _CANDIDATE_POST_FIELDS = {
     "journeyType",
     "proofProfile",
 }
+_CANDIDATE_SEMANTIC_POST_FIELDS = _CANDIDATE_POST_FIELDS | {"semanticProof"}
+_CANDIDATE_INTENT_FIELDS = {"version", "hmacKeyBase64", "intentPlan"}
+_CANDIDATE_INTENT_PLAN_FIELDS = {"slot", "role", "expectedMac"}
+_CANDIDATE_QUIET_FIELDS = {"version", "mode"}
+_CANDIDATE_QUIET_VERSION = "google-live-candidate-quiet.v1"
 _PLAN_FIELDS = {"slot", "phase", "expectedMac"}
 _CANDIDATE_FIELDS = {
     "gitSha",
@@ -68,6 +75,7 @@ class GoogleLiveEvidenceHandler:
         auth_error = self._authorize(request)
         if auth_error is not None:
             return auth_error
+        parsed = None
         try:
             body = await request.json()
             parsed = self._parse_body(request.match_info.get("deviceId", ""), body)
@@ -81,6 +89,10 @@ class GoogleLiveEvidenceHandler:
             return self._error(400, "INVALID_REQUEST", "Invalid Google Live evidence enrollment request")
         except Exception:
             return self._error(400, "INVALID_REQUEST", "Invalid Google Live evidence enrollment request")
+        finally:
+            if parsed is not None:
+                self._zeroize(parsed.get("hmac_key"))
+                self._zeroize(parsed.get("semantic_hmac_key"))
         return web.json_response(
             {
                 "data": {
@@ -281,7 +293,7 @@ class GoogleLiveEvidenceHandler:
                 or proof_profile != PHYSICAL_TRANSCRIPT_PROFILE
             ):
                 raise ValueError
-        elif fields == _CANDIDATE_POST_FIELDS:
+        elif fields in (_CANDIDATE_POST_FIELDS, _CANDIDATE_SEMANTIC_POST_FIELDS):
             journey_type = body["journeyType"]
             proof_profile = body["proofProfile"]
             if (
@@ -358,6 +370,10 @@ class GoogleLiveEvidenceHandler:
             "proof_profile": proof_profile,
             "transcript_plan": (),
             "hmac_key": bytearray(),
+            "semantic_kind": "none",
+            "intent_plan": (),
+            "quiet_mode": None,
+            "semantic_hmac_key": bytearray(),
         }
         ttl_sec = body["ttlSec"]
         if (
@@ -367,7 +383,79 @@ class GoogleLiveEvidenceHandler:
         ):
             raise ValueError
         parsed["ttl_sec"] = ttl_sec
+        semantic_proof = body.get("semanticProof")
+        if journey_type == "bargein":
+            parsed.update(self._parse_candidate_intent_proof(semantic_proof))
+        elif journey_type == "quiet":
+            parsed.update(self._parse_candidate_quiet_proof(semantic_proof))
+        elif semantic_proof is not None:
+            raise ValueError
         return parsed
+
+    def _parse_candidate_intent_proof(self, proof) -> dict:
+        decoded = None
+        try:
+            if not isinstance(proof, dict) or set(proof) != _CANDIDATE_INTENT_FIELDS:
+                raise ValueError
+            if proof["version"] != CANDIDATE_INTENT_NORMALIZATION_VERSION:
+                raise ValueError
+            encoded = proof["hmacKeyBase64"]
+            if not isinstance(encoded, str):
+                raise ValueError
+            decoded = bytearray(base64.b64decode(encoded, validate=True))
+            if len(decoded) != 32 or base64.b64encode(decoded).decode("ascii") != encoded:
+                raise ValueError
+            plan = proof["intentPlan"]
+            if not isinstance(plan, list) or len(plan) != 2:
+                raise ValueError
+            expectations = []
+            for expected_slot, expected_role, item in zip(
+                (1, 2), ("initial", "newest"), plan, strict=True
+            ):
+                if not isinstance(item, dict) or set(item) != _CANDIDATE_INTENT_PLAN_FIELDS:
+                    raise ValueError
+                if (
+                    isinstance(item["slot"], bool)
+                    or not isinstance(item["slot"], int)
+                    or item["slot"] != expected_slot
+                    or item["role"] != expected_role
+                    or not isinstance(item["expectedMac"], str)
+                    or _MAC.fullmatch(item["expectedMac"]) is None
+                ):
+                    raise ValueError
+                expectations.append(
+                    CandidateIntentExpectation(
+                        item["slot"], item["role"], item["expectedMac"]
+                    )
+                )
+            return {
+                "semantic_kind": "bargein-intent",
+                "intent_plan": tuple(expectations),
+                "semantic_hmac_key": decoded,
+            }
+        except Exception:
+            self._zeroize(decoded)
+            raise
+
+    @staticmethod
+    def _parse_candidate_quiet_proof(proof) -> dict:
+        if not isinstance(proof, dict) or set(proof) != _CANDIDATE_QUIET_FIELDS:
+            raise ValueError
+        if (
+            proof["version"] != _CANDIDATE_QUIET_VERSION
+            or proof["mode"] not in ("silence", "robot_speaking")
+        ):
+            raise ValueError
+        return {
+            "semantic_kind": "quiet",
+            "quiet_mode": proof["mode"],
+        }
+
+    @staticmethod
+    def _zeroize(key) -> None:
+        if isinstance(key, bytearray):
+            for index in range(len(key)):
+                key[index] = 0
 
     @staticmethod
     def _safe_id(value) -> str:

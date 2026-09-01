@@ -104,6 +104,24 @@ def _candidate_evidence_body(**overrides):
     return body
 
 
+def _candidate_bargein_body(**overrides):
+    key = b"s" * 32
+    body = _candidate_evidence_body(
+        journeyId="candidate-soak.20260902T010203Z.18",
+        journeyType="bargein",
+        semanticProof={
+            "version": "google-live-candidate-intent-nfkc-casefold.v1",
+            "hmacKeyBase64": base64.b64encode(key).decode("ascii"),
+            "intentPlan": [
+                {"slot": 1, "role": "initial", "expectedMac": "a" * 64},
+                {"slot": 2, "role": "newest", "expectedMac": "b" * 64},
+            ],
+        },
+    )
+    body.update(overrides)
+    return body
+
+
 def _config(**server_overrides):
     server = {
         "auth_key": "test-key",
@@ -513,6 +531,147 @@ async def test_google_live_evidence_post_accepts_explicit_physical_claims():
     snapshot = handler.registry.safe_snapshot("physical.run-1")
     assert snapshot["journeyType"] == "physical"
     assert snapshot["proofProfile"] == "physical-transcript"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "kind", "mode"),
+    [
+        (_candidate_bargein_body(), "bargein-intent", None),
+        (
+            _candidate_evidence_body(
+                journeyType="quiet",
+                semanticProof={
+                    "version": "google-live-candidate-quiet.v1",
+                    "mode": "silence",
+                },
+            ),
+            "quiet",
+            "silence",
+        ),
+        (
+            _candidate_evidence_body(
+                journeyType="quiet",
+                semanticProof={
+                    "version": "google-live-candidate-quiet.v1",
+                    "mode": "robot_speaking",
+                },
+            ),
+            "quiet",
+            "robot_speaking",
+        ),
+    ],
+)
+async def test_google_live_evidence_post_accepts_exact_candidate_semantic_shapes(
+    body, kind, mode
+):
+    handler = GoogleLiveEvidenceHandler(EvidenceEnrollmentRegistry())
+
+    response = await handler.handle_post(_EvidenceRequest(body))
+
+    assert response.status == 201
+    snapshot = handler.registry.safe_snapshot(body["journeyId"])
+    assert snapshot["semanticProofKind"] == kind
+    if mode is not None:
+        assert snapshot["quietMode"] == mode
+    encoded = response.text.casefold() + json.dumps(snapshot).casefold()
+    assert "expectedmac" not in encoded
+    assert "hmackeybase64" not in encoded
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        _candidate_evidence_body(semanticProof={}),
+        _candidate_evidence_body(
+            semanticProof={
+                "version": "google-live-candidate-quiet.v1",
+                "mode": "silence",
+            }
+        ),
+        _candidate_evidence_body(
+            journeyType="bargein",
+            semanticProof={
+                "version": "wrong",
+                "hmacKeyBase64": base64.b64encode(b"s" * 32).decode("ascii"),
+                "intentPlan": [
+                    {"slot": 1, "role": "initial", "expectedMac": "a" * 64},
+                    {"slot": 2, "role": "newest", "expectedMac": "b" * 64},
+                ],
+            },
+        ),
+        _candidate_bargein_body(
+            semanticProof={
+                **_candidate_bargein_body()["semanticProof"],
+                "extra": True,
+            }
+        ),
+        _candidate_bargein_body(
+            semanticProof={
+                **_candidate_bargein_body()["semanticProof"],
+                "intentPlan": [
+                    {"slot": 2, "role": "newest", "expectedMac": "b" * 64},
+                    {"slot": 1, "role": "initial", "expectedMac": "a" * 64},
+                ],
+            }
+        ),
+        _candidate_bargein_body(
+            semanticProof={
+                **_candidate_bargein_body()["semanticProof"],
+                "intentPlan": [
+                    {"slot": 1, "role": "initial", "expectedMac": "a" * 64},
+                    {"slot": 2, "role": "initial", "expectedMac": "b" * 64},
+                ],
+            }
+        ),
+        _candidate_bargein_body(
+            semanticProof={
+                **_candidate_bargein_body()["semanticProof"],
+                "hmacKeyBase64": base64.b64encode(b"short").decode("ascii"),
+            }
+        ),
+        _candidate_bargein_body(
+            semanticProof={
+                **_candidate_bargein_body()["semanticProof"],
+                "intentPlan": [
+                    {"slot": 1, "role": "initial", "expectedMac": "A" * 64},
+                    {"slot": 2, "role": "newest", "expectedMac": "b" * 64},
+                ],
+            }
+        ),
+        _candidate_evidence_body(
+            journeyType="quiet",
+            semanticProof={
+                "version": "google-live-candidate-quiet.v1",
+                "mode": "silence",
+                "intentPlan": [],
+            },
+        ),
+        _candidate_evidence_body(
+            journeyType="quiet",
+            semanticProof={
+                "version": "google-live-candidate-quiet.v1",
+                "mode": "wrong",
+            },
+        ),
+        _physical_evidence_body(
+            semanticProof={
+                "version": "google-live-candidate-quiet.v1",
+                "mode": "silence",
+            }
+        ),
+    ],
+)
+async def test_google_live_evidence_post_rejects_invalid_semantic_shapes_without_echo(body):
+    handler = GoogleLiveEvidenceHandler(EvidenceEnrollmentRegistry())
+
+    response = await handler.handle_post(_EvidenceRequest(body))
+
+    assert response.status == 400
+    assert json.loads(response.text)["error"] == "INVALID_REQUEST"
+    assert "expectedMac" not in response.text
+    assert "hmacKeyBase64" not in response.text
 
 
 @pytest.mark.asyncio
