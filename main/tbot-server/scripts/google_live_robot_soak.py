@@ -2112,6 +2112,17 @@ def _validate_candidate_finalization(finalized, *, result, journey_id, stage):
         else None
     )
     final_live_id = finalized.get("finalLiveConnectionId")
+    scope_fields = {
+        "journeyId",
+        "connectionId",
+        "liveConnectionId",
+        "initialLiveConnectionId",
+        "peerIdentityHash",
+        "serverStartUtc",
+        "journeyType",
+        "proofProfile",
+    }
+    safe_scope_id = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
     if (
         set(finalized)
         != {
@@ -2125,13 +2136,28 @@ def _validate_candidate_finalization(finalized, *, result, journey_id, stage):
         or finalized.get("type") != "evidence_finalized"
         or finalized.get("status") != "PASS"
         or not isinstance(scope, Mapping)
+        or set(scope) != scope_fields
         or dict(scope) != result_scope
+        or re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", str(scope.get("journeyId", "")))
+        is None
+        or any(
+            safe_scope_id.fullmatch(str(scope.get(field, ""))) is None
+            for field in (
+                "connectionId",
+                "liveConnectionId",
+                "initialLiveConnectionId",
+            )
+        )
         or scope.get("journeyId") != journey_id
         or scope.get("journeyType") != stage
         or scope.get("proofProfile") != "candidate-lifecycle"
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(scope.get("peerIdentityHash", "")))
+        is None
+        or scope.get("initialLiveConnectionId") != scope.get("liveConnectionId")
+        or safe_scope_id.fullmatch(str(final_live_id or "")) is None
         or server_start is None
         or server_end is None
-        or server_end < server_start
+        or server_end <= server_start
         or _validated_live_connection_transition_chain(
             initial_live_id,
             final_live_id,

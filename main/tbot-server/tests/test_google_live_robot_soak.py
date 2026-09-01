@@ -2653,6 +2653,16 @@ def test_candidate_factory_enrolls_binds_runs_finalizes_then_analyzes(tmp_path):
         "wrong_journey_type",
         "retryable",
         "malformed",
+        "scope_missing_field",
+        "scope_extra_field",
+        "empty_connection_id",
+        "empty_live_id",
+        "none_initial_live_id",
+        "none_final_live_id",
+        "wrong_peer_hash",
+        "zero_window",
+        "reversed_window",
+        "invalid_transition_chain",
     ],
 )
 def test_candidate_factory_rejects_incomplete_finalize_before_analyzer(
@@ -2678,6 +2688,48 @@ def test_candidate_factory_rejects_incomplete_finalize_before_analyzer(
         finalized["retryable"] = True
     elif case == "malformed":
         finalized = "malformed"
+    elif case == "scope_missing_field":
+        finalized["evidenceScope"] = dict(scope)
+        finalized["evidenceScope"].pop("connectionId")
+    elif case == "scope_extra_field":
+        finalized["evidenceScope"] = {**scope, "unexpected": "value"}
+    elif case == "empty_connection_id":
+        finalized["evidenceScope"] = {**scope, "connectionId": ""}
+    elif case == "empty_live_id":
+        finalized["evidenceScope"] = {**scope, "liveConnectionId": ""}
+    elif case == "none_initial_live_id":
+        finalized["evidenceScope"] = {**scope, "initialLiveConnectionId": None}
+    elif case == "none_final_live_id":
+        finalized["finalLiveConnectionId"] = None
+    elif case == "wrong_peer_hash":
+        finalized["evidenceScope"] = {**scope, "peerIdentityHash": "sha256:ABC"}
+    elif case == "zero_window":
+        finalized["serverEndUtc"] = scope["serverStartUtc"]
+    elif case == "reversed_window":
+        finalized["serverEndUtc"] = "2026-08-31T09:59:59+00:00"
+    elif case == "invalid_transition_chain":
+        finalized["finalLiveConnectionId"] = "live-2"
+        finalized["liveConnectionTransitions"] = [
+            {
+                "attempt": 1,
+                "fromLiveConnectionId": "foreign-live",
+                "toLiveConnectionId": "live-2",
+            }
+        ]
+    driver_scope = (
+        finalized.get("evidenceScope")
+        if isinstance(finalized, dict)
+        and case
+        in {
+            "scope_missing_field",
+            "scope_extra_field",
+            "empty_connection_id",
+            "empty_live_id",
+            "none_initial_live_id",
+            "wrong_peer_hash",
+        }
+        else scope
+    )
 
     async def control(_method, url, _payload=None):
         if url.endswith("/finalize"):
@@ -2699,7 +2751,7 @@ def test_candidate_factory_rejects_incomplete_finalize_before_analyzer(
         candidate_journey_driver=lambda *_args, **_kwargs: {
             "name": "bargein",
             "status": "PASS",
-            "evidenceScope": scope,
+            "evidenceScope": driver_scope,
         },
         candidate_log_analyzer=analyzer,
     )
