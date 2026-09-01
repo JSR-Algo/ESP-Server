@@ -163,6 +163,7 @@ P_RELIABILITY_WINDOW_START = re.compile(
     r"Google Live reliability_window_start window_id=(?P<window_id>[A-Za-z0-9._:-]+) "
     r"(?:journey_id=(?P<journey_id>[A-Za-z0-9._:-]+) )?"
     r"(?:journeys=(?P<journeys>[A-Za-z0-9._:,-]+) )?"
+    r"(?:proof_profile=(?P<proof_profile>[A-Za-z0-9._:-]+) )?"
     r"(?:connection_id=(?P<connection_id>[A-Za-z0-9._:-]+) )?"
     r"(?:live_connection_id=(?P<live_connection_id>[A-Za-z0-9._:-]+) )?"
     r"(?:initial_live_connection_id=(?P<initial_live_connection_id>[A-Za-z0-9._:-]+) )?"
@@ -1832,6 +1833,13 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         )
                     else:
                         evidence_scope = scope_values
+                        if start_match.group("proof_profile") is not None:
+                            evidence_scope["journeyType"] = start_match.group(
+                                "journeys"
+                            )
+                            evidence_scope["proofProfile"] = start_match.group(
+                                "proof_profile"
+                            )
                         scoped_initial_live_connection_id = (
                             scope_values.get("initialLiveConnectionId")
                             or scope_values.get("liveConnectionId")
@@ -1851,6 +1859,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     "evidenceScope": evidence_scope,
                     "claimedJourneys": set(claimed_journey_list),
                     "claimedJourneyList": claimed_journey_list,
+                    "serverIssued": start_match.group("server_issued") == "true",
                 }
                 active = True
                 previous_ts = ts
@@ -3521,20 +3530,48 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
         start_anchor and isinstance(start_anchor.get("evidenceScope"), Mapping)
     )
     recognized_journeys = {
+        "physical",
         "bargein",
         "conversation",
         "conversation_after_lesson",
         "lesson",
         "reconnect",
         "reopen",
+        "quiet",
         "quiet_padding",
+        "websocket",
     }
+    trusted_journey_type = None
     if exact_scope_bound:
-        if (
-            (claimed_journey_list and len(claimed_journey_list) != 1)
+        server_issued_claim = bool(start_anchor.get("serverIssued"))
+        proof_profile = (
+            (start_anchor.get("evidenceScope") or {}).get("proofProfile")
+        )
+        claim_invalid = (
+            (
+                len(claimed_journey_list) != 1
+                if server_issued_claim
+                else bool(claimed_journey_list)
+                and len(claimed_journey_list) != 1
+            )
             or len(claimed_journey_list) != len(set(claimed_journey_list))
             or not set(claimed_journey_list).issubset(recognized_journeys)
-        ):
+            or (
+                proof_profile is not None
+                and not (
+                    (
+                        proof_profile == "physical-transcript"
+                        and claimed_journey_list == ["physical"]
+                    )
+                    or (
+                        proof_profile == "candidate-lifecycle"
+                        and len(claimed_journey_list) == 1
+                        and claimed_journey_list[0] != "physical"
+                    )
+                )
+            )
+        )
+        if claim_invalid:
             failures.append(
                 _failure(
                     "JOURNEY_CLAIM_INVALID",
@@ -3542,6 +3579,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     ",".join(claimed_journey_list) or "empty",
                 )
             )
+        elif claimed_journey_list:
+            trusted_journey_type = claimed_journey_list[0]
         if scoped_interrupts and "bargein" not in claimed_journeys:
             failures.append(
                 _failure(
@@ -3550,7 +3589,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     "bargein",
                 )
             )
-    if claimed_journeys and exact_scope_bound:
+    candidate_journeys = claimed_journeys - {"physical"}
+    if candidate_journeys and exact_scope_bound:
         if scoped_receive_start_count == 0 or scoped_receive_stop_count == 0:
             failures.append(
                 _failure(
@@ -3688,9 +3728,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
         "status": "PASS" if not failures else "FAIL",
         "candidateIdentity": candidate_identity,
         "evidenceScope": start_anchor.get("evidenceScope") if start_anchor else None,
-        "journeyType": (
-            claimed_journey_list[0] if len(claimed_journey_list) == 1 else None
-        ),
+        "journeyType": trusted_journey_type,
         "journeyLatencyEvidence": journey_latency_evidence,
         "initialLiveConnectionId": scoped_initial_live_connection_id,
         "finalLiveConnectionId": scoped_current_live_connection_id,

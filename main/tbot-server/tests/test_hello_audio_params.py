@@ -8,6 +8,7 @@ from core.handle import helloHandle
 from core.handle.helloHandle import handleHelloMessage
 from core.voice.google_live.audio_bridge import GoogleLiveAudioBridge
 from core.voice.google_live.evidence_enrollment import (
+    CANDIDATE_LIFECYCLE_PROFILE,
     EvidenceEnrollmentRegistry,
     TranscriptExpectation,
 )
@@ -25,7 +26,7 @@ class _Logger:
         self.debugs.append(message)
 
     def info(self, message, *_args, **_kwargs):
-        self.infos.append(message)
+        self.infos.append(message.format(*_args))
 
 
 class _WebSocket:
@@ -88,7 +89,7 @@ class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
             device_id=conn.device_id,
             client_id=conn.client_id,
             journey_id=journey_id,
-            transcript_plan=(TranscriptExpectation(1, "interrupt", "a" * 64),),
+            transcript_plan=(TranscriptExpectation(1, "post_lesson", "a" * 64),),
             hmac_key=b"k" * 32,
             ttl_sec=120,
         )
@@ -105,6 +106,92 @@ class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
         )
         conn.evidence_registry = registry
         return registry
+
+    @staticmethod
+    def _enroll_candidate(conn, journey_id="candidate.run-1"):
+        registry = EvidenceEnrollmentRegistry()
+        registry.register(
+            device_id=conn.device_id,
+            client_id=conn.client_id,
+            journey_id=journey_id,
+            journey_type="conversation",
+            proof_profile=CANDIDATE_LIFECYCLE_PROFILE,
+            transcript_plan=(),
+            hmac_key=bytearray(),
+            ttl_sec=120,
+        )
+        registry.bind_candidate_identity(
+            device_id=conn.device_id,
+            journey_id=journey_id,
+            candidate_identity={
+                "gitSha": "a" * 40,
+                "imageDigest": "sha256:" + "b" * 64,
+                "firmwareIdentity": "firmware-v1",
+                "fixtureSha256": "c" * 64,
+                "configFingerprint": "sha256:" + "d" * 64,
+            },
+        )
+        conn.evidence_registry = registry
+        return registry
+
+    async def test_google_live_candidate_scope_and_marker_use_registry_claims(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(return_value="live-7")
+        )
+        self._enroll_candidate(conn)
+
+        await handleHelloMessage(
+            conn,
+            {
+                "evidence_journey_id": "candidate.run-1",
+                "journeyType": "bargein",
+                "proofProfile": "physical-transcript",
+            },
+        )
+
+        scope = json.loads(conn.websocket.sent[0])["evidenceScope"]
+        self.assertEqual(scope["journeyType"], "conversation")
+        self.assertEqual(scope["proofProfile"], CANDIDATE_LIFECYCLE_PROFILE)
+        marker = next(
+            message
+            for message in conn.logger.infos
+            if "reliability_window_start" in message
+        )
+        self.assertIn("journeys=conversation ", marker)
+        self.assertIn("proof_profile=candidate-lifecycle ", marker)
+        self.assertEqual(conn.google_live_evidence_journey_type, "conversation")
+        self.assertEqual(
+            conn.google_live_evidence_proof_profile,
+            CANDIDATE_LIFECYCLE_PROFILE,
+        )
+
+    async def test_google_live_invalid_registry_claims_emit_no_production_marker(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(return_value="live-7")
+        )
+        conn.evidence_registry = SimpleNamespace(
+            claim_for_scope=lambda **_claims: {"gitSha": "a" * 40},
+            safe_snapshot=lambda _journey: {
+                "journeyType": "conversation",
+                "proofProfile": "physical-transcript",
+            },
+            abort_claim=lambda **_claims: None,
+        )
+
+        await handleHelloMessage(conn, {"evidence_journey_id": "candidate.run-1"})
+
+        ack = json.loads(conn.websocket.sent[0])
+        self.assertEqual(
+            ack["evidenceScope"]["failureCode"], "EVIDENCE_ENROLLMENT_INVALID"
+        )
+        conn.voice_provider.prepare_evidence_scope.assert_not_awaited()
+        self.assertFalse(
+            any("reliability_window_start" in message for message in conn.logger.infos)
+        )
 
     async def test_google_live_hello_claims_injected_enrollment_before_scope(self):
         conn = _Conn()
@@ -187,7 +274,7 @@ class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
             device_id=conn.device_id,
             client_id=conn.client_id,
             journey_id="physical.run-1",
-            transcript_plan=(TranscriptExpectation(1, "interrupt", "a" * 64),),
+            transcript_plan=(TranscriptExpectation(1, "post_lesson", "a" * 64),),
             hmac_key=b"k" * 32,
             ttl_sec=120,
         )
@@ -278,7 +365,7 @@ class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
                     client_id=conn.client_id,
                     journey_id="physical.run-2",
                     transcript_plan=(
-                        TranscriptExpectation(1, "interrupt", "a" * 64),
+                        TranscriptExpectation(1, "post_lesson", "a" * 64),
                     ),
                     hmac_key=b"r" * 32,
                     ttl_sec=120,

@@ -17,6 +17,10 @@ from core.providers.tts.dto.dto import SentenceType
 from core.utils.dialogue import Message
 from core.utils.util import audio_to_data, opus_datas_to_wav_bytes, remove_punctuation_and_length
 from core.utils.wakeup_word import WakeupWordsConfig
+from core.voice.google_live.evidence_enrollment import (
+    EnrollmentError,
+    validate_evidence_claims,
+)
 
 TAG = __name__
 SAFE_EVIDENCE_JOURNEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
@@ -112,6 +116,8 @@ def _abort_google_live_claim(conn, registry, journey_id, failure_code):
     conn.google_live_evidence_journey_id = None
     conn.google_live_evidence_scope = None
     conn.google_live_evidence_candidate_identity = None
+    conn.google_live_evidence_journey_type = None
+    conn.google_live_evidence_proof_profile = None
 
 async def _handleHelloMessage(conn: "ConnectionHandler", msg_json):
     """Handle hello message"""
@@ -127,6 +133,8 @@ async def _handleHelloMessage(conn: "ConnectionHandler", msg_json):
     )
     conn.google_live_evidence_scope = None
     conn.google_live_evidence_candidate_identity = None
+    conn.google_live_evidence_journey_type = None
+    conn.google_live_evidence_proof_profile = None
     conn.google_live_reliability_start_logged = False
     enrollment_invalid = False
     registry = getattr(conn, "evidence_registry", None)
@@ -177,7 +185,43 @@ async def _handleHelloMessage(conn: "ConnectionHandler", msg_json):
             conn.google_live_evidence_journey_id = None
             enrollment_invalid = True
         else:
-            conn.google_live_evidence_candidate_identity = claimed
+            safe_snapshot = getattr(registry, "safe_snapshot", None)
+            try:
+                enrollment_snapshot = (
+                    safe_snapshot(conn.google_live_evidence_journey_id)
+                    if callable(safe_snapshot)
+                    else None
+                )
+            except Exception:
+                enrollment_snapshot = None
+            journey_type = (
+                enrollment_snapshot.get("journeyType")
+                if isinstance(enrollment_snapshot, dict)
+                else None
+            )
+            proof_profile = (
+                enrollment_snapshot.get("proofProfile")
+                if isinstance(enrollment_snapshot, dict)
+                else None
+            )
+            claims_valid = False
+            try:
+                validate_evidence_claims(journey_type, proof_profile)
+                claims_valid = True
+            except EnrollmentError:
+                pass
+            if not claims_valid:
+                _abort_google_live_claim(
+                    conn,
+                    registry,
+                    conn.google_live_evidence_journey_id,
+                    "EVIDENCE_ENROLLMENT_INVALID",
+                )
+                enrollment_invalid = True
+            else:
+                conn.google_live_evidence_candidate_identity = claimed
+                conn.google_live_evidence_journey_type = journey_type
+                conn.google_live_evidence_proof_profile = proof_profile
 
     hello_ack = dict(conn.welcome_msg)
     if enrollment_invalid:
@@ -210,6 +254,8 @@ async def _handleHelloMessage(conn: "ConnectionHandler", msg_json):
                     "initialLiveConnectionId": live_connection_id,
                     "peerIdentityHash": _evidence_peer_identity_hash(conn),
                     "serverStartUtc": server_start_utc,
+                    "journeyType": conn.google_live_evidence_journey_type,
+                    "proofProfile": conn.google_live_evidence_proof_profile,
                 }
             except BaseException:
                 _abort_google_live_claim(
@@ -288,11 +334,13 @@ async def _handleHelloMessage(conn: "ConnectionHandler", msg_json):
         try:
             conn.logger.bind(tag=TAG).info(
                 "Google Live reliability_window_start window_id={} journey_id={} "
-                "connection_id={} live_connection_id={} initial_live_connection_id={} "
+                "journeys={} proof_profile={} connection_id={} live_connection_id={} initial_live_connection_id={} "
                 "peer_identity_hash={} server_start_utc={} server_issued=true "
                 "candidate_identity={}",
                 scope["journeyId"],
                 scope["journeyId"],
+                scope["journeyType"],
+                scope["proofProfile"],
                 scope["connectionId"],
                 scope["liveConnectionId"],
                 scope["initialLiveConnectionId"],

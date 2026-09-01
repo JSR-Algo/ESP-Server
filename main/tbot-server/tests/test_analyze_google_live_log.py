@@ -70,12 +70,16 @@ def _server_connection_transition(**overrides):
     )
 
 
+_DEFAULT_TRUSTED_JOURNEY = object()
+
+
 def _window_lines(
     *body,
     candidate_identity=CANDIDATE_IDENTITY,
     window_id="window-1",
     journey_id=None,
-    journeys=None,
+    journeys=_DEFAULT_TRUSTED_JOURNEY,
+    proof_profile=None,
     evidence_scope=None,
     server_issued=False,
 ):
@@ -83,10 +87,14 @@ def _window_lines(
     evidence = ""
     if journey_id is None and evidence_scope is not None:
         journey_id = evidence_scope["journeyId"]
+    if journeys is _DEFAULT_TRUSTED_JOURNEY:
+        journeys = "physical" if server_issued and evidence_scope is not None else None
     if journey_id is not None:
         evidence += f"journey_id={journey_id} "
     if journeys is not None:
         evidence += f"journeys={journeys} "
+    if proof_profile is not None:
+        evidence += f"proof_profile={proof_profile} "
     if evidence_scope is not None:
         evidence += (
             f"connection_id={evidence_scope['connectionId']} "
@@ -678,6 +686,98 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         self.assertEqual(verdict["journeyType"], "quiet_padding")
         self.assertEqual(verdict["maxReceiveLoopsActive"], 1)
         self.assertEqual(verdict["receiveLoopBalance"], 0)
+
+    def test_trusted_journey_claim_accepts_every_registry_type_exactly_once(self):
+        recognized = (
+            "physical",
+            "conversation",
+            "bargein",
+            "quiet",
+            "quiet_padding",
+            "reopen",
+            "reconnect",
+            "lesson",
+            "conversation_after_lesson",
+            "websocket",
+        )
+        for journey_type in recognized:
+            with self.subTest(journey_type=journey_type):
+                verdict = self._analyze(
+                    _window_lines(
+                        journey_id="candidate.run-1",
+                        journeys=journey_type,
+                        proof_profile=(
+                            "physical-transcript"
+                            if journey_type == "physical"
+                            else "candidate-lifecycle"
+                        ),
+                        evidence_scope=EVIDENCE_SCOPE,
+                        server_issued=True,
+                    )
+                )
+                self.assertEqual(verdict["journeyType"], journey_type)
+                self.assertEqual(
+                    verdict["evidenceScope"]["proofProfile"],
+                    "physical-transcript"
+                    if journey_type == "physical"
+                    else "candidate-lifecycle",
+                )
+                self.assertNotIn(
+                    "JOURNEY_CLAIM_INVALID",
+                    [item["code"] for item in verdict["failures"]],
+                )
+
+    def test_trusted_journey_claim_rejects_missing_empty_multi_unknown_and_duplicate_field(self):
+        cases = {
+            "missing": _window_lines(
+                journey_id="candidate.run-1",
+                journeys=None,
+                evidence_scope=EVIDENCE_SCOPE,
+                server_issued=True,
+            ),
+            "empty": _window_lines(
+                journey_id="candidate.run-1",
+                journeys="",
+                evidence_scope=EVIDENCE_SCOPE,
+                server_issued=True,
+            ),
+            "multi": _window_lines(
+                journey_id="candidate.run-1",
+                journeys="conversation,bargein",
+                evidence_scope=EVIDENCE_SCOPE,
+                server_issued=True,
+            ),
+            "unknown": _window_lines(
+                journey_id="candidate.run-1",
+                journeys="unknown",
+                evidence_scope=EVIDENCE_SCOPE,
+                server_issued=True,
+            ),
+            "profile_conflict": _window_lines(
+                journey_id="candidate.run-1",
+                journeys="conversation",
+                proof_profile="physical-transcript",
+                evidence_scope=EVIDENCE_SCOPE,
+                server_issued=True,
+            ),
+        }
+        duplicate = _window_lines(
+            journey_id="candidate.run-1",
+            journeys="conversation",
+            evidence_scope=EVIDENCE_SCOPE,
+            server_issued=True,
+        )
+        duplicate[0] = duplicate[0].replace(
+            "journeys=conversation ",
+            "journeys=conversation journeys=bargein ",
+        )
+        cases["duplicate_field"] = duplicate
+
+        for name, lines in cases.items():
+            with self.subTest(name=name):
+                verdict = self._analyze(lines)
+                self.assertEqual(verdict["status"], "FAIL")
+                self.assertIsNone(verdict["journeyType"])
 
     def test_conversation_normalizes_first_response_latency_from_server_timestamps(self):
         verdict = self._analyze(
