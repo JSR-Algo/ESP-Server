@@ -1226,8 +1226,10 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
             staged["tools"]["nodeInstalls"][key] = observed
         if any(lane.name == "admin-browser" for lane in lanes):
             browser = candidate["tools"]["robotPreviewBrowser"]
-            browser_target = tools_root / "robot-preview-browser"
-            _copy_snapshot_tree(Path(browser["root"]), browser_target, state)
+            browser_source = Path(browser["root"])
+            browser_target = tools_root / browser_source.parent.name / browser_source.name
+            browser_target.parent.mkdir()
+            _copy_snapshot_tree(browser_source, browser_target, state)
             observed, error = secure_browser_bundle_descriptor(browser_target)
             if error or observed != browser["treeDigest"]:
                 raise ValueError("staged browser descriptor mismatch")

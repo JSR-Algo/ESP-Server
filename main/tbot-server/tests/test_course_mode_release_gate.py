@@ -2706,6 +2706,25 @@ def test_admin_browser_environment_is_only_candidate_bound_descriptor(candidate_
     assert "CHROME_BIN" not in environment
 
 
+def test_admin_browser_snapshot_preserves_playwright_platform_layout(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    lane = next(lane for lane in gate.FULL_LANES if lane.name == "admin-browser")
+
+    stage = gate.stage_execution_candidate(candidate, (lane,))
+    try:
+        browser = stage.candidate["tools"]["robotPreviewBrowser"]
+        expected_suffix = Path(
+            f"chromium_headless_shell-{browser['revision']}",
+            "chrome-headless-shell-mac-arm64",
+        )
+
+        assert Path(browser["root"]).parts[-len(expected_suffix.parts):] == expected_suffix.parts
+        assert Path(browser["root"], browser["executable"]).is_file()
+    finally:
+        assert stage.cleanup() is True
+
+
 def test_admin_browser_authority_requires_playwright_metadata_revision(candidate_file: Path) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     root = Path(candidate["repositories"]["adminEsp"]["path"])
