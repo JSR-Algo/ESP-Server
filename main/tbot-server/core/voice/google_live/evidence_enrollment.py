@@ -612,6 +612,8 @@ class EvidenceEnrollmentRegistry:
             return False
         valid = bool(
             enrollment.semantic_eligible
+            and not enrollment.semantic_replacement_started
+            and not enrollment.semantic_replacement_completed
             and response_generation == enrollment.semantic_replacement_generation
             and response_generation != enrollment.semantic_interrupted_old_generation
         )
@@ -635,6 +637,7 @@ class EvidenceEnrollmentRegistry:
         valid = bool(
             enrollment.semantic_eligible
             and enrollment.semantic_replacement_started
+            and not enrollment.semantic_replacement_completed
             and response_generation == enrollment.semantic_replacement_generation
         )
         if not valid:

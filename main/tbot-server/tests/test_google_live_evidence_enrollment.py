@@ -440,6 +440,75 @@ def test_semantic_match_remains_nonterminal_and_does_not_change_lifecycle_readin
     assert after["latestIntentMatched"] is True
 
 
+@pytest.mark.parametrize("duplicate_event", ["start", "end"])
+def test_candidate_replacement_duplicate_lifecycle_event_fails_sticky(duplicate_event):
+    registry = EvidenceEnrollmentRegistry()
+    enrollment = _register_bargein_semantic(registry)
+    registry.claim(
+        device_id=enrollment.device_id,
+        client_id=enrollment.client_id,
+        journey_id=enrollment.journey_id,
+    )
+    registry.observe_candidate_intent(enrollment.journey_id, "First intent", role="initial")
+    registry.observe_candidate_intent(
+        enrollment.journey_id,
+        "Newest intent",
+        role="newest",
+        response_generation=7,
+        active_old_output=True,
+    )
+    assert registry.record_candidate_interrupt(
+        enrollment.journey_id, old_generation=7, new_generation=8
+    )
+    assert registry.record_candidate_response_started(
+        enrollment.journey_id, response_generation=8
+    )
+    if duplicate_event == "start":
+        assert not registry.record_candidate_response_started(
+            enrollment.journey_id, response_generation=8
+        )
+    else:
+        assert registry.record_candidate_response_completed(
+            enrollment.journey_id, response_generation=8
+        )
+        assert not registry.record_candidate_response_completed(
+            enrollment.journey_id, response_generation=8
+        )
+
+    snapshot = registry.safe_snapshot(enrollment.journey_id)
+    assert snapshot["semanticEligible"] is False
+    assert snapshot["semanticOwnershipReady"] is False
+
+
+def test_candidate_replacement_completion_before_start_fails_sticky():
+    registry = EvidenceEnrollmentRegistry()
+    enrollment = _register_bargein_semantic(registry)
+    registry.claim(
+        device_id=enrollment.device_id,
+        client_id=enrollment.client_id,
+        journey_id=enrollment.journey_id,
+    )
+    registry.observe_candidate_intent(enrollment.journey_id, "First intent", role="initial")
+    registry.observe_candidate_intent(
+        enrollment.journey_id,
+        "Newest intent",
+        role="newest",
+        response_generation=7,
+        active_old_output=True,
+    )
+    assert registry.record_candidate_interrupt(
+        enrollment.journey_id, old_generation=7, new_generation=8
+    )
+
+    assert not registry.record_candidate_response_completed(
+        enrollment.journey_id, response_generation=8
+    )
+
+    snapshot = registry.safe_snapshot(enrollment.journey_id)
+    assert snapshot["semanticEligible"] is False
+    assert snapshot["semanticOwnershipReady"] is False
+
+
 @pytest.mark.parametrize(
     "observations",
     [

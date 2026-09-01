@@ -555,6 +555,40 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(snapshot["semanticOwnershipReady"])
         self.assertIsNone(snapshot["semanticOldResponseGeneration"])
 
+    async def test_candidate_semantic_duplicate_provider_lifecycle_event_fails_sticky(self):
+        for duplicate_type in ("audio_start", "audio_end"):
+            with self.subTest(duplicate_type=duplicate_type):
+                conn = _Conn()
+                registry = self._bind_candidate_bargein(conn)
+                provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+                provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+                provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+                provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+                provider._bridge = _Bridge()
+                provider._client = _Client()
+                provider._response_generation = 1
+                conn.google_live_transcript_event_token = object()
+                await provider._on_user_transcript("first intent")
+                await provider._handle_live_event(
+                    {"type": "audio_start", "response_generation": 1}
+                )
+                conn.google_live_transcript_event_token = object()
+                await provider._on_user_transcript_barge_in("newest intent")
+                await provider._handle_live_event(
+                    {"type": "audio_start", "response_generation": 2}
+                )
+                if duplicate_type == "audio_end":
+                    await provider._handle_live_event(
+                        {"type": "audio_end", "response_generation": 2}
+                    )
+                await provider._handle_live_event(
+                    {"type": duplicate_type, "response_generation": 2}
+                )
+
+                snapshot = registry.safe_snapshot("candidate.bargein-1")
+                self.assertFalse(snapshot["semanticEligible"])
+                self.assertFalse(snapshot["semanticOwnershipReady"])
+
     async def test_candidate_semantic_duplicate_callback_is_observed_once(self):
         conn = _Conn()
         registry = self._bind_candidate_bargein(conn)
@@ -942,6 +976,31 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         conn.evidence_registry.observe_transcript.assert_not_called()
+
+    async def test_candidate_semantic_observes_once_before_model_echo_suppression(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._bridge = SimpleNamespace(looks_like_model_echo=lambda _text: True)
+        token = object()
+        conn.google_live_transcript_event_token = token
+
+        handled = await provider._on_user_transcript("first intent")
+        after_normal = registry.safe_snapshot("candidate.bargein-1")
+        await provider._on_user_transcript_barge_in("first intent")
+
+        self.assertTrue(handled)
+        self.assertEqual(after_normal["semanticObservedCount"], 1)
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertEqual(snapshot["semanticObservedCount"], 1)
+        self.assertEqual(snapshot["semanticMatchCount"], 1)
+        self.assertTrue(
+            any(
+                "user_transcript_suppressed_as_model_echo" in str(args[0])
+                for _, args, _ in conn.logger.messages
+                if args
+            )
+        )
 
     async def test_activity_lease_covers_live_open_connect_task(self):
         conn = _Conn()

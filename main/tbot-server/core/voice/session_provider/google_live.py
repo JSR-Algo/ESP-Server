@@ -2069,57 +2069,19 @@ class GoogleLiveProvider(VoiceSessionProvider):
         return (1 << 48) + self._evidence_response_token_serial
 
     def _observe_evidence_transcript(self, transcript_text):
+        if self._candidate_semantic_registry_scope() is not None:
+            return self._observe_candidate_semantic_transcript(transcript_text)
         event_token = getattr(self.conn, "google_live_transcript_event_token", None)
         if (
             event_token is not None
             and event_token is self._evidence_last_transcript_event_token
         ):
             return None
-        registry = getattr(self.conn, "evidence_registry", None)
-        journey_id = getattr(self.conn, "google_live_evidence_journey_id", None)
-        proof_profile = getattr(
-            self.conn, "google_live_evidence_proof_profile", None
-        )
-        journey_type = getattr(self.conn, "google_live_evidence_journey_type", None)
-        if (
-            registry is not None
-            and isinstance(journey_id, str)
-            and journey_id
-            and proof_profile == "candidate-lifecycle"
-            and journey_type == "bargein"
-        ):
-            try:
-                snapshot = registry.safe_snapshot(journey_id)
-                observed = int(snapshot.get("semanticObservedCount", 0))
-                role = "initial" if observed == 0 else "newest"
-                proof = registry.observe_candidate_intent(
-                    journey_id,
-                    transcript_text,
-                    role=role,
-                    response_generation=self._response_generation,
-                    active_old_output=(
-                        self._evidence_active_response_generation
-                        == self._response_generation
-                    ),
-                )
-            except Exception:
-                return None
-            if event_token is not None:
-                self._evidence_last_transcript_event_token = event_token
-            self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live evidence_candidate_intent_match journey_id={} "
-                "slot={} role={} chars={} matched={} response_generation={}",
-                journey_id,
-                proof["slot"],
-                proof["role"],
-                proof["chars"],
-                str(bool(proof["matched"])).lower(),
-                proof["responseGeneration"],
-            )
-            return proof
         phase = self._evidence_transcript_phase()
         if phase is None:
             return None
+        registry = getattr(self.conn, "evidence_registry", None)
+        journey_id = getattr(self.conn, "google_live_evidence_journey_id", None)
         response_token = (
             self._reserve_evidence_response_token()
             if phase == "post_lesson"
@@ -2157,6 +2119,47 @@ class GoogleLiveProvider(VoiceSessionProvider):
             proof["phase"],
             proof["chars"],
             str(bool(proof["matched"])).lower(),
+        )
+        return proof
+
+    def _observe_candidate_semantic_transcript(self, transcript_text):
+        event_token = getattr(self.conn, "google_live_transcript_event_token", None)
+        if (
+            event_token is not None
+            and event_token is self._evidence_last_transcript_event_token
+        ):
+            return None
+        scope = self._candidate_semantic_registry_scope()
+        if scope is None:
+            return None
+        registry, journey_id = scope
+        try:
+            snapshot = registry.safe_snapshot(journey_id)
+            observed = int(snapshot.get("semanticObservedCount", 0))
+            role = "initial" if observed == 0 else "newest"
+            proof = registry.observe_candidate_intent(
+                journey_id,
+                transcript_text,
+                role=role,
+                response_generation=self._response_generation,
+                active_old_output=(
+                    self._evidence_active_response_generation
+                    == self._response_generation
+                ),
+            )
+        except Exception:
+            return None
+        if event_token is not None:
+            self._evidence_last_transcript_event_token = event_token
+        self.conn.logger.bind(tag="GoogleLive").info(
+            "Google Live evidence_candidate_intent_match journey_id={} "
+            "slot={} role={} chars={} matched={} response_generation={}",
+            journey_id,
+            proof["slot"],
+            proof["role"],
+            proof["chars"],
+            str(bool(proof["matched"])).lower(),
+            proof["responseGeneration"],
         )
         return proof
 
@@ -2296,8 +2299,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
     async def _on_user_transcript(self, transcript_text):
         self._cancel_start_lesson_asr_fallback_task()
         self._start_lesson_asr_fallback_audio.clear()
+        self._observe_candidate_semantic_transcript(transcript_text)
         if self._lesson_conversation_tool_path_active():
-            self._observe_evidence_transcript(transcript_text)
+            if self._candidate_semantic_registry_scope() is None:
+                self._observe_evidence_transcript(transcript_text)
             self._lesson_child_audio_pending_transcript = False
             self._cancel_lesson_child_transcript_timeout_task()
             self._record_lesson_conversation_recognized_text(transcript_text)
@@ -2311,7 +2316,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return True
         if self._suppress_user_transcript_as_model_echo(transcript_text):
             return True
-        self._observe_evidence_transcript(transcript_text)
+        if self._candidate_semantic_registry_scope() is None:
+            self._observe_evidence_transcript(transcript_text)
         if await self._dispatch_lesson_child_response(transcript_text):
             return True
         if self._is_live_wake_transcript_only(transcript_text):
