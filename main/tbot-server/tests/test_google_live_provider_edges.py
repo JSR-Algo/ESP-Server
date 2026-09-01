@@ -514,6 +514,98 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         await events.aclose()
         await client.close()
 
+    async def test_real_client_rebind_preserves_open_old_audio_generation_until_terminal(self):
+        def server_message(*, audio=None, turn_complete=False):
+            parts = []
+            if audio is not None:
+                parts.append(
+                    SimpleNamespace(
+                        inline_data=SimpleNamespace(
+                            data=audio,
+                            mime_type="audio/pcm;rate=24000",
+                        )
+                    )
+                )
+            return SimpleNamespace(
+                server_content=SimpleNamespace(
+                    interrupted=False,
+                    turn_complete=turn_complete,
+                    model_turn=SimpleNamespace(parts=parts),
+                )
+            )
+
+        class RebindSequenceSession:
+            def __init__(self):
+                self.receive_calls = 0
+                self.first_waiting = asyncio.Event()
+
+            def receive(self):
+                self.receive_calls += 1
+                call = self.receive_calls
+
+                async def messages():
+                    if call == 1:
+                        yield server_message(audio=b"old", turn_complete=False)
+                        self.first_waiting.set()
+                        await asyncio.Event().wait()
+                    else:
+                        yield server_message(turn_complete=True)
+                        yield server_message(audio=b"new", turn_complete=True)
+
+                return messages()
+
+            async def send_client_content(self, **_kwargs):
+                return None
+
+            async def send_realtime_input(self, **_kwargs):
+                return None
+
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        client = GoogleLiveClient({}, conn.logger)
+        session = RebindSequenceSession()
+        client.connected = True
+        client._session = session
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        provider._client = client
+        provider._bridge = _Bridge()
+        provider._response_generation = 1
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        client.set_response_generation_getter(provider.current_response_id)
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript("first intent")
+        events = client.receive_events().__aiter__()
+
+        old_start = await events.__anext__()
+        old_chunk = await events.__anext__()
+        await provider._handle_live_event(old_start)
+        await provider._handle_live_event(old_chunk)
+        pending_terminal = asyncio.create_task(events.__anext__())
+        await session.first_waiting.wait()
+        conn.google_live_transcript_event_token = object()
+
+        await provider._on_user_transcript_barge_in("newest intent")
+
+        old_end = await asyncio.wait_for(pending_terminal, timeout=0.2)
+        self.assertEqual(old_end["type"], "audio_end")
+        self.assertEqual(old_end["response_generation"], 1)
+        await provider._handle_live_event(old_end)
+        replacement = [await events.__anext__() for _ in range(3)]
+        self.assertEqual(
+            [(item["type"], item["response_generation"]) for item in replacement],
+            [("audio_start", 2), ("audio_chunk", 2), ("audio_end", 2)],
+        )
+        for event in replacement:
+            await provider._handle_live_event(event)
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertTrue(snapshot["semanticOwnershipReady"])
+        self.assertEqual(snapshot["semanticStaleOldAudioCount"], 0)
+        await events.aclose()
+        await client.close()
+
     async def test_candidate_semantic_rejects_newest_without_active_old_output(self):
         conn = _Conn()
         registry = self._bind_candidate_bargein(conn)

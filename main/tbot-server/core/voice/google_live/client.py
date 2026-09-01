@@ -57,6 +57,7 @@ class GoogleLiveClient:
         self._session = None
         self._types = None
         self._audio_started = False
+        self._audio_started_generation = None
         self._audio_chunk_count = 0
         self._audio_byte_count = 0
         self._response_generation_getter = None
@@ -235,18 +236,16 @@ class GoogleLiveClient:
                         continue
                     if message is False:
                         for event in self._finish_open_audio_turn("stream_end"):
-                            if isinstance(event, dict) and origin_generation is not None:
-                                event = dict(event)
-                                event.setdefault(
-                                    "response_generation", origin_generation
-                                )
+                            event = self._stamp_response_generation(
+                                event, origin_generation
+                            )
                             yield event  # pragma: no cover - coverage.py misses this async-generator yield
                         break
                     received_turn_message = True
                     for event in self._normalize_message(message):
-                        if isinstance(event, dict) and origin_generation is not None:
-                            event = dict(event)
-                            event.setdefault("response_generation", origin_generation)
+                        event = self._stamp_response_generation(
+                            event, origin_generation
+                        )
                         yield event
                 if response_rebound:
                     continue
@@ -326,6 +325,26 @@ class GoogleLiveClient:
         except Exception:
             pass
 
+    def _stamp_response_generation(self, event, origin_generation):
+        if not isinstance(event, dict):
+            return event
+        event = dict(event)
+        event_type = event.get("type")
+        if event_type == "audio_start":
+            self._audio_started_generation = origin_generation
+        audio_generation = self._audio_started_generation
+        if origin_generation is not None:
+            event.setdefault(
+                "response_generation",
+                audio_generation
+                if event_type in {"audio", "audio_chunk", "audio_end"}
+                and audio_generation is not None
+                else origin_generation,
+            )
+        if event_type == "audio_end":
+            self._audio_started_generation = None
+        return event
+
     def _message_has_audio_chunk(self, message):
         server_content = self._extract_field(message, "server_content")
         if server_content is None:
@@ -350,6 +369,7 @@ class GoogleLiveClient:
     async def close(self):
         self.connected = False
         self._audio_started = False
+        self._audio_started_generation = None
         self._audio_chunk_count = 0
         self._audio_byte_count = 0
         if self._live_context is not None:
