@@ -3973,6 +3973,8 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
                 "initialLiveConnectionId": "live-1",
                 "peerIdentityHash": f"sha256:{'d' * 64}",
                 "serverStartUtc": cursor.isoformat(),
+                "journeyType": stage,
+                "proofProfile": "candidate-lifecycle",
             }
             server_transitions = []
             if stage == "reconnect":
@@ -4039,6 +4041,8 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
                     "initialLiveConnectionId": "padding-live-1",
                     "peerIdentityHash": f"sha256:{'d' * 64}",
                     "serverStartUtc": padding_start.isoformat(),
+                    "journeyType": "quiet_padding",
+                    "proofProfile": "candidate-lifecycle",
                 },
                 "falseInterrupts": 0,
                 "unexpectedFallbacks": 0,
