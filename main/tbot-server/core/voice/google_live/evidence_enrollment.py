@@ -15,6 +15,22 @@ from functools import wraps
 from typing import Literal
 
 TRANSCRIPT_NORMALIZATION_VERSION = "google-live-transcript-nfkc-casefold.v1"
+PHYSICAL_TRANSCRIPT_PROFILE = "physical-transcript"
+CANDIDATE_LIFECYCLE_PROFILE = "candidate-lifecycle"
+PHYSICAL_JOURNEY_TYPES = frozenset({"physical"})
+CANDIDATE_JOURNEY_TYPES = frozenset(
+    {
+        "conversation",
+        "bargein",
+        "quiet",
+        "quiet_padding",
+        "reopen",
+        "reconnect",
+        "lesson",
+        "conversation_after_lesson",
+        "websocket",
+    }
+)
 
 
 def normalize_transcript(value: str) -> str:
@@ -30,6 +46,20 @@ def normalize_peer_id(value: str) -> str:
 
 class EnrollmentError(ValueError):
     pass
+
+
+def validate_evidence_claims(journey_type: str, proof_profile: str) -> None:
+    if (
+        proof_profile == PHYSICAL_TRANSCRIPT_PROFILE
+        and journey_type in PHYSICAL_JOURNEY_TYPES
+    ):
+        return
+    if (
+        proof_profile == CANDIDATE_LIFECYCLE_PROFILE
+        and journey_type in CANDIDATE_JOURNEY_TYPES
+    ):
+        return
+    raise EnrollmentError("INVALID_EVIDENCE_CLAIMS")
 
 
 def _synchronized(method):
@@ -55,6 +85,8 @@ class EvidenceEnrollment:
     device_id: str
     client_id: str
     journey_id: str
+    journey_type: str
+    proof_profile: str
     transcript_plan: tuple[TranscriptExpectation, ...]
     hmac_key: bytearray = field(repr=False)
     expires_at: float
@@ -67,6 +99,8 @@ class _EvidenceEnrollmentState:
     device_id: str
     client_id: str
     journey_id: str
+    journey_type: str
+    proof_profile: str
     transcript_plan: tuple[TranscriptExpectation, ...]
     hmac_key: bytearray = field(repr=False)
     created_at: float
@@ -118,11 +152,25 @@ class EvidenceEnrollmentRegistry:
         transcript_plan: tuple[TranscriptExpectation, ...],
         hmac_key: bytes | bytearray,
         ttl_sec: int,
+        journey_type: str = "physical",
+        proof_profile: str = PHYSICAL_TRANSCRIPT_PROFILE,
     ) -> EvidenceEnrollment:
         wall_now = self._prepare()
         monotonic_now = self._monotonic_clock()
         device_id = normalize_peer_id(device_id)
         client_id = normalize_peer_id(client_id)
+        transcript_plan = tuple(transcript_plan)
+        try:
+            self._validate_profile_payload(
+                journey_type=journey_type,
+                proof_profile=proof_profile,
+                transcript_plan=transcript_plan,
+                hmac_key=hmac_key,
+            )
+        except EnrollmentError:
+            if isinstance(hmac_key, bytearray):
+                self._zeroize(hmac_key)
+            raise
         error = None
         if journey_id in self._active or journey_id in self._tombstones:
             error = "JOURNEY_REUSED"
@@ -141,7 +189,9 @@ class EvidenceEnrollmentRegistry:
             device_id=device_id,
             client_id=client_id,
             journey_id=journey_id,
-            transcript_plan=tuple(transcript_plan),
+            journey_type=journey_type,
+            proof_profile=proof_profile,
+            transcript_plan=transcript_plan,
             hmac_key=bytearray(hmac_key),
             created_at=wall_now,
             expires_at=wall_now + ttl_sec,
@@ -244,7 +294,13 @@ class EvidenceEnrollmentRegistry:
 
     @_synchronized
     def active_claim_matches(
-        self, *, device_id: str, client_id: str, journey_id: str
+        self,
+        *,
+        device_id: str,
+        client_id: str,
+        journey_id: str,
+        journey_type: str | None = None,
+        proof_profile: str | None = None,
     ) -> bool:
         self._prepare()
         enrollment = self._active.get(journey_id)
@@ -253,11 +309,19 @@ class EvidenceEnrollmentRegistry:
             and enrollment.connected
             and enrollment.device_id == normalize_peer_id(device_id)
             and enrollment.client_id == normalize_peer_id(client_id)
+            and (journey_type is None or enrollment.journey_type == journey_type)
+            and (proof_profile is None or enrollment.proof_profile == proof_profile)
         )
 
     @_synchronized
     def terminal_claim_matches(
-        self, *, device_id: str, client_id: str, journey_id: str
+        self,
+        *,
+        device_id: str,
+        client_id: str,
+        journey_id: str,
+        journey_type: str | None = None,
+        proof_profile: str | None = None,
     ) -> bool:
         self._prepare()
         tombstone = self._tombstones.get(journey_id)
@@ -268,6 +332,8 @@ class EvidenceEnrollmentRegistry:
             == self._peer_digest(device_id)
             and self._terminal_client_digests.get(journey_id)
             == self._peer_digest(client_id)
+            and (journey_type is None or tombstone.get("journeyType") == journey_type)
+            and (proof_profile is None or tombstone.get("proofProfile") == proof_profile)
         )
 
     def claimed_peer_matches(
@@ -304,6 +370,8 @@ class EvidenceEnrollmentRegistry:
         enrollment = self._active.get(journey_id)
         if enrollment is None or not enrollment.connected:
             raise EnrollmentError("JOURNEY_NOT_FOUND")
+        if enrollment.proof_profile != PHYSICAL_TRANSCRIPT_PROFILE:
+            raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
         if phase not in ("interrupt", "lesson", "post_lesson"):
             raise EnrollmentError("INVALID_TRANSCRIPT_PHASE")
         next_index = enrollment.transcript_matched_count
@@ -431,6 +499,8 @@ class EvidenceEnrollmentRegistry:
             raise EnrollmentError("JOURNEY_NOT_FOUND")
         return {
             "journeyId": enrollment.journey_id,
+            "journeyType": enrollment.journey_type,
+            "proofProfile": enrollment.proof_profile,
             "status": "ACTIVE",
             "createdAt": enrollment.created_at,
             "expiresAt": enrollment.expires_at,
@@ -485,6 +555,8 @@ class EvidenceEnrollmentRegistry:
             terminal_at = max(terminal_at, enrollment.expires_at)
         return {
             "journeyId": enrollment.journey_id,
+            "journeyType": enrollment.journey_type,
+            "proofProfile": enrollment.proof_profile,
             "status": status,
             "createdAt": enrollment.created_at,
             "expiresAt": enrollment.expires_at,
@@ -495,6 +567,8 @@ class EvidenceEnrollmentRegistry:
 
     @staticmethod
     def _ready_to_finalize(enrollment: _EvidenceEnrollmentState) -> bool:
+        if enrollment.proof_profile == CANDIDATE_LIFECYCLE_PROFILE:
+            return True
         return bool(
             enrollment.transcript_plan
             and enrollment.transcript_proof_eligible
@@ -517,6 +591,7 @@ class EvidenceEnrollmentRegistry:
             proof["phase"] == "post_lesson" for proof in matched
         )
         return {
+            "expectedCount": len(enrollment.transcript_plan),
             "transcriptExpectedCount": len(enrollment.transcript_plan),
             "transcriptObservedCount": enrollment.transcript_observed_count,
             "transcriptMatchedCount": enrollment.transcript_matched_count,
@@ -549,6 +624,8 @@ class EvidenceEnrollmentRegistry:
             device_id=enrollment.device_id,
             client_id=enrollment.client_id,
             journey_id=enrollment.journey_id,
+            journey_type=enrollment.journey_type,
+            proof_profile=enrollment.proof_profile,
             transcript_plan=tuple(
                 TranscriptExpectation(item.slot, item.phase, "")
                 for item in enrollment.transcript_plan
@@ -558,6 +635,31 @@ class EvidenceEnrollmentRegistry:
             connected=enrollment.connected,
             finalized=enrollment.finalized,
         )
+
+    @staticmethod
+    def _validate_profile_payload(
+        *,
+        journey_type: str,
+        proof_profile: str,
+        transcript_plan: tuple[TranscriptExpectation, ...],
+        hmac_key: bytes | bytearray,
+    ) -> None:
+        validate_evidence_claims(journey_type, proof_profile)
+        if proof_profile == CANDIDATE_LIFECYCLE_PROFILE:
+            if transcript_plan or hmac_key:
+                raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
+            return
+        if len(hmac_key) != 32 or not 1 <= len(transcript_plan) <= 64:
+            raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
+        for expected_slot, expectation in enumerate(transcript_plan, start=1):
+            if (
+                not isinstance(expectation, TranscriptExpectation)
+                or expectation.slot != expected_slot
+                or expectation.phase not in ("interrupt", "lesson", "post_lesson")
+                or len(expectation.expected_mac) != 64
+                or any(character not in "0123456789abcdef" for character in expectation.expected_mac)
+            ):
+                raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
 
     def _add_tombstone(self, snapshot: dict) -> None:
         self._tombstones[snapshot["journeyId"]] = snapshot

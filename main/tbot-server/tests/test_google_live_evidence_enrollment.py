@@ -287,6 +287,168 @@ def _register(registry, **overrides):
     return registry.register(**values)
 
 
+def _register_candidate(registry, **overrides):
+    values = {
+        "device_id": " AA:BB ",
+        "client_id": " Robot-Client ",
+        "journey_id": "candidate-soak.20260901T010203Z.1",
+        "journey_type": "conversation",
+        "proof_profile": "candidate-lifecycle",
+        "transcript_plan": (),
+        "hmac_key": bytearray(),
+        "ttl_sec": 120,
+    }
+    values.update(overrides)
+    return registry.register(**values)
+
+
+def test_registry_stores_immutable_candidate_lifecycle_claims_without_transcript_gate():
+    registry = EvidenceEnrollmentRegistry()
+
+    enrollment = _register_candidate(registry)
+    snapshot = registry.safe_snapshot(enrollment.journey_id)
+
+    assert enrollment.journey_type == "conversation"
+    assert enrollment.proof_profile == "candidate-lifecycle"
+    assert snapshot["journeyType"] == "conversation"
+    assert snapshot["proofProfile"] == "candidate-lifecycle"
+    assert snapshot["transcriptCount"] == 0
+    assert snapshot["expectedCount"] == 0
+    assert snapshot["transcriptExpectedCount"] == 0
+    assert snapshot["transcriptObservedCount"] == 0
+    assert snapshot["transcriptMatchedCount"] == 0
+    assert snapshot["transcriptMissingCount"] == 0
+    assert snapshot["transcriptProofEligible"] is True
+    assert snapshot["readyToFinalize"] is True
+    with pytest.raises(FrozenInstanceError):
+        enrollment.journey_type = "bargein"
+    with pytest.raises(FrozenInstanceError):
+        enrollment.proof_profile = "physical-transcript"
+
+
+def test_registry_defaults_legacy_enrollment_to_physical_transcript_claims():
+    registry = EvidenceEnrollmentRegistry()
+
+    enrollment = _register(registry)
+    snapshot = registry.safe_snapshot(enrollment.journey_id)
+
+    assert enrollment.journey_type == "physical"
+    assert enrollment.proof_profile == "physical-transcript"
+    assert snapshot["journeyType"] == "physical"
+    assert snapshot["proofProfile"] == "physical-transcript"
+    assert snapshot["readyToFinalize"] is False
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"journey_type": "unknown"},
+        {"proof_profile": "unknown"},
+        {"journey_type": "physical"},
+        {"proof_profile": "physical-transcript"},
+        {"transcript_plan": _plan()},
+        {"hmac_key": bytearray(b"k" * 32)},
+    ],
+)
+def test_registry_rejects_invalid_or_mixed_candidate_profile_payload(overrides):
+    registry = EvidenceEnrollmentRegistry()
+
+    with pytest.raises(EnrollmentError, match="INVALID_EVIDENCE"):
+        _register_candidate(registry, **overrides)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"transcript_plan": ()},
+        {"hmac_key": b"short"},
+        {"transcript_plan": (TranscriptExpectation(2, "interrupt", "a" * 64),)},
+    ],
+)
+def test_registry_rejects_invalid_physical_profile_payload(overrides):
+    registry = EvidenceEnrollmentRegistry()
+
+    with pytest.raises(EnrollmentError, match="INVALID_EVIDENCE_PROFILE_PAYLOAD"):
+        _register(registry, **overrides)
+
+
+def test_registry_zeroizes_mutable_key_when_profile_payload_is_rejected():
+    registry = EvidenceEnrollmentRegistry()
+    rejected_key = bytearray(b"r" * 32)
+
+    with pytest.raises(EnrollmentError, match="INVALID_EVIDENCE_PROFILE_PAYLOAD"):
+        _register_candidate(registry, hmac_key=rejected_key)
+
+    assert rejected_key == bytearray(32)
+
+
+def test_candidate_claims_survive_claim_binding_and_safe_tombstoning_without_secrets():
+    registry = EvidenceEnrollmentRegistry()
+    enrollment = _register_candidate(registry)
+
+    registry.bind_candidate_identity(
+        device_id="aa:bb",
+        journey_id=enrollment.journey_id,
+        candidate_identity=_candidate_identity()["candidateIdentity"],
+    )
+    claimed_identity = registry.claim_for_scope(
+        device_id="aa:bb",
+        client_id="robot-client",
+        journey_id=enrollment.journey_id,
+    )
+    claimed = registry.claim(
+        device_id="aa:bb",
+        client_id="robot-client",
+        journey_id=enrollment.journey_id,
+    )
+    terminal = registry.finalize(enrollment.journey_id, status="PASS")
+    retry = registry.finalize(enrollment.journey_id, status="PASS")
+
+    assert claimed_identity == _candidate_identity()["candidateIdentity"]
+    assert claimed.journey_type == "conversation"
+    assert claimed.proof_profile == "candidate-lifecycle"
+    assert terminal["journeyType"] == "conversation"
+    assert terminal["proofProfile"] == "candidate-lifecycle"
+    assert retry == terminal
+    encoded = json.dumps(terminal).casefold()
+    assert "expectedmac" not in encoded
+    assert "hmackey" not in encoded
+    assert "transcriptplan" not in encoded
+
+
+def test_candidate_active_and_terminal_ownership_matching_includes_claims():
+    registry = EvidenceEnrollmentRegistry()
+    enrollment = _register_candidate(registry)
+    registry.claim(
+        device_id="aa:bb",
+        client_id="robot-client",
+        journey_id=enrollment.journey_id,
+    )
+
+    match = {
+        "device_id": "aa:bb",
+        "client_id": "robot-client",
+        "journey_id": enrollment.journey_id,
+        "journey_type": "conversation",
+        "proof_profile": "candidate-lifecycle",
+    }
+    assert registry.active_claim_matches(**match) is True
+    assert registry.active_claim_matches(**{**match, "journey_type": "bargein"}) is False
+    assert registry.active_claim_matches(
+        **{**match, "proof_profile": "physical-transcript"}
+    ) is False
+
+    registry.finalize(enrollment.journey_id, status="PASS")
+
+    assert registry.terminal_claim_matches(**match) is True
+    assert registry.terminal_claim_matches(
+        **{**match, "journey_type": "bargein"}
+    ) is False
+    assert registry.terminal_claim_matches(
+        **{**match, "proof_profile": "physical-transcript"}
+    ) is False
+
+
 def test_registry_binds_exact_normalized_peer_and_rejects_replacement():
     registry = EvidenceEnrollmentRegistry()
     _register(registry)

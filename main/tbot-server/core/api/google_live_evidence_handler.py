@@ -6,6 +6,8 @@ import re
 from aiohttp import web
 
 from core.voice.google_live.evidence_enrollment import (
+    CANDIDATE_LIFECYCLE_PROFILE,
+    PHYSICAL_TRANSCRIPT_PROFILE,
     EnrollmentError,
     EvidenceEnrollmentRegistry,
     TranscriptExpectation,
@@ -15,13 +17,24 @@ from core.voice.google_live.evidence_enrollment import (
 NORMALIZATION_VERSION = "google-live-transcript-nfkc-casefold.v1"
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _MAC = re.compile(r"^[0-9a-f]{64}$")
-_POST_FIELDS = {
+_LEGACY_PHYSICAL_POST_FIELDS = {
     "clientId",
     "journeyId",
     "ttlSec",
     "normalizationVersion",
     "hmacKeyBase64",
     "transcriptPlan",
+}
+_EXPLICIT_PHYSICAL_POST_FIELDS = _LEGACY_PHYSICAL_POST_FIELDS | {
+    "journeyType",
+    "proofProfile",
+}
+_CANDIDATE_POST_FIELDS = {
+    "clientId",
+    "journeyId",
+    "ttlSec",
+    "journeyType",
+    "proofProfile",
 }
 _PLAN_FIELDS = {"slot", "phase", "expectedMac"}
 _CANDIDATE_FIELDS = {
@@ -252,7 +265,32 @@ class GoogleLiveEvidenceHandler:
         return self._error(400, "INVALID_REQUEST", "Invalid Google Live evidence path identity")
 
     def _parse_body(self, route_device_id: str, body) -> dict:
-        if not isinstance(body, dict) or set(body) != _POST_FIELDS:
+        if not isinstance(body, dict):
+            raise ValueError
+        fields = set(body)
+        if fields == _LEGACY_PHYSICAL_POST_FIELDS:
+            journey_type = "physical"
+            proof_profile = PHYSICAL_TRANSCRIPT_PROFILE
+        elif fields == _EXPLICIT_PHYSICAL_POST_FIELDS:
+            journey_type = body["journeyType"]
+            proof_profile = body["proofProfile"]
+            if (
+                journey_type != "physical"
+                or proof_profile != PHYSICAL_TRANSCRIPT_PROFILE
+            ):
+                raise ValueError
+        elif fields == _CANDIDATE_POST_FIELDS:
+            journey_type = body["journeyType"]
+            proof_profile = body["proofProfile"]
+            if proof_profile != CANDIDATE_LIFECYCLE_PROFILE:
+                raise ValueError
+            return self._parse_candidate_body(
+                route_device_id,
+                body,
+                journey_type=journey_type,
+                proof_profile=proof_profile,
+            )
+        else:
             raise ValueError
         device_id = self._safe_id(route_device_id)
         client_id = self._safe_id(body["clientId"])
@@ -289,10 +327,39 @@ class GoogleLiveEvidenceHandler:
             "device_id": device_id,
             "client_id": client_id,
             "journey_id": journey_id,
+            "journey_type": journey_type,
+            "proof_profile": proof_profile,
             "transcript_plan": tuple(expectations),
             "hmac_key": bytearray(decoded),
             "ttl_sec": ttl_sec,
         }
+
+    def _parse_candidate_body(
+        self,
+        route_device_id: str,
+        body: dict,
+        *,
+        journey_type: str,
+        proof_profile: str,
+    ) -> dict:
+        parsed = {
+            "device_id": self._safe_id(route_device_id),
+            "client_id": self._safe_id(body["clientId"]),
+            "journey_id": self._safe_id(body["journeyId"]),
+            "journey_type": journey_type,
+            "proof_profile": proof_profile,
+            "transcript_plan": (),
+            "hmac_key": bytearray(),
+        }
+        ttl_sec = body["ttlSec"]
+        if (
+            isinstance(ttl_sec, bool)
+            or not isinstance(ttl_sec, int)
+            or not 30 <= ttl_sec <= 3600
+        ):
+            raise ValueError
+        parsed["ttl_sec"] = ttl_sec
+        return parsed
 
     @staticmethod
     def _safe_id(value) -> str:

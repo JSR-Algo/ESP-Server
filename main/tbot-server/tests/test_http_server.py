@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import re
 import types
@@ -10,6 +11,7 @@ from aiohttp.test_utils import make_mocked_request
 
 from core import http_server as http_module
 from core.api import lesson_sd_fanout_handler as lesson_sd_fanout_handler_module
+from core.api.google_live_evidence_handler import GoogleLiveEvidenceHandler
 from core.api.lesson_sd_fanout_handler import LessonSdFanoutHandler
 from core.connection_registry import ConnectionRegistry
 from core.http_server import SimpleHttpServer
@@ -65,6 +67,41 @@ class _Request:
 
     async def json(self):
         return self.body
+
+
+class _EvidenceRequest(_Request):
+    def __init__(self, body, device_id="device-1"):
+        super().__init__(
+            headers={"X-Mint-Secret": INTERNAL_MINT_SECRET}, body=body
+        )
+        self.match_info = {"deviceId": device_id}
+
+
+def _physical_evidence_body(**overrides):
+    body = {
+        "clientId": "client-1",
+        "journeyId": "physical.run-1",
+        "ttlSec": 120,
+        "normalizationVersion": "google-live-transcript-nfkc-casefold.v1",
+        "hmacKeyBase64": base64.b64encode(b"k" * 32).decode("ascii"),
+        "transcriptPlan": [
+            {"slot": 1, "phase": "post_lesson", "expectedMac": "a" * 64}
+        ],
+    }
+    body.update(overrides)
+    return body
+
+
+def _candidate_evidence_body(**overrides):
+    body = {
+        "clientId": "client-1",
+        "journeyId": "candidate-soak.20260901T010203Z.1",
+        "ttlSec": 120,
+        "journeyType": "conversation",
+        "proofProfile": "candidate-lifecycle",
+    }
+    body.update(overrides)
+    return body
 
 
 def _config(**server_overrides):
@@ -439,6 +476,90 @@ async def test_google_live_evidence_http_finalize_rejects_expired_tombstone():
 
     assert response.status == 409
     finalize.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_google_live_evidence_post_accepts_candidate_and_legacy_physical_shapes():
+    handler = GoogleLiveEvidenceHandler(EvidenceEnrollmentRegistry())
+
+    candidate = await handler.handle_post(_EvidenceRequest(_candidate_evidence_body()))
+    physical = await handler.handle_post(
+        _EvidenceRequest(_physical_evidence_body(), device_id="device-2")
+    )
+
+    assert candidate.status == 201
+    assert json.loads(candidate.text) == {
+        "data": {
+            "registered": True,
+            "journeyId": "candidate-soak.20260901T010203Z.1",
+        }
+    }
+    assert physical.status == 201
+    assert json.loads(physical.text) == {
+        "data": {"registered": True, "journeyId": "physical.run-1"}
+    }
+
+
+@pytest.mark.asyncio
+async def test_google_live_evidence_post_accepts_explicit_physical_claims():
+    handler = GoogleLiveEvidenceHandler(EvidenceEnrollmentRegistry())
+    body = _physical_evidence_body(
+        journeyType="physical", proofProfile="physical-transcript"
+    )
+
+    response = await handler.handle_post(_EvidenceRequest(body))
+
+    assert response.status == 201
+    snapshot = handler.registry.safe_snapshot("physical.run-1")
+    assert snapshot["journeyType"] == "physical"
+    assert snapshot["proofProfile"] == "physical-transcript"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {
+            key: value
+            for key, value in _candidate_evidence_body().items()
+            if key != "proofProfile"
+        },
+        {
+            key: value
+            for key, value in _candidate_evidence_body().items()
+            if key != "journeyType"
+        },
+        _candidate_evidence_body(unknown=True),
+        _candidate_evidence_body(journeyType="unknown"),
+        _candidate_evidence_body(proofProfile="unknown"),
+        _candidate_evidence_body(
+            journeyType="physical", proofProfile="candidate-lifecycle"
+        ),
+        _candidate_evidence_body(
+            normalizationVersion="google-live-transcript-nfkc-casefold.v1"
+        ),
+        _candidate_evidence_body(hmacKeyBase64="private-key"),
+        _candidate_evidence_body(transcriptPlan=[]),
+        {
+            key: value
+            for key, value in _physical_evidence_body().items()
+            if key != "transcriptPlan"
+        },
+    ],
+)
+async def test_google_live_evidence_post_rejects_invalid_claim_shapes_without_echo(body):
+    handler = GoogleLiveEvidenceHandler(EvidenceEnrollmentRegistry())
+
+    response = await handler.handle_post(_EvidenceRequest(body))
+
+    assert response.status == 400
+    assert json.loads(response.text) == {
+        "error": "INVALID_REQUEST",
+        "message": "Invalid Google Live evidence enrollment request",
+    }
+    assert "private-key" not in response.text
+    assert "expectedMac" not in response.text
+    assert "hmacKeyBase64" not in response.text
 
 
 @pytest.mark.asyncio
