@@ -3,6 +3,7 @@ const test = require('node:test');
 
 const {
   buildResetCommands,
+  composeExecutableFromEnvironment,
   composeEnvironment,
   resetOptionsFromEnvironment,
 } = require('./reset-lesson-studio-e2e-state.cjs');
@@ -10,32 +11,55 @@ const {
 test('resets auth throttling through compose service names', () => {
   const commands = buildResetCommands({
     composeFile: '/repo/docs/docker/docker-compose.lesson-studio-e2e.yml',
+    composeExecutable: '/trusted/docker-compose',
     projectName: 'tbot-ls-e2e',
   });
 
   assert.deepEqual(commands, [
     [
-      'docker', 'compose', '-p', 'tbot-ls-e2e', '-f',
+      '/trusted/docker-compose', '-p', 'tbot-ls-e2e', '-f',
       '/repo/docs/docker/docker-compose.lesson-studio-e2e.yml',
       'exec', '-T', 'redis', 'redis-cli', 'DEL',
       'rate_limit:ip:127.0.0.1:/user/captcha',
       'rate_limit:ip:127.0.0.1:/user/login',
     ],
     [
-      'docker', 'compose', '-p', 'tbot-ls-e2e', '-f',
+      '/trusted/docker-compose', '-p', 'tbot-ls-e2e', '-f',
       '/repo/docs/docker/docker-compose.lesson-studio-e2e.yml',
       'exec', '-T', 'redis', 'redis-cli', 'EVAL',
       "local keys=redis.call('keys','rl:*'); if #keys > 0 then return redis.call('del',unpack(keys)) end return 0",
       '0',
     ],
     [
-      'docker', 'compose', '-p', 'tbot-ls-e2e', '-f',
+      '/trusted/docker-compose', '-p', 'tbot-ls-e2e', '-f',
       '/repo/docs/docker/docker-compose.lesson-studio-e2e.yml',
       'exec', '-T', 'postgres', 'psql', '-v', 'ON_ERROR_STOP=1',
       '-U', 'tbot', '-d', 'tbot', '-c',
       "DELETE FROM admin_login_attempts WHERE email IN ('lesson-author-e2e@local.invalid','lesson-author-b-e2e@local.invalid','lesson-manager-e2e@local.invalid');",
     ],
   ]);
+});
+
+test('uses only an explicit absolute candidate-bound Compose executable in CI', () => {
+  assert.equal(composeExecutableFromEnvironment({
+    CI: '1',
+    TBOT_DOCKER_COMPOSE_EXECUTABLE: '/candidate/tools/docker-compose',
+  }), '/candidate/tools/docker-compose');
+  assert.throws(
+    () => composeExecutableFromEnvironment({ CI: '1' }),
+    /TBOT_DOCKER_COMPOSE_EXECUTABLE is required/,
+  );
+  assert.throws(
+    () => composeExecutableFromEnvironment({
+      CI: '1', TBOT_DOCKER_COMPOSE_EXECUTABLE: 'docker-compose',
+    }),
+    /absolute executable path/,
+  );
+  assert.equal(composeExecutableFromEnvironment({}), 'docker-compose');
+  assert.throws(
+    () => composeExecutableFromEnvironment({}, { requireExplicit: true }),
+    /TBOT_DOCKER_COMPOSE_EXECUTABLE is required/,
+  );
 });
 
 test('reset project precedence is standard Compose, custom fallback, then default', () => {

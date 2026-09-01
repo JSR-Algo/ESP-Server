@@ -338,6 +338,7 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         f"#!{sys.executable}\nimport json,sys\n"
         f"backend_source={repositories['backend']['remoteUrl']!r}\n"
         f"web_source={repositories['adminEsp']['remoteUrl']!r}\n"
+        "if sys.argv[1:] == ['--version']: print('Docker version fixture'); sys.exit(0)\n"
         "ref=sys.argv[-1]\nvalue=None\n"
         "if ref.startswith('local/tbot-backend:course-mode-physical-tft-'): value={'Id':'sha256:'+'1'*64,'Config':{'Labels':{'org.opencontainers.image.revision':ref.rsplit('-',1)[-1],'org.opencontainers.image.source':backend_source}}}\n"
         "elif ref.startswith('local/tbot-server-web:course-mode-physical-tft-'): value={'Id':'sha256:'+'2'*64,'Config':{'Labels':{'org.opencontainers.image.revision':ref.rsplit('-',1)[-1],'org.opencontainers.image.source':web_source}}}\n"
@@ -347,6 +348,14 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     docker.chmod(0o755)
     monkeypatch.setattr(gate._manifest, "TRUSTED_DOCKER_EXECUTABLE", docker)
+    compose = tmp_path / "docker-compose"
+    compose.write_text(
+        f"#!{sys.executable}\nimport sys\n"
+        "print('Docker Compose version fixture') if sys.argv[1:] == ['version'] else sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    compose.chmod(0o755)
+    monkeypatch.setattr(gate._manifest, "_container_tool_path_authorized", lambda *_args: True)
     firmware_dir = tmp_path / "firmware-artifact"
     firmware_dir.mkdir()
     app = firmware_dir / "xiaozhi.bin"
@@ -520,6 +529,16 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             "sourceChecksum": hashlib.sha256(curriculum_path.read_bytes()).hexdigest(),
         },
         "tools": {
+            "docker": {
+                "path": str(docker),
+                "sha256": hashlib.sha256(docker.read_bytes()).hexdigest(),
+                "version": "Docker version fixture",
+            },
+            "dockerCompose": {
+                "path": str(compose),
+                "sha256": hashlib.sha256(compose.read_bytes()).hexdigest(),
+                "version": "Docker Compose version fixture",
+            },
             "pythonTestRuntime": {
                 "version": 1, "distribution": "python-build-standalone",
                 "root": str(python_root), "executable": "bin/python3.11",
@@ -2722,6 +2741,41 @@ def test_admin_browser_snapshot_preserves_playwright_platform_layout(candidate_f
         assert Path(browser["root"]).parts[-len(expected_suffix.parts):] == expected_suffix.parts
         assert Path(browser["root"], browser["executable"]).is_file()
     finally:
+        assert stage.cleanup() is True
+
+
+def test_playwright_lane_stages_candidate_bound_container_tools(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    lane = next(
+        lane for lane in gate.FULL_LANES
+        if lane.name == "admin-course-mode-playwright-chromium-desktop"
+    )
+
+    stage = gate.stage_execution_candidate(candidate, (lane,))
+    execution = None
+    try:
+        execution = stage.create_lane_execution()
+        tools = execution.candidate["tools"]
+        docker = Path(tools["docker"]["path"])
+        compose = Path(tools["dockerCompose"]["path"])
+        assert docker.is_file() and docker.is_relative_to(stage.root)
+        assert compose.is_file() and compose.is_relative_to(stage.root)
+        assert not docker.is_relative_to(execution.root)
+        assert not compose.is_relative_to(execution.root)
+        environment = gate._child_environment(execution.candidate, {}, lane)
+        environment.update(execution.environment)
+        assert environment["TBOT_DOCKER_EXECUTABLE"] == str(docker)
+        assert environment["TBOT_DOCKER_COMPOSE_EXECUTABLE"] == str(compose)
+        result = gate.run_bounded_command(
+            [str(compose), "version"], cwd=Path("/"), env=environment,
+            timeout_sec=5.0, max_output_bytes=4096,
+        )
+        assert result.error is None and result.returncode == 0
+        assert result.stdout.strip() == tools["dockerCompose"]["version"]
+    finally:
+        if execution is not None:
+            assert execution.cleanup() is True
         assert stage.cleanup() is True
 
 

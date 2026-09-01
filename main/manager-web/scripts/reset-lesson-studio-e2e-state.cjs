@@ -7,8 +7,26 @@ const DEFAULT_COMPOSE_FILE = path.resolve(
   '../../../docs/docker/docker-compose.lesson-studio-e2e.yml',
 );
 
-function buildResetCommands({ composeFile = DEFAULT_COMPOSE_FILE, projectName = 'tbot-ls-e2e' } = {}) {
-  const compose = ['docker', 'compose', '-p', projectName, '-f', composeFile];
+function composeExecutableFromEnvironment(env = process.env, { requireExplicit = false } = {}) {
+  const executable = env.TBOT_DOCKER_COMPOSE_EXECUTABLE;
+  if (executable) {
+    if (!path.isAbsolute(executable)) {
+      throw new Error('TBOT_DOCKER_COMPOSE_EXECUTABLE must be an absolute executable path');
+    }
+    return executable;
+  }
+  if (requireExplicit || env.CI === '1' || env.CI === 'true') {
+    throw new Error('TBOT_DOCKER_COMPOSE_EXECUTABLE is required in CI');
+  }
+  return 'docker-compose';
+}
+
+function buildResetCommands({
+  composeFile = DEFAULT_COMPOSE_FILE,
+  composeExecutable = composeExecutableFromEnvironment(),
+  projectName = 'tbot-ls-e2e',
+} = {}) {
+  const compose = [composeExecutable, '-p', projectName, '-f', composeFile];
 
   return [
     [
@@ -72,6 +90,7 @@ if (require.main === module) {
 
 module.exports = {
   buildResetCommands,
+  composeExecutableFromEnvironment,
   composeEnvironment,
   resetLessonStudioE2EState,
   resetOptionsFromEnvironment,

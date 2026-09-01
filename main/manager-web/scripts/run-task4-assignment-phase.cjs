@@ -2,11 +2,12 @@
 
 const { execFileSync } = require('node:child_process');
 const { existsSync, mkdirSync, realpathSync } = require('node:fs');
-const { resolve } = require('node:path');
+const { isAbsolute, resolve } = require('node:path');
 const {
   inspectAndPinCandidateImages,
   verifyStartedServiceImages,
 } = require('./task4-image-identity.cjs');
+const { composeExecutableFromEnvironment } = require('./reset-lesson-studio-e2e-state.cjs');
 
 const phase = process.argv[2];
 if (!['new', 'rollback'].includes(phase)) throw new Error('usage: run-task4-assignment-phase.cjs new|rollback');
@@ -65,8 +66,12 @@ const environment = {
   TASK4_ASSIGNMENT_MEDIA_ORIGIN: `https://${mediaHostname}:${hostPort}`,
   TASK4_ASSIGNMENT_PHASE: phase,
 };
+const dockerExecutable = environment.TBOT_DOCKER_EXECUTABLE;
+if (!dockerExecutable || !isAbsolute(dockerExecutable)) {
+  throw new Error('TBOT_DOCKER_EXECUTABLE must be an absolute candidate-bound executable');
+}
+const composeExecutable = composeExecutableFromEnvironment(environment, { requireExplicit: true });
 const compose = [
-  'compose',
   '-p', environment.LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME,
   '-f', resolve(repoRoot, 'docs/docker/docker-compose.lesson-studio-e2e.yml'),
   '-f', resolve(repoRoot, `docs/docker/task4-admin-assignment/docker-compose.${phase}.yml`),
@@ -74,13 +79,13 @@ const compose = [
 const run = (command, args, options = {}) => execFileSync(command, args, {
   cwd: repoRoot, env: environment, stdio: 'inherit', ...options,
 });
-const composeRun = (...args) => run('docker', [...compose, ...args]);
+const composeRun = (...args) => run(composeExecutable, [...compose, ...args]);
 const pinnedImages = inspectAndPinCandidateImages({
   backendReference: environment.TBOT_LESSON_STUDIO_BACKEND_IMAGE,
   backendId: environment.TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID,
   webReference: environment.TBOT_LESSON_STUDIO_WEB_IMAGE,
   webId: environment.TBOT_LESSON_STUDIO_WEB_IMAGE_ID,
-}, (reference) => execFileSync('docker', ['image', 'inspect', '--format={{.Id}}', reference], {
+}, (reference) => execFileSync(dockerExecutable, ['image', 'inspect', '--format={{.Id}}', reference], {
     cwd: repoRoot, env: environment, encoding: 'utf8',
   }).trim());
 environment.TBOT_LESSON_STUDIO_BACKEND_IMAGE = pinnedImages.backendImage;
@@ -133,11 +138,11 @@ verifyStartedServiceImages({
   web: pinnedImages.webImage,
   'derivative-media': pinnedImages.backendImage,
 }, (service) => {
-  const container = execFileSync('docker', [...compose, 'ps', '-q', service], {
+  const container = execFileSync(composeExecutable, [...compose, 'ps', '-q', service], {
     cwd: repoRoot, env: environment, encoding: 'utf8',
   }).trim();
   if (!container) return '';
-  return execFileSync('docker', ['inspect', '--format={{.Image}}', container], {
+  return execFileSync(dockerExecutable, ['inspect', '--format={{.Image}}', container], {
     cwd: repoRoot, env: environment, encoding: 'utf8',
   }).trim();
 });

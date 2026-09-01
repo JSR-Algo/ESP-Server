@@ -318,25 +318,36 @@ class ExecutionStage:
             lane_descriptor = _open_snapshot_directory(lane_root)
             execution_root = lane_root / "candidate"
             python_runtime = self.root / "tools/python-test-runtime"
-            def ignore_python_runtime(directory: str, _names: list[str]) -> set[str]:
-                return {"python-test-runtime"} if Path(directory) == self.root / "tools" else set()
+            stable_tool_paths = tuple(
+                path for path in (
+                    python_runtime,
+                    self.root / "tools/docker",
+                    self.root / "tools/docker-compose",
+                ) if path.exists()
+            )
+
+            def ignore_stable_tools(directory: str, _names: list[str]) -> set[str]:
+                if Path(directory) != self.root / "tools":
+                    return set()
+                return {path.name for path in stable_tool_paths}
 
             shutil.copytree(
                 self.root, execution_root, symlinks=True,
-                ignore=ignore_python_runtime if python_runtime.is_dir() else None,
+                ignore=ignore_stable_tools if stable_tool_paths else None,
             )
             _make_tree_owner_writable(execution_root)
             source_prefix = str(self.root) + os.sep
             target_prefix = str(execution_root) + os.sep
-            python_prefix = str(python_runtime) + os.sep
+            stable_prefixes = tuple((str(path), str(path) + os.sep) for path in stable_tool_paths)
 
             def rebase(value: object) -> object:
                 if isinstance(value, dict):
                     return {key: rebase(item) for key, item in value.items()}
                 if isinstance(value, list):
                     return [rebase(item) for item in value]
-                if isinstance(value, str) and (
-                    value == str(python_runtime) or value.startswith(python_prefix)
+                if isinstance(value, str) and any(
+                    value == stable or value.startswith(prefix)
+                    for stable, prefix in stable_prefixes
                 ):
                     return value
                 if isinstance(value, str) and value.startswith(source_prefix):
@@ -1151,10 +1162,23 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
                 )
             staged["repositories"][name]["path"] = str(destination)
         tools_root = root / "tools"
+        if any(_container_tools_required(lane) for lane in lanes):
+            tools_root.mkdir(exist_ok=True)
+            for name, basename in (("docker", "docker"), ("dockerCompose", "docker-compose")):
+                descriptor = candidate["tools"][name]
+                target = tools_root / basename
+                _copy_snapshot_file(
+                    Path(descriptor["path"]), target, state,
+                    expected_sha256=descriptor["sha256"],
+                )
+                observed, error = _manifest.secure_executable_descriptor(target)
+                if error or observed is None or observed["sha256"] != descriptor["sha256"]:
+                    raise ValueError(f"staged {name} executable mismatch")
+                staged["tools"][name]["path"] = str(target)
         if any(_python_test_runtime_required(lane) for lane in lanes):
             descriptor = candidate["tools"]["pythonTestRuntime"]
             python_target = tools_root / "python-test-runtime"
-            tools_root.mkdir()
+            tools_root.mkdir(exist_ok=True)
             source_observed, source_error = (
                 _manifest.secure_python_test_runtime_tree_descriptor(Path(descriptor["root"]))
             )
@@ -2014,6 +2038,25 @@ def _python_test_runtime_required(lane: Lane) -> bool:
     )
 
 
+def _container_tools_required(lane: Lane) -> bool:
+    return (
+        lane.name.startswith("admin-course-mode-playwright-")
+        or lane.name.startswith("admin-course-mode-assignment-")
+    )
+
+
+def _container_tools_authorized(candidate: dict) -> bool:
+    try:
+        for name in ("docker", "dockerCompose"):
+            descriptor = candidate["tools"][name]
+            observed, error = _manifest.secure_executable_descriptor(Path(descriptor["path"]))
+            if error or observed is None or observed["sha256"] != descriptor["sha256"]:
+                return False
+        return True
+    except (KeyError, OSError, TypeError, ValueError):
+        return False
+
+
 def node_install_authorized(
     lane: Lane, candidate: dict, cache: dict | None = None,
 ) -> bool:
@@ -2493,6 +2536,11 @@ def _child_environment(candidate: dict, source: Mapping[str, str], lane: Lane) -
     assignment = _assignment_candidate_environment(candidate, lane)
     if assignment is not None:
         environment.update(assignment)
+    if _container_tools_required(lane):
+        environment.update({
+            "TBOT_DOCKER_EXECUTABLE": candidate["tools"]["docker"]["path"],
+            "TBOT_DOCKER_COMPOSE_EXECUTABLE": candidate["tools"]["dockerCompose"]["path"],
+        })
     environment.update(dict(lane.fixed_environment))
     if lane.name == "admin-browser":
         browser = candidate["tools"]["robotPreviewBrowser"]
@@ -3199,7 +3247,13 @@ def run_gate(
                 try:
                     child_environment = _child_environment(execution_candidate, lane_source, lane)
                     child_environment.update(lane_execution.environment)
-                    if _python_test_runtime_required(lane):
+                    container_authority = (
+                        not _container_tools_required(lane)
+                        or _container_tools_authorized(execution_candidate)
+                    )
+                    if not container_authority:
+                        result = _manifest.BoundedCommandResult(None, "", "authority")
+                    elif _python_test_runtime_required(lane):
                         backend_binding = _backend_snapshot_environment(execution_stage)
                         if backend_binding is None:
                             result = _manifest.BoundedCommandResult(None, "", "authority")
@@ -3220,6 +3274,11 @@ def run_gate(
                             backend_binding is None
                             or not _backend_execution_snapshot_matches(execution_stage, backend_binding)
                         )
+                    ):
+                        result = _manifest.BoundedCommandResult(None, "", "authority")
+                    if (
+                        _container_tools_required(lane)
+                        and not _container_tools_authorized(execution_candidate)
                     ):
                         result = _manifest.BoundedCommandResult(None, "", "authority")
                     skip_state = pytest_report_has_skips(junit_path) if junit_path else False

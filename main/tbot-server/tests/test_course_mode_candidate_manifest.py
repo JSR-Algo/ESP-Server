@@ -80,12 +80,21 @@ def candidate(repositories: dict[str, Path], tmp_path: Path, monkeypatch: pytest
     }
     docker.write_text(
         f"#!{sys.executable}\nimport json,sys\npayloads={docker_payloads!r}\n"
+        "if sys.argv[1:] == ['--version']: print('Docker version fixture'); sys.exit(0)\n"
         "value=payloads.get(sys.argv[-1])\n"
         "print(json.dumps(value)) if value is not None else sys.exit(1)\n",
         encoding="utf-8",
     )
     docker.chmod(0o755)
     monkeypatch.setattr(manifest, "TRUSTED_DOCKER_EXECUTABLE", docker, raising=False)
+    compose = tmp_path / "docker-compose"
+    compose.write_text(
+        f"#!{sys.executable}\nimport sys\n"
+        "print('Docker Compose version fixture') if sys.argv[1:] == ['version'] else sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    compose.chmod(0o755)
+    monkeypatch.setattr(manifest, "_container_tool_path_authorized", lambda *_args: True)
     firmware_dir = tmp_path / "firmware-artifact"
     firmware_dir.mkdir()
     app = firmware_dir / "xiaozhi.bin"
@@ -226,6 +235,16 @@ def candidate(repositories: dict[str, Path], tmp_path: Path, monkeypatch: pytest
             ).hexdigest(),
         },
         "tools": {
+            "docker": {
+                "path": str(docker),
+                "sha256": hashlib.sha256(docker.read_bytes()).hexdigest(),
+                "version": "Docker version fixture",
+            },
+            "dockerCompose": {
+                "path": str(compose),
+                "sha256": hashlib.sha256(compose.read_bytes()).hexdigest(),
+                "version": "Docker Compose version fixture",
+            },
             "pythonTestRuntime": {
                 "version": 1, "distribution": "python-build-standalone",
                 "root": str(python_root), "executable": "bin/python3.11",
@@ -257,6 +276,24 @@ NOW = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
 
 def test_candidate_accepts_exact_committed_repository_identity(candidate: dict) -> None:
     assert validate_candidate(candidate, now=NOW) == []
+
+
+@pytest.mark.parametrize("name", ["docker", "dockerCompose"])
+def test_candidate_rejects_container_tool_digest_drift(candidate: dict, name: str) -> None:
+    Path(candidate["tools"][name]["path"]).write_bytes(b"changed tool\n")
+
+    assert f"tools.{name}.identity" in validate_candidate(candidate, now=NOW)
+
+
+def test_candidate_rejects_unapproved_container_tool_path(
+    candidate: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(manifest, "_container_tool_path_authorized", lambda *_args: False)
+
+    reasons = validate_candidate(candidate, now=NOW)
+
+    assert "tools.docker.identity" in reasons
+    assert "tools.dockerCompose.identity" in reasons
 
 
 def test_candidate_rejects_group_or_other_writable_repository_root(candidate: dict) -> None:
@@ -889,18 +926,24 @@ def test_candidate_schema_upgrade_is_deterministic_without_writing_input(candida
     legacy["tools"]["node"] = {
         key: descriptor["version"] for key, descriptor in candidate["tools"]["node"].items()
     }
+    legacy["tools"].pop("docker")
+    legacy["tools"].pop("dockerCompose")
     legacy["tools"]["espIdf"] = candidate["tools"]["espIdf"]["version"]
     before = json.loads(json.dumps(legacy))
 
     first = manifest.upgrade_candidate_schema(
         legacy, node_executables={
             key: descriptor["executable"] for key, descriptor in candidate["tools"]["node"].items()
-        }, esp_idf_root=candidate["tools"]["espIdf"]["root"],
+        }, esp_idf_root=candidate["tools"]["espIdf"]["root"], container_tool_paths={
+            name: candidate["tools"][name]["path"] for name in ("docker", "dockerCompose")
+        },
     )
     second = manifest.upgrade_candidate_schema(
         legacy, node_executables={
             key: descriptor["executable"] for key, descriptor in candidate["tools"]["node"].items()
-        }, esp_idf_root=candidate["tools"]["espIdf"]["root"],
+        }, esp_idf_root=candidate["tools"]["espIdf"]["root"], container_tool_paths={
+            name: candidate["tools"][name]["path"] for name in ("docker", "dockerCompose")
+        },
     )
 
     assert legacy == before

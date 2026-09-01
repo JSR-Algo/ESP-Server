@@ -133,7 +133,9 @@ test('Task 4 release commands run candidate-bound NEW and ROLLBACK orchestration
     'LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME',
     'LESSON_STUDIO_E2E_RESOURCE_PREFIX', 'TASK4_ASSIGNMENT_RUNTIME_ROOT',
   ]) assert.match(source, new RegExp(required));
-  assert.match(source, /docker[\s\S]*compose/);
+  assert.match(source, /composeExecutableFromEnvironment/);
+  assert.match(source, /TBOT_DOCKER_EXECUTABLE/);
+  assert.doesNotMatch(source, /run\('docker', \[\.\.\.compose/);
   assert.match(source, /\['new', 'rollback'\]/);
   assert.match(source, /docker-compose\.\$\{phase\}\.yml/);
   assert.match(source, /bootstrap\.cjs/);

@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import copy
 import contextlib
+import ctypes
+import errno
 import hashlib
 import json
 import math
@@ -86,7 +88,11 @@ FIRMWARE_KEYS = {
     "partitionBytes", "freeBytes", "evidenceManifestPath", "evidenceManifestSha256",
 }
 DATABASE_KEYS = {"engineImage", "engineImageId", "migrationHead", "migrationHeadSha256"}
-TOOLS_KEYS = {"nodeInstalls", "robotPreviewBrowser", "node", "pythonTestRuntime", "espIdf"}
+TOOLS_KEYS = {
+    "docker", "dockerCompose", "nodeInstalls", "robotPreviewBrowser", "node",
+    "pythonTestRuntime", "espIdf",
+}
+CONTAINER_TOOL_KEYS = {"path", "sha256", "version"}
 NODE_KEYS = {"backend", "adminManagerWeb"}
 NODE_DESCRIPTOR_KEYS = {
     "version", "executable", "sha256", "packageRoot", "packageRootMode",
@@ -109,6 +115,7 @@ PYTHON_TEST_RUNTIME_TREE_KEYS = {
 PYTHON_TEST_RUNTIME_TREE_SCHEMA = "sha256-root-mode-path-mode-bytes-v1"
 SECURE_PYTHON_TEST_RUNTIME_ROOT_MODES = {0o555}
 PYTHON_TEST_RUNTIME_DISTRIBUTION = "python-build-standalone"
+DARWIN_PREFLIGHT_TOOL_ROOT = Path("/usr/local/libexec/tbot-preflight")
 BACKEND_SNAPSHOT_TREE_SCHEMA = "sha256-backend-path-mode-bytes-v1"
 PYTHON_RUNTIME_AUTHORITY_PROBE = (
     "import importlib,json,os,sys,sysconfig;"
@@ -563,14 +570,14 @@ def secure_regular_descriptor(
         os.close(parent_fd)
 
 
-def _docker_image_descriptor(reference: str) -> dict[str, Any] | None:
+def _docker_image_descriptor(reference: str, executable: Path) -> dict[str, Any] | None:
     if (
         not isinstance(reference, str) or not reference or len(reference) > 512
         or any(character.isspace() or ord(character) < 32 for character in reference)
     ):
         return None
     result = run_bounded_command(
-        [str(TRUSTED_DOCKER_EXECUTABLE), "image", "inspect", "--format", "{{json .}}", reference],
+        [str(executable), "image", "inspect", "--format", "{{json .}}", reference],
         cwd=Path("/"), env=SECURE_ENV, timeout_sec=10.0, max_output_bytes=1024 * 1024,
     )
     if result.error or result.returncode != 0:
@@ -943,6 +950,98 @@ def secure_node_package_tree_descriptor(root: Path) -> dict[str, Any] | None:
         "sha256": digest.hexdigest(),
         "rootMode": root_mode,
     }
+
+
+def _validate_container_tool(
+    name: str, value: Any, reasons: set[str], *, verify_identity: bool,
+) -> Path | None:
+    prefix = f"tools.{name}"
+    if not isinstance(value, dict) or set(value) != CONTAINER_TOOL_KEYS:
+        reasons.add(f"{prefix}.keys")
+        return None
+    path_value = value.get("path")
+    expected_sha256 = value.get("sha256")
+    expected_version = value.get("version")
+    if not isinstance(path_value, str) or not Path(path_value).is_absolute():
+        reasons.add(f"{prefix}.path")
+    if not isinstance(expected_sha256, str) or SHA256_RE.fullmatch(expected_sha256) is None:
+        reasons.add(f"{prefix}.sha256")
+    if (
+        not isinstance(expected_version, str) or not expected_version
+        or len(expected_version) > 256
+        or any(ord(character) < 32 for character in expected_version)
+    ):
+        reasons.add(f"{prefix}.version")
+    if not verify_identity or any(reason.startswith(f"{prefix}.") for reason in reasons):
+        return None
+    path = Path(path_value)
+    if not _container_tool_path_authorized(name, path, expected_sha256):
+        reasons.add(f"{prefix}.identity")
+        return None
+    observed, error = secure_executable_descriptor(path)
+    if error or observed is None or observed["sha256"] != expected_sha256:
+        reasons.add(f"{prefix}.identity")
+        return None
+    args = ["--version"] if name == "docker" else ["version"]
+    result = run_bounded_command(
+        [str(path), *args], cwd=Path("/"), env=SECURE_ENV,
+        timeout_sec=10.0, max_output_bytes=4096,
+    )
+    if result.error or result.returncode != 0 or result.stdout.strip() != expected_version:
+        reasons.add(f"{prefix}.identity")
+        return None
+    return path
+
+
+def _darwin_path_has_extended_acl(path: Path) -> bool:
+    if sys.platform != "darwin":
+        return False
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.acl_get_file.argtypes = [ctypes.c_char_p, ctypes.c_int]
+        libc.acl_get_file.restype = ctypes.c_void_p
+        libc.acl_get_entry.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+        libc.acl_get_entry.restype = ctypes.c_int
+        libc.acl_free.argtypes = [ctypes.c_void_p]
+        libc.acl_free.restype = ctypes.c_int
+        ctypes.set_errno(0)
+        acl = libc.acl_get_file(os.fsencode(path), 0x00000100)
+        if not acl:
+            return ctypes.get_errno() != errno.ENOENT
+        try:
+            entry = ctypes.c_void_p()
+            result = libc.acl_get_entry(acl, 0, ctypes.byref(entry))
+            return result == 0 or (result == -1 and ctypes.get_errno() != errno.EINVAL)
+        finally:
+            libc.acl_free(acl)
+    except (AttributeError, OSError, TypeError):
+        return True
+
+
+def _container_tool_path_authorized(name: str, path: Path, sha256: str) -> bool:
+    basename = {"docker": "docker", "dockerCompose": "docker-compose"}.get(name)
+    if basename is None:
+        return False
+    if sys.platform != "darwin":
+        return True
+    if path != DARWIN_PREFLIGHT_TOOL_ROOT / sha256 / basename:
+        return False
+    for component in (path, *path.parents):
+        if _darwin_path_has_extended_acl(component):
+            return False
+        try:
+            metadata = component.lstat()
+        except OSError:
+            return False
+        if stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_mode & 0o022:
+            return False
+        if component != path and not stat.S_ISDIR(metadata.st_mode):
+            return False
+    try:
+        metadata = path.stat(follow_symlinks=False)
+    except OSError:
+        return False
+    return stat.S_ISREG(metadata.st_mode) and metadata.st_mode & 0o111 != 0
 
 
 def secure_python_test_runtime_tree_descriptor(
@@ -1438,7 +1537,7 @@ def _parse_rfc3339_utc(value: Any) -> datetime | None:
 
 def _validate_images(
     value: Any, repositories: dict[str, Any], reasons: set[str], *, verify_identity: bool,
-    verify_provenance: bool,
+    verify_provenance: bool, docker_executable: Path | None,
 ) -> None:
     if not isinstance(value, dict) or set(value) != IMAGE_KEYS:
         reasons.add("images.keys")
@@ -1464,8 +1563,8 @@ def _validate_images(
             reasons.add(f"{prefix}.reference")
         if not isinstance(image_id, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None:
             reasons.add(f"{prefix}.id")
-        elif verify_identity and verify_provenance:
-            observed = _docker_image_descriptor(reference)
+        elif verify_identity and verify_provenance and docker_executable is not None:
+            observed = _docker_image_descriptor(reference, docker_executable)
             labels = (
                 observed.get("Config", {}).get("Labels")
                 if isinstance(observed, dict) and isinstance(observed.get("Config"), dict) else None
@@ -1618,6 +1717,7 @@ def _validate_firmware(
 
 def _validate_database(
     value: Any, backend_root: Path | None, backend: Any, reasons: set[str], *, verify_identity: bool,
+    docker_executable: Path | None,
 ) -> None:
     if not isinstance(value, dict) or set(value) != DATABASE_KEYS:
         reasons.add("database.keys")
@@ -1638,7 +1738,10 @@ def _validate_database(
         return
     if image != "postgres:16-alpine":
         reasons.add("database.engineImage")
-    observed_image = _docker_image_descriptor(image) if isinstance(image, str) else None
+    observed_image = (
+        _docker_image_descriptor(image, docker_executable)
+        if isinstance(image, str) and docker_executable is not None else None
+    )
     if isinstance(image_id, str) and (
         not isinstance(observed_image, dict) or observed_image.get("Id") != image_id
     ):
@@ -1817,6 +1920,7 @@ def _validate_esp_idf(value: Any, reasons: set[str], *, verify_identity: bool) -
 
 def upgrade_candidate_schema(
     candidate: dict[str, Any], *, node_executables: dict[str, str], esp_idf_root: str,
+    container_tool_paths: dict[str, str],
 ) -> dict[str, Any]:
     upgraded = copy.deepcopy(candidate)
     app_path = Path(upgraded["firmware"]["appPath"])
@@ -1826,6 +1930,25 @@ def upgrade_candidate_schema(
         raise ValueError("candidate schema upgrade failed")
     upgraded["firmware"]["evidenceManifestPath"] = str(evidence_path)
     upgraded["firmware"]["evidenceManifestSha256"] = evidence["sha256"]
+    for name in ("docker", "dockerCompose"):
+        path = Path(container_tool_paths[name])
+        observed, error = secure_executable_descriptor(path)
+        if (
+            error or observed is None
+            or not _container_tool_path_authorized(name, path, observed["sha256"])
+        ):
+            raise ValueError("candidate schema upgrade failed")
+        args = ["--version"] if name == "docker" else ["version"]
+        result = run_bounded_command(
+            [str(path), *args], cwd=Path("/"), env=SECURE_ENV,
+            timeout_sec=10.0, max_output_bytes=4096,
+        )
+        version = result.stdout.strip()
+        if result.error or result.returncode != 0 or not version or len(version) > 256:
+            raise ValueError("candidate schema upgrade failed")
+        upgraded["tools"][name] = {
+            "path": str(path), "sha256": observed["sha256"], "version": version,
+        }
     node = {}
     for key in sorted(NODE_KEYS):
         executable = Path(node_executables[key])
@@ -1893,9 +2016,17 @@ def validate_candidate(
         elif expires <= validation_now:
             reasons.add("expiresAt.expired")
     tools = candidate.get("tools")
+    docker_executable: Path | None = None
     if isinstance(tools, dict):
         if set(tools) != TOOLS_KEYS:
             reasons.add("tools.keys")
+        docker_executable = _validate_container_tool(
+            "docker", tools.get("docker"), reasons, verify_identity=verify_external_tools,
+        )
+        _validate_container_tool(
+            "dockerCompose", tools.get("dockerCompose"), reasons,
+            verify_identity=verify_external_tools,
+        )
         _validate_robot_preview_browser(
             tools.get("robotPreviewBrowser"), reasons, verify_identity=verify_external_tools,
         )
@@ -1954,6 +2085,7 @@ def validate_candidate(
     _validate_images(
         candidate.get("images"), repositories, reasons, verify_identity=verify_external_tools,
         verify_provenance=not any(reason.startswith("repositories.") for reason in reasons),
+        docker_executable=docker_executable,
     )
     _validate_firmware(
         candidate.get("firmware"), repositories, tools if isinstance(tools, dict) else {}, reasons,
@@ -1976,6 +2108,7 @@ def validate_candidate(
             verify_external_tools
             and not any(reason.startswith("repositories.backend.") for reason in reasons)
         ),
+        docker_executable=docker_executable,
     )
 
     curriculum = candidate.get("curriculum")
