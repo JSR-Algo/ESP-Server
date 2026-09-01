@@ -846,6 +846,10 @@ class EvidenceEnrollmentRegistry:
         quiet_mode: str | None,
         semantic_hmac_key: bytes | bytearray,
     ) -> None:
+        if semantic_kind == "none":
+            if intent_plan or quiet_mode is not None or semantic_hmac_key:
+                raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
+            return
         if journey_type == "bargein":
             if (
                 semantic_kind != "bargein-intent"

@@ -501,7 +501,12 @@ def test_quiet_semantic_claim_is_safe_and_survives_tombstoning_without_key_mater
     "overrides",
     [
         {"semantic_kind": "bargein-intent"},
-        {"journey_type": "quiet", "semantic_kind": "none"},
+        {"semantic_hmac_key": bytearray(b"s" * 32)},
+        {
+            "intent_plan": (
+                CandidateIntentExpectation(1, "initial", "a" * 64),
+            )
+        },
         {
             "journey_type": "quiet",
             "semantic_kind": "quiet",
@@ -517,6 +522,17 @@ def test_registry_rejects_incompatible_candidate_semantic_shapes(overrides):
 
     with pytest.raises(EnrollmentError, match="INVALID_EVIDENCE_PROFILE_PAYLOAD"):
         _register_candidate(registry, **overrides)
+
+
+@pytest.mark.parametrize("journey_type", ["bargein", "quiet"])
+def test_registry_preserves_nonsemantic_candidate_bargein_and_quiet(journey_type):
+    registry = EvidenceEnrollmentRegistry()
+
+    enrollment = _register_candidate(registry, journey_type=journey_type)
+    snapshot = registry.safe_snapshot(enrollment.journey_id)
+
+    assert enrollment.semantic_kind == "none"
+    assert "semanticProofKind" not in snapshot
 
 
 def test_registry_zeroizes_semantic_key_on_validation_and_iterator_failures():

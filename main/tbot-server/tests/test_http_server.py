@@ -580,6 +580,54 @@ async def test_google_live_evidence_post_accepts_exact_candidate_semantic_shapes
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("journey_type", ["bargein", "quiet"])
+async def test_google_live_evidence_post_preserves_nonsemantic_candidate_stages(
+    journey_type,
+):
+    body = _candidate_evidence_body(journeyType=journey_type)
+    handler = GoogleLiveEvidenceHandler(EvidenceEnrollmentRegistry())
+
+    response = await handler.handle_post(_EvidenceRequest(body))
+
+    assert response.status == 201
+    snapshot = handler.registry.safe_snapshot(body["journeyId"])
+    assert "semanticProofKind" not in snapshot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "journey_type",
+    [
+        "conversation",
+        "bargein",
+        "quiet",
+        "quiet_padding",
+        "reopen",
+        "reconnect",
+        "lesson",
+        "conversation_after_lesson",
+        "websocket",
+    ],
+)
+async def test_google_live_evidence_post_rejects_explicit_null_semantic_proof(
+    journey_type,
+):
+    response = await GoogleLiveEvidenceHandler(
+        EvidenceEnrollmentRegistry()
+    ).handle_post(
+        _EvidenceRequest(
+            _candidate_evidence_body(
+                journeyType=journey_type,
+                semanticProof=None,
+            )
+        )
+    )
+
+    assert response.status == 400
+    assert json.loads(response.text)["error"] == "INVALID_REQUEST"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "body",
     [

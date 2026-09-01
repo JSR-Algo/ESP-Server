@@ -383,12 +383,14 @@ class GoogleLiveEvidenceHandler:
         ):
             raise ValueError
         parsed["ttl_sec"] = ttl_sec
-        semantic_proof = body.get("semanticProof")
+        if "semanticProof" not in body:
+            return parsed
+        semantic_proof = body["semanticProof"]
         if journey_type == "bargein":
             parsed.update(self._parse_candidate_intent_proof(semantic_proof))
         elif journey_type == "quiet":
             parsed.update(self._parse_candidate_quiet_proof(semantic_proof))
-        elif semantic_proof is not None:
+        else:
             raise ValueError
         return parsed
 
