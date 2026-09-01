@@ -81,6 +81,8 @@ def _window_lines(
     journey_id=None,
     journeys=_DEFAULT_TRUSTED_JOURNEY,
     proof_profile=_DEFAULT_PROOF_PROFILE,
+    semantic_proof_kind=None,
+    quiet_mode=None,
     evidence_scope=None,
     server_issued=False,
 ):
@@ -104,6 +106,21 @@ def _window_lines(
         evidence += f"journeys={journeys} "
     if proof_profile is not None:
         evidence += f"proof_profile={proof_profile} "
+    if server_issued:
+        if semantic_proof_kind is None:
+            semantic_proof_kind = (
+                "bargein-intent"
+                if journeys == "bargein"
+                else "quiet"
+                if journeys == "quiet"
+                else "none"
+            )
+        if quiet_mode is None:
+            quiet_mode = "silence" if journeys == "quiet" else "none"
+        evidence += (
+            f"semantic_proof_kind={semantic_proof_kind} "
+            f"quiet_mode={quiet_mode} "
+        )
     if evidence_scope is not None:
         evidence += (
             f"connection_id={evidence_scope['connectionId']} "
@@ -153,12 +170,12 @@ def _candidate_semantic_bargein_window(*semantic_overrides):
             4,
             "Google Live evidence_candidate_intent_match "
             "journey_id=bargein-journey-1 slot=2 role=newest chars=9 "
-            "matched=true response_generation=1",
+            "matched=true response_generation=7",
         ),
         _provider_info(
             16,
             "Google Live evidence_candidate_intent_replacement "
-            "journey_id=bargein-journey-1 old_generation=1 new_generation=2 "
+            "journey_id=bargein-journey-1 old_generation=7 new_generation=8 "
             "old_stopped=true replacement_started=true replacement_completed=true "
             "stale_old_audio=0",
         ),
@@ -198,6 +215,8 @@ def _candidate_semantic_bargein_window(*semantic_overrides):
         journey_id="bargein-journey-1",
         journeys="bargein",
         proof_profile="candidate-lifecycle",
+        semantic_proof_kind="bargein-intent",
+        quiet_mode="none",
         evidence_scope=EVIDENCE_SCOPE,
         server_issued=True,
     )
@@ -257,6 +276,8 @@ def _candidate_semantic_quiet_window(mode="silence", **counts):
         journey_id="quiet-journey-1",
         journeys="quiet",
         proof_profile="candidate-lifecycle",
+        semantic_proof_kind="quiet",
+        quiet_mode=mode,
         evidence_scope=scope,
         server_issued=True,
     )
@@ -926,7 +947,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         replacement = _provider_info(
             16,
             "Google Live evidence_candidate_intent_replacement "
-            "journey_id=bargein-journey-1 old_generation=1 new_generation=2 "
+            "journey_id=bargein-journey-1 old_generation=7 new_generation=8 "
             "old_stopped=true replacement_started=true replacement_completed=true "
             "stale_old_audio=0",
         )
@@ -934,11 +955,12 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             4,
             "Google Live evidence_candidate_intent_match "
             "journey_id=bargein-journey-1 slot=2 role=newest chars=9 "
-            "matched=true response_generation=1",
+            "matched=true response_generation=7",
         )
         cases = {
-            "newest-not-during-old": newest.replace("response_generation=1", "response_generation=0"),
-            "wrong-new-generation": replacement.replace("new_generation=2", "new_generation=1"),
+            "newest-not-during-old": newest.replace("response_generation=7", "response_generation=0"),
+            "wrong-old-correlation": replacement.replace("old_generation=7", "old_generation=1"),
+            "wrong-new-correlation": replacement.replace("new_generation=8", "new_generation=2"),
             "old-not-stopped": replacement.replace("old_stopped=true", "old_stopped=false"),
             "replacement-incomplete": replacement.replace("replacement_completed=true", "replacement_completed=false"),
             "stale-audio": replacement.replace("stale_old_audio=0", "stale_old_audio=1"),
@@ -958,6 +980,32 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                     ]
                 )
 
+    def test_candidate_bargein_semantic_generations_must_equal_scoped_correlation_ids(self):
+        newest = _provider_info(
+            4,
+            "Google Live evidence_candidate_intent_match "
+            "journey_id=bargein-journey-1 slot=2 role=newest chars=9 "
+            "matched=true response_generation=1",
+        )
+        replacement = _provider_info(
+            16,
+            "Google Live evidence_candidate_intent_replacement "
+            "journey_id=bargein-journey-1 old_generation=1 new_generation=2 "
+            "old_stopped=true replacement_started=true replacement_completed=true "
+            "stale_old_audio=0",
+        )
+
+        verdict = self._analyze(
+            _candidate_semantic_bargein_window((1, newest), (2, replacement))
+        )
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertFalse(
+            verdict["candidateSemanticEvidence"][
+                "replacementOwnedByNewestGeneration"
+            ]
+        )
+
     def test_candidate_quiet_semantic_evidence_passes_for_both_exact_modes(self):
         for mode, response_count in (("silence", 0), ("robot_speaking", 1)):
             with self.subTest(mode=mode):
@@ -976,6 +1024,35 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                         "fallbacks": 0,
                     },
                 )
+
+    def test_candidate_semantic_claims_are_required_and_match_final_markers(self):
+        quiet_lines = _candidate_semantic_quiet_window("silence")
+        bargein_lines = _candidate_semantic_bargein_window()
+        cases = {
+            "missing-kind": [
+                line.replace("semantic_proof_kind=quiet ", "")
+                for line in quiet_lines
+            ],
+            "wrong-kind": [
+                line.replace(
+                    "semantic_proof_kind=quiet",
+                    "semantic_proof_kind=bargein-intent",
+                )
+                for line in quiet_lines
+            ],
+            "wrong-mode": [
+                line.replace("quiet_mode=silence", "quiet_mode=robot_speaking")
+                for line in quiet_lines
+            ],
+            "bargein-mode": [
+                line.replace("quiet_mode=none", "quiet_mode=silence")
+                for line in bargein_lines
+            ],
+        }
+        for name, lines in cases.items():
+            with self.subTest(name=name):
+                verdict = self._analyze(lines)
+                self.assertEqual(verdict["status"], "FAIL", verdict)
 
     def test_candidate_quiet_semantic_rejects_nonpositive_duration_and_forbidden_counts(self):
         cases = {

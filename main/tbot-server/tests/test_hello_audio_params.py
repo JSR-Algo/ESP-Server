@@ -11,6 +11,7 @@ from core.handle.helloHandle import handleHelloMessage
 from core.voice.google_live.audio_bridge import GoogleLiveAudioBridge
 from core.voice.google_live.evidence_enrollment import (
     CANDIDATE_LIFECYCLE_PROFILE,
+    CandidateIntentExpectation,
     EvidenceEnrollmentRegistry,
     TranscriptExpectation,
 )
@@ -163,6 +164,7 @@ class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("journeys=conversation ", marker)
         self.assertIn("proof_profile=candidate-lifecycle ", marker)
+        self.assertIn("semantic_proof_kind=none quiet_mode=none ", marker)
         self.assertEqual(conn.google_live_evidence_journey_type, "conversation")
         self.assertEqual(
             conn.google_live_evidence_proof_profile,
@@ -211,6 +213,72 @@ class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(conn.google_live_evidence_semantic_kind, "quiet")
         self.assertEqual(conn.google_live_evidence_quiet_mode, "silence")
+        marker = next(
+            message
+            for message in conn.logger.infos
+            if "reliability_window_start" in message
+        )
+        self.assertIn(
+            "semantic_proof_kind=quiet quiet_mode=silence ", marker
+        )
+        self.assertNotIn("robot_speaking", marker)
+
+    async def test_google_live_bargein_semantic_kind_is_bound_from_registry(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(return_value="live-7")
+        )
+        registry = EvidenceEnrollmentRegistry()
+        registry.register(
+            device_id=conn.device_id,
+            client_id=conn.client_id,
+            journey_id="candidate.bargein-1",
+            journey_type="bargein",
+            proof_profile=CANDIDATE_LIFECYCLE_PROFILE,
+            transcript_plan=(),
+            hmac_key=bytearray(),
+            semantic_kind="bargein-intent",
+            intent_plan=(
+                CandidateIntentExpectation(1, "initial", "1" * 64),
+                CandidateIntentExpectation(2, "newest", "2" * 64),
+            ),
+            semantic_hmac_key=bytearray(b"k" * 32),
+            ttl_sec=120,
+        )
+        registry.bind_candidate_identity(
+            device_id=conn.device_id,
+            journey_id="candidate.bargein-1",
+            candidate_identity={
+                "gitSha": "a" * 40,
+                "imageDigest": "sha256:" + "b" * 64,
+                "firmwareIdentity": "firmware-v1",
+                "fixtureSha256": "c" * 64,
+                "configFingerprint": "sha256:" + "d" * 64,
+            },
+        )
+        conn.evidence_registry = registry
+
+        await handleHelloMessage(
+            conn,
+            {
+                "evidence_journey_id": "candidate.bargein-1",
+                "semanticProof": {"kind": "quiet", "mode": "silence"},
+            },
+        )
+
+        scope = json.loads(conn.websocket.sent[0])["evidenceScope"]
+        self.assertEqual(scope["semanticProofKind"], "bargein-intent")
+        self.assertEqual(scope["quietMode"], "none")
+        marker = next(
+            message
+            for message in conn.logger.infos
+            if "reliability_window_start" in message
+        )
+        self.assertIn(
+            "semantic_proof_kind=bargein-intent quiet_mode=none ", marker
+        )
+        self.assertNotIn("semantic_proof_kind=quiet", marker)
 
     async def test_google_live_completed_scope_allows_next_unique_scope_on_same_handler(self):
         conn = _Conn()

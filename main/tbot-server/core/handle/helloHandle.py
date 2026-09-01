@@ -393,11 +393,11 @@ async def _handleHelloMessage(conn: "ConnectionHandler", msg_json):
                     "serverStartUtc": server_start_utc,
                     "journeyType": conn.google_live_evidence_journey_type,
                     "proofProfile": conn.google_live_evidence_proof_profile,
+                    "semanticProofKind": (
+                        conn.google_live_evidence_semantic_kind or "none"
+                    ),
+                    "quietMode": conn.google_live_evidence_quiet_mode or "none",
                 }
-                if conn.google_live_evidence_semantic_kind is not None:
-                    scope["semanticProofKind"] = conn.google_live_evidence_semantic_kind
-                if conn.google_live_evidence_quiet_mode is not None:
-                    scope["quietMode"] = conn.google_live_evidence_quiet_mode
             except BaseException:
                 _abort_google_live_claim(
                     conn,
@@ -475,13 +475,16 @@ async def _handleHelloMessage(conn: "ConnectionHandler", msg_json):
         try:
             conn.logger.bind(tag=TAG).info(
                 "Google Live reliability_window_start window_id={} journey_id={} "
-                "journeys={} proof_profile={} connection_id={} live_connection_id={} initial_live_connection_id={} "
+                "journeys={} proof_profile={} semantic_proof_kind={} quiet_mode={} "
+                "connection_id={} live_connection_id={} initial_live_connection_id={} "
                 "peer_identity_hash={} server_start_utc={} server_issued=true "
                 "candidate_identity={}",
                 scope["journeyId"],
                 scope["journeyId"],
                 scope["journeyType"],
                 scope["proofProfile"],
+                scope["semanticProofKind"],
+                scope["quietMode"],
                 scope["connectionId"],
                 scope["liveConnectionId"],
                 scope["initialLiveConnectionId"],

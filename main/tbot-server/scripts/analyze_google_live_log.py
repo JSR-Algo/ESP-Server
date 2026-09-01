@@ -164,6 +164,8 @@ P_RELIABILITY_WINDOW_START = re.compile(
     r"(?:journey_id=(?P<journey_id>[A-Za-z0-9._:-]+) )?"
     r"(?:journeys=(?P<journeys>[A-Za-z0-9._:,-]+) )?"
     r"(?:proof_profile=(?P<proof_profile>[A-Za-z0-9._:-]+) )?"
+    r"(?:semantic_proof_kind=(?P<semantic_proof_kind>none|bargein-intent|quiet) )?"
+    r"(?:quiet_mode=(?P<quiet_mode>none|silence|robot_speaking) )?"
     r"(?:connection_id=(?P<connection_id>[A-Za-z0-9._:-]+) )?"
     r"(?:live_connection_id=(?P<live_connection_id>[A-Za-z0-9._:-]+) )?"
     r"(?:initial_live_connection_id=(?P<initial_live_connection_id>[A-Za-z0-9._:-]+) )?"
@@ -1919,6 +1921,14 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                             )
                             evidence_scope["proofProfile"] = start_match.group(
                                 "proof_profile"
+                            )
+                        if start_match.group("semantic_proof_kind") is not None:
+                            evidence_scope["semanticProofKind"] = start_match.group(
+                                "semantic_proof_kind"
+                            )
+                        if start_match.group("quiet_mode") is not None:
+                            evidence_scope["quietMode"] = start_match.group(
+                                "quiet_mode"
                             )
                         scoped_initial_live_connection_id = (
                             scope_values.get("initialLiveConnectionId")
@@ -3782,6 +3792,29 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
         proof_profile = (
             (start_anchor.get("evidenceScope") or {}).get("proofProfile")
         )
+        semantic_proof_kind = (
+            (start_anchor.get("evidenceScope") or {}).get("semanticProofKind")
+        )
+        quiet_mode_claim = (
+            (start_anchor.get("evidenceScope") or {}).get("quietMode")
+        )
+        semantic_claim_valid = (
+            (
+                claimed_journey_list == ["bargein"]
+                and semantic_proof_kind == "bargein-intent"
+                and quiet_mode_claim == "none"
+            )
+            or (
+                claimed_journey_list == ["quiet"]
+                and semantic_proof_kind == "quiet"
+                and quiet_mode_claim in {"silence", "robot_speaking"}
+            )
+            or (
+                claimed_journey_list not in (["bargein"], ["quiet"])
+                and semantic_proof_kind == "none"
+                and quiet_mode_claim == "none"
+            )
+        )
         claim_invalid = (
             (
                 len(claimed_journey_list) != 1
@@ -3792,6 +3825,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             or len(claimed_journey_list) != len(set(claimed_journey_list))
             or not set(claimed_journey_list).issubset(recognized_journeys)
             or (server_issued_claim and proof_profile is None)
+            or (server_issued_claim and not semantic_claim_valid)
             or (
                 proof_profile is not None
                 and not (
@@ -3868,8 +3902,14 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
         replacement_owned = bool(
             newest_matched
             and replacement
+            and correlation.get("status") == "PASS"
+            and newest["responseGeneration"]
+            == correlation.get("cancelledResponseId")
             and replacement["oldGeneration"] == newest["responseGeneration"]
-            and replacement["newGeneration"] != replacement["oldGeneration"]
+            and replacement["oldGeneration"]
+            == correlation.get("cancelledResponseId")
+            and replacement["newGeneration"]
+            == correlation.get("replacementResponseId")
             and replacement["oldStopped"]
             and replacement["replacementStarted"]
             and replacement["replacementCompleted"]
@@ -3911,9 +3951,13 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             else None
         )
         mode = quiet["mode"] if quiet else None
+        authenticated_mode = (
+            (start_anchor.get("evidenceScope") or {}).get("quietMode")
+        )
         expected_response_count = 0 if mode == "silence" else 1
         quiet_pass = bool(
             quiet
+            and mode == authenticated_mode
             and quiet["duration_ms"] > 0
             and quiet["user_turns"] == 0
             and quiet["response_starts"] == expected_response_count
