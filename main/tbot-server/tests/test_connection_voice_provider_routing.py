@@ -1573,6 +1573,60 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminal, [("candidate.run-1", "PASS", None)])
         handler.voice_provider.finalize_evidence.assert_awaited_once()
 
+    async def test_candidate_bargein_semantic_failure_still_cleans_up_before_terminal_fail(self):
+        handler = self._build_handler()
+        scope = {
+            "journeyId": "candidate.bargein-1",
+            "journeyType": "bargein",
+            "proofProfile": "candidate-lifecycle",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-09-02T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        terminal = []
+        handler.evidence_registry = types.SimpleNamespace(
+            safe_snapshot=lambda _journey: {
+                "journeyId": scope["journeyId"],
+                "journeyType": "bargein",
+                "proofProfile": "candidate-lifecycle",
+                "semanticProofKind": "bargein-intent",
+                "semanticEligible": True,
+                "semanticOwnershipReady": False,
+            },
+            active_claim_matches=lambda **_claims: True,
+            finalize=lambda journey_id, status, failure_code=None: terminal.append(
+                (journey_id, status, failure_code)
+            ),
+        )
+        provider = types.SimpleNamespace(
+            finalize_evidence=AsyncMock(
+                return_value={
+                    "status": "PASS",
+                    "journeyId": scope["journeyId"],
+                    "connectionId": scope["connectionId"],
+                    "peerIdentityHash": scope["peerIdentityHash"],
+                    "initialLiveConnectionId": scope["initialLiveConnectionId"],
+                    "finalLiveConnectionId": scope["liveConnectionId"],
+                    "liveConnectionTransitions": [],
+                    "pendingTasks": 0,
+                }
+            )
+        )
+        handler.voice_provider = provider
+
+        result = await handler.finalize_google_live_evidence(scope)
+
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(result["failureCode"], "EVIDENCE_SEMANTIC_NOT_READY")
+        provider.finalize_evidence.assert_awaited_once()
+        self.assertEqual(
+            terminal,
+            [(scope["journeyId"], "FAIL", "EVIDENCE_SEMANTIC_NOT_READY")],
+        )
+
     async def test_evidence_finalize_rejects_missing_or_unverifiable_registry_claim(self):
         scope = {
             "journeyId": "physical.run-1",

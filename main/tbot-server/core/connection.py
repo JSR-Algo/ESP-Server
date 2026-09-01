@@ -1298,6 +1298,15 @@ class ConnectionHandler:
                     "evidenceScope": scope,
                     "retryable": True,
                 }
+            elif (
+                proof_profile == "candidate-lifecycle"
+                and journey_type == "bargein"
+                and proof_snapshot.get("semanticProofKind") == "bargein-intent"
+            ):
+                if proof_snapshot.get("semanticEligible") is False:
+                    proof_failure_code = "EVIDENCE_SEMANTIC_INVALID"
+                elif proof_snapshot.get("semanticOwnershipReady") is not True:
+                    proof_failure_code = "EVIDENCE_SEMANTIC_NOT_READY"
             provider = getattr(self, "voice_provider", None)
             finalize = getattr(provider, "finalize_evidence", None)
             if not callable(finalize):

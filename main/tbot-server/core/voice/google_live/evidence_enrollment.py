@@ -145,6 +145,12 @@ class _EvidenceEnrollmentState:
     semantic_observed_count: int = 0
     semantic_mismatch_count: int = 0
     semantic_eligible: bool = True
+    semantic_newest_observed_generation: int | None = field(default=None, repr=False)
+    semantic_interrupted_old_generation: int | None = field(default=None, repr=False)
+    semantic_replacement_generation: int | None = field(default=None, repr=False)
+    semantic_replacement_started: bool = False
+    semantic_replacement_completed: bool = False
+    semantic_stale_old_audio_count: int = 0
 
 
 class EvidenceEnrollmentRegistry:
@@ -497,6 +503,8 @@ class EvidenceEnrollmentRegistry:
         value: str,
         *,
         role: Literal["initial", "newest"],
+        response_generation: int | None = None,
+        active_old_output: bool = False,
     ) -> dict[str, object]:
         self._prepare()
         enrollment = self._active.get(journey_id)
@@ -521,7 +529,22 @@ class EvidenceEnrollmentRegistry:
             and expectation.role == safe_role
             and hmac.compare_digest(observed_mac, expectation.expected_mac)
         )
-        matched = bool(enrollment.semantic_eligible and cryptographic_match)
+        generation_valid = bool(
+            isinstance(response_generation, int)
+            and not isinstance(response_generation, bool)
+            and response_generation >= 0
+        )
+        ownership_supplied = response_generation is not None or active_old_output
+        ownership_valid = bool(
+            safe_role != "newest"
+            or not ownership_supplied
+            or (active_old_output and generation_valid)
+        )
+        matched = bool(
+            enrollment.semantic_eligible
+            and cryptographic_match
+            and ownership_valid
+        )
         proof: dict[str, object] = {
             "slot": (
                 expectation.slot
@@ -532,13 +555,115 @@ class EvidenceEnrollmentRegistry:
             "chars": len(str(value or "")),
             "matched": matched,
         }
+        if ownership_supplied:
+            proof["responseGeneration"] = (
+                response_generation if generation_valid else -1
+            )
         enrollment.semantic_observed_count += 1
         if matched:
             enrollment.semantic_matched_count += 1
+            if safe_role == "newest":
+                enrollment.semantic_newest_observed_generation = response_generation
         else:
             enrollment.semantic_eligible = False
             enrollment.semantic_mismatch_count += 1
         return proof
+
+    @_synchronized
+    def record_candidate_interrupt(
+        self,
+        journey_id: str,
+        *,
+        old_generation: int,
+        new_generation: int,
+    ) -> bool:
+        self._prepare()
+        enrollment = self._active.get(journey_id)
+        if enrollment is None or not enrollment.connected:
+            raise EnrollmentError("JOURNEY_NOT_FOUND")
+        if enrollment.semantic_kind != "bargein-intent":
+            return False
+        valid = bool(
+            enrollment.semantic_eligible
+            and enrollment.semantic_newest_observed_generation == old_generation
+            and isinstance(new_generation, int)
+            and not isinstance(new_generation, bool)
+            and new_generation != old_generation
+        )
+        if not valid:
+            enrollment.semantic_eligible = False
+            enrollment.semantic_mismatch_count += 1
+            return False
+        enrollment.semantic_interrupted_old_generation = old_generation
+        enrollment.semantic_replacement_generation = new_generation
+        return True
+
+    @_synchronized
+    def record_candidate_response_started(
+        self, journey_id: str, *, response_generation: int
+    ) -> bool:
+        self._prepare()
+        enrollment = self._active.get(journey_id)
+        if enrollment is None or not enrollment.connected:
+            raise EnrollmentError("JOURNEY_NOT_FOUND")
+        if enrollment.semantic_kind != "bargein-intent":
+            return False
+        if enrollment.semantic_replacement_generation is None:
+            return False
+        valid = bool(
+            enrollment.semantic_eligible
+            and response_generation == enrollment.semantic_replacement_generation
+            and response_generation != enrollment.semantic_interrupted_old_generation
+        )
+        if not valid:
+            enrollment.semantic_eligible = False
+            enrollment.semantic_mismatch_count += 1
+            return False
+        enrollment.semantic_replacement_started = True
+        return True
+
+    @_synchronized
+    def record_candidate_response_completed(
+        self, journey_id: str, *, response_generation: int
+    ) -> bool:
+        self._prepare()
+        enrollment = self._active.get(journey_id)
+        if enrollment is None or not enrollment.connected:
+            raise EnrollmentError("JOURNEY_NOT_FOUND")
+        if enrollment.semantic_kind != "bargein-intent":
+            return False
+        valid = bool(
+            enrollment.semantic_eligible
+            and enrollment.semantic_replacement_started
+            and response_generation == enrollment.semantic_replacement_generation
+        )
+        if not valid:
+            if enrollment.semantic_replacement_generation is not None:
+                enrollment.semantic_eligible = False
+                enrollment.semantic_mismatch_count += 1
+            return False
+        enrollment.semantic_replacement_completed = True
+        return True
+
+    @_synchronized
+    def record_candidate_stale_audio(
+        self, journey_id: str, *, response_generation: int
+    ) -> bool:
+        self._prepare()
+        enrollment = self._active.get(journey_id)
+        if enrollment is None or not enrollment.connected:
+            raise EnrollmentError("JOURNEY_NOT_FOUND")
+        if enrollment.semantic_kind != "bargein-intent":
+            return False
+        if enrollment.semantic_replacement_generation is None:
+            return False
+        if response_generation == enrollment.semantic_replacement_generation:
+            return False
+        if response_generation == enrollment.semantic_interrupted_old_generation:
+            enrollment.semantic_stale_old_audio_count += 1
+        enrollment.semantic_eligible = False
+        enrollment.semantic_mismatch_count += 1
+        return True
 
     @_synchronized
     def mark_output_idle(self, journey_id: str, *, response_generation: int) -> bool:
@@ -743,6 +868,18 @@ class EvidenceEnrollmentRegistry:
     @staticmethod
     def _safe_semantic_report(enrollment: _EvidenceEnrollmentState) -> dict:
         if enrollment.semantic_kind == "bargein-intent":
+            ownership_ready = bool(
+                enrollment.semantic_eligible
+                and enrollment.semantic_matched_count == len(enrollment.intent_plan)
+                and enrollment.semantic_newest_observed_generation
+                == enrollment.semantic_interrupted_old_generation
+                and enrollment.semantic_replacement_generation is not None
+                and enrollment.semantic_replacement_generation
+                != enrollment.semantic_interrupted_old_generation
+                and enrollment.semantic_replacement_started
+                and enrollment.semantic_replacement_completed
+                and enrollment.semantic_stale_old_audio_count == 0
+            )
             return {
                 "semanticProofKind": "bargein-intent",
                 "semanticExpectedCount": len(enrollment.intent_plan),
@@ -756,6 +893,12 @@ class EvidenceEnrollmentRegistry:
                     and enrollment.semantic_matched_count == len(enrollment.intent_plan)
                     and enrollment.intent_plan[-1].role == "newest"
                 ),
+                "semanticOwnershipReady": ownership_ready,
+                "semanticOldResponseGeneration": enrollment.semantic_interrupted_old_generation,
+                "semanticReplacementGeneration": enrollment.semantic_replacement_generation,
+                "semanticReplacementStarted": enrollment.semantic_replacement_started,
+                "semanticReplacementCompleted": enrollment.semantic_replacement_completed,
+                "semanticStaleOldAudioCount": enrollment.semantic_stale_old_audio_count,
             }
         if enrollment.semantic_kind == "quiet":
             return {

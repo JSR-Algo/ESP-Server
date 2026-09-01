@@ -1,12 +1,12 @@
 import asyncio
 import json
-import unittest
 import types
+import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from core.handle import helloHandle
 from core.connection import ConnectionHandler
+from core.handle import helloHandle
 from core.handle.helloHandle import handleHelloMessage
 from core.voice.google_live.audio_bridge import GoogleLiveAudioBridge
 from core.voice.google_live.evidence_enrollment import (
@@ -168,6 +168,49 @@ class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
             conn.google_live_evidence_proof_profile,
             CANDIDATE_LIFECYCLE_PROFILE,
         )
+
+    async def test_google_live_quiet_mode_is_bound_from_registry_not_hello(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(return_value="live-7")
+        )
+        registry = EvidenceEnrollmentRegistry()
+        registry.register(
+            device_id=conn.device_id,
+            client_id=conn.client_id,
+            journey_id="candidate.quiet-1",
+            journey_type="quiet",
+            proof_profile=CANDIDATE_LIFECYCLE_PROFILE,
+            transcript_plan=(),
+            hmac_key=bytearray(),
+            semantic_kind="quiet",
+            quiet_mode="silence",
+            ttl_sec=120,
+        )
+        registry.bind_candidate_identity(
+            device_id=conn.device_id,
+            journey_id="candidate.quiet-1",
+            candidate_identity={
+                "gitSha": "a" * 40,
+                "imageDigest": "sha256:" + "b" * 64,
+                "firmwareIdentity": "firmware-v1",
+                "fixtureSha256": "c" * 64,
+                "configFingerprint": "sha256:" + "d" * 64,
+            },
+        )
+        conn.evidence_registry = registry
+
+        await handleHelloMessage(
+            conn,
+            {
+                "evidence_journey_id": "candidate.quiet-1",
+                "semanticProof": {"mode": "robot_speaking"},
+            },
+        )
+
+        self.assertEqual(conn.google_live_evidence_semantic_kind, "quiet")
+        self.assertEqual(conn.google_live_evidence_quiet_mode, "silence")
 
     async def test_google_live_completed_scope_allows_next_unique_scope_on_same_handler(self):
         conn = _Conn()

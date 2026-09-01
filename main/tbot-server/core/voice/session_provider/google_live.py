@@ -230,6 +230,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             "toLiveConnectionId": pending["toLiveConnectionId"],
         }
         self._evidence_live_connection_transitions.append(committed)
+        self._increment_candidate_counter("reconnects")
         self._evidence_current_live_connection_id = pending["toLiveConnectionId"]
         self._evidence_pending_reconnect = None
         self._evidence_replay_logged_attempts.discard(pending["attempt"])
@@ -450,6 +451,84 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._evidence_pending_reconnect = None
         self._evidence_reconnect_attempt_serial = 0
         self._evidence_replay_logged_attempts = set()
+        self._evidence_candidate_replacement_logged = False
+        self._evidence_active_response_generation = None
+        self._reset_candidate_scope_measurements()
+
+    def _reset_candidate_scope_measurements(self):
+        self._evidence_active_response_generation = None
+        self._evidence_candidate_scope_started_at = time.monotonic()
+        self._evidence_candidate_counters = {
+            "user_turns": 0,
+            "response_starts": 0,
+            "response_ends": 0,
+            "interrupts": 0,
+            "replacements": 0,
+            "reconnects": 0,
+            "fallbacks": 0,
+            "stale_audio": 0,
+        }
+        self._evidence_candidate_interrupt_pending = False
+        self._evidence_candidate_final_markers_logged = False
+
+    def _candidate_counter_enabled(self):
+        return bool(
+            getattr(self.conn, "google_live_evidence_proof_profile", None)
+            == "candidate-lifecycle"
+            and getattr(self.conn, "google_live_evidence_journey_id", None)
+        )
+
+    def _increment_candidate_counter(self, name):
+        if not self._candidate_counter_enabled():
+            return
+        self._evidence_candidate_counters[name] = (
+            self._evidence_candidate_counters.get(name, 0) + 1
+        )
+
+    def _log_candidate_final_markers(self):
+        if (
+            self._evidence_candidate_final_markers_logged
+            or not self._candidate_counter_enabled()
+        ):
+            return
+        journey_id = self.conn.google_live_evidence_journey_id
+        counters = self._evidence_candidate_counters
+        self.conn.logger.bind(tag="GoogleLive").info(
+            "Google Live evidence_candidate_fallback journey_id={} fallbacks={}",
+            journey_id,
+            counters["fallbacks"],
+        )
+        if getattr(self.conn, "google_live_evidence_journey_type", None) == "quiet":
+            registry = getattr(self.conn, "evidence_registry", None)
+            try:
+                snapshot = registry.safe_snapshot(journey_id)
+                mode = snapshot["quietMode"]
+            except Exception:
+                mode = "invalid"
+            duration_ms = max(
+                1,
+                int(
+                    (time.monotonic() - self._evidence_candidate_scope_started_at)
+                    * 1000
+                ),
+            )
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live evidence_candidate_quiet journey_id={} mode={} "
+                "duration_ms={} user_turns={} response_starts={} response_ends={} "
+                "interrupts={} replacements={} reconnects={} fallbacks={} stale_audio={}",
+                journey_id,
+                mode,
+                duration_ms,
+                counters["user_turns"],
+                counters["response_starts"],
+                counters["response_ends"],
+                counters["interrupts"],
+                counters["replacements"],
+                counters["reconnects"],
+                counters["fallbacks"],
+                counters["stale_audio"],
+            )
+        self._evidence_candidate_final_markers_logged = True
 
     async def start_session(self):
         async with self._get_lifecycle_lock():
@@ -1035,6 +1114,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if evidence_scope is None:
                 return {"status": "FAIL", "failureCode": "EVIDENCE_SCOPE_MISSING"}
             self._ensure_evidence_live_identity()
+            self._log_candidate_final_markers()
             cleanup_result = await self._close_live_resources(
                 evidence_finalize=True
             )
@@ -1115,6 +1195,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._evidence_pending_reconnect = None
             self._evidence_reconnect_attempt_serial = 0
             self._evidence_replay_logged_attempts.clear()
+            self._reset_candidate_scope_measurements()
             self._evidence_response_token_serial = 0
             self._evidence_final_response_reservation = None
             self._evidence_last_transcript_event_token = None
@@ -1236,6 +1317,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         ):
             return None
         self._ensure_evidence_live_identity()
+        self._reset_candidate_scope_measurements()
         self._bind_client_evidence_scope(self._client, self._session_generation)
         return str(live_connection_id)
 
@@ -1993,11 +2075,51 @@ class GoogleLiveProvider(VoiceSessionProvider):
             and event_token is self._evidence_last_transcript_event_token
         ):
             return None
+        registry = getattr(self.conn, "evidence_registry", None)
+        journey_id = getattr(self.conn, "google_live_evidence_journey_id", None)
+        proof_profile = getattr(
+            self.conn, "google_live_evidence_proof_profile", None
+        )
+        journey_type = getattr(self.conn, "google_live_evidence_journey_type", None)
+        if (
+            registry is not None
+            and isinstance(journey_id, str)
+            and journey_id
+            and proof_profile == "candidate-lifecycle"
+            and journey_type == "bargein"
+        ):
+            try:
+                snapshot = registry.safe_snapshot(journey_id)
+                observed = int(snapshot.get("semanticObservedCount", 0))
+                role = "initial" if observed == 0 else "newest"
+                proof = registry.observe_candidate_intent(
+                    journey_id,
+                    transcript_text,
+                    role=role,
+                    response_generation=self._response_generation,
+                    active_old_output=(
+                        self._evidence_active_response_generation
+                        == self._response_generation
+                    ),
+                )
+            except Exception:
+                return None
+            if event_token is not None:
+                self._evidence_last_transcript_event_token = event_token
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live evidence_candidate_intent_match journey_id={} "
+                "slot={} role={} chars={} matched={} response_generation={}",
+                journey_id,
+                proof["slot"],
+                proof["role"],
+                proof["chars"],
+                str(bool(proof["matched"])).lower(),
+                proof["responseGeneration"],
+            )
+            return proof
         phase = self._evidence_transcript_phase()
         if phase is None:
             return None
-        registry = getattr(self.conn, "evidence_registry", None)
-        journey_id = getattr(self.conn, "google_live_evidence_journey_id", None)
         response_token = (
             self._reserve_evidence_response_token()
             if phase == "post_lesson"
@@ -2074,6 +2196,102 @@ class GoogleLiveProvider(VoiceSessionProvider):
             and not self.is_response_cancelled(response_generation)
         ):
             reservation["outputStarted"] = True
+
+    def _candidate_semantic_registry_scope(self):
+        registry = getattr(self.conn, "evidence_registry", None)
+        journey_id = getattr(self.conn, "google_live_evidence_journey_id", None)
+        if (
+            registry is None
+            or not isinstance(journey_id, str)
+            or not journey_id
+            or getattr(self.conn, "google_live_evidence_proof_profile", None)
+            != "candidate-lifecycle"
+            or getattr(self.conn, "google_live_evidence_journey_type", None)
+            != "bargein"
+        ):
+            return None
+        return registry, journey_id
+
+    def _record_candidate_interrupt(self, old_generation, new_generation):
+        scope = self._candidate_semantic_registry_scope()
+        if scope is None:
+            return False
+        registry, journey_id = scope
+        try:
+            recorded = registry.record_candidate_interrupt(
+                journey_id,
+                old_generation=old_generation,
+                new_generation=new_generation,
+            )
+        except Exception:
+            return False
+        if recorded:
+            self._evidence_candidate_replacement_logged = False
+        return bool(recorded)
+
+    def _record_candidate_response_started(self, response_generation):
+        scope = self._candidate_semantic_registry_scope()
+        if scope is None:
+            return False
+        registry, journey_id = scope
+        try:
+            return bool(
+                registry.record_candidate_response_started(
+                    journey_id, response_generation=response_generation
+                )
+            )
+        except Exception:
+            return False
+
+    def _record_candidate_response_completed(self, response_generation):
+        scope = self._candidate_semantic_registry_scope()
+        if scope is None:
+            return False
+        registry, journey_id = scope
+        try:
+            completed = bool(
+                registry.record_candidate_response_completed(
+                    journey_id, response_generation=response_generation
+                )
+            )
+            snapshot = registry.safe_snapshot(journey_id)
+        except Exception:
+            return False
+        if completed and not self._evidence_candidate_replacement_logged:
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "Google Live evidence_candidate_intent_replacement journey_id={} "
+                "old_generation={} new_generation={} old_stopped=true "
+                "replacement_started=true replacement_completed=true stale_old_audio={}",
+                journey_id,
+                snapshot["semanticOldResponseGeneration"],
+                snapshot["semanticReplacementGeneration"],
+                snapshot["semanticStaleOldAudioCount"],
+            )
+            self._evidence_candidate_replacement_logged = True
+        return completed
+
+    def _record_candidate_stale_model_event(self, event_type, response_generation):
+        if event_type == "audio_start":
+            self._increment_candidate_counter("response_starts")
+            return self._record_candidate_response_started(response_generation)
+        if event_type == "audio_end":
+            self._increment_candidate_counter("response_ends")
+            return self._record_candidate_response_completed(response_generation)
+        if event_type not in {"audio", "audio_chunk"}:
+            return False
+        self._increment_candidate_counter("stale_audio")
+        scope = self._candidate_semantic_registry_scope()
+        if scope is None or not isinstance(response_generation, int):
+            return False
+        registry, journey_id = scope
+        try:
+            return bool(
+                registry.record_candidate_stale_audio(
+                    journey_id, response_generation=response_generation
+                )
+            )
+        except Exception:
+            return False
 
     async def _on_user_transcript(self, transcript_text):
         self._cancel_start_lesson_asr_fallback_task()
@@ -3393,6 +3611,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             )
 
     async def _activate_classic_fallback(self, exc):
+        self._increment_candidate_counter("fallbacks")
         await self._stop_live_output_for_transport_change()
         self.conn.logger.bind(tag="GoogleLive").error(
             "Google Live unavailable type={}: {}",
@@ -5296,6 +5515,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 or self.is_response_cancelled(event_generation)
             )
         ):
+            self._record_candidate_stale_model_event(event_type, event_generation)
             log = self.conn.logger.bind(tag="GoogleLive")
             log_method = (
                 log.debug
@@ -5349,6 +5569,20 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if self._is_model_output_event(event_type, event):
             self._consecutive_waiting_model_timeouts = 0
         if event_type == "audio_start":
+            self._evidence_active_response_generation = (
+                event_generation
+                if isinstance(event_generation, int)
+                else self._response_generation
+            )
+            self._increment_candidate_counter("response_starts")
+            if self._evidence_candidate_interrupt_pending:
+                self._increment_candidate_counter("replacements")
+                self._evidence_candidate_interrupt_pending = False
+            self._record_candidate_response_started(
+                event_generation
+                if isinstance(event_generation, int)
+                else self._response_generation
+            )
             self._mark_evidence_output_started(
                 event_generation
                 if isinstance(event_generation, int)
@@ -5378,6 +5612,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     self._response_generation,
                 )
         if event_type == "audio_end":
+            self._increment_candidate_counter("response_ends")
+            self._record_candidate_response_completed(
+                event_generation
+                if isinstance(event_generation, int)
+                else self._response_generation
+            )
             self._cancel_waiting_model_timeout_task()
             self._cancel_input_flush_task()
             self._clear_user_stream()
@@ -5416,6 +5656,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 if isinstance(event_generation, int)
                 else self._response_generation
             )
+            if self._evidence_active_response_generation == (
+                event_generation
+                if isinstance(event_generation, int)
+                else self._response_generation
+            ):
+                self._evidence_active_response_generation = None
 
     def _is_model_output_event(self, event_type, event):
         if event_type in {"audio_start", "audio", "audio_chunk", "audio_end", "tool_call"}:
@@ -6041,6 +6287,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._bridge.allow_model_output()
         if self._last_clean_user_turn_response_id == self._response_generation:
             return
+        self._increment_candidate_counter("user_turns")
         response_already_bound = (
             previous_state == InteractionState.INTERRUPTING
             or self._interrupt_capture_response_id == self._response_generation
@@ -7425,6 +7672,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
 
         previous_response_id = self._response_generation
         self._response_generation += 1
+        self._increment_candidate_counter("interrupts")
+        self._evidence_candidate_interrupt_pending = True
         reservation = self._evidence_final_response_reservation
         if (
             isinstance(reservation, dict)
@@ -7492,6 +7741,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     await lesson_stop()
                 else:
                     await self._bridge.stop_output()
+                self._evidence_active_response_generation = None
+                self._record_candidate_interrupt(
+                    previous_response_id, self._response_generation
+                )
                 if evidence_scope is not None:
                     self.conn.logger.bind(tag="GoogleLive").info(
                         "Google Live interrupt_output_stopped journey_id={} "

@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import json
 import time
 import unittest
@@ -7,17 +9,22 @@ from contextvars import ContextVar
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import core.voice.session_provider.google_live as google_live_module
 from core.activity_lease import (
     ActivityLeaseCoordinator,
     ActivityOperation,
     ExclusiveDisposition,
 )
-from plugins_func.register import Action
-from plugins_func.functions import start_lesson as start_lesson_module
+from core.voice.google_live.evidence_enrollment import (
+    CandidateIntentExpectation,
+    EvidenceEnrollmentRegistry,
+    normalize_transcript,
+)
 from core.voice.live_admission import AdmissionDecision, AdmissionReason
 from core.voice.session_orchestrator import SessionMode
-import core.voice.session_provider.google_live as google_live_module
 from core.voice.session_provider.google_live import GoogleLiveProvider
+from plugins_func.functions import start_lesson as start_lesson_module
+from plugins_func.register import Action
 
 
 class _Logger:
@@ -355,6 +362,307 @@ class _EmptyAuthFailingASR:
         return "", None
 
 class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _bind_candidate_bargein(conn):
+        key = b"s" * 32
+
+        def expected(value):
+            return hmac.new(
+                key,
+                normalize_transcript(value).encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+
+        registry = EvidenceEnrollmentRegistry()
+        registry.register(
+            device_id=conn.device_id,
+            client_id="client-1",
+            journey_id="candidate.bargein-1",
+            journey_type="bargein",
+            proof_profile="candidate-lifecycle",
+            ttl_sec=120,
+            transcript_plan=(),
+            hmac_key=b"",
+            semantic_kind="bargein-intent",
+            intent_plan=(
+                CandidateIntentExpectation(1, "initial", expected("first intent")),
+                CandidateIntentExpectation(2, "newest", expected("newest intent")),
+            ),
+            semantic_hmac_key=key,
+        )
+        registry.claim(
+            device_id=conn.device_id,
+            client_id="client-1",
+            journey_id="candidate.bargein-1",
+        )
+        conn.client_id = "client-1"
+        conn.google_live_evidence_journey_id = "candidate.bargein-1"
+        conn.google_live_evidence_journey_type = "bargein"
+        conn.google_live_evidence_proof_profile = "candidate-lifecycle"
+        conn.evidence_registry = registry
+        return registry
+
+    async def test_candidate_semantic_newest_owns_exact_interrupt_replacement_chain(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._bridge = _Bridge()
+        provider._client = _Client()
+        provider._response_generation = 1
+
+        conn.google_live_transcript_event_token = object()
+        self.assertFalse(await provider._on_user_transcript("first intent"))
+        await provider._handle_live_event(
+            {"type": "audio_start", "response_generation": 1}
+        )
+        conn.google_live_audio_out_started_at = time.monotonic()
+
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript_barge_in("newest intent")
+        self.assertEqual(provider._response_generation, 2)
+        await provider._handle_live_event(
+            {"type": "audio_start", "response_generation": 2}
+        )
+        await provider._handle_live_event(
+            {"type": "audio_end", "response_generation": 2}
+        )
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertTrue(snapshot["semanticOwnershipReady"])
+        self.assertTrue(snapshot["latestIntentMatched"])
+        self.assertEqual(snapshot["semanticOldResponseGeneration"], 1)
+        self.assertEqual(snapshot["semanticReplacementGeneration"], 2)
+        self.assertEqual(snapshot["semanticStaleOldAudioCount"], 0)
+        markers = [str(args[0]) for _, args, _ in conn.logger.messages if args]
+        self.assertTrue(any("evidence_candidate_intent_match" in item for item in markers))
+        self.assertTrue(any("evidence_candidate_intent_replacement" in item for item in markers))
+        self.assertFalse(any("first intent" in str(item) for item in conn.logger.messages))
+        self.assertFalse(any("newest intent" in str(item) for item in conn.logger.messages))
+
+    async def test_candidate_semantic_rejects_newest_without_active_old_output(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._begin_user_interrupt = AsyncMock()
+
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript("first intent")
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript_barge_in("newest intent")
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertFalse(snapshot["semanticEligible"])
+        self.assertFalse(snapshot["semanticOwnershipReady"])
+
+    async def test_candidate_semantic_rejects_newest_after_old_output_ends(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._begin_user_interrupt = AsyncMock()
+        provider._response_generation = 1
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript("first intent")
+        await provider._handle_live_event({"type": "audio_start", "response_generation": 1})
+        await provider._handle_live_event({"type": "audio_end", "response_generation": 1})
+        conn.google_live_audio_out_started_at = None
+        conn.google_live_transcript_event_token = object()
+
+        await provider._on_user_transcript_barge_in("newest intent")
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertFalse(snapshot["semanticEligible"])
+        self.assertFalse(snapshot["semanticOwnershipReady"])
+
+    async def test_candidate_semantic_stale_old_audio_after_replacement_is_sticky_failure(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._bridge = _Bridge()
+        provider._client = _Client()
+        provider._response_generation = 1
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript("first intent")
+        await provider._handle_live_event({"type": "audio_start", "response_generation": 1})
+        conn.google_live_audio_out_started_at = time.monotonic()
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript_barge_in("newest intent")
+        await provider._handle_live_event({"type": "audio_start", "response_generation": 2})
+
+        await provider._handle_live_event({"type": "audio", "response_generation": 1})
+        await provider._handle_live_event({"type": "audio_end", "response_generation": 2})
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertFalse(snapshot["semanticEligible"])
+        self.assertFalse(snapshot["semanticOwnershipReady"])
+        self.assertEqual(snapshot["semanticStaleOldAudioCount"], 1)
+
+    async def test_candidate_semantic_wrong_replacement_generation_fails_closed(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._bridge = _Bridge()
+        provider._client = _Client()
+        provider._response_generation = 1
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript("first intent")
+        await provider._handle_live_event({"type": "audio_start", "response_generation": 1})
+        conn.google_live_audio_out_started_at = time.monotonic()
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript_barge_in("newest intent")
+
+        await provider._handle_live_event({"type": "audio_start", "response_generation": 3})
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertFalse(snapshot["semanticEligible"])
+        self.assertFalse(snapshot["semanticOwnershipReady"])
+
+    async def test_candidate_semantic_stop_failure_cannot_claim_replacement_ownership(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._bridge = _FailingBridge()
+        provider._client = _Client()
+        provider._response_generation = 1
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript("first intent")
+        await provider._handle_live_event({"type": "audio_start", "response_generation": 1})
+        conn.google_live_audio_out_started_at = time.monotonic()
+        conn.google_live_transcript_event_token = object()
+
+        await provider._on_user_transcript_barge_in("newest intent")
+        await provider._handle_live_event({"type": "audio_start", "response_generation": 2})
+        await provider._handle_live_event({"type": "audio_end", "response_generation": 2})
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertFalse(snapshot["semanticOwnershipReady"])
+        self.assertIsNone(snapshot["semanticOldResponseGeneration"])
+
+    async def test_candidate_semantic_duplicate_callback_is_observed_once(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._begin_user_interrupt = AsyncMock()
+        token = object()
+        conn.google_live_transcript_event_token = token
+
+        await provider._on_user_transcript("first intent")
+        await provider._on_user_transcript_barge_in("first intent")
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertEqual(snapshot["semanticObservedCount"], 1)
+        self.assertEqual(snapshot["semanticMatchCount"], 1)
+
+    async def test_candidate_quiet_marker_uses_measured_robot_speaking_counters(self):
+        conn = _Conn()
+        registry = EvidenceEnrollmentRegistry()
+        registry.register(
+            device_id=conn.device_id,
+            client_id="client-1",
+            journey_id="candidate.quiet-1",
+            journey_type="quiet",
+            proof_profile="candidate-lifecycle",
+            ttl_sec=120,
+            transcript_plan=(),
+            hmac_key=b"",
+            semantic_kind="quiet",
+            quiet_mode="robot_speaking",
+        )
+        registry.claim(
+            device_id=conn.device_id,
+            client_id="client-1",
+            journey_id="candidate.quiet-1",
+        )
+        conn.evidence_registry = registry
+        conn.google_live_evidence_journey_id = "candidate.quiet-1"
+        conn.google_live_evidence_journey_type = "quiet"
+        conn.google_live_evidence_proof_profile = "candidate-lifecycle"
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._interaction.start_live_connection("live-quiet")
+        provider._reset_candidate_scope_measurements()
+        provider._close_live_resources = AsyncMock(return_value=None)
+
+        await provider._handle_live_event(
+            {"type": "audio_start", "response_generation": 0}
+        )
+        await provider._handle_live_event(
+            {"type": "audio_end", "response_generation": 0}
+        )
+        result = await provider.finalize_evidence()
+
+        self.assertEqual(result["status"], "PASS")
+        rendered = [
+            (args[0].format(*args[1:]) if len(args) > 1 else str(args[0]))
+            for _, args, _ in conn.logger.messages
+            if args
+        ]
+        quiet = next(item for item in rendered if "evidence_candidate_quiet" in item)
+        self.assertIn("mode=robot_speaking", quiet)
+        self.assertIn("response_starts=1 response_ends=1", quiet)
+        self.assertIn("interrupts=0 replacements=0 reconnects=0 fallbacks=0", quiet)
+        self.assertTrue(any("evidence_candidate_fallback" in item and "fallbacks=0" in item for item in rendered))
+
+    async def test_candidate_quiet_silence_marker_reports_explicit_zero_counters(self):
+        conn = _Conn()
+        registry = EvidenceEnrollmentRegistry()
+        registry.register(
+            device_id=conn.device_id,
+            client_id="client-1",
+            journey_id="candidate.quiet-silence-1",
+            journey_type="quiet",
+            proof_profile="candidate-lifecycle",
+            ttl_sec=120,
+            transcript_plan=(),
+            hmac_key=b"",
+            semantic_kind="quiet",
+            quiet_mode="silence",
+        )
+        registry.claim(
+            device_id=conn.device_id,
+            client_id="client-1",
+            journey_id="candidate.quiet-silence-1",
+        )
+        conn.evidence_registry = registry
+        conn.google_live_evidence_journey_id = "candidate.quiet-silence-1"
+        conn.google_live_evidence_journey_type = "quiet"
+        conn.google_live_evidence_proof_profile = "candidate-lifecycle"
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._interaction.start_live_connection("live-quiet")
+        provider._reset_candidate_scope_measurements()
+        provider._close_live_resources = AsyncMock(return_value=None)
+
+        await provider.finalize_evidence()
+
+        rendered = [
+            (args[0].format(*args[1:]) if len(args) > 1 else str(args[0]))
+            for _, args, _ in conn.logger.messages
+            if args
+        ]
+        quiet = next(item for item in rendered if "evidence_candidate_quiet" in item)
+        self.assertIn("mode=silence", quiet)
+        self.assertIn("user_turns=0 response_starts=0 response_ends=0", quiet)
+        self.assertIn("interrupts=0 replacements=0 reconnects=0 fallbacks=0 stale_audio=0", quiet)
+
     async def test_evidence_transcript_is_observed_before_normal_dispatch_without_changing_result(self):
         conn = _Conn()
         conn.google_live_evidence_journey_id = "physical.run-1"

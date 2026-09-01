@@ -118,6 +118,8 @@ def _abort_google_live_claim(conn, registry, journey_id, failure_code):
     conn.google_live_evidence_candidate_identity = None
     conn.google_live_evidence_journey_type = None
     conn.google_live_evidence_proof_profile = None
+    conn.google_live_evidence_semantic_kind = None
+    conn.google_live_evidence_quiet_mode = None
 
 async def _handleHelloMessage(conn: "ConnectionHandler", msg_json):
     """Handle hello message"""
@@ -136,6 +138,10 @@ async def _handleHelloMessage(conn: "ConnectionHandler", msg_json):
     previous_proof_profile = getattr(
         conn, "google_live_evidence_proof_profile", None
     )
+    previous_semantic_kind = getattr(
+        conn, "google_live_evidence_semantic_kind", None
+    )
+    previous_quiet_mode = getattr(conn, "google_live_evidence_quiet_mode", None)
     previous_reliability_start_logged = getattr(
         conn, "google_live_reliability_start_logged", False
     )
@@ -148,6 +154,8 @@ async def _handleHelloMessage(conn: "ConnectionHandler", msg_json):
         conn.google_live_evidence_candidate_identity = previous_candidate_identity
         conn.google_live_evidence_journey_type = previous_journey_type
         conn.google_live_evidence_proof_profile = previous_proof_profile
+        conn.google_live_evidence_semantic_kind = previous_semantic_kind
+        conn.google_live_evidence_quiet_mode = previous_quiet_mode
         conn.google_live_reliability_start_logged = (
             previous_reliability_start_logged
         )
@@ -166,6 +174,8 @@ async def _handleHelloMessage(conn: "ConnectionHandler", msg_json):
     conn.google_live_evidence_candidate_identity = None
     conn.google_live_evidence_journey_type = None
     conn.google_live_evidence_proof_profile = None
+    conn.google_live_evidence_semantic_kind = None
+    conn.google_live_evidence_quiet_mode = None
     conn.google_live_reliability_start_logged = False
     enrollment_invalid = False
     registry = getattr(conn, "evidence_registry", None)
@@ -253,6 +263,16 @@ async def _handleHelloMessage(conn: "ConnectionHandler", msg_json):
                 conn.google_live_evidence_candidate_identity = claimed
                 conn.google_live_evidence_journey_type = journey_type
                 conn.google_live_evidence_proof_profile = proof_profile
+                conn.google_live_evidence_semantic_kind = (
+                    enrollment_snapshot.get("semanticProofKind")
+                    if isinstance(enrollment_snapshot, dict)
+                    else None
+                )
+                conn.google_live_evidence_quiet_mode = (
+                    enrollment_snapshot.get("quietMode")
+                    if isinstance(enrollment_snapshot, dict)
+                    else None
+                )
                 previous_journey_id = (
                     previous_evidence_scope.get("journeyId")
                     if isinstance(previous_evidence_scope, dict)
@@ -374,6 +394,10 @@ async def _handleHelloMessage(conn: "ConnectionHandler", msg_json):
                     "journeyType": conn.google_live_evidence_journey_type,
                     "proofProfile": conn.google_live_evidence_proof_profile,
                 }
+                if conn.google_live_evidence_semantic_kind is not None:
+                    scope["semanticProofKind"] = conn.google_live_evidence_semantic_kind
+                if conn.google_live_evidence_quiet_mode is not None:
+                    scope["quietMode"] = conn.google_live_evidence_quiet_mode
             except BaseException:
                 _abort_google_live_claim(
                     conn,
