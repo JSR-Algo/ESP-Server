@@ -453,6 +453,34 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             _intent=None,
         )
 
+    @staticmethod
+    def _bind_physical_claim(handler, scope, *, snapshot=None, finalize=None):
+        scope.update(
+            {
+                "journeyType": "physical",
+                "proofProfile": "physical-transcript",
+            }
+        )
+        proof_snapshot = {
+            "journeyId": scope["journeyId"],
+            "journeyType": "physical",
+            "proofProfile": "physical-transcript",
+            "transcriptProofEligible": True,
+            "readyToFinalize": True,
+        }
+        if snapshot is not None:
+            proof_snapshot.update(snapshot)
+        handler.evidence_registry = types.SimpleNamespace(
+            safe_snapshot=lambda _journey: dict(proof_snapshot),
+            active_claim_matches=lambda **claims: (
+                claims["journey_id"] == scope["journeyId"]
+                and claims["journey_type"] == "physical"
+                and claims["proof_profile"] == "physical-transcript"
+            ),
+            finalize=finalize or (lambda *_args, **_kwargs: None),
+        )
+        return scope
+
     async def test_handle_connection_starts_classic_provider_before_private_config_finishes(
         self,
     ):
@@ -1063,6 +1091,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             "peerIdentityHash": "sha256:" + "a" * 64,
             "serverStartUtc": "2026-08-31T03:00:00+00:00",
         }
+        self._bind_physical_claim(handler, handler.google_live_evidence_scope)
         cleanup_complete = asyncio.Event()
 
         class Provider:
@@ -1120,8 +1149,10 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             "peerIdentityHash": "sha256:" + "a" * 64,
             "serverStartUtc": "2026-08-31T03:00:00+00:00",
         }
-        handler.evidence_registry = types.SimpleNamespace(
-            safe_snapshot=lambda _journey: {"readyToFinalize": False}
+        self._bind_physical_claim(
+            handler,
+            handler.google_live_evidence_scope,
+            snapshot={"readyToFinalize": False},
         )
         provider = types.SimpleNamespace(finalize_evidence=AsyncMock())
         handler.voice_provider = provider
@@ -1148,8 +1179,10 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         }
         handler.google_live_evidence_scope = scope
         finalized = []
-        handler.evidence_registry = types.SimpleNamespace(
-            safe_snapshot=lambda _journey: {
+        self._bind_physical_claim(
+            handler,
+            scope,
+            snapshot={
                 "transcriptProofEligible": False,
                 "readyToFinalize": False,
             },
@@ -1232,8 +1265,10 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
                 }
                 handler.google_live_evidence_scope = scope
                 terminal = []
-                handler.evidence_registry = types.SimpleNamespace(
-                    safe_snapshot=lambda _journey: {
+                self._bind_physical_claim(
+                    handler,
+                    scope,
+                    snapshot={
                         "transcriptProofEligible": False,
                         "readyToFinalize": False,
                     },
@@ -1318,8 +1353,10 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         }
         handler.google_live_evidence_scope = scope
         terminal = []
-        handler.evidence_registry = types.SimpleNamespace(
-            safe_snapshot=lambda _journey: {
+        self._bind_physical_claim(
+            handler,
+            scope,
+            snapshot={
                 "transcriptProofEligible": False,
                 "readyToFinalize": False,
             },
@@ -1353,8 +1390,10 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             "serverStartUtc": "2026-08-31T03:00:00+00:00",
         }
         handler.google_live_evidence_scope = scope
-        handler.evidence_registry = types.SimpleNamespace(
-            safe_snapshot=lambda _journey: {
+        self._bind_physical_claim(
+            handler,
+            scope,
+            snapshot={
                 "transcriptProofEligible": False,
                 "readyToFinalize": False,
             },
@@ -1416,8 +1455,10 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             "serverStartUtc": "2026-08-31T03:00:00+00:00",
         }
         handler.google_live_evidence_scope = scope
-        handler.evidence_registry = types.SimpleNamespace(
-            safe_snapshot=lambda _journey: {
+        self._bind_physical_claim(
+            handler,
+            scope,
+            snapshot={
                 "transcriptProofEligible": False,
                 "readyToFinalize": False,
             },
@@ -1456,6 +1497,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             "serverStartUtc": "2026-08-31T03:00:00+00:00",
         }
         handler.google_live_evidence_scope = scope
+        self._bind_physical_claim(handler, scope)
         handler.voice_provider = types.SimpleNamespace(
             finalize_evidence=AsyncMock(return_value={
                 "status": "PASS",
@@ -1531,6 +1573,125 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminal, [("candidate.run-1", "PASS", None)])
         handler.voice_provider.finalize_evidence.assert_awaited_once()
 
+    async def test_evidence_finalize_rejects_missing_or_unverifiable_registry_claim(self):
+        scope = {
+            "journeyId": "physical.run-1",
+            "journeyType": "physical",
+            "proofProfile": "physical-transcript",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+
+        def raises(_journey):
+            raise RuntimeError("private registry detail")
+
+        registries = {
+            "none": None,
+            "no_snapshot": types.SimpleNamespace(active_claim_matches=lambda **_kw: True),
+            "snapshot_raises": types.SimpleNamespace(
+                safe_snapshot=raises,
+                active_claim_matches=lambda **_kw: True,
+            ),
+            "snapshot_non_dict": types.SimpleNamespace(
+                safe_snapshot=lambda _journey: None,
+                active_claim_matches=lambda **_kw: True,
+            ),
+            "snapshot_wrong_journey": types.SimpleNamespace(
+                safe_snapshot=lambda _journey: {
+                    "journeyId": "physical.run-other",
+                    "journeyType": "physical",
+                    "proofProfile": "physical-transcript",
+                    "transcriptProofEligible": True,
+                    "readyToFinalize": True,
+                },
+                active_claim_matches=lambda **_kw: True,
+            ),
+            "no_matcher": types.SimpleNamespace(
+                safe_snapshot=lambda _journey: {
+                    "journeyId": "physical.run-1",
+                    "journeyType": "physical",
+                    "proofProfile": "physical-transcript",
+                    "transcriptProofEligible": True,
+                    "readyToFinalize": True,
+                },
+            ),
+            "matcher_false": types.SimpleNamespace(
+                safe_snapshot=lambda _journey: {
+                    "journeyId": "physical.run-1",
+                    "journeyType": "physical",
+                    "proofProfile": "physical-transcript",
+                    "transcriptProofEligible": True,
+                    "readyToFinalize": True,
+                },
+                active_claim_matches=lambda **_kw: False,
+            ),
+            "matcher_raises": types.SimpleNamespace(
+                safe_snapshot=lambda _journey: {
+                    "journeyId": "physical.run-1",
+                    "journeyType": "physical",
+                    "proofProfile": "physical-transcript",
+                    "transcriptProofEligible": True,
+                    "readyToFinalize": True,
+                },
+                active_claim_matches=lambda **_kw: raises("unused"),
+            ),
+            "claimless_snapshot": types.SimpleNamespace(
+                safe_snapshot=lambda _journey: {
+                    "transcriptProofEligible": True,
+                    "readyToFinalize": True,
+                },
+                active_claim_matches=lambda **_kw: True,
+            ),
+        }
+        for name, registry in registries.items():
+            with self.subTest(name=name):
+                handler = self._build_handler()
+                handler.logger = _RecordingLogger()
+                handler.google_live_evidence_scope = dict(scope)
+                handler.evidence_registry = registry
+                terminal = []
+                if registry is not None:
+                    registry.finalize = lambda *args, **kwargs: terminal.append(
+                        (args, kwargs)
+                    )
+                provider = types.SimpleNamespace(
+                    finalize_evidence=AsyncMock(
+                        return_value={
+                            "status": "PASS",
+                            "journeyId": "physical.run-1",
+                            "connectionId": "server-conn-1",
+                            "peerIdentityHash": "sha256:" + "a" * 64,
+                            "initialLiveConnectionId": "live-7",
+                            "finalLiveConnectionId": "live-7",
+                            "liveConnectionTransitions": [],
+                            "pendingTasks": 0,
+                        }
+                    )
+                )
+                handler.voice_provider = provider
+
+                result = await handler.finalize_google_live_evidence(scope)
+
+                self.assertEqual(result["status"], "FAIL")
+                self.assertEqual(
+                    result["failureCode"], "EVIDENCE_ENROLLMENT_INVALID"
+                )
+                self.assertTrue(result["retryable"])
+                provider.finalize_evidence.assert_not_awaited()
+                self.assertEqual(terminal, [])
+                self.assertFalse(
+                    any(
+                        "reliability_window_end" in record[1]
+                        for record in handler.logger.records
+                    )
+                )
+                self.assertIsNone(
+                    getattr(handler, "google_live_evidence_finalize_result", None)
+                )
+
     async def test_candidate_lifecycle_claim_mismatch_does_not_run_cleanup_or_close_window(self):
         handler = self._build_handler()
         handler.logger = _RecordingLogger()
@@ -1563,7 +1724,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         result = await handler.finalize_google_live_evidence(scope)
 
         self.assertEqual(result["status"], "FAIL")
-        self.assertEqual(result["failureCode"], "EVIDENCE_SCOPE_MISMATCH")
+        self.assertEqual(result["failureCode"], "EVIDENCE_ENROLLMENT_INVALID")
         self.assertTrue(result["retryable"])
         provider.finalize_evidence.assert_not_awaited()
         self.assertEqual(terminal, [])
@@ -1654,6 +1815,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             "serverStartUtc": "2026-08-31T03:00:00+00:00",
         }
         handler.google_live_evidence_scope = scope
+        self._bind_physical_claim(handler, scope)
         handler.voice_provider = types.SimpleNamespace(
             finalize_evidence=AsyncMock(return_value={
                 "status": "PASS",
@@ -1690,6 +1852,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             "peerIdentityHash": "sha256:" + "a" * 64,
             "serverStartUtc": "2026-08-31T03:00:00+00:00",
         }
+        self._bind_physical_claim(handler, handler.google_live_evidence_scope)
         provider = types.SimpleNamespace(finalize_evidence=AsyncMock())
         handler.voice_provider = provider
 
@@ -1723,6 +1886,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             "peerIdentityHash": "sha256:" + "a" * 64,
             "serverStartUtc": "2026-08-31T03:00:00+00:00",
         }
+        self._bind_physical_claim(handler, handler.google_live_evidence_scope)
 
         release_cleanup = asyncio.Event()
         cancelled = []
@@ -1771,10 +1935,12 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         handler.google_live_evidence_scope = scope
         release = asyncio.Event()
         terminal = []
-        handler.evidence_registry = types.SimpleNamespace(
+        self._bind_physical_claim(
+            handler,
+            scope,
             finalize=lambda journey_id, status, failure_code=None: terminal.append(
                 (journey_id, status, failure_code)
-            )
+            ),
         )
 
         async def slow_cleanup():
@@ -1829,6 +1995,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             "serverStartUtc": "2026-08-31T03:00:00+00:00",
         }
         handler.google_live_evidence_scope = scope
+        self._bind_physical_claim(handler, scope)
         release = asyncio.Event()
         stop_requested = asyncio.Event()
 
@@ -1879,6 +2046,7 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             "serverStartUtc": "2026-08-31T03:00:00+00:00",
         }
         handler.google_live_evidence_scope = scope
+        self._bind_physical_claim(handler, scope)
         release = asyncio.Event()
 
         async def hanging_cleanup():
@@ -2376,6 +2544,9 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
                     "peerIdentityHash": "sha256:" + "a" * 64,
                     "serverStartUtc": "2026-08-31T03:00:00+00:00",
                 }
+                self._bind_physical_claim(
+                    handler, handler.google_live_evidence_scope
+                )
                 handler.voice_provider = types.SimpleNamespace(
                     finalize_evidence=AsyncMock(return_value=result)
                 )

@@ -1233,72 +1233,71 @@ class ConnectionHandler:
             registry = getattr(self, "evidence_registry", None)
             journey_id = scope.get("journeyId")
             snapshot = getattr(registry, "safe_snapshot", None)
-            proof_profile = None
-            if callable(snapshot) and isinstance(journey_id, str):
+            active_claim_matches = getattr(registry, "active_claim_matches", None)
+            try:
+                proof_snapshot = (
+                    snapshot(journey_id)
+                    if callable(snapshot) and isinstance(journey_id, str)
+                    else None
+                )
+            except Exception:
+                proof_snapshot = None
+            proof_profile = (
+                proof_snapshot.get("proofProfile")
+                if isinstance(proof_snapshot, dict)
+                else None
+            )
+            journey_type = (
+                proof_snapshot.get("journeyType")
+                if isinstance(proof_snapshot, dict)
+                else None
+            )
+            claim_shape_matches = bool(
+                isinstance(proof_snapshot, dict)
+                and proof_snapshot.get("journeyId") == journey_id
+                and proof_profile in (
+                    "physical-transcript",
+                    "candidate-lifecycle",
+                )
+                and isinstance(journey_type, str)
+                and scope.get("proofProfile") == proof_profile
+                and scope.get("journeyType") == journey_type
+                and callable(active_claim_matches)
+            )
+            claims_match = False
+            if claim_shape_matches:
                 try:
-                    proof_snapshot = snapshot(journey_id)
+                    claims_match = active_claim_matches(
+                        device_id=str(getattr(self, "device_id", "") or ""),
+                        client_id=str(getattr(self, "client_id", "") or ""),
+                        journey_id=journey_id,
+                        journey_type=journey_type,
+                        proof_profile=proof_profile,
+                    ) is True
                 except Exception:
-                    proof_snapshot = None
-                proof_profile = (
-                    proof_snapshot.get("proofProfile")
-                    if isinstance(proof_snapshot, dict)
-                    else None
-                )
-                journey_type = (
-                    proof_snapshot.get("journeyType")
-                    if isinstance(proof_snapshot, dict)
-                    else None
-                )
-                legacy_physical_snapshot = (
-                    isinstance(proof_snapshot, dict)
-                    and proof_profile is None
-                    and journey_type is None
-                )
-                claims_match = legacy_physical_snapshot
-                if not legacy_physical_snapshot and isinstance(proof_snapshot, dict):
-                    active_claim_matches = getattr(
-                        registry, "active_claim_matches", None
-                    )
-                    claims_match = bool(
-                        proof_profile in (
-                            "physical-transcript",
-                            "candidate-lifecycle",
-                        )
-                        and isinstance(journey_type, str)
-                        and scope.get("proofProfile") == proof_profile
-                        and scope.get("journeyType") == journey_type
-                        and callable(active_claim_matches)
-                        and active_claim_matches(
-                            device_id=str(getattr(self, "device_id", "") or ""),
-                            client_id=str(getattr(self, "client_id", "") or ""),
-                            journey_id=journey_id,
-                            journey_type=journey_type,
-                            proof_profile=proof_profile,
-                        )
-                    )
-                if not claims_match:
-                    return {
-                        "type": "evidence_finalized",
-                        "status": "FAIL",
-                        "failureCode": "EVIDENCE_SCOPE_MISMATCH",
-                        "evidenceScope": scope,
-                        "retryable": True,
-                    }
-                transcript_gated = legacy_physical_snapshot or (
-                    proof_profile == "physical-transcript"
-                )
-                if transcript_gated and proof_snapshot.get(
-                    "transcriptProofEligible"
-                ) is False:
-                    proof_failure_code = "EVIDENCE_TRANSCRIPT_INVALID"
-                elif transcript_gated and not proof_snapshot.get("readyToFinalize"):
-                    return {
-                        "type": "evidence_finalized",
-                        "status": "FAIL",
-                        "failureCode": "EVIDENCE_TRANSCRIPT_NOT_READY",
-                        "evidenceScope": scope,
-                        "retryable": True,
-                    }
+                    pass
+            if not claims_match:
+                return {
+                    "type": "evidence_finalized",
+                    "status": "FAIL",
+                    "failureCode": "EVIDENCE_ENROLLMENT_INVALID",
+                    "evidenceScope": scope,
+                    "retryable": True,
+                }
+            if proof_profile == "physical-transcript" and proof_snapshot.get(
+                "transcriptProofEligible"
+            ) is False:
+                proof_failure_code = "EVIDENCE_TRANSCRIPT_INVALID"
+            elif proof_profile == "physical-transcript" and not proof_snapshot.get(
+                "readyToFinalize"
+            ):
+                return {
+                    "type": "evidence_finalized",
+                    "status": "FAIL",
+                    "failureCode": "EVIDENCE_TRANSCRIPT_NOT_READY",
+                    "evidenceScope": scope,
+                    "retryable": True,
+                }
             provider = getattr(self, "voice_provider", None)
             finalize = getattr(provider, "finalize_evidence", None)
             if not callable(finalize):
