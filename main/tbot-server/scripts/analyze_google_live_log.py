@@ -235,7 +235,9 @@ P_EVIDENCE_USER_INTERRUPTED = re.compile(
 P_EVIDENCE_CONNECTION_CLOSE = re.compile(
     r"Google Live evidence_connection_close journey_id=(?P<journey_id>\S+) "
     r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
-    r"pending_tasks=(?P<pending_tasks>\d+) close_code=(?P<close_code>\d+) "
+    r"pending_tasks=(?P<pending_tasks>\d+) "
+    r"(?:active_sessions=(?P<active_sessions>\d+) )?"
+    r"close_code=(?P<close_code>\d+) "
     r"reason=(?P<reason>\S+)"
 )
 P_EVIDENCE_STALE_DROP = re.compile(
@@ -1684,6 +1686,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     active_lesson_step: dict[str, Any] | None = None
     observed_marker_families: dict[str, set[str]] = defaultdict(set)
     scoped_cleanup_pending_tasks: int | None = None
+    scoped_cleanup_active_sessions: int | None = None
     scoped_interrupts: list[dict[str, Any]] = []
     scoped_reconnects: dict[tuple[str, str, int], dict[str, Any]] = {}
     scoped_active_responses: dict[tuple[str, str], int] = {}
@@ -2363,6 +2366,12 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     )
                     scoped_cleanup_pending_tasks = int(
                         scoped_close.group("pending_tasks")
+                    )
+                    active_sessions = scoped_close.group("active_sessions")
+                    scoped_cleanup_active_sessions = (
+                        int(active_sessions)
+                        if active_sessions is not None
+                        else None
                     )
                 elif (
                     isinstance(anchor_scope, Mapping)
@@ -3739,18 +3748,20 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
         "finalLiveConnectionId": scoped_current_live_connection_id,
         "liveConnectionTransitions": scoped_live_connection_transitions,
         "serverConnectionTransitions": server_connection_transitions,
+        "serverIssued": bool(
+            isinstance(start_anchor, Mapping)
+            and start_anchor.get("serverIssued") is True
+        ),
         "cleanupEvidence": {
             "status": (
                 "PASS"
-                if scoped_cleanup_pending_tasks == 0 and receive_loops_active == 0
+                if scoped_cleanup_pending_tasks == 0
+                and scoped_cleanup_active_sessions == 0
+                and receive_loops_active == 0
                 else "FAIL"
             ),
             "pendingOwnedTasks": scoped_cleanup_pending_tasks,
-            "activeSessions": (
-                0
-                if scoped_cleanup_pending_tasks == 0 and receive_loops_active == 0
-                else None
-            ),
+            "activeSessions": scoped_cleanup_active_sessions,
             "activeReceiveLoops": receive_loops_active,
         },
         "logWindow": log_window,

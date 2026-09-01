@@ -4129,9 +4129,14 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
                 self.closed += 1
                 raise RuntimeError("anext(): asynchronous generator is already running")
 
-        provider._client = _ConcurrentCloseClient()
-        await provider._close_live_resources()
-        self.assertIsNone(provider._client)
+        concurrent_client = _ConcurrentCloseClient()
+        provider._client = concurrent_client
+        cleanup_result = await provider._close_live_resources(
+            evidence_finalize=True
+        )
+        self.assertEqual(cleanup_result, "EVIDENCE_CLIENT_CLOSE_INCOMPLETE")
+        self.assertIs(provider._client, concurrent_client)
+        provider._client = None
 
         conn.live_admission_gate = _Gate(SimpleNamespace(decision=AdmissionDecision.ALLOW_LIVE, reason=AdmissionReason.OK))
         conn.google_live_session_started_at = time.monotonic() - 1
@@ -5292,6 +5297,80 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(provider._bridge)
         self.assertIsNone(provider._evidence_cleanup_failure_code)
 
+    async def test_evidence_finalize_retries_concurrent_client_close_before_marker(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "bargein-journey-1"
+        conn.google_live_evidence_scope = {
+            "peerIdentityHash": "sha256:" + "a" * 64,
+        }
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-7")
+        provider._bridge = _Bridge()
+
+        class ConcurrentOnceClient(_Client):
+            async def close(self):
+                self.closed += 1
+                if self.closed == 1:
+                    raise RuntimeError(
+                        "anext(): asynchronous generator is already running"
+                    )
+
+        client = ConcurrentOnceClient()
+        provider._client = client
+
+        first = await provider.finalize_evidence()
+
+        self.assertEqual(first["status"], "FAIL")
+        self.assertEqual(
+            first["failureCode"], "EVIDENCE_CLIENT_CLOSE_INCOMPLETE"
+        )
+        self.assertIs(provider._client, client)
+        self.assertFalse(
+            any(
+                args and "evidence_connection_close" in str(args[0])
+                for _level, args, _kwargs in conn.logger.messages
+            )
+        )
+
+        self.assertTrue(provider.prepare_evidence_finalize_retry())
+        second = await provider.finalize_evidence()
+
+        self.assertEqual(second["status"], "PASS")
+        self.assertIsNone(provider._client)
+        self.assertEqual(client.closed, 2)
+        self.assertEqual(
+            sum(
+                1
+                for _level, args, _kwargs in conn.logger.messages
+                if args and "evidence_connection_close" in str(args[0])
+            ),
+            1,
+        )
+
+    async def test_non_evidence_close_never_leaves_detached_client_close_task(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+
+        class ConcurrentOnceClient(_Client):
+            async def close(self):
+                self.closed += 1
+                if self.closed == 1:
+                    raise RuntimeError(
+                        "anext(): asynchronous generator is already running"
+                    )
+
+        client = ConcurrentOnceClient()
+        provider._client = client
+
+        with self.assertRaisesRegex(RuntimeError, "already running"):
+            await provider._close_live_resources()
+
+        self.assertIs(provider._client, client)
+        self.assertIsNone(provider._evidence_client_close_task)
+        await provider._close_live_resources()
+        self.assertIsNone(provider._client)
+        self.assertEqual(client.closed, 2)
+
     async def test_evidence_live_identity_tracks_ordered_reconnect_transitions(self):
         conn = _Conn()
         conn.google_live_evidence_journey_id = "journey-1"
@@ -5502,7 +5581,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         )
         cleanup_calls = 0
 
-        async def fail_second_cleanup():
+        async def fail_second_cleanup(**_kwargs):
             nonlocal cleanup_calls
             cleanup_calls += 1
             if cleanup_calls == 2:
@@ -5730,7 +5809,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         release_close = asyncio.Event()
         close_calls = 0
 
-        async def controlled_close():
+        async def controlled_close(**_kwargs):
             nonlocal close_calls
             close_calls += 1
             if close_calls == 1:
@@ -5781,7 +5860,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         open_started = asyncio.Event()
         release_open = asyncio.Event()
 
-        async def controlled_close():
+        async def controlled_close(**_kwargs):
             provider._client = None
             provider._bridge = None
 
@@ -5881,7 +5960,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         open_started = asyncio.Event()
         close_calls = 0
 
-        async def controlled_close():
+        async def controlled_close(**_kwargs):
             nonlocal close_calls
             close_calls += 1
             if close_calls == 2:
@@ -5967,7 +6046,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         cleanup_started = asyncio.Event()
         release_cleanup = asyncio.Event()
 
-        async def delayed_cleanup():
+        async def delayed_cleanup(**_kwargs):
             cleanup_started.set()
             await release_cleanup.wait()
 

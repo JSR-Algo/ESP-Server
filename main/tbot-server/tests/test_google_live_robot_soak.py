@@ -505,6 +505,24 @@ def _cleanup_evidence(final_scope):
     }
 
 
+def _cleanup_scope_from_execution(result):
+    return {
+        "journeyId": result["journeyId"],
+        "connectionId": result["connectionId"],
+        "windowId": result["windowId"],
+        "serverEndUtc": result["logWindow"]["end"],
+        "evidenceScope": deepcopy(result["evidenceScope"]),
+        "logWindow": deepcopy(result["logWindow"]),
+        "journeyType": result["name"],
+        "proofProfile": "candidate-lifecycle",
+        "initialLiveConnectionId": result["initialLiveConnectionId"],
+        "finalLiveConnectionId": result["finalLiveConnectionId"],
+        "liveConnectionTransitions": deepcopy(result["liveConnectionTransitions"]),
+        "peerIdentityHash": result["peerIdentityHash"],
+        "serverIssued": True,
+    }
+
+
 class _Clock:
     def __init__(self, values=(0.0, 1800.0, 1800.0)):
         self.values = iter(values)
@@ -1617,12 +1635,7 @@ def test_replay_derives_duration_from_execution_and_padding_windows():
                     )
                 )
         padding = await journeys["monitor"](_args(), duration_sec=480)
-        final_scope = {
-            "journeyId": padding[-1]["journeyId"],
-            "connectionId": padding[-1]["connectionId"],
-            "windowId": padding[-1]["windowId"],
-            "serverEndUtc": padding[-1]["logWindow"]["end"],
-        }
+        final_scope = _cleanup_scope_from_execution(padding[-1])
         return {
             "schemaVersion": "google-live-reliability.v1",
             "name": "candidate_soak_evidence_manifest",
@@ -1633,7 +1646,7 @@ def test_replay_derives_duration_from_execution_and_padding_windows():
             "quietPadding": padding,
             "cleanup": _cleanup_evidence(final_scope),
             "resourceSamples": [
-                {**_samples(), "sampleId": f"resource-{index}"}
+                {**_samples(), "sampleId": f"candidate-resource-{index}"}
                 for index in range(1, 37)
             ],
         }
@@ -1663,12 +1676,7 @@ def test_replay_does_not_credit_inter_window_gaps_toward_duration():
     _refresh_execution_sequence(manifest["executions"])
     manifest["durationSec"] = 1485
     manifest["cleanup"] = _cleanup_evidence(
-        {
-            "journeyId": manifest["executions"][-1]["journeyId"],
-            "connectionId": manifest["executions"][-1]["connectionId"],
-            "windowId": manifest["executions"][-1]["windowId"],
-            "serverEndUtc": manifest["executions"][-1]["logWindow"]["end"],
-        }
+        _cleanup_scope_from_execution(manifest["executions"][-1])
     )
 
     report = _run_manifest(manifest)
@@ -1788,15 +1796,10 @@ def _full_span_manifest(*, padding=None, samples=35):
             "executions": executions,
             "quietPadding": [] if padding is None else padding,
             "cleanup": _cleanup_evidence(
-                {
-                    "journeyId": executions[-1]["journeyId"],
-                    "connectionId": executions[-1]["connectionId"],
-                    "windowId": executions[-1]["windowId"],
-                    "serverEndUtc": executions[-1]["logWindow"]["end"],
-                }
+                _cleanup_scope_from_execution(executions[-1])
             ),
             "resourceSamples": [
-                {**_samples(), "sampleId": f"resource-{index}"}
+                {**_samples(), "sampleId": f"candidate-resource-{index}"}
                 for index in range(1, samples + 1)
             ],
         }
@@ -1888,7 +1891,7 @@ def test_needed_padding_rejects_duplicate_resource_sample_id():
                 executions.append(await journeys[callable_name](_args(), name=name, index=index))
         padding = await journeys["monitor"](_args(), duration_sec=480)
         samples = [
-            {**_samples(), "sampleId": f"resource-{index}"}
+            {**_samples(), "sampleId": f"candidate-resource-{index}"}
             for index in range(1, 37)
         ]
         samples[-1]["sampleId"] = samples[-2]["sampleId"]
@@ -1901,12 +1904,7 @@ def test_needed_padding_rejects_duplicate_resource_sample_id():
             "executions": executions,
             "quietPadding": padding,
             "cleanup": _cleanup_evidence(
-                {
-                    "journeyId": padding[-1]["journeyId"],
-                    "connectionId": padding[-1]["connectionId"],
-                    "windowId": padding[-1]["windowId"],
-                    "serverEndUtc": padding[-1]["logWindow"]["end"],
-                }
+                _cleanup_scope_from_execution(padding[-1])
             ),
             "resourceSamples": samples,
         }
@@ -2404,6 +2402,70 @@ def test_candidate_producer_writes_closed_manifest_with_exact_accounting(tmp_pat
     assert replay["durationSec"] == 1800.0
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing", "extra", "wrong_id", "duplicate_id", "bool_count",
+        "negative_count", "float_rss", "negative_rss",
+    ],
+)
+def test_candidate_replay_rejects_invalid_resource_sample_contract(
+    tmp_path, mutation
+):
+    manifest = _full_span_manifest()
+    sample = manifest["resourceSamples"][0]
+    if mutation == "missing":
+        sample.pop("fdCount")
+    elif mutation == "extra":
+        sample["extra"] = 0
+    elif mutation == "wrong_id":
+        sample["sampleId"] = "resource-1"
+    elif mutation == "duplicate_id":
+        manifest["resourceSamples"][1]["sampleId"] = sample["sampleId"]
+    elif mutation == "bool_count":
+        sample["threadCount"] = True
+    elif mutation == "negative_count":
+        sample["asyncioTaskCount"] = -1
+    elif mutation == "float_rss":
+        sample["rssBytes"] = 1.5
+    else:
+        sample["rssBytes"] = -1
+    report_path = tmp_path / "candidate-soak" / "report.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text('{"status":"PASS","closed":true}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="resource accounting"):
+        asyncio.run(
+            run_soak(
+                _args(
+                    mode="candidate",
+                    candidate_journeys=None,
+                    journey_evidence=manifest,
+                )
+            )
+        )
+
+    assert report_path.read_text(encoding="utf-8") == (
+        '{"status":"PASS","closed":true}\n'
+    )
+
+
+def test_candidate_producer_rejects_invalid_resource_sample_before_publish(tmp_path):
+    output = tmp_path / "journey-evidence.json"
+
+    result = asyncio.run(
+        produce_candidate_evidence(
+            _args(produce_candidate_evidence=output),
+            journeys=_journeys(),
+            sample_resources=lambda: {**_samples(), "fdCount": False},
+            clock=_Clock(),
+        )
+    )
+
+    assert result["status"] == "FAIL"
+    assert not output.exists()
+
+
 def test_candidate_producer_failure_leaves_no_partial_manifest(tmp_path):
     output = tmp_path / "journey-evidence.json"
     journeys = _journeys()
@@ -2588,6 +2650,71 @@ def test_candidate_exclusive_writer_rejects_parent_symlink(tmp_path):
             linked_parent / "report.json", {"status": "PASS"}
         )
     assert not (real_parent / "report.json").exists()
+
+
+def test_candidate_exclusive_writer_rejects_ancestor_symlink(tmp_path):
+    real_ancestor = tmp_path / "real"
+    (real_ancestor / "nested").mkdir(parents=True)
+    linked_ancestor = tmp_path / "linked"
+    linked_ancestor.symlink_to(real_ancestor, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        robot_soak._atomic_write_json_exclusive(
+            linked_ancestor / "nested" / "report.json", {"status": "PASS"}
+        )
+    assert not (real_ancestor / "nested" / "report.json").exists()
+
+
+def test_candidate_exclusive_writer_rejects_ancestor_component_swap(
+    tmp_path, monkeypatch
+):
+    ancestor = tmp_path / "evidence"
+    (ancestor / "nested").mkdir(parents=True)
+    moved = tmp_path / "evidence-original"
+    original_open = robot_soak.os.open
+    swapped = False
+
+    def swap_then_open(path, *args, **kwargs):
+        nonlocal swapped
+        if path == "nested" and kwargs.get("dir_fd") is not None and not swapped:
+            ancestor.rename(moved)
+            (ancestor / "nested").mkdir(parents=True)
+            swapped = True
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(robot_soak.os, "open", swap_then_open)
+
+    with pytest.raises(RuntimeError, match="parent changed"):
+        robot_soak._atomic_write_json_exclusive(
+            ancestor / "nested" / "report.json", {"status": "PASS"}
+        )
+    assert not (ancestor / "nested" / "report.json").exists()
+
+
+def test_candidate_exclusive_writer_rejects_ancestor_swap_to_alias_symlink(
+    tmp_path, monkeypatch
+):
+    ancestor = tmp_path / "evidence"
+    (ancestor / "nested").mkdir(parents=True)
+    moved = tmp_path / "evidence-original"
+    original_link = robot_soak.os.link
+    swapped = False
+
+    def swap_to_alias_then_link(*args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            ancestor.rename(moved)
+            ancestor.symlink_to(moved, target_is_directory=True)
+            swapped = True
+        return original_link(*args, **kwargs)
+
+    monkeypatch.setattr(robot_soak.os, "link", swap_to_alias_then_link)
+
+    with pytest.raises(RuntimeError, match="parent changed"):
+        robot_soak._atomic_write_json_exclusive(
+            ancestor / "nested" / "report.json", {"status": "PASS"}
+        )
+    assert not (moved / "nested" / "report.json").exists()
 
 
 def test_candidate_exclusive_writer_rejects_parent_swap(tmp_path, monkeypatch):
@@ -3090,25 +3217,29 @@ def test_default_candidate_cleanup_rejects_authoritative_leaked_server_work(tmp_
         async def close(self):
             return None
 
+    execution = asyncio.run(
+        _journeys()["quiet"](_args(), name="quiet", index=1)
+    )
+    final_scope = _cleanup_scope_from_execution(execution)
+    log_evidence = deepcopy(execution["task5LogEvidence"])
+    log_evidence["serverIssued"] = True
+    log_evidence["cleanupEvidence"] = {
+        "status": "FAIL",
+        "pendingOwnedTasks": 1,
+        "activeSessions": 1,
+        "activeReceiveLoops": 1,
+    }
     args = _args(
         produce_candidate_evidence=tmp_path / "journey-evidence.json",
         evidence_control_url="http://server.test",
         device_id="aa:bb",
         candidate_control_json=lambda *_args, **_kwargs: {
-            "journeyId": "candidate-soak.20260831T100000Z.34",
-            "journeyType": "quiet_padding",
+            "journeyId": final_scope["journeyId"],
+            "journeyType": final_scope["journeyType"],
             "proofProfile": "candidate-lifecycle",
             "status": "PASS",
         },
-        candidate_log_analyzer=lambda **_kwargs: {
-            "status": "PASS",
-            "cleanupEvidence": {
-                "status": "FAIL",
-                "pendingOwnedTasks": 1,
-                "activeSessions": 1,
-                "activeReceiveLoops": 1,
-            },
-        },
+        candidate_log_analyzer=lambda **_kwargs: log_evidence,
     )
     args._candidate_websocket_state = {"websocket": Websocket()}
 
@@ -3116,16 +3247,133 @@ def test_default_candidate_cleanup_rejects_authoritative_leaked_server_work(tmp_
         robot_soak._run_candidate_websocket_journey(
             args,
             operation="cleanup",
-            final_scope={
-                "journeyId": "candidate-soak.20260831T100000Z.34",
-                "connectionId": "connection-1",
-            },
+            final_scope=final_scope,
         )
     )
 
     assert result["status"] == "FAIL"
     assert result["providerCloseStatus"] == "FAIL"
     assert result["pendingOwnedTasks"] == 1
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "identity", "scope", "window", "journey_type", "proof_profile",
+        "lineage", "server_issued", "journey_id", "final_scope",
+        "terminal_type", "terminal_profile",
+    ],
+)
+def test_default_candidate_cleanup_rejects_unbound_analyzer_evidence(
+    tmp_path, mutation
+):
+    class Websocket:
+        async def close(self):
+            return None
+
+    result = asyncio.run(
+        _journeys()["quiet"](_args(), name="quiet", index=1)
+    )
+    final_scope = _cleanup_scope_from_execution(result)
+    log_evidence = deepcopy(result["task5LogEvidence"])
+    log_evidence["serverIssued"] = True
+    log_evidence["cleanupEvidence"] = {
+        "status": "PASS",
+        "pendingOwnedTasks": 0,
+        "activeSessions": 0,
+        "activeReceiveLoops": 0,
+    }
+    terminal = {
+        "journeyId": final_scope["journeyId"],
+        "journeyType": final_scope["journeyType"],
+        "proofProfile": final_scope["proofProfile"],
+        "status": "PASS",
+    }
+    if mutation == "identity":
+        log_evidence["candidateIdentity"] = {**IDENTITY, "gitSha": "f" * 40}
+    elif mutation == "scope":
+        log_evidence["evidenceScope"]["connectionId"] = "foreign"
+    elif mutation == "window":
+        log_evidence["logWindow"]["windowId"] = "foreign"
+    elif mutation == "journey_type":
+        log_evidence["journeyType"] = "conversation"
+    elif mutation == "proof_profile":
+        log_evidence["evidenceScope"]["proofProfile"] = "physical-transcript"
+    elif mutation == "lineage":
+        log_evidence["finalLiveConnectionId"] = "foreign-live"
+    elif mutation == "server_issued":
+        log_evidence["serverIssued"] = False
+    elif mutation == "journey_id":
+        terminal["journeyId"] = "foreign-journey"
+    elif mutation == "final_scope":
+        final_scope["connectionId"] = "foreign-connection"
+    elif mutation == "terminal_type":
+        terminal["journeyType"] = "conversation"
+    else:
+        terminal["proofProfile"] = "physical-transcript"
+    args = _args(
+        produce_candidate_evidence=tmp_path / "journey-evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        candidate_control_json=lambda *_args, **_kwargs: terminal,
+        candidate_log_analyzer=lambda **_kwargs: log_evidence,
+    )
+    args._candidate_websocket_state = {"websocket": Websocket()}
+
+    cleanup = asyncio.run(
+        robot_soak._run_candidate_websocket_journey(
+            args,
+            operation="cleanup",
+            final_scope=final_scope,
+        )
+    )
+
+    assert cleanup["status"] == "FAIL"
+    assert cleanup["providerCloseStatus"] == "FAIL"
+    assert cleanup["logStatus"] == "FAIL"
+
+
+def test_default_candidate_cleanup_accepts_only_bound_analyzer_evidence(tmp_path):
+    class Websocket:
+        async def close(self):
+            return None
+
+    execution = asyncio.run(
+        _journeys()["quiet"](_args(), name="quiet", index=1)
+    )
+    final_scope = _cleanup_scope_from_execution(execution)
+    log_evidence = deepcopy(execution["task5LogEvidence"])
+    log_evidence["serverIssued"] = True
+    log_evidence["cleanupEvidence"] = {
+        "status": "PASS",
+        "pendingOwnedTasks": 0,
+        "activeSessions": 0,
+        "activeReceiveLoops": 0,
+    }
+    args = _args(
+        produce_candidate_evidence=tmp_path / "journey-evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        candidate_control_json=lambda *_args, **_kwargs: {
+            "journeyId": final_scope["journeyId"],
+            "journeyType": final_scope["journeyType"],
+            "proofProfile": final_scope["proofProfile"],
+            "status": "PASS",
+        },
+        candidate_log_analyzer=lambda **_kwargs: log_evidence,
+    )
+    args._candidate_websocket_state = {"websocket": Websocket()}
+
+    cleanup = asyncio.run(
+        robot_soak._run_candidate_websocket_journey(
+            args, operation="cleanup", final_scope=final_scope
+        )
+    )
+
+    assert cleanup["status"] == "PASS"
+    assert cleanup["pendingOwnedTasks"] == 0
+    assert cleanup["activeSessions"] == 0
+    assert cleanup["activeReceiveLoops"] == 0
 
 
 def test_candidate_cli_producer_and_replay_are_mutually_exclusive(tmp_path):

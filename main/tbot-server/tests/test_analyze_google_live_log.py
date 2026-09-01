@@ -2238,6 +2238,16 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         self.assertEqual(verdict["cleanupEvidence"]["status"], "FAIL")
         self.assertEqual(verdict["cleanupEvidence"]["activeReceiveLoops"], 1)
 
+    def test_cleanup_evidence_fails_when_live_session_remains_active(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live evidence_connection_close journey_id=j1 connection_id=c1 live_connection_id=l1 pending_tasks=0 active_sessions=1 close_code=1000 reason=evidence_finalize",
+            )
+        )
+
+        self.assertEqual(verdict["cleanupEvidence"]["status"], "FAIL")
+        self.assertEqual(verdict["cleanupEvidence"]["activeSessions"], 1)
+
     def test_claimed_lesson_and_reconnect_require_non_vacuous_coverage(self):
         for journey in ("lesson", "reconnect"):
             with self.subTest(journey=journey):

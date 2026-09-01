@@ -443,6 +443,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._evidence_final_response_reservation = None
         self._evidence_last_transcript_event_token = None
         self._evidence_cleanup_failure_code = None
+        self._evidence_client_close_task = None
         self._evidence_initial_live_connection_id = None
         self._evidence_current_live_connection_id = None
         self._evidence_live_connection_transitions = []
@@ -1034,7 +1035,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if evidence_scope is None:
                 return {"status": "FAIL", "failureCode": "EVIDENCE_SCOPE_MISSING"}
             self._ensure_evidence_live_identity()
-            cleanup_result = await self._close_live_resources()
+            cleanup_result = await self._close_live_resources(
+                evidence_finalize=True
+            )
             cleanup_failure_code = (
                 cleanup_result
                 if cleanup_result == "EVIDENCE_BRIDGE_CLOSE_FAILED"
@@ -1043,13 +1046,17 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if self._fallback_provider is not None:
                 await self._fallback_provider.close()
             pending_tasks = self._pending_evidence_task_count()
-            self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live evidence_connection_close journey_id={} "
-                "connection_id={} live_connection_id={} pending_tasks={} "
-                "close_code=1000 reason=evidence_finalize",
-                *evidence_scope,
-                pending_tasks,
-            )
+            if not str(cleanup_failure_code or "").startswith(
+                "EVIDENCE_CLIENT_CLOSE_"
+            ):
+                self.conn.logger.bind(tag="GoogleLive").info(
+                    "Google Live evidence_connection_close journey_id={} "
+                    "connection_id={} live_connection_id={} pending_tasks={} active_sessions={} "
+                    "close_code=1000 reason=evidence_finalize",
+                    *evidence_scope,
+                    pending_tasks,
+                    int(self._client is not None),
+                )
             self._evidence_finalize_result = {
                 "status": (
                     "PASS"
@@ -1129,7 +1136,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._closing = True
         self._lifecycle_generation += 1
         async with self._get_lifecycle_lock():
-            await self._close_live_resources()
+            await self._close_live_resources(evidence_finalize=True)
             if self._fallback_provider is not None:
                 await self._fallback_provider.close()
 
@@ -3453,7 +3460,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
         finally:
             self._fallback_activating = False
 
-    async def _close_live_resources(self, *, preserve_live_prewarm=False):
+    async def _close_live_resources(
+        self, *, preserve_live_prewarm=False, evidence_finalize=False
+    ):
         cleanup_failure_code = None
         current_task = asyncio.current_task()
         receive_task = self._receive_task
@@ -3609,16 +3618,49 @@ class GoogleLiveProvider(VoiceSessionProvider):
         await self._record_live_session_usage()
 
         if self._client is not None:
-            try:
+            if not evidence_finalize:
                 await self._client.close()
-            except RuntimeError as exc:
-                if "asynchronous generator is already running" not in str(exc):
-                    raise
-                self.conn.logger.bind(tag="GoogleLive").warning(
-                    "Google Live close skipped concurrent live_context exit: {}",
-                    self._safe_error_message(exc),
-                )
-        self._client = None
+                self._client = None
+            else:
+                close_task = self._evidence_client_close_task
+                if close_task is None:
+                    close_task = asyncio.create_task(self._client.close())
+                    self._evidence_client_close_task = close_task
+                try:
+                    await asyncio.wait_for(asyncio.shield(close_task), timeout=2.0)
+                except RuntimeError as exc:
+                    self._evidence_client_close_task = None
+                    cleanup_failure_code = (
+                        "EVIDENCE_CLIENT_CLOSE_INCOMPLETE"
+                        if "asynchronous generator is already running" in str(exc)
+                        else "EVIDENCE_CLIENT_CLOSE_FAILED"
+                    )
+                    self._evidence_cleanup_failure_code = cleanup_failure_code
+                    self.conn.logger.bind(tag="GoogleLive").warning(
+                        "Google Live client close incomplete: {}",
+                        self._safe_error_message(exc),
+                    )
+                except asyncio.TimeoutError:
+                    cleanup_failure_code = "EVIDENCE_CLIENT_CLOSE_INCOMPLETE"
+                    self._evidence_cleanup_failure_code = cleanup_failure_code
+                    self.conn.logger.bind(tag="GoogleLive").warning(
+                        "Google Live client close incomplete: timeout"
+                    )
+                except Exception as exc:
+                    self._evidence_client_close_task = None
+                    cleanup_failure_code = "EVIDENCE_CLIENT_CLOSE_FAILED"
+                    self._evidence_cleanup_failure_code = cleanup_failure_code
+                    self.conn.logger.bind(tag="GoogleLive").warning(
+                        "Google Live client close failed: {}",
+                        self._safe_error_message(exc),
+                    )
+                else:
+                    self._evidence_client_close_task = None
+                    self._client = None
+                    if str(
+                        self._evidence_cleanup_failure_code or ""
+                    ).startswith("EVIDENCE_CLIENT_CLOSE_"):
+                        self._evidence_cleanup_failure_code = None
 
         self._start_lesson_asr_fallback_audio.clear()
         if self._has_session_orchestrator():

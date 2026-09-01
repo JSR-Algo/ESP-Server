@@ -1641,14 +1641,63 @@ def _atomic_write_json(path: Path, value: Mapping) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _atomic_write_json_exclusive(path: Path, value: Mapping):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _open_pinned_parent(path: Path):
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    parts = absolute.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts[1:]):
+        raise ValueError("candidate evidence output path is invalid")
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(
         os, "O_NOFOLLOW", 0
     )
-    directory_fd = os.open(path.parent, directory_flags)
-    directory_stat = os.fstat(directory_fd)
+    directory_fd = os.open(parts[0], directory_flags)
+    ancestry = [
+        (os.fstat(directory_fd).st_dev, os.fstat(directory_fd).st_ino)
+    ]
+    try:
+        for component in parts[1:-1]:
+            try:
+                next_fd = os.open(
+                    component, directory_flags, dir_fd=directory_fd
+                )
+            except FileNotFoundError:
+                os.mkdir(component, 0o755, dir_fd=directory_fd)
+                next_fd = os.open(
+                    component, directory_flags, dir_fd=directory_fd
+                )
+            os.close(directory_fd)
+            directory_fd = next_fd
+            opened = os.fstat(directory_fd)
+            ancestry.append((opened.st_dev, opened.st_ino))
+        return absolute, directory_fd, tuple(ancestry)
+    except BaseException:
+        os.close(directory_fd)
+        raise
+
+
+def _pinned_parent_path_matches(path: Path, ancestry) -> bool:
+    parts = path.parts
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    directory_fd = os.open(parts[0], directory_flags)
+    try:
+        opened = os.fstat(directory_fd)
+        observed = [(opened.st_dev, opened.st_ino)]
+        for component in parts[1:]:
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+            opened = os.fstat(directory_fd)
+            observed.append((opened.st_dev, opened.st_ino))
+        return tuple(observed) == tuple(ancestry)
+    except OSError:
+        return False
+    finally:
+        os.close(directory_fd)
+
+
+def _atomic_write_json_exclusive(path: Path, value: Mapping):
+    path, directory_fd, ancestry = _open_pinned_parent(Path(path))
     temporary_name = f".{path.name}.{secrets.token_hex(12)}.tmp"
     descriptor = None
     written_stat = None
@@ -1705,11 +1754,7 @@ def _atomic_write_json_exclusive(path: Path, value: Mapping):
             or final_stat.st_nlink != 1
         ):
             raise RuntimeError("candidate evidence output alias detected")
-        current_parent_stat = os.stat(path.parent, follow_symlinks=False)
-        if (current_parent_stat.st_dev, current_parent_stat.st_ino) != (
-            directory_stat.st_dev,
-            directory_stat.st_ino,
-        ):
+        if not _pinned_parent_path_matches(path.parent, ancestry):
             raise RuntimeError("candidate evidence parent changed")
         os.fsync(directory_fd)
         published = True
@@ -1748,6 +1793,36 @@ def _publish_candidate_report(path: Path, report: Mapping) -> bool:
     except FileExistsError:
         return False
     return True
+
+
+_RESOURCE_SAMPLE_FIELDS = frozenset(
+    {"sampleId", "rssBytes", "fdCount", "asyncioTaskCount", "threadCount"}
+)
+_RESOURCE_METRIC_FIELDS = _RESOURCE_SAMPLE_FIELDS - {"sampleId"}
+
+
+def _valid_resource_metrics(sample) -> bool:
+    return (
+        isinstance(sample, Mapping)
+        and set(sample) == _RESOURCE_METRIC_FIELDS
+        and all(
+            type(sample.get(field)) is int and sample[field] >= 0
+            for field in _RESOURCE_METRIC_FIELDS
+        )
+    )
+
+
+def _valid_resource_samples(samples) -> bool:
+    return isinstance(samples, list) and all(
+        isinstance(sample, Mapping)
+        and set(sample) == _RESOURCE_SAMPLE_FIELDS
+        and sample.get("sampleId") == f"candidate-resource-{index}"
+        and all(
+            type(sample.get(field)) is int and sample[field] >= 0
+            for field in _RESOURCE_METRIC_FIELDS
+        )
+        for index, sample in enumerate(samples, 1)
+    )
 
 
 def _validate_candidate_manifest_structure(manifest, *, identity) -> None:
@@ -1791,13 +1866,7 @@ def _validate_candidate_manifest_structure(manifest, *, identity) -> None:
         or not _finite_nonnegative(manifest.get("runtimeElapsedSec"))
     ):
         raise ValueError("candidate evidence manifest is incomplete")
-    sample_ids = [
-        sample.get("sampleId") if isinstance(sample, Mapping) else None
-        for sample in samples
-    ]
-    if any(not isinstance(value, str) or not value for value in sample_ids) or len(
-        set(sample_ids)
-    ) != len(sample_ids):
+    if not _valid_resource_samples(samples):
         raise ValueError("candidate evidence resource accounting is invalid")
     execution_fields = {
         "schemaVersion", "name", "status", "candidateIdentity", "evidenceSequence",
@@ -1948,16 +2017,55 @@ async def _run_candidate_websocket_journey(args, **context):
             cleanup_output,
         )
         terminal = await _candidate_control_json(args, "GET", journey_url)
-        cleanup_proof = (
+        raw_cleanup_proof = (
             log_evidence.get("cleanupEvidence")
             if isinstance(log_evidence, Mapping)
             else None
         )
-        proof_pass = (
-            isinstance(terminal, Mapping)
+        expected_scope = final_scope.get("evidenceScope")
+        expected_log_window = final_scope.get("logWindow")
+        analyzer_bound = (
+            isinstance(log_evidence, Mapping)
+            and isinstance(expected_scope, Mapping)
+            and isinstance(expected_log_window, Mapping)
+            and not _validate_log_reliability_contract(
+                log_evidence,
+                expected_candidate_identity=_candidate_identity(args),
+                expected_log_window=dict(expected_log_window),
+                expected_evidence_scope=dict(expected_scope),
+            )
+            and log_evidence.get("serverIssued") is True
+            and log_evidence.get("journeyType") == final_scope.get("journeyType")
+            and expected_scope.get("journeyId") == journey_id
+            and final_scope.get("connectionId")
+            == expected_scope.get("connectionId")
+            and final_scope.get("windowId") == expected_log_window.get("windowId")
+            and final_scope.get("serverEndUtc") == expected_log_window.get("end")
+            and expected_scope.get("journeyType") == final_scope.get("journeyType")
+            and expected_scope.get("proofProfile")
+            == final_scope.get("proofProfile")
+            and final_scope.get("peerIdentityHash")
+            == expected_scope.get("peerIdentityHash")
+            and final_scope.get("initialLiveConnectionId")
+            == expected_scope.get("initialLiveConnectionId")
+            and final_scope.get("serverIssued") is True
+            and all(
+                log_evidence.get(field) == final_scope.get(field)
+                for field in (
+                    "initialLiveConnectionId",
+                    "finalLiveConnectionId",
+                    "liveConnectionTransitions",
+                )
+            )
+            and isinstance(terminal, Mapping)
             and terminal.get("journeyId") == journey_id
+            and terminal.get("journeyType") == final_scope.get("journeyType")
+            and terminal.get("proofProfile") == final_scope.get("proofProfile")
             and terminal.get("status") == "PASS"
-            and terminal.get("proofProfile") == "candidate-lifecycle"
+        )
+        cleanup_proof = raw_cleanup_proof if analyzer_bound else None
+        proof_pass = (
+            analyzer_bound
             and isinstance(cleanup_proof, Mapping)
             and cleanup_proof.get("status") == "PASS"
             and cleanup_proof.get("pendingOwnedTasks") == 0
@@ -1977,7 +2085,7 @@ async def _run_candidate_websocket_journey(args, **context):
             },
             "websocketClosed": True,
             "providerFinalizeStatus": (
-                "PASS" if isinstance(terminal, Mapping) and terminal.get("status") == "PASS" else "FAIL"
+                "PASS" if analyzer_bound else "FAIL"
             ),
             "providerCloseStatus": (
                 "PASS" if isinstance(cleanup_proof, Mapping) and cleanup_proof.get("status") == "PASS" else "FAIL"
@@ -1991,7 +2099,7 @@ async def _run_candidate_websocket_journey(args, **context):
             "activeReceiveLoops": cleanup_proof.get("activeReceiveLoops")
             if isinstance(cleanup_proof, Mapping)
             else None,
-            "logStatus": "PASS" if isinstance(log_evidence, Mapping) and log_evidence.get("status") == "PASS" else "FAIL",
+            "logStatus": "PASS" if analyzer_bound else "FAIL",
             "resourceEndSampleRequired": True,
         }
     name = context["name"]
@@ -2525,8 +2633,8 @@ async def produce_candidate_evidence(
     def recorded_sample():
         nonlocal sample_sequence
         value = sample_resources()
-        if not isinstance(value, Mapping):
-            return value
+        if not _valid_resource_metrics(value):
+            raise ValueError("candidate evidence resource accounting is invalid")
         sample_sequence += 1
         sample = dict(value)
         sample["sampleId"] = f"candidate-resource-{sample_sequence}"
@@ -3303,6 +3411,17 @@ async def _run_candidate_soak_impl(
         "serverEndUtc": last_window_end.isoformat()
         if last_window_end is not None
         else None,
+        "evidenceScope": final_evidence.get("evidenceScope"),
+        "logWindow": final_evidence.get("logWindow"),
+        "journeyType": final_evidence.get("name"),
+        "proofProfile": "candidate-lifecycle",
+        "initialLiveConnectionId": final_evidence.get("initialLiveConnectionId"),
+        "finalLiveConnectionId": final_evidence.get("finalLiveConnectionId"),
+        "liveConnectionTransitions": final_evidence.get(
+            "liveConnectionTransitions"
+        ),
+        "peerIdentityHash": final_evidence.get("peerIdentityHash"),
+        "serverIssued": final_evidence.get("serverIssued"),
     }
     cleanup_evidence = await cleanup(args, final_scope=final_scope)
     samples.append(safe_sample())
