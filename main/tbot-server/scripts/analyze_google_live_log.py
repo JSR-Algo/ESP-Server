@@ -1755,6 +1755,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     scoped_interrupts: list[dict[str, Any]] = []
     scoped_reconnects: dict[tuple[str, str, int], dict[str, Any]] = {}
     scoped_active_responses: dict[tuple[str, str], int] = {}
+    scoped_ambiguous_response_scopes: set[tuple[str, str]] = set()
     scoped_lesson_pending_pings: dict[str, int] = {}
     scoped_receive_generations: set[int] = set()
     scoped_receive_start_count = 0
@@ -2159,6 +2160,21 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                             )
                         )
                         continue
+                    active_response_ids = []
+                    if isinstance(anchor_scope, Mapping):
+                        anchored_response_scope = (
+                            anchor_scope.get("connectionId"),
+                            scoped_current_live_connection_id,
+                        )
+                        active_response_ids = [
+                            response_id
+                            for (connection_id, live_connection_id), response_id
+                            in scoped_active_responses.items()
+                            if connection_id == anchor_scope.get("connectionId")
+                            and live_connection_id == scoped_current_live_connection_id
+                        ]
+                        if anchored_response_scope in scoped_ambiguous_response_scopes:
+                            active_response_ids = []
                     candidate_intent_matches.append(
                         {
                             "line": line_number,
@@ -2167,7 +2183,12 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                             "chars": chars,
                             "matched": groups["matched"] == "true",
                             "responseGeneration": generation,
-                            "duringActiveResponse": bool(scoped_active_responses),
+                            "activeResponseIds": tuple(active_response_ids),
+                            "activeResponseId": (
+                                active_response_ids[0]
+                                if len(active_response_ids) == 1
+                                else None
+                            ),
                         }
                     )
                 elif semantic_match.re is P_EVIDENCE_CANDIDATE_INTENT_REPLACEMENT:
@@ -2343,6 +2364,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 response_scope = response_key[:2]
                 active_response_id = scoped_active_responses.get(response_scope)
                 if active_response_id is not None:
+                    scoped_ambiguous_response_scopes.add(response_scope)
                     failures.append(
                         _failure(
                             "RESPONSE_OVERLAP"
@@ -3897,12 +3919,17 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
         )
         initial_matched = bool(initial and initial["matched"])
         newest_matched = bool(
-            newest and newest["matched"] and newest["duringActiveResponse"]
+            newest
+            and newest["matched"]
+            and len(newest["activeResponseIds"]) == 1
+            and newest["responseGeneration"] == newest["activeResponseId"]
         )
         replacement_owned = bool(
             newest_matched
             and replacement
             and correlation.get("status") == "PASS"
+            and newest["activeResponseId"]
+            == correlation.get("cancelledResponseId")
             and newest["responseGeneration"]
             == correlation.get("cancelledResponseId")
             and replacement["oldGeneration"] == newest["responseGeneration"]

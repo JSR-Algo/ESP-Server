@@ -1006,6 +1006,74 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             ]
         )
 
+    def test_candidate_bargein_newest_intent_must_observe_the_exact_cancelled_response(self):
+        lines = _candidate_semantic_bargein_window()
+        old_start_index = next(
+            index
+            for index, line in enumerate(lines)
+            if "evidence_response_started" in line and "response_id=7" in line
+        )
+        newest_index = next(
+            index
+            for index, line in enumerate(lines)
+            if "role=newest" in line
+        )
+        lines[old_start_index] = lines[old_start_index].replace(
+            "response_id=7", "response_id=6"
+        )
+        lines[newest_index + 1:newest_index + 1] = [
+            "2026-08-31 10:00:04 Google Live evidence_response_ended "
+            "journey_id=bargein-journey-1 connection_id=conn-1 "
+            "live_connection_id=live-1 response_id=6",
+            "2026-08-31 10:00:04 Google Live evidence_response_started "
+            "journey_id=bargein-journey-1 connection_id=conn-1 "
+            "live_connection_id=live-1 response_id=7",
+        ]
+
+        verdict = self._analyze(lines)
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertFalse(verdict["candidateSemanticEvidence"]["latestIntentMatched"])
+        self.assertFalse(
+            verdict["candidateSemanticEvidence"][
+                "replacementOwnedByNewestGeneration"
+            ]
+        )
+
+    def test_candidate_bargein_newest_intent_rejects_zero_or_foreign_active_response(self):
+        for foreign_active in (False, True):
+            with self.subTest(foreign_active=foreign_active):
+                lines = _candidate_semantic_bargein_window()
+                old_start_index = next(
+                    index
+                    for index, line in enumerate(lines)
+                    if "evidence_response_started" in line
+                    and "response_id=7" in line
+                )
+                newest_index = next(
+                    index for index, line in enumerate(lines) if "role=newest" in line
+                )
+                old_start = lines.pop(old_start_index)
+                newest_index = next(
+                    index for index, line in enumerate(lines) if "role=newest" in line
+                )
+                if foreign_active:
+                    lines.insert(
+                        newest_index,
+                        "2026-08-31 10:00:03 Google Live evidence_response_started "
+                        "journey_id=foreign connection_id=conn-foreign "
+                        "live_connection_id=live-foreign response_id=7",
+                    )
+                    newest_index += 1
+                lines.insert(newest_index + 1, old_start)
+
+                verdict = self._analyze(lines)
+
+                self.assertEqual(verdict["status"], "FAIL", verdict)
+                self.assertFalse(
+                    verdict["candidateSemanticEvidence"]["latestIntentMatched"]
+                )
+
     def test_candidate_quiet_semantic_evidence_passes_for_both_exact_modes(self):
         for mode, response_count in (("silence", 0), ("robot_speaking", 1)):
             with self.subTest(mode=mode):
