@@ -430,6 +430,11 @@ async def run_smoke(
             if preflight_failure is not None:
                 summary["failureCode"] = preflight_failure
                 return summary
+            await websocket.send(
+                json.dumps(
+                    {"type": "listen", "state": "start", "mode": "realtime"}
+                )
+            )
             first_packet_sent = asyncio.Event()
             stop_task = asyncio.create_task(
                 _observe_interrupt_stop(

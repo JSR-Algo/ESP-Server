@@ -2227,6 +2227,17 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
         self.assertEqual(verdict["status"], "FAIL", verdict)
         self.assertIn("PENDING_TASK_AT_CLOSE", [item["code"] for item in verdict["failures"]])
 
+    def test_cleanup_evidence_fails_when_receive_loop_remains_active(self):
+        verdict = self._analyze(
+            _window_lines(
+                "2026-08-31 10:00:01 Google Live evidence_receive_loop_started journey_id=j1 connection_id=c1 live_connection_id=l1 generation=1",
+                "2026-08-31 10:00:02 Google Live evidence_connection_close journey_id=j1 connection_id=c1 live_connection_id=l1 pending_tasks=0 close_code=1000 reason=evidence_finalize",
+            )
+        )
+
+        self.assertEqual(verdict["cleanupEvidence"]["status"], "FAIL")
+        self.assertEqual(verdict["cleanupEvidence"]["activeReceiveLoops"], 1)
+
     def test_claimed_lesson_and_reconnect_require_non_vacuous_coverage(self):
         for journey in ("lesson", "reconnect"):
             with self.subTest(journey=journey):

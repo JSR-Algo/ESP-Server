@@ -5165,6 +5165,78 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second, third)
         self.assertEqual(provider._close_live_resources.await_count, 2)
 
+    async def test_next_evidence_scope_rejects_unrelated_provider_pass(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        provider._evidence_finalize_result = {
+            "status": "PASS",
+            "journeyId": "journey-previous",
+            "connectionId": "session-1",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "initialLiveConnectionId": "live-1",
+        }
+
+        prepared = await provider.prepare_next_evidence_scope(
+            {
+                "journeyId": "journey-other",
+                "connectionId": "session-1",
+                "peerIdentityHash": "sha256:" + "a" * 64,
+                "initialLiveConnectionId": "live-1",
+            }
+        )
+
+        self.assertFalse(prepared)
+        self.assertIsNotNone(provider._evidence_finalize_result)
+
+    async def test_next_evidence_scope_resets_prior_scope_identity_state(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        peer_identity_hash = "sha256:" + "a" * 64
+        previous_scope = {
+            "journeyId": "journey-previous",
+            "connectionId": "session-1",
+            "peerIdentityHash": peer_identity_hash,
+            "initialLiveConnectionId": "live-1",
+        }
+        provider._evidence_finalize_result = {
+            "status": "PASS",
+            **previous_scope,
+        }
+        provider._evidence_initial_live_connection_id = "live-1"
+        provider._evidence_current_live_connection_id = "live-2"
+        provider._evidence_live_connection_transitions = [
+            {
+                "attempt": 1,
+                "fromLiveConnectionId": "live-1",
+                "toLiveConnectionId": "live-2",
+            }
+        ]
+        provider._evidence_pending_reconnect = {
+            "attempt": 2,
+            "fromLiveConnectionId": "live-2",
+        }
+        provider._evidence_reconnect_attempt_serial = 2
+        provider._evidence_replay_logged_attempts = {1}
+        provider._evidence_response_token_serial = 4
+        provider._evidence_final_response_reservation = {"token": 4}
+        provider._evidence_last_transcript_event_token = 4
+        conn.google_live_evidence_reconnect_attempt = 2
+
+        prepared = await provider.prepare_next_evidence_scope(previous_scope)
+
+        self.assertTrue(prepared)
+        self.assertIsNone(provider._evidence_finalize_result)
+        self.assertIsNone(provider._evidence_initial_live_connection_id)
+        self.assertIsNone(provider._evidence_current_live_connection_id)
+        self.assertEqual(provider._evidence_live_connection_transitions, [])
+        self.assertIsNone(provider._evidence_pending_reconnect)
+        self.assertEqual(provider._evidence_reconnect_attempt_serial, 0)
+        self.assertEqual(provider._evidence_replay_logged_attempts, set())
+        self.assertEqual(provider._evidence_response_token_serial, 0)
+        self.assertIsNone(provider._evidence_final_response_reservation)
+        self.assertIsNone(provider._evidence_last_transcript_event_token)
+        self.assertIsNone(conn.google_live_evidence_reconnect_attempt)
+
     async def test_evidence_finalize_fails_safely_when_bridge_close_fails(self):
         conn = _Conn()
         conn.google_live_evidence_journey_id = "bargein-journey-1"

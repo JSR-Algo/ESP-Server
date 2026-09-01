@@ -1683,6 +1683,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     interrupt_records: list[dict[str, Any]] = []
     active_lesson_step: dict[str, Any] | None = None
     observed_marker_families: dict[str, set[str]] = defaultdict(set)
+    scoped_cleanup_pending_tasks: int | None = None
     scoped_interrupts: list[dict[str, Any]] = []
     scoped_reconnects: dict[tuple[str, str, int], dict[str, Any]] = {}
     scoped_active_responses: dict[tuple[str, str], int] = {}
@@ -2359,6 +2360,9 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 if cleanup_scope_matches and cleanup_semantics_valid:
                     observed_marker_families[scoped_close.group("journey_id")].add(
                         "cleanup"
+                    )
+                    scoped_cleanup_pending_tasks = int(
+                        scoped_close.group("pending_tasks")
                     )
                 elif (
                     isinstance(anchor_scope, Mapping)
@@ -3735,6 +3739,20 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
         "finalLiveConnectionId": scoped_current_live_connection_id,
         "liveConnectionTransitions": scoped_live_connection_transitions,
         "serverConnectionTransitions": server_connection_transitions,
+        "cleanupEvidence": {
+            "status": (
+                "PASS"
+                if scoped_cleanup_pending_tasks == 0 and receive_loops_active == 0
+                else "FAIL"
+            ),
+            "pendingOwnedTasks": scoped_cleanup_pending_tasks,
+            "activeSessions": (
+                0
+                if scoped_cleanup_pending_tasks == 0 and receive_loops_active == 0
+                else None
+            ),
+            "activeReceiveLoops": receive_loops_active,
+        },
         "logWindow": log_window,
         "receiveLoopBalance": receive_loops_active,
         "maxReceiveLoopsActive": max_receive_loops_active,

@@ -123,6 +123,37 @@ async def _handleHelloMessage(conn: "ConnectionHandler", msg_json):
     """Handle hello message"""
     send_mcp_initialize = False
     connection_transition_to_log = None
+    previous_evidence_scope = getattr(conn, "google_live_evidence_scope", None)
+    previous_finalize_result = getattr(
+        conn, "google_live_evidence_finalize_result", None
+    )
+    previous_candidate_identity = getattr(
+        conn, "google_live_evidence_candidate_identity", None
+    )
+    previous_journey_type = getattr(
+        conn, "google_live_evidence_journey_type", None
+    )
+    previous_proof_profile = getattr(
+        conn, "google_live_evidence_proof_profile", None
+    )
+    previous_reliability_start_logged = getattr(
+        conn, "google_live_reliability_start_logged", False
+    )
+
+    def restore_previous_evidence_scope():
+        conn.google_live_evidence_journey_id = previous_evidence_scope.get(
+            "journeyId"
+        )
+        conn.google_live_evidence_scope = previous_evidence_scope
+        conn.google_live_evidence_candidate_identity = previous_candidate_identity
+        conn.google_live_evidence_journey_type = previous_journey_type
+        conn.google_live_evidence_proof_profile = previous_proof_profile
+        conn.google_live_reliability_start_logged = (
+            previous_reliability_start_logged
+        )
+
+    rotate_completed_scope = False
+    preserved_previous_scope_after_rejection = False
     evidence_journey_id = msg_json.get("evidence_journey_id")
     conn.google_live_evidence_journey_id = (
         evidence_journey_id
@@ -222,6 +253,43 @@ async def _handleHelloMessage(conn: "ConnectionHandler", msg_json):
                 conn.google_live_evidence_candidate_identity = claimed
                 conn.google_live_evidence_journey_type = journey_type
                 conn.google_live_evidence_proof_profile = proof_profile
+                previous_journey_id = (
+                    previous_evidence_scope.get("journeyId")
+                    if isinstance(previous_evidence_scope, dict)
+                    else None
+                )
+                if (
+                    isinstance(previous_journey_id, str)
+                    and previous_journey_id != conn.google_live_evidence_journey_id
+                ):
+                    terminal_matches = getattr(
+                        registry, "terminal_claim_matches", None
+                    )
+                    previous_complete = (
+                        isinstance(previous_finalize_result, dict)
+                        and previous_finalize_result.get("type")
+                        == "evidence_finalized"
+                        and previous_finalize_result.get("status") == "PASS"
+                        and previous_finalize_result.get("evidenceScope")
+                        == previous_evidence_scope
+                        and callable(terminal_matches)
+                        and terminal_matches(
+                            device_id=str(getattr(conn, "device_id", "") or ""),
+                            client_id=_single_client_id(conn),
+                            journey_id=previous_journey_id,
+                        )
+                        is True
+                    )
+                    if previous_complete:
+                        rotate_completed_scope = True
+                    else:
+                        _abort_google_live_claim(
+                            conn,
+                            registry,
+                            conn.google_live_evidence_journey_id,
+                            "PREVIOUS_EVIDENCE_SCOPE_INCOMPLETE",
+                        )
+                        enrollment_invalid = True
 
     hello_ack = dict(conn.welcome_msg)
     if enrollment_invalid:
@@ -229,9 +297,58 @@ async def _handleHelloMessage(conn: "ConnectionHandler", msg_json):
             "status": "FAIL",
             "failureCode": "EVIDENCE_ENROLLMENT_INVALID",
         }
-    if conn.google_live_evidence_journey_id is not None:
+        previous_journey_id = (
+            previous_evidence_scope.get("journeyId")
+            if isinstance(previous_evidence_scope, dict)
+            else None
+        )
+        if isinstance(previous_journey_id, str):
+            restore_previous_evidence_scope()
+            preserved_previous_scope_after_rejection = True
+    elif (
+        conn.google_live_evidence_journey_id is None
+        and isinstance(previous_evidence_scope, dict)
+    ):
+        restore_previous_evidence_scope()
+        preserved_previous_scope_after_rejection = True
+    if (
+        conn.google_live_evidence_journey_id is not None
+        and not preserved_previous_scope_after_rejection
+    ):
         server_start_utc = _utc_now_iso()
         provider = getattr(conn, "voice_provider", None)
+        if rotate_completed_scope:
+            prepare_next_scope = getattr(
+                provider, "prepare_next_evidence_scope", None
+            )
+            try:
+                rotated = (
+                    await prepare_next_scope(previous_evidence_scope)
+                    if callable(prepare_next_scope)
+                    else False
+                )
+            except Exception:
+                rotated = False
+            if rotated is not True:
+                failed_journey_id = conn.google_live_evidence_journey_id
+                _abort_google_live_claim(
+                    conn,
+                    registry,
+                    failed_journey_id,
+                    "PREVIOUS_EVIDENCE_SCOPE_ROTATION_FAILED",
+                )
+                restore_previous_evidence_scope()
+                hello_ack["evidenceScope"] = {
+                    "status": "FAIL",
+                    "failureCode": "PREVIOUS_EVIDENCE_SCOPE_ROTATION_FAILED",
+                }
+                try:
+                    await conn.websocket.send(json.dumps(hello_ack))
+                except BaseException:
+                    raise
+                return
+            conn.google_live_evidence_finalize_result = None
+            conn.google_live_evidence_finalize_task = None
         prepare_scope = getattr(provider, "prepare_evidence_scope", None)
         try:
             live_connection_id = (
@@ -330,7 +447,7 @@ async def _handleHelloMessage(conn: "ConnectionHandler", msg_json):
     candidate_identity = getattr(
         conn, "google_live_evidence_candidate_identity", None
     )
-    if isinstance(scope, dict):
+    if isinstance(scope, dict) and not preserved_previous_scope_after_rejection:
         try:
             conn.logger.bind(tag=TAG).info(
                 "Google Live reliability_window_start window_id={} journey_id={} "

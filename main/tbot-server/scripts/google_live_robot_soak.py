@@ -45,6 +45,7 @@ import json
 import math
 import os
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -145,6 +146,15 @@ _FORBIDDEN_EVIDENCE_KEYS = frozenset(
         "exception",
         "sessionresumptionhandle",
     }
+)
+_SENSITIVE_EVIDENCE_VALUE_RE = re.compile(
+    r"(?i)(?:\bbearer\s+\S+|\bauthorization\s*[:=]|\b(?:set-)?cookie\s*[:=]|"
+    r"\b(?:api[_ -]?key|secret|token|session(?:resumption)?handle|transcript|"
+    r"prompt|raw[_ -]?exception|raw[_ -]?audio)\s*[:=]|"
+    r"\bAIza[0-9A-Za-z_-]{35}\b|"
+    r"\beyJ[0-9A-Za-z_-]{5,}\.[0-9A-Za-z_-]{5,}\.[0-9A-Za-z_-]+\b|"
+    r"\bsk-(?:proj-)?[0-9A-Za-z_-]{20,}\b|"
+    r"\bAQEA[0-9A-Za-z_-]{32,}\b)"
 )
 
 # ---------------------------------------------------------------------------
@@ -1631,27 +1641,102 @@ def _atomic_write_json(path: Path, value: Mapping) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _atomic_write_json_exclusive(path: Path, value: Mapping) -> None:
+def _atomic_write_json_exclusive(path: Path, value: Mapping):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
     )
-    temporary = Path(temporary_name)
+    directory_fd = os.open(path.parent, directory_flags)
+    directory_stat = os.fstat(directory_fd)
+    temporary_name = f".{path.name}.{secrets.token_hex(12)}.tmp"
+    descriptor = None
+    written_stat = None
+    published = False
+    target_linked = False
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=False) as handle:
             json.dump(value, handle, indent=2, sort_keys=True)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.link(temporary, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
+        written_stat = os.fstat(descriptor)
+        os.link(
+            temporary_name,
+            path.name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        target_linked = True
+        target_fd = os.open(
+            path.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
         try:
-            os.fsync(directory_fd)
+            target_stat = os.fstat(target_fd)
+            if (
+                (written_stat.st_dev, written_stat.st_ino)
+                != (target_stat.st_dev, target_stat.st_ino)
+                or target_stat.st_nlink != 2
+            ):
+                raise RuntimeError("candidate evidence output identity changed")
+            with os.fdopen(target_fd, "r", encoding="utf-8", closefd=False) as target:
+                reopened = json.load(target)
         finally:
-            os.close(directory_fd)
+            os.close(target_fd)
+        os.unlink(temporary_name, dir_fd=directory_fd)
+        temporary_name = None
+        final_stat = os.stat(
+            path.name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        if (
+            (final_stat.st_dev, final_stat.st_ino)
+            != (written_stat.st_dev, written_stat.st_ino)
+            or final_stat.st_nlink != 1
+        ):
+            raise RuntimeError("candidate evidence output alias detected")
+        current_parent_stat = os.stat(path.parent, follow_symlinks=False)
+        if (current_parent_stat.st_dev, current_parent_stat.st_ino) != (
+            directory_stat.st_dev,
+            directory_stat.st_ino,
+        ):
+            raise RuntimeError("candidate evidence parent changed")
+        os.fsync(directory_fd)
+        published = True
+        return reopened
     finally:
-        temporary.unlink(missing_ok=True)
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary_name is not None:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        if target_linked and not published:
+            try:
+                current_target_stat = os.stat(
+                    path.name,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                if written_stat is not None and (
+                    current_target_stat.st_dev,
+                    current_target_stat.st_ino,
+                ) == (written_stat.st_dev, written_stat.st_ino):
+                    os.unlink(path.name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        os.close(directory_fd)
 
 
 def _publish_candidate_report(path: Path, report: Mapping) -> bool:
@@ -1714,6 +1799,44 @@ def _validate_candidate_manifest_structure(manifest, *, identity) -> None:
         set(sample_ids)
     ) != len(sample_ids):
         raise ValueError("candidate evidence resource accounting is invalid")
+    execution_fields = {
+        "schemaVersion", "name", "status", "candidateIdentity", "evidenceSequence",
+        "journeyId", "connectionId", "liveConnectionId", "initialLiveConnectionId",
+        "finalLiveConnectionId", "liveConnectionTransitions", "peerIdentityHash",
+        "serverIssued", "windowId", "logWindow", "evidenceScope", "successfulTurns",
+        "bargeins", "latestIntentSuccesses", "falseInterrupts", "unexpectedFallbacks",
+        "latencies", "task5LogEvidence",
+    }
+    padding_fields = {
+        "schemaVersion", "name", "status", "candidateIdentity", "journeyId",
+        "connectionId", "serverIssued", "windowId", "logWindow", "evidenceScope",
+        "liveConnectionId", "initialLiveConnectionId", "finalLiveConnectionId",
+        "liveConnectionTransitions", "peerIdentityHash", "durationSec", "falseInterrupts",
+        "unexpectedFallbacks", "resourceVerdict", "task5LogEvidence",
+    }
+    cleanup_fields = {
+        "schemaVersion", "name", "status", "candidateIdentity", "finalScope",
+        "serverAnchor", "websocketClosed", "providerFinalizeStatus",
+        "providerCloseStatus", "pendingOwnedTasks", "activeSessions",
+        "activeReceiveLoops", "logStatus", "resourceEndSampleRequired",
+    }
+    if any(
+        not isinstance(item, Mapping)
+        or set(item)
+        != execution_fields
+        | (
+            {"task4TransportEvidence", "task5CorrelatedEvidence"}
+            if item.get("name") == "bargein"
+            else {"lessonManifestSha256"}
+            if item.get("name") == "lesson"
+            else set()
+        )
+        for item in executions
+    ) or any(
+        not isinstance(item, Mapping) or set(item) != padding_fields
+        for item in padding
+    ) or set(cleanup) != cleanup_fields:
+        raise ValueError("candidate evidence manifest schema is invalid")
 
 
 async def _invoke_candidate_driver(args, **context):
@@ -1753,6 +1876,9 @@ async def _run_candidate_audio_bargein(args, websocket, *, clock=time.monotonic)
     )
     if preflight_failure is not None:
         raise RuntimeError("candidate audio barge-in preflight failed")
+    await websocket.send(
+        json.dumps({"type": "listen", "state": "start", "mode": "realtime"})
+    )
     first_packet_sent = asyncio.Event()
     stop_task = asyncio.create_task(
         _observe_interrupt_stop(
@@ -1810,10 +1936,39 @@ async def _run_candidate_websocket_journey(args, **context):
         if websocket is not None:
             await websocket.close()
             state["websocket"] = None
+        journey_id = final_scope.get("journeyId")
+        collection_url = _evidence_collection_url(args)
+        journey_url = f"{collection_url}/{urllib.parse.quote(str(journey_id), safe='')}"
+        output_root = Path(getattr(args, "produce_candidate_evidence")).parent
+        cleanup_output = output_root / "cleanup" / f"{journey_id}.json"
+        cleanup_output.parent.mkdir(parents=True, exist_ok=True)
+        log_evidence = await _analyze_candidate_journey(
+            args,
+            journey_id,
+            cleanup_output,
+        )
+        terminal = await _candidate_control_json(args, "GET", journey_url)
+        cleanup_proof = (
+            log_evidence.get("cleanupEvidence")
+            if isinstance(log_evidence, Mapping)
+            else None
+        )
+        proof_pass = (
+            isinstance(terminal, Mapping)
+            and terminal.get("journeyId") == journey_id
+            and terminal.get("status") == "PASS"
+            and terminal.get("proofProfile") == "candidate-lifecycle"
+            and isinstance(cleanup_proof, Mapping)
+            and cleanup_proof.get("status") == "PASS"
+            and cleanup_proof.get("pendingOwnedTasks") == 0
+            and cleanup_proof.get("activeSessions") == 0
+            and cleanup_proof.get("activeReceiveLoops") == 0
+            and log_evidence.get("status") == "PASS"
+        )
         return {
             "schemaVersion": SCHEMA_VERSION,
             "name": "candidate_cleanup",
-            "status": "PASS",
+            "status": "PASS" if proof_pass else "FAIL",
             "candidateIdentity": _candidate_identity(args),
             "finalScope": final_scope,
             "serverAnchor": {
@@ -1821,12 +1976,22 @@ async def _run_candidate_websocket_journey(args, **context):
                 "peerIdentityHash": getattr(args, "candidate_peer_identity_hash", None),
             },
             "websocketClosed": True,
-            "providerFinalizeStatus": "PASS",
-            "providerCloseStatus": "PASS",
-            "pendingOwnedTasks": 0,
-            "activeSessions": 0,
-            "activeReceiveLoops": 0,
-            "logStatus": "PASS",
+            "providerFinalizeStatus": (
+                "PASS" if isinstance(terminal, Mapping) and terminal.get("status") == "PASS" else "FAIL"
+            ),
+            "providerCloseStatus": (
+                "PASS" if isinstance(cleanup_proof, Mapping) and cleanup_proof.get("status") == "PASS" else "FAIL"
+            ),
+            "pendingOwnedTasks": cleanup_proof.get("pendingOwnedTasks")
+            if isinstance(cleanup_proof, Mapping)
+            else None,
+            "activeSessions": cleanup_proof.get("activeSessions")
+            if isinstance(cleanup_proof, Mapping)
+            else None,
+            "activeReceiveLoops": cleanup_proof.get("activeReceiveLoops")
+            if isinstance(cleanup_proof, Mapping)
+            else None,
+            "logStatus": "PASS" if isinstance(log_evidence, Mapping) and log_evidence.get("status") == "PASS" else "FAIL",
             "resourceEndSampleRequired": True,
         }
     name = context["name"]
@@ -2418,8 +2583,7 @@ async def produce_candidate_evidence(
         "resourceSamples": resource_samples,
     }
     _validate_candidate_manifest_structure(manifest, identity=identity)
-    _atomic_write_json_exclusive(output, manifest)
-    reopened = json.loads(output.read_text(encoding="utf-8"))
+    reopened = _atomic_write_json_exclusive(output, manifest)
     _validate_candidate_manifest_structure(reopened, identity=identity)
     return {
         "schemaVersion": SCHEMA_VERSION,
@@ -2453,6 +2617,8 @@ def _forbidden_evidence_fields(value, path=""):
     elif isinstance(value, list):
         for index, item in enumerate(value):
             hits.extend(_forbidden_evidence_fields(item, f"{path}[{index}]"))
+    elif isinstance(value, str) and _SENSITIVE_EVIDENCE_VALUE_RE.search(value):
+        hits.append(path or "value")
     return hits
 
 

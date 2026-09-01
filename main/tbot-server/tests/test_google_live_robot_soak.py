@@ -1825,15 +1825,15 @@ def test_full_span_rejects_any_supplied_padding_even_when_safe():
             "candidateIdentity": IDENTITY,
         }
     ]
-    report = _run_manifest(_full_span_manifest(padding=safe_padding, samples=36))
-    assert "UNEXPECTED_EVIDENCE" in {item["code"] for item in report["failures"]}
+    with pytest.raises(ValueError, match="manifest schema"):
+        _run_manifest(_full_span_manifest(padding=safe_padding, samples=36))
 
 
 def test_full_span_rejects_malformed_padding_instead_of_ignoring_it():
-    report = _run_manifest(
-        _full_span_manifest(padding=[{"name": "quiet_padding"}], samples=36)
-    )
-    assert "UNEXPECTED_EVIDENCE" in {item["code"] for item in report["failures"]}
+    with pytest.raises(ValueError, match="manifest schema"):
+        _run_manifest(
+            _full_span_manifest(padding=[{"name": "quiet_padding"}], samples=36)
+        )
 
 
 def test_full_span_rejects_unused_or_leaking_resource_sample():
@@ -2446,6 +2446,47 @@ def test_candidate_producer_refuses_to_replace_existing_closed_manifest(tmp_path
     assert output.read_text(encoding="utf-8") == '{"closed":true}\n'
 
 
+@pytest.mark.parametrize("mutation", ["extra_field", "secret_value"])
+def test_candidate_manifest_rejects_untrusted_execution_shape_and_values(
+    tmp_path, mutation
+):
+    output = tmp_path / "journey-evidence.json"
+    asyncio.run(
+        produce_candidate_evidence(
+            _args(produce_candidate_evidence=output, run_id="20260831T100000Z"),
+            journeys=_journeys(),
+            sample_resources=_samples,
+            clock=_Clock(),
+        )
+    )
+    manifest = json.loads(output.read_text(encoding="utf-8"))
+    if mutation == "extra_field":
+        manifest["executions"][0]["futureField"] = "safe"
+    else:
+        manifest["executions"][0]["windowId"] = "Authorization: Bearer secret"
+
+    with pytest.raises(ValueError, match="manifest"):
+        robot_soak._validate_candidate_manifest_structure(
+            manifest,
+            identity=IDENTITY,
+        )
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "AIzaSyA12345678901234567890123456789012",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature",
+        "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+        "AQEAbcdEfghIjklMNopQRstUvwxYZ0123456789",
+    ],
+)
+def test_candidate_manifest_rejects_credential_shaped_allowed_values(secret):
+    assert robot_soak._forbidden_evidence_fields({"windowId": secret}) == [
+        "windowId"
+    ]
+
+
 @pytest.mark.parametrize(
     "mutation",
     ["candidate_identity", "schema", "name", "extra", "missing"],
@@ -2534,6 +2575,68 @@ def test_candidate_report_publish_loses_atomic_create_race_without_overwrite(
         report_path, {"status": "PASS"}
     ) is False
     assert report_path.read_text(encoding="utf-8") == '{"winner":true}\n'
+
+
+def test_candidate_exclusive_writer_rejects_parent_symlink(tmp_path):
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    linked_parent = tmp_path / "linked"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        robot_soak._atomic_write_json_exclusive(
+            linked_parent / "report.json", {"status": "PASS"}
+        )
+    assert not (real_parent / "report.json").exists()
+
+
+def test_candidate_exclusive_writer_rejects_parent_swap(tmp_path, monkeypatch):
+    parent = tmp_path / "evidence"
+    parent.mkdir()
+    moved = tmp_path / "evidence-original"
+    original_link = robot_soak.os.link
+    swapped = False
+
+    def swap_then_link(*args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            parent.rename(moved)
+            parent.mkdir()
+            swapped = True
+        return original_link(*args, **kwargs)
+
+    monkeypatch.setattr(robot_soak.os, "link", swap_then_link)
+
+    with pytest.raises(RuntimeError, match="parent changed"):
+        robot_soak._atomic_write_json_exclusive(
+            parent / "report.json", {"status": "PASS"}
+        )
+    assert not (parent / "report.json").exists()
+
+
+def test_candidate_exclusive_writer_does_not_remove_post_link_replacement(
+    tmp_path, monkeypatch
+):
+    parent = tmp_path / "evidence"
+    parent.mkdir()
+    target = parent / "report.json"
+    original_unlink = robot_soak.os.unlink
+    replacement_created = False
+
+    def replace_target_after_temp_unlink(path, *args, **kwargs):
+        nonlocal replacement_created
+        result = original_unlink(path, *args, **kwargs)
+        if not replacement_created and str(path).endswith(".tmp"):
+            original_unlink(target)
+            target.write_text('{"winner":true}\n', encoding="utf-8")
+            replacement_created = True
+        return result
+
+    monkeypatch.setattr(robot_soak.os, "unlink", replace_target_after_temp_unlink)
+
+    with pytest.raises(RuntimeError, match="identity changed|alias detected"):
+        robot_soak._atomic_write_json_exclusive(target, {"status": "PASS"})
+    assert target.read_text(encoding="utf-8") == '{"winner":true}\n'
 
 
 def test_candidate_producer_cancellation_leaves_no_partial_manifest(tmp_path):
@@ -2955,7 +3058,10 @@ def test_default_candidate_bargein_sends_opus_audio_not_text(monkeypatch):
         )
     )
 
-    assert sent == [b"opus"]
+    assert sent == [
+        json.dumps({"type": "listen", "state": "start", "mode": "realtime"}),
+        b"opus",
+    ]
     assert result["bargeinStopMs"] == 400.0
 
 
@@ -2977,6 +3083,49 @@ def test_candidate_factory_cleanup_refuses_second_call():
     with pytest.raises(RuntimeError, match="more than once"):
         asyncio.run(cleanup(args, final_scope={}))
     assert calls == 1
+
+
+def test_default_candidate_cleanup_rejects_authoritative_leaked_server_work(tmp_path):
+    class Websocket:
+        async def close(self):
+            return None
+
+    args = _args(
+        produce_candidate_evidence=tmp_path / "journey-evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        candidate_control_json=lambda *_args, **_kwargs: {
+            "journeyId": "candidate-soak.20260831T100000Z.34",
+            "journeyType": "quiet_padding",
+            "proofProfile": "candidate-lifecycle",
+            "status": "PASS",
+        },
+        candidate_log_analyzer=lambda **_kwargs: {
+            "status": "PASS",
+            "cleanupEvidence": {
+                "status": "FAIL",
+                "pendingOwnedTasks": 1,
+                "activeSessions": 1,
+                "activeReceiveLoops": 1,
+            },
+        },
+    )
+    args._candidate_websocket_state = {"websocket": Websocket()}
+
+    result = asyncio.run(
+        robot_soak._run_candidate_websocket_journey(
+            args,
+            operation="cleanup",
+            final_scope={
+                "journeyId": "candidate-soak.20260831T100000Z.34",
+                "connectionId": "connection-1",
+            },
+        )
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["providerCloseStatus"] == "FAIL"
+    assert result["pendingOwnedTasks"] == 1
 
 
 def test_candidate_cli_producer_and_replay_are_mutually_exclusive(tmp_path):

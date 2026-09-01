@@ -1080,6 +1080,44 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._evidence_finalize_result = None
         return True
 
+    async def prepare_next_evidence_scope(self, previous_scope):
+        if not isinstance(previous_scope, dict):
+            return False
+        async with self._get_lifecycle_lock():
+            finalized = self._evidence_finalize_result
+            scope_matches = isinstance(finalized, dict) and all(
+                finalized.get(key) == previous_scope.get(key)
+                for key in (
+                    "journeyId",
+                    "connectionId",
+                    "peerIdentityHash",
+                    "initialLiveConnectionId",
+                )
+            )
+            if (
+                not isinstance(finalized, dict)
+                or finalized.get("status") != "PASS"
+                or not scope_matches
+            ):
+                return False
+            self._evidence_finalize_result = None
+            self._evidence_cleanup_failure_code = None
+            self._evidence_initial_live_connection_id = None
+            self._evidence_current_live_connection_id = None
+            self._evidence_live_connection_transitions = []
+            self._evidence_pending_reconnect = None
+            self._evidence_reconnect_attempt_serial = 0
+            self._evidence_replay_logged_attempts.clear()
+            self._evidence_response_token_serial = 0
+            self._evidence_final_response_reservation = None
+            self._evidence_last_transcript_event_token = None
+            self._closing = False
+            self._lifecycle_generation += 1
+            self.conn.google_live_evidence_force_close_completed = False
+            self.conn.google_live_evidence_force_closed_provider = None
+            self.conn.google_live_evidence_reconnect_attempt = None
+        return True
+
     def request_evidence_finalize_stop(self):
         self._closing = True
         self._lifecycle_generation += 1

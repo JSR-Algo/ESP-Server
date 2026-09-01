@@ -1,10 +1,12 @@
 import asyncio
 import json
 import unittest
+import types
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from core.handle import helloHandle
+from core.connection import ConnectionHandler
 from core.handle.helloHandle import handleHelloMessage
 from core.voice.google_live.audio_bridge import GoogleLiveAudioBridge
 from core.voice.google_live.evidence_enrollment import (
@@ -166,6 +168,242 @@ class HelloAudioParamsTest(unittest.IsolatedAsyncioTestCase):
             conn.google_live_evidence_proof_profile,
             CANDIDATE_LIFECYCLE_PROFILE,
         )
+
+    async def test_google_live_completed_scope_allows_next_unique_scope_on_same_handler(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(side_effect=["live-1", "live-2"]),
+            prepare_next_evidence_scope=AsyncMock(return_value=True),
+        )
+        registry = self._enroll_candidate(conn, "candidate.run-1")
+
+        await handleHelloMessage(conn, {"evidence_journey_id": "candidate.run-1"})
+        first_scope = json.loads(conn.websocket.sent[-1])["evidenceScope"]
+        registry.finalize("candidate.run-1", status="PASS")
+        conn.google_live_evidence_finalize_result = {
+            "type": "evidence_finalized",
+            "status": "PASS",
+            "evidenceScope": first_scope,
+            "serverEndUtc": "2026-08-31T10:01:00+00:00",
+            "finalLiveConnectionId": "live-1",
+            "liveConnectionTransitions": [],
+        }
+        registry.register(
+            device_id=conn.device_id,
+            client_id=conn.client_id,
+            journey_id="candidate.run-2",
+            journey_type="conversation",
+            proof_profile=CANDIDATE_LIFECYCLE_PROFILE,
+            transcript_plan=(),
+            hmac_key=bytearray(),
+            ttl_sec=120,
+        )
+        registry.bind_candidate_identity(
+            device_id=conn.device_id,
+            journey_id="candidate.run-2",
+            candidate_identity={
+                "gitSha": "a" * 40,
+                "imageDigest": "sha256:" + "b" * 64,
+                "firmwareIdentity": "firmware-v1",
+                "fixtureSha256": "c" * 64,
+                "configFingerprint": "sha256:" + "d" * 64,
+            },
+        )
+
+        await handleHelloMessage(conn, {"evidence_journey_id": "candidate.run-2"})
+
+        second_scope = json.loads(conn.websocket.sent[-1])["evidenceScope"]
+        self.assertEqual(second_scope["journeyId"], "candidate.run-2")
+        self.assertEqual(second_scope["connectionId"], first_scope["connectionId"])
+        self.assertEqual(second_scope["liveConnectionId"], "live-2")
+        self.assertIsNone(getattr(conn, "google_live_evidence_finalize_result", None))
+        conn._finalize_google_live_evidence_once = AsyncMock(
+            return_value={
+                "type": "evidence_finalized",
+                "status": "PASS",
+                "evidenceScope": second_scope,
+            }
+        )
+        conn.finalize_google_live_evidence = types.MethodType(
+            ConnectionHandler.finalize_google_live_evidence,
+            conn,
+        )
+
+        second_finalize = await conn.finalize_google_live_evidence(second_scope)
+
+        self.assertEqual(second_finalize["status"], "PASS")
+        conn._finalize_google_live_evidence_once.assert_awaited_once_with(second_scope)
+
+    async def test_google_live_rotation_failure_preserves_completed_scope_proof(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(return_value="live-1"),
+            prepare_next_evidence_scope=AsyncMock(return_value=False),
+        )
+        registry = self._enroll_candidate(conn, "candidate.run-1")
+        await handleHelloMessage(conn, {"evidence_journey_id": "candidate.run-1"})
+        first_scope = json.loads(conn.websocket.sent[-1])["evidenceScope"]
+        registry.finalize("candidate.run-1", status="PASS")
+        first_finalize = {
+            "type": "evidence_finalized",
+            "status": "PASS",
+            "evidenceScope": first_scope,
+        }
+        conn.google_live_evidence_finalize_result = first_finalize
+        registry.register(
+            device_id=conn.device_id,
+            client_id=conn.client_id,
+            journey_id="candidate.run-2",
+            journey_type="conversation",
+            proof_profile=CANDIDATE_LIFECYCLE_PROFILE,
+            transcript_plan=(),
+            hmac_key=bytearray(),
+            ttl_sec=120,
+        )
+        registry.bind_candidate_identity(
+            device_id=conn.device_id,
+            journey_id="candidate.run-2",
+            candidate_identity={
+                "gitSha": "a" * 40,
+                "imageDigest": "sha256:" + "b" * 64,
+                "firmwareIdentity": "firmware-v1",
+                "fixtureSha256": "c" * 64,
+                "configFingerprint": "sha256:" + "d" * 64,
+            },
+        )
+
+        await handleHelloMessage(conn, {"evidence_journey_id": "candidate.run-2"})
+
+        failed_scope = json.loads(conn.websocket.sent[-1])["evidenceScope"]
+        self.assertEqual(
+            failed_scope["failureCode"],
+            "PREVIOUS_EVIDENCE_SCOPE_ROTATION_FAILED",
+        )
+        self.assertEqual(conn.google_live_evidence_scope, first_scope)
+        self.assertEqual(conn.google_live_evidence_journey_id, "candidate.run-1")
+        self.assertEqual(conn.google_live_evidence_finalize_result, first_finalize)
+        conn.voice_provider.prepare_evidence_scope.assert_awaited_once()
+
+    async def test_google_live_scope_rotation_propagates_cancellation(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(return_value="live-1"),
+            prepare_next_evidence_scope=AsyncMock(
+                side_effect=asyncio.CancelledError
+            ),
+        )
+        registry = self._enroll_candidate(conn, "candidate.run-1")
+        await handleHelloMessage(conn, {"evidence_journey_id": "candidate.run-1"})
+        first_scope = json.loads(conn.websocket.sent[-1])["evidenceScope"]
+        registry.finalize("candidate.run-1", status="PASS")
+        conn.google_live_evidence_finalize_result = {
+            "type": "evidence_finalized",
+            "status": "PASS",
+            "evidenceScope": first_scope,
+        }
+        registry.register(
+            device_id=conn.device_id,
+            client_id=conn.client_id,
+            journey_id="candidate.run-2",
+            journey_type="conversation",
+            proof_profile=CANDIDATE_LIFECYCLE_PROFILE,
+            transcript_plan=(),
+            hmac_key=bytearray(),
+            ttl_sec=120,
+        )
+        registry.bind_candidate_identity(
+            device_id=conn.device_id,
+            journey_id="candidate.run-2",
+            candidate_identity={
+                "gitSha": "a" * 40,
+                "imageDigest": "sha256:" + "b" * 64,
+                "firmwareIdentity": "firmware-v1",
+                "fixtureSha256": "c" * 64,
+                "configFingerprint": "sha256:" + "d" * 64,
+            },
+        )
+
+        with self.assertRaises(asyncio.CancelledError):
+            await handleHelloMessage(
+                conn, {"evidence_journey_id": "candidate.run-2"}
+            )
+
+    async def test_google_live_incomplete_rotation_preserves_previous_scope(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(return_value="live-1")
+        )
+        registry = self._enroll_candidate(conn, "candidate.run-1")
+        await handleHelloMessage(conn, {"evidence_journey_id": "candidate.run-1"})
+        first_scope = json.loads(conn.websocket.sent[-1])["evidenceScope"]
+        registry.finalize("candidate.run-1", status="PASS")
+        registry.register(
+            device_id=conn.device_id,
+            client_id=conn.client_id,
+            journey_id="candidate.run-2",
+            journey_type="conversation",
+            proof_profile=CANDIDATE_LIFECYCLE_PROFILE,
+            transcript_plan=(),
+            hmac_key=bytearray(),
+            ttl_sec=120,
+        )
+        registry.bind_candidate_identity(
+            device_id=conn.device_id,
+            journey_id="candidate.run-2",
+            candidate_identity={
+                "gitSha": "a" * 40,
+                "imageDigest": "sha256:" + "b" * 64,
+                "firmwareIdentity": "firmware-v1",
+                "fixtureSha256": "c" * 64,
+                "configFingerprint": "sha256:" + "d" * 64,
+            },
+        )
+
+        await handleHelloMessage(conn, {"evidence_journey_id": "candidate.run-2"})
+
+        failed_scope = json.loads(conn.websocket.sent[-1])["evidenceScope"]
+        self.assertEqual(failed_scope["status"], "FAIL")
+        self.assertEqual(conn.google_live_evidence_scope, first_scope)
+        self.assertEqual(conn.google_live_evidence_journey_id, "candidate.run-1")
+        conn.voice_provider.prepare_evidence_scope.assert_awaited_once()
+
+    async def test_google_live_duplicate_hello_preserves_active_scope(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(return_value="live-1")
+        )
+        self._enroll_candidate(conn, "candidate.run-1")
+        await handleHelloMessage(conn, {"evidence_journey_id": "candidate.run-1"})
+        first_scope = json.loads(conn.websocket.sent[-1])["evidenceScope"]
+
+        await handleHelloMessage(conn, {"evidence_journey_id": "candidate.run-1"})
+
+        failed_scope = json.loads(conn.websocket.sent[-1])["evidenceScope"]
+        self.assertEqual(failed_scope["status"], "FAIL")
+        self.assertEqual(conn.google_live_evidence_scope, first_scope)
+        self.assertEqual(conn.google_live_evidence_journey_id, "candidate.run-1")
+        conn.voice_provider.prepare_evidence_scope.assert_awaited_once()
+
+    async def test_google_live_unscoped_hello_preserves_active_scope(self):
+        conn = _Conn()
+        conn.config["voice_mode"] = {"type": "google_live"}
+        conn.voice_provider = SimpleNamespace(
+            prepare_evidence_scope=AsyncMock(return_value="live-1")
+        )
+        self._enroll_candidate(conn, "candidate.run-1")
+        await handleHelloMessage(conn, {"evidence_journey_id": "candidate.run-1"})
+        first_scope = json.loads(conn.websocket.sent[-1])["evidenceScope"]
+
+        await handleHelloMessage(conn, {})
+
+        self.assertEqual(conn.google_live_evidence_scope, first_scope)
+        self.assertEqual(conn.google_live_evidence_journey_id, "candidate.run-1")
+        conn.voice_provider.prepare_evidence_scope.assert_awaited_once()
 
     async def test_google_live_invalid_registry_claims_emit_no_production_marker(self):
         conn = _Conn()
