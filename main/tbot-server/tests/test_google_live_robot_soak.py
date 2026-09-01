@@ -3217,9 +3217,9 @@ def test_default_candidate_cleanup_rejects_authoritative_leaked_server_work(tmp_
         async def close(self):
             return None
 
-    execution = asyncio.run(
-        _journeys()["quiet"](_args(), name="quiet", index=1)
-    )
+    journeys = _journeys()
+    asyncio.run(journeys["quiet"](_args(), name="quiet", index=1))
+    execution = asyncio.run(journeys["monitor"](_args(), duration_sec=480))[0]
     final_scope = _cleanup_scope_from_execution(execution)
     log_evidence = deepcopy(execution["task5LogEvidence"])
     log_evidence["serverIssued"] = True
@@ -3271,9 +3271,9 @@ def test_default_candidate_cleanup_rejects_unbound_analyzer_evidence(
         async def close(self):
             return None
 
-    result = asyncio.run(
-        _journeys()["quiet"](_args(), name="quiet", index=1)
-    )
+    journeys = _journeys()
+    asyncio.run(journeys["quiet"](_args(), name="quiet", index=1))
+    result = asyncio.run(journeys["monitor"](_args(), duration_sec=480))[0]
     final_scope = _cleanup_scope_from_execution(result)
     log_evidence = deepcopy(result["task5LogEvidence"])
     log_evidence["serverIssued"] = True
@@ -3338,9 +3338,9 @@ def test_default_candidate_cleanup_accepts_only_bound_analyzer_evidence(tmp_path
         async def close(self):
             return None
 
-    execution = asyncio.run(
-        _journeys()["quiet"](_args(), name="quiet", index=1)
-    )
+    journeys = _journeys()
+    asyncio.run(journeys["quiet"](_args(), name="quiet", index=1))
+    execution = asyncio.run(journeys["monitor"](_args(), duration_sec=480))[0]
     final_scope = _cleanup_scope_from_execution(execution)
     log_evidence = deepcopy(execution["task5LogEvidence"])
     log_evidence["serverIssued"] = True
@@ -3374,6 +3374,111 @@ def test_default_candidate_cleanup_accepts_only_bound_analyzer_evidence(tmp_path
     assert cleanup["pendingOwnedTasks"] == 0
     assert cleanup["activeSessions"] == 0
     assert cleanup["activeReceiveLoops"] == 0
+
+
+@pytest.mark.parametrize(
+    "stage",
+    ["quiet_padding", "conversation_after_lesson"],
+)
+def test_default_candidate_cleanup_rejects_reconnect_transition_for_non_reconnect_final_stage(
+    tmp_path, monkeypatch, stage
+):
+    class Websocket:
+        async def close(self):
+            return None
+
+    if stage == "conversation_after_lesson":
+        def extended_window(sequence):
+            start = datetime(
+                2026, 8, 31, 11, 0, tzinfo=timezone.utc
+            ) + timedelta(seconds=(sequence - 1) * 55)
+            return {
+                "windowId": f"window-{sequence}",
+                "start": start.isoformat(),
+                "end": (start + timedelta(seconds=55)).isoformat(),
+            }
+
+        monkeypatch.setitem(
+            _journeys.__globals__, "_execution_window", extended_window
+        )
+    journeys = _journeys()
+    captured = {}
+    original_conversation = journeys["conversation"]
+    original_monitor = journeys["monitor"]
+
+    async def capture_conversation(*args, **kwargs):
+        execution = await original_conversation(*args, **kwargs)
+        if kwargs.get("name") == "conversation_after_lesson":
+            captured["final"] = execution
+        return execution
+
+    async def capture_monitor(*args, **kwargs):
+        padding = await original_monitor(*args, **kwargs)
+        captured["final"] = padding[-1]
+        return padding
+
+    output = tmp_path / "journey-evidence.json"
+    args = _args(
+        produce_candidate_evidence=output,
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        candidate_peer_identity_hash=PEER_HASH,
+    )
+
+    async def cleanup(_args, *, final_scope):
+        execution = captured["final"]
+        assert execution["name"] == stage
+        log_evidence = deepcopy(execution["task5LogEvidence"])
+        log_evidence["serverIssued"] = True
+        log_evidence["serverConnectionTransitions"] = [
+            {
+                "status": "PASS",
+                "source": "server_log",
+                "serverIssued": True,
+                "sequence": 1,
+                "reason": "same_device_reconnect",
+                "fromJourneyId": "foreign-journey",
+                "fromConnectionId": SOAK_CONNECTION_1,
+                "toJourneyId": final_scope["journeyId"],
+                "toConnectionId": final_scope["connectionId"],
+                "peerIdentityHash": final_scope["peerIdentityHash"],
+            }
+        ]
+        log_evidence["cleanupEvidence"] = {
+            "status": "PASS",
+            "pendingOwnedTasks": 0,
+            "activeSessions": 0,
+            "activeReceiveLoops": 0,
+        }
+        args.candidate_control_json = lambda *_args, **_kwargs: {
+            "journeyId": final_scope["journeyId"],
+            "journeyType": final_scope["journeyType"],
+            "proofProfile": final_scope["proofProfile"],
+            "status": "PASS",
+        }
+        args.candidate_log_analyzer = lambda **_kwargs: log_evidence
+        args._candidate_websocket_state = {"websocket": Websocket()}
+        return await robot_soak._run_candidate_websocket_journey(
+            args, operation="cleanup", final_scope=final_scope
+        )
+
+    journeys["conversation"] = capture_conversation
+    journeys["monitor"] = capture_monitor
+    journeys["cleanup"] = cleanup
+    result = asyncio.run(
+        produce_candidate_evidence(
+            args,
+            journeys=journeys,
+            sample_resources=_samples,
+            clock=_Clock(),
+        )
+    )
+
+    assert result["status"] == "FAIL"
+    assert {failure["code"] for failure in result["failures"]} >= {
+        "CLEANUP_FAILED"
+    }
+    assert not output.exists()
 
 
 def test_candidate_cli_producer_and_replay_are_mutually_exclusive(tmp_path):

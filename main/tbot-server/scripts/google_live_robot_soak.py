@@ -2036,6 +2036,9 @@ async def _run_candidate_websocket_journey(args, **context):
             )
             and log_evidence.get("serverIssued") is True
             and log_evidence.get("journeyType") == final_scope.get("journeyType")
+            and final_scope.get("journeyType")
+            in {"quiet_padding", "conversation_after_lesson"}
+            and log_evidence.get("serverConnectionTransitions") == []
             and expected_scope.get("journeyId") == journey_id
             and final_scope.get("connectionId")
             == expected_scope.get("connectionId")
