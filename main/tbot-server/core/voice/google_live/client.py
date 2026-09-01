@@ -229,6 +229,12 @@ class GoogleLiveClient:
                         if callable(close_iterator):
                             with suppress(asyncio.CancelledError, Exception):
                                 await close_iterator()
+                        for event in self._finish_open_audio_turn(
+                            "response_generation_rebound"
+                        ):
+                            yield self._stamp_response_generation(
+                                event, origin_generation
+                            )
                         response_rebound = True
                         break
                     if message is None:

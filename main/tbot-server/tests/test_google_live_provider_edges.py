@@ -606,6 +606,96 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         await events.aclose()
         await client.close()
 
+    async def test_real_client_rebind_synthesizes_old_end_before_direct_replacement_audio(self):
+        def audio_message(payload, *, turn_complete):
+            return SimpleNamespace(
+                server_content=SimpleNamespace(
+                    interrupted=False,
+                    turn_complete=turn_complete,
+                    model_turn=SimpleNamespace(
+                        parts=[
+                            SimpleNamespace(
+                                inline_data=SimpleNamespace(
+                                    data=payload,
+                                    mime_type="audio/pcm;rate=24000",
+                                )
+                            )
+                        ]
+                    ),
+                )
+            )
+
+        class DirectReplacementSession:
+            def __init__(self):
+                self.receive_calls = 0
+                self.first_waiting = asyncio.Event()
+
+            def receive(self):
+                self.receive_calls += 1
+                call = self.receive_calls
+
+                async def messages():
+                    if call == 1:
+                        yield audio_message(b"old", turn_complete=False)
+                        self.first_waiting.set()
+                        await asyncio.Event().wait()
+                    else:
+                        yield audio_message(b"new", turn_complete=True)
+
+                return messages()
+
+            async def send_client_content(self, **_kwargs):
+                return None
+
+            async def send_realtime_input(self, **_kwargs):
+                return None
+
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        client = GoogleLiveClient({}, conn.logger)
+        session = DirectReplacementSession()
+        client.connected = True
+        client._session = session
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        provider._client = client
+        provider._bridge = _Bridge()
+        provider._response_generation = 1
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        client.set_response_generation_getter(provider.current_response_id)
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript("first intent")
+        events = client.receive_events().__aiter__()
+        old_events = [await events.__anext__(), await events.__anext__()]
+        for event in old_events:
+            await provider._handle_live_event(event)
+        pending_end = asyncio.create_task(events.__anext__())
+        await session.first_waiting.wait()
+        conn.google_live_transcript_event_token = object()
+
+        await provider._on_user_transcript_barge_in("newest intent")
+
+        synthesized_end = await asyncio.wait_for(pending_end, timeout=0.2)
+        self.assertEqual(
+            (synthesized_end["type"], synthesized_end["response_generation"]),
+            ("audio_end", 1),
+        )
+        await provider._handle_live_event(synthesized_end)
+        replacement = [await events.__anext__() for _ in range(3)]
+        self.assertEqual(
+            [(item["type"], item["response_generation"]) for item in replacement],
+            [("audio_start", 2), ("audio_chunk", 2), ("audio_end", 2)],
+        )
+        for event in replacement:
+            await provider._handle_live_event(event)
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertTrue(snapshot["semanticOwnershipReady"])
+        self.assertEqual(snapshot["semanticStaleOldAudioCount"], 0)
+        await events.aclose()
+        await client.close()
+
     async def test_candidate_semantic_rejects_newest_without_active_old_output(self):
         conn = _Conn()
         registry = self._bind_candidate_bargein(conn)
