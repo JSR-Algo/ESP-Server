@@ -485,14 +485,13 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._evidence_candidate_counters.get(name, 0) + 1
         )
 
-    def _log_candidate_final_markers(self):
+    def _log_candidate_final_markers(self, counters):
         if (
             self._evidence_candidate_final_markers_logged
             or not self._candidate_counter_enabled()
         ):
             return
         journey_id = self.conn.google_live_evidence_journey_id
-        counters = self._evidence_candidate_counters
         self.conn.logger.bind(tag="GoogleLive").info(
             "Google Live evidence_candidate_fallback journey_id={} fallbacks={}",
             journey_id,
@@ -1114,7 +1113,6 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if evidence_scope is None:
                 return {"status": "FAIL", "failureCode": "EVIDENCE_SCOPE_MISSING"}
             self._ensure_evidence_live_identity()
-            self._log_candidate_final_markers()
             cleanup_result = await self._close_live_resources(
                 evidence_finalize=True
             )
@@ -1126,6 +1124,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if self._fallback_provider is not None:
                 await self._fallback_provider.close()
             pending_tasks = self._pending_evidence_task_count()
+            cleanup_verified = pending_tasks == 0 and cleanup_failure_code is None
+            if cleanup_verified:
+                self._log_candidate_final_markers(
+                    dict(self._evidence_candidate_counters)
+                )
             if not str(cleanup_failure_code or "").startswith(
                 "EVIDENCE_CLIENT_CLOSE_"
             ):
@@ -1139,9 +1142,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 )
             self._evidence_finalize_result = {
                 "status": (
-                    "PASS"
-                    if pending_tasks == 0 and cleanup_failure_code is None
-                    else "FAIL"
+                    "PASS" if cleanup_verified else "FAIL"
                 ),
                 "journeyId": evidence_scope[0],
                 "connectionId": evidence_scope[1],
@@ -2278,6 +2279,18 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._increment_candidate_counter("response_starts")
             return self._record_candidate_response_started(response_generation)
         if event_type == "audio_end":
+            scope = self._candidate_semantic_registry_scope()
+            if scope is not None:
+                registry, journey_id = scope
+                try:
+                    snapshot = registry.safe_snapshot(journey_id)
+                    if (
+                        response_generation
+                        == snapshot.get("semanticOldResponseGeneration")
+                    ):
+                        return True
+                except Exception:
+                    pass
             self._increment_candidate_counter("response_ends")
             return self._record_candidate_response_completed(response_generation)
         if event_type not in {"audio", "audio_chunk"}:
@@ -7678,6 +7691,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
 
         previous_response_id = self._response_generation
         self._response_generation += 1
+        bind_generation = getattr(self._client, "bind_response_generation", None)
+        if callable(bind_generation):
+            try:
+                bind_generation(self._response_generation)
+            except Exception:
+                pass
         self._increment_candidate_counter("interrupts")
         self._evidence_candidate_interrupt_pending = True
         reservation = self._evidence_final_response_reservation
