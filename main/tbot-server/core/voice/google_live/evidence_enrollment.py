@@ -49,6 +49,8 @@ class EnrollmentError(ValueError):
 
 
 def validate_evidence_claims(journey_type: str, proof_profile: str) -> None:
+    if not isinstance(journey_type, str) or not isinstance(proof_profile, str):
+        raise EnrollmentError("INVALID_EVIDENCE_CLAIMS")
     if (
         proof_profile == PHYSICAL_TRANSCRIPT_PROFILE
         and journey_type in PHYSICAL_JOURNEY_TYPES
@@ -660,6 +662,8 @@ class EvidenceEnrollmentRegistry:
                 or any(character not in "0123456789abcdef" for character in expectation.expected_mac)
             ):
                 raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
+        if transcript_plan[-1].phase != "post_lesson":
+            raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
 
     def _add_tombstone(self, snapshot: dict) -> None:
         self._tombstones[snapshot["journeyId"]] = snapshot

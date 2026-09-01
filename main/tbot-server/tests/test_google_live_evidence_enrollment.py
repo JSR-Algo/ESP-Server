@@ -25,7 +25,7 @@ class Clock:
 
 
 def _plan(mac="a" * 64):
-    return (TranscriptExpectation(slot=1, phase="interrupt", expected_mac=mac),)
+    return (TranscriptExpectation(slot=1, phase="post_lesson", expected_mac=mac),)
 
 
 def _mac(key, value):
@@ -93,7 +93,7 @@ def test_registry_wrong_phase_terminally_invalidates_proof_even_if_later_sequenc
         hmac_key=key,
         transcript_plan=(
             TranscriptExpectation(1, "interrupt", _mac(key, "Café")),
-            TranscriptExpectation(2, "lesson", _mac(key, "two")),
+            TranscriptExpectation(2, "post_lesson", _mac(key, "two")),
         ),
     )
     registry.claim(device_id="aa:bb", client_id="robot-client", journey_id="physical.run-1")
@@ -124,6 +124,7 @@ def test_registry_accepts_unicode_equivalent_transcript_without_prior_mismatch()
         hmac_key=key,
         transcript_plan=(
             TranscriptExpectation(1, "interrupt", _mac(key, "Café")),
+            TranscriptExpectation(2, "post_lesson", _mac(key, "done")),
         ),
     )
     registry.claim(device_id="aa:bb", client_id="robot-client", journey_id="physical.run-1")
@@ -228,6 +229,7 @@ def test_registry_mismatch_and_cancellation_never_expose_or_retain_transcript_se
         hmac_key=key,
         transcript_plan=(
             TranscriptExpectation(1, "interrupt", _mac(key, "private phrase")),
+            TranscriptExpectation(2, "post_lesson", _mac(key, "done")),
         ),
     )
     registry.claim(device_id="aa:bb", client_id="robot-client", journey_id="physical.run-1")
@@ -259,6 +261,7 @@ def test_transcript_observation_cannot_bypass_expiry_with_explicit_timestamp():
         ttl_sec=30,
         transcript_plan=(
             TranscriptExpectation(1, "interrupt", _mac(key, "hello")),
+            TranscriptExpectation(2, "post_lesson", _mac(key, "done")),
         ),
     )
     registry.claim(device_id="aa:bb", client_id="robot-client", journey_id="physical.run-1")
@@ -370,6 +373,37 @@ def test_registry_rejects_invalid_physical_profile_payload(overrides):
 
     with pytest.raises(EnrollmentError, match="INVALID_EVIDENCE_PROFILE_PAYLOAD"):
         _register(registry, **overrides)
+
+
+def test_registry_rejects_physical_plan_without_final_post_lesson():
+    registry = EvidenceEnrollmentRegistry()
+
+    with pytest.raises(EnrollmentError, match="INVALID_EVIDENCE_PROFILE_PAYLOAD"):
+        _register(
+            registry,
+            transcript_plan=(TranscriptExpectation(1, "interrupt", "a" * 64),),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "malformed"),
+    [
+        ("journey_type", []),
+        ("journey_type", {}),
+        ("journey_type", 1),
+        ("proof_profile", []),
+        ("proof_profile", {}),
+        ("proof_profile", 1),
+    ],
+)
+def test_registry_normalizes_malformed_claim_types_and_zeroizes_key(field, malformed):
+    registry = EvidenceEnrollmentRegistry()
+    rejected_key = bytearray(b"r" * 32)
+
+    with pytest.raises(EnrollmentError, match="INVALID_EVIDENCE_CLAIMS"):
+        _register(registry, hmac_key=rejected_key, **{field: malformed})
+
+    assert rejected_key == bytearray(32)
 
 
 def test_registry_zeroizes_mutable_key_when_profile_payload_is_rejected():
@@ -700,7 +734,7 @@ def _body(**overrides):
         "ttlSec": 120,
         "normalizationVersion": "google-live-transcript-nfkc-casefold.v1",
         "hmacKeyBase64": base64.b64encode(b"k" * 32).decode(),
-        "transcriptPlan": [{"slot": 1, "phase": "interrupt", "expectedMac": "a" * 64}],
+        "transcriptPlan": [{"slot": 1, "phase": "post_lesson", "expectedMac": "a" * 64}],
     }
     value.update(overrides)
     return value

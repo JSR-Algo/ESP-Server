@@ -83,7 +83,7 @@ async def test_ota_emits_only_exact_active_evidence_journey(tmp_path, monkeypatc
         device_id="aa:bb",
         client_id="client-1",
         journey_id="physical.run-1",
-        transcript_plan=(TranscriptExpectation(1, "interrupt", "a" * 64),),
+        transcript_plan=(TranscriptExpectation(1, "post_lesson", "a" * 64),),
         hmac_key=bytearray(b"k" * 32),
         ttl_sec=120,
     )

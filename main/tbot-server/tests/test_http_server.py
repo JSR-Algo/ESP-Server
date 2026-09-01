@@ -382,7 +382,7 @@ async def test_google_live_evidence_http_finalize_reserves_exact_current_connect
         device_id="device-1",
         client_id="client-1",
         journey_id="physical.run-1",
-        transcript_plan=(TranscriptExpectation(1, "interrupt", "a" * 64),),
+        transcript_plan=(TranscriptExpectation(1, "post_lesson", "a" * 64),),
         hmac_key=b"k" * 32,
         ttl_sec=120,
     )
@@ -448,7 +448,7 @@ async def test_google_live_evidence_http_finalize_rejects_expired_tombstone():
         device_id="device-1",
         client_id="client-1",
         journey_id="physical.run-1",
-        transcript_plan=(TranscriptExpectation(1, "interrupt", "a" * 64),),
+        transcript_plan=(TranscriptExpectation(1, "post_lesson", "a" * 64),),
         hmac_key=b"k" * 32,
         ttl_sec=30,
     )
@@ -516,6 +516,24 @@ async def test_google_live_evidence_post_accepts_explicit_physical_claims():
 
 
 @pytest.mark.asyncio
+async def test_google_live_evidence_post_rejects_physical_plan_without_final_post_lesson():
+    handler = GoogleLiveEvidenceHandler(EvidenceEnrollmentRegistry())
+    body = _physical_evidence_body(
+        transcriptPlan=[
+            {"slot": 1, "phase": "interrupt", "expectedMac": "a" * 64}
+        ]
+    )
+
+    response = await handler.handle_post(_EvidenceRequest(body))
+
+    assert response.status == 400
+    assert json.loads(response.text) == {
+        "error": "INVALID_REQUEST",
+        "message": "Invalid Google Live evidence enrollment request",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "body",
     [
@@ -532,9 +550,15 @@ async def test_google_live_evidence_post_accepts_explicit_physical_claims():
         _candidate_evidence_body(unknown=True),
         _candidate_evidence_body(journeyType="unknown"),
         _candidate_evidence_body(proofProfile="unknown"),
+        _candidate_evidence_body(journeyType=[]),
+        _candidate_evidence_body(proofProfile={}),
         _candidate_evidence_body(
             journeyType="physical", proofProfile="candidate-lifecycle"
         ),
+        _physical_evidence_body(
+            journeyType=[], proofProfile="physical-transcript"
+        ),
+        _physical_evidence_body(journeyType="physical", proofProfile={}),
         _candidate_evidence_body(
             normalizationVersion="google-live-transcript-nfkc-casefold.v1"
         ),

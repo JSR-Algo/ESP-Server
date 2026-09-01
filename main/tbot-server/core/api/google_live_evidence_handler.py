@@ -275,14 +275,20 @@ class GoogleLiveEvidenceHandler:
             journey_type = body["journeyType"]
             proof_profile = body["proofProfile"]
             if (
-                journey_type != "physical"
+                not isinstance(journey_type, str)
+                or not isinstance(proof_profile, str)
+                or journey_type != "physical"
                 or proof_profile != PHYSICAL_TRANSCRIPT_PROFILE
             ):
                 raise ValueError
         elif fields == _CANDIDATE_POST_FIELDS:
             journey_type = body["journeyType"]
             proof_profile = body["proofProfile"]
-            if proof_profile != CANDIDATE_LIFECYCLE_PROFILE:
+            if (
+                not isinstance(journey_type, str)
+                or not isinstance(proof_profile, str)
+                or proof_profile != CANDIDATE_LIFECYCLE_PROFILE
+            ):
                 raise ValueError
             return self._parse_candidate_body(
                 route_device_id,
@@ -323,6 +329,8 @@ class GoogleLiveEvidenceHandler:
             if not isinstance(item["expectedMac"], str) or not _MAC.fullmatch(item["expectedMac"]):
                 raise ValueError
             expectations.append(TranscriptExpectation(item["slot"], item["phase"], item["expectedMac"]))
+        if expectations[-1].phase != "post_lesson":
+            raise ValueError
         return {
             "device_id": device_id,
             "client_id": client_id,
