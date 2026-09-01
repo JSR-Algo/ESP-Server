@@ -1400,7 +1400,7 @@ class ConnectionHandler:
                         prepare_retry = getattr(
                             provider, "prepare_evidence_finalize_retry", None
                         )
-                        retry_prepared = not callable(prepare_retry)
+                        retry_prepared = False
                         if callable(prepare_retry):
                             try:
                                 prepare_result = prepare_retry()
@@ -1426,7 +1426,7 @@ class ConnectionHandler:
                         prepare_retry = getattr(
                             provider, "prepare_evidence_finalize_retry", None
                         )
-                        retry_prepared = not callable(prepare_retry)
+                        retry_prepared = False
                         if callable(prepare_retry):
                             try:
                                 prepare_result = prepare_retry()
@@ -1481,6 +1481,36 @@ class ConnectionHandler:
         registry = getattr(self, "evidence_registry", None)
         journey_id = scope.get("journeyId") if isinstance(scope, dict) else None
         scope_matched = isinstance(scope, dict) and expected_scope == scope
+        if registry is not None and isinstance(journey_id, str) and scope_matched:
+            active_claim_matches = getattr(registry, "active_claim_matches", None)
+            registry_finalize = getattr(registry, "finalize", None)
+            try:
+                claim_still_active = bool(
+                    callable(active_claim_matches)
+                    and active_claim_matches(
+                        device_id=str(getattr(self, "device_id", "") or ""),
+                        client_id=str(getattr(self, "client_id", "") or ""),
+                        journey_id=journey_id,
+                        journey_type=scope.get("journeyType"),
+                        proof_profile=scope.get("proofProfile"),
+                    )
+                    is True
+                )
+                if not claim_still_active or not callable(registry_finalize):
+                    raise RuntimeError("evidence enrollment is no longer active")
+                registry_finalize(
+                    journey_id,
+                    status="FAIL" if failure_code else "PASS",
+                    failure_code=failure_code,
+                )
+            except Exception:
+                return {
+                    "type": "evidence_finalized",
+                    "status": "FAIL",
+                    "failureCode": "EVIDENCE_ENROLLMENT_INVALID",
+                    "evidenceScope": scope,
+                    "retryable": True,
+                }
         if scope_matched and ack.get("status") in ("PASS", "FAIL"):
             server_end_utc = ack.get("serverEndUtc") or _utc_now_iso()
             self.logger.bind(tag=TAG).info(
@@ -1488,21 +1518,6 @@ class ConnectionHandler:
                 journey_id,
                 server_end_utc,
             )
-        if registry is not None and isinstance(journey_id, str) and scope_matched:
-            try:
-                registry.finalize(
-                    journey_id,
-                    status="FAIL" if failure_code else "PASS",
-                    failure_code=failure_code,
-                )
-            except Exception:
-                if not failure_code:
-                    ack = {
-                        "type": "evidence_finalized",
-                        "status": "FAIL",
-                        "failureCode": "EVIDENCE_ENROLLMENT_INVALID",
-                        "evidenceScope": scope,
-                    }
         if scope_matched:
             self.google_live_evidence_finalize_result = dict(ack)
         return dict(ack)

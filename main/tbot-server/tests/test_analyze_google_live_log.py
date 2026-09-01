@@ -71,6 +71,7 @@ def _server_connection_transition(**overrides):
 
 
 _DEFAULT_TRUSTED_JOURNEY = object()
+_DEFAULT_PROOF_PROFILE = object()
 
 
 def _window_lines(
@@ -79,7 +80,7 @@ def _window_lines(
     window_id="window-1",
     journey_id=None,
     journeys=_DEFAULT_TRUSTED_JOURNEY,
-    proof_profile=None,
+    proof_profile=_DEFAULT_PROOF_PROFILE,
     evidence_scope=None,
     server_issued=False,
 ):
@@ -89,6 +90,14 @@ def _window_lines(
         journey_id = evidence_scope["journeyId"]
     if journeys is _DEFAULT_TRUSTED_JOURNEY:
         journeys = "physical" if server_issued and evidence_scope is not None else None
+    if proof_profile is _DEFAULT_PROOF_PROFILE:
+        proof_profile = (
+            "physical-transcript"
+            if server_issued and journeys == "physical"
+            else "candidate-lifecycle"
+            if server_issued and journeys is not None
+            else None
+        )
     if journey_id is not None:
         evidence += f"journey_id={journey_id} "
     if journeys is not None:
@@ -761,6 +770,14 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                 server_issued=True,
             ),
         }
+        for journey_type in ("quiet_padding", "conversation", "reconnect"):
+            cases[f"{journey_type}_missing_profile"] = _window_lines(
+                journey_id="candidate.run-1",
+                journeys=journey_type,
+                proof_profile=None,
+                evidence_scope=EVIDENCE_SCOPE,
+                server_issued=True,
+            )
         duplicate = _window_lines(
             journey_id="candidate.run-1",
             journeys="conversation",

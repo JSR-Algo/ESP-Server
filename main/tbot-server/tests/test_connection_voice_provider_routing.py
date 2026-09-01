@@ -1802,6 +1802,119 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
                     getattr(handler, "google_live_evidence_finalize_result", None)
                 )
 
+    async def test_candidate_lifecycle_retries_cleanup_only_after_explicit_prepare(self):
+        for hook_result, expected_calls in ((None, 1), (False, 1), (True, 2)):
+            with self.subTest(hook_result=hook_result):
+                handler = self._build_handler()
+                handler.logger = _RecordingLogger()
+                scope = {
+                    "journeyId": "candidate.run-1",
+                    "journeyType": "conversation",
+                    "proofProfile": "candidate-lifecycle",
+                    "connectionId": "server-conn-1",
+                    "liveConnectionId": "live-7",
+                    "initialLiveConnectionId": "live-7",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "serverStartUtc": "2026-08-31T03:00:00+00:00",
+                }
+                handler.google_live_evidence_scope = scope
+                terminal = []
+                handler.evidence_registry = types.SimpleNamespace(
+                    safe_snapshot=lambda _journey: {
+                        "journeyId": "candidate.run-1",
+                        "journeyType": "conversation",
+                        "proofProfile": "candidate-lifecycle",
+                        "readyToFinalize": True,
+                    },
+                    active_claim_matches=lambda **_claims: True,
+                    finalize=lambda journey_id, status, failure_code=None: terminal.append(
+                        (journey_id, status, failure_code)
+                    ),
+                )
+                invalid = {"status": "FAIL", "pendingTasks": 1}
+                valid = {
+                    "status": "PASS",
+                    "journeyId": "candidate.run-1",
+                    "connectionId": "server-conn-1",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "initialLiveConnectionId": "live-7",
+                    "finalLiveConnectionId": "live-7",
+                    "liveConnectionTransitions": [],
+                    "pendingTasks": 0,
+                }
+                provider = types.SimpleNamespace(
+                    finalize_evidence=AsyncMock(side_effect=[invalid, valid])
+                )
+                if hook_result is not None:
+                    provider.prepare_evidence_finalize_retry = lambda: hook_result
+                handler.voice_provider = provider
+
+                first = await handler.finalize_google_live_evidence(scope)
+                second = await handler.finalize_google_live_evidence(scope)
+
+                self.assertEqual(first["failureCode"], "EVIDENCE_CLEANUP_INCOMPLETE")
+                self.assertEqual(provider.finalize_evidence.await_count, expected_calls)
+                if hook_result is True:
+                    self.assertEqual(second["status"], "PASS")
+                    self.assertEqual(terminal, [("candidate.run-1", "PASS", None)])
+                else:
+                    self.assertEqual(second["failureCode"], "EVIDENCE_CLEANUP_INCOMPLETE")
+                    self.assertEqual(terminal, [])
+
+    async def test_registry_finalize_failure_after_cleanup_emits_no_terminal_boundary(self):
+        handler = self._build_handler()
+        handler.logger = _RecordingLogger()
+        scope = {
+            "journeyId": "candidate.run-1",
+            "journeyType": "conversation",
+            "proofProfile": "candidate-lifecycle",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        def fail_registry_finalize(*_args, **_kwargs):
+            raise RuntimeError("expired private state")
+
+        handler.evidence_registry = types.SimpleNamespace(
+            safe_snapshot=lambda _journey: {
+                "journeyId": "candidate.run-1",
+                "journeyType": "conversation",
+                "proofProfile": "candidate-lifecycle",
+                "readyToFinalize": True,
+            },
+            active_claim_matches=lambda **_claims: True,
+            finalize=fail_registry_finalize,
+        )
+        handler.voice_provider = types.SimpleNamespace(
+            finalize_evidence=AsyncMock(
+                return_value={
+                    "status": "PASS",
+                    "journeyId": "candidate.run-1",
+                    "connectionId": "server-conn-1",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "initialLiveConnectionId": "live-7",
+                    "finalLiveConnectionId": "live-7",
+                    "liveConnectionTransitions": [],
+                    "pendingTasks": 0,
+                }
+            )
+        )
+
+        result = await handler.finalize_google_live_evidence(scope)
+
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(result["failureCode"], "EVIDENCE_ENROLLMENT_INVALID")
+        self.assertTrue(result["retryable"])
+        self.assertFalse(
+            any("reliability_window_end" in record[1] for record in handler.logger.records)
+        )
+        self.assertIsNone(
+            getattr(handler, "google_live_evidence_finalize_result", None)
+        )
+
     async def test_evidence_finalize_concurrent_callers_emit_one_terminal_boundary(self):
         handler = self._build_handler()
         handler.config["voice_mode"] = {"type": "google_live"}

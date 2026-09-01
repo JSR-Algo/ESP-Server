@@ -3556,6 +3556,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             )
             or len(claimed_journey_list) != len(set(claimed_journey_list))
             or not set(claimed_journey_list).issubset(recognized_journeys)
+            or (server_issued_claim and proof_profile is None)
             or (
                 proof_profile is not None
                 and not (
