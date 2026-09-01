@@ -2307,6 +2307,27 @@ def test_git_archive_rejects_oversized_symlink_before_content_read(
     assert process.stdout.read_sizes == []
 
 
+def test_git_archive_closes_all_batch_process_streams(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _git(source, "init")
+    _git(source, "config", "user.email", "course-mode@example.invalid")
+    _git(source, "config", "user.name", "Course Mode Test")
+    (source / "tracked.txt").write_text("candidate\n", encoding="utf-8")
+    _git(source, "add", "tracked.txt")
+    _git(source, "commit", "-m", "candidate")
+    sha = _git(source, "rev-parse", "HEAD")
+    before = len(os.listdir("/dev/fd"))
+
+    monkeypatch.setattr(gate, "MAX_SNAPSHOT_BYTES", 0)
+    with pytest.raises(ValueError, match="byte limit"):
+        gate._archive_repository(source, sha, tmp_path / "archive", {"entries": 0, "bytes": 0})
+
+    assert len(os.listdir("/dev/fd")) == before
+
+
 def test_git_archive_rejects_bounded_ls_tree_overflow_before_cat_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

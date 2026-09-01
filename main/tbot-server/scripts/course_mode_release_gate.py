@@ -1131,6 +1131,11 @@ def _archive_repository(source: Path, sha: str, destination: Path, state: dict[s
             if batch.poll() is None:
                 batch.kill()
                 batch.wait()
+            for stream in (batch.stdout, batch.stderr):
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    with contextlib.suppress(OSError):
+                        close()
             if batch.returncode != 0:
                 raise ValueError("candidate archive failed")
     except ValueError:
