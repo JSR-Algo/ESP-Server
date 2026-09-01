@@ -406,6 +406,53 @@ def test_registry_normalizes_malformed_claim_types_and_zeroizes_key(field, malfo
     assert rejected_key == bytearray(32)
 
 
+@pytest.mark.parametrize(
+    "malformed_plan",
+    [
+        7,
+        (object(),),
+        (TranscriptExpectation([], "post_lesson", "a" * 64),),
+        (TranscriptExpectation(True, "post_lesson", "a" * 64),),
+        (TranscriptExpectation("1", "post_lesson", "a" * 64),),
+        (TranscriptExpectation(1, [], "a" * 64),),
+        (TranscriptExpectation(1, "post_lesson", 7),),
+        (TranscriptExpectation(1, "post_lesson", {}),),
+    ],
+)
+def test_registry_normalizes_malformed_transcript_plan_and_zeroizes_key(
+    malformed_plan,
+):
+    registry = EvidenceEnrollmentRegistry()
+    rejected_key = bytearray(b"r" * 32)
+
+    with pytest.raises(EnrollmentError, match="INVALID_EVIDENCE_PROFILE_PAYLOAD"):
+        _register(
+            registry,
+            transcript_plan=malformed_plan,
+            hmac_key=rejected_key,
+        )
+
+    assert rejected_key == bytearray(32)
+
+
+def test_registry_zeroizes_key_before_preserving_unexpected_plan_iterator_error():
+    class ExplodingPlan:
+        def __iter__(self):
+            raise RuntimeError("unexpected iterator failure")
+
+    registry = EvidenceEnrollmentRegistry()
+    rejected_key = bytearray(b"r" * 32)
+
+    with pytest.raises(RuntimeError, match="unexpected iterator failure"):
+        _register(
+            registry,
+            transcript_plan=ExplodingPlan(),
+            hmac_key=rejected_key,
+        )
+
+    assert rejected_key == bytearray(32)
+
+
 def test_registry_zeroizes_mutable_key_when_profile_payload_is_rejected():
     registry = EvidenceEnrollmentRegistry()
     rejected_key = bytearray(b"r" * 32)

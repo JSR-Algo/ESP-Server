@@ -157,50 +157,60 @@ class EvidenceEnrollmentRegistry:
         journey_type: str = "physical",
         proof_profile: str = PHYSICAL_TRANSCRIPT_PROFILE,
     ) -> EvidenceEnrollment:
-        wall_now = self._prepare()
-        monotonic_now = self._monotonic_clock()
-        device_id = normalize_peer_id(device_id)
-        client_id = normalize_peer_id(client_id)
-        transcript_plan = tuple(transcript_plan)
+        owned_key: bytearray | None = None
         try:
+            wall_now = self._prepare()
+            monotonic_now = self._monotonic_clock()
+            device_id = normalize_peer_id(device_id)
+            client_id = normalize_peer_id(client_id)
+            try:
+                transcript_plan = tuple(transcript_plan)
+            except TypeError as exc:
+                if not hasattr(transcript_plan, "__iter__"):
+                    raise EnrollmentError(
+                        "INVALID_EVIDENCE_PROFILE_PAYLOAD"
+                    ) from exc
+                raise
             self._validate_profile_payload(
                 journey_type=journey_type,
                 proof_profile=proof_profile,
                 transcript_plan=transcript_plan,
                 hmac_key=hmac_key,
             )
-        except EnrollmentError:
+            error = None
+            if journey_id in self._active or journey_id in self._tombstones:
+                error = "JOURNEY_REUSED"
+            elif any(
+                item.device_id == device_id and item.client_id == client_id
+                for item in self._active.values()
+            ):
+                error = "ENROLLMENT_ACTIVE"
+            elif len(self._active) >= self._max_active:
+                error = "CAPACITY_EXCEEDED"
+            if error is not None:
+                raise EnrollmentError(error)
+            owned_key = bytearray(hmac_key)
+            enrollment = _EvidenceEnrollmentState(
+                device_id=device_id,
+                client_id=client_id,
+                journey_id=journey_id,
+                journey_type=journey_type,
+                proof_profile=proof_profile,
+                transcript_plan=transcript_plan,
+                hmac_key=owned_key,
+                created_at=wall_now,
+                expires_at=wall_now + ttl_sec,
+                monotonic_deadline=monotonic_now + ttl_sec,
+            )
+            view = self._view(enrollment)
+        except Exception:
             if isinstance(hmac_key, bytearray):
                 self._zeroize(hmac_key)
+            if owned_key is not None:
+                self._zeroize(owned_key)
             raise
-        error = None
-        if journey_id in self._active or journey_id in self._tombstones:
-            error = "JOURNEY_REUSED"
-        elif any(
-            item.device_id == device_id and item.client_id == client_id
-            for item in self._active.values()
-        ):
-            error = "ENROLLMENT_ACTIVE"
-        elif len(self._active) >= self._max_active:
-            error = "CAPACITY_EXCEEDED"
-        if error is not None:
-            if isinstance(hmac_key, bytearray):
-                self._zeroize(hmac_key)
-            raise EnrollmentError(error)
-        enrollment = _EvidenceEnrollmentState(
-            device_id=device_id,
-            client_id=client_id,
-            journey_id=journey_id,
-            journey_type=journey_type,
-            proof_profile=proof_profile,
-            transcript_plan=transcript_plan,
-            hmac_key=bytearray(hmac_key),
-            created_at=wall_now,
-            expires_at=wall_now + ttl_sec,
-            monotonic_deadline=monotonic_now + ttl_sec,
-        )
         self._active[journey_id] = enrollment
-        return self._view(enrollment)
+        return view
 
     @_synchronized
     def ota_journey(self, device_id: str, client_id: str) -> str | None:
@@ -647,6 +657,8 @@ class EvidenceEnrollmentRegistry:
         hmac_key: bytes | bytearray,
     ) -> None:
         validate_evidence_claims(journey_type, proof_profile)
+        if not isinstance(hmac_key, (bytes, bytearray)):
+            raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
         if proof_profile == CANDIDATE_LIFECYCLE_PROFILE:
             if transcript_plan or hmac_key:
                 raise EnrollmentError("INVALID_EVIDENCE_PROFILE_PAYLOAD")
@@ -656,8 +668,12 @@ class EvidenceEnrollmentRegistry:
         for expected_slot, expectation in enumerate(transcript_plan, start=1):
             if (
                 not isinstance(expectation, TranscriptExpectation)
+                or not isinstance(expectation.slot, int)
+                or isinstance(expectation.slot, bool)
                 or expectation.slot != expected_slot
+                or not isinstance(expectation.phase, str)
                 or expectation.phase not in ("interrupt", "lesson", "post_lesson")
+                or not isinstance(expectation.expected_mac, str)
                 or len(expectation.expected_mac) != 64
                 or any(character not in "0123456789abcdef" for character in expectation.expected_mac)
             ):
