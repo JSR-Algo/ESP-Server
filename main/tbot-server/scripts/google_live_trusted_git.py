@@ -7,8 +7,11 @@ import os
 import re
 import stat
 import subprocess
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Iterator
 
 
 @dataclass(frozen=True)
@@ -19,10 +22,22 @@ class GitExecutableIdentity:
     size: int
     modified_ns: int
     changed_ns: int
+    owner_uid: int
     mode: int
     sha256: str
     version: str
     parent_chain: tuple[tuple[int, int, int, int, int, int, int], ...]
+
+
+_SESSION_IDENTITY: ContextVar[GitExecutableIdentity | None] = ContextVar(
+    "google_live_trusted_git_identity", default=None
+)
+
+
+def _expected_privileged_uid() -> int:
+    if os.name != "posix":
+        raise RuntimeError("trusted Git executable is unavailable")
+    return 0
 
 
 def _fixed_git_candidates() -> list[Path]:
@@ -52,6 +67,25 @@ def _is_writable_by_current_user(opened: os.stat_result) -> bool:
     ):
         return True
     return opened.st_uid == os.geteuid() and bool(opened.st_mode & stat.S_IWUSR)
+
+
+def _is_privileged_read_only(path: Path, opened: os.stat_result) -> bool:
+    privileged_uid = _expected_privileged_uid()
+    if os.geteuid() == privileged_uid:
+        return (
+            opened.st_uid == privileged_uid
+            and not opened.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        )
+    try:
+        effectively_writable = os.access(path, os.W_OK, effective_ids=True)
+    except (NotImplementedError, TypeError):
+        effectively_writable = os.access(path, os.W_OK)
+    return (
+        opened.st_uid == privileged_uid
+        and not opened.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        and not _is_writable_by_current_user(opened)
+        and not effectively_writable
+    )
 
 
 def _read_executable(path: Path) -> tuple[bytes, os.stat_result]:
@@ -93,13 +127,31 @@ def _trusted_parent_chain(path: Path) -> tuple[tuple[int, int, int, int, int, in
         raise RuntimeError("trusted Git executable is invalid")
     chain = []
     current = Path(path.anchor)
+    root = current.lstat()
+    if (
+        stat.S_ISLNK(root.st_mode)
+        or not stat.S_ISDIR(root.st_mode)
+        or not _is_privileged_read_only(current, root)
+    ):
+        raise RuntimeError("trusted Git executable is invalid")
+    chain.append(
+        (
+            root.st_dev,
+            root.st_ino,
+            root.st_size,
+            root.st_mtime_ns,
+            root.st_ctime_ns,
+            root.st_uid,
+            root.st_mode,
+        )
+    )
     for component in path.parts[1:-1]:
         current /= component
         opened = current.lstat()
         if (
             not stat.S_ISDIR(opened.st_mode)
             or stat.S_ISLNK(opened.st_mode)
-            or _is_writable_by_current_user(opened)
+            or not _is_privileged_read_only(current, opened)
         ):
             raise RuntimeError("trusted Git executable is invalid")
         chain.append(
@@ -109,8 +161,8 @@ def _trusted_parent_chain(path: Path) -> tuple[tuple[int, int, int, int, int, in
                 opened.st_size,
                 opened.st_mtime_ns,
                 opened.st_ctime_ns,
+                opened.st_uid,
                 opened.st_mode,
-                opened.st_nlink,
             )
         )
     return tuple(chain)
@@ -121,7 +173,7 @@ def executable_identity(path: Path) -> GitExecutableIdentity:
         raise RuntimeError("trusted Git executable is invalid")
     parent_chain = _trusted_parent_chain(path)
     content, opened = _read_executable(path)
-    if not stat.S_ISREG(opened.st_mode) or _is_writable_by_current_user(opened):
+    if not stat.S_ISREG(opened.st_mode) or not _is_privileged_read_only(path, opened):
         raise RuntimeError("trusted Git executable is invalid")
     completed = subprocess.run(
         _git_command(path, Path("/"), "--version"),
@@ -166,6 +218,7 @@ def executable_identity(path: Path) -> GitExecutableIdentity:
         size=opened.st_size,
         modified_ns=opened.st_mtime_ns,
         changed_ns=opened.st_ctime_ns,
+        owner_uid=opened.st_uid,
         mode=opened.st_mode,
         sha256=hashlib.sha256(content).hexdigest(),
         version=version,
@@ -201,6 +254,7 @@ def require_executable_unchanged(identity: GitExecutableIdentity) -> None:
         opened.st_size,
         opened.st_mtime_ns,
         opened.st_ctime_ns,
+        opened.st_uid,
         opened.st_mode,
         hashlib.sha256(content).hexdigest(),
     )
@@ -210,11 +264,30 @@ def require_executable_unchanged(identity: GitExecutableIdentity) -> None:
         identity.size,
         identity.modified_ns,
         identity.changed_ns,
+        identity.owner_uid,
         identity.mode,
         identity.sha256,
     )
     if observed != expected:
         raise RuntimeError("trusted Git executable changed")
+
+
+@contextmanager
+def trusted_git_session() -> Iterator[GitExecutableIdentity]:
+    existing = _SESSION_IDENTITY.get()
+    if existing is not None:
+        require_executable_unchanged(existing)
+        yield existing
+        require_executable_unchanged(existing)
+        return
+    identity = resolve_trusted_git()
+    token = _SESSION_IDENTITY.set(identity)
+    try:
+        require_executable_unchanged(identity)
+        yield identity
+        require_executable_unchanged(identity)
+    finally:
+        _SESSION_IDENTITY.reset(token)
 
 
 def _git_command(executable: Path, repo: Path, *arguments: str) -> list[str]:
@@ -249,7 +322,7 @@ def _git_command(executable: Path, repo: Path, *arguments: str) -> list[str]:
 
 def git_output(repo_root: Path, *arguments: str) -> bytes:
     repo = repo_root.resolve(strict=True)
-    identity = resolve_trusted_git()
+    identity = _SESSION_IDENTITY.get() or resolve_trusted_git()
     require_executable_unchanged(identity)
     command = _git_command(identity.path, repo, *arguments)
     completed = subprocess.run(

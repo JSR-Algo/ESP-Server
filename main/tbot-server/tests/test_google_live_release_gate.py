@@ -976,8 +976,17 @@ def test_cli_reads_checksum_manifest_and_writes_deterministic_failure(tmp_path: 
     command = [sys.executable, str(script), "--expected-git-sha", IDENTITY["gitSha"], "--expected-image-digest", IDENTITY["imageDigest"], "--expected-firmware-identity", IDENTITY["firmwareIdentity"], "--expected-config-fingerprint", IDENTITY["configFingerprint"], "--expected-fixture-sha256", IDENTITY["fixtureSha256"], "--checksums-file", str(manifest), "--out", str(out)]
     for layer in REQUIRED_LAYERS:
         command.extend(["--layer", f"{layer}={paths[layer]}"])
+    command.extend(
+        [
+            "--support",
+            f"deterministic_manifest={paths['deterministic_manifest']}",
+            "--support",
+            f"deterministic_junit={paths['deterministic_junit']}",
+        ]
+    )
     completed = subprocess.run(command, text=True, capture_output=True, check=False)
     assert completed.returncode == 1
+    assert completed.stdout, completed.stderr
     assert json.loads(completed.stdout) == json.loads(out.read_text(encoding="utf-8"))
     assert json.loads(completed.stdout)["status"] == "FAIL"
 
@@ -1014,7 +1023,7 @@ def test_cli_never_overwrites_checksum_manifest(tmp_path: Path) -> None:
     assert manifest.read_bytes() == original
 
 
-def test_cli_writes_failure_atomically_for_malformed_checksum_manifest(
+def test_cli_does_not_publish_for_malformed_checksum_manifest(
     tmp_path: Path,
 ) -> None:
     paths, _, manifest = _write_evidence(tmp_path)
@@ -1024,14 +1033,13 @@ def test_cli_writes_failure_atomically_for_malformed_checksum_manifest(
     completed = _run_cli(paths, manifest, out)
 
     assert completed.returncode == 1
-    assert out.exists(), completed.stderr
-    verdict = json.loads(out.read_text(encoding="utf-8"))
-    assert verdict["status"] == "FAIL"
-    assert json.loads(completed.stdout) == verdict
+    assert completed.stdout == ""
+    assert completed.stderr == "release evidence validation failed\n"
+    assert not out.exists()
     assert not list(tmp_path.glob(".release-verdict.json.*.tmp"))
 
 
-def test_cli_writes_failure_atomically_for_malformed_layer_argument(
+def test_cli_does_not_publish_for_malformed_layer_argument(
     tmp_path: Path,
 ) -> None:
     _, _, manifest = _write_evidence(tmp_path)
@@ -1061,8 +1069,32 @@ def test_cli_writes_failure_atomically_for_malformed_layer_argument(
     completed = subprocess.run(command, text=True, capture_output=True, check=False)
 
     assert completed.returncode == 1
-    assert json.loads(out.read_text(encoding="utf-8"))["status"] == "FAIL"
+    assert completed.stdout == ""
+    assert completed.stderr == "release evidence validation failed\n"
+    assert not out.exists()
     assert not list(tmp_path.glob(".release-verdict.json.*.tmp"))
+
+
+@pytest.mark.parametrize("unsafe", ["delete", "symlink"])
+def test_cli_does_not_publish_when_an_input_is_unsafe(
+    tmp_path: Path, unsafe: str
+) -> None:
+    paths, _, manifest = _write_evidence(tmp_path)
+    target = paths["real_api"]
+    if unsafe == "delete":
+        target.unlink()
+    else:
+        moved = tmp_path / "moved-real-api.json"
+        target.rename(moved)
+        target.symlink_to(moved)
+    out = tmp_path / "release-verdict.json"
+
+    completed = _run_cli(paths, manifest, out)
+
+    assert completed.returncode == 1
+    assert completed.stdout == ""
+    assert completed.stderr == "release evidence validation failed\n"
+    assert not out.exists()
 
 
 def test_malformed_duplicate_layers_cannot_hide_output_alias(tmp_path: Path) -> None:
@@ -1195,6 +1227,24 @@ def test_bound_release_input_detects_parent_directory_aba(tmp_path: Path) -> Non
 
     with pytest.raises(RuntimeError, match="release evidence changed"):
         release_gate._require_release_input_unchanged(bound)
+
+
+def test_bound_release_verdict_leaves_no_output_when_publisher_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _, manifest = _write_evidence(tmp_path)
+    out = tmp_path / "release-verdict.json"
+    monkeypatch.setattr(
+        release_gate,
+        "_atomic_write",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("publisher failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="publisher failed"):
+        release_gate.produce_release_verdict(IDENTITY, paths, manifest, out)
+
+    assert not out.exists()
 
 
 @pytest.mark.parametrize("support_name", ["node-manifest.txt", "pytest.xml"])

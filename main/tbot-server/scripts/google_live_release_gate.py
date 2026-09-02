@@ -40,7 +40,10 @@ from scripts.google_live_reliability import (
     validate_log_reliability_contract,
     validate_real_api_pass_report,
 )
-from scripts.google_live_trusted_git import git_output as _trusted_git_output
+from scripts.google_live_trusted_git import (
+    git_output as _trusted_git_output,
+    trusted_git_session,
+)
 from scripts.physical_smoke_audit import validate_physical_candidate_report
 
 RELEASE_SCHEMA_VERSION = "google-live-release-verdict.v1"
@@ -822,7 +825,7 @@ def _atomic_write(
     )
 
 
-def produce_release_verdict(
+def _produce_release_verdict(
     expected_identity: Mapping[str, Any],
     layer_paths: Mapping[str, Path | str],
     checksum_path: Path | str,
@@ -894,6 +897,30 @@ def produce_release_verdict(
     return verdict
 
 
+def produce_release_verdict(
+    expected_identity: Mapping[str, Any],
+    layer_paths: Mapping[str, Path | str],
+    checksum_path: Path | str,
+    output_path: Path,
+    *,
+    after_checksum_read: Callable[[], None] | None = None,
+    after_inputs_parsed: Callable[[], None] | None = None,
+    pre_publish: Callable[[], None] | None = None,
+    post_publish: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    with trusted_git_session():
+        return _produce_release_verdict(
+            expected_identity,
+            layer_paths,
+            checksum_path,
+            output_path,
+            after_checksum_read=after_checksum_read,
+            after_inputs_parsed=after_inputs_parsed,
+            pre_publish=pre_publish,
+            post_publish=post_publish,
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expected-git-sha", required=True)
@@ -928,37 +955,20 @@ def main(argv: list[str] | None = None) -> int:
         _layer_path_candidates(args.layer) + _layer_path_candidates(args.support),
         args.checksums_file,
     )
-    if output_safe and parse_valid:
-        try:
-            verdict = produce_release_verdict(
-                identity,
-                paths,
-                args.checksums_file,
-                args.out,
-            )
-        except ReleaseEvidenceChanged:
-            verdict = aggregate_release_evidence(identity, {}, {})
-            print(json.dumps(verdict, indent=2, sort_keys=True) + "\n", end="")
-            return 1
-        except (OSError, UnicodeError, ValueError):
-            verdict = aggregate_release_evidence(identity, {}, {})
-        except RuntimeError:
-            verdict = aggregate_release_evidence(identity, {}, {})
-            print(json.dumps(verdict, indent=2, sort_keys=True) + "\n", end="")
-            return 1
-        else:
-            rendered = json.dumps(verdict, indent=2, sort_keys=True) + "\n"
-            print(rendered, end="")
-            return 0 if verdict["status"] == "PASS" else 1
-    else:
-        verdict = aggregate_release_evidence(identity, {}, {})
+    if not output_safe or not parse_valid:
+        print("release evidence validation failed", file=sys.stderr)
+        return 1
+    try:
+        verdict = produce_release_verdict(
+            identity,
+            paths,
+            args.checksums_file,
+            args.out,
+        )
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        print("release evidence validation failed", file=sys.stderr)
+        return 1
     rendered = json.dumps(verdict, indent=2, sort_keys=True) + "\n"
-    if output_safe:
-        try:
-            _atomic_write(args.out, rendered)
-        except (OSError, ValueError, RuntimeError):
-            print(rendered, end="")
-            return 1
     print(rendered, end="")
     return 0 if verdict["status"] == "PASS" else 1
 

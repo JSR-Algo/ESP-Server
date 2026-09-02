@@ -133,6 +133,111 @@ def test_trusted_git_rejects_executable_in_user_writable_parent(
         trusted_git.resolve_trusted_git(refresh=True)
 
 
+def test_trusted_git_requires_privileged_owner_even_when_mode_is_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = Path("/usr/bin/git")
+    monkeypatch.setattr(trusted_git, "_fixed_git_candidates", lambda: [executable])
+    monkeypatch.setattr(
+        trusted_git,
+        "_expected_privileged_uid",
+        lambda: executable.stat().st_uid + 1,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="trusted Git executable"):
+        trusted_git.resolve_trusted_git(refresh=True)
+
+
+def test_trusted_git_rejects_effectively_writable_acl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = Path("/usr/bin/git")
+    real_access = trusted_git.os.access
+
+    def access(path, mode, **kwargs):
+        if Path(path) == executable and mode == os.W_OK:
+            return True
+        return real_access(path, mode, **kwargs)
+
+    monkeypatch.setattr(trusted_git, "_fixed_git_candidates", lambda: [executable])
+    monkeypatch.setattr(trusted_git.os, "access", access)
+
+    with pytest.raises(RuntimeError, match="trusted Git executable"):
+        trusted_git.resolve_trusted_git(refresh=True)
+
+
+def test_trusted_git_identity_includes_filesystem_root() -> None:
+    identity = trusted_git.executable_identity(Path("/usr/bin/git"))
+    root = Path("/").stat()
+
+    assert identity.parent_chain[0][:2] == (root.st_dev, root.st_ino)
+
+
+def test_trusted_git_session_reuses_one_identity_for_every_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = trusted_git.executable_identity(Path("/usr/bin/git"))
+    resolutions = []
+    monkeypatch.setattr(
+        trusted_git,
+        "resolve_trusted_git",
+        lambda: resolutions.append(identity) or identity,
+    )
+    monkeypatch.setattr(
+        trusted_git.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, stdout=b"ok\n", stderr=b""
+        ),
+    )
+
+    with trusted_git.trusted_git_session():
+        trusted_git.git_output(tmp_path, "status")
+        trusted_git.git_output(tmp_path, "rev-parse", "HEAD")
+
+    assert resolutions == [identity]
+
+
+@pytest.mark.parametrize("swap", ["executable", "parent"])
+def test_trusted_git_session_rejects_identity_swap_between_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    swap: str,
+) -> None:
+    identity = trusted_git.executable_identity(Path("/usr/bin/git"))
+    monkeypatch.setattr(trusted_git, "resolve_trusted_git", lambda: identity)
+    monkeypatch.setattr(
+        trusted_git.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, stdout=b"ok\n", stderr=b""
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="trusted Git executable changed"):
+        with trusted_git.trusted_git_session():
+            trusted_git.git_output(tmp_path, "status")
+            if swap == "parent":
+                changed = list(identity.parent_chain)
+                changed[-1] = (changed[-1][0], changed[-1][1] + 1, *changed[-1][2:])
+                monkeypatch.setattr(
+                    trusted_git, "_trusted_parent_chain", lambda _path: tuple(changed)
+                )
+            else:
+                real_read = trusted_git._read_executable
+
+                def changed_executable(path):
+                    content, opened = real_read(path)
+                    values = list(opened)
+                    values[1] += 1
+                    return content, os.stat_result(values)
+
+                monkeypatch.setattr(trusted_git, "_read_executable", changed_executable)
+            trusted_git.git_output(tmp_path, "rev-parse", "HEAD")
+
+
 def test_trusted_git_disables_repository_replace_refs(tmp_path: Path) -> None:
     executable = "/usr/bin/git"
     repo = tmp_path / "repo"

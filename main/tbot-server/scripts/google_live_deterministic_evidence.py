@@ -31,7 +31,10 @@ if __package__ in {None, ""}:
 
 from scripts import google_live_deterministic_nodeid_plugin as nodeid_plugin
 from scripts.google_live_reliability import SCHEMA_VERSION
-from scripts.google_live_trusted_git import git_output as _trusted_git_output
+from scripts.google_live_trusted_git import (
+    git_output as _trusted_git_output,
+    trusted_git_session,
+)
 
 MANIFEST_SCHEMA = "google-live-deterministic-nodes.v1"
 PYTEST_RUNTIME_SCHEMA = "google-live-pytest-runtime.v1"
@@ -1362,7 +1365,7 @@ def _read_candidate_tracked_file(
     return bound
 
 
-def produce(
+def _produce(
     *,
     manifest_path: Path,
     junit_out: Path,
@@ -1523,6 +1526,34 @@ def produce(
             temporary_path.unlink()
         if not completed_successfully and published_junit is not None:
             _unlink_if_bound(junit_out, published_junit)
+
+
+def produce(
+    *,
+    manifest_path: Path,
+    junit_out: Path,
+    report_path: Path,
+    identity: Mapping[str, str],
+    repo_root: Path,
+    run: Callable[..., subprocess.CompletedProcess[str]] = _default_run,
+    git_status: Callable[[], bytes] | None = None,
+    git_head: Callable[[], str] | None = None,
+    approved_test_files: Sequence[str] = APPROVED_TEST_FILES,
+    canonical_manifest_path: Path | None = None,
+) -> dict[str, Any]:
+    with trusted_git_session():
+        return _produce(
+            manifest_path=manifest_path,
+            junit_out=junit_out,
+            report_path=report_path,
+            identity=identity,
+            repo_root=repo_root,
+            run=run,
+            git_status=git_status,
+            git_head=git_head,
+            approved_test_files=approved_test_files,
+            canonical_manifest_path=canonical_manifest_path,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
