@@ -275,6 +275,48 @@ def test_exclusive_publish_rejects_parent_inode_swap_without_touching_evidence(
     assert not (tmp_path / "moved-out" / "report.json").exists()
 
 
+@pytest.mark.parametrize("boundary", ["parent_match", "post_publish", "directory_fsync"])
+def test_exclusive_publish_rechecks_hardlinks_at_final_boundary(
+    tmp_path: Path, monkeypatch, boundary: str
+) -> None:
+    target = tmp_path / "report.json"
+    external_alias = tmp_path / "external-alias.json"
+    real_match = deterministic._pinned_parent_path_matches
+    real_fsync = deterministic.os.fsync
+    fsync_calls = 0
+
+    def inject_alias() -> None:
+        if target.exists() and not external_alias.exists():
+            os.link(target, external_alias)
+
+    def match(path, ancestry):
+        result = real_match(path, ancestry)
+        if boundary == "parent_match":
+            inject_alias()
+        return result
+
+    def post_publish() -> None:
+        if boundary == "post_publish":
+            inject_alias()
+
+    def fsync(descriptor):
+        nonlocal fsync_calls
+        fsync_calls += 1
+        if boundary == "directory_fsync" and fsync_calls == 2:
+            inject_alias()
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(deterministic, "_pinned_parent_path_matches", match)
+    monkeypatch.setattr(deterministic.os, "fsync", fsync)
+    with pytest.raises(RuntimeError, match="alias"):
+        deterministic.atomic_write_exclusive(
+            target, b"candidate", post_publish=post_publish
+        )
+    assert not target.exists()
+    assert external_alias.read_bytes() == b"candidate"
+    assert external_alias.stat().st_nlink == 1
+
+
 def test_producer_uses_argument_vector_and_publishes_only_verified_pass(tmp_path: Path) -> None:
     nodes = ["tests/test_a.py::test_one"]
     manifest = tmp_path / "node-manifest.txt"

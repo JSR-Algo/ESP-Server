@@ -8,6 +8,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import tempfile
@@ -430,6 +431,20 @@ def atomic_write_exclusive(
         if post_publish is not None:
             post_publish()
         os.fsync(directory_fd)
+        if not _pinned_parent_path_matches(absolute.parent, ancestry):
+            raise RuntimeError("evidence output parent changed")
+        # Last observable boundary: no caller hook runs after this. POSIX offers no
+        # portable lock against an unrelated process linking the inode after stat.
+        committed = os.stat(
+            absolute.name, dir_fd=directory_fd, follow_symlinks=False
+        )
+        if (
+            not stat.S_ISREG(committed.st_mode)
+            or (committed.st_dev, committed.st_ino)
+            != (written_stat.st_dev, written_stat.st_ino)
+            or committed.st_nlink != 1
+        ):
+            raise RuntimeError("evidence output alias detected")
         published = True
     finally:
         if descriptor is not None:

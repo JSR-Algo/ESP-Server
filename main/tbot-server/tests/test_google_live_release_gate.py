@@ -803,3 +803,27 @@ def test_release_atomic_writer_rejects_directory_replacement_after_snapshot(
         release_gate._atomic_write(output, "candidate", identity)
     assert not output.exists()
     assert not (tmp_path / "original-out" / "release.json").exists()
+
+
+def test_release_writer_cannot_return_pass_after_late_hardlink_alias(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from scripts import google_live_deterministic_evidence as deterministic
+    from scripts import google_live_release_gate as release_gate
+
+    output = tmp_path / "release.json"
+    external_alias = tmp_path / "external-alias.json"
+    real_match = deterministic._pinned_parent_path_matches
+
+    def match(path, ancestry):
+        result = real_match(path, ancestry)
+        if output.exists() and not external_alias.exists():
+            os.link(output, external_alias)
+        return result
+
+    monkeypatch.setattr(deterministic, "_pinned_parent_path_matches", match)
+    with pytest.raises(RuntimeError, match="alias"):
+        release_gate._atomic_write(output, '{"status":"PASS"}\n')
+    assert not output.exists()
+    assert json.loads(external_alias.read_text(encoding="utf-8"))["status"] == "PASS"
+    assert external_alias.stat().st_nlink == 1
