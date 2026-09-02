@@ -221,6 +221,9 @@ class _CandidateProtectedInput:
                         ),
                     )
                 )
+        except BaseException:
+            self.zeroize()
+            raise
         finally:
             for private in (self.initial_expected, self.newest_expected):
                 if private is not None:
@@ -422,8 +425,32 @@ def _candidate_semantic_counters(
         return {"latestIntentSuccesses": 1, "falseInterrupts": 0}
     if stage == "quiet":
         expected_responses = 0 if quiet_mode == "silence" else 1
-        expected_duration_ms = requested_duration_sec * 1000
         observed_duration_ms = semantic.get("durationMs") if valid else None
+        duration_valid = False
+        if quiet_mode == "silence":
+            expected_duration_ms = requested_duration_sec * 1000
+            duration_valid = bool(
+                type(observed_duration_ms) is int
+                and expected_duration_ms <= observed_duration_ms
+                <= expected_duration_ms + _QUIET_DURATION_TOLERANCE_MS
+                and isinstance(window_duration_sec, (int, float))
+                and not isinstance(window_duration_sec, bool)
+                and math.isfinite(window_duration_sec)
+                and requested_duration_sec <= window_duration_sec
+                <= requested_duration_sec + _QUIET_WINDOW_TOLERANCE_SEC
+            )
+        elif quiet_mode == "robot_speaking":
+            duration_valid = bool(
+                type(observed_duration_ms) is int
+                and 0 < observed_duration_ms <= _MAX_QUIET_OBSERVATION_SEC * 1000
+                and isinstance(window_duration_sec, (int, float))
+                and not isinstance(window_duration_sec, bool)
+                and math.isfinite(window_duration_sec)
+                and 0 < window_duration_sec
+                <= _MAX_QUIET_OBSERVATION_SEC + _QUIET_WINDOW_TOLERANCE_SEC
+                and observed_duration_ms
+                <= window_duration_sec * 1000 + _QUIET_DURATION_TOLERANCE_MS
+            )
         valid = (
             valid
             and set(semantic)
@@ -434,15 +461,7 @@ def _candidate_semantic_counters(
             and semantic.get("status") == "PASS"
             and semantic.get("kind") == "quiet"
             and semantic.get("mode") == quiet_mode
-            and type(observed_duration_ms) is int
-            and expected_duration_ms <= observed_duration_ms
-            <= expected_duration_ms + _QUIET_DURATION_TOLERANCE_MS
-            and isinstance(window_duration_sec, (int, float))
-            and not isinstance(window_duration_sec, bool)
-            and math.isfinite(window_duration_sec)
-            and window_duration_sec >= requested_duration_sec
-            and window_duration_sec
-            <= requested_duration_sec + _QUIET_WINDOW_TOLERANCE_SEC
+            and duration_valid
             and semantic.get("falseInterrupts") == 0
             and semantic.get("responseStarts") == expected_responses
             and semantic.get("responseEnds") == expected_responses
@@ -2976,7 +2995,12 @@ def build_candidate_journeys(args, *, protected_input=None):
                 )
             if name == "quiet" and quiet_mode is not None:
                 combined["quietMode"] = quiet_mode
-                combined["observationDurationSec"] = quiet_duration_sec
+                combined["observationDurationSec"] = (
+                    quiet_duration_sec
+                    if quiet_mode == "silence"
+                    else log_evidence["candidateSemanticEvidence"]["durationMs"]
+                    / 1000
+                )
             trusted_latency = log_evidence.get("journeyLatencyEvidence", {})
             if name in {"conversation", "conversation_after_lesson"}:
                 combined["latencies"] = {

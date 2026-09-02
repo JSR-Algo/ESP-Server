@@ -2949,6 +2949,53 @@ def test_candidate_protected_input_seals_plans_and_drops_expected_plaintext(tmp_
     assert len({bytes(plan.key) for plan in protected.bargein_plans}) == 10
 
 
+def test_candidate_plan_seal_failure_zeroizes_prior_plans_and_all_private_input(tmp_path, monkeypatch):
+    stream, _private = _protected_candidate_input(tmp_path)
+    protected = robot_soak._read_candidate_protected_input(
+        stream, output_paths=(), sample_rate=24000
+    )
+    private_buffers = [
+        protected.bargein_initial.pcm,
+        protected.bargein_newest.pcm,
+        protected.robot_speaking.pcm,
+        protected.initial_expected,
+        protected.newest_expected,
+    ]
+    created = []
+    original_plan = robot_soak._SealedBargeinPlan
+
+    def capture_plan(*args, **kwargs):
+        plan = original_plan(*args, **kwargs)
+        created.append(plan)
+        return plan
+
+    calls = 0
+    original_token_bytes = robot_soak.secrets.token_bytes
+
+    def fail_after_two(size):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise RuntimeError("injected seal failure")
+        return original_token_bytes(size)
+
+    monkeypatch.setattr(robot_soak, "_SealedBargeinPlan", capture_plan)
+    monkeypatch.setattr(robot_soak.secrets, "token_bytes", fail_after_two)
+
+    with pytest.raises(RuntimeError, match="injected"):
+        protected.seal_bargein_plans(10)
+
+    assert protected.bargein_plans == []
+    assert protected.initial_expected is None
+    assert protected.newest_expected is None
+    assert all(not any(private) for private in private_buffers if private is not None)
+    assert all(
+        not any(private)
+        for plan in created
+        for private in (plan.key, plan.initial_mac, plan.newest_mac)
+    )
+
+
 def test_candidate_producer_cancellation_zeroizes_all_remaining_sealed_plans(tmp_path, monkeypatch):
     stream, _private = _protected_candidate_input(tmp_path)
     protected = robot_soak._read_candidate_protected_input(
@@ -3050,6 +3097,31 @@ def test_candidate_quiet_rejects_short_semantic_observation(tmp_path):
             requested_duration_sec=120,
             window_duration_sec=120,
         )
+
+
+def test_candidate_robot_speaking_accepts_short_bounded_terminal_response():
+    counters = robot_soak._candidate_semantic_counters(
+        "quiet",
+        {
+            "status": "PASS",
+            "candidateSemanticEvidence": {
+                "status": "PASS",
+                "kind": "quiet",
+                "mode": "robot_speaking",
+                "durationMs": 2400,
+                "falseInterrupts": 0,
+                "responseStarts": 1,
+                "responseEnds": 1,
+                "replacements": 0,
+                "fallbacks": 0,
+            },
+        },
+        quiet_mode="robot_speaking",
+        requested_duration_sec=120,
+        window_duration_sec=3.0,
+    )
+
+    assert counters == {"latestIntentSuccesses": 0, "falseInterrupts": 0}
 
 
 def test_candidate_semantic_verdicts_are_derived_only_from_exact_bound_analyzer():
