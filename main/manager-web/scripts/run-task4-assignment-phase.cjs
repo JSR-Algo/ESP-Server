@@ -7,6 +7,7 @@ const {
   inspectAndPinCandidateImages,
   verifyStartedServiceImages,
 } = require('./task4-image-identity.cjs');
+const { validateAssignmentRuntimeCapsule } = require('./task4-assignment-runtime.cjs');
 const { composeExecutableFromEnvironment } = require('./reset-lesson-studio-e2e-state.cjs');
 
 const phase = process.argv[2];
@@ -16,7 +17,8 @@ const required = [
   'TBOT_BACKEND_WORKTREE', 'TBOT_LESSON_STUDIO_BACKEND_IMAGE',
   'TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID', 'TBOT_LESSON_STUDIO_WEB_IMAGE',
   'TBOT_LESSON_STUDIO_WEB_IMAGE_ID', 'LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME',
-  'LESSON_STUDIO_E2E_RESOURCE_PREFIX', 'TASK4_ASSIGNMENT_RUNTIME_ROOT',
+  'LESSON_STUDIO_E2E_RESOURCE_PREFIX', 'TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT',
+  'TASK4_ASSIGNMENT_RUNTIME_ROOT',
   'JWT_PUBLIC_KEY', 'TBOT_DEVICE_MINT_SECRET', 'LESSON_ASSET_ORIGIN_BASE',
   'ROBOT_ESP_BASE_URL', 'TBOT_FIRMWARE_WORKTREE',
 ];
@@ -31,10 +33,13 @@ if (!/^tbot-task4-[a-z0-9-]+$/.test(project) || prefix !== project) {
 
 const repoRoot = resolve(__dirname, '../../..');
 const backendRoot = realpathSync(process.env.TBOT_BACKEND_WORKTREE);
+const firmwareRoot = realpathSync(process.env.TBOT_FIRMWARE_WORKTREE);
+const { runtimeRoot } = validateAssignmentRuntimeCapsule(process.env, [
+  repoRoot, backendRoot, firmwareRoot,
+]);
 if (!existsSync(resolve(backendRoot, 'dist/lessons/course-mode/curriculum-course-mode.js'))) {
   throw new Error('TBOT_BACKEND_WORKTREE must be the built candidate backend worktree');
 }
-const firmwareRoot = realpathSync(process.env.TBOT_FIRMWARE_WORKTREE);
 for (const asset of [
   'lesson/assets/background/barn-round-field-poster.jpg',
   'lesson/assets/robot/poses/bright-teach.png',
@@ -44,11 +49,6 @@ for (const asset of [
   if (!existsSync(resolve(firmwareRoot, asset))) {
     throw new Error(`TBOT_FIRMWARE_WORKTREE lacks required candidate asset: ${asset}`);
   }
-}
-const runtimeRoot = resolve(process.env.TASK4_ASSIGNMENT_RUNTIME_ROOT);
-const outputRoot = resolve(repoRoot, 'main/manager-web/output');
-if (runtimeRoot !== outputRoot && !runtimeRoot.startsWith(`${outputRoot}/`)) {
-  throw new Error('TASK4_ASSIGNMENT_RUNTIME_ROOT must be isolated under manager-web/output');
 }
 const mediaRoot = resolve(runtimeRoot, 'media');
 const tlsRoot = resolve(runtimeRoot, 'tls');

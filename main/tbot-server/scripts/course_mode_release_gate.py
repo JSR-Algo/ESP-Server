@@ -326,6 +326,7 @@ PLAYWRIGHT_SOURCE_PATHS = (
     "main/manager-web/scripts/check-robot-lesson-preview.mjs",
     "main/manager-web/scripts/lesson-studio-e2e-environment.test.cjs",
     "main/manager-web/scripts/page-errors-helper.test.cjs",
+    "main/manager-web/scripts/task4-assignment-runtime.cjs",
     "main/manager-web/src/apis/module/lesson.js",
     "main/manager-web/src/components/lesson/CinematicVideoLayer.vue",
     "main/manager-web/src/components/lesson/RobotEspTftProjectionPreview.vue",

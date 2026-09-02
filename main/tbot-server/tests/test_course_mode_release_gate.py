@@ -41,6 +41,7 @@ _PLAYWRIGHT_SOURCE_PATHS = [
     "main/manager-web/scripts/check-robot-lesson-preview.mjs",
     "main/manager-web/scripts/lesson-studio-e2e-environment.test.cjs",
     "main/manager-web/scripts/page-errors-helper.test.cjs",
+    "main/manager-web/scripts/task4-assignment-runtime.cjs",
     "main/manager-web/src/apis/module/lesson.js",
     "main/manager-web/src/components/lesson/CinematicVideoLayer.vue",
     "main/manager-web/src/components/lesson/RobotEspTftProjectionPreview.vue",
@@ -171,6 +172,7 @@ def _commit_playwright_fixture(
         "main/manager-web/scripts/prepare-task4-media-templates.cjs": "module.exports = {};\n",
         "main/manager-web/scripts/run-task4-assignment-phase.cjs": "module.exports = {};\n",
         "main/manager-web/scripts/task4-assignment-fixture.test.cjs": "require('node:test')('fixture', () => {});\n",
+        "main/manager-web/scripts/task4-assignment-runtime.cjs": "module.exports = {};\n",
         "main/manager-web/scripts/task4-image-identity.cjs": "module.exports = {};\n",
     }
     for relative, source in assignment_files.items():
@@ -1873,6 +1875,126 @@ def test_assignment_lanes_share_capsule_then_remove_it(
     assert observed[0].name == "runtime"
     assert observed[0].parent.name.startswith("course-mode-assignment-runtime-")
     assert not observed[0].exists()
+
+
+def test_assignment_runner_accepts_gate_owned_capsule(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    admin_root = Path(candidate["repositories"]["adminEsp"]["path"])
+    scripts = admin_root / "main/manager-web/scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    canonical_root = Path(__file__).resolve().parents[3]
+    helper_source = (
+        canonical_root / "main/manager-web/scripts/task4-assignment-runtime.cjs"
+    ).read_text(encoding="utf-8")
+    instrumented_helper = helper_source.replace(
+        "  return Object.freeze({ capsuleRoot: realOwner, runtimeRoot: realRuntime });",
+        "  require('node:fs').writeFileSync(resolve(realRuntime, 'validated.marker'), "
+        "`${realOwner}\\n${realRuntime}\\n${__filename}`);\n"
+        "  process.exit(0);",
+    )
+    assert instrumented_helper != helper_source
+    (scripts / "task4-assignment-runtime.cjs").write_text(
+        instrumented_helper, encoding="utf-8",
+    )
+    (scripts / "run-task4-assignment-phase.cjs").write_text(
+        (canonical_root / "main/manager-web/scripts/run-task4-assignment-phase.cjs").read_text(
+            encoding="utf-8",
+        ),
+        encoding="utf-8",
+    )
+    (scripts / "task4-image-identity.cjs").write_text(
+        "module.exports = { inspectAndPinCandidateImages() {}, "
+        "verifyStartedServiceImages() {} };\n",
+        encoding="utf-8",
+    )
+    (scripts / "reset-lesson-studio-e2e-state.cjs").write_text(
+        "module.exports = { composeExecutableFromEnvironment() { return '/unused'; } };\n",
+        encoding="utf-8",
+    )
+    web_root = admin_root / "main/manager-web"
+    (web_root / "package.json").write_text(json.dumps({"scripts": {
+        "test:e2e:course-mode:assignment:new":
+            "node scripts/run-task4-assignment-phase.cjs new",
+    }}), encoding="utf-8")
+    _git(admin_root, "add", "main/manager-web/scripts")
+    _git(admin_root, "add", "main/manager-web/package.json")
+    _git(admin_root, "commit", "-m", "add assignment capsule probe")
+    candidate["repositories"]["adminEsp"].update(_repository(admin_root))
+    _refresh_image_reference(candidate, "adminEsp")
+    _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    node_path = shutil.which("node")
+    assert node_path is not None
+    node = Path(node_path).resolve()
+    node_descriptor = candidate["tools"]["node"]["adminManagerWeb"]
+    candidate_node = Path(node_descriptor["executable"])
+    candidate_node.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = --version ]; then echo v20.20.2; else "
+        f"exec {node} \"$@\"; fi\n",
+        encoding="utf-8",
+    )
+    candidate_node.chmod(0o755)
+    npm_entrypoint = Path(node_descriptor["npm"]["entrypoint"])
+    npm_entrypoint.write_text(
+        "const assert = require('node:assert/strict');\n"
+        "const { resolve } = require('node:path');\n"
+        "assert.deepEqual(process.argv.slice(2), "
+        "['run', 'test:e2e:course-mode:assignment:new']);\n"
+        "process.argv = [process.argv[0], "
+        "resolve(process.cwd(), 'scripts/run-task4-assignment-phase.cjs'), 'new'];\n"
+        "require(resolve(process.cwd(), 'scripts/run-task4-assignment-phase.cjs'));\n",
+        encoding="utf-8",
+    )
+    node_descriptor["npm"]["sha256"] = hashlib.sha256(npm_entrypoint.read_bytes()).hexdigest()
+    package_tree = gate._manifest.secure_node_package_tree_descriptor(
+        Path(node_descriptor["packageRoot"]),
+    )
+    assert package_tree is not None
+    node_descriptor.update({
+        "version": "v20.20.2",
+        "executable": str(candidate_node),
+        "sha256": hashlib.sha256(candidate_node.read_bytes()).hexdigest(),
+        "packageRootMode": package_tree["rootMode"],
+        "packageTreeSha256": package_tree["sha256"],
+    })
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+
+    lane = next(
+        item for item in gate.FULL_LANES
+        if item.name == "admin-course-mode-assignment-new"
+    )
+    observed: list[tuple[Path, Path, list[str]]] = []
+    original_run = gate.run_bounded_command
+
+    def observe_marker(command, **kwargs):
+        result = original_run(command, **kwargs)
+        capsule_root = Path(kwargs["env"]["TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT"])
+        runtime_root = Path(kwargs["env"]["TASK4_ASSIGNMENT_RUNTIME_ROOT"])
+        marker = runtime_root / "validated.marker"
+        observed.append((
+            capsule_root, runtime_root, marker.read_text(encoding="utf-8").splitlines(),
+        ))
+        return result
+
+    monkeypatch.setattr(gate, "run_bounded_command", observe_marker)
+    _authorize_assignment_test_lane(monkeypatch)
+    monkeypatch.setattr(gate, "source_contract_ready", lambda *_args: True)
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=(lane,),
+        source_environment=_assignment_source(candidate_file),
+    )
+
+    assert result["verdict"] == "PASS", result
+    assert len(observed) == 1
+    capsule_root, runtime_root, marker = observed[0]
+    assert runtime_root == capsule_root / "runtime"
+    assert marker[:2] == [str(capsule_root), str(runtime_root)]
+    assert marker[2].endswith("/main/manager-web/scripts/task4-assignment-runtime.cjs")
+    assert marker[2].startswith(str(admin_root.parent)) is False
+    assert not capsule_root.exists()
 
 
 def test_assignment_capsule_rename_blocks_rollback_and_reports_owner(

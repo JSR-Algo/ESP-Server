@@ -400,8 +400,16 @@ test('Task 4 release commands run candidate-bound NEW and ROLLBACK orchestration
     'TBOT_LESSON_STUDIO_BACKEND_IMAGE', 'TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID',
     'TBOT_LESSON_STUDIO_WEB_IMAGE', 'TBOT_LESSON_STUDIO_WEB_IMAGE_ID',
     'LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME',
-    'LESSON_STUDIO_E2E_RESOURCE_PREFIX', 'TASK4_ASSIGNMENT_RUNTIME_ROOT',
+    'LESSON_STUDIO_E2E_RESOURCE_PREFIX', 'TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT',
+    'TASK4_ASSIGNMENT_RUNTIME_ROOT',
   ]) assert.match(source, new RegExp(required));
+  assert.match(source, /const \{ validateAssignmentRuntimeCapsule \} = require\('\.\/task4-assignment-runtime\.cjs'\);/);
+  assert.match(source, /const \{ runtimeRoot \} = validateAssignmentRuntimeCapsule\(process\.env, \[/);
+  assert.doesNotMatch(source, /manager-web\/output|must be isolated under manager-web\/output/);
+  const validationIndex = source.indexOf('validateAssignmentRuntimeCapsule(process.env, [');
+  for (const sideEffect of ['mkdirSync(', 'inspectAndPinCandidateImages({', "run('openssl'", 'composeRun(']) {
+    assert.ok(validationIndex < source.indexOf(sideEffect), `capsule validation must precede ${sideEffect}`);
+  }
   assert.match(source, /composeExecutableFromEnvironment/);
   assert.match(source, /TBOT_DOCKER_EXECUTABLE/);
   assert.doesNotMatch(source, /run\('docker', \[\.\.\.compose/);
