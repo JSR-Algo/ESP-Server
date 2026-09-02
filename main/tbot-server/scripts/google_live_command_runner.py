@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -171,9 +172,10 @@ class CommandResult:
 
 @dataclass(frozen=True)
 class BoundWorkingDirectory:
+    root: Path
     path: Path
     descriptor: int
-    chain: tuple[tuple[int, int, int, int], ...]
+    chain: tuple[tuple[int, int, int, int, int, int], ...]
 
 
 @dataclass(frozen=True)
@@ -238,6 +240,76 @@ def _directory_chain(path: Path) -> tuple[tuple[int, int], ...]:
     return tuple(result)
 
 
+def _component_key(value: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9._-]+", value) is None:
+        raise ValueError("evidence path component is invalid")
+    return unicodedata.normalize("NFC", value).casefold()
+
+
+def _reject_component_alias(directory_fd: int, component: str) -> None:
+    expected_key = _component_key(component)
+    for existing in os.listdir(directory_fd):
+        if unicodedata.normalize("NFC", existing).casefold() == expected_key and existing != component:
+            raise ValueError("evidence path component aliases an existing name")
+
+
+def _secure_materialize_directory(root: Path, path: Path) -> BoundWorkingDirectory:
+    _absolute_clean(root)
+    _absolute_clean(path)
+    if path != root and not _inside(root, path):
+        raise ValueError("evidence directory is outside the evidence root")
+    bound_root = _open_bound_working_directory(root, root)
+    descriptor = bound_root.descriptor
+    chain = list(bound_root.chain)
+    try:
+        for component in path.relative_to(root).parts:
+            _reject_component_alias(descriptor, component)
+            try:
+                next_descriptor = os.open(
+                    component,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, 0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+                next_descriptor = os.open(
+                    component,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=descriptor,
+                )
+            opened = os.fstat(next_descriptor)
+            if (
+                not stat.S_ISDIR(opened.st_mode)
+                or opened.st_uid != os.geteuid()
+                or opened.st_nlink < 1
+            ):
+                os.close(next_descriptor)
+                raise RuntimeError("evidence directory is invalid")
+            os.close(descriptor)
+            descriptor = next_descriptor
+            chain.append(
+                (
+                    opened.st_dev,
+                    opened.st_ino,
+                    opened.st_mode,
+                    opened.st_ctime_ns,
+                    opened.st_uid,
+                    opened.st_nlink,
+                )
+            )
+        return BoundWorkingDirectory(root, path, descriptor, tuple(chain))
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def _open_bound_working_directory(root: Path, cwd: Path) -> BoundWorkingDirectory:
     _absolute_clean(root)
     _absolute_clean(cwd)
@@ -250,7 +322,16 @@ def _open_bound_working_directory(root: Path, cwd: Path) -> BoundWorkingDirector
     chain = []
     try:
         opened = os.fstat(descriptor)
-        chain.append((opened.st_dev, opened.st_ino, opened.st_mode, opened.st_ctime_ns))
+        chain.append(
+            (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_mode,
+                opened.st_ctime_ns,
+                opened.st_uid,
+                opened.st_nlink,
+            )
+        )
         for component in cwd.parts[1:]:
             next_descriptor = os.open(component, flags, dir_fd=descriptor)
             os.close(descriptor)
@@ -258,11 +339,20 @@ def _open_bound_working_directory(root: Path, cwd: Path) -> BoundWorkingDirector
             opened = os.fstat(descriptor)
             if not stat.S_ISDIR(opened.st_mode):
                 raise RuntimeError("cwd component is not a directory")
-            chain.append((opened.st_dev, opened.st_ino, opened.st_mode, opened.st_ctime_ns))
+            chain.append(
+                (
+                    opened.st_dev,
+                    opened.st_ino,
+                    opened.st_mode,
+                    opened.st_ctime_ns,
+                    opened.st_uid,
+                    opened.st_nlink,
+                )
+            )
         root_index = len(root.parts) - 1
         if root_index >= len(chain):
             raise RuntimeError("cwd is outside the evidence root")
-        return BoundWorkingDirectory(cwd, descriptor, tuple(chain))
+        return BoundWorkingDirectory(root, cwd, descriptor, tuple(chain[root_index:]))
     except BaseException:
         os.close(descriptor)
         raise
@@ -272,12 +362,20 @@ def _require_working_directory_unchanged(
     bound: BoundWorkingDirectory, *, require_ctime: bool
 ) -> None:
     try:
-        current = _open_bound_working_directory(bound.path, bound.path)
+        current = _open_bound_working_directory(bound.root, bound.path)
     except OSError as exc:
         raise RuntimeError("cwd changed") from exc
     try:
-        observed = current.chain if require_ctime else tuple(item[:3] for item in current.chain)
-        expected = bound.chain if require_ctime else tuple(item[:3] for item in bound.chain)
+        observed = (
+            current.chain
+            if require_ctime
+            else tuple((item[0], item[1], item[2], item[4]) for item in current.chain)
+        )
+        expected = (
+            bound.chain
+            if require_ctime
+            else tuple((item[0], item[1], item[2], item[4]) for item in bound.chain)
+        )
         if observed != expected:
             raise RuntimeError("cwd changed")
     finally:
@@ -288,7 +386,7 @@ def _prepare_paths(
     spec: CommandSpec, root: Path
 ) -> tuple[
     dict[Path, tuple[Any, tuple[tuple[int, int], ...]]],
-    dict[Path, tuple[tuple[int, int], ...]],
+    dict[Path, tuple[tuple[int, int, int, int, int, int], ...]],
 ]:
     all_paths = (*spec.inputs, *spec.outputs)
     for path in all_paths:
@@ -305,10 +403,17 @@ def _prepare_paths(
         inputs[path] = (bound, _directory_chain(path.parent))
     parents = {}
     for output in spec.outputs:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        if output.exists() or output.is_symlink():
-            raise ValueError("evidence output already exists")
-        parents[output] = _directory_chain(output.parent)
+        parent = _secure_materialize_directory(root, output.parent)
+        try:
+            try:
+                os.stat(output.name, dir_fd=parent.descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise ValueError("evidence output already exists")
+            parents[output] = parent.chain
+        finally:
+            os.close(parent.descriptor)
     return inputs, parents
 
 
@@ -557,13 +662,20 @@ def _artifact_rows(root: Path, paths: tuple[Path, ...]) -> list[dict[str, str]]:
 
 
 def _cleanup_declared_outputs(
+    root: Path,
     outputs: tuple[Path, ...],
-    parents: Mapping[Path, tuple[tuple[int, int], ...]],
+    parents: Mapping[Path, tuple[tuple[int, int, int, int, int, int], ...]],
 ) -> None:
     for path in outputs:
         try:
-            if _directory_chain(path.parent) != parents[path]:
-                continue
+            current = _open_bound_working_directory(root, path.parent)
+            try:
+                if tuple((item[0], item[1]) for item in current.chain) != tuple(
+                    (item[0], item[1]) for item in parents[path]
+                ):
+                    continue
+            finally:
+                os.close(current.descriptor)
             opened = os.stat(path, follow_symlinks=False)
             if stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1:
                 path.unlink()
@@ -746,8 +858,8 @@ def _safe_existing(path: Path) -> bytes | None:
 
 
 def _atomic_replace(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    parent = _open_bound_working_directory(path.parent, path.parent)
+    directory = parent.descriptor
     name = f".{path.name}.{secrets.token_hex(12)}.tmp"
     descriptor = None
     try:
@@ -776,13 +888,32 @@ def _atomic_replace(path: Path, content: bytes) -> None:
         os.close(directory)
 
 
+def _open_provenance_lock(directory_fd: int, name: str) -> int:
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        return os.open(name, flags, dir_fd=directory_fd)
+    except FileNotFoundError:
+        try:
+            return os.open(
+                name,
+                flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=directory_fd,
+            )
+        except FileExistsError:
+            return os.open(name, flags, dir_fd=directory_fd)
+
+
 def _commit_entry(provenance: Path, entry: dict[str, Any]) -> None:
     projection = provenance.with_suffix(".txt")
     if projection == provenance:
         raise ValueError("provenance projection path aliases JSONL")
-    provenance.parent.mkdir(parents=True, exist_ok=True)
     lock_path = provenance.with_name(f".{provenance.name}.lock")
-    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    parent = _open_bound_working_directory(provenance.parent, provenance.parent)
+    try:
+        lock_fd = _open_provenance_lock(parent.descriptor, lock_path.name)
+    finally:
+        os.close(parent.descriptor)
     try:
         opened_lock = os.fstat(lock_fd)
         if not stat.S_ISREG(opened_lock.st_mode) or opened_lock.st_nlink != 1:
@@ -823,9 +954,12 @@ def _commit_entry(provenance: Path, entry: dict[str, Any]) -> None:
 
 def _preflight_provenance(provenance: Path, command_id: str) -> None:
     projection = provenance.with_suffix(".txt")
-    provenance.parent.mkdir(parents=True, exist_ok=True)
     lock_path = provenance.with_name(f".{provenance.name}.lock")
-    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    parent = _open_bound_working_directory(provenance.parent, provenance.parent)
+    try:
+        lock_fd = _open_provenance_lock(parent.descriptor, lock_path.name)
+    finally:
+        os.close(parent.descriptor)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         old_jsonl = _safe_existing(provenance)
@@ -909,7 +1043,7 @@ def execute_and_record(
                         pass
                     os.close(descriptor)
     except BaseException:
-        _cleanup_declared_outputs(spec.outputs, output_parents)
+        _cleanup_declared_outputs(root, spec.outputs, output_parents)
         raise
     finally:
         os.close(bound_cwd.descriptor)
@@ -918,10 +1052,16 @@ def execute_and_record(
             raise RuntimeError("evidence input parent changed")
         require_file_unchanged(path, bound)
     for path, chain in output_parents.items():
-        if _directory_chain(path.parent) != chain:
-            raise RuntimeError("evidence output parent changed")
+        current_parent = _open_bound_working_directory(root, path.parent)
+        try:
+            if tuple((item[0], item[1]) for item in current_parent.chain) != tuple(
+                (item[0], item[1]) for item in chain
+            ):
+                raise RuntimeError("evidence output parent changed")
+        finally:
+            os.close(current_parent.descriptor)
     if not satisfied:
-        _cleanup_declared_outputs(spec.outputs, output_parents)
+        _cleanup_declared_outputs(root, spec.outputs, output_parents)
     output_rows = _artifact_rows(root, spec.outputs) if satisfied else []
     input_rows = [
         {"label": _label(root, path), "sha256": hashlib.sha256(bound.content).hexdigest()}

@@ -266,6 +266,145 @@ def test_rejects_paths_outside_evidence_root_and_input_output_aliases(tmp_path: 
             )
 
 
+@pytest.mark.parametrize("depth", ["first", "middle", "late"])
+def test_output_parent_symlink_never_creates_outside_directory(
+    tmp_path: Path, depth: str
+) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-mkdir-{depth}"
+    outside.mkdir()
+    if depth == "first":
+        (tmp_path / "link").symlink_to(outside, target_is_directory=True)
+        output = tmp_path / "link" / "created" / "report.json"
+    elif depth == "middle":
+        (tmp_path / "safe").mkdir()
+        (tmp_path / "safe" / "link").symlink_to(outside, target_is_directory=True)
+        output = tmp_path / "safe" / "link" / "created" / "report.json"
+    else:
+        (tmp_path / "safe" / "nested").mkdir(parents=True)
+        (tmp_path / "safe" / "nested" / "link").symlink_to(
+            outside, target_is_directory=True
+        )
+        output = tmp_path / "safe" / "nested" / "link" / "created" / "report.json"
+    with pytest.raises((ValueError, RuntimeError, OSError)):
+        execute_and_record(
+            _spec(tmp_path, "pass", outputs=(output,)),
+            provenance=tmp_path / "commands.jsonl",
+        )
+    assert not (outside / "created").exists()
+
+
+def test_file_component_cannot_be_materialized_as_output_parent(tmp_path: Path) -> None:
+    component = tmp_path / "file-component"
+    component.write_text("keep")
+    with pytest.raises((ValueError, RuntimeError, OSError)):
+        execute_and_record(
+            _spec(tmp_path, "pass", outputs=(component / "nested" / "report.json",)),
+            provenance=tmp_path / "commands.jsonl",
+        )
+    assert component.read_text() == "keep"
+
+
+def test_case_output_parent_alias_is_rejected(tmp_path: Path) -> None:
+    (tmp_path / "SAFE").mkdir()
+    with pytest.raises(ValueError, match="aliases|component"):
+        execute_and_record(
+            _spec(tmp_path, "pass", outputs=(tmp_path / "safe" / "report.json",)),
+            provenance=tmp_path / "commands.jsonl",
+        )
+
+
+def test_unicode_output_parent_component_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="component"):
+        execute_and_record(
+            _spec(tmp_path, "pass", outputs=(tmp_path / "saf\u00e9" / "report.json",)),
+            provenance=tmp_path / "commands.jsonl",
+        )
+
+
+def test_valid_nested_output_parent_is_materialized_inside_root(tmp_path: Path) -> None:
+    output = tmp_path / "safe" / "nested" / "report.json"
+    code = "from pathlib import Path; Path('safe/nested/report.json').write_text('ok')"
+    execute_and_record(
+        _spec(tmp_path, code, outputs=(output,)),
+        provenance=tmp_path / "commands.jsonl",
+    )
+    assert output.read_text() == "ok"
+
+
+def test_provenance_parent_symlink_does_not_create_lock_outside(tmp_path: Path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-provenance-outside"
+    outside.mkdir()
+    linked = tmp_path / "linked-root"
+    linked.symlink_to(outside, target_is_directory=True)
+    with pytest.raises((ValueError, RuntimeError, OSError)):
+        execute_and_record(
+            _spec(linked, "pass", outputs=()),
+            provenance=linked / "commands.jsonl",
+        )
+    assert list(outside.iterdir()) == []
+
+
+def test_parent_swap_during_secure_mkdir_never_mutates_outside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    safe = tmp_path / "safe"
+    safe.mkdir()
+    outside = tmp_path.parent / f"{tmp_path.name}-mkdir-swap"
+    outside.mkdir()
+    real_mkdir = runner.os.mkdir
+    swapped = False
+
+    def swapping_mkdir(name, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if name == "created" and not swapped:
+            swapped = True
+            safe.rename(tmp_path / "moved-safe")
+            safe.symlink_to(outside, target_is_directory=True)
+        return real_mkdir(name, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(runner.os, "mkdir", swapping_mkdir)
+    with pytest.raises((ValueError, RuntimeError, OSError)):
+        execute_and_record(
+            _spec(tmp_path, "pass", outputs=(safe / "created" / "report.json",)),
+            provenance=tmp_path / "commands.jsonl",
+        )
+    assert not (outside / "created").exists()
+
+
+def test_concurrent_commands_safely_share_new_nested_parent(tmp_path: Path) -> None:
+    provenance = tmp_path / "commands.jsonl"
+    errors = []
+
+    def run(index: int) -> None:
+        output = tmp_path / "shared" / "nested" / f"report-{index}.json"
+        code = f"from pathlib import Path; Path('shared/nested/report-{index}.json').write_text('ok')"
+        try:
+            execute_and_record(
+                _spec(
+                    tmp_path,
+                    code,
+                    command_id=f"diagnostic.nested{index}",
+                    outputs=(output,),
+                ),
+                provenance=provenance,
+            )
+        except Exception as exc:  # pragma: no cover - assertion reports details
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(index,)) for index in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert sorted(path.read_text() for path in (tmp_path / "shared" / "nested").iterdir()) == [
+        "ok",
+        "ok",
+    ]
+
+
 def test_rejects_cwd_symlink_to_outside_without_execution(tmp_path: Path) -> None:
     outside = tmp_path.parent / f"{tmp_path.name}-outside"
     outside.mkdir()
