@@ -655,6 +655,7 @@ class AssignmentRuntimeCapsule:
     runtime_identity: tuple[int, int]
     runtime_descriptor: int | None
     _retained_path: Path | None = None
+    _retained_paths: tuple[Path, ...] = ()
     _cleanup_succeeded: bool | None = None
 
     @classmethod
@@ -727,9 +728,17 @@ class AssignmentRuntimeCapsule:
             if self.runtime_descriptor is not None else None
         )
         if owner_actual != self.root or runtime_actual != self.runtime_root:
-            self._retained_path = (
+            owner_retained = (
                 owner_actual if owner_actual != self.root else self.root
             ) or self.root
+            retained = {owner_retained}
+            if (
+                runtime_actual is not None
+                and not _path_overlaps(owner_retained, runtime_actual)
+            ):
+                retained.add(runtime_actual)
+            self._retained_path = owner_retained
+            self._retained_paths = tuple(sorted(retained, key=str))
             if self.runtime_descriptor is not None:
                 os.close(self.runtime_descriptor)
             if self.descriptor is not None:
@@ -754,6 +763,7 @@ class AssignmentRuntimeCapsule:
             self._retained_path = (
                 retained or _find_owned_tree(self.root.parent, self.identity) or self.root
             )
+            self._retained_paths = (self._retained_path,)
         os.close(self.descriptor)
         os.close(self.runtime_descriptor)
         self.descriptor = None
@@ -763,6 +773,9 @@ class AssignmentRuntimeCapsule:
 
     def retained_path(self) -> Path:
         return self._retained_path or self.root
+
+    def retained_paths(self) -> tuple[Path, ...]:
+        return self._retained_paths or (self.retained_path(),)
 
     def __del__(self) -> None:
         with contextlib.suppress(Exception):
@@ -1017,7 +1030,12 @@ def _cleanup_gate_owned(
     retained = list(report.get("retainedPaths", ()))
     for item in owned:
         if item is not None and not item.cleanup():
-            retained.append(str(item.retained_path()))
+            paths = (
+                item.retained_paths()
+                if isinstance(item, AssignmentRuntimeCapsule)
+                else (item.retained_path(),)
+            )
+            retained.extend(str(path) for path in paths)
     if retained:
         report["verdict"] = "BLOCKED"
         report["failedLane"] = "cleanup"

@@ -1606,6 +1606,26 @@ def test_assignment_runtime_capsule_nested_runtime_replacement_reports_owner_roo
         original_remove(capsule.root, capsule.identity)
 
 
+def test_assignment_runtime_capsule_reports_owner_and_escaped_runtime_inode() -> None:
+    capsule = gate.AssignmentRuntimeCapsule.create(())
+    original_remove = gate._remove_owned_tree
+    escaped = capsule.root.with_name(capsule.root.name + "-runtime-moved")
+    capsule.runtime_root.rename(escaped)
+    capsule.runtime_root.mkdir(mode=0o700)
+    report = {"candidateId": "test", "verdict": "PASS", "failedLane": None}
+    try:
+        assert gate._cleanup_gate_owned(report, capsule) is False
+        assert report["verdict"] == "BLOCKED"
+        assert report["failedLane"] == "cleanup"
+        assert report["retainedPaths"] == sorted({
+            str(capsule.root), str(escaped),
+        })
+        assert capsule.retained_path() == capsule.root
+    finally:
+        assert original_remove(capsule.root, capsule.identity) is True
+        assert original_remove(escaped, capsule.runtime_identity) is True
+
+
 def test_assignment_runtime_capsule_usable_rejects_swap_during_path_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
