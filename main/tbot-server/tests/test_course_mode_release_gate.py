@@ -6668,6 +6668,24 @@ def test_firmware_handler_environment_rejects_noncanonical_esp_idf_root(
     assert gate._child_environment(candidate, {}, lane) is None
 
 
+def test_firmware_handler_environment_rejects_esp_idf_root_under_symlink_loop(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    esp_idf = Path(candidate["tools"]["espIdf"]["root"])
+    real_resolve = Path.resolve
+
+    def resolve(path: Path, strict: bool = False) -> Path:
+        if path == esp_idf:
+            raise RuntimeError("Symlink loop from candidate ESP-IDF root")
+        return real_resolve(path, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+
+    assert gate._child_environment(candidate, {}, lane) is None
+
+
 def test_firmware_handler_command_receives_usable_candidate_cjson_with_nonexistent_home(
     candidate_file: Path,
 ) -> None:

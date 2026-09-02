@@ -3118,7 +3118,7 @@ def _firmware_handler_cjson_directory(candidate: dict) -> str | None:
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
             return None
         return str(cjson)
-    except (KeyError, OSError, TypeError, ValueError):
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError):
         return None
 
 
