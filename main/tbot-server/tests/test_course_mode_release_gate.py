@@ -2103,6 +2103,69 @@ def test_assignment_cleanup_preserves_lane_and_capsule_retained_paths(
     original_remove(capsules[0].root, capsules[0].identity)
 
 
+def test_assignment_interrupt_reports_lane_owner_and_escaped_runtime_paths(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _authorize_assignment_test_lane(monkeypatch)
+    capsules: list[gate.AssignmentRuntimeCapsule] = []
+    lane_executions: list[gate.LaneExecution] = []
+    original_capsule_create = gate.AssignmentRuntimeCapsule.create
+    original_lane_create = gate.ExecutionStage.create_lane_execution
+    original_remove = gate._remove_owned_tree
+    escaped_runtime: Path | None = None
+
+    def record_capsule(protected):
+        capsule = original_capsule_create(protected)
+        capsules.append(capsule)
+        return capsule
+
+    def record_lane(self):
+        execution = original_lane_create(self)
+        lane_executions.append(execution)
+        return execution
+
+    def retain_lane(path: Path, identity=None) -> bool:
+        if path.name.startswith("course-mode-lane-"):
+            return False
+        return original_remove(path, identity)
+
+    def escape_runtime_then_interrupt(*_args, **_kwargs):
+        nonlocal escaped_runtime
+        capsule = capsules[0]
+        escaped_runtime = capsule.root.with_name(capsule.root.name + "-escaped-runtime")
+        capsule.runtime_root.rename(escaped_runtime)
+        capsule.runtime_root.mkdir(mode=0o700)
+        raise KeyboardInterrupt("lane interrupt")
+
+    monkeypatch.setattr(gate.AssignmentRuntimeCapsule, "create", record_capsule)
+    monkeypatch.setattr(gate.ExecutionStage, "create_lane_execution", record_lane)
+    monkeypatch.setattr(gate, "_remove_owned_tree", retain_lane)
+    monkeypatch.setattr(gate, "run_bounded_command", escape_runtime_then_interrupt)
+    lane = _stateful_assignment_lane("admin-course-mode-assignment-new", "pass")
+    try:
+        result = gate.run_gate(
+            candidate_file, "full", lanes=(lane,),
+            source_environment=_assignment_source(candidate_file),
+        )
+
+        assert result["verdict"] == "BLOCKED"
+        assert result["failedLane"] == "cleanup"
+        assert escaped_runtime is not None
+        assert result["retainedPaths"] == sorted({
+            str(lane_executions[0].root),
+            str(capsules[0].root),
+            str(escaped_runtime),
+        })
+    finally:
+        monkeypatch.setattr(gate, "_remove_owned_tree", original_remove)
+        if lane_executions:
+            original_remove(lane_executions[0].root, lane_executions[0].identity)
+        if capsules:
+            original_remove(capsules[0].root, capsules[0].identity)
+        if escaped_runtime is not None:
+            original_remove(escaped_runtime, capsules[0].runtime_identity)
+
+
 @pytest.mark.parametrize("failure_point", ["snapshot", "environment", "command"])
 def test_assignment_capsule_finally_cleans_after_interrupt(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch, failure_point: str,

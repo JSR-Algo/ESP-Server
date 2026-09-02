@@ -1023,11 +1023,11 @@ def _remove_owned_tree(root: Path, expected_identity: tuple[int, int] | None = N
     return expected_identity is None and not os.path.lexists(root)
 
 
-def _cleanup_gate_owned(
-    report: dict,
-    *owned: ExecutionStage | LaneExecution | AssignmentRuntimeCapsule | None,
-) -> bool:
-    retained = list(report.get("retainedPaths", ()))
+def _collect_gate_owned_retained_paths(
+    owned: Sequence[ExecutionStage | LaneExecution | AssignmentRuntimeCapsule | None],
+    existing: Sequence[str] = (),
+) -> tuple[str, ...]:
+    retained = set(existing)
     for item in owned:
         if item is not None and not item.cleanup():
             paths = (
@@ -1035,12 +1035,22 @@ def _cleanup_gate_owned(
                 if isinstance(item, AssignmentRuntimeCapsule)
                 else (item.retained_path(),)
             )
-            retained.extend(str(path) for path in paths)
+            retained.update(str(path) for path in paths)
+    return tuple(sorted(retained))
+
+
+def _cleanup_gate_owned(
+    report: dict,
+    *owned: ExecutionStage | LaneExecution | AssignmentRuntimeCapsule | None,
+) -> bool:
+    retained = _collect_gate_owned_retained_paths(
+        owned, report.get("retainedPaths", ()),
+    )
     if retained:
         report["verdict"] = "BLOCKED"
         report["failedLane"] = "cleanup"
         report["retainedOwner"] = "current-process"
-        report["retainedPaths"] = sorted(set(retained))
+        report["retainedPaths"] = list(retained)
         return False
     return True
 
@@ -1068,10 +1078,7 @@ class AssignmentRuntimeGuard:
 def _cleanup_gate_owned_or_raise(
     *owned: ExecutionStage | LaneExecution | AssignmentRuntimeCapsule | None,
 ) -> None:
-    retained = []
-    for item in owned:
-        if item is not None and not item.cleanup():
-            retained.append(str(item.retained_path()))
+    retained = _collect_gate_owned_retained_paths(owned)
     if retained:
         raise RetainedStagingError(*(Path(path) for path in retained))
 
