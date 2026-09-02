@@ -560,6 +560,79 @@ class GoogleLiveProvider(VoiceSessionProvider):
             )
         self._evidence_candidate_final_markers_logged = True
 
+    def _candidate_quiet_semantic_evidence(self, counters):
+        if (
+            not self._candidate_counter_enabled()
+            or getattr(self.conn, "google_live_evidence_journey_type", None)
+            != "quiet"
+        ):
+            return None
+        try:
+            mode = self.conn.evidence_registry.safe_snapshot(
+                self.conn.google_live_evidence_journey_id
+            )["quietMode"]
+        except Exception:
+            mode = "invalid"
+        duration_ms = max(
+            0,
+            int(
+                (
+                    (self._evidence_candidate_observation_ended_at or 0)
+                    - self._evidence_candidate_scope_started_at
+                )
+                * 1000
+            ),
+        )
+        response_duration_ms = (
+            max(
+                0,
+                int(
+                    (
+                        self._evidence_quiet_response_ended_at
+                        - self._evidence_quiet_response_started_at
+                    )
+                    * 1000
+                ),
+            )
+            if isinstance(self._evidence_quiet_response_started_at, (int, float))
+            and isinstance(self._evidence_quiet_response_ended_at, (int, float))
+            else 0
+        )
+        output_chunks = int(getattr(self, "_evidence_quiet_output_chunks", 0) or 0)
+        forbidden_zero = all(
+            counters.get(name) == 0
+            for name in (
+                "user_turns", "interrupts", "replacements", "reconnects",
+                "fallbacks", "stale_audio",
+            )
+        )
+        valid = bool(
+            duration_ms > 0
+            and forbidden_zero
+            and (
+                mode == "silence"
+                and counters.get("response_starts") == 0
+                and counters.get("response_ends") == 0
+                and self._evidence_quiet_response_generation is None
+                and response_duration_ms == 0
+                and output_chunks == 0
+                or mode == "robot_speaking"
+                and counters.get("response_starts") == 1
+                and counters.get("response_ends") == 1
+                and isinstance(self._evidence_quiet_response_generation, int)
+                and response_duration_ms > 0
+                and output_chunks > 0
+            )
+        )
+        return {
+            "status": "PASS" if valid else "FAIL",
+            "mode": mode,
+            "durationMs": duration_ms,
+            "responseGeneration": self._evidence_quiet_response_generation,
+            "responseDurationMs": response_duration_ms,
+            "outputChunks": output_chunks,
+        }
+
     async def start_session(self):
         async with self._get_lifecycle_lock():
             self._lifecycle_generation += 1
@@ -1146,6 +1219,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._ensure_evidence_live_identity()
             if self._evidence_candidate_observation_ended_at is None:
                 self._evidence_candidate_observation_ended_at = time.monotonic()
+                self._evidence_quiet_output_chunks = int(
+                    getattr(self._bridge, "_output_chunk_count", 0) or 0
+                )
             cleanup_result = await self._close_live_resources(
                 evidence_finalize=True
             )
@@ -1191,6 +1267,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 ],
                 "pendingTasks": pending_tasks,
             }
+            quiet_semantic = self._candidate_quiet_semantic_evidence(
+                dict(self._evidence_candidate_counters)
+            )
+            if quiet_semantic is not None:
+                self._evidence_finalize_result["quietSemanticEvidence"] = quiet_semantic
             if cleanup_failure_code is not None:
                 self._evidence_finalize_result["failureCode"] = cleanup_failure_code
             return dict(self._evidence_finalize_result)

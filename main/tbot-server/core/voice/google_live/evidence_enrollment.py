@@ -145,6 +145,8 @@ class _EvidenceEnrollmentState:
     semantic_observed_count: int = 0
     semantic_mismatch_count: int = 0
     semantic_eligible: bool = True
+    semantic_initial_observed_generation: int | None = field(default=None, repr=False)
+    semantic_initial_response_generation: int | None = field(default=None, repr=False)
     semantic_newest_observed_generation: int | None = field(default=None, repr=False)
     semantic_interrupted_old_generation: int | None = field(default=None, repr=False)
     semantic_replacement_generation: int | None = field(default=None, repr=False)
@@ -535,11 +537,17 @@ class EvidenceEnrollmentRegistry:
             and not isinstance(response_generation, bool)
             and response_generation >= 0
         )
-        ownership_supplied = response_generation is not None or active_old_output
         ownership_valid = bool(
-            safe_role != "newest"
-            or not ownership_supplied
-            or (active_old_output and generation_valid)
+            generation_valid
+            and (
+                safe_role == "initial"
+                or (
+                    safe_role == "newest"
+                    and active_old_output
+                    and response_generation
+                    == enrollment.semantic_initial_response_generation
+                )
+            )
         )
         matched = bool(
             enrollment.semantic_eligible
@@ -556,14 +564,13 @@ class EvidenceEnrollmentRegistry:
             "chars": len(str(value or "")),
             "matched": matched,
         }
-        if ownership_supplied:
-            proof["responseGeneration"] = (
-                response_generation if generation_valid else -1
-            )
+        proof["responseGeneration"] = response_generation if generation_valid else -1
         enrollment.semantic_observed_count += 1
         if matched:
             enrollment.semantic_matched_count += 1
-            if safe_role == "newest":
+            if safe_role == "initial":
+                enrollment.semantic_initial_observed_generation = response_generation
+            else:
                 enrollment.semantic_newest_observed_generation = response_generation
         else:
             enrollment.semantic_eligible = False
@@ -604,6 +611,7 @@ class EvidenceEnrollmentRegistry:
             return False
         valid = bool(
             enrollment.semantic_eligible
+            and enrollment.semantic_initial_response_generation == old_generation
             and enrollment.semantic_newest_observed_generation == old_generation
             and isinstance(new_generation, int)
             and not isinstance(new_generation, bool)
@@ -628,6 +636,18 @@ class EvidenceEnrollmentRegistry:
         if enrollment.semantic_kind != "bargein-intent":
             return False
         if enrollment.semantic_replacement_generation is None:
+            valid = bool(
+                enrollment.semantic_eligible
+                and enrollment.semantic_matched_count == 1
+                and enrollment.semantic_initial_response_generation is None
+                and response_generation
+                == enrollment.semantic_initial_observed_generation
+            )
+            if valid:
+                enrollment.semantic_initial_response_generation = response_generation
+                return True
+            enrollment.semantic_eligible = False
+            enrollment.semantic_mismatch_count += 1
             return False
         valid = bool(
             enrollment.semantic_eligible
@@ -916,6 +936,8 @@ class EvidenceEnrollmentRegistry:
                     and enrollment.intent_plan[-1].role == "newest"
                 ),
                 "semanticOwnershipReady": ownership_ready,
+                "semanticInitialObservedGeneration": enrollment.semantic_initial_observed_generation,
+                "semanticInitialResponseGeneration": enrollment.semantic_initial_response_generation,
                 "semanticOldResponseGeneration": enrollment.semantic_interrupted_old_generation,
                 "semanticReplacementGeneration": enrollment.semantic_replacement_generation,
                 "semanticReplacementStarted": enrollment.semantic_replacement_started,

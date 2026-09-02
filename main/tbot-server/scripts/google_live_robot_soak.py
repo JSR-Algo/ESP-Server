@@ -518,6 +518,7 @@ def _candidate_semantic_counters(
             "status": "PASS",
             "kind": "bargein-intent",
             "initialSlotMatched": True,
+            "initialIntentOwnedOldGeneration": True,
             "newestSlotMatched": True,
             "orderingValid": True,
             "latestIntentMatched": True,
@@ -2801,7 +2802,9 @@ def _evidence_collection_url(args) -> str:
     return f"{base}/internal/devices/{encoded_device}/google-live-evidence"
 
 
-async def _candidate_control_json(args, method, url, payload=None):
+async def _candidate_control_json(
+    args, method, url, payload=None, *, request_timeout_sec=None
+):
     override = getattr(args, "candidate_control_json", None)
     if callable(override):
         value = override(method, url, payload)
@@ -2818,10 +2821,15 @@ async def _candidate_control_json(args, method, url, payload=None):
         headers = {"X-Mint-Secret": secret, "Accept": "application/json"}
         if body is not None:
             headers["Content-Type"] = "application/json"
+        timeout = (
+            float(request_timeout_sec)
+            if request_timeout_sec is not None
+            else float(getattr(args, "event_timeout_sec", 30.0))
+        )
         try:
             with urllib.request.urlopen(
                 urllib.request.Request(url, data=body, headers=headers, method=method),
-                timeout=float(getattr(args, "event_timeout_sec", 30.0)),
+                timeout=timeout,
             ) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
@@ -3007,9 +3015,16 @@ def build_candidate_journeys(args, *, protected_input=None):
             if remaining <= 0:
                 raise _CleanupDeadlineExceeded
             try:
-                return await asyncio.wait_for(
-                    _candidate_control_json(args, method, journey_url),
-                    timeout=remaining,
+                if callable(getattr(args, "candidate_control_json", None)):
+                    return await asyncio.wait_for(
+                        _candidate_control_json(args, method, journey_url),
+                        timeout=remaining,
+                    )
+                return await _candidate_control_json(
+                    args,
+                    method,
+                    journey_url,
+                    request_timeout_sec=remaining,
                 )
             except asyncio.TimeoutError as exc:
                 raise _CleanupDeadlineExceeded from exc

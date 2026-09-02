@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import threading
 import wave
 from collections import deque
 from copy import deepcopy
@@ -178,6 +179,7 @@ def _refresh_execution_contract(result):
             "status": "PASS",
             "kind": "bargein-intent",
             "initialSlotMatched": True,
+            "initialIntentOwnedOldGeneration": True,
             "newestSlotMatched": True,
             "orderingValid": True,
             "latestIntentMatched": True,
@@ -3255,6 +3257,7 @@ def test_candidate_semantic_verdicts_are_derived_only_from_exact_bound_analyzer(
                 "status": "PASS",
                 "kind": "bargein-intent",
                 "initialSlotMatched": True,
+                "initialIntentOwnedOldGeneration": True,
                 "newestSlotMatched": True,
                 "orderingValid": True,
                 "latestIntentMatched": True,
@@ -3297,6 +3300,7 @@ def test_candidate_semantic_verdicts_are_derived_only_from_exact_bound_analyzer(
                     "status": "PASS",
                     "kind": "bargein-intent",
                     "initialSlotMatched": True,
+                    "initialIntentOwnedOldGeneration": True,
                     "newestSlotMatched": True,
                     "orderingValid": True,
                     "latestIntentMatched": False,
@@ -4045,6 +4049,118 @@ def test_candidate_cleanup_bounds_each_request_by_remaining_deadline(
     asyncio.run(run())
 
 
+def test_candidate_control_forwards_cleanup_budget_to_blocking_socket(monkeypatch):
+    observed = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"status":"FAIL"}'
+
+    def urlopen(_request, *, timeout):
+        observed["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(robot_soak.urllib.request, "urlopen", urlopen)
+    monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint")
+    args = _args(candidate_control_json=None, event_timeout_sec=30)
+
+    result = asyncio.run(
+        robot_soak._candidate_control_json(
+            args,
+            "GET",
+            "http://server.test/evidence/journey",
+            request_timeout_sec=0.125,
+        )
+    )
+
+    assert result == {"status": "FAIL"}
+    assert observed["timeout"] == 0.125
+
+
+def test_candidate_real_blocking_cleanup_worker_remains_owned_until_exit(
+    tmp_path, monkeypatch
+):
+    release_delete = threading.Event()
+    delete_started = threading.Event()
+    late_effects = []
+    journey_id = "candidate-soak.20260831T100000Z.1"
+    terminal = {
+        "journeyId": journey_id,
+        "journeyType": "conversation",
+        "proofProfile": "candidate-lifecycle",
+        "status": "FAIL",
+        "failureCode": "OPERATOR_CANCELLED",
+    }
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+    def urlopen(request, *, timeout):
+        method = request.get_method()
+        if method == "DELETE":
+            delete_started.set()
+            release_delete.wait()
+            late_effects.append("delete-finished")
+            return Response(terminal)
+        if method == "GET":
+            return Response(terminal)
+        return Response({"status": "PASS"})
+
+    monkeypatch.setattr(robot_soak.urllib.request, "urlopen", urlopen)
+    monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint")
+
+    async def driver(_args, **_context):
+        raise RuntimeError("journey failed")
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=None,
+        candidate_journey_driver=driver,
+        cleanup_timeout_sec=0.01,
+    )
+
+    async def run():
+        with pytest.raises(RuntimeError, match="candidate enrollment cleanup failed"):
+            await build_candidate_journeys(args)["conversation"](
+                args, name="conversation", index=1
+            )
+        assert delete_started.is_set()
+        assert late_effects == []
+        assert any(
+            task.get_name() == "google-live-candidate-enrollment-cleanup"
+            for task in robot_soak._OWNED_CLEANUP_TASKS
+        )
+        release_delete.set()
+        for _attempt in range(100):
+            if not robot_soak._OWNED_CLEANUP_TASKS:
+                break
+            await asyncio.sleep(0.001)
+        assert late_effects == ["delete-finished"]
+        assert not robot_soak._OWNED_CLEANUP_TASKS
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     "case",
     [
@@ -4314,6 +4430,7 @@ def test_candidate_factory_posts_fresh_semantic_plans_and_derives_safe_verdicts(
                 "status": "PASS",
                 "kind": "bargein-intent",
                 "initialSlotMatched": True,
+                "initialIntentOwnedOldGeneration": True,
                 "newestSlotMatched": True,
                 "orderingValid": True,
                 "latestIntentMatched": True,

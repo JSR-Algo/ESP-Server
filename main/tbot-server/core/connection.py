@@ -1404,6 +1404,20 @@ class ConnectionHandler:
                     and result.get("pendingTasks") == 0
                     and validated_transition_result is not None
                 )
+                if (
+                    cleanup_verified
+                    and proof_profile == "candidate-lifecycle"
+                    and journey_type == "quiet"
+                    and proof_snapshot.get("semanticProofKind") == "quiet"
+                ):
+                    quiet_semantic = result.get("quietSemanticEvidence")
+                    if (
+                        not isinstance(quiet_semantic, dict)
+                        or quiet_semantic.get("status") != "PASS"
+                        or quiet_semantic.get("mode")
+                        != proof_snapshot.get("quietMode")
+                    ):
+                        proof_failure_code = "EVIDENCE_SEMANTIC_INVALID"
                 if proof_profile == "candidate-lifecycle" and not cleanup_verified:
                     if finalize_task.done():
                         prepare_retry = getattr(

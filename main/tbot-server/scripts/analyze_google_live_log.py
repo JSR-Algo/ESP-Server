@@ -4054,6 +4054,14 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             and replacement_start_line < replacement_end_line < replacement["line"]
         )
         initial_matched = bool(initial and initial["matched"])
+        initial_owned = bool(
+            initial_matched
+            and replacement
+            and correlated
+            and initial["responseGeneration"] == replacement["oldGeneration"]
+            and initial["responseGeneration"] == correlated["cancelledResponseId"]
+            and old_start_line is not None
+        )
         newest_matched = bool(
             newest
             and newest["matched"]
@@ -4081,7 +4089,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
         )
         semantic_pass = bool(
             ordering_valid
-            and initial_matched
+            and initial_owned
             and newest_matched
             and replacement_owned
             and len(candidate_fallback_observations) == 1
@@ -4094,6 +4102,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             "status": "PASS" if semantic_pass else "FAIL",
             "kind": "bargein-intent",
             "initialSlotMatched": initial_matched,
+            "initialIntentOwnedOldGeneration": initial_owned,
             "newestSlotMatched": newest_matched,
             "orderingValid": ordering_valid,
             "latestIntentMatched": newest_matched and replacement_owned,

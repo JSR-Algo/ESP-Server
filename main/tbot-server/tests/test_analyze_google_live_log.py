@@ -164,7 +164,7 @@ def _candidate_semantic_bargein_window(*semantic_overrides):
             2,
             "Google Live evidence_candidate_intent_match "
             "journey_id=bargein-journey-1 slot=1 role=initial chars=12 "
-            "matched=true response_generation=0",
+            "matched=true response_generation=7",
         ),
         _provider_info(
             4,
@@ -879,6 +879,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                 "status": "PASS",
                 "kind": "bargein-intent",
                 "initialSlotMatched": True,
+                "initialIntentOwnedOldGeneration": True,
                 "newestSlotMatched": True,
                 "orderingValid": True,
                 "latestIntentMatched": True,
@@ -1196,6 +1197,32 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                 self.assertEqual(verdict["status"], "FAIL", verdict)
                 self.assertFalse(
                     verdict["candidateSemanticEvidence"]["orderingValid"]
+                )
+
+    def test_candidate_bargein_initial_generation_must_own_old_response(self):
+        base = _candidate_semantic_bargein_window()
+        cases = {
+            "unrelated": [
+                line.replace(
+                    "role=initial chars=12 matched=true response_generation=7",
+                    "role=initial chars=12 matched=true response_generation=999999999",
+                )
+                for line in base
+            ],
+            "stale": [
+                line.replace(
+                    "role=initial chars=12 matched=true response_generation=7",
+                    "role=initial chars=12 matched=true response_generation=6",
+                )
+                for line in base
+            ],
+        }
+        for name, lines in cases.items():
+            with self.subTest(name=name):
+                verdict = self._analyze(lines)
+                self.assertEqual(verdict["status"], "FAIL", verdict)
+                self.assertFalse(
+                    verdict["candidateSemanticEvidence"]["initialIntentOwnedOldGeneration"]
                 )
 
     def test_candidate_quiet_semantic_evidence_passes_for_both_exact_modes(self):

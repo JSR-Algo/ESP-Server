@@ -1573,6 +1573,63 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminal, [("candidate.run-1", "PASS", None)])
         handler.voice_provider.finalize_evidence.assert_awaited_once()
 
+    async def test_candidate_quiet_finalize_terminal_status_uses_provider_semantic_verdict(self):
+        for semantic_status, expected_status in (("PASS", "PASS"), ("FAIL", "FAIL")):
+            with self.subTest(semantic_status=semantic_status):
+                handler = self._build_handler()
+                scope = {
+                    "journeyId": f"candidate.quiet-{semantic_status.lower()}",
+                    "journeyType": "quiet",
+                    "proofProfile": "candidate-lifecycle",
+                    "connectionId": "server-conn-1",
+                    "liveConnectionId": "live-7",
+                    "initialLiveConnectionId": "live-7",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "serverStartUtc": "2026-08-31T03:00:00+00:00",
+                }
+                handler.google_live_evidence_scope = scope
+                terminal = []
+                handler.evidence_registry = types.SimpleNamespace(
+                    safe_snapshot=lambda _journey: {
+                        "journeyId": scope["journeyId"],
+                        "journeyType": "quiet",
+                        "proofProfile": "candidate-lifecycle",
+                        "semanticProofKind": "quiet",
+                        "quietMode": "silence",
+                    },
+                    active_claim_matches=lambda **_claims: True,
+                    finalize=lambda journey_id, status, failure_code=None: terminal.append(
+                        (journey_id, status, failure_code)
+                    ),
+                )
+                handler.voice_provider = types.SimpleNamespace(
+                    finalize_evidence=AsyncMock(
+                        return_value={
+                            "status": "PASS",
+                            "journeyId": scope["journeyId"],
+                            "connectionId": "server-conn-1",
+                            "peerIdentityHash": "sha256:" + "a" * 64,
+                            "initialLiveConnectionId": "live-7",
+                            "finalLiveConnectionId": "live-7",
+                            "liveConnectionTransitions": [],
+                            "pendingTasks": 0,
+                            "quietSemanticEvidence": {
+                                "status": semantic_status,
+                                "mode": "silence",
+                            },
+                        }
+                    )
+                )
+
+                result = await handler.finalize_google_live_evidence(scope)
+
+                self.assertEqual(result["status"], expected_status)
+                self.assertEqual(terminal[0][1], expected_status)
+                if expected_status == "FAIL":
+                    self.assertEqual(
+                        result["failureCode"], "EVIDENCE_SEMANTIC_INVALID"
+                    )
+
     async def test_candidate_bargein_semantic_failure_still_cleans_up_before_terminal_fail(self):
         handler = self._build_handler()
         scope = {

@@ -341,10 +341,15 @@ def test_registry_matches_exact_ordered_candidate_intents_without_exposing_secre
     )
 
     initial = registry.observe_candidate_intent(
-        enrollment.journey_id, "ＦＩＲＳＴ intent", role="initial"
+        enrollment.journey_id, "ＦＩＲＳＴ intent", role="initial",
+        response_generation=7,
+    )
+    assert registry.record_candidate_response_started(
+        enrollment.journey_id, response_generation=7
     )
     newest = registry.observe_candidate_intent(
-        enrollment.journey_id, "Newest intent", role="newest"
+        enrollment.journey_id, "Newest intent", role="newest",
+        response_generation=7, active_old_output=True,
     )
     snapshot = registry.safe_snapshot(enrollment.journey_id)
 
@@ -353,12 +358,14 @@ def test_registry_matches_exact_ordered_candidate_intents_without_exposing_secre
         "role": "initial",
         "chars": len("ＦＩＲＳＴ intent"),
         "matched": True,
+        "responseGeneration": 7,
     }
     assert newest == {
         "slot": 2,
         "role": "newest",
         "chars": len("Newest intent"),
         "matched": True,
+        "responseGeneration": 7,
     }
     assert snapshot["semanticProofKind"] == "bargein-intent"
     assert snapshot["semanticExpectedCount"] == 2
@@ -391,7 +398,8 @@ def test_candidate_intent_matching_uses_constant_time_digest_comparison(monkeypa
     )
 
     proof = registry.observe_candidate_intent(
-        enrollment.journey_id, "First intent", role="initial"
+        enrollment.journey_id, "First intent", role="initial",
+        response_generation=7,
     )
 
     assert proof["matched"] is True
@@ -428,10 +436,15 @@ def test_semantic_match_remains_nonterminal_and_does_not_change_lifecycle_readin
     before = registry.safe_snapshot(enrollment.journey_id)
 
     registry.observe_candidate_intent(
-        enrollment.journey_id, "First intent", role="initial"
+        enrollment.journey_id, "First intent", role="initial",
+        response_generation=7,
+    )
+    registry.record_candidate_response_started(
+        enrollment.journey_id, response_generation=7
     )
     registry.observe_candidate_intent(
-        enrollment.journey_id, "Newest intent", role="newest"
+        enrollment.journey_id, "Newest intent", role="newest",
+        response_generation=7, active_old_output=True,
     )
     after = registry.safe_snapshot(enrollment.journey_id)
 
@@ -449,7 +462,13 @@ def test_candidate_replacement_duplicate_lifecycle_event_fails_sticky(duplicate_
         client_id=enrollment.client_id,
         journey_id=enrollment.journey_id,
     )
-    registry.observe_candidate_intent(enrollment.journey_id, "First intent", role="initial")
+    registry.observe_candidate_intent(
+        enrollment.journey_id, "First intent", role="initial",
+        response_generation=7,
+    )
+    assert registry.record_candidate_response_started(
+        enrollment.journey_id, response_generation=7
+    )
     registry.observe_candidate_intent(
         enrollment.journey_id,
         "Newest intent",
@@ -488,7 +507,13 @@ def test_candidate_replacement_completion_before_start_fails_sticky():
         client_id=enrollment.client_id,
         journey_id=enrollment.journey_id,
     )
-    registry.observe_candidate_intent(enrollment.journey_id, "First intent", role="initial")
+    registry.observe_candidate_intent(
+        enrollment.journey_id, "First intent", role="initial",
+        response_generation=7,
+    )
+    assert registry.record_candidate_response_started(
+        enrollment.journey_id, response_generation=7
+    )
     registry.observe_candidate_intent(
         enrollment.journey_id,
         "Newest intent",

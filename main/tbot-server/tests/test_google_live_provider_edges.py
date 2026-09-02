@@ -861,6 +861,47 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["semanticObservedCount"], 1)
         self.assertEqual(snapshot["semanticMatchCount"], 1)
 
+    async def test_candidate_semantic_initial_response_generation_is_sticky(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._response_generation = 1
+        conn.google_live_transcript_event_token = object()
+
+        await provider._on_user_transcript("first intent")
+        await provider._handle_live_event(
+            {"type": "audio_start", "response_generation": 2}
+        )
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertFalse(snapshot["semanticEligible"])
+        self.assertEqual(snapshot["semanticInitialObservedGeneration"], 1)
+        self.assertIsNone(snapshot["semanticInitialResponseGeneration"])
+
+    async def test_candidate_semantic_duplicate_initial_response_start_fails_sticky(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._response_generation = 1
+        conn.google_live_transcript_event_token = object()
+
+        await provider._on_user_transcript("first intent")
+        await provider._handle_live_event(
+            {"type": "audio_start", "response_generation": 1}
+        )
+        await provider._handle_live_event(
+            {"type": "audio_start", "response_generation": 1}
+        )
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertFalse(snapshot["semanticEligible"])
+
     async def test_candidate_quiet_marker_uses_measured_robot_speaking_counters(self):
         conn = _Conn()
         registry = EvidenceEnrollmentRegistry()
