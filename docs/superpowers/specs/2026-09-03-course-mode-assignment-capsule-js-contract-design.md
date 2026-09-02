@@ -62,15 +62,23 @@ closed before Docker execution.
    ROLLBACK.
 3. The JavaScript runner validates the pair and derives `media/` and `tls/`
    only from the validated runtime child.
-4. NEW creates derivatives and assignment state. The lane snapshot is removed,
+4. The candidate-bound media-preparation script independently validates the
+   same capsule pair and requires `TASK4_ASSIGNMENT_MEDIA_ROOT` to equal the
+   validated `<runtime>/media` directory before it creates templates or invokes
+   `ffmpeg`. This keeps direct invocation fail closed without restoring the old
+   `manager-web/output` restriction.
+5. NEW creates derivatives and assignment state. The lane snapshot is removed,
    while the capsule survives.
-5. ROLLBACK receives the same two paths, verifies NEW state, then the gate
+6. ROLLBACK receives the same two paths, verifies NEW state, then the gate
    removes the capsule using its existing identity-bound cleanup.
 
 ## Failure Behavior
 
 - Missing, malformed, replaced, symlinked, incorrectly owned, writable, or
   overlapping capsule paths fail before Docker starts.
+- Media preparation rejects a missing or invalid capsule pair and any media
+  root other than the exact `media` child of the validated runtime. Rejection
+  occurs before directory creation or `ffmpeg`/`ffprobe` execution.
 - A path pair that is valid during JavaScript validation but is replaced later
   is still caught by the gate's descriptor-based post-lane usability and
   cleanup checks.
@@ -93,7 +101,8 @@ First, add test-first coverage for:
   modes, wrong ownership where testable, prefix violations, and repository
   overlap.
 - A focused actual assignment runner regression proving the capsule contract
-  passes before Docker orchestration.
+  passes through media preparation before Docker orchestration, with explicit
+  traps proving Docker and Compose were not invoked.
 
 Next, run the real candidate-bound runtime path in this order:
 

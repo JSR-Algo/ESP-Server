@@ -14,6 +14,7 @@
 
 - Create `main/manager-web/scripts/task4-assignment-runtime.cjs` for the narrow JavaScript named-path validation contract.
 - Modify `main/manager-web/scripts/run-task4-assignment-phase.cjs` to require and consume the validated capsule pair.
+- Modify `main/manager-web/scripts/prepare-task4-media-templates.cjs` to revalidate the capsule pair and require the exact validated `runtime/media` path before filesystem or media-tool side effects.
 - Modify `main/manager-web/scripts/task4-assignment-fixture.test.cjs` for real-filesystem JavaScript validation and runner source-contract tests.
 - Modify `main/tbot-server/scripts/course_mode_release_gate.py` to inject the capsule owner path together with the existing runtime child.
 - Modify `main/tbot-server/tests/test_course_mode_release_gate.py` for Python environment isolation and real NEW-to-ROLLBACK integration regressions.
@@ -240,6 +241,7 @@ git commit -m "test(course-mode): specify assignment capsule contract"
 
 **Files:**
 - Modify: `main/manager-web/scripts/run-task4-assignment-phase.cjs`
+- Modify: `main/manager-web/scripts/prepare-task4-media-templates.cjs`
 - Modify: `main/manager-web/scripts/task4-assignment-fixture.test.cjs`
 - Modify: `main/manager-web/course-mode.playwright.contract.json`
 - Modify: `main/tbot-server/scripts/course_mode_release_gate.py`
@@ -247,9 +249,9 @@ git commit -m "test(course-mode): specify assignment capsule contract"
 
 - [ ] **Step 1: Add failing runner and contract tests**
 
-Update the Task 4 source-contract test to require `TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT`, import the validator, use its returned `runtimeRoot`, and reject the old `manager-web/output` prefix check. Add the helper path to the expected Playwright source paths.
+Update the Task 4 source-contract test to require `TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT`, import the validator, use its returned `runtimeRoot`, and reject the old `manager-web/output` prefix check. Add real-filesystem media-preparation tests that require the exact validated `<runtime>/media` path and prove invalid pairs, mismatched media roots, and direct invocation fail before directory creation or `ffmpeg`/`ffprobe`. Add the helper path to the expected Playwright source paths.
 
-Add a Python integration regression using the real assignment NEW lane with a temporary executable command that invokes the validator through candidate-bound Node, records successful validation inside the capsule, and performs no Docker operation. Assert `verdict == "PASS"`, the marker was created inside the runtime, and the capsule was removed after the selected lane.
+Add a Python integration regression using the real assignment NEW lane and candidate-bound Node. Keep the validator return intact, run the real media-preparation script with candidate-bound `ffmpeg`/`ffprobe` stubs, record successful validation and template preparation inside the capsule, and install Docker/Compose traps that fail if invoked. Assert `verdict == "PASS"`, all observations are inside the validated runtime, neither Docker trap ran, and the capsule was removed after the selected lane.
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
@@ -264,7 +266,7 @@ cd main/manager-web
 node --test scripts/task4-assignment-fixture.test.cjs
 ```
 
-Expected: tests fail because the runner still applies the old output-root restriction and the new helper is not bound in the contract.
+Expected: tests fail because the runner still applies the old output-root restriction, media preparation still requires `manager-web/output`, and the new helper is not bound in the contract.
 
 - [ ] **Step 3: Integrate the validator before side effects**
 
@@ -284,6 +286,8 @@ const tlsRoot = resolve(runtimeRoot, 'tls');
 Do not retain the previous `manager-web/output` check. Do not use `capsuleRoot` for deletion; cleanup remains gate-owned.
 
 Add `main/manager-web/scripts/task4-assignment-runtime.cjs` to both `PLAYWRIGHT_SOURCE_PATHS` and `course-mode.playwright.contract.json` in the existing sorted location.
+
+In `prepare-task4-media-templates.cjs`, import the validator and validate the same owner/runtime pair against the staged admin, backend, and firmware roots. Require the supplied media root to equal `resolve(runtimeRoot, 'media')`. Perform this validation before `mkdirSync`, `execFileSync`, or any other filesystem/media-tool side effect. Remove the old `manager-web/output` restriction; do not add a second cleanup owner.
 
 - [ ] **Step 4: Run focused integration tests and verify GREEN**
 
