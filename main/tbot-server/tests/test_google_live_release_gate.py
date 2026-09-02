@@ -19,6 +19,10 @@ from scripts.google_live_release_gate import (
     aggregate_release_evidence,
     load_checksum_manifest,
 )
+from scripts.google_live_command_runner import (
+    COMMAND_PROVENANCE_SCHEMA,
+    render_provenance,
+)
 from scripts.google_live_deterministic_evidence import (
     MANIFEST_SCHEMA,
     PYTEST_RUNTIME_SCHEMA,
@@ -254,6 +258,65 @@ def _write_evidence(
         paths[name] = support
         checksums[name] = digest
         rows.append(f"{digest}  {support.relative_to(root)}")
+    command_outputs = {
+        "deterministic.produce": ("deterministic", "deterministic_manifest", "deterministic_junit"),
+        "real_api.round_trip": ("real_api",),
+        "websocket.transport": (),
+        "websocket.log_analysis": ("server_regression",),
+        "websocket.correlation": ("websocket_e2e",),
+        "candidate_soak.produce": ("candidate_soak",),
+        "candidate_soak.replay": (),
+        "physical.capture_and_audit": ("server_regression", "physical"),
+    }
+    commands = []
+    for index, (command_id, output_names) in enumerate(command_outputs.items()):
+        secret_sources = (
+            ["<env:GOOGLE_LIVE_EVIDENCE_MINT_SECRET>"]
+            if command_id in {"websocket.transport", "candidate_soak.produce", "physical.capture_and_audit"}
+            else []
+        )
+        commands.append(
+            {
+                "argv": ["python3", "-m", command_id],
+                "candidateIdentity": copy.deepcopy(IDENTITY),
+                "commandId": command_id,
+                "cwd": ".",
+                "endedAtUtc": f"2026-09-03T00:00:{index:02d}.500000Z",
+                "environmentSources": [],
+                "exitCode": 0,
+                "inputs": (
+                    [{"label": str(paths["candidate_soak"].relative_to(root)), "sha256": checksums["candidate_soak"]}]
+                    if command_id == "candidate_soak.replay"
+                    else []
+                ),
+                "outputs": [
+                    {"label": str(paths[name].relative_to(root)), "sha256": checksums[name]}
+                    for name in output_names
+                ],
+                "schemaVersion": COMMAND_PROVENANCE_SCHEMA,
+                "secretSources": secret_sources,
+                "specSha256": hashlib.sha256(command_id.encode()).hexdigest(),
+                "startedAtUtc": f"2026-09-03T00:00:{index:02d}.000000Z",
+                "stdinSource": (
+                    "<stdin:protected_transcript_plan>"
+                    if command_id == "physical.capture_and_audit"
+                    else None
+                ),
+                "terminalPolicy": {
+                    "classification": "expected_exit",
+                    "cleanupGraceSec": 2.0,
+                    "expectedExitCodes": [0],
+                    "satisfied": True,
+                    "timeoutSec": 300.0,
+                },
+            }
+        )
+    provenance = root / "commands.jsonl"
+    provenance.write_bytes(render_provenance(commands))
+    digest = hashlib.sha256(provenance.read_bytes()).hexdigest()
+    paths["command_provenance"] = provenance
+    checksums["command_provenance"] = digest
+    rows.append(f"{digest}  {provenance.relative_to(root)}")
     manifest = root / "checksums.sha256"
     manifest.write_text("\n".join(rows) + "\n", encoding="utf-8")
     return paths, checksums, manifest
@@ -265,6 +328,21 @@ def _rewrite(path: Path, mutate) -> None:
     path.write_text(json.dumps(report, sort_keys=True), encoding="utf-8")
 
 
+def _rebind_provenance_output(
+    paths: dict[str, Path], checksums: dict[str, str], artifact: str
+) -> None:
+    entries = [json.loads(line) for line in paths["command_provenance"].read_text().splitlines()]
+    label = str(paths[artifact].relative_to(paths["command_provenance"].parent))
+    for entry in entries:
+        for output in entry["outputs"]:
+            if output["label"] == label:
+                output["sha256"] = checksums[artifact]
+    paths["command_provenance"].write_bytes(render_provenance(entries))
+    checksums["command_provenance"] = hashlib.sha256(
+        paths["command_provenance"].read_bytes()
+    ).hexdigest()
+
+
 def test_release_passes_only_real_exact_candidate_contracts(tmp_path: Path) -> None:
     paths, checksums, _ = _write_evidence(tmp_path)
     verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
@@ -274,6 +352,51 @@ def test_release_passes_only_real_exact_candidate_contracts(tmp_path: Path) -> N
     assert verdict["candidateIdentity"] == IDENTITY
     assert [item["name"] for item in verdict["layers"]] == list(REQUIRED_LAYERS)
     assert verdict["failures"] == []
+
+
+@pytest.mark.parametrize("mutation", ["missing", "reordered", "diagnostic_substitution"])
+def test_release_requires_exact_ordered_command_provenance(tmp_path: Path, mutation: str) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    entries = [json.loads(line) for line in paths["command_provenance"].read_text().splitlines()]
+    if mutation == "missing":
+        entries.pop(2)
+    elif mutation == "reordered":
+        entries[1], entries[2] = entries[2], entries[1]
+    else:
+        entries[2]["commandId"] = "diagnostic.websocket_transport"
+        entries[2]["specSha256"] = "f" * 64
+    paths["command_provenance"].write_bytes(render_provenance(entries))
+    checksums["command_provenance"] = hashlib.sha256(paths["command_provenance"].read_bytes()).hexdigest()
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+    assert verdict["status"] == "FAIL"
+    assert any(item["code"] == "COMMAND_PROVENANCE_INVALID" for item in verdict["failures"])
+
+
+@pytest.mark.parametrize("mutation", ["identity", "output", "exit", "digest", "privacy"])
+def test_release_rejects_command_provenance_mismatch_or_tamper(tmp_path: Path, mutation: str) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    entries = [json.loads(line) for line in paths["command_provenance"].read_text().splitlines()]
+    if mutation == "identity":
+        entries[0]["candidateIdentity"]["gitSha"] = "f" * 40
+    elif mutation == "output":
+        entries[1]["outputs"][0]["sha256"] = "f" * 64
+    elif mutation == "exit":
+        entries[1]["terminalPolicy"]["satisfied"] = False
+    elif mutation == "digest":
+        entries[1]["specSha256"] = entries[0]["specSha256"]
+    else:
+        entries[1]["metadata"] = {"apiKey": "must-never-leak"}
+    if mutation == "privacy":
+        content = ("\n".join(json.dumps(item, sort_keys=True, separators=(",", ":")) for item in entries) + "\n").encode()
+    else:
+        content = ("\n".join(json.dumps(item, sort_keys=True, separators=(",", ":")) for item in entries) + "\n").encode()
+    paths["command_provenance"].write_bytes(content)
+    checksums["command_provenance"] = hashlib.sha256(content).hexdigest()
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+    encoded = json.dumps(verdict)
+    assert verdict["status"] == "FAIL"
+    assert "must-never-leak" not in encoded
+    assert any(item["code"] == "COMMAND_PROVENANCE_INVALID" for item in verdict["failures"])
 
 
 def test_release_rejects_self_consistent_tiny_deterministic_manifest(tmp_path: Path) -> None:
@@ -739,6 +862,7 @@ def test_release_allows_safe_near_miss_metadata_keys(tmp_path: Path, safe_key: s
     checksums["deterministic"] = hashlib.sha256(
         paths["deterministic"].read_bytes()
     ).hexdigest()
+    _rebind_provenance_output(paths, checksums, "deterministic")
 
     verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
 
@@ -982,6 +1106,8 @@ def test_cli_reads_checksum_manifest_and_writes_deterministic_failure(tmp_path: 
             f"deterministic_manifest={paths['deterministic_manifest']}",
             "--support",
             f"deterministic_junit={paths['deterministic_junit']}",
+            "--support",
+            f"command_provenance={paths['command_provenance']}",
         ]
     )
     completed = subprocess.run(command, text=True, capture_output=True, check=False)
@@ -1138,6 +1264,7 @@ def _run_cli(paths: dict[str, Path], manifest: Path, out: Path) -> subprocess.Co
         command.extend(["--layer", f"{layer}={paths[layer]}"])
     command.extend(["--support", f"deterministic_manifest={paths['deterministic'].parent / 'node-manifest.txt'}"])
     command.extend(["--support", f"deterministic_junit={paths['deterministic'].parent / 'pytest.xml'}"])
+    command.extend(["--support", f"command_provenance={paths['command_provenance']}"])
     return subprocess.run(command, text=True, capture_output=True, check=False)
 
 

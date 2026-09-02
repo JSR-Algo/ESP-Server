@@ -33,6 +33,7 @@ from scripts.google_live_deterministic_evidence import (
     parse_pytest_runtime_manifest,
     snapshot_output_parent,
 )
+from scripts.google_live_command_runner import parse_provenance
 from scripts.google_live_reliability import (
     SCHEMA_VERSION,
     forbidden_report_fields,
@@ -56,6 +57,18 @@ REQUIRED_LAYERS = (
     "candidate_soak",
 )
 DETERMINISTIC_SUPPORTS = ("deterministic_manifest", "deterministic_junit")
+COMMAND_PROVENANCE_SUPPORT = "command_provenance"
+REQUIRED_SUPPORTS = (*DETERMINISTIC_SUPPORTS, COMMAND_PROVENANCE_SUPPORT)
+REQUIRED_COMMAND_IDS = (
+    "deterministic.produce",
+    "real_api.round_trip",
+    "websocket.transport",
+    "websocket.log_analysis",
+    "websocket.correlation",
+    "candidate_soak.produce",
+    "candidate_soak.replay",
+    "physical.capture_and_audit",
+)
 IDENTITY_FIELDS = (
     "gitSha",
     "imageDigest",
@@ -583,7 +596,7 @@ def aggregate_release_evidence(
         validate_expected_identity(expected_identity)
     except ValueError:
         failures.append(_failure("EXPECTED_CANDIDATE_IDENTITY_INVALID"))
-    for name in sorted(set(layer_paths) - set(REQUIRED_LAYERS) - set(DETERMINISTIC_SUPPORTS)):
+    for name in sorted(set(layer_paths) - set(REQUIRED_LAYERS) - set(REQUIRED_SUPPORTS)):
         failures.append(_failure("UNEXPECTED_LAYER", name))
 
     for layer in REQUIRED_LAYERS:
@@ -750,6 +763,78 @@ def aggregate_release_evidence(
             if item["name"] == "deterministic":
                 item["status"] = "FAIL"
                 break
+    provenance_path = layer_paths.get(COMMAND_PROVENANCE_SUPPORT)
+    provenance_checksum = expected_checksums.get(COMMAND_PROVENANCE_SUPPORT)
+    try:
+        if (
+            provenance_path is None
+            or type(provenance_checksum) is not str
+            or SHA256.fullmatch(provenance_checksum) is None
+        ):
+            raise ValueError
+        content = (
+            input_contents[COMMAND_PROVENANCE_SUPPORT]
+            if input_contents is not None
+            else Path(provenance_path).read_bytes()
+        )
+        if not hmac.compare_digest(hashlib.sha256(content).hexdigest(), provenance_checksum):
+            raise ValueError
+        entries = parse_provenance(content)
+        required = [
+            entry for entry in entries if not entry["commandId"].startswith("diagnostic.")
+        ]
+        if [entry["commandId"] for entry in required] != list(REQUIRED_COMMAND_IDS):
+            raise ValueError
+        if any(entry["candidateIdentity"] != dict(expected_identity) for entry in entries):
+            raise ValueError
+        if any(
+            entry["terminalPolicy"]["classification"] != "expected_exit"
+            or entry["terminalPolicy"]["satisfied"] is not True
+            or type(entry["exitCode"]) is not int
+            or entry["exitCode"] not in entry["terminalPolicy"]["expectedExitCodes"]
+            for entry in required
+        ):
+            raise ValueError
+        root = Path(provenance_path).parent
+        artifact_by_name = {
+            name: {
+                "label": Path(path).relative_to(root).as_posix(),
+                "sha256": expected_checksums[name],
+            }
+            for name, path in layer_paths.items()
+            if name in (*REQUIRED_LAYERS, *DETERMINISTIC_SUPPORTS)
+        }
+        by_id = {entry["commandId"]: entry for entry in required}
+        expected_output_bindings = {
+            "deterministic.produce": {
+                "deterministic",
+                "deterministic_manifest",
+                "deterministic_junit",
+            },
+            "real_api.round_trip": {"real_api"},
+            "websocket.correlation": {"websocket_e2e"},
+            "candidate_soak.produce": {"candidate_soak"},
+            "physical.capture_and_audit": {"server_regression", "physical"},
+        }
+        for command_id, names in expected_output_bindings.items():
+            if any(
+                artifact_by_name[name] not in by_id[command_id]["outputs"]
+                for name in names
+            ):
+                raise ValueError
+        if artifact_by_name["candidate_soak"] not in by_id["candidate_soak.replay"]["inputs"]:
+            raise ValueError
+        for command_id in {
+            "websocket.transport",
+            "candidate_soak.produce",
+            "physical.capture_and_audit",
+        }:
+            if "<env:GOOGLE_LIVE_EVIDENCE_MINT_SECRET>" not in by_id[command_id]["secretSources"]:
+                raise ValueError
+        if by_id["physical.capture_and_audit"]["stdinSource"] != "<stdin:protected_transcript_plan>":
+            raise ValueError
+    except (KeyError, OSError, RuntimeError, TypeError, UnicodeError, ValueError):
+        failures.append(_failure("COMMAND_PROVENANCE_INVALID"))
     return {
         "schemaVersion": RELEASE_SCHEMA_VERSION,
         "status": "PASS" if not failures else "FAIL",
@@ -837,7 +922,7 @@ def _produce_release_verdict(
     post_publish: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Publish a verdict only while every validated input retains its identity."""
-    if set(layer_paths) != set(REQUIRED_LAYERS) | set(DETERMINISTIC_SUPPORTS):
+    if set(layer_paths) != set(REQUIRED_LAYERS) | set(REQUIRED_SUPPORTS):
         raise ValueError("release evidence paths are incomplete")
     evidence_paths = [Path(path) for path in layer_paths.values()]
     if _evidence_paths_alias([*evidence_paths, Path(checksum_path)]):
@@ -943,7 +1028,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         paths = _parse_layers(args.layer)
         supports = _parse_layers(args.support)
-        if set(paths) & set(supports) or set(supports) != set(DETERMINISTIC_SUPPORTS):
+        if set(paths) & set(supports) or set(supports) != set(REQUIRED_SUPPORTS):
             raise ValueError("support arguments are malformed")
         paths.update(supports)
         parse_valid = True
