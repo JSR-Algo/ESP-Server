@@ -3350,14 +3350,62 @@ def test_unexpected_runner_error_reports_cleanup_failure(
         original_remove(path)
 
 
-def test_assignment_environment_uses_image_ids_not_mutable_tags(candidate_file: Path) -> None:
+def test_assignment_environment_uses_image_ids_not_mutable_tags(
+    candidate_file: Path, tmp_path: Path,
+) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     lane = next(item for item in gate.FULL_LANES if item.name == "admin-course-mode-assignment-new")
 
-    environment = gate._child_environment(candidate, _assignment_source(candidate_file), lane)
+    environment = gate._child_environment(
+        candidate,
+        _assignment_source(candidate_file),
+        lane,
+        assignment_runtime_capsule_root=tmp_path / "owner",
+        assignment_runtime_root=tmp_path / "owner/runtime",
+    )
 
     assert environment["TBOT_LESSON_STUDIO_BACKEND_IMAGE"] == candidate["images"]["lessonStudioBackend"]["id"]
     assert environment["TBOT_LESSON_STUDIO_WEB_IMAGE"] == candidate["images"]["lessonStudioWeb"]["id"]
+
+
+def test_assignment_environment_receives_exact_capsule_pair(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(item for item in gate.FULL_LANES if item.name == "admin-course-mode-assignment-new")
+    capsule = gate.AssignmentRuntimeCapsule.create(())
+    try:
+        environment = gate._child_environment(
+            candidate,
+            _assignment_source(candidate_file),
+            lane,
+            source_candidate=candidate,
+            assignment_runtime_capsule_root=capsule.root,
+            assignment_runtime_root=capsule.runtime_root,
+        )
+
+        assert environment is not None
+        assert environment["TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT"] == str(capsule.root)
+        assert environment["TASK4_ASSIGNMENT_RUNTIME_ROOT"] == str(capsule.runtime_root)
+    finally:
+        assert capsule.cleanup() is True
+
+
+def test_non_assignment_environment_never_receives_capsule_pair(
+    candidate_file: Path, tmp_path: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = _lane("ordinary", "pass")
+
+    environment = gate._child_environment(
+        candidate,
+        {},
+        lane,
+        assignment_runtime_capsule_root=tmp_path / "owner",
+        assignment_runtime_root=tmp_path / "owner/runtime",
+    )
+
+    assert environment is not None
+    assert "TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT" not in environment
+    assert "TASK4_ASSIGNMENT_RUNTIME_ROOT" not in environment
 
 
 @pytest.mark.parametrize(
@@ -3455,13 +3503,19 @@ def test_assignment_lane_rejects_duplicate_or_standard_stack_port(
 
 
 def test_assignment_lane_forwards_isolated_ports_without_changing_namespace(
-    candidate_file: Path,
+    candidate_file: Path, tmp_path: Path,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     lane = next(item for item in gate.FULL_LANES if item.name == "admin-course-mode-assignment-rollback")
     source = _assignment_source(candidate_file)
 
-    environment = gate._child_environment(candidate, source, lane)
+    environment = gate._child_environment(
+        candidate,
+        source,
+        lane,
+        assignment_runtime_capsule_root=tmp_path / "owner",
+        assignment_runtime_root=tmp_path / "owner/runtime",
+    )
 
     assert environment is not None
     assert environment["LESSON_STUDIO_E2E_BACKEND_HOST_PORT"] == "13100"
@@ -3471,8 +3525,8 @@ def test_assignment_lane_forwards_isolated_ports_without_changing_namespace(
     assert environment["LESSON_STUDIO_E2E_RESOURCE_PREFIX"] == "tbot-task4-unit"
 
 
-def test_assignment_runtime_root_is_rebased_to_lane_execution_snapshot(
-    candidate_file: Path,
+def test_assignment_source_runtime_root_is_validated_before_capsule_injection(
+    candidate_file: Path, tmp_path: Path,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     lane = next(item for item in gate.FULL_LANES if item.name == "admin-course-mode-assignment-new")
@@ -3490,14 +3544,14 @@ def test_assignment_runtime_root_is_rebased_to_lane_execution_snapshot(
             {**_assignment_source(candidate_file), "TASK4_ASSIGNMENT_RUNTIME_ROOT": str(source_runtime)},
             lane,
             source_candidate=candidate,
+            assignment_runtime_capsule_root=tmp_path / "owner",
+            assignment_runtime_root=tmp_path / "owner/runtime",
         )
 
         assert environment is not None
-        expected = (
-            Path(execution.candidate["repositories"]["adminEsp"]["path"])
-            / "main/manager-web/output/task4-candidate"
+        assert environment["TASK4_ASSIGNMENT_RUNTIME_ROOT"] == str(
+            tmp_path / "owner/runtime"
         )
-        assert environment["TASK4_ASSIGNMENT_RUNTIME_ROOT"] == str(expected)
     finally:
         if execution is not None:
             assert execution.cleanup() is True
@@ -3505,7 +3559,7 @@ def test_assignment_runtime_root_is_rebased_to_lane_execution_snapshot(
 
 
 def test_assignment_runtime_root_uses_one_required_environment_snapshot(
-    candidate_file: Path,
+    candidate_file: Path, tmp_path: Path,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     lane = next(item for item in gate.FULL_LANES if item.name == "admin-course-mode-assignment-new")
@@ -3533,15 +3587,18 @@ def test_assignment_runtime_root_uses_one_required_environment_snapshot(
         })
 
         environment = gate._child_environment(
-            execution.candidate, source, lane, source_candidate=candidate,
+            execution.candidate,
+            source,
+            lane,
+            source_candidate=candidate,
+            assignment_runtime_capsule_root=tmp_path / "owner",
+            assignment_runtime_root=tmp_path / "owner/runtime",
         )
 
         assert environment is not None
-        expected = (
-            Path(execution.candidate["repositories"]["adminEsp"]["path"])
-            / "main/manager-web/output/task4-candidate"
+        assert environment["TASK4_ASSIGNMENT_RUNTIME_ROOT"] == str(
+            tmp_path / "owner/runtime"
         )
-        assert environment["TASK4_ASSIGNMENT_RUNTIME_ROOT"] == str(expected)
         assert source.reads == 1
     finally:
         if execution is not None:
@@ -3573,6 +3630,8 @@ def test_assignment_runtime_root_rebase_fails_closed(
         {**_assignment_source(candidate_file), "TASK4_ASSIGNMENT_RUNTIME_ROOT": str(source_runtime)},
         lane,
         source_candidate=candidate,
+        assignment_runtime_capsule_root=tmp_path / "owner",
+        assignment_runtime_root=tmp_path / "owner/runtime",
     )
 
     assert environment is None
@@ -6291,7 +6350,9 @@ def test_full_esp_lane_maps_task06_roots_and_rejects_skips(candidate_file: Path)
     assert lane.reject_pytest_skips is True
 
 
-def test_assignment_lane_identity_is_derived_only_from_candidate(candidate_file: Path) -> None:
+def test_assignment_lane_identity_is_derived_only_from_candidate(
+    candidate_file: Path, tmp_path: Path,
+) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     lane = next(
         item for item in gate.lanes_for_mode("full")
@@ -6314,7 +6375,13 @@ def test_assignment_lane_identity_is_derived_only_from_candidate(candidate_file:
         "TASK4_ASSIGNMENT_MEDIA_HOST_PORT": "28443",
     }
 
-    environment = gate._child_environment(candidate, hostile, lane)
+    environment = gate._child_environment(
+        candidate,
+        hostile,
+        lane,
+        assignment_runtime_capsule_root=tmp_path / "owner",
+        assignment_runtime_root=tmp_path / "owner/runtime",
+    )
 
     assert environment["TBOT_BACKEND_WORKTREE"] == candidate["repositories"]["backend"]["path"]
     assert environment["TBOT_FIRMWARE_WORKTREE"] == candidate["repositories"]["firmware"]["path"]

@@ -380,6 +380,7 @@ TASK4_ASSIGNMENT_CANDIDATE_ENV = (
     "LESSON_STUDIO_E2E_BACKEND_HOST_PORT", "LESSON_STUDIO_E2E_WEB_HOST_PORT",
     "TASK4_ASSIGNMENT_MEDIA_HOST_PORT",
 )
+TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ENV = "TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT"
 STATEFUL_ASSIGNMENT_LANES = frozenset({
     "admin-course-mode-assignment-new",
     "admin-course-mode-assignment-rollback",
@@ -3100,6 +3101,7 @@ def _child_environment(
     lane: Lane,
     *,
     source_candidate: dict | None = None,
+    assignment_runtime_capsule_root: Path | None = None,
     assignment_runtime_root: Path | None = None,
 ) -> dict[str, str] | None:
     environment = dict(BASE_ENVIRONMENT)
@@ -3129,20 +3131,27 @@ def _child_environment(
     if assignment_ports is None:
         return None
     environment.update(assignment_ports)
-    if (
-        lane.name in STATEFUL_ASSIGNMENT_LANES
-        and required_environment.get("TASK4_ASSIGNMENT_RUNTIME_ROOT")
-    ):
+    if lane.name in STATEFUL_ASSIGNMENT_LANES:
+        source_runtime_root = required_environment.get(
+            "TASK4_ASSIGNMENT_RUNTIME_ROOT"
+        )
+        if (
+            not source_runtime_root
+            or assignment_runtime_capsule_root is None
+            or assignment_runtime_root is None
+        ):
+            return None
         runtime_root = _assignment_runtime_root(
             source_candidate if source_candidate is not None else candidate,
             candidate,
-            required_environment["TASK4_ASSIGNMENT_RUNTIME_ROOT"],
+            source_runtime_root,
         )
         if runtime_root is None:
             return None
-        environment["TASK4_ASSIGNMENT_RUNTIME_ROOT"] = str(
-            assignment_runtime_root if assignment_runtime_root is not None else runtime_root
+        environment[TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ENV] = str(
+            assignment_runtime_capsule_root
         )
+        environment["TASK4_ASSIGNMENT_RUNTIME_ROOT"] = str(assignment_runtime_root)
     if lane.name == LIVE_DB_LANE.name:
         environment["COURSE_MODE_V5_SOURCE_ROOT"] = candidate["repositories"]["adminEsp"]["path"]
     assignment = _assignment_candidate_environment(candidate, lane)
@@ -3902,6 +3911,10 @@ def _run_gate_impl(
                     required_source,
                     lane,
                     source_candidate=candidate,
+                    assignment_runtime_capsule_root=(
+                        assignment_runtime.root
+                        if assignment_runtime is not None else None
+                    ),
                     assignment_runtime_root=(
                         assignment_runtime.runtime_root
                         if assignment_runtime is not None else None
