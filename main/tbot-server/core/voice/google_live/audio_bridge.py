@@ -1186,7 +1186,7 @@ class GoogleLiveAudioBridge:
                 mime_type,
                 include_preroll,
             )
-            if packets:
+            if packets and not getattr(self.conn, "client_abort", False):
                 await sendAudio(self.conn, packets)
                 return len(packets)
             return 0

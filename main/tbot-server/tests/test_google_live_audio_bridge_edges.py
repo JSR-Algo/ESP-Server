@@ -293,6 +293,18 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
                 0,
             )
 
+            async def abort_during_encode(*_args):
+                conn.client_abort = True
+                return [b"suppressed"]
+
+            bridge._run_audio_cpu = abort_during_encode
+            self.assertEqual(
+                await bridge._send_binary_audio_message(
+                    b"pcm", audio_format="pcm16"
+                ),
+                0,
+            )
+
         self.assertEqual(send_audio.await_count, 2)
         self.assertEqual(
             await self.make_bridge(conn=_Conn(websocket=None))._send_binary_audio_message(
@@ -331,6 +343,36 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         )
 
         forwarded.assert_called_once_with(7)
+
+    async def test_abort_during_pcm_encode_does_not_emit_forwarded_proof(self):
+        forwarded = MagicMock()
+        conn = _Conn(websocket=_WebSocket())
+        bridge = self.make_bridge(
+            conn=conn,
+            response_id_getter=lambda: 1,
+            model_output_forwarded_handler=forwarded,
+        )
+        bridge._send_tts_message = AsyncMock()
+        await bridge.handle_event({"type": "audio_start", "response_generation": 1})
+
+        async def abort_during_encode(*_args):
+            conn.client_abort = True
+            return [b"suppressed"]
+
+        bridge._run_audio_cpu = abort_during_encode
+        self.assertTrue(
+            await bridge.handle_event(
+                {
+                    "type": "audio",
+                    "audio": b"pcm",
+                    "audio_format": "pcm16",
+                    "response_generation": 1,
+                }
+            )
+        )
+
+        forwarded.assert_not_called()
+        self.assertEqual(conn.websocket.sent, [])
 
     async def test_handler_failures_and_blocked_audio_end_edges(self):
         async def fail_tool(_event):
