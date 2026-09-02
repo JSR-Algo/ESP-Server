@@ -80,7 +80,10 @@ closed before Docker execution.
 
 ## Tests
 
-Add test-first coverage for:
+Testing is ordered by product risk, with runtime behavior and firmware-facing
+results ahead of broad static coverage.
+
+First, add test-first coverage for:
 
 - Python injection of the exact owner/runtime pair into NEW and ROLLBACK.
 - Absence of both variables from non-assignment lanes.
@@ -91,10 +94,27 @@ Add test-first coverage for:
   overlap.
 - A focused actual assignment runner regression proving the capsule contract
   passes before Docker orchestration.
-- Existing capsule tamper, retained-path, process containment, copy-only, and
-  full release-gate suites.
+
+Next, run the real candidate-bound runtime path in this order:
+
+1. An isolated NEW-to-ROLLBACK assignment flow using one shared capsule, real
+   Docker services, real derivative generation, and Playwright WebKit.
+2. Firmware-facing renderer, handler, backward-compatibility, and
+   cross-contract parity lanes, verifying the same lesson/media contract that
+   the firmware consumes.
+3. Existing capsule tamper, retained-path, process containment, copy-only, and
+   full canonical source suites.
+
+The runtime qualification must assert that generated media survives NEW lane
+snapshot cleanup, ROLLBACK observes the same derivative bytes and database
+state, all exact assignment Docker resources are removed, and the capsule has
+no retained paths. Firmware-facing qualification must use the frozen firmware
+SHA and artifact hashes from the candidate and must not rebuild, flash, reboot,
+open serial, or move the robot.
 
 After implementation, require independent spec and quality/security reviews,
 the full canonical source suite, a clean committed repository, and a newly
 frozen candidate. Do not continue to live-db or physical testing until the new
-candidate's Quick and Full gates pass.
+candidate's Quick and Full gates pass. Physical firmware validation remains a
+separate attended phase that requires a fresh point-of-use confirmation after
+the software verdict.
