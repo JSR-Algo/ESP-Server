@@ -80,16 +80,6 @@ const run = (command, args, options = {}) => execFileSync(command, args, {
   cwd: repoRoot, env: environment, stdio: 'inherit', ...options,
 });
 const composeRun = (...args) => run(composeExecutable, [...compose, ...args]);
-const pinnedImages = inspectAndPinCandidateImages({
-  backendReference: environment.TBOT_LESSON_STUDIO_BACKEND_IMAGE,
-  backendId: environment.TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID,
-  webReference: environment.TBOT_LESSON_STUDIO_WEB_IMAGE,
-  webId: environment.TBOT_LESSON_STUDIO_WEB_IMAGE_ID,
-}, (reference) => execFileSync(dockerExecutable, ['image', 'inspect', '--format={{.Id}}', reference], {
-    cwd: repoRoot, env: environment, encoding: 'utf8',
-  }).trim());
-environment.TBOT_LESSON_STUDIO_BACKEND_IMAGE = pinnedImages.backendImage;
-environment.TBOT_LESSON_STUDIO_WEB_IMAGE = pinnedImages.webImage;
 
 const tlsKey = resolve(tlsRoot, 'key.pem');
 const tlsCert = resolve(tlsRoot, 'cert.pem');
@@ -119,6 +109,16 @@ if (!tlsCertificateIsUsable()) {
 run(process.execPath, [resolve(__dirname, 'prepare-task4-media-templates.cjs')], {
   env: { ...environment, TASK4_ASSIGNMENT_MEDIA_ROOT: mediaRoot },
 });
+const pinnedImages = inspectAndPinCandidateImages({
+  backendReference: environment.TBOT_LESSON_STUDIO_BACKEND_IMAGE,
+  backendId: environment.TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID,
+  webReference: environment.TBOT_LESSON_STUDIO_WEB_IMAGE,
+  webId: environment.TBOT_LESSON_STUDIO_WEB_IMAGE_ID,
+}, (reference) => execFileSync(dockerExecutable, ['image', 'inspect', '--format={{.Id}}', reference], {
+    cwd: repoRoot, env: environment, encoding: 'utf8',
+  }).trim());
+environment.TBOT_LESSON_STUDIO_BACKEND_IMAGE = pinnedImages.backendImage;
+environment.TBOT_LESSON_STUDIO_WEB_IMAGE = pinnedImages.webImage;
 
 if (phase === 'new') {
   // NEW owns a fresh isolated stack. ROLLBACK intentionally preserves this PostgreSQL volume.

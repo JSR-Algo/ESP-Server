@@ -1,16 +1,28 @@
 'use strict';
 
 const { execFileSync } = require('node:child_process');
-const { mkdirSync, statSync } = require('node:fs');
+const { mkdirSync, realpathSync, statSync } = require('node:fs');
 const { resolve } = require('node:path');
+const { validateAssignmentRuntimeCapsule } = require('./task4-assignment-runtime.cjs');
 
-const root = process.env.TASK4_ASSIGNMENT_MEDIA_ROOT;
-const outputRoot = resolve(__dirname, '../output');
-if (!root || !resolve(root).startsWith(`${outputRoot}/`)) {
-  throw new Error('TASK4_ASSIGNMENT_MEDIA_ROOT must be an explicit path under manager-web/output');
+for (const name of [
+  'TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT', 'TASK4_ASSIGNMENT_RUNTIME_ROOT',
+  'TASK4_ASSIGNMENT_MEDIA_ROOT', 'TBOT_BACKEND_WORKTREE', 'TBOT_FIRMWARE_WORKTREE',
+]) {
+  if (!process.env[name]) throw new Error(`${name} is required for Task4 media preparation`);
+}
+const repoRoot = resolve(__dirname, '../../..');
+const backendRoot = realpathSync(process.env.TBOT_BACKEND_WORKTREE);
+const firmwareRoot = realpathSync(process.env.TBOT_FIRMWARE_WORKTREE);
+const { runtimeRoot } = validateAssignmentRuntimeCapsule(process.env, [
+  repoRoot, backendRoot, firmwareRoot,
+]);
+const mediaRoot = resolve(process.env.TASK4_ASSIGNMENT_MEDIA_ROOT);
+if (mediaRoot !== resolve(runtimeRoot, 'media')) {
+  throw new Error('TASK4_ASSIGNMENT_MEDIA_ROOT must be the media child of the validated runtime root');
 }
 const durations = [600, 1100, 1200, 1300, 1400, 1600, 2600, 3000, 9500];
-const templateRoot = resolve(root, 'templates');
+const templateRoot = resolve(mediaRoot, 'templates');
 mkdirSync(templateRoot, { recursive: true });
 
 for (const durationMs of durations) {

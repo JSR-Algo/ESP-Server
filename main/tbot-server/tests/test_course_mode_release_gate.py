@@ -1885,6 +1885,9 @@ def test_assignment_runner_accepts_gate_owned_capsule(
     scripts = admin_root / "main/manager-web/scripts"
     scripts.mkdir(parents=True, exist_ok=True)
     canonical_root = Path(__file__).resolve().parents[3]
+    node_path = shutil.which("node")
+    assert node_path is not None
+    node = Path(node_path).resolve()
     helper_source = (
         canonical_root / "main/manager-web/scripts/task4-assignment-runtime.cjs"
     ).read_text(encoding="utf-8")
@@ -1906,6 +1909,12 @@ def test_assignment_runner_accepts_gate_owned_capsule(
         ),
         encoding="utf-8",
     )
+    (scripts / "prepare-task4-media-templates.cjs").write_text(
+        (canonical_root / "main/manager-web/scripts/prepare-task4-media-templates.cjs").read_text(
+            encoding="utf-8",
+        ),
+        encoding="utf-8",
+    )
     (scripts / "task4-image-identity.cjs").write_text(
         "const { statSync, writeFileSync } = require('node:fs');\n"
         "const { resolve } = require('node:path');\n"
@@ -1917,6 +1926,11 @@ def test_assignment_runner_accepts_gate_owned_capsule(
         "    if (!statSync(mediaRoot).isDirectory() || !statSync(tlsRoot).isDirectory()) {\n"
         "      throw new Error('runner did not create capsule media and TLS roots');\n"
         "    }\n"
+        "    for (const durationMs of [600, 1100, 1200, 1300, 1400, 1600, 2600, 3000, 9500]) {\n"
+        "      if (!statSync(resolve(mediaRoot, 'templates', `${durationMs}.mp4`)).isFile()) {\n"
+        "        throw new Error(`missing prepared template ${durationMs}`);\n"
+        "      }\n"
+        "    }\n"
         "    writeFileSync(resolve(runtimeRoot, 'roots.marker'), "
         "`${mediaRoot}\\n${tlsRoot}`);\n"
         "    process.exit(0);\n"
@@ -1925,6 +1939,34 @@ def test_assignment_runner_accepts_gate_owned_capsule(
         "};\n",
         encoding="utf-8",
     )
+    media_tools = scripts / "media-tools"
+    media_tools.mkdir()
+    (media_tools / "ffmpeg").write_text(
+        f"#!{node}\n"
+        "require('node:fs').writeFileSync(process.argv.at(-1), 'stub media');\n",
+        encoding="utf-8",
+    )
+    (media_tools / "ffprobe").write_text(
+        f"#!{node}\n"
+        "const { basename } = require('node:path');\n"
+        "const durationMs = Number(basename(process.argv.at(-1), '.mp4'));\n"
+        "process.stdout.write(JSON.stringify({ streams: [{ codec_name: 'h264', width: 480, "
+        "height: 320, r_frame_rate: '10/1', nb_frames: durationMs / 100 }], "
+        "format: { duration: durationMs / 1000 } }));\n",
+        encoding="utf-8",
+    )
+    (media_tools / "openssl").write_text(
+        f"#!{node}\n"
+        "const { writeFileSync } = require('node:fs');\n"
+        "const key = process.argv.indexOf('-keyout');\n"
+        "const cert = process.argv.indexOf('-out');\n"
+        "if (key < 0 || cert < 0) process.exit(96);\n"
+        "writeFileSync(process.argv[key + 1], 'stub key');\n"
+        "writeFileSync(process.argv[cert + 1], 'stub cert');\n",
+        encoding="utf-8",
+    )
+    for tool in (media_tools / "ffmpeg", media_tools / "ffprobe", media_tools / "openssl"):
+        tool.chmod(0o755)
     (scripts / "reset-lesson-studio-e2e-state.cjs").write_text(
         "module.exports = { composeExecutableFromEnvironment(environment) { "
         "return environment.TBOT_DOCKER_COMPOSE_EXECUTABLE; } };\n",
@@ -1983,9 +2025,6 @@ def test_assignment_runner_accepts_gate_owned_capsule(
         executable.write_text("".join(lines), encoding="utf-8")
         executable.chmod(0o755)
         descriptor["sha256"] = hashlib.sha256(executable.read_bytes()).hexdigest()
-    node_path = shutil.which("node")
-    assert node_path is not None
-    node = Path(node_path).resolve()
     node_descriptor = candidate["tools"]["node"]["adminManagerWeb"]
     candidate_node = Path(node_descriptor["executable"])
     candidate_node.write_text(
@@ -2001,6 +2040,7 @@ def test_assignment_runner_accepts_gate_owned_capsule(
         "const { resolve } = require('node:path');\n"
         "assert.deepEqual(process.argv.slice(2), "
         "['run', 'test:e2e:course-mode:assignment:new']);\n"
+        "process.env.PATH = `${resolve(process.cwd(), 'scripts/media-tools')}:${process.env.PATH}`;\n"
         "process.argv = [process.argv[0], "
         "resolve(process.cwd(), 'scripts/run-task4-assignment-phase.cjs'), 'new'];\n"
         "require(resolve(process.cwd(), 'scripts/run-task4-assignment-phase.cjs'));\n",

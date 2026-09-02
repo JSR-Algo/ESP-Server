@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
 const { existsSync, readFileSync } = require('node:fs');
 const {
   chmod, link, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile,
@@ -18,6 +19,7 @@ const rollbackSpecPath = resolve(__dirname, '../e2e/lesson-studio/assignment-rol
 const playwrightConfigPath = resolve(__dirname, '../playwright.assignment-rollback.config.js');
 const orchestratorPath = resolve(__dirname, 'run-task4-assignment-phase.cjs');
 const imageIdentityPath = resolve(__dirname, 'task4-image-identity.cjs');
+const mediaPrepPath = resolve(__dirname, 'prepare-task4-media-templates.cjs');
 
 async function createAssignmentRuntimeCapsule(t, prefix = 'course-mode-assignment-runtime-') {
   const capsuleRoot = await mkdtemp(resolve(tmpdir(), prefix));
@@ -35,6 +37,120 @@ function capsuleEnvironment(capsuleRoot, runtimeRoot) {
     TASK4_ASSIGNMENT_RUNTIME_ROOT: runtimeRoot,
   };
 }
+
+async function createMediaPrepFixture(t) {
+  const createdCapsule = await createAssignmentRuntimeCapsule(t);
+  const capsule = {
+    capsuleRoot: await realpath(createdCapsule.capsuleRoot),
+    runtimeRoot: await realpath(createdCapsule.runtimeRoot),
+  };
+  const protectedRoot = await mkdtemp(resolve(tmpdir(), 'course-mode-media-protected-'));
+  const backendRoot = resolve(protectedRoot, 'backend');
+  const firmwareRoot = resolve(protectedRoot, 'firmware');
+  const toolRoot = resolve(protectedRoot, 'tools');
+  const toolMarker = resolve(protectedRoot, 'media-tool.marker');
+  await mkdir(backendRoot);
+  await mkdir(firmwareRoot);
+  await mkdir(toolRoot);
+  const ffmpeg = resolve(toolRoot, 'ffmpeg');
+  const ffprobe = resolve(toolRoot, 'ffprobe');
+  await writeFile(ffmpeg, [
+    `#!${process.execPath}`,
+    "const { appendFileSync, writeFileSync } = require('node:fs');",
+    `appendFileSync(${JSON.stringify(toolMarker)}, 'ffmpeg\\n');`,
+    "writeFileSync(process.argv.at(-1), 'stub media');",
+  ].join('\n'));
+  await writeFile(ffprobe, [
+    `#!${process.execPath}`,
+    "const { appendFileSync } = require('node:fs');",
+    "const { basename } = require('node:path');",
+    `appendFileSync(${JSON.stringify(toolMarker)}, 'ffprobe\\n');`,
+    "const durationMs = Number(basename(process.argv.at(-1), '.mp4'));",
+    "process.stdout.write(JSON.stringify({ streams: [{ codec_name: 'h264', width: 480, height: 320, r_frame_rate: '10/1', nb_frames: durationMs / 100 }], format: { duration: durationMs / 1000 } }));",
+  ].join('\n'));
+  await chmod(ffmpeg, 0o755);
+  await chmod(ffprobe, 0o755);
+  t.after(() => rm(protectedRoot, { recursive: true, force: true }));
+  return { capsule, backendRoot, firmwareRoot, toolRoot, toolMarker };
+}
+
+function runMediaPrep(fixture, overrides = {}) {
+  const mediaRoot = resolve(fixture.capsule.runtimeRoot, 'media');
+  return execFileSync(process.execPath, [mediaPrepPath], {
+    env: {
+      ...process.env,
+      ...capsuleEnvironment(fixture.capsule.capsuleRoot, fixture.capsule.runtimeRoot),
+      TASK4_ASSIGNMENT_MEDIA_ROOT: mediaRoot,
+      TBOT_BACKEND_WORKTREE: fixture.backendRoot,
+      TBOT_FIRMWARE_WORKTREE: fixture.firmwareRoot,
+      PATH: `${fixture.toolRoot}:${process.env.PATH || ''}`,
+      ...overrides,
+    },
+    stdio: 'pipe',
+  });
+}
+
+test('assignment media prep accepts a valid gate-owned system-temp capsule', async (t) => {
+  const fixture = await createMediaPrepFixture(t);
+
+  runMediaPrep(fixture);
+
+  const templateRoot = resolve(fixture.capsule.runtimeRoot, 'media/templates');
+  for (const durationMs of [600, 1100, 1200, 1300, 1400, 1600, 2600, 3000, 9500]) {
+    assert.equal((await stat(resolve(templateRoot, `${durationMs}.mp4`))).isFile(), true);
+  }
+  assert.equal((await readFile(fixture.toolMarker, 'utf8')).trim().split('\n').length, 18);
+});
+
+test('assignment media prep rejects a mismatched media root before side effects', async (t) => {
+  const fixture = await createMediaPrepFixture(t);
+  const mismatchedRoot = resolve(fixture.capsule.runtimeRoot, 'other-media');
+
+  assert.throws(
+    () => runMediaPrep(fixture, { TASK4_ASSIGNMENT_MEDIA_ROOT: mismatchedRoot }),
+    /TASK4_ASSIGNMENT_MEDIA_ROOT/,
+  );
+  assert.equal(existsSync(resolve(mismatchedRoot, 'templates')), false);
+  assert.equal(existsSync(fixture.toolMarker), false);
+});
+
+test('assignment media prep rejects an invalid capsule before side effects', async (t) => {
+  const fixture = await createMediaPrepFixture(t);
+  await chmod(fixture.capsule.capsuleRoot, 0o755);
+  const templateRoot = resolve(fixture.capsule.runtimeRoot, 'media/templates');
+
+  assert.throws(() => runMediaPrep(fixture), /0700/);
+  assert.equal(existsSync(templateRoot), false);
+  assert.equal(existsSync(fixture.toolMarker), false);
+});
+
+test('assignment media prep rejects a missing capsule owner before side effects', async (t) => {
+  const fixture = await createMediaPrepFixture(t);
+  const templateRoot = resolve(fixture.capsule.runtimeRoot, 'media/templates');
+
+  assert.throws(
+    () => runMediaPrep(fixture, { TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT: '' }),
+    /TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT/,
+  );
+  assert.equal(existsSync(templateRoot), false);
+  assert.equal(existsSync(fixture.toolMarker), false);
+});
+
+test('assignment media prep validates the capsule before filesystem or media side effects', () => {
+  const source = readFileSync(mediaPrepPath, 'utf8');
+
+  for (const required of [
+    'TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT', 'TASK4_ASSIGNMENT_RUNTIME_ROOT',
+    'TASK4_ASSIGNMENT_MEDIA_ROOT', 'TBOT_BACKEND_WORKTREE', 'TBOT_FIRMWARE_WORKTREE',
+  ]) assert.match(source, new RegExp(required));
+  assert.match(source, /validateAssignmentRuntimeCapsule/);
+  assert.doesNotMatch(source, /manager-web\/output/);
+  const validationIndex = source.indexOf('validateAssignmentRuntimeCapsule(process.env, [');
+  assert.ok(validationIndex >= 0);
+  assert.ok(validationIndex < source.indexOf('mkdirSync('));
+  assert.ok(validationIndex < source.indexOf("execFileSync('ffmpeg'"));
+  assert.ok(validationIndex < source.indexOf("execFileSync('ffprobe'"));
+});
 
 test('assignment runtime capsule accepts an exact private owner and direct runtime child', async (t) => {
   const capsule = await createAssignmentRuntimeCapsule(t);
