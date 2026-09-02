@@ -890,12 +890,18 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._reset_candidate_scope_measurements()
         provider._close_live_resources = AsyncMock(return_value=None)
 
-        await provider._handle_live_event(
-            {"type": "audio_start", "response_generation": 0}
-        )
-        await provider._handle_live_event(
-            {"type": "audio_end", "response_generation": 0}
-        )
+        provider._mark_clean_user_turn_opened("audio_input")
+        response_clock = [10.0]
+        with patch.object(
+            google_live_module.time, "monotonic", side_effect=lambda: response_clock[0]
+        ):
+            await provider._handle_live_event(
+                {"type": "audio_start", "response_generation": 1}
+            )
+            response_clock[0] = 12.4
+            await provider._handle_live_event(
+                {"type": "audio_end", "response_generation": 1}
+            )
         result = await provider.finalize_evidence()
 
         self.assertEqual(result["status"], "PASS")
@@ -906,9 +912,52 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         ]
         quiet = next(item for item in rendered if "evidence_candidate_quiet" in item)
         self.assertIn("mode=robot_speaking", quiet)
+        self.assertIn("user_turns=0", quiet)
         self.assertIn("response_starts=1 response_ends=1", quiet)
+        self.assertIn("response_generation=1 response_duration_ms=2400", quiet)
         self.assertIn("interrupts=0 replacements=0 reconnects=0 fallbacks=0", quiet)
         self.assertTrue(any("evidence_candidate_fallback" in item and "fallbacks=0" in item for item in rendered))
+
+        provider._response_generation = 2
+        provider._mark_clean_user_turn_opened("audio_input")
+        self.assertEqual(provider._evidence_candidate_counters["user_turns"], 1)
+
+    async def test_candidate_quiet_silence_duration_excludes_successful_teardown(self):
+        conn = _Conn()
+        registry = EvidenceEnrollmentRegistry()
+        registry.register(
+            device_id=conn.device_id,
+            client_id="client-1",
+            journey_id="candidate.quiet-frozen-1",
+            journey_type="quiet",
+            proof_profile="candidate-lifecycle",
+            ttl_sec=120,
+            transcript_plan=(),
+            hmac_key=b"",
+            semantic_kind="quiet",
+            quiet_mode="silence",
+        )
+        registry.claim(device_id=conn.device_id, client_id="client-1", journey_id="candidate.quiet-frozen-1")
+        conn.evidence_registry = registry
+        conn.google_live_evidence_journey_id = "candidate.quiet-frozen-1"
+        conn.google_live_evidence_journey_type = "quiet"
+        conn.google_live_evidence_proof_profile = "candidate-lifecycle"
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._interaction.start_live_connection("live-quiet")
+        provider._evidence_candidate_scope_started_at = 10.0
+
+        async def slow_close(**_kwargs):
+            clock[0] = 15.5
+
+        clock = [12.0]
+        provider._close_live_resources = AsyncMock(side_effect=slow_close)
+        with patch.object(google_live_module.time, "monotonic", side_effect=lambda: clock[0]):
+            result = await provider.finalize_evidence()
+
+        self.assertEqual(result["status"], "PASS")
+        rendered = [args[0].format(*args[1:]) for _, args, _ in conn.logger.messages if args]
+        quiet = next(item for item in rendered if "evidence_candidate_quiet" in item)
+        self.assertIn("duration_ms=2000", quiet)
 
     async def test_candidate_quiet_silence_marker_reports_explicit_zero_counters(self):
         conn = _Conn()

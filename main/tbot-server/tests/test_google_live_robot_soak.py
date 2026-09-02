@@ -163,6 +163,9 @@ def _refresh_execution_contract(result):
             "kind": "quiet",
             "mode": mode,
             "durationMs": duration_ms,
+            "responseGeneration": None if mode == "silence" else 1,
+            "responseDurationMs": 0 if mode == "silence" else duration_ms,
+            "outputChunks": response_count,
             "falseInterrupts": 0,
             "responseStarts": response_count,
             "responseEnds": response_count,
@@ -3188,6 +3191,9 @@ def test_candidate_quiet_rejects_short_semantic_observation(tmp_path):
                     "kind": "quiet",
                     "mode": "silence",
                     "durationMs": 119000,
+                    "responseGeneration": None,
+                    "responseDurationMs": 0,
+                    "outputChunks": 0,
                     "falseInterrupts": 0,
                     "responseStarts": 0,
                     "responseEnds": 0,
@@ -3211,6 +3217,9 @@ def test_candidate_robot_speaking_accepts_short_bounded_terminal_response():
                 "kind": "quiet",
                 "mode": "robot_speaking",
                 "durationMs": 2400,
+                "responseGeneration": 1,
+                "responseDurationMs": 2400,
+                "outputChunks": 1,
                 "falseInterrupts": 0,
                 "responseStarts": 1,
                 "responseEnds": 1,
@@ -3261,6 +3270,9 @@ def test_candidate_semantic_verdicts_are_derived_only_from_exact_bound_analyzer(
                 "kind": "quiet",
                 "mode": "silence",
                 "durationMs": 120000,
+                "responseGeneration": None,
+                "responseDurationMs": 0,
+                "outputChunks": 0,
                 "falseInterrupts": 0,
                 "responseStarts": 0,
                 "responseEnds": 0,
@@ -3546,6 +3558,66 @@ def test_candidate_failed_post_treats_delete_not_found_as_safe_cleanup(tmp_path)
 
 @pytest.mark.parametrize(
     "case",
+    ("delete_failure", "malformed_delete", "get_identity_mismatch", "get_active"),
+)
+def test_candidate_ambiguous_enrollment_cleanup_requires_verified_terminal_state(
+    tmp_path, case
+):
+    journey_id = "candidate-soak.20260831T100000Z.1"
+    terminal = {
+        "journeyId": journey_id,
+        "journeyType": "conversation",
+        "proofProfile": "candidate-lifecycle",
+        "status": "FAIL",
+        "failureCode": "OPERATOR_CANCELLED",
+    }
+    calls = []
+
+    async def control(method, _url, payload=None):
+        calls.append(method)
+        if method == "POST":
+            return {"data": {"registered": True, "journeyId": payload["journeyId"]}}
+        if method == "DELETE":
+            if case == "delete_failure":
+                raise RuntimeError("private delete detail")
+            if case == "malformed_delete":
+                return {"status": "PASS"}
+            return dict(terminal)
+        if method == "GET":
+            if case == "get_identity_mismatch":
+                return {**terminal, "journeyId": "other"}
+            if case == "get_active":
+                return {**terminal, "status": "ACTIVE"}
+            return dict(terminal)
+        return {"status": "PASS"}
+
+    async def driver(_args, **_context):
+        raise RuntimeError("journey failed")
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=control,
+        candidate_journey_driver=driver,
+    )
+
+    with pytest.raises(RuntimeError, match="candidate enrollment cleanup failed"):
+        asyncio.run(
+            build_candidate_journeys(args)["conversation"](
+                args, name="conversation", index=1
+            )
+        )
+
+    assert calls.count("DELETE") == 1
+    assert calls.count("GET") == (0 if case in {"delete_failure", "malformed_delete"} else 1)
+    assert not args.produce_candidate_evidence.exists()
+
+
+@pytest.mark.parametrize(
+    "case",
     [
         "fail",
         "missing_status",
@@ -3633,9 +3705,19 @@ def test_candidate_factory_rejects_incomplete_finalize_before_analyzer(
         else scope
     )
 
-    async def control(_method, url, _payload=None):
+    cleanup_terminal = {
+        "journeyId": journey_id,
+        "journeyType": "bargein",
+        "proofProfile": "candidate-lifecycle",
+        "status": "FAIL",
+        "failureCode": "OPERATOR_CANCELLED",
+    }
+
+    async def control(method, url, _payload=None):
         if url.endswith("/finalize"):
             return finalized
+        if method in {"DELETE", "GET"}:
+            return dict(cleanup_terminal)
         return {"status": "PASS"}
 
     async def analyzer(**_kwargs):
@@ -3814,6 +3896,9 @@ def test_candidate_factory_posts_fresh_semantic_plans_and_derives_safe_verdicts(
                 "kind": "quiet",
                 "mode": "silence",
                 "durationMs": 60000,
+                "responseGeneration": None,
+                "responseDurationMs": 0,
+                "outputChunks": 0,
                 "falseInterrupts": 0,
                 "responseStarts": 0,
                 "responseEnds": 0,

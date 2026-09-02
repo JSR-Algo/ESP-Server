@@ -151,6 +151,7 @@ class _EvidenceEnrollmentState:
     semantic_replacement_started: bool = False
     semantic_replacement_completed: bool = False
     semantic_stale_old_audio_count: int = 0
+    quiet_setup_turn_consumed: bool = False
 
 
 class EvidenceEnrollmentRegistry:
@@ -568,6 +569,24 @@ class EvidenceEnrollmentRegistry:
             enrollment.semantic_eligible = False
             enrollment.semantic_mismatch_count += 1
         return proof
+
+    @_synchronized
+    def consume_quiet_setup_turn(self, journey_id: str, *, source: str) -> bool:
+        self._prepare()
+        enrollment = self._active.get(journey_id)
+        if (
+            enrollment is None
+            or not enrollment.connected
+            or enrollment.proof_profile != CANDIDATE_LIFECYCLE_PROFILE
+            or enrollment.journey_type != "quiet"
+            or enrollment.semantic_kind != "quiet"
+            or enrollment.quiet_mode != "robot_speaking"
+            or source != "audio_input"
+            or enrollment.quiet_setup_turn_consumed
+        ):
+            return False
+        enrollment.quiet_setup_turn_consumed = True
+        return True
 
     @_synchronized
     def record_candidate_interrupt(

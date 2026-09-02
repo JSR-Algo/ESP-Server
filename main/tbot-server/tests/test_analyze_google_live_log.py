@@ -244,6 +244,9 @@ def _candidate_semantic_quiet_window(mode="silence", **counts):
                 "2026-08-31 10:00:01 Google Live evidence_response_started "
                 "journey_id=quiet-journey-1 connection_id=conn-1 "
                 "live_connection_id=live-1 response_id=1",
+                "2026-08-31 10:00:01 Google Live model_output_chunk_forwarded "
+                "journey_id=quiet-journey-1 connection_id=conn-1 "
+                "live_connection_id=live-1 response_id=1 bytes=320",
                 "2026-08-31 10:00:02 Google Live evidence_response_ended "
                 "journey_id=quiet-journey-1 connection_id=conn-1 "
                 "live_connection_id=live-1 response_id=1",
@@ -259,7 +262,8 @@ def _candidate_semantic_quiet_window(mode="silence", **counts):
         _provider_info(
             3,
             "Google Live evidence_candidate_quiet journey_id=quiet-journey-1 "
-            f"mode={mode} duration_ms=1500 "
+            f"mode={mode} duration_ms=1500 response_generation={'1' if mode == 'robot_speaking' else 'none'} "
+            f"response_duration_ms={1000 if mode == 'robot_speaking' else 0} "
             + " ".join(f"{key}={value}" for key, value in expected.items()),
         ),
         "2026-08-31 10:00:04 Google Live evidence_receive_loop_stopped "
@@ -1206,6 +1210,9 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                         "kind": "quiet",
                         "mode": mode,
                         "durationMs": 1500,
+                        "responseGeneration": 1 if mode == "robot_speaking" else None,
+                        "responseDurationMs": 1000 if mode == "robot_speaking" else 0,
+                        "outputChunks": response_count,
                         "falseInterrupts": 0,
                         "responseStarts": response_count,
                         "responseEnds": response_count,
@@ -1276,6 +1283,19 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
 
         self.assertEqual(verdict["status"], "FAIL", verdict)
         self.assertEqual(verdict["candidateSemanticEvidence"]["status"], "FAIL")
+
+    def test_candidate_robot_speaking_requires_positive_exact_audio_response(self):
+        base = _candidate_semantic_quiet_window("robot_speaking")
+        cases = {
+            "zero-duration": [line.replace("response_duration_ms=1000", "response_duration_ms=0") for line in base],
+            "zero-output": [line for line in base if "model_output_chunk_forwarded" not in line],
+            "wrong-generation": [line.replace("response_generation=1", "response_generation=2") for line in base],
+            "stale-output": [line.replace("response_id=1 bytes=320", "response_id=2 bytes=320") for line in base],
+        }
+        for name, lines in cases.items():
+            with self.subTest(name=name):
+                verdict = self._analyze(lines)
+                self.assertEqual(verdict["status"], "FAIL", verdict)
 
     def test_candidate_quiet_semantic_requires_exact_marker_and_fallback_agreement(self):
         lines = _candidate_semantic_quiet_window()

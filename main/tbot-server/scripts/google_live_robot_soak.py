@@ -124,6 +124,10 @@ _CANDIDATE_LATENCY_METRICS = (
     "reconnectRecoveryP95Ms",
 )
 _OWNED_CLEANUP_TASKS = set()
+
+
+class _EvidenceControlNotFound(RuntimeError):
+    pass
 _FORBIDDEN_EVIDENCE_KEYS = frozenset(
     {
         "audio",
@@ -551,6 +555,7 @@ def _candidate_semantic_counters(
             and set(semantic)
             == {
                 "status", "kind", "mode", "durationMs", "falseInterrupts",
+                "responseGeneration", "responseDurationMs", "outputChunks",
                 "responseStarts", "responseEnds", "replacements", "fallbacks",
             }
             and semantic.get("status") == "PASS"
@@ -560,6 +565,20 @@ def _candidate_semantic_counters(
             and semantic.get("falseInterrupts") == 0
             and semantic.get("responseStarts") == expected_responses
             and semantic.get("responseEnds") == expected_responses
+            and (
+                semantic.get("responseGeneration") is None
+                and semantic.get("responseDurationMs") == 0
+                and semantic.get("outputChunks") == 0
+                if quiet_mode == "silence"
+                else (
+                    type(semantic.get("responseGeneration")) is int
+                    and semantic.get("responseGeneration") >= 0
+                    and type(semantic.get("responseDurationMs")) is int
+                    and 0 < semantic.get("responseDurationMs") <= observed_duration_ms
+                    and type(semantic.get("outputChunks")) is int
+                    and semantic.get("outputChunks") > 0
+                )
+            )
             and semantic.get("replacements") == 0
             and semantic.get("fallbacks") == 0
         )
@@ -2801,6 +2820,12 @@ async def _candidate_control_json(args, method, url, payload=None):
                 timeout=float(getattr(args, "event_timeout_sec", 30.0)),
             ) as response:
                 return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise _EvidenceControlNotFound(
+                    "evidence control journey not found"
+                ) from exc
+            raise RuntimeError("evidence control request failed") from exc
         except (urllib.error.URLError, json.JSONDecodeError) as exc:
             raise RuntimeError("evidence control request failed") from exc
 
@@ -2938,9 +2963,15 @@ def build_candidate_journeys(args, *, protected_input=None):
             timeout = 2.0
         if not math.isfinite(timeout) or timeout <= 0:
             timeout = 2.0
-        await asyncio.wait({task}, timeout=timeout)
+        done, _pending = await asyncio.wait({task}, timeout=timeout)
+        if task in done:
+            return task.result()
+        return None
 
-    async def cleanup_ambiguous_enrollment(post_task, journey_url):
+    async def cleanup_ambiguous_enrollment(
+        post_task, journey_url, *, journey_id, journey_type
+    ):
+        post_committed = False
         if post_task is not None:
             while not post_task.done():
                 try:
@@ -2952,12 +2983,41 @@ def build_candidate_journeys(args, *, protected_input=None):
             if post_task.done():
                 try:
                     post_task.result()
+                    post_committed = True
                 except BaseException:
                     pass
         try:
-            await _candidate_control_json(args, "DELETE", journey_url)
+            deleted = await _candidate_control_json(args, "DELETE", journey_url)
+        except _EvidenceControlNotFound:
+            if not post_committed:
+                return
+            raise RuntimeError("candidate enrollment cleanup failed") from None
         except BaseException:
-            pass
+            if not post_committed:
+                return
+            raise RuntimeError("candidate enrollment cleanup failed") from None
+        expected = {
+            "journeyId": journey_id,
+            "journeyType": journey_type,
+            "proofProfile": "candidate-lifecycle",
+            "status": "FAIL",
+            "failureCode": "OPERATOR_CANCELLED",
+        }
+        if (
+            not isinstance(deleted, Mapping)
+            or any(deleted.get(key) != value for key, value in expected.items())
+        ):
+            raise RuntimeError("candidate enrollment cleanup failed")
+        try:
+            terminal = await _candidate_control_json(args, "GET", journey_url)
+        except BaseException:
+            raise RuntimeError("candidate enrollment cleanup failed") from None
+        if (
+            not isinstance(terminal, Mapping)
+            or any(terminal.get(key) != value for key, value in expected.items())
+            or terminal.get("status") == "ACTIVE"
+        ):
+            raise RuntimeError("candidate enrollment cleanup failed")
 
     async def run_lifecycle(
         _args,
@@ -3182,13 +3242,18 @@ def build_candidate_journeys(args, *, protected_input=None):
                     cleanup_ambiguous_enrollment(
                         enrollment_post_task,
                         journey_url,
+                        journey_id=journey_id,
+                        journey_type=name,
                     ),
                     "google-live-candidate-enrollment-cleanup",
                 )
                 try:
                     await asyncio.shield(wait_bounded(enrollment_cleanup_task))
                 except asyncio.CancelledError:
-                    await wait_bounded(enrollment_cleanup_task)
+                    try:
+                        await wait_bounded(enrollment_cleanup_task)
+                    except BaseException:
+                        pass
             raise
 
     async def execute(_args, *, name, index, label=None, **_kwargs):

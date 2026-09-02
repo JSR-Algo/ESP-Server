@@ -458,6 +458,10 @@ class GoogleLiveProvider(VoiceSessionProvider):
     def _reset_candidate_scope_measurements(self):
         self._evidence_active_response_generation = None
         self._evidence_candidate_scope_started_at = time.monotonic()
+        self._evidence_candidate_observation_ended_at = None
+        self._evidence_quiet_response_generation = None
+        self._evidence_quiet_response_started_at = None
+        self._evidence_quiet_response_ended_at = None
         self._evidence_candidate_counters = {
             "user_turns": 0,
             "response_starts": 0,
@@ -504,20 +508,47 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 mode = snapshot["quietMode"]
             except Exception:
                 mode = "invalid"
-            duration_ms = max(
-                1,
-                int(
-                    (time.monotonic() - self._evidence_candidate_scope_started_at)
-                    * 1000
-                ),
+            observation_end = self._evidence_candidate_observation_ended_at
+            duration_ms = (
+                max(
+                    1,
+                    int(
+                        (observation_end - self._evidence_candidate_scope_started_at)
+                        * 1000
+                    ),
+                )
+                if isinstance(observation_end, (int, float))
+                and observation_end >= self._evidence_candidate_scope_started_at
+                else 0
+            )
+            response_generation = self._evidence_quiet_response_generation
+            response_duration_ms = (
+                max(
+                    0,
+                    int(
+                        (
+                            self._evidence_quiet_response_ended_at
+                            - self._evidence_quiet_response_started_at
+                        )
+                        * 1000
+                    ),
+                )
+                if isinstance(self._evidence_quiet_response_started_at, (int, float))
+                and isinstance(self._evidence_quiet_response_ended_at, (int, float))
+                and self._evidence_quiet_response_ended_at
+                >= self._evidence_quiet_response_started_at
+                else 0
             )
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live evidence_candidate_quiet journey_id={} mode={} "
-                "duration_ms={} user_turns={} response_starts={} response_ends={} "
+                "duration_ms={} response_generation={} response_duration_ms={} "
+                "user_turns={} response_starts={} response_ends={} "
                 "interrupts={} replacements={} reconnects={} fallbacks={} stale_audio={}",
                 journey_id,
                 mode,
                 duration_ms,
+                response_generation if response_generation is not None else "none",
+                response_duration_ms,
                 counters["user_turns"],
                 counters["response_starts"],
                 counters["response_ends"],
@@ -1113,6 +1144,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             if evidence_scope is None:
                 return {"status": "FAIL", "failureCode": "EVIDENCE_SCOPE_MISSING"}
             self._ensure_evidence_live_identity()
+            if self._evidence_candidate_observation_ended_at is None:
+                self._evidence_candidate_observation_ended_at = time.monotonic()
             cleanup_result = await self._close_live_resources(
                 evidence_finalize=True
             )
@@ -5588,11 +5621,20 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if self._is_model_output_event(event_type, event):
             self._consecutive_waiting_model_timeouts = 0
         if event_type == "audio_start":
-            self._evidence_active_response_generation = (
+            exact_response_generation = (
                 event_generation
                 if isinstance(event_generation, int)
                 else self._response_generation
             )
+            self._evidence_active_response_generation = exact_response_generation
+            if (
+                self._candidate_counter_enabled()
+                and getattr(self.conn, "google_live_evidence_journey_type", None)
+                == "quiet"
+                and self._evidence_quiet_response_generation is None
+            ):
+                self._evidence_quiet_response_generation = exact_response_generation
+                self._evidence_quiet_response_started_at = time.monotonic()
             self._increment_candidate_counter("response_starts")
             if self._evidence_candidate_interrupt_pending:
                 self._increment_candidate_counter("replacements")
@@ -5628,9 +5670,20 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     "Google Live evidence_response_started journey_id={} "
                     "connection_id={} live_connection_id={} response_id={}",
                     *evidence_scope,
-                    self._response_generation,
+                    exact_response_generation,
                 )
         if event_type == "audio_end":
+            exact_response_generation = (
+                event_generation
+                if isinstance(event_generation, int)
+                else self._response_generation
+            )
+            if (
+                self._evidence_quiet_response_generation
+                == exact_response_generation
+                and self._evidence_quiet_response_ended_at is None
+            ):
+                self._evidence_quiet_response_ended_at = time.monotonic()
             self._increment_candidate_counter("response_ends")
             self._record_candidate_response_completed(
                 event_generation
@@ -5668,7 +5721,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     "Google Live evidence_response_ended journey_id={} "
                     "connection_id={} live_connection_id={} response_id={}",
                     *evidence_scope,
-                    self._response_generation,
+                    exact_response_generation,
                 )
             self._mark_evidence_output_idle(
                 event_generation
@@ -6306,7 +6359,20 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._bridge.allow_model_output()
         if self._last_clean_user_turn_response_id == self._response_generation:
             return
-        self._increment_candidate_counter("user_turns")
+        setup_turn_consumed = False
+        if self._candidate_counter_enabled():
+            registry = getattr(self.conn, "evidence_registry", None)
+            try:
+                setup_turn_consumed = bool(
+                    registry.consume_quiet_setup_turn(
+                        self.conn.google_live_evidence_journey_id,
+                        source=reason,
+                    )
+                )
+            except Exception:
+                setup_turn_consumed = False
+        if not setup_turn_consumed:
+            self._increment_candidate_counter("user_turns")
         response_already_bound = (
             previous_state == InteractionState.INTERRUPTING
             or self._interrupt_capture_response_id == self._response_generation

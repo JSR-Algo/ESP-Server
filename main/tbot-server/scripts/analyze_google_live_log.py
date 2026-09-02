@@ -330,6 +330,8 @@ P_EVIDENCE_CANDIDATE_QUIET = re.compile(
     + r"Google Live evidence_candidate_quiet "
     r"journey_id=(?P<journey_id>[A-Za-z0-9._:-]{1,64}) "
     r"mode=(?P<mode>silence|robot_speaking) duration_ms=(?P<duration_ms>\d+) "
+    r"response_generation=(?P<response_generation>none|\d+) "
+    r"response_duration_ms=(?P<response_duration_ms>\d+) "
     r"user_turns=(?P<user_turns>\d+) response_starts=(?P<response_starts>\d+) "
     r"response_ends=(?P<response_ends>\d+) interrupts=(?P<interrupts>\d+) "
     r"replacements=(?P<replacements>\d+) reconnects=(?P<reconnects>\d+) "
@@ -1814,6 +1816,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     response_starts: dict[Any, int] = defaultdict(int)
     response_start_lines: dict[tuple[str, str, int], int] = {}
     response_end_lines: dict[tuple[str, str, int], int] = {}
+    forwarded_counts: dict[tuple[str, str, int], int] = defaultdict(int)
     replay_counts_by_reopen: dict[str, int] = {}
     current_reopen: str | None = None
     current_reopen_ready = False
@@ -2302,6 +2305,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                 elif semantic_match.re is P_EVIDENCE_CANDIDATE_QUIET:
                     numeric_names = (
                         "duration_ms",
+                        "response_duration_ms",
                         "user_turns",
                         "response_starts",
                         "response_ends",
@@ -2328,6 +2332,11 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         {
                             "line": line_number,
                             "mode": groups["mode"],
+                            "response_generation": (
+                                None
+                                if groups["response_generation"] == "none"
+                                else int(groups["response_generation"])
+                            ),
                             **numeric,
                         }
                     )
@@ -2528,6 +2537,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                             str((*response_scope, forwarded_response_id)),
                         )
                     )
+                forwarded_counts[(*response_scope, forwarded_response_id)] += 1
                 for record in scoped_interrupts:
                     if (
                         record["journeyId"] == scoped_forwarded.group("journey_id")
@@ -4108,6 +4118,34 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             (start_anchor.get("evidenceScope") or {}).get("quietMode")
         )
         expected_response_count = 0 if mode == "silence" else 1
+        response_generation = quiet["response_generation"] if quiet else None
+        exact_response_key = (
+            (start_anchor.get("evidenceScope") or {}).get("connectionId"),
+            scoped_current_live_connection_id,
+            response_generation,
+        ) if quiet and isinstance(response_generation, int) else None
+        output_chunks = (
+            forwarded_counts.get(exact_response_key, 0)
+            if exact_response_key is not None
+            else 0
+        )
+        if mode == "silence" and quiet:
+            response_proof_valid = bool(
+                response_generation is None
+                and quiet["response_duration_ms"] == 0
+                and not forwarded_counts
+            )
+        else:
+            response_proof_valid = bool(
+                quiet
+                and exact_response_key is not None
+                and quiet["response_duration_ms"] > 0
+                and quiet["response_duration_ms"] <= quiet["duration_ms"]
+                and exact_response_key in response_start_lines
+                and exact_response_key in response_end_lines
+                and output_chunks > 0
+                and sum(forwarded_counts.values()) == output_chunks
+            )
         quiet_pass = bool(
             quiet
             and mode == authenticated_mode
@@ -4117,6 +4155,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             and quiet["response_ends"] == expected_response_count
             and scoped_response_start_count == expected_response_count
             and scoped_response_end_count == expected_response_count
+            and response_proof_valid
             and quiet["interrupts"] == 0
             and quiet["replacements"] == 0
             and quiet["reconnects"] == 0
@@ -4136,6 +4175,9 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             "kind": "quiet",
             "mode": mode,
             "durationMs": quiet["duration_ms"] if quiet else 0,
+            "responseGeneration": response_generation,
+            "responseDurationMs": quiet["response_duration_ms"] if quiet else 0,
+            "outputChunks": output_chunks,
             "falseInterrupts": 0 if quiet_pass else None,
             "responseStarts": quiet["response_starts"] if quiet else 0,
             "responseEnds": quiet["response_ends"] if quiet else 0,
