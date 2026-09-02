@@ -35,7 +35,7 @@ function pathsOverlap(left, right) {
 function validateAssignmentRuntimeCapsule(
   environment,
   protectedRoots,
-  effectiveUid = process.getuid(),
+  effectiveUid = process.geteuid(),
 ) {
   const capsuleRoot = requireAbsolutePath(environment, OWNER_KEY);
   const runtimeRoot = requireAbsolutePath(environment, RUNTIME_KEY);

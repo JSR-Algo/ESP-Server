@@ -168,6 +168,47 @@ test('assignment runtime capsule accepts an exact private owner and direct runti
   assert.equal(Object.isFrozen(result), true);
 });
 
+test('assignment runtime capsule defaults ownership checks to the effective UID', { concurrency: false }, async (t) => {
+  const capsule = await createAssignmentRuntimeCapsule(t);
+  const actualUid = (await stat(capsule.capsuleRoot)).uid;
+  const originalGetuid = process.getuid;
+  const originalGeteuid = process.geteuid;
+
+  try {
+    process.getuid = () => actualUid + 1;
+    process.geteuid = () => actualUid;
+    assert.doesNotThrow(() => validateAssignmentRuntimeCapsule(
+      capsuleEnvironment(capsule.capsuleRoot, capsule.runtimeRoot),
+      [],
+    ));
+  } finally {
+    process.getuid = originalGetuid;
+    process.geteuid = originalGeteuid;
+  }
+});
+
+test('assignment runtime capsule rejects a real-UID owner with a different effective UID', { concurrency: false }, async (t) => {
+  const capsule = await createAssignmentRuntimeCapsule(t);
+  const actualUid = (await stat(capsule.capsuleRoot)).uid;
+  const originalGetuid = process.getuid;
+  const originalGeteuid = process.geteuid;
+
+  try {
+    process.getuid = () => actualUid;
+    process.geteuid = () => actualUid + 1;
+    assert.throws(
+      () => validateAssignmentRuntimeCapsule(
+        capsuleEnvironment(capsule.capsuleRoot, capsule.runtimeRoot),
+        [],
+      ),
+      /owner UID.*runtime UID/,
+    );
+  } finally {
+    process.getuid = originalGetuid;
+    process.geteuid = originalGeteuid;
+  }
+});
+
 test('assignment runtime capsule rejects a missing owner variable', async (t) => {
   const capsule = await createAssignmentRuntimeCapsule(t);
   assert.throws(
