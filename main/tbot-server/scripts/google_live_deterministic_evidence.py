@@ -26,6 +26,16 @@ from scripts.google_live_reliability import SCHEMA_VERSION
 
 MANIFEST_SCHEMA = "google-live-deterministic-nodes.v1"
 NODE_PATTERN = re.compile(r"tests/[A-Za-z0-9_./-]+\.py::[^\r\n]+")
+_XML_DECLARATIONS = (
+    '<?xml version="1.0" encoding="utf-8"?>',
+    "<?xml version='1.0' encoding='utf-8'?>",
+)
+_XML_CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_SENSITIVE_JUNIT_VALUE = re.compile(
+    r"(?i)(?:\bbearer\s+\S+|\bauthorization\s*[:=]|\b(?:set-)?cookie\s*[:=]|"
+    r"\b(?:google[\s_-]*)?api[\s_-]*key\s*[:=]|\b(?:secret|token)\s*[:=]|"
+    r"\bAIza[0-9A-Za-z_-]{20,}|\bsk-(?:proj-)?[0-9A-Za-z_-]{20,})"
+)
 APPROVED_TEST_FILES = (
     "tests/test_google_live_lifecycle_e2e.py",
     "tests/test_google_live_client.py",
@@ -110,20 +120,52 @@ def _strict_nonnegative_int(value: str | None, label: str) -> int:
     return int(value)
 
 
+def _decode_strict_junit_xml(content: bytes) -> str:
+    if content.startswith(b"\xef\xbb\xbf"):
+        raise ValueError("JUnit XML encoding is invalid")
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("JUnit XML encoding is invalid") from exc
+    if _XML_CONTROL_CHARACTERS.search(text):
+        raise ValueError("JUnit XML contains invalid characters")
+    remainder = text
+    if remainder.startswith("<?xml"):
+        declaration = next(
+            (candidate for candidate in _XML_DECLARATIONS if remainder.startswith(candidate)),
+            None,
+        )
+        if declaration is None:
+            raise ValueError("JUnit XML declaration is invalid")
+        remainder = remainder[len(declaration) :]
+    if "<?" in remainder or "<!" in remainder:
+        raise ValueError("JUnit XML contains unsupported markup")
+    if _SENSITIVE_JUNIT_VALUE.search(text):
+        raise ValueError("JUnit XML violates the privacy contract")
+    return text
+
+
 def _parse_clean_junit(
     content: bytes,
     expected_nodes: Sequence[str] | None,
     *,
     allow_suite_test_count_mismatch: bool,
 ) -> tuple[ET.Element, ET.Element, list[str]]:
+    text = _decode_strict_junit_xml(content)
     try:
-        root = ET.fromstring(content)
+        root = ET.fromstring(text)
     except (ET.ParseError, UnicodeDecodeError) as exc:
         raise ValueError("JUnit XML is invalid") from exc
     elements = list(root.iter())
     allowed_tags = {"testsuites", "testsuite", "testcase", "properties", "property"}
     if root.tag != "testsuites" or any(element.tag not in allowed_tags for element in elements):
         raise ValueError("JUnit structure or namespace is invalid")
+    if any(
+        (element.text is not None and element.text.strip())
+        or (element.tail is not None and element.tail.strip())
+        for element in elements
+    ):
+        raise ValueError("JUnit XML contains unexpected text")
     allowed_attributes = {
         "testsuites": {"name", "tests", "failures", "errors", "skipped"},
         "testsuite": {
@@ -136,6 +178,12 @@ def _parse_clean_junit(
     }
     if any(set(element.attrib) - allowed_attributes[element.tag] for element in elements):
         raise ValueError("JUnit contains unknown or namespaced attributes")
+    if any(
+        _SENSITIVE_JUNIT_VALUE.search(value)
+        for element in elements
+        for value in element.attrib.values()
+    ):
+        raise ValueError("JUnit XML violates the privacy contract")
     root_children = list(root)
     if len(root_children) != 1 or root_children[0].tag != "testsuite":
         raise ValueError("JUnit must contain exactly one direct test suite")

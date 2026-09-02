@@ -156,6 +156,66 @@ def test_canonicalizer_allows_only_clean_pytest9_test_count_inaccuracy() -> None
     }
 
 
+@pytest.mark.parametrize("location", ["root", "suite", "testcase", "property", "tail"])
+def test_junit_rejects_non_whitespace_text_and_tail_without_leaking(location: str) -> None:
+    node = "tests/test_a.py::test_one"
+    xml = _junit([node]).decode()
+    tag = {"root": "<testsuites ", "suite": "<testsuite ", "testcase": "<testcase"}.get(location)
+    if tag is not None:
+        start = xml.index(tag)
+        end = xml.index(">", start) + 1
+        xml = xml[:end] + "GOOGLE_API_KEY=secret" + xml[end:]
+    elif location == "property":
+        start = xml.index("<property")
+        end = xml.index("/>", start) + 2
+        xml = xml[: end - 2] + ">GOOGLE_API_KEY=secret</property>" + xml[end:]
+    else:
+        xml = xml.replace("</testcase>", "</testcase>GOOGLE_API_KEY=secret", 1)
+    with pytest.raises(ValueError) as error:
+        deterministic.parse_passing_junit(xml.encode(), [node])
+    assert "secret" not in str(error.value).lower()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "internal_doctype", "external_doctype", "pi", "comment", "cdata",
+        "bom", "utf16", "declaration_case", "control",
+    ],
+)
+def test_junit_rejects_dtd_entities_markup_and_encoding_ambiguity(mutation: str) -> None:
+    xml = _junit(["tests/test_a.py::test_one"])
+    if mutation == "internal_doctype":
+        payload = b'<!DOCTYPE testsuites [<!ENTITY leak "GOOGLE_API_KEY=secret">]>' + xml
+    elif mutation == "external_doctype":
+        payload = b'<!DOCTYPE testsuites SYSTEM "file:///etc/passwd">' + xml
+    elif mutation == "pi":
+        payload = b'<?probe value="secret"?>' + xml
+    elif mutation == "comment":
+        payload = xml.replace(b'<testsuites ', b'<testsuites ', 1).replace(b'>', b'><!-- secret -->', 1)
+    elif mutation == "cdata":
+        payload = xml.replace(b'>', b'><![CDATA[GOOGLE_API_KEY=secret]]>', 1)
+    elif mutation == "bom":
+        payload = b"\xef\xbb\xbf" + xml
+    elif mutation == "utf16":
+        payload = ('<?xml version="1.0" encoding="UTF-16"?>' + xml.decode()).encode("utf-16")
+    elif mutation == "declaration_case":
+        payload = b'<?XML version="1.0" encoding="utf-8"?>' + xml
+    else:
+        payload = xml.replace(b'>', b'>\x01', 1)
+    with pytest.raises(ValueError):
+        deterministic.canonicalize_junit_summary(payload)
+
+
+def test_junit_privacy_scan_catches_case_whitespace_and_character_reference_obfuscation() -> None:
+    node = "tests/test_a.py::test_one"
+    for secret in ("google Api Key = secret", "Bearer abc123", "GOOGLE&#95;API&#95;KEY=secret"):
+        xml = _junit([node]).replace(b'classname="suite"', f'classname="{secret}"'.encode())
+        with pytest.raises(ValueError) as error:
+            deterministic.parse_passing_junit(xml, [node])
+        assert "secret" not in str(error.value).lower()
+
+
 def test_build_report_binds_manifest_and_junit_hashes_and_exact_counts() -> None:
     nodes = ["tests/test_a.py::test_one", "tests/test_b.py::test_two"]
     manifest = ("\n".join(nodes) + "\n").encode()
@@ -373,6 +433,37 @@ def test_producer_does_not_publish_report_for_failed_pytest(tmp_path: Path) -> N
         )
     assert not report.exists()
     assert not junit.exists()
+
+
+def test_producer_rejects_secret_junit_without_publishing_or_leaking(
+    tmp_path: Path,
+) -> None:
+    node = "tests/test_a.py::test_one"
+    manifest = tmp_path / "node-manifest.txt"
+    manifest.write_text(node + "\n", encoding="utf-8")
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    junit = evidence_root / "deterministic" / "pytest.xml"
+    report = junit.with_name("report.json")
+
+    def run(command, **kwargs):
+        if "--collect-only" in command:
+            return subprocess.CompletedProcess(command, 0, stdout=node + "\n", stderr="")
+        junit_arg = next(value for value in command if value.startswith("--junitxml="))
+        malicious = _junit([node]).replace(b'<testsuites ', b'<testsuites >GOOGLE_API_KEY=secret<', 1)
+        Path(junit_arg.split("=", 1)[1]).write_bytes(malicious)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    with pytest.raises(ValueError) as error:
+        deterministic.produce(
+            manifest_path=manifest, junit_out=junit, report_path=report,
+            identity=IDENTITY, repo_root=tmp_path, run=run,
+            git_status=lambda: b"", git_head=lambda: IDENTITY["gitSha"],
+            approved_test_files=("tests/test_a.py",), canonical_manifest_path=manifest,
+        )
+    assert "secret" not in str(error.value).lower()
+    assert not junit.exists()
+    assert not report.exists()
 
 
 @pytest.mark.parametrize("drift", ["tracked", "staged", "untracked", "owned_root_untracked", "head"])

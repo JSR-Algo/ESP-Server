@@ -262,6 +262,23 @@ def test_release_independently_rejects_suite_level_junit_error_even_with_rebound
     assert any(item["code"] == "DETERMINISTIC_SUPPORT_CONTRACT_INVALID" for item in verdict["failures"])
 
 
+def test_release_independently_rejects_secret_junit_without_leaking(
+    tmp_path: Path,
+) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    junit = paths["deterministic_junit"]
+    junit.write_bytes(
+        junit.read_bytes().replace(b'<testsuites>', b'<testsuites>GOOGLE_API_KEY=secret', 1)
+    )
+    digest = hashlib.sha256(junit.read_bytes()).hexdigest()
+    checksums["deterministic_junit"] = digest
+    _rewrite(paths["deterministic"], lambda report: report["coverageProof"].update(junitSha256=digest))
+    checksums["deterministic"] = hashlib.sha256(paths["deterministic"].read_bytes()).hexdigest()
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+    assert verdict["status"] == "FAIL"
+    assert "secret" not in json.dumps(verdict).lower()
+
+
 @pytest.mark.parametrize("missing_layer", REQUIRED_LAYERS)
 def test_release_fails_closed_for_missing_layer(tmp_path: Path, missing_layer: str) -> None:
     paths, checksums, _ = _write_evidence(tmp_path)
