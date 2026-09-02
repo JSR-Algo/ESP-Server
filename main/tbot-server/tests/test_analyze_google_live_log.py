@@ -1205,6 +1205,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                         "status": "PASS",
                         "kind": "quiet",
                         "mode": mode,
+                        "durationMs": 1500,
                         "falseInterrupts": 0,
                         "responseStarts": response_count,
                         "responseEnds": response_count,

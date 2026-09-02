@@ -6,6 +6,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -155,11 +156,13 @@ def _refresh_execution_contract(result):
         }
     elif result["name"] == "quiet":
         mode = result.get("quietMode")
+        duration_ms = int(result.get("observationDurationSec", 40.0) * 1000)
         response_count = 0 if mode == "silence" else 1
         result["task5LogEvidence"]["candidateSemanticEvidence"] = {
             "status": "PASS",
             "kind": "quiet",
             "mode": mode,
+            "durationMs": duration_ms,
             "falseInterrupts": 0,
             "responseStarts": response_count,
             "responseEnds": response_count,
@@ -387,6 +390,7 @@ def _journeys(*, mutation=None):
         }
         if name == "quiet":
             result["quietMode"] = "silence" if index == 1 else "robot_speaking"
+            result["observationDurationSec"] = 40.0
         _refresh_execution_contract(result)
         if name in {"conversation", "conversation_after_lesson"}:
             result["latencies"] = {"firstAudioMs": [1000]}
@@ -1726,6 +1730,11 @@ def test_replay_does_not_credit_inter_window_gaps_toward_duration():
             start=window_start.isoformat(),
             end=(window_start + timedelta(seconds=45)).isoformat(),
         )
+        if execution["name"] == "quiet":
+            execution["observationDurationSec"] = 45.0
+            execution["task5LogEvidence"]["candidateSemanticEvidence"][
+                "durationMs"
+            ] = 45000
     _refresh_execution_sequence(manifest["executions"])
     manifest["durationSec"] = 1485
     manifest["cleanup"] = _cleanup_evidence(
@@ -1837,6 +1846,11 @@ def _full_span_manifest(*, padding=None, samples=35):
                         start + timedelta(seconds=40 if sequence == 33 else 55)
                     ).isoformat(),
                 )
+                if name == "quiet":
+                    item["observationDurationSec"] = 55.0
+                    item["task5LogEvidence"]["candidateSemanticEvidence"][
+                        "durationMs"
+                    ] = 55000
                 _refresh_execution_contract(item)
                 executions.append(item)
         _refresh_execution_sequence(executions)
@@ -2882,7 +2896,7 @@ def test_candidate_protected_input_is_exact_private_json_with_distinct_safe_fixt
     assert private["bargein"]["newestExpected"] not in rendered
 
 
-@pytest.mark.parametrize("mutation", ["missing", "unknown", "symlink", "duplicate", "bad_wav", "output_alias"])
+@pytest.mark.parametrize("mutation", ["missing", "unknown", "symlink", "duplicate", "equal_text", "copied_text", "bad_wav", "output_alias"])
 def test_candidate_protected_input_fails_closed_for_unsafe_documents(tmp_path, mutation):
     stream, document = _protected_candidate_input(tmp_path)
     output = tmp_path / "evidence.json"
@@ -2899,6 +2913,12 @@ def test_candidate_protected_input_fails_closed_for_unsafe_documents(tmp_path, m
     elif mutation == "duplicate":
         document["bargein"]["newestAudioPath"] = document["bargein"]["initialAudioPath"]
         stream = io.BytesIO(json.dumps(document).encode())
+    elif mutation == "equal_text":
+        document["bargein"]["newestExpected"] = document["bargein"]["initialExpected"]
+        stream = io.BytesIO(json.dumps(document).encode())
+    elif mutation == "copied_text":
+        document["bargein"]["newestExpected"] = " private--initial   intent "
+        stream = io.BytesIO(json.dumps(document).encode())
     elif mutation == "bad_wav":
         bad = tmp_path / "bad.wav"
         bad.write_bytes(b"not-wave")
@@ -2912,6 +2932,123 @@ def test_candidate_protected_input_fails_closed_for_unsafe_documents(tmp_path, m
             stream,
             output_paths=(output,),
             sample_rate=24000,
+        )
+
+
+def test_candidate_protected_input_seals_plans_and_drops_expected_plaintext(tmp_path):
+    stream, _private = _protected_candidate_input(tmp_path)
+    protected = robot_soak._read_candidate_protected_input(
+        stream, output_paths=(), sample_rate=24000
+    )
+
+    protected.seal_bargein_plans(10)
+
+    assert protected.initial_expected is None
+    assert protected.newest_expected is None
+    assert len(protected.bargein_plans) == 10
+    assert len({bytes(plan.key) for plan in protected.bargein_plans}) == 10
+
+
+def test_candidate_producer_cancellation_zeroizes_all_remaining_sealed_plans(tmp_path, monkeypatch):
+    stream, _private = _protected_candidate_input(tmp_path)
+    protected = robot_soak._read_candidate_protected_input(
+        stream, output_paths=(), sample_rate=24000
+    )
+    protected.seal_bargein_plans(10)
+    private_buffers = [
+        private
+        for plan in protected.bargein_plans
+        for private in (plan.key, plan.initial_mac, plan.newest_mac)
+    ]
+    monkeypatch.setattr(robot_soak, "_read_candidate_protected_input", lambda *_args, **_kwargs: protected)
+    monkeypatch.setattr(robot_soak, "build_candidate_journeys", lambda *_args, **_kwargs: {})
+
+    async def cancelled(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(robot_soak, "run_candidate_soak", cancelled)
+    args = _args(
+        produce_candidate_evidence=tmp_path / "evidence.json",
+        candidate_protected_stdin=io.BytesIO(b"{}"),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(produce_candidate_evidence(args))
+    assert protected.bargein_plans == []
+    assert all(not any(private) for private in private_buffers)
+
+
+def test_candidate_wav_oversize_is_rejected_before_readframes(tmp_path):
+    fixture = tmp_path / "oversize.wav"
+    fixture.write_bytes(b"placeholder")
+
+    class Source:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        getnchannels = lambda self: 1
+        getsampwidth = lambda self: 2
+        getframerate = lambda self: 24000
+        getcomptype = lambda self: "NONE"
+        getnframes = lambda self: 20_000_000
+
+        def readframes(self, _count):
+            raise AssertionError("oversize WAV must be rejected before readframes")
+
+    with patch.object(robot_soak.wave, "open", return_value=Source()):
+        with pytest.raises(ValueError, match="unsupported"):
+            robot_soak._read_protected_wav(
+                fixture, sample_rate=24000, label="bargein/initial"
+            )
+
+
+@pytest.mark.parametrize("duration", [0, -1, float("nan"), float("inf"), 601])
+def test_candidate_quiet_duration_rejected_before_enrollment(tmp_path, duration):
+    stream, _private = _protected_candidate_input(tmp_path)
+    protected = robot_soak._read_candidate_protected_input(
+        stream, output_paths=(), sample_rate=24000
+    )
+    calls = []
+    args = _args(
+        run_id="20260831T100000Z",
+        idle_duration_sec=duration,
+        produce_candidate_evidence=tmp_path / "evidence.json",
+        candidate_control_json=lambda *items, **_kwargs: calls.append(items),
+    )
+
+    with pytest.raises(ValueError, match="quiet duration"):
+        asyncio.run(
+            build_candidate_journeys(args, protected_input=protected)["quiet"](
+                args, name="quiet", index=1
+            )
+        )
+    assert calls == []
+
+
+def test_candidate_quiet_rejects_short_semantic_observation(tmp_path):
+    with pytest.raises(RuntimeError, match="semantic evidence"):
+        robot_soak._candidate_semantic_counters(
+            "quiet",
+            {
+                "status": "PASS",
+                "candidateSemanticEvidence": {
+                    "status": "PASS",
+                    "kind": "quiet",
+                    "mode": "silence",
+                    "durationMs": 119000,
+                    "falseInterrupts": 0,
+                    "responseStarts": 0,
+                    "responseEnds": 0,
+                    "replacements": 0,
+                    "fallbacks": 0,
+                },
+            },
+            quiet_mode="silence",
+            requested_duration_sec=120,
+            window_duration_sec=120,
         )
 
 
@@ -2939,6 +3076,7 @@ def test_candidate_semantic_verdicts_are_derived_only_from_exact_bound_analyzer(
                 "status": "PASS",
                 "kind": "quiet",
                 "mode": "silence",
+                "durationMs": 120000,
                 "falseInterrupts": 0,
                 "responseStarts": 0,
                 "responseEnds": 0,
@@ -2947,6 +3085,8 @@ def test_candidate_semantic_verdicts_are_derived_only_from_exact_bound_analyzer(
             },
         },
         quiet_mode="silence",
+        requested_duration_sec=120,
+        window_duration_sec=120,
     )
 
     assert bargein == {"latestIntentSuccesses": 1, "falseInterrupts": 0}
@@ -3299,6 +3439,7 @@ def test_candidate_factory_posts_fresh_semantic_plans_and_derives_safe_verdicts(
                 "status": "PASS",
                 "kind": "quiet",
                 "mode": "silence",
+                "durationMs": 60000,
                 "falseInterrupts": 0,
                 "responseStarts": 0,
                 "responseEnds": 0,
@@ -3331,6 +3472,7 @@ def test_candidate_factory_posts_fresh_semantic_plans_and_derives_safe_verdicts(
         candidate_control_json=control,
         candidate_journey_driver=driver,
         candidate_log_analyzer=analyzer,
+        idle_duration_sec=60.0,
     )
     journeys = build_candidate_journeys(args, protected_input=protected)
 

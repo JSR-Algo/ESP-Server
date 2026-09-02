@@ -4135,6 +4135,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             "status": "PASS" if quiet_pass else "FAIL",
             "kind": "quiet",
             "mode": mode,
+            "durationMs": quiet["duration_ms"] if quiet else 0,
             "falseInterrupts": 0 if quiet_pass else None,
             "responseStarts": quiet["response_starts"] if quiet else 0,
             "responseEnds": quiet["response_ends"] if quiet else 0,

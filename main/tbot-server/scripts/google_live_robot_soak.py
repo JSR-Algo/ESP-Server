@@ -166,6 +166,9 @@ _SENSITIVE_EVIDENCE_VALUE_RE = re.compile(
 _CANDIDATE_INTENT_VERSION = "google-live-candidate-intent-nfkc-casefold.v1"
 _MAX_PROTECTED_INPUT_BYTES = 1024 * 1024
 _MAX_PROTECTED_PCM_BYTES = 16 * 1024 * 1024
+_MAX_QUIET_OBSERVATION_SEC = 600.0
+_QUIET_DURATION_TOLERANCE_MS = 1000
+_QUIET_WINDOW_TOLERANCE_SEC = 5.0
 
 
 @dataclass(slots=True)
@@ -175,12 +178,61 @@ class _ProtectedAudioFixture:
 
 
 @dataclass(slots=True)
+class _SealedBargeinPlan:
+    key: bytearray = field(repr=False)
+    initial_mac: bytearray = field(repr=False)
+    newest_mac: bytearray = field(repr=False)
+
+    def zeroize(self):
+        for private in (self.key, self.initial_mac, self.newest_mac):
+            for offset in range(len(private)):
+                private[offset] = 0
+
+
+@dataclass(slots=True)
 class _CandidateProtectedInput:
     bargein_initial: _ProtectedAudioFixture
     bargein_newest: _ProtectedAudioFixture
     robot_speaking: _ProtectedAudioFixture
-    initial_expected: bytearray = field(repr=False)
-    newest_expected: bytearray = field(repr=False)
+    initial_expected: bytearray | None = field(repr=False)
+    newest_expected: bytearray | None = field(repr=False)
+    bargein_plans: list[_SealedBargeinPlan] = field(default_factory=list, repr=False)
+
+    def seal_bargein_plans(self, count):
+        if self.bargein_plans:
+            return
+        if self.initial_expected is None or self.newest_expected is None:
+            raise ValueError("protected candidate input expectations are unavailable")
+        try:
+            for _index in range(count):
+                key = bytearray(secrets.token_bytes(32))
+                self.bargein_plans.append(
+                    _SealedBargeinPlan(
+                        key=key,
+                        initial_mac=bytearray(
+                            hmac.new(key, self.initial_expected, hashlib.sha256)
+                            .hexdigest()
+                            .encode("ascii")
+                        ),
+                        newest_mac=bytearray(
+                            hmac.new(key, self.newest_expected, hashlib.sha256)
+                            .hexdigest()
+                            .encode("ascii")
+                        ),
+                    )
+                )
+        finally:
+            for private in (self.initial_expected, self.newest_expected):
+                if private is not None:
+                    for offset in range(len(private)):
+                        private[offset] = 0
+            self.initial_expected = None
+            self.newest_expected = None
+
+    def consume_bargein_plan(self):
+        if not self.bargein_plans:
+            raise ValueError("protected candidate input semantic plans are exhausted")
+        return self.bargein_plans.pop(0)
 
     def zeroize(self):
         for private in (
@@ -190,8 +242,14 @@ class _CandidateProtectedInput:
             self.initial_expected,
             self.newest_expected,
         ):
-            for offset in range(len(private)):
-                private[offset] = 0
+            if private is not None:
+                for offset in range(len(private)):
+                    private[offset] = 0
+        for plan in self.bargein_plans:
+            plan.zeroize()
+        self.bargein_plans.clear()
+        self.initial_expected = None
+        self.newest_expected = None
 
 
 def _open_regular_nofollow(path: Path) -> int:
@@ -237,8 +295,17 @@ def _read_protected_wav(path: Path, *, sample_rate: int, label: str):
                     or source.getnframes() <= 0
                 ):
                     raise ValueError("protected candidate input WAV shape is unsupported")
-                pcm = source.readframes(source.getnframes())
-        if not pcm or len(pcm) > _MAX_PROTECTED_PCM_BYTES:
+                frame_count = source.getnframes()
+                bytes_per_frame = source.getnchannels() * source.getsampwidth()
+                if (
+                    frame_count <= 0
+                    or bytes_per_frame <= 0
+                    or frame_count > _MAX_PROTECTED_PCM_BYTES // bytes_per_frame
+                ):
+                    raise ValueError("protected candidate input WAV shape is unsupported")
+                expected_bytes = frame_count * bytes_per_frame
+                pcm = source.readframes(frame_count)
+        if not pcm or len(pcm) != expected_bytes:
             raise ValueError("protected candidate input fixture is empty")
         return _ProtectedAudioFixture(label=label, pcm=bytearray(pcm)), identity
     except (OSError, EOFError, wave.Error) as exc:
@@ -297,6 +364,10 @@ def _read_candidate_protected_input(stream, *, output_paths, sample_rate):
         newest_expected = _normalize_candidate_intent(bargein["newestExpected"])
         if not initial_expected or not newest_expected:
             raise ValueError("protected candidate input expectation is invalid")
+        if hmac.compare_digest(
+            initial_expected.encode("utf-8"), newest_expected.encode("utf-8")
+        ):
+            raise ValueError("protected candidate input expectations must be distinct")
         return _CandidateProtectedInput(
             fixtures[0], fixtures[1], fixtures[2],
             bytearray(initial_expected.encode("utf-8")),
@@ -322,7 +393,14 @@ def _normalize_candidate_intent(value):
     )
 
 
-def _candidate_semantic_counters(stage, log_evidence, *, quiet_mode=None):
+def _candidate_semantic_counters(
+    stage,
+    log_evidence,
+    *,
+    quiet_mode=None,
+    requested_duration_sec=None,
+    window_duration_sec=None,
+):
     semantic = (
         log_evidence.get("candidateSemanticEvidence")
         if isinstance(log_evidence, Mapping)
@@ -344,19 +422,32 @@ def _candidate_semantic_counters(stage, log_evidence, *, quiet_mode=None):
         return {"latestIntentSuccesses": 1, "falseInterrupts": 0}
     if stage == "quiet":
         expected_responses = 0 if quiet_mode == "silence" else 1
+        expected_duration_ms = requested_duration_sec * 1000
+        observed_duration_ms = semantic.get("durationMs") if valid else None
         valid = (
             valid
-            and semantic
+            and set(semantic)
             == {
-                "status": "PASS",
-                "kind": "quiet",
-                "mode": quiet_mode,
-                "falseInterrupts": 0,
-                "responseStarts": expected_responses,
-                "responseEnds": expected_responses,
-                "replacements": 0,
-                "fallbacks": 0,
+                "status", "kind", "mode", "durationMs", "falseInterrupts",
+                "responseStarts", "responseEnds", "replacements", "fallbacks",
             }
+            and semantic.get("status") == "PASS"
+            and semantic.get("kind") == "quiet"
+            and semantic.get("mode") == quiet_mode
+            and type(observed_duration_ms) is int
+            and expected_duration_ms <= observed_duration_ms
+            <= expected_duration_ms + _QUIET_DURATION_TOLERANCE_MS
+            and isinstance(window_duration_sec, (int, float))
+            and not isinstance(window_duration_sec, bool)
+            and math.isfinite(window_duration_sec)
+            and window_duration_sec >= requested_duration_sec
+            and window_duration_sec
+            <= requested_duration_sec + _QUIET_WINDOW_TOLERANCE_SEC
+            and semantic.get("falseInterrupts") == 0
+            and semantic.get("responseStarts") == expected_responses
+            and semantic.get("responseEnds") == expected_responses
+            and semantic.get("replacements") == 0
+            and semantic.get("fallbacks") == 0
         )
         if not valid:
             raise RuntimeError("candidate semantic evidence is invalid")
@@ -2102,7 +2193,7 @@ def _validate_candidate_manifest_structure(manifest, *, identity) -> None:
         | (
             {"task4TransportEvidence", "task5CorrelatedEvidence"}
             if item.get("name") == "bargein"
-            else {"quietMode"}
+            else {"quietMode", "observationDurationSec"}
             if item.get("name") == "quiet"
             else {"lessonManifestSha256"}
             if item.get("name") == "lesson"
@@ -2503,6 +2594,9 @@ async def _run_candidate_websocket_journey(args, **context):
     }
     if name == "quiet" and context.get("quiet_mode") in {"silence", "robot_speaking"}:
         result["quietMode"] = context["quiet_mode"]
+        result["observationDurationSec"] = float(
+            getattr(args, "idle_duration_sec", 120.0)
+        )
         result["latencies"] = {}
     if operation == "monitor":
         start_utc = _parse_utc_iso(result["logWindow"]["start"])
@@ -2712,6 +2806,8 @@ def build_candidate_journeys(args, *, protected_input=None):
     run_id = str(getattr(args, "run_id", "") or "").strip()
     if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z", run_id) is None:
         raise ValueError("run_id must be a UTC basic timestamp")
+    if isinstance(protected_input, _CandidateProtectedInput):
+        protected_input.seal_bargein_plans(10)
     sequence = 0
     cleanup_called = False
 
@@ -2724,6 +2820,18 @@ def build_candidate_journeys(args, *, protected_input=None):
         duration_sec=None,
     ):
         nonlocal sequence
+        quiet_duration_sec = None
+        if name == "quiet":
+            try:
+                quiet_duration_sec = float(getattr(args, "idle_duration_sec", 120.0))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("candidate quiet duration is invalid") from exc
+            if (
+                not math.isfinite(quiet_duration_sec)
+                or quiet_duration_sec <= 0
+                or quiet_duration_sec > _MAX_QUIET_OBSERVATION_SEC
+            ):
+                raise ValueError("candidate quiet duration is invalid")
         sequence += 1
         journey_id = f"candidate-soak.{run_id}.{sequence}"
         collection_url = _evidence_collection_url(args)
@@ -2737,9 +2845,8 @@ def build_candidate_journeys(args, *, protected_input=None):
             semantic_key = None
             quiet_mode = None
             if name == "bargein" and isinstance(protected_input, _CandidateProtectedInput):
-                semantic_key = bytearray(secrets.token_bytes(32))
-                initial_expected = protected_input.initial_expected
-                newest_expected = protected_input.newest_expected
+                sealed_plan = protected_input.consume_bargein_plan()
+                semantic_key = sealed_plan.key
                 semantic_proof = {
                     "version": _CANDIDATE_INTENT_VERSION,
                     "hmacKeyBase64": base64.b64encode(semantic_key).decode("ascii"),
@@ -2747,25 +2854,15 @@ def build_candidate_journeys(args, *, protected_input=None):
                         {
                             "slot": 1,
                             "role": "initial",
-                            "expectedMac": hmac.new(
-                                semantic_key,
-                                initial_expected,
-                                hashlib.sha256,
-                            ).hexdigest(),
+                            "expectedMac": sealed_plan.initial_mac.decode("ascii"),
                         },
                         {
                             "slot": 2,
                             "role": "newest",
-                            "expectedMac": hmac.new(
-                                semantic_key,
-                                newest_expected,
-                                hashlib.sha256,
-                            ).hexdigest(),
+                            "expectedMac": sealed_plan.newest_mac.decode("ascii"),
                         },
                     ],
                 }
-                initial_expected = None
-                newest_expected = None
             elif name == "quiet" and isinstance(protected_input, _CandidateProtectedInput):
                 quiet_mode = "silence" if index == 1 else "robot_speaking"
                 semantic_proof = {
@@ -2790,8 +2887,7 @@ def build_candidate_journeys(args, *, protected_input=None):
                 )
             finally:
                 if semantic_key is not None:
-                    for offset in range(len(semantic_key)):
-                        semantic_key[offset] = 0
+                    sealed_plan.zeroize()
                     semantic_key = None
                 if isinstance(semantic_proof, dict) and "hmacKeyBase64" in semantic_proof:
                     semantic_proof["hmacKeyBase64"] = ""
@@ -2866,11 +2962,21 @@ def build_candidate_journeys(args, *, protected_input=None):
             if isinstance(protected_input, _CandidateProtectedInput):
                 combined.update(
                     _candidate_semantic_counters(
-                        name, log_evidence, quiet_mode=quiet_mode
+                        name,
+                        log_evidence,
+                        quiet_mode=quiet_mode,
+                        requested_duration_sec=quiet_duration_sec,
+                        window_duration_sec=(
+                            _parse_utc_iso(combined["logWindow"]["end"])
+                            - _parse_utc_iso(combined["logWindow"]["start"])
+                        ).total_seconds()
+                        if name == "quiet"
+                        else None,
                     )
                 )
             if name == "quiet" and quiet_mode is not None:
                 combined["quietMode"] = quiet_mode
+                combined["observationDurationSec"] = quiet_duration_sec
             trusted_latency = log_evidence.get("journeyLatencyEvidence", {})
             if name in {"conversation", "conversation_after_lesson"}:
                 combined["latencies"] = {
@@ -2903,8 +3009,7 @@ def build_candidate_journeys(args, *, protected_input=None):
             return [combined] if name == "quiet_padding" else combined
         except BaseException:
             if semantic_key is not None:
-                for offset in range(len(semantic_key)):
-                    semantic_key[offset] = 0
+                sealed_plan.zeroize()
             if enrolled:
                 try:
                     await asyncio.shield(
@@ -3189,11 +3294,17 @@ def _validated_execution_server_scope(value, *, identity):
     if log_proof.get("journeyType") != stage:
         return None
     if stage in {"bargein", "quiet"}:
+        log_start = _parse_utc_iso(value["logWindow"]["start"])
+        log_end = _parse_utc_iso(value["logWindow"]["end"])
         try:
             semantic_counters = _candidate_semantic_counters(
                 stage,
                 log_proof,
                 quiet_mode=value.get("quietMode"),
+                requested_duration_sec=value.get("observationDurationSec"),
+                window_duration_sec=(log_end - log_start).total_seconds()
+                if log_start is not None and log_end is not None
+                else None,
             )
         except RuntimeError:
             return None
