@@ -124,6 +124,7 @@ _CANDIDATE_LATENCY_METRICS = (
     "reconnectRecoveryP95Ms",
 )
 _OWNED_CLEANUP_TASKS = set()
+_UNRESOLVED_CANDIDATE_CLEANUPS = set()
 
 
 class _EvidenceControlNotFound(RuntimeError):
@@ -2998,10 +2999,20 @@ def build_candidate_journeys(args, *, protected_input=None):
     sequence = 0
     cleanup_called = False
 
-    def own_task(coroutine, name):
+    def own_task(coroutine, name, *, unresolved_key=None):
         task = asyncio.create_task(coroutine, name=name)
         _OWNED_CLEANUP_TASKS.add(task)
-        task.add_done_callback(_release_owned_cleanup_task)
+
+        def release(owned):
+            _release_owned_cleanup_task(owned)
+            if unresolved_key is None:
+                return
+            if owned.cancelled() or owned.exception() is not None:
+                _UNRESOLVED_CANDIDATE_CLEANUPS.add(unresolved_key)
+            else:
+                _UNRESOLVED_CANDIDATE_CLEANUPS.discard(unresolved_key)
+
+        task.add_done_callback(release)
         return task
 
     def cleanup_timeout():
@@ -3030,15 +3041,6 @@ def build_candidate_journeys(args, *, protected_input=None):
         finalize_task=None,
         driver_result=None,
     ):
-        loop = asyncio.get_running_loop()
-        clock = getattr(args, "candidate_cleanup_clock", None)
-        if not callable(clock):
-            clock = loop.time
-        deadline = clock() + cleanup_timeout()
-
-        def remaining_budget():
-            return deadline - clock()
-
         def defer_current_cancellation():
             current = asyncio.current_task()
             if current is None:
@@ -3060,8 +3062,6 @@ def build_candidate_journeys(args, *, protected_input=None):
                     post_task.result()
                 except BaseException:
                     pass
-        if remaining_budget() <= 0:
-            raise RuntimeError("candidate enrollment cleanup failed")
         if finalize_task is not None:
             while not finalize_task.done():
                 try:
@@ -3071,8 +3071,6 @@ def build_candidate_journeys(args, *, protected_input=None):
                     continue
                 except BaseException:
                     break
-            if remaining_budget() <= 0:
-                raise RuntimeError("candidate enrollment cleanup failed")
             try:
                 finalized = finalize_task.result()
                 _validate_candidate_finalization(
@@ -3085,6 +3083,15 @@ def build_candidate_journeys(args, *, protected_input=None):
                 pass
             else:
                 return
+
+        loop = asyncio.get_running_loop()
+        clock = getattr(args, "candidate_cleanup_clock", None)
+        if not callable(clock):
+            clock = loop.time
+        deadline = clock() + cleanup_timeout()
+
+        def remaining_budget():
+            return deadline - clock()
 
         async def cancellation_resistant_step(coroutine_factory):
             while True:
@@ -3200,6 +3207,10 @@ def build_candidate_journeys(args, *, protected_input=None):
         duration_sec=None,
     ):
         nonlocal sequence
+        if _UNRESOLVED_CANDIDATE_CLEANUPS or any(
+            not task.done() for task in _OWNED_CLEANUP_TASKS
+        ):
+            raise RuntimeError("candidate cleanup obligations are unresolved")
         quiet_duration_sec = None
         if name == "quiet":
             try:
@@ -3433,6 +3444,7 @@ def build_candidate_journeys(args, *, protected_input=None):
             if semantic_key is not None:
                 sealed_plan.zeroize()
             if enrollment_attempted and not terminal_finalized:
+                _UNRESOLVED_CANDIDATE_CLEANUPS.discard(journey_id)
                 enrollment_cleanup_task = own_task(
                     cleanup_ambiguous_enrollment(
                         enrollment_post_task,
@@ -3443,6 +3455,7 @@ def build_candidate_journeys(args, *, protected_input=None):
                         driver_result=driver_result,
                     ),
                     "google-live-candidate-enrollment-cleanup",
+                    unresolved_key=journey_id,
                 )
                 try:
                     cleanup_complete = await asyncio.shield(
@@ -4371,7 +4384,7 @@ async def _run_candidate_soak_impl(
     )
     actual_pending_cleanup_tasks = sum(
         1 for task in _OWNED_CLEANUP_TASKS if not task.done()
-    )
+    ) + len(_UNRESOLVED_CANDIDATE_CLEANUPS)
     cleanup_pass = (
         isinstance(cleanup_evidence, Mapping)
         and not _forbidden_evidence_fields(cleanup_evidence)
@@ -4401,6 +4414,8 @@ async def _run_candidate_soak_impl(
     )
     if not cleanup_pass:
         failures.append({"code": "CLEANUP_FAILED"})
+    if _UNRESOLVED_CANDIDATE_CLEANUPS:
+        failures.append({"code": "CANDIDATE_CLEANUP_UNRESOLVED"})
     accounting = journeys.get("accounting")
     if callable(accounting):
         try:

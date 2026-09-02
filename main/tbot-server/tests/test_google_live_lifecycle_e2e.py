@@ -47,6 +47,7 @@ class LifecycleResult:
     replay_count: int = 0
     replacement_device_audio: list[bytes] = field(default_factory=list)
     response_ids: list[int] = field(default_factory=list)
+    text_response_id: int = -1
     session_generations: list[int] = field(default_factory=list)
     stale_state_before: str = ""
     stale_state_after: str = ""
@@ -455,6 +456,7 @@ async def _run_lifecycle_journey():
             assert await provider.handle_text_message(
                 json.dumps({"type": "text", "text": "first user turn"})
             )
+            result.text_response_id = provider.current_response_id()
             assert first_session.client_content_inputs[-1]["turn_complete"] is True
 
             await first_session.emit(_server_message(audio=b"old-audio"))
@@ -733,8 +735,9 @@ async def test_google_live_full_lifecycle_recovers_without_duplicate_owners_or_a
     )
     assert result.replay_count == 1
     assert result.replacement_device_audio == [b"new-audio"]
+    assert result.text_response_id == 1
     assert result.response_ids == sorted(set(result.response_ids))
-    assert result.response_ids == [0, 1]
+    assert result.response_ids == [0, 2]
     assert result.session_generations == sorted(set(result.session_generations))
     assert result.session_generations == [1, 2]
     assert result.stale_state_before == "INTERRUPTING"

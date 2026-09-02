@@ -265,6 +265,7 @@ def _layer(name):
 
 
 def _args(**overrides):
+    robot_soak._UNRESOLVED_CANDIDATE_CLEANUPS.clear()
     values = {
         "candidate_git_sha": IDENTITY["gitSha"],
         "candidate_image_digest": IDENTITY["imageDigest"],
@@ -2375,6 +2376,24 @@ def test_candidate_soak_blocks_pass_while_prior_owned_cleanup_is_pending():
     asyncio.run(run_twice())
 
 
+def test_candidate_soak_reports_persisted_unresolved_compensation_safely():
+    args = _args()
+    robot_soak._UNRESOLVED_CANDIDATE_CLEANUPS.add(
+        "candidate-soak.20260831T100000Z.1"
+    )
+    try:
+        report = _run(args=args)
+    finally:
+        robot_soak._UNRESOLVED_CANDIDATE_CLEANUPS.clear()
+
+    assert report["status"] == "FAIL"
+    assert report["cleanupVerdict"]["actualPendingCleanupTasks"] == 1
+    assert "CANDIDATE_CLEANUP_UNRESOLVED" in {
+        item["code"] for item in report["failures"]
+    }
+    assert "candidate-soak.20260831T100000Z.1" not in json.dumps(report)
+
+
 def test_candidate_mode_cli_requires_identity_and_evidence_inputs():
     parser = _build_argument_parser()
     incomplete = parser.parse_args(["--mode", "candidate"])
@@ -3375,7 +3394,7 @@ def test_candidate_factory_enrolls_binds_runs_finalizes_then_analyzes(tmp_path):
     assert "secret" not in json.dumps(events)
 
 
-def test_candidate_enrollment_cancel_after_commit_past_deadline_skips_delete(tmp_path):
+def test_candidate_enrollment_cancel_after_late_commit_still_reconciles(tmp_path):
     stream, _private = _protected_candidate_input(tmp_path)
     protected = robot_soak._read_candidate_protected_input(
         stream, output_paths=(), sample_rate=24000
@@ -3384,6 +3403,13 @@ def test_candidate_enrollment_cancel_after_commit_past_deadline_skips_delete(tmp
     release_response = asyncio.Event()
     deletes = 0
     registry = set()
+    terminal = {
+        "journeyId": "candidate-soak.20260831T100000Z.1",
+        "journeyType": "bargein",
+        "proofProfile": "candidate-lifecycle",
+        "status": "FAIL",
+        "failureCode": "OPERATOR_CANCELLED",
+    }
 
     async def control(method, url, payload=None):
         nonlocal deletes
@@ -3395,7 +3421,9 @@ def test_candidate_enrollment_cancel_after_commit_past_deadline_skips_delete(tmp
         if method == "DELETE":
             deletes += 1
             registry.discard(url.rsplit("/", 1)[-1])
-            return {"status": "PASS"}
+            return dict(terminal)
+        if method == "GET":
+            return dict(terminal)
         return {"status": "PASS"}
 
     args = _args(
@@ -3421,12 +3449,12 @@ def test_candidate_enrollment_cancel_after_commit_past_deadline_skips_delete(tmp
         assert not any(attempted_plan.key)
         assert not args.produce_candidate_evidence.exists()
         release_response.set()
-        for _attempt in range(20):
-            if not robot_soak._OWNED_CLEANUP_TASKS:
+        for _attempt in range(100):
+            if not registry and not robot_soak._OWNED_CLEANUP_TASKS:
                 break
-            await asyncio.sleep(0)
-        assert deletes == 0
-        assert registry
+            await asyncio.sleep(0.001)
+        assert deletes == 1
+        assert registry == set()
         assert not robot_soak._OWNED_CLEANUP_TASKS
 
     asyncio.run(cancel())
@@ -3672,8 +3700,8 @@ def test_candidate_real_post_worker_uses_whole_cleanup_deadline(
     asyncio.run(run())
 
     assert calls.count("POST") == 1
-    assert calls.count("DELETE") == (0 if release_after_deadline else 1)
-    assert calls.count("GET") == (0 if release_after_deadline else 1)
+    assert calls.count("DELETE") == 1
+    assert calls.count("GET") == 1
     assert not robot_soak._OWNED_CLEANUP_TASKS
 
 
@@ -3997,11 +4025,18 @@ def test_candidate_reconciliation_defers_cancellation_during_retry_backoff(
     assert not robot_soak._OWNED_CLEANUP_TASKS
 
 
-def test_candidate_reconciliation_skips_delete_after_late_post_commit(tmp_path):
+def test_candidate_reconciliation_deletes_after_late_post_commit(tmp_path):
     post_started = asyncio.Event()
     release_commit = asyncio.Event()
     registry = set()
     deletes = 0
+    terminal = {
+        "journeyId": "candidate-soak.20260831T100000Z.1",
+        "journeyType": "conversation",
+        "proofProfile": "candidate-lifecycle",
+        "status": "FAIL",
+        "failureCode": "OPERATOR_CANCELLED",
+    }
 
     async def control(method, url, payload=None):
         nonlocal deletes
@@ -4013,7 +4048,9 @@ def test_candidate_reconciliation_skips_delete_after_late_post_commit(tmp_path):
         if method == "DELETE":
             deletes += 1
             registry.discard(url.rsplit("/", 1)[-1])
-            return {"status": "PASS"}
+            return dict(terminal)
+        if method == "GET":
+            return dict(terminal)
         return {"status": "PASS"}
 
     args = _args(
@@ -4039,21 +4076,166 @@ def test_candidate_reconciliation_skips_delete_after_late_post_commit(tmp_path):
             for owned in robot_soak._OWNED_CLEANUP_TASKS
         )
         release_commit.set()
-        for _attempt in range(20):
-            if not any(
+        for _attempt in range(100):
+            if not registry and not any(
                 owned.get_name() == "google-live-candidate-enrollment-cleanup"
                 for owned in robot_soak._OWNED_CLEANUP_TASKS
             ):
                 break
-            await asyncio.sleep(0)
-        assert deletes == 0
-        assert registry
+            await asyncio.sleep(0.001)
+        assert deletes == 1
+        assert registry == set()
         assert not any(
             owned.get_name() == "google-live-candidate-enrollment-cleanup"
             for owned in robot_soak._OWNED_CLEANUP_TASKS
         )
 
     asyncio.run(cancel())
+
+
+def test_candidate_reconciliation_deletes_after_late_post_error_with_server_commit(
+    tmp_path,
+):
+    post_started = asyncio.Event()
+    release_post = asyncio.Event()
+    registry = set()
+    calls = []
+    deletes = 0
+    journey_id = "candidate-soak.20260831T100000Z.1"
+    terminal = {
+        "journeyId": journey_id,
+        "journeyType": "conversation",
+        "proofProfile": "candidate-lifecycle",
+        "status": "FAIL",
+        "failureCode": "OPERATOR_CANCELLED",
+    }
+
+    async def control(method, url, payload=None):
+        nonlocal deletes
+        calls.append(method)
+        if method == "POST":
+            registry.add(payload["journeyId"])
+            post_started.set()
+            await release_post.wait()
+            raise RuntimeError("local response failed after commit")
+        if method == "DELETE":
+            deletes += 1
+            if deletes == 1:
+                raise RuntimeError("ambiguous compensation delete")
+            registry.discard(url.rsplit("/", 1)[-1])
+            return dict(terminal)
+        if method == "GET":
+            return dict(terminal if deletes > 1 else {**terminal, "status": "ACTIVE"})
+        return {"status": "PASS"}
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=control,
+        cleanup_timeout_sec=0.05,
+    )
+
+    async def cancel():
+        task = asyncio.create_task(
+            build_candidate_journeys(args)["conversation"](
+                args, name="conversation", index=1
+            )
+        )
+        await post_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert registry == {journey_id}
+        assert robot_soak._OWNED_CLEANUP_TASKS
+        release_post.set()
+        for _attempt in range(100):
+            if not registry and not robot_soak._OWNED_CLEANUP_TASKS:
+                break
+            await asyncio.sleep(0.001)
+
+    asyncio.run(cancel())
+
+    assert calls == ["POST", "DELETE", "GET", "DELETE", "GET"]
+    assert registry == set()
+    assert not robot_soak._OWNED_CLEANUP_TASKS
+    assert not robot_soak._UNRESOLVED_CANDIDATE_CLEANUPS
+
+
+def test_candidate_late_real_post_compensation_survives_asyncio_shutdown(
+    tmp_path, monkeypatch
+):
+    journey_id = "candidate-soak.20260831T100000Z.1"
+    terminal = {
+        "journeyId": journey_id,
+        "journeyType": "conversation",
+        "proofProfile": "candidate-lifecycle",
+        "status": "FAIL",
+        "failureCode": "OPERATOR_CANCELLED",
+    }
+    post_started = threading.Event()
+    release_post = threading.Event()
+    calls = []
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+    def urlopen(request, *, timeout):
+        method = request.get_method()
+        calls.append(method)
+        if method == "POST":
+            post_started.set()
+            release_post.wait()
+            return Response(
+                {"data": {"registered": True, "journeyId": journey_id}}
+            )
+        if method in {"DELETE", "GET"}:
+            return Response(terminal)
+        return Response({"status": "PASS"})
+
+    monkeypatch.setattr(robot_soak.urllib.request, "urlopen", urlopen)
+    monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "mint")
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=None,
+        cleanup_timeout_sec=0.01,
+    )
+
+    async def run():
+        lifecycle = asyncio.create_task(
+            build_candidate_journeys(args)["conversation"](
+                args, name="conversation", index=1
+            )
+        )
+        while not post_started.is_set():
+            await asyncio.sleep(0)
+        lifecycle.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await lifecycle
+        assert robot_soak._OWNED_CLEANUP_TASKS
+        threading.Timer(0.02, release_post.set).start()
+
+    asyncio.run(run())
+
+    assert calls == ["POST", "DELETE", "GET"]
+    assert not robot_soak._OWNED_CLEANUP_TASKS
+    assert not robot_soak._UNRESOLVED_CANDIDATE_CLEANUPS
 
 
 def test_candidate_failed_post_treats_delete_not_found_as_safe_cleanup(tmp_path):
@@ -4368,15 +4550,28 @@ def test_candidate_active_cleanup_retry_exhaustion_is_explicit(tmp_path):
         cleanup_timeout_sec=0.05,
     )
 
-    with pytest.raises(RuntimeError, match="candidate enrollment cleanup failed"):
-        asyncio.run(
-            build_candidate_journeys(args)["conversation"](
-                args, name="conversation", index=1
+    try:
+        journeys = build_candidate_journeys(args)
+        with pytest.raises(RuntimeError, match="candidate enrollment cleanup failed"):
+            asyncio.run(
+                journeys["conversation"](
+                    args, name="conversation", index=1
+                )
             )
-        )
 
-    assert 1 < deletes <= 4
-    assert not robot_soak._OWNED_CLEANUP_TASKS
+        assert 1 < deletes <= 4
+        assert not robot_soak._OWNED_CLEANUP_TASKS
+        assert robot_soak._UNRESOLVED_CANDIDATE_CLEANUPS == {journey_id}
+        with pytest.raises(
+            RuntimeError, match="candidate cleanup obligations are unresolved"
+        ):
+            asyncio.run(
+                journeys["conversation"](
+                    args, name="conversation", index=2
+                )
+            )
+    finally:
+        robot_soak._UNRESOLVED_CANDIDATE_CLEANUPS.clear()
 
 
 def test_candidate_cancellation_during_active_retry_keeps_cleanup_owned(tmp_path):
