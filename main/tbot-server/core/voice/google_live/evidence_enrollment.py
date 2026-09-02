@@ -671,6 +671,9 @@ class EvidenceEnrollmentRegistry:
             return False
         valid = bool(
             enrollment.quiet_semantic_eligible
+            and isinstance(response_generation, int)
+            and not isinstance(response_generation, bool)
+            and response_generation >= 0
             and enrollment.quiet_response_started_generation
             == response_generation
             and enrollment.quiet_response_completed_generation is None

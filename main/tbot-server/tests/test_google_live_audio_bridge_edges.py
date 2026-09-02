@@ -4,7 +4,7 @@ import json
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from core.voice.child_safety import SAFE_DEFLECTION_LINE
 from core.voice.google_live.audio_bridge import GoogleLiveAudioBridge
@@ -217,7 +217,7 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
             logger=logger,
             response_id_getter=lambda: 9,
         )
-        bridge._send_binary_audio_message = AsyncMock()
+        bridge._send_binary_audio_message = AsyncMock(return_value=1)
 
         await bridge.handle_event({"type": "audio_start"})
         await bridge.handle_event({"type": "audio", "audio": b"one"})
@@ -245,7 +245,7 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
             logger=normal_logger,
             response_id_getter=lambda: 9,
         )
-        normal_bridge._send_binary_audio_message = AsyncMock()
+        normal_bridge._send_binary_audio_message = AsyncMock(return_value=1)
         await normal_bridge.handle_event({"type": "audio_start"})
         await normal_bridge.handle_event({"type": "audio", "audio": b"normal"})
         self.assertFalse(
@@ -267,6 +267,70 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
 
         bridge._suppress_audio_until = time.monotonic() + 1
         self.assertTrue(await bridge.handle_event({"type": "audio_start"}))
+
+    async def test_binary_audio_send_reports_only_packets_accepted_for_forwarding(self):
+        websocket = _WebSocket()
+        conn = _Conn(websocket=websocket)
+        conn.sentence_id = "sentence-1"
+        conn.conn_from_mqtt_gateway = False
+        bridge = self.make_bridge(conn=conn)
+
+        send_audio = AsyncMock()
+        with patch("core.handle.sendAudioHandle.sendAudio", send_audio):
+            self.assertEqual(await bridge._send_binary_audio_message(b"opus"), 1)
+            bridge._run_audio_cpu = AsyncMock(return_value=[b"one", b"two"])
+            self.assertEqual(
+                await bridge._send_binary_audio_message(
+                    b"pcm", audio_format="pcm16"
+                ),
+                2,
+            )
+            bridge._run_audio_cpu = AsyncMock(return_value=[])
+            self.assertEqual(
+                await bridge._send_binary_audio_message(
+                    b"pcm", audio_format="pcm16"
+                ),
+                0,
+            )
+
+        self.assertEqual(send_audio.await_count, 2)
+        self.assertEqual(
+            await self.make_bridge(conn=_Conn(websocket=None))._send_binary_audio_message(
+                b"opus"
+            ),
+            0,
+        )
+
+    async def test_binary_audio_send_exception_does_not_report_forwarding(self):
+        conn = _Conn(websocket=_WebSocket())
+        bridge = self.make_bridge(conn=conn)
+
+        with patch(
+            "core.handle.sendAudioHandle.sendAudio",
+            AsyncMock(side_effect=RuntimeError("send failed")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "send failed"):
+                await bridge._send_binary_audio_message(b"opus")
+
+    async def test_forwarded_handler_uses_source_generation_only_after_positive_send(self):
+        forwarded = MagicMock()
+        bridge = self.make_bridge(
+            conn=_Conn(websocket=_WebSocket()),
+            response_id_getter=lambda: 1,
+            model_output_forwarded_handler=forwarded,
+        )
+        bridge._send_tts_message = AsyncMock()
+        bridge._send_binary_audio_message = AsyncMock(side_effect=[0, 2])
+        await bridge.handle_event({"type": "audio_start", "response_generation": 1})
+
+        await bridge.handle_event(
+            {"type": "audio", "audio": b"empty", "response_generation": 1}
+        )
+        await bridge.handle_event(
+            {"type": "audio", "audio": b"packets", "response_generation": 7}
+        )
+
+        forwarded.assert_called_once_with(7)
 
     async def test_handler_failures_and_blocked_audio_end_edges(self):
         async def fail_tool(_event):
@@ -425,7 +489,7 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         await bridge.close()
         self.assertEqual(await bridge._run_audio_cpu(lambda value: value + 1, 2), 3)
         self.assertEqual(bridge._decode_input_audio(b""), b"")
-        self.assertIsNone(await bridge._send_binary_audio_message(None))
+        self.assertEqual(await bridge._send_binary_audio_message(None), 0)
         self.assertEqual(await bridge._flush_output_audio(), 0)
         self.assertEqual(bridge._extract_sample_rate_from_mime("audio/pcm;rate=bad"), 24000)
 

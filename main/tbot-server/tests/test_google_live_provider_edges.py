@@ -364,6 +364,32 @@ class _EmptyAuthFailingASR:
 
 class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
     @staticmethod
+    def _bind_candidate_quiet(conn, journey_id="candidate.quiet-1"):
+        registry = EvidenceEnrollmentRegistry()
+        registry.register(
+            device_id=conn.device_id,
+            client_id="client-1",
+            journey_id=journey_id,
+            journey_type="quiet",
+            proof_profile="candidate-lifecycle",
+            ttl_sec=120,
+            transcript_plan=(),
+            hmac_key=b"",
+            semantic_kind="quiet",
+            quiet_mode="robot_speaking",
+        )
+        registry.claim(
+            device_id=conn.device_id,
+            client_id="client-1",
+            journey_id=journey_id,
+        )
+        conn.evidence_registry = registry
+        conn.google_live_evidence_journey_id = journey_id
+        conn.google_live_evidence_journey_type = "quiet"
+        conn.google_live_evidence_proof_profile = "candidate-lifecycle"
+        return registry
+
+    @staticmethod
     def _bind_candidate_bargein(conn):
         key = b"s" * 32
 
@@ -904,28 +930,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_candidate_quiet_marker_uses_measured_robot_speaking_counters(self):
         conn = _Conn()
-        registry = EvidenceEnrollmentRegistry()
-        registry.register(
-            device_id=conn.device_id,
-            client_id="client-1",
-            journey_id="candidate.quiet-1",
-            journey_type="quiet",
-            proof_profile="candidate-lifecycle",
-            ttl_sec=120,
-            transcript_plan=(),
-            hmac_key=b"",
-            semantic_kind="quiet",
-            quiet_mode="robot_speaking",
-        )
-        registry.claim(
-            device_id=conn.device_id,
-            client_id="client-1",
-            journey_id="candidate.quiet-1",
-        )
-        conn.evidence_registry = registry
-        conn.google_live_evidence_journey_id = "candidate.quiet-1"
-        conn.google_live_evidence_journey_type = "quiet"
-        conn.google_live_evidence_proof_profile = "candidate-lifecycle"
+        registry = self._bind_candidate_quiet(conn)
         provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
         provider._interaction.start_live_connection("live-quiet")
         provider._reset_candidate_scope_measurements()
@@ -939,7 +944,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             response_cancelled_checker=provider.is_response_cancelled,
             model_output_forwarded_handler=provider._record_quiet_forwarded_output,
         )
-        provider._bridge._send_binary_audio_message = AsyncMock()
+        provider._bridge._send_binary_audio_message = AsyncMock(return_value=1)
         provider._bridge._send_tts_message = AsyncMock()
 
         provider._mark_clean_user_turn_opened("audio_input")
@@ -1000,6 +1005,116 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._response_generation = 2
         provider._mark_clean_user_turn_opened("audio_input")
         self.assertEqual(provider._evidence_candidate_counters["user_turns"], 1)
+
+    async def test_candidate_quiet_forwarded_chunks_fail_closed_outside_exact_lifecycle(self):
+        scenarios = {
+            "pre_start": [
+                {"type": "audio", "audio": b"early", "response_generation": 1},
+                {"type": "audio_start", "response_generation": 1},
+                {"type": "audio", "audio": b"valid", "response_generation": 1},
+                {"type": "audio_end", "response_generation": 1},
+            ],
+            "post_end": [
+                {"type": "audio_start", "response_generation": 1},
+                {"type": "audio", "audio": b"valid", "response_generation": 1},
+                {"type": "audio_end", "response_generation": 1},
+                {"type": "audio", "audio": b"late", "response_generation": 1},
+            ],
+            "wrong_generation": [
+                {"type": "audio_start", "response_generation": 1},
+                {"type": "audio", "audio": b"wrong", "response_generation": 2},
+                {"type": "audio", "audio": b"valid", "response_generation": 1},
+                {"type": "audio_end", "response_generation": 1},
+            ],
+            "stale_generation": [
+                {"type": "audio_start", "response_generation": 1},
+                {"type": "audio", "audio": b"stale", "response_generation": 0},
+                {"type": "audio", "audio": b"valid", "response_generation": 1},
+                {"type": "audio_end", "response_generation": 1},
+            ],
+            "missing_generation": [
+                {"type": "audio_start", "response_generation": 1},
+                {"type": "audio", "audio": b"missing"},
+                {"type": "audio", "audio": b"valid", "response_generation": 1},
+                {"type": "audio_end", "response_generation": 1},
+            ],
+            "non_int_generation": [
+                {"type": "audio_start", "response_generation": 1},
+                {"type": "audio", "audio": b"invalid", "response_generation": "1"},
+                {"type": "audio", "audio": b"valid", "response_generation": 1},
+                {"type": "audio_end", "response_generation": 1},
+            ],
+        }
+        for suffix, events in scenarios.items():
+            with self.subTest(scenario=suffix):
+                conn = _Conn()
+                journey_id = f"candidate.quiet-{suffix}"
+                registry = self._bind_candidate_quiet(conn, journey_id)
+                provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+                provider._interaction.start_live_connection("live-quiet")
+                provider._reset_candidate_scope_measurements()
+                provider._close_live_resources = AsyncMock(return_value=None)
+                provider._bridge = google_live_module.GoogleLiveAudioBridge(
+                    conn,
+                    _Client(),
+                    conn.logger,
+                    response_id_getter=provider.current_response_id,
+                    response_cancelled_checker=provider.is_response_cancelled,
+                    model_output_forwarded_handler=provider._record_quiet_forwarded_output,
+                )
+                provider._bridge._send_binary_audio_message = AsyncMock(return_value=1)
+                provider._bridge._send_tts_message = AsyncMock()
+                provider._mark_clean_user_turn_opened("audio_input")
+                provider._evidence_candidate_scope_started_at = 9.0
+
+                for event in events:
+                    await provider._handle_live_event(event)
+                    await provider._bridge.handle_event(event)
+                provider._evidence_candidate_observation_ended_at = 12.0
+                result = await provider.finalize_evidence()
+
+                snapshot = registry.safe_snapshot(journey_id)
+                self.assertFalse(snapshot["quietSemanticEligible"], snapshot)
+                self.assertEqual(result["quietSemanticEvidence"]["status"], "FAIL")
+
+    async def test_candidate_quiet_failed_binary_send_does_not_create_output_proof(self):
+        conn = _Conn()
+        registry = self._bind_candidate_quiet(conn, "candidate.quiet-send-failed")
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._interaction.start_live_connection("live-quiet")
+        provider._reset_candidate_scope_measurements()
+        provider._close_live_resources = AsyncMock(return_value=None)
+        provider._bridge = google_live_module.GoogleLiveAudioBridge(
+            conn,
+            _Client(),
+            conn.logger,
+            response_id_getter=provider.current_response_id,
+            response_cancelled_checker=provider.is_response_cancelled,
+            model_output_forwarded_handler=provider._record_quiet_forwarded_output,
+        )
+        provider._bridge._send_binary_audio_message = AsyncMock(
+            side_effect=RuntimeError("send failed")
+        )
+        provider._bridge._send_tts_message = AsyncMock()
+        provider._mark_clean_user_turn_opened("audio_input")
+        provider._evidence_candidate_scope_started_at = 9.0
+        start = {"type": "audio_start", "response_generation": 1}
+        await provider._handle_live_event(start)
+        await provider._bridge.handle_event(start)
+        chunk = {"type": "audio", "audio": b"pcm", "response_generation": 1}
+        await provider._handle_live_event(chunk)
+        with self.assertRaisesRegex(RuntimeError, "send failed"):
+            await provider._bridge.handle_event(chunk)
+        end = {"type": "audio_end", "response_generation": 1}
+        await provider._handle_live_event(end)
+        await provider._bridge.handle_event(end)
+        provider._evidence_candidate_observation_ended_at = 12.0
+
+        result = await provider.finalize_evidence()
+
+        snapshot = registry.safe_snapshot("candidate.quiet-send-failed")
+        self.assertEqual(snapshot["quietForwardedOutputChunks"], 0)
+        self.assertEqual(result["quietSemanticEvidence"]["status"], "FAIL")
 
     async def test_candidate_quiet_silence_duration_excludes_successful_teardown(self):
         conn = _Conn()

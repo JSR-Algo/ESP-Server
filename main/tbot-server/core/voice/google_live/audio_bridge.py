@@ -315,18 +315,24 @@ class GoogleLiveAudioBridge:
             self._output_byte_count += len(audio_bytes)
             self._log_first_audio_out_latency()
             self._record_turn_first_audio_latency()
-            await self._send_binary_audio_message(
+            forwarded_packet_count = await self._send_binary_audio_message(
                 audio_bytes,
                 audio_format=event.get("audio_format"),
                 mime_type=event.get("mime_type"),
             )
-            if callable(self._model_output_forwarded_handler):
-                self._model_output_forwarded_handler(self._active_response_id)
+            output_forwarded = bool(
+                isinstance(forwarded_packet_count, int)
+                and not isinstance(forwarded_packet_count, bool)
+                and forwarded_packet_count > 0
+            )
+            if output_forwarded and callable(self._model_output_forwarded_handler):
+                self._model_output_forwarded_handler(event.get("response_generation"))
             journey_id = getattr(
                 self.conn, "google_live_evidence_journey_id", None
             )
             if (
-                isinstance(journey_id, str)
+                output_forwarded
+                and isinstance(journey_id, str)
                 and journey_id
             ):
                 self.logger.bind(tag="GoogleLive").info(
@@ -1155,8 +1161,12 @@ class GoogleLiveAudioBridge:
         audio_format=None,
         mime_type=None,
     ):
-        if audio_bytes is None or self.conn.websocket is None:
-            return
+        if (
+            not audio_bytes
+            or self.conn.websocket is None
+            or getattr(self.conn, "client_abort", False)
+        ):
+            return 0
         from core.handle.sendAudioHandle import sendAudio
 
         if audio_format == "pcm16" or (mime_type and "audio/pcm" in mime_type):
@@ -1178,9 +1188,12 @@ class GoogleLiveAudioBridge:
             )
             if packets:
                 await sendAudio(self.conn, packets)
-            return
+                return len(packets)
+            return 0
         if audio_bytes:
             await sendAudio(self.conn, audio_bytes)
+            return 1
+        return 0
 
     def _should_send_lesson_output_preroll(self):
         if self._output_preroll_sent:

@@ -2341,13 +2341,19 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if (
             registry is None
             or not isinstance(journey_id, str)
-            or not isinstance(response_generation, int)
         ):
             return False
+        exact_generation = (
+            response_generation
+            if isinstance(response_generation, int)
+            and not isinstance(response_generation, bool)
+            and response_generation >= 0
+            else -1
+        )
         try:
             return bool(
                 registry.record_quiet_forwarded_output(
-                    journey_id, response_generation=response_generation
+                    journey_id, response_generation=exact_generation
                 )
             )
         except Exception:
