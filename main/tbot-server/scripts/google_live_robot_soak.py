@@ -39,22 +39,28 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import hashlib
+import hmac
 import inspect
 import json
 import math
 import os
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+import wave
 from collections import Counter
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import websockets
@@ -90,6 +96,7 @@ from scripts.voice_mode_websocket_audio_bargein import (  # noqa: E402
     _observe_interrupt_stop,
     _opus_packets,
     _opus_packets_from_audio_file,
+    _opus_packets_from_pcm,
 )
 from scripts.voice_mode_websocket_soak import (  # noqa: E402
     _build_headers,
@@ -156,6 +163,205 @@ _SENSITIVE_EVIDENCE_VALUE_RE = re.compile(
     r"\bsk-(?:proj-)?[0-9A-Za-z_-]{20,}\b|"
     r"\bAQEA[0-9A-Za-z_-]{32,}\b)"
 )
+_CANDIDATE_INTENT_VERSION = "google-live-candidate-intent-nfkc-casefold.v1"
+_MAX_PROTECTED_INPUT_BYTES = 1024 * 1024
+_MAX_PROTECTED_PCM_BYTES = 16 * 1024 * 1024
+
+
+@dataclass(slots=True)
+class _ProtectedAudioFixture:
+    label: str
+    pcm: bytearray = field(repr=False)
+
+
+@dataclass(slots=True)
+class _CandidateProtectedInput:
+    bargein_initial: _ProtectedAudioFixture
+    bargein_newest: _ProtectedAudioFixture
+    robot_speaking: _ProtectedAudioFixture
+    initial_expected: bytearray = field(repr=False)
+    newest_expected: bytearray = field(repr=False)
+
+    def zeroize(self):
+        for private in (
+            self.bargein_initial.pcm,
+            self.bargein_newest.pcm,
+            self.robot_speaking.pcm,
+            self.initial_expected,
+            self.newest_expected,
+        ):
+            for offset in range(len(private)):
+                private[offset] = 0
+
+
+def _open_regular_nofollow(path: Path) -> int:
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    parts = absolute.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts[1:]):
+        raise ValueError("protected candidate input fixture is invalid")
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    directory_fd = os.open(parts[0], directory_flags)
+    try:
+        for component in parts[1:-1]:
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        descriptor = os.open(
+            parts[-1],
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+    except BaseException:
+        os.close(directory_fd)
+        raise
+    os.close(directory_fd)
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise ValueError("protected candidate input fixture is not regular")
+    return descriptor
+
+
+def _read_protected_wav(path: Path, *, sample_rate: int, label: str):
+    descriptor = _open_regular_nofollow(path)
+    try:
+        identity = (os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino)
+        with os.fdopen(os.dup(descriptor), "rb") as raw:
+            with wave.open(raw, "rb") as source:
+                if (
+                    source.getnchannels() != 1
+                    or source.getsampwidth() != 2
+                    or source.getframerate() != sample_rate
+                    or source.getcomptype() != "NONE"
+                    or source.getnframes() <= 0
+                ):
+                    raise ValueError("protected candidate input WAV shape is unsupported")
+                pcm = source.readframes(source.getnframes())
+        if not pcm or len(pcm) > _MAX_PROTECTED_PCM_BYTES:
+            raise ValueError("protected candidate input fixture is empty")
+        return _ProtectedAudioFixture(label=label, pcm=bytearray(pcm)), identity
+    except (OSError, EOFError, wave.Error) as exc:
+        raise ValueError("protected candidate input fixture is invalid") from exc
+    finally:
+        os.close(descriptor)
+
+
+def _read_candidate_protected_input(stream, *, output_paths, sample_rate):
+    fixtures = []
+    try:
+        raw = stream.read(_MAX_PROTECTED_INPUT_BYTES + 1)
+        if not raw:
+            raise ValueError("protected candidate input is missing")
+        if len(raw) > _MAX_PROTECTED_INPUT_BYTES:
+            raise ValueError("protected candidate input is too large")
+        document = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+        if not isinstance(document, dict) or set(document) != {"bargein", "robotSpeaking"}:
+            raise ValueError("protected candidate input schema is invalid")
+        bargein = document["bargein"]
+        speaking = document["robotSpeaking"]
+        if (
+            not isinstance(bargein, dict)
+            or set(bargein)
+            != {"initialAudioPath", "initialExpected", "newestAudioPath", "newestExpected"}
+            or not isinstance(speaking, dict)
+            or set(speaking) != {"triggerAudioPath"}
+        ):
+            raise ValueError("protected candidate input schema is invalid")
+        values = (*bargein.values(), speaking["triggerAudioPath"])
+        if any(not isinstance(value, str) or not value for value in values):
+            raise ValueError("protected candidate input schema is invalid")
+        identities = []
+        for label, value in (
+            ("bargein/initial", bargein["initialAudioPath"]),
+            ("bargein/newest", bargein["newestAudioPath"]),
+            ("robot_speaking/trigger", speaking["triggerAudioPath"]),
+        ):
+            fixture, identity = _read_protected_wav(
+                Path(value), sample_rate=sample_rate, label=label
+            )
+            fixtures.append(fixture)
+            identities.append(identity)
+        if len(set(identities)) != len(identities):
+            raise ValueError("protected candidate input fixture alias detected")
+        for output_path in output_paths:
+            if Path(output_path).is_symlink():
+                raise ValueError("protected candidate input output alias detected")
+            try:
+                output_stat = os.stat(output_path, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if (output_stat.st_dev, output_stat.st_ino) in identities:
+                raise ValueError("protected candidate input output alias detected")
+        initial_expected = _normalize_candidate_intent(bargein["initialExpected"])
+        newest_expected = _normalize_candidate_intent(bargein["newestExpected"])
+        if not initial_expected or not newest_expected:
+            raise ValueError("protected candidate input expectation is invalid")
+        return _CandidateProtectedInput(
+            fixtures[0], fixtures[1], fixtures[2],
+            bytearray(initial_expected.encode("utf-8")),
+            bytearray(newest_expected.encode("utf-8")),
+        )
+    except BaseException as exc:
+        for fixture in fixtures:
+            for offset in range(len(fixture.pcm)):
+                fixture.pcm[offset] = 0
+        if isinstance(exc, ValueError) and str(exc).startswith(
+            "protected candidate input"
+        ):
+            raise
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise ValueError("protected candidate input is invalid") from exc
+
+
+def _normalize_candidate_intent(value):
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return " ".join(
+        "".join(character if character.isalnum() else " " for character in normalized).split()
+    )
+
+
+def _candidate_semantic_counters(stage, log_evidence, *, quiet_mode=None):
+    semantic = (
+        log_evidence.get("candidateSemanticEvidence")
+        if isinstance(log_evidence, Mapping)
+        else None
+    )
+    valid = isinstance(semantic, Mapping) and log_evidence.get("status") == "PASS"
+    if stage == "bargein":
+        valid = valid and semantic == {
+            "status": "PASS",
+            "kind": "bargein-intent",
+            "initialSlotMatched": True,
+            "newestSlotMatched": True,
+            "orderingValid": True,
+            "latestIntentMatched": True,
+            "replacementOwnedByNewestGeneration": True,
+        }
+        if not valid:
+            raise RuntimeError("candidate semantic evidence is invalid")
+        return {"latestIntentSuccesses": 1, "falseInterrupts": 0}
+    if stage == "quiet":
+        expected_responses = 0 if quiet_mode == "silence" else 1
+        valid = (
+            valid
+            and semantic
+            == {
+                "status": "PASS",
+                "kind": "quiet",
+                "mode": quiet_mode,
+                "falseInterrupts": 0,
+                "responseStarts": expected_responses,
+                "responseEnds": expected_responses,
+                "replacements": 0,
+                "fallbacks": 0,
+            }
+        )
+        if not valid:
+            raise RuntimeError("candidate semantic evidence is invalid")
+        return {"latestIntentSuccesses": 0, "falseInterrupts": 0}
+    return {"latestIntentSuccesses": 0, "falseInterrupts": 0}
 
 # ---------------------------------------------------------------------------
 # Latency-chain patterns for PR5 modes (also used by analyze_google_live_log)
@@ -1896,6 +2102,8 @@ def _validate_candidate_manifest_structure(manifest, *, identity) -> None:
         | (
             {"task4TransportEvidence", "task5CorrelatedEvidence"}
             if item.get("name") == "bargein"
+            else {"quietMode"}
+            if item.get("name") == "quiet"
             else {"lessonManifestSha256"}
             if item.get("name") == "lesson"
             else set()
@@ -1916,7 +2124,13 @@ async def _invoke_candidate_driver(args, **context):
     return await value if inspect.isawaitable(value) else value
 
 
-def _candidate_audio_packets(args):
+def _candidate_audio_packets(args, fixture=None):
+    if isinstance(fixture, _ProtectedAudioFixture):
+        return _opus_packets_from_pcm(
+            fixture.pcm,
+            int(getattr(args, "sample_rate", 24000)),
+            int(getattr(args, "frame_duration_ms", 60)),
+        )
     audio_file = str(getattr(args, "inject_audio", "") or "")
     sample_rate = int(getattr(args, "sample_rate", 24000))
     frame_duration_ms = int(getattr(args, "frame_duration_ms", 60))
@@ -1934,8 +2148,14 @@ def _candidate_audio_packets(args):
     )
 
 
-async def _run_candidate_audio_bargein(args, websocket, *, clock=time.monotonic):
-    packets = _candidate_audio_packets(args)
+async def _run_candidate_audio_bargein(
+    args, websocket, *, fixture=None, clock=time.monotonic
+):
+    packets = (
+        _candidate_audio_packets(args)
+        if fixture is None
+        else _candidate_audio_packets(args, fixture)
+    )
     if not packets:
         raise RuntimeError("candidate audio barge-in has no opus packets")
     frame_duration_ms = int(getattr(args, "frame_duration_ms", 60))
@@ -2166,27 +2386,66 @@ async def _run_candidate_websocket_journey(args, **context):
             if monitor_resources.get("status") != "PASS":
                 raise RuntimeError("candidate quiet padding resource budget failed")
         else:
-            prompt = (
-                args.idle_prompt
+            protected = context.get("protected_input")
+            quiet_mode = context.get("quiet_mode")
+            initial_fixture = (
+                protected.bargein_initial
+                if name == "bargein" and isinstance(protected, _CandidateProtectedInput)
+                else protected.robot_speaking
                 if name == "quiet"
-                else f"{args.first_prompt} Lần {index}."
+                and quiet_mode == "robot_speaking"
+                and isinstance(protected, _CandidateProtectedInput)
+                else None
             )
-            await websocket.send(json.dumps(_detect_message(prompt)))
-            first_start, observed, _messages = await _recv_until(
-                websocket,
-                lambda payload: _is_tts_state(payload, "start"),
-                args.event_timeout_sec,
-            )
-            binary_chunks += observed
-            if first_start is None:
-                raise RuntimeError("candidate tts start timeout")
-            first_audio_ms = (time.monotonic() - started) * 1000
+            if name == "quiet" and quiet_mode == "silence":
+                duration_sec = float(getattr(args, "idle_duration_sec", 120.0))
+                try:
+                    unexpected = await asyncio.wait_for(
+                        websocket.recv(), timeout=duration_sec
+                    )
+                except asyncio.TimeoutError:
+                    unexpected = None
+                if unexpected is not None:
+                    raise RuntimeError("candidate quiet silence observed unexpected output")
+                first_start = None
+            elif initial_fixture is not None:
+                await websocket.send(
+                    json.dumps({"type": "listen", "state": "start", "mode": "realtime"})
+                )
+                for packet in _candidate_audio_packets(args, initial_fixture):
+                    await websocket.send(packet)
+                    await asyncio.sleep(int(getattr(args, "frame_duration_ms", 60)) / 1000)
+                first_start, observed, _messages = await _recv_until(
+                    websocket,
+                    lambda payload: _is_tts_state(payload, "start"),
+                    args.event_timeout_sec,
+                )
+                binary_chunks += observed
+            else:
+                prompt = args.idle_prompt if name == "quiet" else f"{args.first_prompt} Lần {index}."
+                await websocket.send(json.dumps(_detect_message(prompt)))
+                first_start, observed, _messages = await _recv_until(
+                    websocket,
+                    lambda payload: _is_tts_state(payload, "start"),
+                    args.event_timeout_sec,
+                )
+                binary_chunks += observed
+            if name == "quiet" and quiet_mode == "silence":
+                first_audio_ms = None
+            else:
+                if first_start is None:
+                    raise RuntimeError("candidate tts start timeout")
+                first_audio_ms = (time.monotonic() - started) * 1000
             if name == "bargein":
                 await asyncio.sleep(args.speak_for_sec)
-                audio_bargein = await _run_candidate_audio_bargein(args, websocket)
+                audio_bargein = await _run_candidate_audio_bargein(
+                    args,
+                    websocket,
+                    fixture=(protected.bargein_newest if isinstance(protected, _CandidateProtectedInput) else None),
+                )
                 bargein_stop_ms = audio_bargein["bargeinStopMs"]
                 binary_chunks += audio_bargein["binaryChunks"]
-            else:
+            elif not (name == "quiet" and quiet_mode == "silence"):
                 stopped, observed, _messages = await _recv_until(
                     websocket,
                     lambda payload: _is_tts_state(payload, "stop"),
@@ -2242,6 +2501,9 @@ async def _run_candidate_websocket_journey(args, **context):
         "_scopeFinalized": True,
         "_finalizeResult": dict(finalized),
     }
+    if name == "quiet" and context.get("quiet_mode") in {"silence", "robot_speaking"}:
+        result["quietMode"] = context["quiet_mode"]
+        result["latencies"] = {}
     if operation == "monitor":
         start_utc = _parse_utc_iso(result["logWindow"]["start"])
         end_utc = _parse_utc_iso(result["logWindow"]["end"])
@@ -2445,7 +2707,7 @@ def _validate_candidate_finalization(finalized, *, result, journey_id, stage):
     return dict(finalized)
 
 
-def build_candidate_journeys(args):
+def build_candidate_journeys(args, *, protected_input=None):
     """Build the exact stateful journey surface consumed by candidate soak."""
     run_id = str(getattr(args, "run_id", "") or "").strip()
     if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z", run_id) is None:
@@ -2471,18 +2733,72 @@ def build_candidate_journeys(args):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         enrolled = False
         try:
-            await _candidate_control_json(
-                args,
-                "POST",
-                collection_url,
-                {
-                    "clientId": args.client_id,
-                    "journeyId": journey_id,
-                    "ttlSec": 3600,
-                    "journeyType": name,
-                    "proofProfile": "candidate-lifecycle",
-                },
-            )
+            semantic_proof = None
+            semantic_key = None
+            quiet_mode = None
+            if name == "bargein" and isinstance(protected_input, _CandidateProtectedInput):
+                semantic_key = bytearray(secrets.token_bytes(32))
+                initial_expected = protected_input.initial_expected
+                newest_expected = protected_input.newest_expected
+                semantic_proof = {
+                    "version": _CANDIDATE_INTENT_VERSION,
+                    "hmacKeyBase64": base64.b64encode(semantic_key).decode("ascii"),
+                    "intentPlan": [
+                        {
+                            "slot": 1,
+                            "role": "initial",
+                            "expectedMac": hmac.new(
+                                semantic_key,
+                                initial_expected,
+                                hashlib.sha256,
+                            ).hexdigest(),
+                        },
+                        {
+                            "slot": 2,
+                            "role": "newest",
+                            "expectedMac": hmac.new(
+                                semantic_key,
+                                newest_expected,
+                                hashlib.sha256,
+                            ).hexdigest(),
+                        },
+                    ],
+                }
+                initial_expected = None
+                newest_expected = None
+            elif name == "quiet" and isinstance(protected_input, _CandidateProtectedInput):
+                quiet_mode = "silence" if index == 1 else "robot_speaking"
+                semantic_proof = {
+                    "version": "google-live-candidate-quiet.v1",
+                    "mode": quiet_mode,
+                }
+            enrollment_payload = {
+                "clientId": args.client_id,
+                "journeyId": journey_id,
+                "ttlSec": 3600,
+                "journeyType": name,
+                "proofProfile": "candidate-lifecycle",
+            }
+            if semantic_proof is not None:
+                enrollment_payload["semanticProof"] = semantic_proof
+            try:
+                await _candidate_control_json(
+                    args,
+                    "POST",
+                    collection_url,
+                    enrollment_payload,
+                )
+            finally:
+                if semantic_key is not None:
+                    for offset in range(len(semantic_key)):
+                        semantic_key[offset] = 0
+                    semantic_key = None
+                if isinstance(semantic_proof, dict) and "hmacKeyBase64" in semantic_proof:
+                    semantic_proof["hmacKeyBase64"] = ""
+                    for item in semantic_proof.get("intentPlan", ()):
+                        if isinstance(item, dict):
+                            item["expectedMac"] = ""
+            semantic_proof = None
             enrolled = True
             await _candidate_control_json(
                 args,
@@ -2499,6 +2815,8 @@ def build_candidate_journeys(args):
                 sequence=sequence,
                 journey_id=journey_id,
                 duration_sec=duration_sec,
+                protected_input=protected_input,
+                quiet_mode=quiet_mode,
             )
             driver_result = dict(result) if isinstance(result, Mapping) else None
             embedded_finalize = (
@@ -2537,7 +2855,22 @@ def build_candidate_journeys(args):
             ):
                 raise RuntimeError("candidate log claims are invalid")
             combined = driver_result
+            if isinstance(protected_input, _CandidateProtectedInput) and (
+                dict(analyzer_scope) != dict(finalized["evidenceScope"])
+                or log_evidence.get("candidateIdentity") != _candidate_identity(args)
+                or log_evidence.get("logWindow") != combined.get("logWindow")
+                or log_evidence.get("serverIssued") is not True
+            ):
+                raise RuntimeError("candidate semantic evidence scope is invalid")
             combined["task5LogEvidence"] = log_evidence
+            if isinstance(protected_input, _CandidateProtectedInput):
+                combined.update(
+                    _candidate_semantic_counters(
+                        name, log_evidence, quiet_mode=quiet_mode
+                    )
+                )
+            if name == "quiet" and quiet_mode is not None:
+                combined["quietMode"] = quiet_mode
             trusted_latency = log_evidence.get("journeyLatencyEvidence", {})
             if name in {"conversation", "conversation_after_lesson"}:
                 combined["latencies"] = {
@@ -2569,6 +2902,9 @@ def build_candidate_journeys(args):
                 }
             return [combined] if name == "quiet_padding" else combined
         except BaseException:
+            if semantic_key is not None:
+                for offset in range(len(semantic_key)):
+                    semantic_key[offset] = 0
             if enrolled:
                 try:
                     await asyncio.shield(
@@ -2626,7 +2962,28 @@ async def produce_candidate_evidence(
     if output.exists() or output.is_symlink():
         raise ValueError("candidate evidence output must not already exist")
     identity = _candidate_identity(args)
-    source = journeys if isinstance(journeys, Mapping) else build_candidate_journeys(args)
+    protected_input = None
+    if isinstance(journeys, Mapping):
+        source = journeys
+    else:
+        protected_stream = getattr(args, "candidate_protected_stdin", None)
+        if protected_stream is None:
+            protected_stream = sys.stdin.buffer
+        protected_input = _read_candidate_protected_input(
+            protected_stream,
+            output_paths=tuple(
+                path
+                for path in (
+                    output,
+                    getattr(args, "report", None),
+                    getattr(args, "server_log", None),
+                    getattr(args, "lesson_manifest", None),
+                )
+                if path is not None
+            ),
+            sample_rate=int(getattr(args, "sample_rate", 24000)),
+        )
+        source = build_candidate_journeys(args, protected_input=protected_input)
     executions = []
     padding = []
     cleanup_records = []
@@ -2674,12 +3031,16 @@ async def produce_candidate_evidence(
     )
     recorded["monitor"] = record_monitor
     recorded["cleanup"] = record_cleanup
-    report = await run_candidate_soak(
-        args,
-        journeys=recorded,
-        sample_resources=recorded_sample,
-        clock=clock,
-    )
+    try:
+        report = await run_candidate_soak(
+            args,
+            journeys=recorded,
+            sample_resources=recorded_sample,
+            clock=clock,
+        )
+    finally:
+        if protected_input is not None:
+            protected_input.zeroize()
     if report.get("status") != "PASS" or len(cleanup_records) != 1:
         return report
     manifest = {
@@ -2827,6 +3188,17 @@ def _validated_execution_server_scope(value, *, identity):
     stage = value.get("name")
     if log_proof.get("journeyType") != stage:
         return None
+    if stage in {"bargein", "quiet"}:
+        try:
+            semantic_counters = _candidate_semantic_counters(
+                stage,
+                log_proof,
+                quiet_mode=value.get("quietMode"),
+            )
+        except RuntimeError:
+            return None
+        if any(value.get(field) != expected for field, expected in semantic_counters.items()):
+            return None
     flat_latencies = value.get("latencies")
     proof_latencies = log_proof.get("journeyLatencyEvidence")
     expected_flat_latencies = {}
@@ -4354,6 +4726,10 @@ def _validate_candidate_args(parser, args):
     ]
     if producing:
         required.extend(("evidence_control_url", "server_log", "run_id"))
+        if getattr(args, "inject_audio", None) or getattr(args, "inject_text", None):
+            parser.error(
+                "candidate producer audio and expected text must use protected stdin"
+            )
         secret_name = getattr(args, "evidence_mint_secret_env", "")
         if not isinstance(secret_name, str) or not secret_name or not os.environ.get(
             secret_name

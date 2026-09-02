@@ -1,5 +1,7 @@
 import asyncio
+import io
 import json
+import wave
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,6 +20,32 @@ from scripts.google_live_robot_soak import (
     run_candidate_soak,
     run_soak,
 )
+
+
+def _write_pcm_wav(path, *, sample_rate=24000):
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(b"\0\0" * 960)
+
+
+def _protected_candidate_input(tmp_path):
+    initial = tmp_path / "initial.wav"
+    newest = tmp_path / "newest.wav"
+    trigger = tmp_path / "trigger.wav"
+    for path in (initial, newest, trigger):
+        _write_pcm_wav(path)
+    document = {
+        "bargein": {
+            "initialAudioPath": str(initial),
+            "initialExpected": "PRIVATE INITIAL INTENT",
+            "newestAudioPath": str(newest),
+            "newestExpected": "PRIVATE NEWEST INTENT",
+        },
+        "robotSpeaking": {"triggerAudioPath": str(trigger)},
+    }
+    return io.BytesIO(json.dumps(document).encode()), document
 
 IDENTITY = {
     "gitSha": "candidate-sha",
@@ -125,7 +153,29 @@ def _refresh_execution_contract(result):
         result["task5LogEvidence"]["journeyLatencyEvidence"] = {
             "reconnectRecoveryMs": 1000.0
         }
+    elif result["name"] == "quiet":
+        mode = result.get("quietMode")
+        response_count = 0 if mode == "silence" else 1
+        result["task5LogEvidence"]["candidateSemanticEvidence"] = {
+            "status": "PASS",
+            "kind": "quiet",
+            "mode": mode,
+            "falseInterrupts": 0,
+            "responseStarts": response_count,
+            "responseEnds": response_count,
+            "replacements": 0,
+            "fallbacks": 0,
+        }
     if result["name"] == "bargein":
+        result["task5LogEvidence"]["candidateSemanticEvidence"] = {
+            "status": "PASS",
+            "kind": "bargein-intent",
+            "initialSlotMatched": True,
+            "newestSlotMatched": True,
+            "orderingValid": True,
+            "latestIntentMatched": True,
+            "replacementOwnedByNewestGeneration": True,
+        }
         result["task5LogEvidence"]["correlation"] = {
             "status": "PASS",
             "cancelledResponseId": cancelled_id,
@@ -335,6 +385,8 @@ def _journeys(*, mutation=None):
             "unexpectedFallbacks": 0,
             "latencies": {},
         }
+        if name == "quiet":
+            result["quietMode"] = "silence" if index == 1 else "robot_speaking"
         _refresh_execution_contract(result)
         if name in {"conversation", "conversation_after_lesson"}:
             result["latencies"] = {"firstAudioMs": [1000]}
@@ -593,7 +645,7 @@ def test_candidate_soak_runs_fixed_sequence_and_meets_production_budgets():
     assert "raw child" not in json.dumps(report).lower()
 
 
-def test_candidate_soak_accepts_minimum_latest_intent_rate():
+def test_candidate_soak_rejects_client_mutation_below_exact_semantic_evidence():
     report = _run(
         journeys=_journeys(
             mutation=lambda result, _sequence, name, index, _label: (
@@ -604,9 +656,10 @@ def test_candidate_soak_accepts_minimum_latest_intent_rate():
         )
     )
 
-    assert report["status"] == "PASS"
-    assert report["totals"]["latestIntentSuccesses"] == 8
-    assert report["totals"]["latestIntentSuccessRate"] == 0.8
+    assert report["status"] == "FAIL"
+    assert "EXECUTION_SERVER_SCOPE_INVALID" in {
+        failure["code"] for failure in report["failures"]
+    }
 
 
 @pytest.mark.parametrize(
@@ -2811,6 +2864,111 @@ def test_candidate_producer_factory_has_only_consumed_journey_keys():
     }
 
 
+def test_candidate_protected_input_is_exact_private_json_with_distinct_safe_fixtures(tmp_path):
+    stream, private = _protected_candidate_input(tmp_path)
+    output = tmp_path / "evidence.json"
+
+    protected = robot_soak._read_candidate_protected_input(
+        stream,
+        output_paths=(output,),
+        sample_rate=24000,
+    )
+
+    assert protected.bargein_initial.label == "bargein/initial"
+    assert protected.bargein_newest.label == "bargein/newest"
+    assert protected.robot_speaking.label == "robot_speaking/trigger"
+    rendered = repr(protected)
+    assert private["bargein"]["initialExpected"] not in rendered
+    assert private["bargein"]["newestExpected"] not in rendered
+
+
+@pytest.mark.parametrize("mutation", ["missing", "unknown", "symlink", "duplicate", "bad_wav", "output_alias"])
+def test_candidate_protected_input_fails_closed_for_unsafe_documents(tmp_path, mutation):
+    stream, document = _protected_candidate_input(tmp_path)
+    output = tmp_path / "evidence.json"
+    if mutation == "missing":
+        stream = io.BytesIO(b"")
+    elif mutation == "unknown":
+        document["unexpected"] = True
+        stream = io.BytesIO(json.dumps(document).encode())
+    elif mutation == "symlink":
+        alias = tmp_path / "alias.wav"
+        alias.symlink_to(tmp_path / "initial.wav")
+        document["bargein"]["initialAudioPath"] = str(alias)
+        stream = io.BytesIO(json.dumps(document).encode())
+    elif mutation == "duplicate":
+        document["bargein"]["newestAudioPath"] = document["bargein"]["initialAudioPath"]
+        stream = io.BytesIO(json.dumps(document).encode())
+    elif mutation == "bad_wav":
+        bad = tmp_path / "bad.wav"
+        bad.write_bytes(b"not-wave")
+        document["robotSpeaking"]["triggerAudioPath"] = str(bad)
+        stream = io.BytesIO(json.dumps(document).encode())
+    elif mutation == "output_alias":
+        output = tmp_path / "initial.wav"
+
+    with pytest.raises(ValueError, match="protected candidate input"):
+        robot_soak._read_candidate_protected_input(
+            stream,
+            output_paths=(output,),
+            sample_rate=24000,
+        )
+
+
+def test_candidate_semantic_verdicts_are_derived_only_from_exact_bound_analyzer():
+    bargein = robot_soak._candidate_semantic_counters(
+        "bargein",
+        {
+            "status": "PASS",
+            "candidateSemanticEvidence": {
+                "status": "PASS",
+                "kind": "bargein-intent",
+                "initialSlotMatched": True,
+                "newestSlotMatched": True,
+                "orderingValid": True,
+                "latestIntentMatched": True,
+                "replacementOwnedByNewestGeneration": True,
+            },
+        },
+    )
+    quiet = robot_soak._candidate_semantic_counters(
+        "quiet",
+        {
+            "status": "PASS",
+            "candidateSemanticEvidence": {
+                "status": "PASS",
+                "kind": "quiet",
+                "mode": "silence",
+                "falseInterrupts": 0,
+                "responseStarts": 0,
+                "responseEnds": 0,
+                "replacements": 0,
+                "fallbacks": 0,
+            },
+        },
+        quiet_mode="silence",
+    )
+
+    assert bargein == {"latestIntentSuccesses": 1, "falseInterrupts": 0}
+    assert quiet == {"latestIntentSuccesses": 0, "falseInterrupts": 0}
+    with pytest.raises(RuntimeError, match="semantic evidence"):
+        robot_soak._candidate_semantic_counters(
+            "bargein",
+            {
+                "status": "PASS",
+                "candidateSemanticEvidence": {
+                    "status": "PASS",
+                    "kind": "bargein-intent",
+                    "initialSlotMatched": True,
+                    "newestSlotMatched": True,
+                    "orderingValid": True,
+                    "latestIntentMatched": False,
+                    "replacementOwnedByNewestGeneration": True,
+                },
+            },
+        )
+
+
 def test_candidate_factory_enrolls_binds_runs_finalizes_then_analyzes(tmp_path):
     events = []
 
@@ -3088,6 +3246,111 @@ def test_candidate_factory_posts_exact_lifecycle_claims_for_all_33_executions(
     assert "hmac" not in encoded
     assert "key" not in encoded
     assert "mac" not in encoded
+
+
+def test_candidate_factory_posts_fresh_semantic_plans_and_derives_safe_verdicts(tmp_path):
+    stream, private = _protected_candidate_input(tmp_path)
+    protected = robot_soak._read_candidate_protected_input(
+        stream,
+        output_paths=(tmp_path / "evidence.json",),
+        sample_rate=24000,
+    )
+    posts = []
+
+    async def control(method, url, payload=None):
+        if method == "POST" and isinstance(payload, dict) and "clientId" in payload:
+            posts.append(deepcopy(payload))
+        if url.endswith("/finalize"):
+            body = posts[-1]
+            return _candidate_finalize(
+                _candidate_scope(body["journeyId"], body["journeyType"])
+            )
+        return {"status": "PASS"}
+
+    async def driver(_args, **context):
+        scope = _candidate_scope(context["journey_id"], context["name"])
+        return {
+            "name": context["name"],
+            "status": "PASS",
+            "evidenceScope": scope,
+            "logWindow": {
+                "windowId": context["journey_id"],
+                "start": scope["serverStartUtc"],
+                "end": "2026-08-31T10:01:00+00:00",
+            },
+            "latestIntentSuccesses": 0,
+            "falseInterrupts": 99,
+        }
+
+    async def analyzer(*, journey_id, **_kwargs):
+        stage = posts[-1]["journeyType"]
+        semantic = (
+            {
+                "status": "PASS",
+                "kind": "bargein-intent",
+                "initialSlotMatched": True,
+                "newestSlotMatched": True,
+                "orderingValid": True,
+                "latestIntentMatched": True,
+                "replacementOwnedByNewestGeneration": True,
+            }
+            if stage == "bargein"
+            else {
+                "status": "PASS",
+                "kind": "quiet",
+                "mode": "silence",
+                "falseInterrupts": 0,
+                "responseStarts": 0,
+                "responseEnds": 0,
+                "replacements": 0,
+                "fallbacks": 0,
+            }
+        )
+        return {
+            "name": "google_live_log_reliability",
+            "status": "PASS",
+            "journeyType": stage,
+            "candidateIdentity": IDENTITY,
+            "serverIssued": True,
+            "evidenceScope": _candidate_scope(journey_id, stage),
+            "logWindow": {
+                "windowId": journey_id,
+                "start": "2026-08-31T10:00:00+00:00",
+                "end": "2026-08-31T10:01:00+00:00",
+            },
+            "candidateSemanticEvidence": semantic,
+            "journeyLatencyEvidence": {},
+        }
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=control,
+        candidate_journey_driver=driver,
+        candidate_log_analyzer=analyzer,
+    )
+    journeys = build_candidate_journeys(args, protected_input=protected)
+
+    bargein = asyncio.run(journeys["bargein"](args, name="bargein", index=1))
+    asyncio.run(journeys["bargein"](args, name="bargein", index=2))
+    quiet = asyncio.run(journeys["quiet"](args, name="quiet", index=1))
+
+    intent = posts[0]["semanticProof"]
+    assert intent["version"] == "google-live-candidate-intent-nfkc-casefold.v1"
+    assert [item["role"] for item in intent["intentPlan"]] == ["initial", "newest"]
+    assert private["bargein"]["initialExpected"] not in json.dumps(posts)
+    assert private["bargein"]["newestExpected"] not in json.dumps(posts)
+    assert posts[0]["semanticProof"]["hmacKeyBase64"] != posts[1]["semanticProof"]["hmacKeyBase64"]
+    assert posts[2]["semanticProof"] == {
+        "version": "google-live-candidate-quiet.v1",
+        "mode": "silence",
+    }
+    assert bargein["latestIntentSuccesses"] == 1
+    assert quiet["falseInterrupts"] == 0
+    assert quiet["quietMode"] == "silence"
 
 
 def test_candidate_factory_monitor_uses_enrolled_lifecycle_window(tmp_path):

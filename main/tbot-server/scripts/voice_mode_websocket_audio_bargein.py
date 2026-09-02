@@ -134,6 +134,20 @@ def _opus_packets(sample_rate, frame_duration_ms, duration_sec, rms):
     return packets
 
 
+def _opus_packets_from_pcm(pcm, sample_rate, frame_duration_ms):
+    encoder = OpusEncoderUtils(sample_rate, 1, frame_duration_ms)
+    packets = []
+    try:
+        encoder.encode_pcm_to_opus_stream(
+            pcm,
+            end_of_stream=True,
+            callback=packets.append,
+        )
+    finally:
+        encoder.close()
+    return packets
+
+
 def _opus_packets_from_audio_file(audio_file, sample_rate, frame_duration_ms):
     encoder = OpusEncoderUtils(sample_rate, 1, frame_duration_ms)
     packets = []

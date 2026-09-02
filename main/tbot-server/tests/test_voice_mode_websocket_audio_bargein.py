@@ -32,6 +32,27 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         ):
             audio_bargein._queued_receive_count(SimpleNamespace())
 
+    def test_opus_packets_from_validated_pcm_uses_existing_encoder_path(self):
+        audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
+        packets = []
+
+        class Encoder:
+            def __init__(self, sample_rate, channels, frame_duration_ms):
+                self.args = (sample_rate, channels, frame_duration_ms)
+
+            def encode_pcm_to_opus_stream(self, pcm, *, end_of_stream, callback):
+                self.pcm = pcm
+                self.end_of_stream = end_of_stream
+                callback(b"opus")
+
+            def close(self):
+                self.closed = True
+
+        with patch.object(audio_bargein, "OpusEncoderUtils", Encoder):
+            packets = audio_bargein._opus_packets_from_pcm(b"\0\0", 24000, 60)
+
+        self.assertEqual(packets, [b"opus"])
+
     def test_cli_pending_transport_evidence_is_blocking_and_never_prints_ok(self):
         audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
         stdout = io.StringIO()
