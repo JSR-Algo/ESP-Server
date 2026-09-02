@@ -2996,6 +2996,59 @@ def test_candidate_plan_seal_failure_zeroizes_prior_plans_and_all_private_input(
     )
 
 
+@pytest.mark.parametrize("failure", ["initial_hmac", "newest_hmac", "constructor"])
+def test_candidate_plan_seal_zeroizes_untransferred_current_key(tmp_path, monkeypatch, failure):
+    stream, _private = _protected_candidate_input(tmp_path)
+    protected = robot_soak._read_candidate_protected_input(
+        stream, output_paths=(), sample_rate=24000
+    )
+    keys = []
+    macs = []
+
+    def new_key():
+        key = bytearray(bytes([len(keys) + 1]) * 32)
+        keys.append(key)
+        return key
+
+    hmac_calls = 0
+    original_hmac = robot_soak._candidate_hmac_hex
+
+    def failing_hmac(key, value):
+        nonlocal hmac_calls
+        hmac_calls += 1
+        if (failure == "initial_hmac" and hmac_calls == 3) or (
+            failure == "newest_hmac" and hmac_calls == 4
+        ):
+            raise RuntimeError("injected hmac failure")
+        mac = original_hmac(key, value)
+        macs.append(mac)
+        return mac
+
+    original_plan = robot_soak._SealedBargeinPlan
+    constructor_calls = 0
+
+    def failing_plan(*args, **kwargs):
+        nonlocal constructor_calls
+        constructor_calls += 1
+        if failure == "constructor" and constructor_calls == 2:
+            raise RuntimeError("injected constructor failure")
+        return original_plan(*args, **kwargs)
+
+    monkeypatch.setattr(robot_soak, "_new_candidate_semantic_key", new_key)
+    monkeypatch.setattr(robot_soak, "_candidate_hmac_hex", failing_hmac)
+    monkeypatch.setattr(robot_soak, "_SealedBargeinPlan", failing_plan)
+
+    with pytest.raises(RuntimeError, match="injected"):
+        protected.seal_bargein_plans(10)
+
+    assert keys
+    assert all(not any(key) for key in keys)
+    assert all(not any(mac) for mac in macs)
+    assert protected.bargein_plans == []
+    assert protected.initial_expected is None
+    assert protected.newest_expected is None
+
+
 def test_candidate_producer_cancellation_zeroizes_all_remaining_sealed_plans(tmp_path, monkeypatch):
     stream, _private = _protected_candidate_input(tmp_path)
     protected = robot_soak._read_candidate_protected_input(
@@ -3050,6 +3103,38 @@ def test_candidate_wav_oversize_is_rejected_before_readframes(tmp_path):
             robot_soak._read_protected_wav(
                 fixture, sample_rate=24000, label="bargein/initial"
             )
+
+
+@pytest.mark.parametrize(
+    "relative_target",
+    [
+        "executions/01-conversation.json",
+        "executions/34-quiet_padding.json",
+        "cleanup/candidate-soak.20260831T100000Z.34.json",
+    ],
+)
+def test_candidate_protected_fixture_cannot_alias_any_future_generated_output(
+    tmp_path, relative_target
+):
+    output = tmp_path / "manifest.json"
+    target = tmp_path / relative_target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _write_pcm_wav(target)
+    stream, document = _protected_candidate_input(tmp_path)
+    document["bargein"]["initialAudioPath"] = str(target)
+    stream = io.BytesIO(json.dumps(document).encode())
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=output,
+        maximum_padding_windows=60,
+    )
+
+    with pytest.raises(ValueError, match="output alias"):
+        robot_soak._read_candidate_protected_input(
+            stream,
+            output_paths=robot_soak._candidate_generated_output_paths(args, output),
+            sample_rate=24000,
+        )
 
 
 @pytest.mark.parametrize("duration", [0, -1, float("nan"), float("inf"), 601])

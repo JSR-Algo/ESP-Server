@@ -189,6 +189,24 @@ class _SealedBargeinPlan:
                 private[offset] = 0
 
 
+def _new_candidate_semantic_key():
+    return bytearray(secrets.token_bytes(32))
+
+
+def _candidate_hmac_hex(key, value):
+    digest = bytearray(hmac.new(key, value, hashlib.sha256).digest())
+    rendered = bytearray(len(digest) * 2)
+    alphabet = b"0123456789abcdef"
+    try:
+        for index, item in enumerate(digest):
+            rendered[index * 2] = alphabet[item >> 4]
+            rendered[index * 2 + 1] = alphabet[item & 0x0F]
+        return rendered
+    finally:
+        for index in range(len(digest)):
+            digest[index] = 0
+
+
 @dataclass(slots=True)
 class _CandidateProtectedInput:
     bargein_initial: _ProtectedAudioFixture
@@ -205,22 +223,26 @@ class _CandidateProtectedInput:
             raise ValueError("protected candidate input expectations are unavailable")
         try:
             for _index in range(count):
-                key = bytearray(secrets.token_bytes(32))
-                self.bargein_plans.append(
-                    _SealedBargeinPlan(
+                key = _new_candidate_semantic_key()
+                initial_mac = None
+                newest_mac = None
+                transferred = False
+                try:
+                    initial_mac = _candidate_hmac_hex(key, self.initial_expected)
+                    newest_mac = _candidate_hmac_hex(key, self.newest_expected)
+                    plan = _SealedBargeinPlan(
                         key=key,
-                        initial_mac=bytearray(
-                            hmac.new(key, self.initial_expected, hashlib.sha256)
-                            .hexdigest()
-                            .encode("ascii")
-                        ),
-                        newest_mac=bytearray(
-                            hmac.new(key, self.newest_expected, hashlib.sha256)
-                            .hexdigest()
-                            .encode("ascii")
-                        ),
+                        initial_mac=initial_mac,
+                        newest_mac=newest_mac,
                     )
-                )
+                    self.bargein_plans.append(plan)
+                    transferred = True
+                finally:
+                    if not transferred:
+                        for private in (key, initial_mac, newest_mac):
+                            if private is not None:
+                                for offset in range(len(private)):
+                                    private[offset] = 0
         except BaseException:
             self.zeroize()
             raise
@@ -284,8 +306,7 @@ def _open_regular_nofollow(path: Path) -> int:
     return descriptor
 
 
-def _read_protected_wav(path: Path, *, sample_rate: int, label: str):
-    descriptor = _open_regular_nofollow(path)
+def _read_protected_wav_descriptor(descriptor, *, path, sample_rate, label):
     try:
         identity = (os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino)
         with os.fdopen(os.dup(descriptor), "rb") as raw:
@@ -313,12 +334,53 @@ def _read_protected_wav(path: Path, *, sample_rate: int, label: str):
         return _ProtectedAudioFixture(label=label, pcm=bytearray(pcm)), identity
     except (OSError, EOFError, wave.Error) as exc:
         raise ValueError("protected candidate input fixture is invalid") from exc
+
+
+def _read_protected_wav(path: Path, *, sample_rate: int, label: str):
+    descriptor = _open_regular_nofollow(path)
+    try:
+        return _read_protected_wav_descriptor(
+            descriptor, path=path, sample_rate=sample_rate, label=label
+        )
     finally:
         os.close(descriptor)
 
 
+def _candidate_generated_output_paths(args, output):
+    output = Path(output)
+    root = output.parent
+    run_id = str(getattr(args, "run_id", "") or "")
+    paths = {
+        output,
+        *(Path(value) for value in (
+            getattr(args, "report", None),
+            getattr(args, "server_log", None),
+            getattr(args, "lesson_manifest", None),
+        ) if isinstance(value, (str, os.PathLike))),
+    }
+    sequence = 0
+    for stage, count in _CANDIDATE_STAGE_COUNTS:
+        for _index in range(count):
+            sequence += 1
+            paths.add(root / "executions" / f"{sequence:02d}-{stage}.json")
+    maximum_padding = int(getattr(args, "maximum_padding_windows", 60))
+    for padding_index in range(0, maximum_padding + 1):
+        padding_sequence = sequence + padding_index
+        if padding_index:
+            paths.add(
+                root / "executions" / f"{padding_sequence:02d}-quiet_padding.json"
+            )
+        paths.add(
+            root
+            / "cleanup"
+            / f"candidate-soak.{run_id}.{padding_sequence}.json"
+        )
+    return tuple(sorted(paths, key=lambda path: str(path)))
+
+
 def _read_candidate_protected_input(stream, *, output_paths, sample_rate):
     fixtures = []
+    descriptors = []
     try:
         raw = stream.read(_MAX_PROTECTED_INPUT_BYTES + 1)
         if not raw:
@@ -342,15 +404,25 @@ def _read_candidate_protected_input(stream, *, output_paths, sample_rate):
         if any(not isinstance(value, str) or not value for value in values):
             raise ValueError("protected candidate input schema is invalid")
         identities = []
-        for label, value in (
+        source_specs = (
             ("bargein/initial", bargein["initialAudioPath"]),
             ("bargein/newest", bargein["newestAudioPath"]),
             ("robot_speaking/trigger", speaking["triggerAudioPath"]),
+        )
+        output_paths = tuple(Path(path) for path in output_paths)
+        normalized_outputs = {
+            os.path.abspath(os.fspath(path)) for path in output_paths
+        }
+        if any(
+            os.path.abspath(os.fspath(Path(value))) in normalized_outputs
+            for _label, value in source_specs
         ):
-            fixture, identity = _read_protected_wav(
-                Path(value), sample_rate=sample_rate, label=label
-            )
-            fixtures.append(fixture)
+            raise ValueError("protected candidate input output alias detected")
+        for _label, value in source_specs:
+            descriptor = _open_regular_nofollow(Path(value))
+            descriptors.append(descriptor)
+            opened = os.fstat(descriptor)
+            identity = (opened.st_dev, opened.st_ino)
             identities.append(identity)
         if len(set(identities)) != len(identities):
             raise ValueError("protected candidate input fixture alias detected")
@@ -363,6 +435,16 @@ def _read_candidate_protected_input(stream, *, output_paths, sample_rate):
                 continue
             if (output_stat.st_dev, output_stat.st_ino) in identities:
                 raise ValueError("protected candidate input output alias detected")
+        for (label, value), descriptor in zip(
+            source_specs, descriptors, strict=True
+        ):
+            fixture, _identity = _read_protected_wav_descriptor(
+                descriptor,
+                path=Path(value),
+                sample_rate=sample_rate,
+                label=label,
+            )
+            fixtures.append(fixture)
         initial_expected = _normalize_candidate_intent(bargein["initialExpected"])
         newest_expected = _normalize_candidate_intent(bargein["newestExpected"])
         if not initial_expected or not newest_expected:
@@ -387,6 +469,9 @@ def _read_candidate_protected_input(stream, *, output_paths, sample_rate):
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
         raise ValueError("protected candidate input is invalid") from exc
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
 
 
 def _normalize_candidate_intent(value):
@@ -3100,16 +3185,7 @@ async def produce_candidate_evidence(
             protected_stream = sys.stdin.buffer
         protected_input = _read_candidate_protected_input(
             protected_stream,
-            output_paths=tuple(
-                path
-                for path in (
-                    output,
-                    getattr(args, "report", None),
-                    getattr(args, "server_log", None),
-                    getattr(args, "lesson_manifest", None),
-                )
-                if path is not None
-            ),
+            output_paths=_candidate_generated_output_paths(args, output),
             sample_rate=int(getattr(args, "sample_rate", 24000)),
         )
         source = build_candidate_journeys(args, protected_input=protected_input)
