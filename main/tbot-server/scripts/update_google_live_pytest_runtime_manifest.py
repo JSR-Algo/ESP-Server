@@ -30,29 +30,31 @@ def build_manifest(repo_root: Path) -> dict[str, object]:
         package_root = Path(installed.locate_file("")).resolve(strict=True)
         packages = sorted(_PYTEST_DISTRIBUTION_PACKAGES[name])
         files = []
-        for package in packages:
-            root = package_root / package
-            if root.is_symlink() or not root.is_dir():
-                raise RuntimeError("pytest package root is invalid")
-            for path in sorted(root.rglob("*")):
-                if path.is_symlink():
-                    raise RuntimeError("pytest package alias detected")
-                if path.is_dir() or "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
-                    continue
-                opened = path.stat(follow_symlinks=False)
-                if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
-                    raise RuntimeError("pytest package file is invalid")
-                if path.suffix.lower() in {".so", ".dylib", ".dll", ".pyd"}:
-                    raise RuntimeError("platform-specific pytest runtime requires an explicit section")
-                files.append(
-                    {
-                        "path": path.relative_to(package_root).as_posix(),
-                        "sha256": _sha256(path),
-                    }
-                )
+        import_names = set(packages)
+        for owned_path in sorted(installed.files or (), key=str):
+            if "__pycache__" in owned_path.parts or owned_path.suffix in {".pyc", ".pyo"}:
+                continue
+            path = Path(installed.locate_file(owned_path))
+            try:
+                relative = path.resolve(strict=True).relative_to(package_root)
+            except ValueError:
+                continue
+            if any(part.endswith(".dist-info") for part in relative.parts):
+                continue
+            if path.is_symlink():
+                raise RuntimeError("pytest package alias detected")
+            opened = path.stat(follow_symlinks=False)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+                raise RuntimeError("pytest package file is invalid")
+            if path.suffix.lower() in {".so", ".dylib", ".dll", ".pyd"}:
+                raise RuntimeError("platform-specific pytest runtime requires an explicit section")
+            if len(relative.parts) == 1 and path.suffix in {".py", ".pyi"}:
+                import_names.add(path.stem)
+            files.append({"path": relative.as_posix(), "sha256": _sha256(path)})
         distributions.append(
             {
                 "files": sorted(files, key=lambda item: item["path"]),
+                "importNames": sorted(import_names),
                 "name": name,
                 "packages": packages,
                 "version": installed.version,
