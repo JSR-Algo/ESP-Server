@@ -105,6 +105,7 @@ def run_assignment_bounded_command(
     exit_events = None
     process = None
     buffers = {}
+    pending_exception: BaseException | None = None
     try:
         selector = selectors.DefaultSelector()
         exit_events = select.kqueue()
@@ -151,15 +152,25 @@ def run_assignment_bounded_command(
                     break
             if error:
                 break
-    except BaseException:
+    except BaseException as caught:
         if process is None:
             raise
         error = "containment"
+        if not isinstance(caught, Exception):
+            pending_exception = caught
     finally:
         try:
             if process is not None:
-                if not _terminate_assignment_process_group(process.pid):
+                try:
+                    if not _terminate_assignment_process_group(process.pid):
+                        error = "containment"
+                except BaseException as caught:
                     error = "containment"
+                    if not isinstance(caught, Exception) and pending_exception is None:
+                        pending_exception = caught
+                    if process.returncode is None:
+                        with contextlib.suppress(OSError):
+                            os.killpg(process.pid, signal.SIGKILL)
                 # Reap before the final non-signaling absence proof.
                 try:
                     returncode = process.wait(timeout=1)
@@ -171,17 +182,24 @@ def run_assignment_bounded_command(
                     except (OSError, subprocess.TimeoutExpired):
                         error = "containment"
                     returncode = process.returncode
-                if not _assignment_process_group_absent_after_reap(process.pid):
+                try:
+                    if not _assignment_process_group_absent_after_reap(process.pid):
+                        error = "containment"
+                except BaseException as caught:
                     error = "containment"
-        except BaseException:
+                    if not isinstance(caught, Exception) and pending_exception is None:
+                        pending_exception = caught
+        except BaseException as caught:
             if process is not None and process.returncode is None:
                 with contextlib.suppress(ProcessLookupError):
-                    process.kill()
+                    os.killpg(process.pid, signal.SIGKILL)
                 with contextlib.suppress(OSError, subprocess.TimeoutExpired):
                     process.wait(timeout=1)
             if process is not None:
                 returncode = process.returncode
                 error = "containment"
+            if not isinstance(caught, Exception) and pending_exception is None:
+                pending_exception = caught
         finally:
             if process is not None:
                 if process.stdout is not None:
@@ -196,6 +214,8 @@ def run_assignment_bounded_command(
             if selector is not None:
                 with contextlib.suppress(Exception):
                     selector.close()
+    if pending_exception is not None:
+        raise pending_exception
     if process is None:
         return _manifest.BoundedCommandResult(None, "", "containment")
     stdout = bytes(buffers[process.stdout]).decode("utf-8", errors="replace")
@@ -660,7 +680,7 @@ class AssignmentRuntimeCapsule:
                 root, identity, descriptor,
                 runtime_root, runtime_identity, runtime_descriptor,
             )
-        except Exception:
+        except BaseException:
             if runtime_descriptor is not None:
                 os.close(runtime_descriptor)
             if descriptor is not None:
@@ -708,7 +728,7 @@ class AssignmentRuntimeCapsule:
         )
         if owner_actual != self.root or runtime_actual != self.runtime_root:
             self._retained_path = (
-                owner_actual if owner_actual != self.root else runtime_actual
+                owner_actual if owner_actual != self.root else self.root
             ) or self.root
             if self.runtime_descriptor is not None:
                 os.close(self.runtime_descriptor)

@@ -1590,6 +1590,22 @@ def test_assignment_runtime_capsule_rejects_path_replacement(
     capsule.root.rmdir()
 
 
+def test_assignment_runtime_capsule_nested_runtime_replacement_reports_owner_root() -> None:
+    capsule = gate.AssignmentRuntimeCapsule.create(())
+    original_remove = gate._remove_owned_tree
+    moved = capsule.runtime_root.with_name("runtime-moved")
+    capsule.runtime_root.rename(moved)
+    capsule.runtime_root.mkdir(mode=0o700)
+    try:
+        assert capsule.usable() is False
+        assert capsule.cleanup() is False
+        assert capsule.retained_path() == capsule.root
+        assert moved.is_dir()
+        assert capsule.runtime_root.is_dir()
+    finally:
+        original_remove(capsule.root, capsule.identity)
+
+
 def test_assignment_runtime_capsule_usable_rejects_swap_during_path_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1714,6 +1730,54 @@ def test_assignment_runtime_capsule_post_open_failure_closes_exact_descriptor(
         os.fstat(descriptors[0])
     assert caught.value.errno == errno.EBADF
     assert roots and all(not root.exists() for root in roots)
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_assignment_runtime_capsule_create_cleans_up_after_base_exception(
+    monkeypatch: pytest.MonkeyPatch, interrupt: type[BaseException],
+) -> None:
+    roots: list[Path] = []
+    descriptors: list[int] = []
+    original_mkdtemp = gate.tempfile.mkdtemp
+    original_remove = gate._remove_owned_tree
+
+    def record_mkdtemp(*args, **kwargs) -> str:
+        root = Path(original_mkdtemp(*args, **kwargs))
+        roots.append(root)
+        return str(root)
+
+    def interrupt_construction(
+        self,
+        _root: Path,
+        _identity: tuple[int, int],
+        descriptor: int,
+        _runtime_root: Path,
+        _runtime_identity: tuple[int, int],
+        runtime_descriptor: int,
+        *_args,
+        **_kwargs,
+    ) -> None:
+        descriptors.extend((descriptor, runtime_descriptor))
+        raise interrupt()
+
+    monkeypatch.setattr(gate.tempfile, "mkdtemp", record_mkdtemp)
+    monkeypatch.setattr(gate.AssignmentRuntimeCapsule, "__init__", interrupt_construction)
+    try:
+        with pytest.raises(interrupt):
+            gate.AssignmentRuntimeCapsule.create(())
+
+        assert roots and all(not root.exists() for root in roots)
+        assert len(descriptors) == 2
+        for descriptor in descriptors:
+            with pytest.raises(OSError) as caught:
+                os.fstat(descriptor)
+            assert caught.value.errno == errno.EBADF
+    finally:
+        for descriptor in descriptors:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        for root in roots:
+            original_remove(root)
 
 
 def _stateful_assignment_lane(name: str, code: str) -> gate.Lane:
@@ -2225,6 +2289,75 @@ def test_assignment_runner_reaps_group_and_closes_fds_after_runtime_exception(
             with pytest.raises(OSError) as caught:
                 os.fstat(descriptor)
             assert caught.value.errno == errno.EBADF
+    finally:
+        if processes and processes[0].returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(processes[0].pid, signal.SIGKILL)
+            processes[0].wait()
+        if child_pid is None and child_pid_file.exists():
+            child_pid = _wait_for_pid_file(child_pid_file)
+        if child_pid is not None and not _pid_is_absent(child_pid):
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child_pid, signal.SIGKILL)
+
+
+@pytest.mark.parametrize("failure_source", ["terminate", "absence"])
+def test_assignment_runner_reraises_teardown_interrupt_after_group_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_source: str,
+) -> None:
+    child_pid_file = tmp_path / f"{failure_source}-child.pid"
+    processes: list[subprocess.Popen] = []
+    original_popen = gate.subprocess.Popen
+    original_terminate = gate._terminate_assignment_process_group
+    original_absence = gate._assignment_process_group_absent_after_reap
+
+    class TeardownInterrupt(KeyboardInterrupt):
+        pass
+
+    def record_popen(*args, **kwargs):
+        process = original_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    def interrupt_terminate(process_group: int) -> bool:
+        _wait_for_pid_file(child_pid_file)
+        raise TeardownInterrupt("terminate interrupt")
+
+    def interrupt_absence(process_group: int) -> bool:
+        assert original_absence(process_group) is True
+        raise TeardownInterrupt("absence interrupt")
+
+    monkeypatch.setattr(gate.subprocess, "Popen", record_popen)
+    monkeypatch.setattr(
+        gate,
+        "_terminate_assignment_process_group",
+        interrupt_terminate if failure_source == "terminate" else original_terminate,
+    )
+    monkeypatch.setattr(
+        gate,
+        "_assignment_process_group_absent_after_reap",
+        interrupt_absence if failure_source == "absence" else original_absence,
+    )
+    child_code = "import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(10)"
+    leader_code = (
+        "import subprocess,sys,time;from pathlib import Path;"
+        f"p=subprocess.Popen([sys.executable,'-c',{child_code!r}],"
+        "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);"
+        f"Path({str(child_pid_file)!r}).write_text(str(p.pid));time.sleep(.1)"
+    )
+    child_pid = None
+    try:
+        with pytest.raises(TeardownInterrupt, match=failure_source):
+            gate.run_assignment_bounded_command(
+                [sys.executable, "-c", leader_code], cwd=tmp_path,
+                timeout_sec=5, max_output_bytes=1024,
+            )
+
+        child_pid = _wait_for_pid_file(child_pid_file)
+        assert processes[0].returncode is not None
+        assert _pid_is_absent(child_pid)
+        with pytest.raises(ProcessLookupError):
+            os.killpg(processes[0].pid, 0)
     finally:
         if processes and processes[0].returncode is None:
             with contextlib.suppress(ProcessLookupError):
