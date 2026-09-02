@@ -241,6 +241,27 @@ def test_release_rejects_tampered_deterministic_support(tmp_path: Path, support_
     assert any(item["code"].startswith("DETERMINISTIC_") for item in verdict["failures"])
 
 
+def test_release_independently_rejects_suite_level_junit_error_even_with_rebound_hashes(
+    tmp_path: Path,
+) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    junit = paths["deterministic_junit"]
+    junit.write_text(
+        junit.read_text(encoding="utf-8").replace(
+            '<testsuite tests="2" failures="0" errors="0" skipped="0">',
+            '<testsuite tests="2" failures="0" errors="1" skipped="0"><error message="session crashed" />',
+        ),
+        encoding="utf-8",
+    )
+    digest = hashlib.sha256(junit.read_bytes()).hexdigest()
+    checksums["deterministic_junit"] = digest
+    _rewrite(paths["deterministic"], lambda report: report["coverageProof"].update(junitSha256=digest))
+    checksums["deterministic"] = hashlib.sha256(paths["deterministic"].read_bytes()).hexdigest()
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+    assert verdict["status"] == "FAIL"
+    assert any(item["code"] == "DETERMINISTIC_SUPPORT_CONTRACT_INVALID" for item in verdict["failures"])
+
+
 @pytest.mark.parametrize("missing_layer", REQUIRED_LAYERS)
 def test_release_fails_closed_for_missing_layer(tmp_path: Path, missing_layer: str) -> None:
     paths, checksums, _ = _write_evidence(tmp_path)
@@ -741,3 +762,44 @@ def test_cli_never_overwrites_deterministic_support_through_output_alias(
     completed = _run_cli(paths, manifest, out)
     assert completed.returncode == 1
     assert support.read_bytes() == original
+
+
+def test_release_atomic_writer_rejects_parent_inode_swap(tmp_path: Path, monkeypatch) -> None:
+    from scripts import google_live_deterministic_evidence as deterministic
+    from scripts import google_live_release_gate as release_gate
+
+    parent = tmp_path / "out"
+    parent.mkdir()
+    evidence_parent = tmp_path / "evidence"
+    evidence_parent.mkdir()
+    evidence = evidence_parent / "release.json"
+    evidence.write_text("evidence", encoding="utf-8")
+    real_match = deterministic._pinned_parent_path_matches
+
+    def swap_then_match(path, ancestry):
+        parent.rename(tmp_path / "moved-out")
+        parent.symlink_to(evidence_parent, target_is_directory=True)
+        return real_match(path, ancestry)
+
+    monkeypatch.setattr(deterministic, "_pinned_parent_path_matches", swap_then_match)
+    with pytest.raises(RuntimeError, match="parent changed"):
+        release_gate._atomic_write(parent / "release.json", "candidate")
+    assert evidence.read_text(encoding="utf-8") == "evidence"
+
+
+def test_release_atomic_writer_rejects_directory_replacement_after_snapshot(
+    tmp_path: Path,
+) -> None:
+    from scripts import google_live_deterministic_evidence as deterministic
+    from scripts import google_live_release_gate as release_gate
+
+    parent = tmp_path / "out"
+    parent.mkdir()
+    output = parent / "release.json"
+    identity = deterministic.snapshot_output_parent(output)
+    parent.rename(tmp_path / "original-out")
+    parent.mkdir()
+    with pytest.raises(RuntimeError, match="parent changed"):
+        release_gate._atomic_write(output, "candidate", identity)
+    assert not output.exists()
+    assert not (tmp_path / "original-out" / "release.json").exists()

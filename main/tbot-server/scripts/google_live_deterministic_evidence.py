@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -108,19 +109,70 @@ def _strict_nonnegative_int(value: str | None, label: str) -> int:
     return int(value)
 
 
-def parse_passing_junit(content: bytes, expected_nodes: Sequence[str]) -> dict[str, int]:
+def _parse_clean_junit(
+    content: bytes,
+    expected_nodes: Sequence[str] | None,
+    *,
+    allow_suite_test_count_mismatch: bool,
+) -> tuple[ET.Element, ET.Element, list[str]]:
     try:
         root = ET.fromstring(content)
     except (ET.ParseError, UnicodeDecodeError) as exc:
         raise ValueError("JUnit XML is invalid") from exc
-    if root.tag not in {"testsuites", "testsuite"}:
-        raise ValueError("JUnit root is invalid")
-    testcases = list(root.iter("testcase"))
+    elements = list(root.iter())
+    allowed_tags = {"testsuites", "testsuite", "testcase", "properties", "property"}
+    if root.tag != "testsuites" or any(element.tag not in allowed_tags for element in elements):
+        raise ValueError("JUnit structure or namespace is invalid")
+    allowed_attributes = {
+        "testsuites": {"name", "tests", "failures", "errors", "skipped"},
+        "testsuite": {
+            "name", "tests", "failures", "errors", "skipped", "time",
+            "timestamp", "hostname",
+        },
+        "testcase": {"classname", "name", "time"},
+        "properties": set(),
+        "property": {"name", "value"},
+    }
+    if any(set(element.attrib) - allowed_attributes[element.tag] for element in elements):
+        raise ValueError("JUnit contains unknown or namespaced attributes")
+    root_children = list(root)
+    if len(root_children) != 1 or root_children[0].tag != "testsuite":
+        raise ValueError("JUnit must contain exactly one direct test suite")
+    suite = root_children[0]
+    if any(element.tag in {"failure", "error", "skipped"} for element in elements):
+        raise ValueError("JUnit contains an outcome outside a passing testcase set")
+    for owner, require_counts in ((root, False), (suite, True)):
+        for name in ("failures", "errors", "skipped"):
+            raw = owner.get(name)
+            if raw is None:
+                if require_counts:
+                    raise ValueError(f"JUnit {name} count is missing")
+                continue
+            if _strict_nonnegative_int(raw, name) != 0:
+                raise ValueError("JUnit contains a nonzero outcome counter")
+    suite_children = list(suite)
+    if any(child.tag not in {"properties", "testcase"} for child in suite_children):
+        raise ValueError("JUnit suite contains an ambiguous child")
+    testcases = [child for child in suite_children if child.tag == "testcase"]
+    if len(testcases) != len(list(root.iter("testcase"))):
+        raise ValueError("JUnit contains nested or mixed testcase locations")
     observed = []
     for testcase in testcases:
+        children = list(testcase)
+        if any(child.tag != "properties" for child in children):
+            raise ValueError("JUnit testcase contains an ambiguous child")
+        property_groups = [child for child in children if child.tag == "properties"]
+        if len(property_groups) != 1:
+            raise ValueError("each JUnit testcase must contain one property group")
+        properties = list(property_groups[0])
+        if any(prop.tag != "property" or list(prop) for prop in properties):
+            raise ValueError("JUnit property structure is invalid")
+        property_names = [prop.get("name") for prop in properties]
+        if any(name is None for name in property_names) or len(property_names) != len(set(property_names)):
+            raise ValueError("JUnit testcase properties must have unique names")
         properties = [
             prop.get("value")
-            for prop in testcase.findall("./properties/property")
+            for prop in properties
             if prop.get("name") == "google_live_nodeid"
         ]
         if len(properties) != 1 or type(properties[0]) is not str:
@@ -128,36 +180,31 @@ def parse_passing_junit(content: bytes, expected_nodes: Sequence[str]) -> dict[s
         node = properties[0]
         if testcase.get("name") != node.rsplit("::", 1)[-1]:
             raise ValueError("JUnit testcase name does not match its node ID")
-        if any(testcase.find(child) is not None for child in ("failure", "error", "skipped")):
-            raise ValueError("JUnit contains a non-passing testcase")
         observed.append(node)
-    require_exact_nodes(observed, expected_nodes, label="JUnit")
-    declared_suites = [root] if root.tag == "testsuite" else list(root.findall("./testsuite"))
-    if not declared_suites:
-        raise ValueError("JUnit contains no test suite")
-    totals = {name: 0 for name in ("tests", "failures", "errors", "skipped")}
-    for suite in declared_suites:
-        for name in totals:
-            totals[name] += _strict_nonnegative_int(suite.get(name), name)
-    if totals != {"tests": len(testcases), "failures": 0, "errors": 0, "skipped": 0}:
+    if expected_nodes is not None:
+        require_exact_nodes(observed, expected_nodes, label="JUnit")
+    declared_tests = _strict_nonnegative_int(suite.get("tests"), "tests")
+    if not allow_suite_test_count_mismatch and declared_tests != len(testcases):
         raise ValueError("JUnit summary counts do not match exact passing testcases")
-    return totals
+    root_tests = root.get("tests")
+    if root_tests is not None and _strict_nonnegative_int(root_tests, "tests") != len(testcases):
+        raise ValueError("JUnit root count contradicts exact testcases")
+    return root, suite, observed
+
+
+def parse_passing_junit(content: bytes, expected_nodes: Sequence[str]) -> dict[str, int]:
+    _root, _suite, observed = _parse_clean_junit(
+        content, expected_nodes, allow_suite_test_count_mismatch=False
+    )
+    return {"tests": len(observed), "failures": 0, "errors": 0, "skipped": 0}
 
 
 def canonicalize_junit_summary(content: bytes) -> bytes:
     """Replace pytest's session counters with counts derived from testcase XML."""
-    try:
-        root = ET.fromstring(content)
-    except ET.ParseError as exc:
-        raise ValueError("JUnit XML is invalid") from exc
-    suites = [root] if root.tag == "testsuite" else list(root.findall("./testsuite"))
-    if not suites:
-        raise ValueError("JUnit contains no test suite")
-    for suite in suites:
-        cases = list(suite.findall("./testcase"))
-        suite.set("tests", str(len(cases)))
-        for child, attribute in (("failure", "failures"), ("error", "errors"), ("skipped", "skipped")):
-            suite.set(attribute, str(sum(case.find(child) is not None for case in cases)))
+    root, suite, observed = _parse_clean_junit(
+        content, None, allow_suite_test_count_mismatch=True
+    )
+    suite.set("tests", str(len(observed)))
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
@@ -222,6 +269,20 @@ def validate_porcelain_status(status: bytes, repo_root: Path, allowed_root: Path
             raise ValueError("worktree contains unowned untracked files")
 
 
+def _untracked_paths(status: bytes) -> frozenset[str]:
+    result = set()
+    for record in status.split(b"\0"):
+        if not record:
+            continue
+        try:
+            decoded = record.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("worktree status is invalid") from exc
+        if decoded.startswith("?? "):
+            result.add(decoded[3:])
+    return frozenset(result)
+
+
 def atomic_write(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
@@ -237,19 +298,178 @@ def atomic_write(path: Path, content: bytes) -> None:
             temporary_path.unlink()
 
 
-def atomic_write_exclusive(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    temporary_path = Path(temporary)
+def _open_pinned_parent(path: Path) -> tuple[Path, int, tuple[tuple[int, int], ...]]:
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    parts = absolute.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts[1:]):
+        raise ValueError("evidence output path is invalid")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(parts[0], flags)
+    ancestry = []
     try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.link(temporary_path, path, follow_symlinks=False)
+        opened = os.fstat(directory_fd)
+        ancestry.append((opened.st_dev, opened.st_ino))
+        for component in parts[1:-1]:
+            try:
+                next_fd = os.open(component, flags, dir_fd=directory_fd)
+            except FileNotFoundError:
+                os.mkdir(component, 0o755, dir_fd=directory_fd)
+                next_fd = os.open(component, flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+            opened = os.fstat(directory_fd)
+            ancestry.append((opened.st_dev, opened.st_ino))
+        return absolute, directory_fd, tuple(ancestry)
+    except BaseException:
+        os.close(directory_fd)
+        raise
+
+
+def _pinned_parent_path_matches(path: Path, ancestry: Sequence[tuple[int, int]]) -> bool:
+    parts = path.parts
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        directory_fd = os.open(parts[0], flags)
+    except OSError:
+        return False
+    try:
+        observed = []
+        opened = os.fstat(directory_fd)
+        observed.append((opened.st_dev, opened.st_ino))
+        for component in parts[1:]:
+            next_fd = os.open(component, flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+            opened = os.fstat(directory_fd)
+            observed.append((opened.st_dev, opened.st_ino))
+        return tuple(observed) == tuple(ancestry)
+    except OSError:
+        return False
     finally:
-        if temporary_path.exists():
-            temporary_path.unlink()
+        os.close(directory_fd)
+
+
+def _link_exclusive(source: str, destination: str, directory_fd: int) -> None:
+    os.link(
+        source,
+        destination,
+        src_dir_fd=directory_fd,
+        dst_dir_fd=directory_fd,
+        follow_symlinks=False,
+    )
+
+
+def snapshot_output_parent(path: Path) -> tuple[int, int]:
+    absolute, directory_fd, ancestry = _open_pinned_parent(path)
+    try:
+        if not _pinned_parent_path_matches(absolute.parent, ancestry):
+            raise RuntimeError("evidence output parent changed")
+        opened = os.fstat(directory_fd)
+        return opened.st_dev, opened.st_ino
+    finally:
+        os.close(directory_fd)
+
+
+def atomic_write_exclusive(
+    path: Path,
+    content: bytes,
+    *,
+    pre_publish: Callable[[Path], None] | None = None,
+    post_publish: Callable[[], None] | None = None,
+    expected_parent_identity: tuple[int, int] | None = None,
+) -> None:
+    absolute, directory_fd, ancestry = _open_pinned_parent(path)
+    temporary_name = f".{absolute.name}.{secrets.token_hex(12)}.tmp"
+    descriptor = None
+    written_stat = None
+    linked = False
+    published = False
+    try:
+        opened_parent = os.fstat(directory_fd)
+        if expected_parent_identity is not None and (
+            opened_parent.st_dev,
+            opened_parent.st_ino,
+        ) != expected_parent_identity:
+            raise RuntimeError("evidence output parent changed")
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        remaining = memoryview(content)
+        while remaining:
+            count = os.write(descriptor, remaining)
+            if count <= 0:
+                raise OSError("evidence output write failed")
+            remaining = remaining[count:]
+        os.fsync(descriptor)
+        written_stat = os.fstat(descriptor)
+        if pre_publish is not None:
+            pre_publish(absolute.parent / temporary_name)
+        _link_exclusive(temporary_name, absolute.name, directory_fd)
+        linked = True
+        target_stat = os.stat(absolute.name, dir_fd=directory_fd, follow_symlinks=False)
+        if (
+            (target_stat.st_dev, target_stat.st_ino)
+            != (written_stat.st_dev, written_stat.st_ino)
+            or target_stat.st_nlink != 2
+        ):
+            raise RuntimeError("evidence output identity changed")
+        os.unlink(temporary_name, dir_fd=directory_fd)
+        temporary_name = ""
+        final_stat = os.stat(absolute.name, dir_fd=directory_fd, follow_symlinks=False)
+        if (
+            (final_stat.st_dev, final_stat.st_ino)
+            != (written_stat.st_dev, written_stat.st_ino)
+            or final_stat.st_nlink != 1
+        ):
+            raise RuntimeError("evidence output alias detected")
+        if not _pinned_parent_path_matches(absolute.parent, ancestry):
+            raise RuntimeError("evidence output parent changed")
+        if post_publish is not None:
+            post_publish()
+        os.fsync(directory_fd)
+        published = True
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary_name:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        if linked and not published:
+            try:
+                current = os.stat(absolute.name, dir_fd=directory_fd, follow_symlinks=False)
+                if written_stat is not None and (current.st_dev, current.st_ino) == (
+                    written_stat.st_dev,
+                    written_stat.st_ino,
+                ):
+                    os.unlink(absolute.name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        os.close(directory_fd)
+
+
+def _unlink_if_bound(path: Path, bound: BoundFile) -> None:
+    try:
+        absolute, directory_fd, _ancestry = _open_pinned_parent(path)
+    except OSError:
+        return
+    try:
+        current = os.stat(absolute.name, dir_fd=directory_fd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) == (
+            bound.device,
+            bound.inode,
+            bound.size,
+            bound.modified_ns,
+        ):
+            os.unlink(absolute.name, dir_fd=directory_fd)
+    except FileNotFoundError:
+        pass
+    finally:
+        os.close(directory_fd)
 
 
 def _default_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
@@ -293,11 +513,30 @@ def produce(
         or repo_root not in evidence_root.resolve(strict=True).parents
     ):
         raise ValueError("evidence root must be a preexisting runner-owned directory")
-    status = git_status() if git_status else _git_output(repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
-    validate_porcelain_status(status, repo_root, evidence_root)
-    head = git_head() if git_head else _git_output(repo_root, "rev-parse", "HEAD").decode().strip()
-    if head != identity.get("gitSha"):
-        raise ValueError("candidate git SHA does not match repository HEAD")
+    initial_status = git_status() if git_status else _git_output(
+        repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=all"
+    )
+    validate_porcelain_status(initial_status, repo_root, evidence_root)
+    baseline_untracked = _untracked_paths(initial_status)
+
+    def verify_repository(*allowed_generated: Path) -> None:
+        status = git_status() if git_status else _git_output(
+            repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=all"
+        )
+        validate_porcelain_status(status, repo_root, evidence_root)
+        generated = {
+            str(path.resolve(strict=False).relative_to(repo_root))
+            for path in allowed_generated
+        }
+        if _untracked_paths(status) - generated != baseline_untracked:
+            raise ValueError("worktree contains test-created untracked files")
+        head = git_head() if git_head else _git_output(
+            repo_root, "rev-parse", "HEAD"
+        ).decode().strip()
+        if head != identity.get("gitSha"):
+            raise ValueError("candidate git SHA does not match repository HEAD")
+
+    verify_repository()
     manifest_bound = read_bound_file(manifest_path)
     canonical_path = canonical_manifest_path or (
         repo_root / "tests" / "fixtures" / "google_live_deterministic_nodes.txt"
@@ -312,13 +551,16 @@ def produce(
     )
     if collect.returncode != 0:
         raise RuntimeError("pytest collection failed")
+    verify_repository()
     collected = [line for line in collect.stdout.splitlines() if NODE_PATTERN.fullmatch(line)]
     require_exact_nodes(collected, nodes, label="collection")
-    junit_out.parent.mkdir(parents=True, exist_ok=True)
+    output_parent_identity = snapshot_output_parent(junit_out)
     descriptor, temporary = tempfile.mkstemp(dir=junit_out.parent, prefix=".pytest.", suffix=".xml")
     os.close(descriptor)
     temporary_path = Path(temporary)
     temporary_path.unlink()
+    published_junit: BoundFile | None = None
+    completed_successfully = False
     try:
         completed = run(
             [
@@ -336,23 +578,40 @@ def produce(
         if completed.returncode != 0:
             raise RuntimeError("pytest failed; deterministic evidence was not published")
         normalized = canonicalize_junit_summary(read_bound_file(temporary_path).content)
-        atomic_write(temporary_path, normalized)
-        junit_bound = read_bound_file(temporary_path)
-        parse_passing_junit(junit_bound.content, nodes)
+        parse_passing_junit(normalized, nodes)
+        verify_repository(temporary_path)
         require_file_unchanged(manifest_path, manifest_bound)
         require_file_unchanged(canonical_path, canonical_bound)
-        os.link(temporary_path, junit_out, follow_symlinks=False)
+        verify_repository(temporary_path)
+        atomic_write_exclusive(
+            junit_out,
+            normalized,
+            pre_publish=lambda publish_temp: verify_repository(
+                temporary_path, publish_temp
+            ),
+            post_publish=lambda: verify_repository(temporary_path, junit_out),
+            expected_parent_identity=output_parent_identity,
+        )
         temporary_path.unlink()
         published_junit = read_bound_file(junit_out)
         report = build_report(identity, manifest_bound.content, published_junit.content)
         require_file_unchanged(junit_out, published_junit)
         atomic_write_exclusive(
-            report_path, (json.dumps(report, indent=2, sort_keys=True) + "\n").encode()
+            report_path,
+            (json.dumps(report, indent=2, sort_keys=True) + "\n").encode(),
+            pre_publish=lambda publish_temp: verify_repository(
+                junit_out, publish_temp
+            ),
+            post_publish=lambda: verify_repository(junit_out, report_path),
+            expected_parent_identity=output_parent_identity,
         )
+        completed_successfully = True
         return report
     finally:
         if temporary_path.exists():
             temporary_path.unlink()
+        if not completed_successfully and published_junit is not None:
+            _unlink_if_bound(junit_out, published_junit)
 
 
 def main(argv: list[str] | None = None) -> int:

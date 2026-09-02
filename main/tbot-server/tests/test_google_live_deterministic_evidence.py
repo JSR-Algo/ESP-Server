@@ -92,6 +92,70 @@ def test_junit_parser_fails_closed_for_ambiguous_or_nonpassing_results(mutation:
         deterministic.parse_passing_junit(xml, nodes)
 
 
+@pytest.mark.parametrize("outcome", ["errors", "failures", "skipped"])
+@pytest.mark.parametrize("location", ["root_counter", "suite_counter", "root_child", "suite_child"])
+def test_junit_rejects_non_testcase_outcomes(outcome: str, location: str) -> None:
+    node = "tests/test_a.py::test_one"
+    child = outcome.removesuffix("s") if outcome != "skipped" else "skipped"
+    root_attrs = f' {outcome}="1"' if location == "root_counter" else ""
+    suite_value = "1" if location == "suite_counter" else "0"
+    root_child = f'<{child} message="session crashed" />' if location == "root_child" else ""
+    suite_child = f'<{child} message="session crashed" />' if location == "suite_child" else ""
+    xml = (
+        f'<testsuites{root_attrs}>{root_child}'
+        f'<testsuite tests="1" failures="{suite_value if outcome == "failures" else "0"}" '
+        f'errors="{suite_value if outcome == "errors" else "0"}" '
+        f'skipped="{suite_value if outcome == "skipped" else "0"}">{suite_child}'
+        f'<testcase name="test_one"><properties><property name="google_live_nodeid" '
+        f'value="{node}" /></properties></testcase></testsuite></testsuites>'
+    ).encode()
+    with pytest.raises(ValueError):
+        deterministic.parse_passing_junit(xml, [node])
+    with pytest.raises(ValueError):
+        deterministic.canonicalize_junit_summary(xml)
+
+
+@pytest.mark.parametrize(
+    "xml",
+    [
+        b'<testsuites><testsuite tests="1" failures="x" errors="0" skipped="0" /></testsuites>',
+        b'<testsuites><testsuite tests="1" failures="0" errors="0" skipped="0"><testsuite><error /></testsuite></testsuite></testsuites>',
+        b'<testsuites><testcase name="direct" /><testsuite tests="0" failures="0" errors="0" skipped="0" /></testsuites>',
+        b'<testsuites><testsuite tests="0" failures="0" errors="0" skipped="0" /><testsuite tests="0" failures="0" errors="0" skipped="0" /></testsuites>',
+        b'<ns:testsuites xmlns:ns="urn:hostile"><ns:testsuite /></ns:testsuites>',
+    ],
+)
+def test_junit_rejects_malformed_namespace_nested_or_ambiguous_structure(xml: bytes) -> None:
+    with pytest.raises(ValueError):
+        deterministic.parse_passing_junit(xml, [])
+    with pytest.raises(ValueError):
+        deterministic.canonicalize_junit_summary(xml)
+
+
+def test_junit_rejects_duplicate_property_names() -> None:
+    node = "tests/test_a.py::test_one"
+    xml = (
+        '<testsuites><testsuite tests="1" failures="0" errors="0" skipped="0">'
+        '<testcase name="test_one"><properties>'
+        f'<property name="google_live_nodeid" value="{node}" />'
+        f'<property name="google_live_nodeid" value="{node}" />'
+        '</properties></testcase></testsuite></testsuites>'
+    ).encode()
+    with pytest.raises(ValueError):
+        deterministic.parse_passing_junit(xml, [node])
+
+
+def test_canonicalizer_allows_only_clean_pytest9_test_count_inaccuracy() -> None:
+    node = "tests/test_a.py::test_one"
+    raw = _junit([node]).replace(
+        b'<testsuite tests="1"', b'<testsuite tests="994"', 1
+    )
+    canonical = deterministic.canonicalize_junit_summary(raw)
+    assert deterministic.parse_passing_junit(canonical, [node]) == {
+        "tests": 1, "failures": 0, "errors": 0, "skipped": 0
+    }
+
+
 def test_build_report_binds_manifest_and_junit_hashes_and_exact_counts() -> None:
     nodes = ["tests/test_a.py::test_one", "tests/test_b.py::test_two"]
     manifest = ("\n".join(nodes) + "\n").encode()
@@ -158,18 +222,57 @@ def test_atomic_report_write_preserves_old_file_on_replace_failure(tmp_path: Pat
     assert not list(tmp_path.glob(".report.json.*.tmp"))
 
 
-def test_exclusive_publish_loses_create_race_without_overwrite(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("alias_kind", ["direct", "symlink", "hardlink"])
+def test_exclusive_publish_loses_alias_race_without_overwrite(
+    tmp_path: Path, monkeypatch, alias_kind: str
+) -> None:
     target = tmp_path / "report.json"
+    evidence = tmp_path / "evidence.json"
+    evidence.write_bytes(b"evidence")
 
-    def raced_link(source, destination, **kwargs):
-        Path(destination).write_bytes(b"winner")
+    def raced_link(source, destination, *args, **kwargs):
+        del source, destination, args, kwargs
+        destination = target
+        if alias_kind == "direct":
+            destination.write_bytes(b"winner")
+        elif alias_kind == "symlink":
+            destination.symlink_to(evidence)
+        else:
+            os.link(evidence, destination)
         raise FileExistsError
 
-    monkeypatch.setattr(deterministic.os, "link", raced_link)
+    monkeypatch.setattr(deterministic, "_link_exclusive", raced_link)
     with pytest.raises(FileExistsError):
         deterministic.atomic_write_exclusive(target, b"candidate")
-    assert target.read_bytes() == b"winner"
+    assert evidence.read_bytes() == b"evidence"
     assert not list(tmp_path.glob(".report.json.*.tmp"))
+
+
+def test_exclusive_publish_rejects_parent_inode_swap_without_touching_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    parent = tmp_path / "out"
+    parent.mkdir()
+    evidence_parent = tmp_path / "evidence"
+    evidence_parent.mkdir()
+    evidence = evidence_parent / "report.json"
+    evidence.write_bytes(b"evidence")
+    real_match = deterministic._pinned_parent_path_matches
+    swapped = False
+
+    def swap_then_match(path, ancestry):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            parent.rename(tmp_path / "moved-out")
+            parent.symlink_to(evidence_parent, target_is_directory=True)
+        return real_match(path, ancestry)
+
+    monkeypatch.setattr(deterministic, "_pinned_parent_path_matches", swap_then_match)
+    with pytest.raises(RuntimeError, match="parent changed"):
+        deterministic.atomic_write_exclusive(parent / "report.json", b"candidate")
+    assert evidence.read_bytes() == b"evidence"
+    assert not (tmp_path / "moved-out" / "report.json").exists()
 
 
 def test_producer_uses_argument_vector_and_publishes_only_verified_pass(tmp_path: Path) -> None:
@@ -225,6 +328,86 @@ def test_producer_does_not_publish_report_for_failed_pytest(tmp_path: Path) -> N
             git_status=lambda: b"", git_head=lambda: IDENTITY["gitSha"],
             approved_test_files=("tests/test_a.py",),
             canonical_manifest_path=manifest,
+        )
+    assert not report.exists()
+    assert not junit.exists()
+
+
+@pytest.mark.parametrize("drift", ["tracked", "staged", "untracked", "owned_root_untracked", "head"])
+@pytest.mark.parametrize("phase", ["collect", "run"])
+def test_producer_revalidates_repository_after_each_execution_boundary(
+    tmp_path: Path, drift: str, phase: str
+) -> None:
+    node = "tests/test_a.py::test_one"
+    manifest = tmp_path / "node-manifest.txt"
+    manifest.write_text(node + "\n", encoding="utf-8")
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    junit = evidence_root / "deterministic" / "pytest.xml"
+    report = junit.with_name("report.json")
+    state = {"status": b"", "head": IDENTITY["gitSha"]}
+
+    def run(command, **kwargs):
+        is_collect = "--collect-only" in command
+        if (phase == "collect" and is_collect) or (phase == "run" and not is_collect):
+            if drift == "head":
+                state["head"] = "e" * 40
+            else:
+                state["status"] = {
+                    "tracked": b" M scripts/a.py\0",
+                    "staged": b"M  scripts/a.py\0",
+                    "untracked": b"?? unexpected.txt\0",
+                    "owned_root_untracked": b"?? evidence/evil.txt\0",
+                }[drift]
+        if is_collect:
+            return subprocess.CompletedProcess(command, 0, stdout=node + "\n", stderr="")
+        junit_arg = next(value for value in command if value.startswith("--junitxml="))
+        Path(junit_arg.split("=", 1)[1]).write_bytes(_junit([node]))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    with pytest.raises(ValueError, match="worktree|HEAD"):
+        deterministic.produce(
+            manifest_path=manifest, junit_out=junit, report_path=report,
+            identity=IDENTITY, repo_root=tmp_path, run=run,
+            git_status=lambda: state["status"], git_head=lambda: state["head"],
+            approved_test_files=("tests/test_a.py",), canonical_manifest_path=manifest,
+        )
+    assert not report.exists()
+    assert not junit.exists()
+
+
+def test_producer_rolls_back_owned_junit_when_final_publication_guard_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    node = "tests/test_a.py::test_one"
+    manifest = tmp_path / "node-manifest.txt"
+    manifest.write_text(node + "\n", encoding="utf-8")
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    junit = evidence_root / "deterministic" / "pytest.xml"
+    report = junit.with_name("report.json")
+    state = {"status": b""}
+    real_publish = deterministic.atomic_write_exclusive
+
+    def publish(path, content, **kwargs):
+        if Path(path) == report:
+            state["status"] = b" M scripts/changed.py\0"
+        return real_publish(path, content, **kwargs)
+
+    def run(command, **kwargs):
+        if "--collect-only" in command:
+            return subprocess.CompletedProcess(command, 0, stdout=node + "\n", stderr="")
+        junit_arg = next(value for value in command if value.startswith("--junitxml="))
+        Path(junit_arg.split("=", 1)[1]).write_bytes(_junit([node]))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(deterministic, "atomic_write_exclusive", publish)
+    with pytest.raises(ValueError, match="worktree"):
+        deterministic.produce(
+            manifest_path=manifest, junit_out=junit, report_path=report,
+            identity=IDENTITY, repo_root=tmp_path, run=run,
+            git_status=lambda: state["status"], git_head=lambda: IDENTITY["gitSha"],
+            approved_test_files=("tests/test_a.py",), canonical_manifest_path=manifest,
         )
     assert not report.exists()
     assert not junit.exists()

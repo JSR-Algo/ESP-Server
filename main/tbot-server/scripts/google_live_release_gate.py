@@ -9,7 +9,6 @@ import json
 import os
 import re
 import sys
-import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -20,8 +19,10 @@ if __package__ in {None, ""}:
 from scripts.analyze_google_live_log import correlate_websocket_bargein_evidence
 from scripts.google_live_deterministic_evidence import (
     MANIFEST_SCHEMA,
+    atomic_write_exclusive,
     parse_manifest,
     parse_passing_junit,
+    snapshot_output_parent,
 )
 from scripts.google_live_reliability import (
     SCHEMA_VERSION,
@@ -413,21 +414,14 @@ def _evidence_paths_alias(paths: list[Path]) -> bool:
     )
 
 
-def _atomic_write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(
-        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+def _atomic_write(
+    path: Path, content: str, expected_parent_identity: tuple[int, int] | None = None
+) -> None:
+    atomic_write_exclusive(
+        path,
+        content.encode("utf-8"),
+        expected_parent_identity=expected_parent_identity,
     )
-    temporary_path = Path(temporary)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary_path, path)
-    finally:
-        if temporary_path.exists():
-            temporary_path.unlink()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -465,6 +459,11 @@ def main(argv: list[str] | None = None) -> int:
         args.checksums_file,
     )
     try:
+        output_parent_identity = snapshot_output_parent(args.out) if output_safe else None
+    except (OSError, ValueError, RuntimeError):
+        output_parent_identity = None
+        output_safe = False
+    try:
         if not output_safe:
             raise ValueError("output aliases release evidence")
         if not parse_valid:
@@ -478,7 +477,11 @@ def main(argv: list[str] | None = None) -> int:
     verdict = aggregate_release_evidence(identity, paths, checksums)
     rendered = json.dumps(verdict, indent=2, sort_keys=True) + "\n"
     if output_safe:
-        _atomic_write(args.out, rendered)
+        try:
+            _atomic_write(args.out, rendered, output_parent_identity)
+        except (OSError, ValueError, RuntimeError):
+            print(rendered, end="")
+            return 1
     print(rendered, end="")
     return 0 if verdict["status"] == "PASS" else 1
 
