@@ -1,6 +1,7 @@
 import json
 import os
 import signal
+import stat
 import sys
 import threading
 import time
@@ -438,6 +439,13 @@ def _second_provenance_entry(provenance: Path) -> dict:
     return entry
 
 
+def _provenance_entry(provenance: Path, command_id: str, digest: str) -> dict:
+    entry = json.loads(provenance.read_text().splitlines()[0])
+    entry["commandId"] = command_id
+    entry["specSha256"] = digest * 64
+    return entry
+
+
 @pytest.mark.parametrize("mutation", ["append", "hardlink"])
 def test_provenance_read_rejects_file_mutation_after_initial_stat(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
@@ -566,6 +574,233 @@ def test_provenance_preflight_rejects_parent_swap_after_lock(
         runner._preflight_provenance(provenance, "diagnostic.second")
 
     assert list(parent.iterdir()) == []
+
+
+def test_replaced_lock_cannot_create_a_concurrent_lock_domain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    entry_a = _provenance_entry(provenance, "diagnostic.writer_a", "1")
+    entry_b = _provenance_entry(provenance, "diagnostic.writer_b", "2")
+    lock_path = tmp_path / ".commands.jsonl.lock"
+    writer_b_acquired = threading.Event()
+    writer_b_errors = []
+    writer_b = None
+    replaced = False
+
+    def run_writer_b() -> None:
+        try:
+            runner._commit_entry(provenance, entry_b)
+        except BaseException as exc:
+            writer_b_errors.append(exc)
+
+    def replace_lock(stage: str) -> None:
+        nonlocal replaced, writer_b
+        if threading.current_thread().name == "writer-b":
+            if stage == "after_lock":
+                writer_b_acquired.set()
+            return
+        if stage == "after_lock" and not replaced:
+            replaced = True
+            lock_path.unlink()
+            lock_path.write_bytes(b"")
+            lock_path.chmod(0o600)
+            writer_b = threading.Thread(target=run_writer_b, name="writer-b")
+            writer_b.start()
+            assert not writer_b_acquired.wait(0.2)
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", replace_lock)
+    with pytest.raises(RuntimeError, match="lock"):
+        runner._commit_entry(provenance, entry_a)
+    assert writer_b is not None
+    writer_b.join(timeout=3)
+    assert not writer_b.is_alive()
+    assert writer_b_errors == []
+    entries = runner.parse_provenance(provenance.read_bytes())
+    assert [entry["commandId"] for entry in entries] == [
+        "real_api.round_trip",
+        "diagnostic.writer_b",
+    ]
+    assert provenance.with_suffix(".txt").read_bytes() == runner.render_commands_projection(
+        entries
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation_stage", "forbidden_stage", "mutation"),
+    [
+        ("after_lock", "before_read", "replace"),
+        ("after_jsonl_replace", "after_projection_replace", "replace"),
+        ("after_projection_replace", "post_publish", "unlink"),
+        ("after_jsonl_replace", "after_projection_replace", "hardlink"),
+    ],
+)
+def test_lock_entry_is_revalidated_before_each_transaction_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation_stage: str,
+    forbidden_stage: str,
+    mutation: str,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    original_jsonl = provenance.read_bytes()
+    original_projection = provenance.with_suffix(".txt").read_bytes()
+    lock_path = tmp_path / ".commands.jsonl.lock"
+    reached_forbidden_boundary = False
+    mutated = False
+
+    def mutate_lock(stage: str) -> None:
+        nonlocal reached_forbidden_boundary, mutated
+        if stage == forbidden_stage:
+            reached_forbidden_boundary = True
+        if stage != mutation_stage or mutated:
+            return
+        mutated = True
+        if mutation == "hardlink":
+            os.link(lock_path, tmp_path / "lock.alias")
+        else:
+            lock_path.unlink()
+            if mutation == "replace":
+                lock_path.write_bytes(b"")
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", mutate_lock)
+    with pytest.raises(RuntimeError, match="lock"):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+        )
+    assert reached_forbidden_boundary is False
+    assert provenance.read_bytes() == original_jsonl
+    assert provenance.with_suffix(".txt").read_bytes() == original_projection
+
+
+@pytest.mark.parametrize(
+    "failure_stage",
+    ["after_jsonl_replace", "after_projection_replace", "post_publish"],
+)
+def test_rollback_compare_and_swap_preserves_newer_complete_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    entry_a = _provenance_entry(provenance, "diagnostic.writer_a", "1")
+    entry_b = _provenance_entry(provenance, "diagnostic.writer_b", "2")
+    existing = runner.parse_provenance(provenance.read_bytes())
+    newer_entries = [*existing, entry_b]
+    newer_jsonl = runner.render_provenance(newer_entries)
+    newer_projection = runner.render_commands_projection(newer_entries)
+    injected = False
+
+    def inject_newer_commit(stage: str) -> None:
+        nonlocal injected
+        if stage == failure_stage:
+            raise ValueError("injected writer A failure")
+        if stage == "before_rollback" and not injected:
+            injected = True
+            parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                runner._atomic_replace_at(parent_fd, provenance.name, newer_jsonl)
+                runner._atomic_replace_at(
+                    parent_fd, provenance.with_suffix(".txt").name, newer_projection
+                )
+            finally:
+                os.close(parent_fd)
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", inject_newer_commit)
+    with pytest.raises(RuntimeError, match="rollback conflict"):
+        runner._commit_entry(provenance, entry_a)
+    assert provenance.read_bytes() == newer_jsonl
+    assert provenance.with_suffix(".txt").read_bytes() == newer_projection
+
+
+def test_directory_fsync_failure_after_publish_rolls_back_complete_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    original_jsonl = provenance.read_bytes()
+    original_projection = provenance.with_suffix(".txt").read_bytes()
+    real_fsync = runner.os.fsync
+    failed = False
+
+    def fail_first_directory_sync(descriptor: int) -> None:
+        nonlocal failed
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode) and not failed:
+            failed = True
+            raise OSError("injected directory fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(runner.os, "fsync", fail_first_directory_sync)
+    with pytest.raises(OSError, match="directory fsync failure"):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+        )
+    assert provenance.read_bytes() == original_jsonl
+    assert provenance.with_suffix(".txt").read_bytes() == original_projection
+
+
+@pytest.mark.parametrize("original_exists", [True, False])
+def test_directory_fsync_failure_during_rollback_still_restores_complete_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    original_exists: bool,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    seed_provenance = seed / "commands.jsonl"
+    execute_and_record(_spec(seed, "pass", outputs=()), provenance=seed_provenance)
+    entry = _provenance_entry(seed_provenance, "diagnostic.writer_a", "1")
+    parent = tmp_path / "target"
+    parent.mkdir()
+    provenance = parent / "commands.jsonl"
+    if original_exists:
+        execute_and_record(_spec(parent, "pass", outputs=()), provenance=provenance)
+        original_jsonl = provenance.read_bytes()
+        original_projection = provenance.with_suffix(".txt").read_bytes()
+    else:
+        original_jsonl = None
+        original_projection = None
+    real_fsync = runner.os.fsync
+    directory_syncs = 0
+
+    def fail_first_rollback_directory_sync(descriptor: int) -> None:
+        nonlocal directory_syncs
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            directory_syncs += 1
+            if directory_syncs == 3:
+                raise OSError("injected rollback directory fsync failure")
+        real_fsync(descriptor)
+
+    def fail_after_both_publishes(stage: str) -> None:
+        if stage == "after_projection_replace":
+            raise ValueError("trigger rollback")
+
+    monkeypatch.setattr(runner.os, "fsync", fail_first_rollback_directory_sync)
+    monkeypatch.setattr(
+        runner, "_provenance_transaction_hook", fail_after_both_publishes
+    )
+    with pytest.raises(OSError, match="rollback directory fsync failure"):
+        runner._commit_entry(provenance, entry)
+    assert (
+        provenance.read_bytes() if provenance.exists() else None
+    ) == original_jsonl
+    projection = provenance.with_suffix(".txt")
+    assert (projection.read_bytes() if projection.exists() else None) == original_projection
 
 
 def test_parent_swap_during_secure_mkdir_never_mutates_outside(

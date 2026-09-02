@@ -179,6 +179,13 @@ class BoundWorkingDirectory:
 
 
 @dataclass(frozen=True)
+class PublishedArtifact:
+    device: int
+    inode: int
+    digest: str
+
+
+@dataclass(frozen=True)
 class BoundArgumentArtifacts:
     argv: tuple[str, ...]
     descriptors: tuple[int, ...]
@@ -910,7 +917,9 @@ def _provenance_file_identity(opened: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def _read_existing_at(directory_fd: int, name: str) -> bytes | None:
+def _read_existing_version_at(
+    directory_fd: int, name: str
+) -> tuple[bytes, PublishedArtifact] | None:
     try:
         descriptor = os.open(
             name,
@@ -939,12 +948,23 @@ def _read_existing_at(directory_fd: int, name: str) -> bytes | None:
             or len(content) != opened.st_size
         ):
             raise RuntimeError("provenance artifact changed")
-        return content
+        return content, PublishedArtifact(
+            opened.st_dev,
+            opened.st_ino,
+            hashlib.sha256(content).hexdigest(),
+        )
     finally:
         os.close(descriptor)
 
 
-def _atomic_replace_at(directory_fd: int, target_name: str, content: bytes) -> None:
+def _read_existing_at(directory_fd: int, name: str) -> bytes | None:
+    existing = _read_existing_version_at(directory_fd, name)
+    return None if existing is None else existing[0]
+
+
+def _atomic_replace_at(
+    directory_fd: int, target_name: str, content: bytes
+) -> PublishedArtifact:
     name = f".{target_name}.{secrets.token_hex(12)}.tmp"
     descriptor = None
     try:
@@ -967,6 +987,11 @@ def _atomic_replace_at(directory_fd: int, target_name: str, content: bytes) -> N
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
             raise RuntimeError("provenance temporary file is invalid")
+        published = PublishedArtifact(
+            opened.st_dev,
+            opened.st_ino,
+            hashlib.sha256(content).hexdigest(),
+        )
         os.replace(
             name,
             target_name,
@@ -974,7 +999,12 @@ def _atomic_replace_at(directory_fd: int, target_name: str, content: bytes) -> N
             dst_dir_fd=directory_fd,
         )
         name = ""
-        os.fsync(directory_fd)
+        try:
+            os.fsync(directory_fd)
+        except BaseException as exc:
+            setattr(exc, "_provenance_published", published)
+            raise
+        return published
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -1011,11 +1041,67 @@ def _open_provenance_lock(directory_fd: int, name: str) -> int:
 
 def _require_bound_lock(directory_fd: int, name: str, lock_fd: int) -> None:
     opened = os.fstat(lock_fd)
-    if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_nlink != 1
+        or opened.st_uid != os.geteuid()
+        or stat.S_IMODE(opened.st_mode) != 0o600
+    ):
         raise RuntimeError("provenance lock is invalid")
-    linked = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-    if (linked.st_dev, linked.st_ino) != (opened.st_dev, opened.st_ino):
+    try:
+        linked = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise RuntimeError("provenance lock changed") from exc
+    if (
+        linked.st_dev,
+        linked.st_ino,
+        linked.st_nlink,
+        linked.st_uid,
+        linked.st_mode,
+    ) != (
+        opened.st_dev,
+        opened.st_ino,
+        opened.st_nlink,
+        opened.st_uid,
+        opened.st_mode,
+    ):
         raise RuntimeError("provenance lock changed")
+
+
+def _require_transaction_binding(
+    parent: BoundWorkingDirectory, lock_name: str, lock_fd: int
+) -> None:
+    _require_bound_lock(parent.descriptor, lock_name, lock_fd)
+    _require_working_directory_unchanged(parent, require_ctime=False)
+
+
+def _rollback_published_at(
+    directory_fd: int,
+    originals: Mapping[str, bytes | None],
+    expected_current: Mapping[str, PublishedArtifact | None],
+    published_names: set[str],
+) -> None:
+    for name, expected in expected_current.items():
+        current = _read_existing_version_at(directory_fd, name)
+        observed = None if current is None else current[1]
+        if observed != expected:
+            raise RuntimeError("provenance rollback conflict")
+    rollback_error = None
+    for name in published_names:
+        try:
+            original = originals[name]
+            if original is None:
+                _unlink_if_exists_at(directory_fd, name)
+            else:
+                _atomic_replace_at(directory_fd, name, original)
+        except BaseException as exc:
+            if rollback_error is None:
+                rollback_error = exc
+    for name, original in originals.items():
+        if _read_existing_at(directory_fd, name) != original:
+            raise RuntimeError("provenance rollback failed") from rollback_error
+    if rollback_error is not None:
+        raise rollback_error
 
 
 def _provenance_transaction_hook(stage: str) -> None:
@@ -1029,17 +1115,31 @@ def _commit_entry(provenance: Path, entry: dict[str, Any]) -> None:
     lock_path = provenance.with_name(f".{provenance.name}.lock")
     parent = _open_bound_working_directory(provenance.parent, provenance.parent)
     lock_fd = None
+    directory_locked = False
     try:
+        _require_working_directory_unchanged(parent, require_ctime=False)
+        fcntl.flock(parent.descriptor, fcntl.LOCK_EX)
+        directory_locked = True
         _require_working_directory_unchanged(parent, require_ctime=False)
         lock_fd = _open_provenance_lock(parent.descriptor, lock_path.name)
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        _require_bound_lock(parent.descriptor, lock_path.name, lock_fd)
+        _require_transaction_binding(parent, lock_path.name, lock_fd)
         _provenance_transaction_hook("after_lock")
-        _require_working_directory_unchanged(parent, require_ctime=False)
+        _require_transaction_binding(parent, lock_path.name, lock_fd)
         _provenance_transaction_hook("before_read")
-        _require_working_directory_unchanged(parent, require_ctime=False)
-        old_jsonl = _read_existing_at(parent.descriptor, provenance.name)
-        old_projection = _read_existing_at(parent.descriptor, projection.name)
+        _require_transaction_binding(parent, lock_path.name, lock_fd)
+        old_jsonl_state = _read_existing_version_at(
+            parent.descriptor, provenance.name
+        )
+        old_jsonl = None if old_jsonl_state is None else old_jsonl_state[0]
+        _require_transaction_binding(parent, lock_path.name, lock_fd)
+        old_projection_state = _read_existing_version_at(
+            parent.descriptor, projection.name
+        )
+        old_projection = (
+            None if old_projection_state is None else old_projection_state[0]
+        )
+        _require_transaction_binding(parent, lock_path.name, lock_fd)
         entries = parse_provenance(old_jsonl or b"")
         expected_old_projection = render_commands_projection(entries)
         if (old_jsonl is None) != (old_projection is None) or (
@@ -1051,12 +1151,47 @@ def _commit_entry(provenance: Path, entry: dict[str, Any]) -> None:
         next_entries = [*entries, entry]
         next_jsonl = render_provenance(next_entries)
         next_projection = render_commands_projection(next_entries)
+        originals = {
+            provenance.name: old_jsonl,
+            projection.name: old_projection,
+        }
+        expected_current = {
+            provenance.name: None if old_jsonl_state is None else old_jsonl_state[1],
+            projection.name: (
+                None if old_projection_state is None else old_projection_state[1]
+            ),
+        }
+        published_names: set[str] = set()
         try:
-            _require_bound_lock(parent.descriptor, lock_path.name, lock_fd)
-            _atomic_replace_at(parent.descriptor, provenance.name, next_jsonl)
+            _require_transaction_binding(parent, lock_path.name, lock_fd)
+            try:
+                expected_current[provenance.name] = _atomic_replace_at(
+                    parent.descriptor, provenance.name, next_jsonl
+                )
+            except BaseException as exc:
+                published = getattr(exc, "_provenance_published", None)
+                if published is not None:
+                    expected_current[provenance.name] = published
+                    published_names.add(provenance.name)
+                raise
+            published_names.add(provenance.name)
             _provenance_transaction_hook("after_jsonl_replace")
-            _atomic_replace_at(parent.descriptor, projection.name, next_projection)
+            _require_transaction_binding(parent, lock_path.name, lock_fd)
+            try:
+                expected_current[projection.name] = _atomic_replace_at(
+                    parent.descriptor, projection.name, next_projection
+                )
+            except BaseException as exc:
+                published = getattr(exc, "_provenance_published", None)
+                if published is not None:
+                    expected_current[projection.name] = published
+                    published_names.add(projection.name)
+                raise
+            published_names.add(projection.name)
             _provenance_transaction_hook("after_projection_replace")
+            _require_transaction_binding(parent, lock_path.name, lock_fd)
+            _provenance_transaction_hook("before_verify")
+            _require_transaction_binding(parent, lock_path.name, lock_fd)
             if (
                 _read_existing_at(parent.descriptor, provenance.name) != next_jsonl
                 or _read_existing_at(parent.descriptor, projection.name)
@@ -1064,30 +1199,36 @@ def _commit_entry(provenance: Path, entry: dict[str, Any]) -> None:
             ):
                 raise RuntimeError("provenance projection is inconsistent")
             _provenance_transaction_hook("post_publish")
-            _require_bound_lock(parent.descriptor, lock_path.name, lock_fd)
-            _require_working_directory_unchanged(parent, require_ctime=False)
+            _require_transaction_binding(parent, lock_path.name, lock_fd)
+            _provenance_transaction_hook("before_unlock")
+            _require_transaction_binding(parent, lock_path.name, lock_fd)
         except BaseException:
             _provenance_transaction_hook("before_rollback")
-            if old_jsonl is None:
-                _unlink_if_exists_at(parent.descriptor, provenance.name)
-            else:
-                _atomic_replace_at(parent.descriptor, provenance.name, old_jsonl)
-            if old_projection is None:
-                _unlink_if_exists_at(parent.descriptor, projection.name)
-            else:
-                _atomic_replace_at(parent.descriptor, projection.name, old_projection)
-            if (
-                _read_existing_at(parent.descriptor, provenance.name) != old_jsonl
-                or _read_existing_at(parent.descriptor, projection.name)
-                != old_projection
-            ):
-                raise RuntimeError("provenance rollback failed")
+            try:
+                _require_transaction_binding(parent, lock_path.name, lock_fd)
+            except (OSError, RuntimeError):
+                pass
+            _rollback_published_at(
+                parent.descriptor,
+                originals,
+                expected_current,
+                published_names,
+            )
             raise
     finally:
+        unlock_error = None
         if lock_fd is not None:
+            try:
+                _require_bound_lock(parent.descriptor, lock_path.name, lock_fd)
+            except BaseException as exc:
+                unlock_error = exc
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
+        if directory_locked:
+            fcntl.flock(parent.descriptor, fcntl.LOCK_UN)
         os.close(parent.descriptor)
+        if unlock_error is not None:
+            raise unlock_error
 
 
 def _preflight_provenance(provenance: Path, command_id: str) -> None:
@@ -1095,16 +1236,21 @@ def _preflight_provenance(provenance: Path, command_id: str) -> None:
     lock_path = provenance.with_name(f".{provenance.name}.lock")
     parent = _open_bound_working_directory(provenance.parent, provenance.parent)
     lock_fd = None
+    directory_locked = False
     try:
+        _require_working_directory_unchanged(parent, require_ctime=False)
+        fcntl.flock(parent.descriptor, fcntl.LOCK_EX)
+        directory_locked = True
         _require_working_directory_unchanged(parent, require_ctime=False)
         lock_fd = _open_provenance_lock(parent.descriptor, lock_path.name)
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        _require_bound_lock(parent.descriptor, lock_path.name, lock_fd)
+        _require_transaction_binding(parent, lock_path.name, lock_fd)
         _provenance_transaction_hook("preflight_after_lock")
-        _require_working_directory_unchanged(parent, require_ctime=False)
+        _require_transaction_binding(parent, lock_path.name, lock_fd)
         _provenance_transaction_hook("preflight_before_read")
-        _require_working_directory_unchanged(parent, require_ctime=False)
+        _require_transaction_binding(parent, lock_path.name, lock_fd)
         old_jsonl = _read_existing_at(parent.descriptor, provenance.name)
+        _require_transaction_binding(parent, lock_path.name, lock_fd)
         old_projection = _read_existing_at(parent.descriptor, projection.name)
         entries = parse_provenance(old_jsonl or b"")
         if (old_jsonl is None) != (old_projection is None) or (
@@ -1113,13 +1259,23 @@ def _preflight_provenance(provenance: Path, command_id: str) -> None:
             raise ValueError("provenance projection is inconsistent")
         if any(item["commandId"] == command_id for item in entries):
             raise ValueError("duplicate command ID")
-        _require_bound_lock(parent.descriptor, lock_path.name, lock_fd)
-        _require_working_directory_unchanged(parent, require_ctime=False)
+        _require_transaction_binding(parent, lock_path.name, lock_fd)
+        _provenance_transaction_hook("preflight_before_unlock")
+        _require_transaction_binding(parent, lock_path.name, lock_fd)
     finally:
+        unlock_error = None
         if lock_fd is not None:
+            try:
+                _require_bound_lock(parent.descriptor, lock_path.name, lock_fd)
+            except BaseException as exc:
+                unlock_error = exc
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
+        if directory_locked:
+            fcntl.flock(parent.descriptor, fcntl.LOCK_UN)
         os.close(parent.descriptor)
+        if unlock_error is not None:
+            raise unlock_error
 
 
 def execute_and_record(
