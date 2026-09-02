@@ -33,6 +33,7 @@ COMMAND_PROVENANCE_SCHEMA = "google-live-command-provenance.v1"
 COMMAND_ID = re.compile(r"(?:diagnostic\.)?[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+")
 ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+_MAX_PROVENANCE_ARTIFACT_BYTES = 16 * 1024 * 1024
 _EXACT_ENTRY_FIELDS = {
     "argv",
     "candidateIdentity",
@@ -183,6 +184,19 @@ class PublishedArtifact:
     device: int
     inode: int
     digest: str
+
+
+@dataclass(frozen=True)
+class ProvenanceFileSnapshot:
+    content: bytes
+    identity: tuple[int, ...]
+    version: PublishedArtifact
+
+
+@dataclass(frozen=True)
+class ProvenancePairSnapshot:
+    jsonl: ProvenanceFileSnapshot | None
+    projection: ProvenanceFileSnapshot | None
 
 
 @dataclass(frozen=True)
@@ -904,6 +918,12 @@ def _provenance_read_hook(stage: str, directory_fd: int, name: str) -> None:
     del stage, directory_fd, name
 
 
+def _provenance_pair_hook(
+    stage: str, directory_fd: int, jsonl_name: str, projection_name: str
+) -> None:
+    del stage, directory_fd, jsonl_name, projection_name
+
+
 def _provenance_file_identity(opened: os.stat_result) -> tuple[int, ...]:
     return (
         opened.st_dev,
@@ -923,7 +943,9 @@ def _read_existing_version_at(
     try:
         descriptor = os.open(
             name,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
             dir_fd=directory_fd,
         )
     except FileNotFoundError:
@@ -955,6 +977,193 @@ def _read_existing_version_at(
         )
     finally:
         os.close(descriptor)
+
+
+def _open_optional_provenance_at(directory_fd: int, name: str) -> int | None:
+    try:
+        return os.open(
+            name,
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=directory_fd,
+        )
+    except FileNotFoundError:
+        return None
+
+
+def _read_open_provenance_at(
+    directory_fd: int,
+    name: str,
+    descriptor: int,
+    initial_identity: tuple[int, ...],
+) -> ProvenanceFileSnapshot:
+    opened = os.fstat(descriptor)
+    if _provenance_file_identity(opened) != initial_identity:
+        raise RuntimeError("provenance pair changed")
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_nlink != 1
+        or opened.st_size > _MAX_PROVENANCE_ARTIFACT_BYTES
+    ):
+        raise RuntimeError("provenance artifact alias detected")
+    chunks = []
+    total = 0
+    while True:
+        chunk = os.read(descriptor, min(1024 * 1024, _MAX_PROVENANCE_ARTIFACT_BYTES + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > _MAX_PROVENANCE_ARTIFACT_BYTES:
+            raise RuntimeError("provenance artifact is too large")
+    _provenance_read_hook("after_read", directory_fd, name)
+    content = b"".join(chunks)
+    identity = _provenance_file_identity(opened)
+    return ProvenanceFileSnapshot(
+        content,
+        identity,
+        PublishedArtifact(
+            opened.st_dev,
+            opened.st_ino,
+            hashlib.sha256(content).hexdigest(),
+        ),
+    )
+
+
+def _require_open_snapshot_current(
+    directory_fd: int,
+    name: str,
+    descriptor: int,
+    snapshot: ProvenanceFileSnapshot,
+) -> None:
+    observed = os.fstat(descriptor)
+    try:
+        linked = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise RuntimeError("provenance pair changed") from exc
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks = []
+    total = 0
+    while True:
+        chunk = os.read(descriptor, min(1024 * 1024, _MAX_PROVENANCE_ARTIFACT_BYTES + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > _MAX_PROVENANCE_ARTIFACT_BYTES:
+            raise RuntimeError("provenance artifact is too large")
+    if (
+        _provenance_file_identity(observed) != snapshot.identity
+        or _provenance_file_identity(linked) != snapshot.identity
+        or b"".join(chunks) != snapshot.content
+    ):
+        raise RuntimeError("provenance pair changed")
+
+
+def _require_absent_at(directory_fd: int, name: str) -> None:
+    try:
+        os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    raise RuntimeError("provenance pair changed")
+
+
+def _read_provenance_pair_once_at(
+    directory_fd: int,
+    jsonl_name: str,
+    projection_name: str,
+    *,
+    require_complete: bool,
+) -> ProvenancePairSnapshot:
+    jsonl_fd = _open_optional_provenance_at(directory_fd, jsonl_name)
+    projection_fd = None
+    try:
+        _provenance_pair_hook(
+            "after_jsonl_lookup", directory_fd, jsonl_name, projection_name
+        )
+        projection_fd = _open_optional_provenance_at(directory_fd, projection_name)
+        _provenance_pair_hook(
+            "after_projection_lookup", directory_fd, jsonl_name, projection_name
+        )
+        if require_complete and (jsonl_fd is None) != (projection_fd is None):
+            raise RuntimeError("provenance pair changed")
+        jsonl_identity = (
+            None if jsonl_fd is None else _provenance_file_identity(os.fstat(jsonl_fd))
+        )
+        projection_identity = (
+            None
+            if projection_fd is None
+            else _provenance_file_identity(os.fstat(projection_fd))
+        )
+        jsonl = (
+            None
+            if jsonl_fd is None
+            else _read_open_provenance_at(
+                directory_fd, jsonl_name, jsonl_fd, jsonl_identity
+            )
+        )
+        _provenance_pair_hook(
+            "after_jsonl_read", directory_fd, jsonl_name, projection_name
+        )
+        projection = (
+            None
+            if projection_fd is None
+            else _read_open_provenance_at(
+                directory_fd,
+                projection_name,
+                projection_fd,
+                projection_identity,
+            )
+        )
+        _provenance_pair_hook(
+            "after_projection_read", directory_fd, jsonl_name, projection_name
+        )
+        if jsonl_fd is None:
+            _require_absent_at(directory_fd, jsonl_name)
+        else:
+            _require_open_snapshot_current(
+                directory_fd, jsonl_name, jsonl_fd, jsonl
+            )
+        if projection_fd is None:
+            _require_absent_at(directory_fd, projection_name)
+        else:
+            _require_open_snapshot_current(
+                directory_fd, projection_name, projection_fd, projection
+            )
+        return ProvenancePairSnapshot(jsonl, projection)
+    finally:
+        if projection_fd is not None:
+            os.close(projection_fd)
+        if jsonl_fd is not None:
+            os.close(jsonl_fd)
+
+
+def _read_provenance_pair_at(
+    directory_fd: int,
+    jsonl_name: str,
+    projection_name: str,
+    *,
+    require_complete: bool = True,
+) -> ProvenancePairSnapshot:
+    first = _read_provenance_pair_once_at(
+        directory_fd,
+        jsonl_name,
+        projection_name,
+        require_complete=require_complete,
+    )
+    _provenance_pair_hook(
+        "between_snapshots", directory_fd, jsonl_name, projection_name
+    )
+    second = _read_provenance_pair_once_at(
+        directory_fd,
+        jsonl_name,
+        projection_name,
+        require_complete=require_complete,
+    )
+    if first != second:
+        raise RuntimeError("provenance pair changed")
+    return second
 
 
 def _read_existing_at(directory_fd: int, name: str) -> bytes | None:
@@ -1077,17 +1286,35 @@ def _require_transaction_binding(
 
 def _rollback_published_at(
     directory_fd: int,
+    jsonl_name: str,
+    projection_name: str,
     originals: Mapping[str, bytes | None],
     expected_current: Mapping[str, PublishedArtifact | None],
     published_names: set[str],
 ) -> None:
+    current_pair = _read_provenance_pair_at(
+        directory_fd,
+        jsonl_name,
+        projection_name,
+        require_complete=False,
+    )
+    current_states = {
+        jsonl_name: current_pair.jsonl,
+        projection_name: current_pair.projection,
+    }
+    already_restored = set()
     for name, expected in expected_current.items():
-        current = _read_existing_version_at(directory_fd, name)
-        observed = None if current is None else current[1]
+        current = current_states[name]
+        observed = None if current is None else current.version
         if observed != expected:
-            raise RuntimeError("provenance rollback conflict")
+            content = None if current is None else current.content
+            if content != originals[name]:
+                raise RuntimeError("provenance rollback conflict")
+            already_restored.add(name)
     rollback_error = None
     for name in published_names:
+        if name in already_restored:
+            continue
         try:
             original = originals[name]
             if original is None:
@@ -1097,8 +1324,19 @@ def _rollback_published_at(
         except BaseException as exc:
             if rollback_error is None:
                 rollback_error = exc
+    restored_pair = _read_provenance_pair_at(
+        directory_fd, jsonl_name, projection_name
+    )
+    restored = {
+        jsonl_name: None if restored_pair.jsonl is None else restored_pair.jsonl.content,
+        projection_name: (
+            None
+            if restored_pair.projection is None
+            else restored_pair.projection.content
+        ),
+    }
     for name, original in originals.items():
-        if _read_existing_at(directory_fd, name) != original:
+        if restored[name] != original:
             raise RuntimeError("provenance rollback failed") from rollback_error
     if rollback_error is not None:
         raise rollback_error
@@ -1128,16 +1366,12 @@ def _commit_entry(provenance: Path, entry: dict[str, Any]) -> None:
         _require_transaction_binding(parent, lock_path.name, lock_fd)
         _provenance_transaction_hook("before_read")
         _require_transaction_binding(parent, lock_path.name, lock_fd)
-        old_jsonl_state = _read_existing_version_at(
-            parent.descriptor, provenance.name
+        old_pair = _read_provenance_pair_at(
+            parent.descriptor, provenance.name, projection.name
         )
-        old_jsonl = None if old_jsonl_state is None else old_jsonl_state[0]
-        _require_transaction_binding(parent, lock_path.name, lock_fd)
-        old_projection_state = _read_existing_version_at(
-            parent.descriptor, projection.name
-        )
+        old_jsonl = None if old_pair.jsonl is None else old_pair.jsonl.content
         old_projection = (
-            None if old_projection_state is None else old_projection_state[0]
+            None if old_pair.projection is None else old_pair.projection.content
         )
         _require_transaction_binding(parent, lock_path.name, lock_fd)
         entries = parse_provenance(old_jsonl or b"")
@@ -1156,9 +1390,11 @@ def _commit_entry(provenance: Path, entry: dict[str, Any]) -> None:
             projection.name: old_projection,
         }
         expected_current = {
-            provenance.name: None if old_jsonl_state is None else old_jsonl_state[1],
+            provenance.name: (
+                None if old_pair.jsonl is None else old_pair.jsonl.version
+            ),
             projection.name: (
-                None if old_projection_state is None else old_projection_state[1]
+                None if old_pair.projection is None else old_pair.projection.version
             ),
         }
         published_names: set[str] = set()
@@ -1192,10 +1428,14 @@ def _commit_entry(provenance: Path, entry: dict[str, Any]) -> None:
             _require_transaction_binding(parent, lock_path.name, lock_fd)
             _provenance_transaction_hook("before_verify")
             _require_transaction_binding(parent, lock_path.name, lock_fd)
+            published_pair = _read_provenance_pair_at(
+                parent.descriptor, provenance.name, projection.name
+            )
             if (
-                _read_existing_at(parent.descriptor, provenance.name) != next_jsonl
-                or _read_existing_at(parent.descriptor, projection.name)
-                != next_projection
+                published_pair.jsonl is None
+                or published_pair.projection is None
+                or published_pair.jsonl.content != next_jsonl
+                or published_pair.projection.content != next_projection
             ):
                 raise RuntimeError("provenance projection is inconsistent")
             _provenance_transaction_hook("post_publish")
@@ -1210,6 +1450,8 @@ def _commit_entry(provenance: Path, entry: dict[str, Any]) -> None:
                 pass
             _rollback_published_at(
                 parent.descriptor,
+                provenance.name,
+                projection.name,
                 originals,
                 expected_current,
                 published_names,
@@ -1249,9 +1491,13 @@ def _preflight_provenance(provenance: Path, command_id: str) -> None:
         _require_transaction_binding(parent, lock_path.name, lock_fd)
         _provenance_transaction_hook("preflight_before_read")
         _require_transaction_binding(parent, lock_path.name, lock_fd)
-        old_jsonl = _read_existing_at(parent.descriptor, provenance.name)
-        _require_transaction_binding(parent, lock_path.name, lock_fd)
-        old_projection = _read_existing_at(parent.descriptor, projection.name)
+        old_pair = _read_provenance_pair_at(
+            parent.descriptor, provenance.name, projection.name
+        )
+        old_jsonl = None if old_pair.jsonl is None else old_pair.jsonl.content
+        old_projection = (
+            None if old_pair.projection is None else old_pair.projection.content
+        )
         entries = parse_provenance(old_jsonl or b"")
         if (old_jsonl is None) != (old_projection is None) or (
             old_projection is not None and old_projection != render_commands_projection(entries)

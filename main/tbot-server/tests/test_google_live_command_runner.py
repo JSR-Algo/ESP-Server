@@ -2,6 +2,7 @@ import json
 import os
 import signal
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -480,6 +481,208 @@ def test_provenance_read_rejects_file_mutation_after_initial_stat(
             runner._read_existing_at(directory_fd, artifact.name)
     finally:
         os.close(directory_fd)
+
+
+@pytest.mark.parametrize("mutation", ["recreate", "byte_restore", "hardlink"])
+def test_pair_snapshot_rejects_projection_mutation_during_jsonl_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    jsonl = tmp_path / "commands.jsonl"
+    projection = tmp_path / "commands.txt"
+    jsonl.write_bytes(b"jsonl")
+    projection.write_bytes(b"projection")
+    mutated = False
+
+    def mutate(stage: str, directory_fd: int, name: str) -> None:
+        nonlocal mutated
+        if stage != "after_read" or name != jsonl.name or mutated:
+            return
+        mutated = True
+        if mutation == "recreate":
+            projection.unlink()
+            projection.write_bytes(b"projection")
+        elif mutation == "byte_restore":
+            descriptor = os.open(projection.name, os.O_WRONLY, dir_fd=directory_fd)
+            try:
+                os.write(descriptor, b"X")
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                os.write(descriptor, b"p")
+            finally:
+                os.close(descriptor)
+        else:
+            os.link(projection, tmp_path / "projection.alias")
+
+    monkeypatch.setattr(runner, "_provenance_read_hook", mutate)
+    directory_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(RuntimeError, match="pair|artifact"):
+            runner._read_provenance_pair_at(
+                directory_fd, jsonl.name, projection.name
+            )
+    finally:
+        os.close(directory_fd)
+
+
+def test_absent_pair_snapshot_rejects_file_appearing_between_lookups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    def create_projection(
+        stage: str, directory_fd: int, jsonl_name: str, projection_name: str
+    ) -> None:
+        if stage == "after_jsonl_lookup":
+            descriptor = os.open(
+                projection_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            os.close(descriptor)
+
+    monkeypatch.setattr(runner, "_provenance_pair_hook", create_projection)
+    directory_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(RuntimeError, match="pair"):
+            runner._read_provenance_pair_at(
+                directory_fd, "commands.jsonl", "commands.txt"
+            )
+    finally:
+        os.close(directory_fd)
+
+
+def test_pair_snapshot_rejects_fifo_without_blocking(tmp_path: Path) -> None:
+    fifo = tmp_path / "commands.jsonl"
+    os.mkfifo(fifo)
+    script = (
+        "import os,sys\n"
+        "from scripts import google_live_command_runner as runner\n"
+        "fd=os.open(sys.argv[1], os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))\n"
+        "try:\n"
+        " runner._read_provenance_pair_at(fd, 'commands.jsonl', 'commands.txt')\n"
+        "except RuntimeError:\n"
+        " raise SystemExit(0)\n"
+        "finally:\n"
+        " os.close(fd)\n"
+        "raise SystemExit(2)\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)],
+        cwd=Path(__file__).parents[1],
+        timeout=1,
+        check=False,
+    )
+    assert completed.returncode == 0
+
+
+def test_final_pair_verification_rejects_jsonl_mutation_during_projection_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    original_jsonl = provenance.read_bytes()
+    original_projection = provenance.with_suffix(".txt").read_bytes()
+    armed = False
+    mutated = False
+
+    def arm(stage: str) -> None:
+        nonlocal armed
+        if stage == "before_verify":
+            armed = True
+
+    def mutate(stage: str, directory_fd: int, name: str) -> None:
+        nonlocal mutated
+        if (
+            armed
+            and not mutated
+            and stage == "after_read"
+            and name == provenance.with_suffix(".txt").name
+        ):
+            mutated = True
+            runner._atomic_replace_at(directory_fd, provenance.name, original_jsonl)
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", arm)
+    monkeypatch.setattr(runner, "_provenance_read_hook", mutate)
+    with pytest.raises(RuntimeError, match="pair|artifact|rollback"):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+        )
+    assert provenance.read_bytes() == original_jsonl
+    assert provenance.with_suffix(".txt").read_bytes() == original_projection
+
+
+def test_preflight_pair_race_never_allows_child_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    existing = runner.parse_provenance(provenance.read_bytes())
+    newer_jsonl = runner.render_provenance(
+        [*existing, _provenance_entry(provenance, "diagnostic.injected", "3")]
+    )
+    marker = tmp_path / "child-executed"
+    armed = False
+    mutated = False
+
+    def arm(stage: str) -> None:
+        nonlocal armed
+        if stage == "preflight_before_read":
+            armed = True
+
+    def mutate(stage: str, directory_fd: int, name: str) -> None:
+        nonlocal mutated
+        if (
+            armed
+            and not mutated
+            and stage == "after_read"
+            and name == provenance.with_suffix(".txt").name
+        ):
+            mutated = True
+            runner._atomic_replace_at(directory_fd, provenance.name, newer_jsonl)
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", arm)
+    monkeypatch.setattr(runner, "_provenance_read_hook", mutate)
+    code = f"from pathlib import Path; Path({str(marker)!r}).write_text('bad')"
+    with pytest.raises((RuntimeError, ValueError), match="pair|artifact|provenance"):
+        execute_and_record(
+            _spec(tmp_path, code, command_id="diagnostic.candidate", outputs=()),
+            provenance=provenance,
+        )
+    assert not marker.exists()
+
+
+def test_initially_absent_pair_rolls_back_failure_after_first_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    seed_provenance = seed / "commands.jsonl"
+    execute_and_record(_spec(seed, "pass", outputs=()), provenance=seed_provenance)
+    target = tmp_path / "target"
+    target.mkdir()
+    provenance = target / "commands.jsonl"
+
+    def fail_after_jsonl(stage: str) -> None:
+        if stage == "after_jsonl_replace":
+            raise ValueError("injected first publish failure")
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", fail_after_jsonl)
+    with pytest.raises(ValueError, match="first publish failure"):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(seed_provenance, "diagnostic.writer_a", "1"),
+        )
+    assert not provenance.exists()
+    assert not provenance.with_suffix(".txt").exists()
 
 
 @pytest.mark.parametrize(
