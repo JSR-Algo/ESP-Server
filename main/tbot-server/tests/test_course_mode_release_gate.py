@@ -1875,6 +1875,55 @@ def test_assignment_lanes_share_capsule_then_remove_it(
     assert not observed[0].exists()
 
 
+def test_assignment_capsule_rename_blocks_rollback_and_reports_owner(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    _authorize_assignment_test_lane(monkeypatch)
+    capsules: list[gate.AssignmentRuntimeCapsule] = []
+    original_create = gate.AssignmentRuntimeCapsule.create
+    original_remove = gate._remove_owned_tree
+    rollback_marker = tmp_path / "rollback-ran"
+
+    def record_create(protected):
+        capsule = original_create(protected)
+        capsules.append(capsule)
+        return capsule
+
+    monkeypatch.setattr(gate.AssignmentRuntimeCapsule, "create", record_create)
+    lanes = (
+        _stateful_assignment_lane(
+            "admin-course-mode-assignment-new",
+            "import os;from pathlib import Path;"
+            "p=Path(os.environ['TASK4_ASSIGNMENT_RUNTIME_ROOT']);"
+            "p.rename(p.with_name(p.name+'-moved'));p.mkdir(mode=0o700)",
+        ),
+        _stateful_assignment_lane(
+            "admin-course-mode-assignment-rollback",
+            f"from pathlib import Path;Path({str(rollback_marker)!r}).touch()",
+        ),
+    )
+    try:
+        result = gate.run_gate(
+            candidate_file, "full", lanes=lanes,
+            source_environment=_assignment_source(candidate_file),
+        )
+
+        capsule = capsules[0]
+        moved_runtime = capsule.runtime_root.with_name(
+            capsule.runtime_root.name + "-moved"
+        )
+        assert result["verdict"] == "BLOCKED"
+        assert result["failedLane"] == "cleanup"
+        assert result["retainedOwner"] == "current-process"
+        assert result["retainedPaths"] == [str(capsule.root)]
+        assert moved_runtime.is_dir()
+        assert capsule.runtime_root.is_dir()
+        assert not rollback_marker.exists()
+    finally:
+        if capsules:
+            original_remove(capsules[0].root, capsules[0].identity)
+
+
 def test_assignment_capsule_is_cleaned_after_new_failure(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2206,7 +2255,7 @@ def test_assignment_capsule_finally_cleans_after_interrupt(
     assert capsules and not capsules[0].root.exists()
 
 
-def test_assignment_lanes_snapshot_mutable_source_once(
+def test_assignment_capsule_cannot_be_redirected_by_mutable_source(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     _authorize_assignment_test_lane(monkeypatch)
