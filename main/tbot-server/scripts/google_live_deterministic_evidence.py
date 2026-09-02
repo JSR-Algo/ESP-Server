@@ -6,10 +6,12 @@ import argparse
 import base64
 import binascii
 import hashlib
+import importlib.util
 import json
 import os
 import re
 import secrets
+import site
 import stat
 import subprocess
 import sys
@@ -43,6 +45,25 @@ _SENSITIVE_JUNIT_VALUE = re.compile(
 )
 _BASIC_AUTH_PAYLOAD = re.compile(r"\bbasic\s+([a-z0-9+/]+={0,2})(?![a-z0-9+/=])", re.IGNORECASE)
 _BEARER_AUTH_PAYLOAD = re.compile(r"\bbearer\s+([a-z0-9._~+/=-]+)", re.IGNORECASE)
+_PYTEST_CHILD_ENV_ALLOWLIST = (
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "TZ",
+)
+_PYTEST_PLUGINS = (
+    "pytest_asyncio.plugin",
+    "scripts.google_live_deterministic_nodeid_plugin",
+)
+_PYTEST_BOOTSTRAP = (
+    "import json,runpy,sys;"
+    "sys.path[:0]=json.loads(sys.argv.pop(1));"
+    "sys.argv[0]='pytest';"
+    "runpy.run_module('pytest',run_name='__main__')"
+)
 APPROVED_TEST_FILES = (
     "tests/test_google_live_lifecycle_e2e.py",
     "tests/test_google_live_client.py",
@@ -777,6 +798,61 @@ def _default_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[st
     return subprocess.run(command, check=False, text=True, capture_output=True, **kwargs)
 
 
+def _pytest_child_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
+    inherited = os.environ if source is None else source
+    child = {
+        name: inherited[name]
+        for name in _PYTEST_CHILD_ENV_ALLOWLIST
+        if inherited.get(name)
+    }
+    child.update(
+        {
+            "PATH": os.defpath,
+            "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+            "PYTHONNOUSERSITE": "1",
+        }
+    )
+    return child
+
+
+def _pytest_import_roots(repo_root: Path) -> list[str]:
+    roots = [str(repo_root)]
+    allowed_package_roots = {
+        Path(path).resolve(strict=True)
+        for path in (*site.getsitepackages(), site.getusersitepackages())
+        if Path(path).is_dir()
+    }
+    for module_name in ("pytest", "pytest_asyncio"):
+        specification = importlib.util.find_spec(module_name)
+        if specification is None or specification.origin is None:
+            raise RuntimeError("required pytest plugin is unavailable")
+        origin = Path(specification.origin).resolve(strict=True)
+        package_root_path = next(
+            (root for root in allowed_package_roots if root == origin.parent or root in origin.parents),
+            None,
+        )
+        if package_root_path is None:
+            raise RuntimeError("required pytest plugin is outside approved package roots")
+        package_root = str(package_root_path)
+        if package_root not in roots:
+            roots.append(package_root)
+    return roots
+
+
+def _pytest_command(repo_root: Path, *arguments: str) -> list[str]:
+    command = [
+        sys.executable,
+        "-I",
+        "-c",
+        _PYTEST_BOOTSTRAP,
+        json.dumps(_pytest_import_roots(repo_root), separators=(",", ":")),
+    ]
+    for plugin in _PYTEST_PLUGINS:
+        command.extend(["-p", plugin])
+    command.extend(arguments)
+    return command
+
+
 def _git_output(repo_root: Path, *arguments: str) -> bytes:
     completed = subprocess.run(
         ["git", *arguments], cwd=repo_root, check=False, capture_output=True
@@ -846,9 +922,11 @@ def produce(
     if manifest_bound.content != canonical_bound.content:
         raise ValueError("manifest does not match the checked-in canonical manifest")
     nodes = parse_manifest(manifest_bound.content)
+    child_environment = _pytest_child_environment()
     collect = run(
-        [sys.executable, "-m", "pytest", *approved_test_files, "--collect-only", "-qq"],
+        _pytest_command(repo_root, *approved_test_files, "--collect-only", "-qq"),
         cwd=repo_root,
+        env=child_environment,
     )
     if collect.returncode != 0:
         raise RuntimeError("pytest collection failed")
@@ -864,17 +942,14 @@ def produce(
     completed_successfully = False
     try:
         completed = run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
+            _pytest_command(
+                repo_root,
                 *nodes,
-                "-p",
-                "scripts.google_live_deterministic_nodeid_plugin",
                 f"--junitxml={temporary_path}",
                 "-q",
-            ],
+            ),
             cwd=repo_root,
+            env=child_environment,
         )
         if completed.returncode != 0:
             raise RuntimeError("pytest failed; deterministic evidence was not published")

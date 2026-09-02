@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 import re
+import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -18,7 +19,9 @@ if __package__ in {None, ""}:
 
 from scripts.analyze_google_live_log import correlate_websocket_bargein_evidence
 from scripts.google_live_deterministic_evidence import (
+    APPROVED_TEST_FILES,
     MANIFEST_SCHEMA,
+    _junit_value_is_sensitive,
     atomic_write_exclusive,
     parse_manifest,
     parse_passing_junit,
@@ -52,6 +55,10 @@ IDENTITY_FIELDS = (
 )
 SHA256 = re.compile(r"[0-9a-f]{64}")
 TAGGED_SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
+CANONICAL_DETERMINISTIC_NODE_COUNT = 783
+CANONICAL_DETERMINISTIC_MANIFEST = Path(
+    "main/tbot-server/tests/fixtures/google_live_deterministic_nodes.txt"
+)
 
 
 def _failure(code: str, layer: str | None = None, field: str | None = None) -> dict:
@@ -207,6 +214,95 @@ def validate_expected_identity(identity: Mapping[str, Any]) -> None:
         raise ValueError("fixture checksum must be 64 lowercase hex characters")
 
 
+def _git_output(repo_root: Path, *arguments: str) -> bytes:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("repository verification failed")
+    return completed.stdout
+
+
+def _trusted_manifest_path() -> Path:
+    code_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(
+        _git_output(code_root, "rev-parse", "--show-toplevel").decode().strip()
+    ).resolve(strict=True)
+    return repo_root / CANONICAL_DETERMINISTIC_MANIFEST
+
+
+def _validate_canonical_nodes(content: bytes) -> list[str]:
+    nodes = parse_manifest(content)
+    files = [node.split("::", 1)[0] for node in nodes]
+    if (
+        len(nodes) != CANONICAL_DETERMINISTIC_NODE_COUNT
+        or len(nodes) != len(set(nodes))
+        or set(files) != set(APPROVED_TEST_FILES)
+        or list(dict.fromkeys(files)) != list(APPROVED_TEST_FILES)
+    ):
+        raise ValueError("canonical deterministic manifest scope is invalid")
+    return nodes
+
+
+def _load_trusted_deterministic_manifest(expected_git_sha: str) -> bytes:
+    fixture_path = _trusted_manifest_path()
+    repo_root = Path(
+        _git_output(fixture_path.parent, "rev-parse", "--show-toplevel").decode().strip()
+    ).resolve(strict=True)
+    relative = fixture_path.relative_to(repo_root)
+    if _git_output(repo_root, "rev-parse", "HEAD").decode().strip() != expected_git_sha:
+        raise ValueError("candidate git SHA does not match repository HEAD")
+    if _git_output(
+        repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=no"
+    ):
+        raise ValueError("candidate worktree contains tracked or staged modifications")
+    _git_output(repo_root, "ls-files", "--error-unmatch", "--", str(relative))
+    ancestors = []
+    current = fixture_path.parent
+    while current != repo_root:
+        ancestors.append(current)
+        current = current.parent
+    fixture_stat = fixture_path.stat()
+    if (
+        fixture_path.is_symlink()
+        or any(parent.is_symlink() for parent in ancestors)
+        or not fixture_path.is_file()
+        or fixture_stat.st_nlink != 1
+    ):
+        raise ValueError("canonical deterministic manifest path is invalid")
+    worktree_content = fixture_path.read_bytes()
+    after_read_stat = fixture_path.stat()
+    if (
+        fixture_stat.st_dev,
+        fixture_stat.st_ino,
+        fixture_stat.st_size,
+        fixture_stat.st_mtime_ns,
+        fixture_stat.st_nlink,
+    ) != (
+        after_read_stat.st_dev,
+        after_read_stat.st_ino,
+        after_read_stat.st_size,
+        after_read_stat.st_mtime_ns,
+        after_read_stat.st_nlink,
+    ):
+        raise ValueError("canonical deterministic manifest changed while being read")
+    committed_content = _git_output(repo_root, "show", f"HEAD:{relative.as_posix()}")
+    if worktree_content != committed_content:
+        raise ValueError("canonical deterministic manifest differs from candidate Git object")
+    _validate_canonical_nodes(committed_content)
+    if (
+        _git_output(repo_root, "rev-parse", "HEAD").decode().strip() != expected_git_sha
+        or _git_output(
+            repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=no"
+        )
+    ):
+        raise ValueError("candidate repository changed during manifest validation")
+    return committed_content
+
+
 def load_checksum_manifest(
     manifest_path: Path | str, layer_paths: Mapping[str, Path | str]
 ) -> dict[str, str]:
@@ -219,19 +315,28 @@ def load_checksum_manifest(
     seen_paths = set()
     for line in manifest.read_text(encoding="utf-8").splitlines():
         if not line.strip():
-            continue
+            raise ValueError("checksum manifest row is malformed")
+        if _junit_value_is_sensitive(line):
+            raise ValueError("checksum manifest violates the privacy contract")
         match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
         if match is None:
             raise ValueError("checksum manifest row is malformed")
-        candidate = (root / match.group(2)).resolve()
+        relative = match.group(2)
+        if re.fullmatch(r"(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+", relative) is None:
+            raise ValueError("checksum manifest artifact path is invalid")
+        if _junit_value_is_sensitive(relative):
+            raise ValueError("checksum manifest violates the privacy contract")
+        candidate = (root / relative).resolve()
         if root not in candidate.parents:
             raise ValueError("checksum manifest path escapes its evidence root")
         if candidate not in by_path:
-            continue
+            raise ValueError("checksum manifest contains an undeclared artifact")
         if candidate in seen_paths:
             raise ValueError("checksum manifest must name each exact report once")
         seen_paths.add(candidate)
         result[by_path[candidate]] = match.group(1)
+    if set(result) != set(expected):
+        raise ValueError("checksum manifest is incomplete")
     return result
 
 
@@ -310,7 +415,28 @@ def aggregate_release_evidence(
                 break
     deterministic = loaded_reports.get("deterministic")
     coverage = deterministic.get("coverageProof") if isinstance(deterministic, Mapping) else None
+    try:
+        trusted_manifest_path = _trusted_manifest_path()
+        trusted_manifest_content = _load_trusted_deterministic_manifest(
+            str(expected_identity.get("gitSha", ""))
+        )
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        trusted_manifest_path = None
+        trusted_manifest_content = None
+        failures.append(_failure("DETERMINISTIC_TRUSTED_MANIFEST_INVALID", "deterministic"))
     support_contents: dict[str, bytes] = {}
+    supplied_support_paths = [
+        Path(layer_paths[support])
+        for support in DETERMINISTIC_SUPPORTS
+        if layer_paths.get(support) is not None
+    ]
+    support_alias_detected = any(
+        _same_file(left, right)
+        for index, left in enumerate(supplied_support_paths)
+        for right in supplied_support_paths[index + 1 :]
+    )
+    if support_alias_detected:
+        failures.append(_failure("DETERMINISTIC_SUPPORT_ALIAS", "deterministic"))
     for support in DETERMINISTIC_SUPPORTS:
         path_value = layer_paths.get(support)
         checksum = expected_checksums.get(support)
@@ -320,6 +446,12 @@ def aggregate_release_evidence(
         path = Path(path_value)
         try:
             if path.is_symlink() or not path.is_file():
+                raise OSError
+            if (
+                support == "deterministic_manifest"
+                and trusted_manifest_path is not None
+                and _same_file(path, trusted_manifest_path)
+            ):
                 raise OSError
             content = path.read_bytes()
         except OSError:
@@ -331,7 +463,15 @@ def aggregate_release_evidence(
     try:
         manifest_content = support_contents["deterministic_manifest"]
         junit_content = support_contents["deterministic_junit"]
+        if support_alias_detected:
+            raise ValueError
+        if trusted_manifest_content is None or not hmac.compare_digest(
+            manifest_content, trusted_manifest_content
+        ):
+            raise ValueError
         nodes = parse_manifest(manifest_content)
+        if nodes != _validate_canonical_nodes(trusted_manifest_content):
+            raise ValueError
         totals = parse_passing_junit(junit_content, nodes)
         expected_coverage = {
             "manifestSchema": MANIFEST_SCHEMA,
@@ -349,7 +489,12 @@ def aggregate_release_evidence(
             "failures": [],
         }:
             raise ValueError
-    except (KeyError, TypeError, ValueError):
+        if not hmac.compare_digest(
+            trusted_manifest_content,
+            _load_trusted_deterministic_manifest(str(expected_identity.get("gitSha", ""))),
+        ):
+            raise ValueError
+    except (KeyError, OSError, RuntimeError, TypeError, UnicodeError, ValueError):
         failures.append(_failure("DETERMINISTIC_SUPPORT_CONTRACT_INVALID", "deterministic"))
     if any(item.get("layer") == "deterministic" for item in failures):
         for item in layers:

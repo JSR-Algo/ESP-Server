@@ -3,6 +3,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -644,7 +645,10 @@ def test_exclusive_publish_rechecks_hardlinks_at_final_boundary(
     assert external_alias.stat().st_nlink == 1
 
 
-def test_producer_uses_argument_vector_and_publishes_only_verified_pass(tmp_path: Path) -> None:
+def test_producer_uses_isolated_allowlisted_pytest_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     nodes = ["tests/test_a.py::test_one"]
     manifest = tmp_path / "node-manifest.txt"
     manifest.write_text(nodes[0] + "\n", encoding="utf-8")
@@ -652,9 +656,20 @@ def test_producer_uses_argument_vector_and_publishes_only_verified_pass(tmp_path
     junit.parent.parent.mkdir()
     report = junit.with_name("report.json")
     calls = []
+    sentinel = "must-never-reach-child"
+    for name in (
+        "GOOGLE_API_KEY",
+        "PYTEST_ADDOPTS",
+        "PYTEST_PLUGINS",
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "SESSION_TOKEN",
+    ):
+        monkeypatch.setenv(name, sentinel)
+    monkeypatch.setenv("PATH", f"/attacker/{sentinel}")
 
     def run(command, **kwargs):
-        calls.append(command)
+        calls.append((command, kwargs))
         if "--collect-only" in command:
             return subprocess.CompletedProcess(command, 0, stdout=nodes[0] + "\n", stderr="")
         junit_arg = next(value for value in command if value.startswith("--junitxml="))
@@ -673,9 +688,64 @@ def test_producer_uses_argument_vector_and_publishes_only_verified_pass(tmp_path
         approved_test_files=("tests/test_a.py",),
         canonical_manifest_path=manifest,
     )
-    assert all(isinstance(command, list) for command in calls)
+    assert all(isinstance(command, list) for command, _kwargs in calls)
+    for command, kwargs in calls:
+        assert command[:3] == [sys.executable, "-I", "-c"]
+        assert "run_module('pytest'" in command[3]
+        assert str(tmp_path.resolve()) in json.loads(command[4])
+        assert command.count("pytest_asyncio.plugin") == 1
+        assert command.count("scripts.google_live_deterministic_nodeid_plugin") == 1
+        assert kwargs["cwd"] == tmp_path.resolve()
+        assert kwargs["env"]["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
+        assert kwargs["env"]["PYTHONNOUSERSITE"] == "1"
+        assert sentinel not in json.dumps(kwargs["env"])
+        assert kwargs["env"]["PATH"] == os.defpath
     assert json.loads(report.read_text(encoding="utf-8"))["status"] == "PASS"
+    assert sentinel not in report.read_text(encoding="utf-8")
     assert deterministic.parse_passing_junit(junit.read_bytes(), nodes)["tests"] == 1
+
+
+def test_isolated_pytest_process_ignores_environment_injection(tmp_path: Path) -> None:
+    sentinel = "must-never-reach-child"
+    injection = tmp_path / "injection"
+    injection.mkdir()
+    (injection / "sitecustomize.py").write_text(
+        "raise RuntimeError('sitecustomize loaded')\n",
+        encoding="utf-8",
+    )
+    (injection / "evil_plugin.py").write_text(
+        "raise RuntimeError('plugin loaded')\n",
+        encoding="utf-8",
+    )
+    test_file = tmp_path / "test_isolated_child.py"
+    test_file.write_text(
+        "import os\n"
+        "def test_child_is_clean():\n"
+        f"    assert {sentinel!r} not in repr(dict(os.environ))\n",
+        encoding="utf-8",
+    )
+    source = {
+        "GOOGLE_API_KEY": sentinel,
+        "PATH": str(injection),
+        "PYTEST_ADDOPTS": "--collect-only",
+        "PYTEST_PLUGINS": "evil_plugin",
+        "PYTHONPATH": str(injection),
+        "PYTHONSTARTUP": str(injection / "sitecustomize.py"),
+    }
+    repo_root = Path(__file__).parents[1].resolve()
+
+    completed = subprocess.run(
+        deterministic._pytest_command(repo_root, str(test_file), "-q"),
+        cwd=repo_root,
+        env=deterministic._pytest_child_environment(source),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert "1 passed" in completed.stdout
+    assert sentinel not in completed.stdout + completed.stderr
 
 
 def test_producer_does_not_publish_report_for_failed_pytest(tmp_path: Path) -> None:

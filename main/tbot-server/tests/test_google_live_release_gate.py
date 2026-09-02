@@ -12,17 +12,34 @@ sys.path.insert(0, str(Path(__file__).parent))
 import test_physical_smoke_audit as physical_fixture
 
 from scripts.analyze_google_live_log import correlate_websocket_bargein_evidence
+from scripts import google_live_release_gate as release_gate
 from scripts.google_live_release_gate import (
     RELEASE_SCHEMA_VERSION,
     REQUIRED_LAYERS,
     aggregate_release_evidence,
     load_checksum_manifest,
 )
-from scripts.google_live_deterministic_evidence import MANIFEST_SCHEMA
+from scripts.google_live_deterministic_evidence import MANIFEST_SCHEMA, parse_manifest
 
 _PHYSICAL_CASE = physical_fixture.PhysicalSmokeAuditTest()
 _OPTIONS = _PHYSICAL_CASE._candidate_audit_options()
 IDENTITY = _OPTIONS["candidate_identity"]
+CANONICAL_MANIFEST_PATH = (
+    Path(__file__).parent / "fixtures" / "google_live_deterministic_nodes.txt"
+)
+CANONICAL_MANIFEST = CANONICAL_MANIFEST_PATH.read_bytes()
+CANONICAL_NODES = parse_manifest(CANONICAL_MANIFEST)
+REAL_LOAD_TRUSTED_MANIFEST = release_gate._load_trusted_deterministic_manifest
+
+
+@pytest.fixture(autouse=True)
+def _pin_release_manifest_loader(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        release_gate,
+        "_load_trusted_deterministic_manifest",
+        lambda _expected_git_sha: CANONICAL_MANIFEST,
+        raising=False,
+    )
 
 
 def _websocket_report() -> dict:
@@ -68,7 +85,7 @@ def _websocket_report() -> dict:
     }
 
 
-def _reports() -> dict[str, dict]:
+def _reports(test_count: int = len(CANONICAL_NODES)) -> dict[str, dict]:
     physical_audit = _PHYSICAL_CASE._candidate_audit(
         _PHYSICAL_CASE._candidate_physical_log()
     )
@@ -114,7 +131,7 @@ def _reports() -> dict[str, dict]:
             "coverageProof": {},
             "testVerdict": {
                 "status": "PASS",
-                "total": 2,
+                "total": test_count,
                 "failed": 0,
                 "skipped": 0,
                 "errors": 0,
@@ -168,29 +185,38 @@ def _reports() -> dict[str, dict]:
     }
 
 
-def _write_evidence(root: Path) -> tuple[dict[str, Path], dict[str, str], Path]:
+def _write_evidence(
+    root: Path,
+    *,
+    nodes: list[str] | None = None,
+) -> tuple[dict[str, Path], dict[str, str], Path]:
     deterministic_dir = root / "deterministic"
     deterministic_dir.mkdir(parents=True)
-    nodes = ["tests/test_a.py::test_one", "tests/test_b.py::test_two"]
+    nodes = list(CANONICAL_NODES if nodes is None else nodes)
     node_manifest = deterministic_dir / "node-manifest.txt"
     node_manifest.write_text("\n".join(nodes) + "\n", encoding="utf-8")
     junit = deterministic_dir / "pytest.xml"
-    cases = "".join(
-        f'<testcase classname="{node.split("::", 1)[0][:-3].replace("/", ".")}" '
-        f'name="{node.rsplit("::", 1)[-1]}" time="0.000"><properties>'
-        f'<property name="google_live_nodeid" value="{node}" /></properties></testcase>'
-        for node in nodes
-    )
+    cases = []
+    for node in nodes:
+        parts = node.split("::")
+        classname = parts[0][:-3].replace("/", ".")
+        if len(parts) > 2:
+            classname += "." + ".".join(parts[1:-1])
+        cases.append(
+            f'<testcase classname="{classname}" name="{parts[-1]}" time="0.000">'
+            f'<properties><property name="google_live_nodeid" value="{node}" />'
+            f'</properties></testcase>'
+        )
     junit.write_text(
-        f'<testsuites name="pytest tests"><testsuite name="pytest" tests="2" failures="0" errors="0" skipped="0">{cases}</testsuite></testsuites>',
+        f'<testsuites name="pytest tests"><testsuite name="pytest" tests="{len(nodes)}" failures="0" errors="0" skipped="0">{"".join(cases)}</testsuite></testsuites>',
         encoding="utf-8",
     )
-    reports = _reports()
+    reports = _reports(len(nodes))
     reports["deterministic"]["coverageProof"] = {
         "manifestSchema": MANIFEST_SCHEMA,
         "manifestSha256": hashlib.sha256(node_manifest.read_bytes()).hexdigest(),
-        "manifestNodeCount": 2,
-        "executedNodeCount": 2,
+        "manifestNodeCount": len(nodes),
+        "executedNodeCount": len(nodes),
         "junitSha256": hashlib.sha256(junit.read_bytes()).hexdigest(),
     }
     paths = {}
@@ -232,6 +258,100 @@ def test_release_passes_only_real_exact_candidate_contracts(tmp_path: Path) -> N
     assert verdict["failures"] == []
 
 
+def test_release_rejects_self_consistent_tiny_deterministic_manifest(tmp_path: Path) -> None:
+    paths, checksums, _ = _write_evidence(
+        tmp_path,
+        nodes=["tests/test_a.py::test_one", "tests/test_b.py::test_two"],
+    )
+
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+
+    assert verdict["status"] == "FAIL"
+    assert any(
+        item["code"] == "DETERMINISTIC_SUPPORT_CONTRACT_INVALID"
+        for item in verdict["failures"]
+    )
+
+
+@pytest.mark.parametrize("mutation", ["reordered", "missing", "duplicate", "unapproved"])
+def test_release_rejects_self_consistent_noncanonical_manifest(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    nodes = list(CANONICAL_NODES)
+    if mutation == "reordered":
+        nodes[0], nodes[1] = nodes[1], nodes[0]
+    elif mutation == "missing":
+        nodes.pop()
+    elif mutation == "duplicate":
+        nodes.append(nodes[-1])
+    else:
+        nodes[0] = "tests/unapproved_google_live.py::test_hidden"
+    paths, checksums, _ = _write_evidence(tmp_path, nodes=nodes)
+
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+
+    assert verdict["status"] == "FAIL"
+    assert any(
+        item["code"] == "DETERMINISTIC_SUPPORT_CONTRACT_INVALID"
+        for item in verdict["failures"]
+    )
+
+
+@pytest.mark.parametrize("alias_kind", ["direct", "symlink", "hardlink"])
+def test_release_rejects_canonical_fixture_alias_as_supplied_manifest(
+    tmp_path: Path,
+    alias_kind: str,
+) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    supplied = paths["deterministic_manifest"]
+    supplied.unlink()
+    if alias_kind == "direct":
+        paths["deterministic_manifest"] = CANONICAL_MANIFEST_PATH
+    elif alias_kind == "symlink":
+        supplied.symlink_to(CANONICAL_MANIFEST_PATH)
+    else:
+        os.link(CANONICAL_MANIFEST_PATH, supplied)
+
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+
+    assert verdict["status"] == "FAIL"
+    assert any(item["code"].startswith("DETERMINISTIC_SUPPORT") for item in verdict["failures"])
+
+
+@pytest.mark.parametrize("drift", ["head", "status", "untracked", "content"])
+def test_trusted_manifest_loader_rejects_repository_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    fixture = tmp_path / "main/tbot-server/tests/fixtures/google_live_deterministic_nodes.txt"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_bytes(CANONICAL_MANIFEST)
+    expected_sha = "a" * 40
+
+    def git_output(_repo_root: Path, *arguments: str) -> bytes:
+        if arguments[:2] == ("rev-parse", "--show-toplevel"):
+            return str(tmp_path).encode() + b"\n"
+        if arguments == ("rev-parse", "HEAD"):
+            return (("b" * 40) if drift == "head" else expected_sha).encode() + b"\n"
+        if arguments[0] == "status":
+            return b" M main/tbot-server/tests/fixtures/google_live_deterministic_nodes.txt\0" if drift == "status" else b""
+        if arguments[0] == "ls-files":
+            if drift == "untracked":
+                raise RuntimeError("not tracked")
+            return str(fixture.relative_to(tmp_path)).encode() + b"\n"
+        if arguments[0] == "show":
+            return b"tests/test_a.py::test_one\n" if drift == "content" else CANONICAL_MANIFEST
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(release_gate, "_trusted_manifest_path", lambda: fixture)
+    monkeypatch.setattr(release_gate, "_git_output", git_output)
+
+    with pytest.raises((RuntimeError, ValueError)):
+        REAL_LOAD_TRUSTED_MANIFEST(expected_sha)
+
+
 @pytest.mark.parametrize("support_name", ["node-manifest.txt", "pytest.xml"])
 def test_release_rejects_tampered_deterministic_support(tmp_path: Path, support_name: str) -> None:
     paths, checksums, _ = _write_evidence(tmp_path)
@@ -249,8 +369,8 @@ def test_release_independently_rejects_suite_level_junit_error_even_with_rebound
     junit = paths["deterministic_junit"]
     junit.write_text(
         junit.read_text(encoding="utf-8").replace(
-            '<testsuite name="pytest" tests="2" failures="0" errors="0" skipped="0">',
-            '<testsuite name="pytest" tests="2" failures="0" errors="1" skipped="0"><error message="session crashed" />',
+            f'<testsuite name="pytest" tests="{len(CANONICAL_NODES)}" failures="0" errors="0" skipped="0">',
+            f'<testsuite name="pytest" tests="{len(CANONICAL_NODES)}" failures="0" errors="1" skipped="0"><error message="session crashed" />',
         ),
         encoding="utf-8",
     )
@@ -309,7 +429,11 @@ def test_release_rejects_rebound_fullwidth_sensitive_allowed_attribute(
     secret = "private"
     sensitive = f"ＧＯＯＧＬＥ＿ＡＰＩ＿ＫＥＹ＝{secret}"
     junit.write_bytes(
-        junit.read_bytes().replace(b'classname="tests.test_a"', f'classname="{sensitive}"'.encode(), 1)
+        junit.read_bytes().replace(
+            f'classname="{CANONICAL_NODES[0].split("::", 1)[0][:-3].replace("/", ".")}"'.encode(),
+            f'classname="{sensitive}"'.encode(),
+            1,
+        )
     )
     digest = hashlib.sha256(junit.read_bytes()).hexdigest()
     checksums["deterministic_junit"] = digest
@@ -560,13 +684,55 @@ def test_release_allows_safe_near_miss_metadata_keys(tmp_path: Path, safe_key: s
     assert verdict["status"] == "PASS"
 
 
-def test_checksum_manifest_maps_exact_files_and_allows_other_bounded_artifacts(tmp_path: Path) -> None:
+def test_checksum_manifest_maps_every_exact_declared_artifact(tmp_path: Path) -> None:
     paths, checksums, manifest = _write_evidence(tmp_path)
+    assert load_checksum_manifest(manifest, paths) == checksums
+
+
+def test_checksum_manifest_rejects_unknown_artifacts(tmp_path: Path) -> None:
+    paths, _, manifest = _write_evidence(tmp_path)
     manifest.write_text(
         manifest.read_text(encoding="utf-8") + f"{'0' * 64}  timeline.log\n",
         encoding="utf-8",
     )
-    assert load_checksum_manifest(manifest, paths) == checksums
+    with pytest.raises(ValueError):
+        load_checksum_manifest(manifest, paths)
+
+
+@pytest.mark.parametrize(
+    "hidden_path",
+    [
+        "GOOGLE_API_KEY=super-secret",
+        "ＧＯＯＧＬＥ＿ＡＰＩ＿ＫＥＹ＝super-secret",
+        "access%255Ftoken%253Dsuper-secret",
+        "Bearer abcdefghijklmnopqrst",
+        "cookie=session-private",
+    ],
+)
+def test_checksum_manifest_rejects_private_unknown_rows_without_leaking(
+    tmp_path: Path,
+    hidden_path: str,
+) -> None:
+    paths, _, manifest = _write_evidence(tmp_path)
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8") + f"{'0' * 64}  {hidden_path}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError) as error:
+        load_checksum_manifest(manifest, paths)
+    assert "super-secret" not in str(error.value)
+    assert "abcdefghijklmnopqrst" not in str(error.value)
+
+
+@pytest.mark.parametrize("suffix", ["\n", "# hidden\n"])
+def test_checksum_manifest_rejects_blank_or_comment_rows(
+    tmp_path: Path,
+    suffix: str,
+) -> None:
+    paths, _, manifest = _write_evidence(tmp_path)
+    manifest.write_text(manifest.read_text(encoding="utf-8") + suffix, encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_checksum_manifest(manifest, paths)
 
 
 def test_checksum_manifest_rejects_duplicate_report(tmp_path: Path) -> None:
