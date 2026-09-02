@@ -655,6 +655,25 @@ def _runtime_root(candidate_file: Path) -> Path:
     return Path(candidate["repositories"]["adminEsp"]["path"])
 
 
+def _assignment_source(candidate_file: Path) -> dict[str, str]:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    return {
+        "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME": "tbot-task4-unit",
+        "LESSON_STUDIO_E2E_RESOURCE_PREFIX": "tbot-task4-unit",
+        "TASK4_ASSIGNMENT_RUNTIME_ROOT": str(
+            Path(candidate["repositories"]["adminEsp"]["path"])
+            / "main/manager-web/output/task4"
+        ),
+        "JWT_PUBLIC_KEY": "test-public-key",
+        "TBOT_DEVICE_MINT_SECRET": "test-mint-secret",
+        "LESSON_ASSET_ORIGIN_BASE": "https://task4-media.localhost:28443/tvideo-demo",
+        "ROBOT_ESP_BASE_URL": "http://127.0.0.1:18013",
+        "LESSON_STUDIO_E2E_BACKEND_HOST_PORT": "13100",
+        "LESSON_STUDIO_E2E_WEB_HOST_PORT": "18102",
+        "TASK4_ASSIGNMENT_MEDIA_HOST_PORT": "28443",
+    }
+
+
 def _operator_attestation_payload(candidate_file: Path) -> dict:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     return {
@@ -2262,10 +2281,121 @@ def test_assignment_environment_uses_image_ids_not_mutable_tags(candidate_file: 
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     lane = next(item for item in gate.FULL_LANES if item.name == "admin-course-mode-assignment-new")
 
-    environment = gate._child_environment(candidate, {}, lane)
+    environment = gate._child_environment(candidate, _assignment_source(candidate_file), lane)
 
     assert environment["TBOT_LESSON_STUDIO_BACKEND_IMAGE"] == candidate["images"]["lessonStudioBackend"]["id"]
     assert environment["TBOT_LESSON_STUDIO_WEB_IMAGE"] == candidate["images"]["lessonStudioWeb"]["id"]
+
+
+@pytest.mark.parametrize(
+    "lane_name,missing",
+    [
+        ("admin-course-mode-assignment-new", "LESSON_STUDIO_E2E_BACKEND_HOST_PORT"),
+        ("admin-course-mode-assignment-new", "LESSON_STUDIO_E2E_WEB_HOST_PORT"),
+        ("admin-course-mode-assignment-new", "TASK4_ASSIGNMENT_MEDIA_HOST_PORT"),
+        ("admin-course-mode-assignment-rollback", "LESSON_STUDIO_E2E_BACKEND_HOST_PORT"),
+        ("admin-course-mode-assignment-rollback", "LESSON_STUDIO_E2E_WEB_HOST_PORT"),
+        ("admin-course-mode-assignment-rollback", "TASK4_ASSIGNMENT_MEDIA_HOST_PORT"),
+    ],
+)
+def test_assignment_lane_requires_isolated_ports_before_command(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, lane_name: str, missing: str,
+) -> None:
+    lane = next(item for item in gate.FULL_LANES if item.name == lane_name)
+    source = _assignment_source(candidate_file)
+    source.pop(missing)
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args: True)
+    monkeypatch.setattr(
+        gate, "stage_execution_candidate",
+        lambda *_args: pytest.fail("assignment lane staged before required port validation"),
+    )
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=(lane,), source_environment=source,
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == lane_name
+
+
+@pytest.mark.parametrize("name", gate.TASK4_ASSIGNMENT_PORT_ENV)
+@pytest.mark.parametrize(
+    "value", ["not-a-port", "0", "65536", "+13100", " 13100", "9" * 5000],
+)
+def test_assignment_lane_rejects_invalid_isolated_port(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, name: str, value: str,
+) -> None:
+    lane = next(item for item in gate.FULL_LANES if item.name == "admin-course-mode-assignment-new")
+    source = _assignment_source(candidate_file)
+    source[name] = value
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args: True)
+    monkeypatch.setattr(
+        gate, "stage_execution_candidate",
+        lambda *_args: pytest.fail("assignment lane staged before port validation"),
+    )
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=(lane,), source_environment=source,
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == lane.name
+
+
+@pytest.mark.parametrize(
+    "ports",
+    [
+        ("13100", "13100", "28443"),
+        ("13100", "18102", "13100"),
+        ("13100", "18102", "18102"),
+        ("3100", "18102", "28443"),
+        ("13100", "8102", "28443"),
+        ("13100", "18102", "18443"),
+    ],
+)
+def test_assignment_lane_rejects_duplicate_or_standard_stack_port(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, ports: tuple[str, str, str],
+) -> None:
+    lane = next(item for item in gate.FULL_LANES if item.name == "admin-course-mode-assignment-new")
+    source = _assignment_source(candidate_file)
+    for name, value in zip(
+        (
+            "LESSON_STUDIO_E2E_BACKEND_HOST_PORT",
+            "LESSON_STUDIO_E2E_WEB_HOST_PORT",
+            "TASK4_ASSIGNMENT_MEDIA_HOST_PORT",
+        ),
+        ports,
+    ):
+        source[name] = value
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args: True)
+    monkeypatch.setattr(
+        gate, "stage_execution_candidate",
+        lambda *_args: pytest.fail("assignment lane staged before port isolation validation"),
+    )
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=(lane,), source_environment=source,
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == lane.name
+
+
+def test_assignment_lane_forwards_isolated_ports_without_changing_namespace(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(item for item in gate.FULL_LANES if item.name == "admin-course-mode-assignment-rollback")
+    source = _assignment_source(candidate_file)
+
+    environment = gate._child_environment(candidate, source, lane)
+
+    assert environment is not None
+    assert environment["LESSON_STUDIO_E2E_BACKEND_HOST_PORT"] == "13100"
+    assert environment["LESSON_STUDIO_E2E_WEB_HOST_PORT"] == "18102"
+    assert environment["TASK4_ASSIGNMENT_MEDIA_HOST_PORT"] == "28443"
+    assert environment["LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME"] == "tbot-task4-unit"
+    assert environment["LESSON_STUDIO_E2E_RESOURCE_PREFIX"] == "tbot-task4-unit"
 
 
 def test_assignment_runtime_root_is_rebased_to_lane_execution_snapshot(
@@ -2284,7 +2414,7 @@ def test_assignment_runtime_root_is_rebased_to_lane_execution_snapshot(
 
         environment = gate._child_environment(
             execution.candidate,
-            {"TASK4_ASSIGNMENT_RUNTIME_ROOT": str(source_runtime)},
+            {**_assignment_source(candidate_file), "TASK4_ASSIGNMENT_RUNTIME_ROOT": str(source_runtime)},
             lane,
             source_candidate=candidate,
         )
@@ -2324,7 +2454,10 @@ def test_assignment_runtime_root_uses_one_required_environment_snapshot(
     execution = None
     try:
         execution = stage.create_lane_execution()
-        source = MutableSource({"TASK4_ASSIGNMENT_RUNTIME_ROOT": source_runtime})
+        source = MutableSource({
+            **_assignment_source(candidate_file),
+            "TASK4_ASSIGNMENT_RUNTIME_ROOT": source_runtime,
+        })
 
         environment = gate._child_environment(
             execution.candidate, source, lane, source_candidate=candidate,
@@ -2364,7 +2497,7 @@ def test_assignment_runtime_root_rebase_fails_closed(
 
     environment = gate._child_environment(
         candidate,
-        {"TASK4_ASSIGNMENT_RUNTIME_ROOT": str(source_runtime)},
+        {**_assignment_source(candidate_file), "TASK4_ASSIGNMENT_RUNTIME_ROOT": str(source_runtime)},
         lane,
         source_candidate=candidate,
     )
@@ -5103,6 +5236,9 @@ def test_assignment_lane_identity_is_derived_only_from_candidate(candidate_file:
         "TBOT_DEVICE_MINT_SECRET": "test-mint-secret",
         "LESSON_ASSET_ORIGIN_BASE": "https://task4-media.localhost:18443/tvideo-demo",
         "ROBOT_ESP_BASE_URL": "http://127.0.0.1:18013",
+        "LESSON_STUDIO_E2E_BACKEND_HOST_PORT": "13100",
+        "LESSON_STUDIO_E2E_WEB_HOST_PORT": "18102",
+        "TASK4_ASSIGNMENT_MEDIA_HOST_PORT": "28443",
     }
 
     environment = gate._child_environment(candidate, hostile, lane)

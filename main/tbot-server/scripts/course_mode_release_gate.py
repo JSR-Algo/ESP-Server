@@ -187,7 +187,14 @@ TASK4_ASSIGNMENT_CANDIDATE_ENV = (
     "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME", "LESSON_STUDIO_E2E_RESOURCE_PREFIX",
     "TASK4_ASSIGNMENT_RUNTIME_ROOT", "JWT_PUBLIC_KEY", "TBOT_DEVICE_MINT_SECRET",
     "LESSON_ASSET_ORIGIN_BASE", "ROBOT_ESP_BASE_URL",
+    "LESSON_STUDIO_E2E_BACKEND_HOST_PORT", "LESSON_STUDIO_E2E_WEB_HOST_PORT",
+    "TASK4_ASSIGNMENT_MEDIA_HOST_PORT",
 )
+TASK4_ASSIGNMENT_PORT_ENV = (
+    "LESSON_STUDIO_E2E_BACKEND_HOST_PORT", "LESSON_STUDIO_E2E_WEB_HOST_PORT",
+    "TASK4_ASSIGNMENT_MEDIA_HOST_PORT",
+)
+TASK4_STANDARD_HOST_PORTS = frozenset({3100, 8102, 18443})
 TASK4_BACKEND_MOUNT_ROOTS = (
     "src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json",
     "src/lessons/fixtures/tvideo-raw-code/assets/admin",
@@ -2748,6 +2755,10 @@ def _child_environment(
         if value:
             required_environment[name] = value
     environment.update(required_environment)
+    assignment_ports = _assignment_port_environment(required_environment, lane)
+    if assignment_ports is None:
+        return None
+    environment.update(assignment_ports)
     if lane.name in {
         "admin-course-mode-assignment-new", "admin-course-mode-assignment-rollback",
     } and required_environment.get("TASK4_ASSIGNMENT_RUNTIME_ROOT"):
@@ -2956,6 +2967,28 @@ def _assignment_candidate_environment(candidate: dict, lane: Lane) -> dict[str, 
     for key in ("TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID", "TBOT_LESSON_STUDIO_WEB_IMAGE_ID"):
         if re.fullmatch(r"sha256:[0-9a-f]{64}", values[key]) is None:
             return None
+    return values
+
+
+def _assignment_port_environment(
+    environment: Mapping[str, str], lane: Lane,
+) -> dict[str, str] | None:
+    if lane.name not in {
+        "admin-course-mode-assignment-new", "admin-course-mode-assignment-rollback",
+    }:
+        return {}
+    values = {name: environment.get(name) for name in TASK4_ASSIGNMENT_PORT_ENV}
+    if any(
+        not isinstance(value, str)
+        or re.fullmatch(r"[0-9]+", value) is None
+        or len(value) > 5
+        or not 1 <= int(value) <= 65535
+        for value in values.values()
+    ):
+        return None
+    ports = {int(value) for value in values.values()}
+    if len(ports) != len(TASK4_ASSIGNMENT_PORT_ENV) or ports & TASK4_STANDARD_HOST_PORTS:
+        return None
     return values
 
 
@@ -3382,6 +3415,11 @@ def run_gate(
                     name: lane_source.get(name) for name in required_environment
                 }
                 if any(not required_source[name] for name in required_environment):
+                    report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
+                    report["verdict"] = "BLOCKED"
+                    report["failedLane"] = lane.name
+                    break
+                if _assignment_port_environment(required_source, lane) is None:
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
