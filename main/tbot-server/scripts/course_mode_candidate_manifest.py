@@ -89,9 +89,13 @@ FIRMWARE_KEYS = {
 }
 DATABASE_KEYS = {"engineImage", "engineImageId", "migrationHead", "migrationHeadSha256"}
 TOOLS_KEYS = {
-    "docker", "dockerCompose", "nodeInstalls", "robotPreviewBrowser", "node",
-    "pythonTestRuntime", "espIdf",
+    "docker", "dockerCompose", "nodeInstalls", "playwrightBrowsers",
+    "robotPreviewBrowser", "node", "pythonTestRuntime", "espIdf",
 }
+PLAYWRIGHT_BROWSER_REVISIONS = {
+    "chromium-headless-shell": "1223", "webkit": "2287", "ffmpeg": "1011",
+}
+PLAYWRIGHT_BROWSER_KEYS = set(PLAYWRIGHT_BROWSER_REVISIONS)
 CONTAINER_TOOL_KEYS = {"path", "sha256", "version"}
 NODE_KEYS = {"backend", "adminManagerWeb"}
 NODE_DESCRIPTOR_KEYS = {
@@ -851,6 +855,36 @@ def secure_browser_bundle_descriptor(root: Path) -> tuple[dict[str, Any] | None,
             os.close(root_fd)
 
 
+def secure_playwright_browser_bundle_descriptor(
+    root: Path,
+) -> tuple[dict[str, Any] | None, str | None]:
+    root_fd = None
+    try:
+        if not root.is_absolute() or str(root) != str(root.resolve(strict=True)) or root.is_symlink():
+            return None, "path"
+        root_before = root.lstat()
+        if not stat.S_ISDIR(root_before.st_mode):
+            return None, "path"
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+        if _tree_metadata_identity(os.fstat(root_fd)) != _tree_metadata_identity(root_before):
+            return None, "changed"
+        descriptor, error = _secure_browser_bundle_descriptor_fd(
+            root_fd, root_before, allow_safe_symlinks=True,
+        )
+        if error is not None:
+            return descriptor, error
+        if _tree_metadata_identity(root.lstat()) != _tree_metadata_identity(root_before):
+            return None, "changed"
+        return descriptor, None
+    except RecursionError:
+        return None, "tree"
+    except (OSError, UnicodeEncodeError):
+        return None, "path"
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
+
+
 def secure_backend_snapshot_tree_descriptor(
     root: Path,
 ) -> tuple[dict[str, Any] | None, str | None]:
@@ -1413,6 +1447,62 @@ def _validate_robot_preview_browser(value: Any, reasons: set[str], *, verify_ide
             or executable_path.is_symlink() or not os.access(executable_path, os.X_OK)
         ):
             reasons.add(f"{prefix}.identity")
+
+
+def _validate_playwright_browsers(
+    value: Any, reasons: set[str], *, verify_identity: bool,
+) -> None:
+    prefix = "tools.playwrightBrowsers"
+    if not isinstance(value, dict) or set(value) != PLAYWRIGHT_BROWSER_KEYS:
+        reasons.add(f"{prefix}.keys")
+        return
+    roots: list[Path] = []
+    for engine, descriptor in value.items():
+        item_prefix = f"{prefix}.{engine}"
+        if not isinstance(descriptor, dict) or set(descriptor) != BROWSER_DESCRIPTOR_KEYS:
+            reasons.add(f"{item_prefix}.keys")
+            continue
+        if type(descriptor.get("version")) is not int or descriptor["version"] != 1:
+            reasons.add(f"{item_prefix}.version")
+        if descriptor.get("engine") != engine:
+            reasons.add(f"{item_prefix}.engine")
+        revision = descriptor.get("revision")
+        if revision != PLAYWRIGHT_BROWSER_REVISIONS[engine]:
+            reasons.add(f"{item_prefix}.revision")
+        root = descriptor.get("root")
+        executable = descriptor.get("executable")
+        tree = descriptor.get("treeDigest")
+        if not isinstance(root, str) or not Path(root).is_absolute():
+            reasons.add(f"{item_prefix}.root")
+        else:
+            root_path = Path(root)
+            roots.append(root_path)
+            if root_path.name != f"{engine.replace('-', '_')}-{revision}":
+                reasons.add(f"{item_prefix}.root")
+        if not _valid_relative_path(executable):
+            reasons.add(f"{item_prefix}.executable")
+        if not isinstance(tree, dict) or set(tree) != BROWSER_TREE_KEYS:
+            reasons.add(f"{item_prefix}.treeDigest.keys")
+        elif (
+            tree.get("schema") != BROWSER_TREE_SCHEMA
+            or not isinstance(tree.get("sha256"), str)
+            or SHA256_RE.fullmatch(tree["sha256"]) is None
+            or type(tree.get("entryCount")) is not int or tree["entryCount"] <= 0
+            or type(tree.get("totalBytes")) is not int or tree["totalBytes"] <= 0
+        ):
+            reasons.add(f"{item_prefix}.treeDigest")
+        if verify_identity and not any(
+            reason.startswith(f"{item_prefix}.") for reason in reasons
+        ):
+            observed, error = secure_playwright_browser_bundle_descriptor(Path(root))
+            executable_path = Path(root) / executable
+            if (
+                error or observed != tree or not executable_path.is_file()
+                or executable_path.is_symlink() or not os.access(executable_path, os.X_OK)
+            ):
+                reasons.add(f"{item_prefix}.identity")
+    if len(roots) == len(PLAYWRIGHT_BROWSER_KEYS) and len({root.parent for root in roots}) != 1:
+        reasons.add(f"{prefix}.root")
 
 
 def _valid_relative_path(value: Any) -> bool:
@@ -2029,6 +2119,9 @@ def validate_candidate(
         )
         _validate_robot_preview_browser(
             tools.get("robotPreviewBrowser"), reasons, verify_identity=verify_external_tools,
+        )
+        _validate_playwright_browsers(
+            tools.get("playwrightBrowsers"), reasons, verify_identity=verify_external_tools,
         )
         _validate_node_tools(tools.get("node"), reasons, verify_identity=verify_external_tools)
         _validate_python_test_runtime(

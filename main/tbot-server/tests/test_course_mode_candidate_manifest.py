@@ -64,6 +64,27 @@ def candidate(repositories: dict[str, Path], tmp_path: Path, monkeypatch: pytest
     browser.chmod(0o755)
     tree, error = manifest.secure_browser_bundle_descriptor(browser.parent)
     assert error is None and tree is not None
+    playwright_browsers = {}
+    for engine, relative in (
+        ("chromium-headless-shell", "chromium_headless_shell-1223/chrome-headless-shell-mac-arm64/chrome-headless-shell"),
+        ("webkit", "webkit-2287/pw_run.sh"),
+        ("ffmpeg", "ffmpeg-1011/ffmpeg-mac"),
+    ):
+        executable = tmp_path / "playwright-browsers" / relative
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(f"{engine} fixture\n".encode())
+        executable.chmod(0o755)
+        bundle_root = executable.parents[1] if engine == "chromium-headless-shell" else executable.parent
+        if engine == "webkit":
+            (bundle_root / "current").symlink_to(executable.name)
+        bundle_tree, bundle_error = manifest.secure_playwright_browser_bundle_descriptor(bundle_root)
+        assert bundle_error is None and bundle_tree is not None
+        playwright_browsers[engine] = {
+            "version": 1, "engine": engine,
+            "revision": {"chromium-headless-shell": "1223", "webkit": "2287", "ffmpeg": "1011"}[engine],
+            "root": str(bundle_root), "executable": str(executable.relative_to(bundle_root)),
+            "treeDigest": bundle_tree,
+        }
     docker = tmp_path / "docker"
     backend_ref = f"local/tbot-backend:course-mode-physical-tft-{_git(repositories['backend'], 'rev-parse', 'HEAD')}"
     web_ref = f"local/tbot-server-web:course-mode-physical-tft-{_git(repositories['adminEsp'], 'rev-parse', 'HEAD')}"
@@ -251,7 +272,7 @@ def candidate(repositories: dict[str, Path], tmp_path: Path, monkeypatch: pytest
                 "pythonVersion": "3.11.9", "pytestVersion": "8.4.1",
                 "treeDigest": python_tree,
             },
-            "nodeInstalls": {},
+            "nodeInstalls": {}, "playwrightBrowsers": playwright_browsers,
             "robotPreviewBrowser": {
                 "version": 2,
                 "engine": "chromium-headless-shell",
@@ -276,6 +297,27 @@ NOW = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
 
 def test_candidate_accepts_exact_committed_repository_identity(candidate: dict) -> None:
     assert validate_candidate(candidate, now=NOW) == []
+
+
+def test_candidate_rejects_playwright_browser_bundle_digest_drift(candidate: dict) -> None:
+    descriptor = candidate["tools"]["playwrightBrowsers"]["webkit"]
+    (Path(descriptor["root"]) / descriptor["executable"]).write_bytes(b"drift")
+
+    assert validate_candidate(candidate, now=NOW) == ["tools.playwrightBrowsers.webkit.identity"]
+
+
+def test_candidate_rejects_coherently_renamed_playwright_browser_revision(
+    candidate: dict,
+) -> None:
+    descriptor = candidate["tools"]["playwrightBrowsers"]["webkit"]
+    original = Path(descriptor["root"])
+    renamed = original.with_name("webkit-9999")
+    original.rename(renamed)
+    descriptor.update({"revision": "9999", "root": str(renamed)})
+
+    assert validate_candidate(candidate, now=NOW) == [
+        "tools.playwrightBrowsers.webkit.revision",
+    ]
 
 
 @pytest.mark.parametrize("name", ["docker", "dockerCompose"])
@@ -1061,6 +1103,32 @@ def test_browser_bundle_descriptor_rejects_over_depth_tree(tmp_path: Path) -> No
         directory.mkdir()
 
     assert manifest.secure_browser_bundle_descriptor(root) == (None, "tree")
+
+
+def test_playwright_browser_bundle_descriptor_accepts_internal_relative_symlink(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "webkit-2287"
+    target = root / "Versions/A/pw_run.sh"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    target.chmod(0o755)
+    (root / "Versions/Current").symlink_to("A", target_is_directory=True)
+
+    descriptor, error = manifest.secure_playwright_browser_bundle_descriptor(root)
+
+    assert error is None
+    assert descriptor is not None
+
+
+def test_playwright_browser_bundle_descriptor_rejects_escaping_symlink(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "webkit-2287"
+    root.mkdir()
+    (root / "escape").symlink_to("../outside")
+
+    assert manifest.secure_playwright_browser_bundle_descriptor(root) == (None, "tree")
 
 
 def test_browser_bundle_descriptor_rejects_surrogateescaped_filename(

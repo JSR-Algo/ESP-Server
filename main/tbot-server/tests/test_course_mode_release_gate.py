@@ -331,6 +331,26 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     browser.chmod(0o755)
     tree, error = gate.secure_browser_bundle_descriptor(browser.parent)
     assert error is None and tree is not None
+    playwright_browsers = {}
+    for engine, revision, relative in (
+        ("chromium-headless-shell", "1223", "chromium_headless_shell-1223/chrome-headless-shell-mac-arm64/chrome-headless-shell"),
+        ("webkit", "2287", "webkit-2287/pw_run.sh"),
+        ("ffmpeg", "1011", "ffmpeg-1011/ffmpeg-mac"),
+    ):
+        executable = tmp_path / "playwright-browsers" / relative
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(f"{engine} fixture\n".encode())
+        executable.chmod(0o755)
+        bundle_root = executable.parents[1] if engine == "chromium-headless-shell" else executable.parent
+        if engine == "webkit":
+            (bundle_root / "current").symlink_to(executable.name)
+        bundle_tree, bundle_error = gate.secure_playwright_browser_bundle_descriptor(bundle_root)
+        assert bundle_error is None and bundle_tree is not None
+        playwright_browsers[engine] = {
+            "version": 1, "engine": engine, "revision": revision,
+            "root": str(bundle_root), "executable": str(executable.relative_to(bundle_root)),
+            "treeDigest": bundle_tree,
+        }
     docker = tmp_path / "docker"
     backend_ref = f"local/tbot-backend:course-mode-physical-tft-{repositories['backend']['sha']}"
     web_ref = f"local/tbot-server-web:course-mode-physical-tft-{repositories['adminEsp']['sha']}"
@@ -545,7 +565,7 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                 "pythonVersion": "3.11.9", "pytestVersion": "8.4.1",
                 "treeDigest": python_tree,
             },
-            "nodeInstalls": {},
+            "nodeInstalls": {}, "playwrightBrowsers": playwright_browsers,
             "robotPreviewBrowser": {
                 "version": 2,
                 "engine": "chromium-headless-shell",
@@ -2744,6 +2764,7 @@ def test_admin_browser_environment_is_only_candidate_bound_descriptor(candidate_
     assert environment["TBOT_ROBOT_PREVIEW_BROWSER_TREE_ENTRY_COUNT"] == str(browser["treeDigest"]["entryCount"])
     assert environment["TBOT_ROBOT_PREVIEW_BROWSER_TREE_TOTAL_BYTES"] == str(browser["treeDigest"]["totalBytes"])
     assert "CHROME_BIN" not in environment
+    assert "PLAYWRIGHT_BROWSERS_PATH" not in environment
 
 
 def test_admin_browser_snapshot_preserves_playwright_platform_layout(candidate_file: Path) -> None:
@@ -2798,6 +2819,112 @@ def test_playwright_lane_stages_candidate_bound_container_tools(candidate_file: 
         if execution is not None:
             assert execution.cleanup() is True
         assert stage.cleanup() is True
+
+
+def test_playwright_lane_stages_bound_browser_cache_and_sets_only_its_environment(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    lane = next(
+        lane for lane in gate.FULL_LANES
+        if lane.name == "admin-course-mode-playwright-webkit-desktop"
+    )
+
+    stage = gate.stage_execution_candidate(candidate, (lane,))
+    execution = None
+    try:
+        execution = stage.create_lane_execution()
+        environment = gate._child_environment(execution.candidate, {}, lane)
+        browser_root = Path(environment["PLAYWRIGHT_BROWSERS_PATH"])
+        assert browser_root.is_relative_to(stage.root)
+        assert not browser_root.is_relative_to(execution.root)
+        for descriptor in execution.candidate["tools"]["playwrightBrowsers"].values():
+            root = Path(descriptor["root"])
+            assert root.parent == browser_root
+            assert (root / descriptor["executable"]).is_file()
+
+        non_playwright_lane = next(
+            item for item in gate.FULL_LANES if item.name == "admin-build"
+        )
+        assert "PLAYWRIGHT_BROWSERS_PATH" not in gate._child_environment(
+            execution.candidate, {}, non_playwright_lane,
+        )
+    finally:
+        if execution is not None:
+            assert execution.cleanup() is True
+        assert stage.cleanup() is True
+
+
+def test_playwright_browser_authority_survives_stage_read_only_normalization(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    install = _add_node_install(
+        candidate, "adminEsp", "main/manager-web", "adminManagerWeb",
+    )
+    metadata = install / "playwright-core/browsers.json"
+    metadata.parent.mkdir(parents=True)
+    metadata.write_text(json.dumps({"browsers": [
+        {"name": engine, "revision": descriptor["revision"]}
+        for engine, descriptor in candidate["tools"]["playwrightBrowsers"].items()
+    ]}), encoding="utf-8")
+    lock = Path(candidate["repositories"]["adminEsp"]["path"]) / "main/manager-web/package-lock.json"
+    candidate["tools"]["nodeInstalls"]["adminManagerWeb"] = gate.describe_node_install(
+        install, lock,
+    )
+    lane = next(
+        item for item in gate.FULL_LANES
+        if item.name == "admin-course-mode-playwright-webkit-desktop"
+    )
+
+    stage = gate.stage_execution_candidate(candidate, (lane,))
+    execution = None
+    try:
+        execution = stage.create_lane_execution()
+        assert gate.playwright_browsers_authorized(execution.candidate) is True
+    finally:
+        if execution is not None:
+            assert execution.cleanup() is True
+        assert stage.cleanup() is True
+
+
+def test_playwright_browser_authority_matches_candidate_node_metadata(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    root = Path(candidate["repositories"]["adminEsp"]["path"])
+    metadata = root / "main/manager-web/node_modules/playwright-core/browsers.json"
+    metadata.parent.mkdir(parents=True)
+    metadata.write_text(json.dumps({"browsers": [
+        {"name": engine, "revision": descriptor["revision"]}
+        for engine, descriptor in candidate["tools"]["playwrightBrowsers"].items()
+    ]}), encoding="utf-8")
+
+    assert gate.playwright_browsers_authorized(candidate) is True
+
+    candidate["tools"]["playwrightBrowsers"]["webkit"]["revision"] = "9999"
+    assert gate.playwright_browsers_authorized(candidate) is False
+
+
+def test_playwright_browser_authority_rejects_coherent_revision_drift(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    descriptor = candidate["tools"]["playwrightBrowsers"]["webkit"]
+    original = Path(descriptor["root"])
+    renamed = original.with_name("webkit-9999")
+    original.rename(renamed)
+    descriptor.update({"revision": "9999", "root": str(renamed)})
+    root = Path(candidate["repositories"]["adminEsp"]["path"])
+    metadata = root / "main/manager-web/node_modules/playwright-core/browsers.json"
+    metadata.parent.mkdir(parents=True)
+    metadata.write_text(json.dumps({"browsers": [
+        {"name": engine, "revision": item["revision"]}
+        for engine, item in candidate["tools"]["playwrightBrowsers"].items()
+    ]}), encoding="utf-8")
+
+    assert gate.playwright_browsers_authorized(candidate) is False
 
 
 def test_admin_browser_authority_requires_playwright_metadata_revision(candidate_file: Path) -> None:

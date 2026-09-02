@@ -43,6 +43,9 @@ strict_json_loads = _manifest.strict_json_loads
 validate_candidate = _manifest.validate_candidate
 _candidate_git = _manifest._git
 secure_browser_bundle_descriptor = _manifest.secure_browser_bundle_descriptor
+secure_playwright_browser_bundle_descriptor = (
+    _manifest.secure_playwright_browser_bundle_descriptor
+)
 
 
 SECURE_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -323,6 +326,7 @@ class ExecutionStage:
                     python_runtime,
                     self.root / "tools/docker",
                     self.root / "tools/docker-compose",
+                    self.root / "tools/playwright-browsers",
                 ) if path.exists()
             )
 
@@ -1253,6 +1257,22 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
             if not _json_exact_equal(observed, expected):
                 raise ValueError("staged Node installation descriptor mismatch")
             staged["tools"]["nodeInstalls"][key] = observed
+        if any(_playwright_browsers_required(lane) for lane in lanes):
+            browser_cache = tools_root / "playwright-browsers"
+            browser_cache.mkdir()
+            for engine, browser in candidate["tools"]["playwrightBrowsers"].items():
+                browser_source = Path(browser["root"])
+                source_observed, source_error = secure_playwright_browser_bundle_descriptor(
+                    browser_source,
+                )
+                if source_error or source_observed != browser["treeDigest"]:
+                    raise ValueError(f"Playwright {engine} source descriptor mismatch")
+                browser_target = browser_cache / browser_source.name
+                _copy_snapshot_tree(browser_source, browser_target, state)
+                observed, error = secure_playwright_browser_bundle_descriptor(browser_target)
+                if error or observed != browser["treeDigest"]:
+                    raise ValueError(f"staged Playwright {engine} descriptor mismatch")
+                staged["tools"]["playwrightBrowsers"][engine]["root"] = str(browser_target)
         if any(lane.name == "admin-browser" for lane in lanes):
             browser = candidate["tools"]["robotPreviewBrowser"]
             browser_source = Path(browser["root"])
@@ -1286,6 +1306,14 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
                 "executionTreeDigest": execution_tree, "version": 3,
             }, sort_keys=True), encoding="utf-8")
         _make_tree_read_only(root)
+        if any(_playwright_browsers_required(lane) for lane in lanes):
+            for engine, browser in staged["tools"]["playwrightBrowsers"].items():
+                observed, error = secure_playwright_browser_bundle_descriptor(
+                    Path(browser["root"]),
+                )
+                if error or observed is None:
+                    raise ValueError(f"read-only Playwright {engine} descriptor mismatch")
+                browser["treeDigest"] = observed
         stage = ExecutionStage(root, staged, root_identity, root_descriptor)
         root_descriptor = None
         return stage
@@ -2050,6 +2078,15 @@ def _container_tools_required(lane: Lane) -> bool:
     )
 
 
+def _playwright_browsers_required(lane: Lane) -> bool:
+    return (
+        lane.name.startswith("admin-course-mode-playwright-")
+        or lane.name in {
+            "admin-course-mode-assignment-new", "admin-course-mode-assignment-rollback",
+        }
+    )
+
+
 def _container_tools_authorized(candidate: dict) -> bool:
     try:
         for name in ("docker", "dockerCompose"):
@@ -2154,6 +2191,56 @@ def robot_preview_browser_authorized(candidate: dict) -> bool:
         return False
 
 
+def playwright_browsers_authorized(candidate: dict) -> bool:
+    try:
+        descriptors = candidate["tools"]["playwrightBrowsers"]
+        if not isinstance(descriptors, dict) or set(descriptors) != {
+            "chromium-headless-shell", "webkit", "ffmpeg",
+        }:
+            return False
+        admin_root = Path(candidate["repositories"]["adminEsp"]["path"])
+        metadata_path = admin_root / "main/manager-web/node_modules/playwright-core/browsers.json"
+        metadata = strict_json_loads(read_secure_regular(metadata_path, 1024 * 1024))
+        browsers = metadata.get("browsers") if isinstance(metadata, dict) else None
+        revisions = {
+            item["name"]: item["revision"] for item in browsers
+            if isinstance(item, dict) and item.get("name") in descriptors
+        }
+        if (
+            set(revisions) != set(descriptors)
+            or revisions != _manifest.PLAYWRIGHT_BROWSER_REVISIONS
+        ):
+            return False
+        roots = {Path(descriptor["root"]).parent for descriptor in descriptors.values()}
+        if len(roots) != 1:
+            return False
+        for engine, descriptor in descriptors.items():
+            if (
+                not isinstance(descriptor, dict)
+                or set(descriptor) != {
+                    "version", "engine", "revision", "root", "executable", "treeDigest",
+                }
+                or descriptor["version"] != 1 or descriptor["engine"] != engine
+                or descriptor["revision"] != _manifest.PLAYWRIGHT_BROWSER_REVISIONS[engine]
+                or descriptor["revision"] != revisions[engine]
+                or Path(descriptor["root"]).name
+                != f"{engine.replace('-', '_')}-{descriptor['revision']}"
+            ):
+                return False
+            observed, error = secure_playwright_browser_bundle_descriptor(
+                Path(descriptor["root"]),
+            )
+            executable = Path(descriptor["root"]) / descriptor["executable"]
+            if (
+                error or observed != descriptor["treeDigest"] or not executable.is_file()
+                or executable.is_symlink() or not os.access(executable, os.X_OK)
+            ):
+                return False
+        return True
+    except (KeyError, OSError, TypeError, ValueError):
+        return False
+
+
 def release_state_matches(
     candidate_path: Path, candidate: dict, lanes: Sequence[Lane], runtime_root: Path | None,
     require_runtime: bool, node_lanes: Sequence[Lane] | None = None,
@@ -2181,6 +2268,8 @@ def release_state_matches(
         if not node_install_authorized(lane, candidate, node_cache):
             return False
         if lane.name == "admin-browser" and not robot_preview_browser_authorized(candidate):
+            return False
+        if _playwright_browsers_required(lane) and not playwright_browsers_authorized(candidate):
             return False
     return True
 
@@ -2546,6 +2635,13 @@ def _child_environment(candidate: dict, source: Mapping[str, str], lane: Lane) -
             "TBOT_DOCKER_EXECUTABLE": candidate["tools"]["docker"]["path"],
             "TBOT_DOCKER_COMPOSE_EXECUTABLE": candidate["tools"]["dockerCompose"]["path"],
         })
+    if _playwright_browsers_required(lane):
+        roots = {
+            Path(descriptor["root"]).parent
+            for descriptor in candidate["tools"]["playwrightBrowsers"].values()
+        }
+        if len(roots) == 1:
+            environment["PLAYWRIGHT_BROWSERS_PATH"] = str(roots.pop())
     environment.update(dict(lane.fixed_environment))
     if lane.name == "admin-browser":
         browser = candidate["tools"]["robotPreviewBrowser"]
@@ -3256,7 +3352,11 @@ def run_gate(
                         not _container_tools_required(lane)
                         or _container_tools_authorized(execution_candidate)
                     )
-                    if not container_authority:
+                    browser_authority = (
+                        not _playwright_browsers_required(lane)
+                        or playwright_browsers_authorized(execution_candidate)
+                    )
+                    if not container_authority or not browser_authority:
                         result = _manifest.BoundedCommandResult(None, "", "authority")
                     elif _python_test_runtime_required(lane):
                         backend_binding = _backend_snapshot_environment(execution_stage)
@@ -3284,6 +3384,11 @@ def run_gate(
                     if (
                         _container_tools_required(lane)
                         and not _container_tools_authorized(execution_candidate)
+                    ):
+                        result = _manifest.BoundedCommandResult(None, "", "authority")
+                    if (
+                        _playwright_browsers_required(lane)
+                        and not playwright_browsers_authorized(execution_candidate)
                     ):
                         result = _manifest.BoundedCommandResult(None, "", "authority")
                     skip_state = pytest_report_has_skips(junit_path) if junit_path else False
