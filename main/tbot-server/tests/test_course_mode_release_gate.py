@@ -2301,6 +2301,48 @@ def test_assignment_runtime_root_is_rebased_to_lane_execution_snapshot(
         assert stage.cleanup() is True
 
 
+def test_assignment_runtime_root_uses_one_required_environment_snapshot(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(item for item in gate.FULL_LANES if item.name == "admin-course-mode-assignment-new")
+    source_runtime = str(
+        Path(candidate["repositories"]["adminEsp"]["path"])
+        / "main/manager-web/output/task4-candidate"
+    )
+
+    class MutableSource(dict[str, str]):
+        reads = 0
+
+        def get(self, key: str, default: str | None = None) -> str | None:
+            if key == "TASK4_ASSIGNMENT_RUNTIME_ROOT":
+                self.reads += 1
+                return source_runtime if self.reads == 1 else ""
+            return super().get(key, default)
+
+    stage = gate.stage_execution_candidate(candidate, ())
+    execution = None
+    try:
+        execution = stage.create_lane_execution()
+        source = MutableSource({"TASK4_ASSIGNMENT_RUNTIME_ROOT": source_runtime})
+
+        environment = gate._child_environment(
+            execution.candidate, source, lane, source_candidate=candidate,
+        )
+
+        assert environment is not None
+        expected = (
+            Path(execution.candidate["repositories"]["adminEsp"]["path"])
+            / "main/manager-web/output/task4-candidate"
+        )
+        assert environment["TASK4_ASSIGNMENT_RUNTIME_ROOT"] == str(expected)
+        assert source.reads == 1
+    finally:
+        if execution is not None:
+            assert execution.cleanup() is True
+        assert stage.cleanup() is True
+
+
 @pytest.mark.parametrize("runtime", ["outside", "lexical-escape", "symlink-escape"])
 def test_assignment_runtime_root_rebase_fails_closed(
     candidate_file: Path, tmp_path: Path, runtime: str,

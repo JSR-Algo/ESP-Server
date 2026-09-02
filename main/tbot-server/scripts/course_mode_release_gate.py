@@ -2742,16 +2742,19 @@ def _child_environment(
             Path(candidate["repositories"]["backend"]["path"]) / "contracts"
         ),
     })
+    required_environment = {}
     for name in _required_environment(lane):
-        if source.get(name):
-            environment[name] = source[name]
+        value = source.get(name)
+        if value:
+            required_environment[name] = value
+    environment.update(required_environment)
     if lane.name in {
         "admin-course-mode-assignment-new", "admin-course-mode-assignment-rollback",
-    } and source.get("TASK4_ASSIGNMENT_RUNTIME_ROOT"):
+    } and required_environment.get("TASK4_ASSIGNMENT_RUNTIME_ROOT"):
         runtime_root = _assignment_runtime_root(
             source_candidate if source_candidate is not None else candidate,
             candidate,
-            source["TASK4_ASSIGNMENT_RUNTIME_ROOT"],
+            required_environment["TASK4_ASSIGNMENT_RUNTIME_ROOT"],
         )
         if runtime_root is None:
             return None
@@ -3375,7 +3378,10 @@ def run_gate(
                         break
                     lane_source = live_db_source
                 required_environment = _required_environment(lane)
-                if any(not lane_source.get(name) for name in required_environment):
+                required_source = {
+                    name: lane_source.get(name) for name in required_environment
+                }
+                if any(not required_source[name] for name in required_environment):
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
@@ -3425,7 +3431,7 @@ def run_gate(
                         report["failedLane"] = "snapshot"
                     break
                 lane_environment = _child_environment(
-                    execution_candidate, lane_source, lane, source_candidate=candidate,
+                    execution_candidate, required_source, lane, source_candidate=candidate,
                 )
                 if lane_environment is None:
                     report["lanes"].append({
