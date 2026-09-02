@@ -128,6 +128,10 @@ _OWNED_CLEANUP_TASKS = set()
 
 class _EvidenceControlNotFound(RuntimeError):
     pass
+
+
+class _CleanupDeadlineExceeded(RuntimeError):
+    pass
 _FORBIDDEN_EVIDENCE_KEYS = frozenset(
     {
         "audio",
@@ -2989,7 +2993,27 @@ def build_candidate_journeys(args, *, protected_input=None):
                     post_task.result()
                 except BaseException:
                     pass
-        deadline = asyncio.get_running_loop().time() + cleanup_timeout()
+        loop = asyncio.get_running_loop()
+        clock = getattr(args, "candidate_cleanup_clock", None)
+        if not callable(clock):
+            clock = loop.time
+        deadline = clock() + cleanup_timeout()
+
+        def remaining_budget():
+            return deadline - clock()
+
+        async def control_before_deadline(method):
+            remaining = remaining_budget()
+            if remaining <= 0:
+                raise _CleanupDeadlineExceeded
+            try:
+                return await asyncio.wait_for(
+                    _candidate_control_json(args, method, journey_url),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError as exc:
+                raise _CleanupDeadlineExceeded from exc
+
         expected = {
             "journeyId": journey_id,
             "journeyType": journey_type,
@@ -3004,11 +3028,13 @@ def build_candidate_journeys(args, *, protected_input=None):
             "status": "ACTIVE",
         }
         for attempt in range(3):
+            if remaining_budget() <= 0:
+                raise RuntimeError("candidate enrollment cleanup failed")
             delete_ambiguous = False
             try:
-                deleted = await _candidate_control_json(
-                    args, "DELETE", journey_url
-                )
+                deleted = await control_before_deadline("DELETE")
+            except _CleanupDeadlineExceeded:
+                raise RuntimeError("candidate enrollment cleanup failed") from None
             except Exception:
                 delete_ambiguous = True
             if not delete_ambiguous and (
@@ -3020,7 +3046,9 @@ def build_candidate_journeys(args, *, protected_input=None):
             ):
                 raise RuntimeError("candidate enrollment cleanup failed")
             try:
-                terminal = await _candidate_control_json(args, "GET", journey_url)
+                terminal = await control_before_deadline("GET")
+            except _CleanupDeadlineExceeded:
+                raise RuntimeError("candidate enrollment cleanup failed") from None
             except _EvidenceControlNotFound:
                 return
             except Exception:
@@ -3035,7 +3063,7 @@ def build_candidate_journeys(args, *, protected_input=None):
             )
             if not active_matches:
                 raise RuntimeError("candidate enrollment cleanup failed")
-            remaining = deadline - asyncio.get_running_loop().time()
+            remaining = remaining_budget()
             if attempt == 2 or remaining <= 0:
                 raise RuntimeError("candidate enrollment cleanup failed")
             await asyncio.sleep(min(0.01 * (attempt + 1), remaining))
