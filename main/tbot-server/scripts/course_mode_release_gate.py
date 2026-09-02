@@ -2696,7 +2696,35 @@ def _backend_execution_snapshot_matches(
         return False
 
 
-def _child_environment(candidate: dict, source: Mapping[str, str], lane: Lane) -> dict[str, str]:
+def _assignment_runtime_root(
+    source_candidate: dict, execution_candidate: dict, value: object,
+) -> str | None:
+    try:
+        if not isinstance(value, str) or not value or os.path.abspath(value) != value:
+            return None
+        source_admin = Path(source_candidate["repositories"]["adminEsp"]["path"])
+        execution_admin = Path(execution_candidate["repositories"]["adminEsp"]["path"])
+        source_output = source_admin / "main/manager-web/output"
+        relative = Path(value).relative_to(source_output)
+        execution_runtime = execution_admin / "main/manager-web/output" / relative
+        for admin, runtime in ((source_admin, Path(value)), (execution_admin, execution_runtime)):
+            current = admin
+            for component in runtime.relative_to(admin).parts:
+                current /= component
+                try:
+                    metadata = current.lstat()
+                except FileNotFoundError:
+                    break
+                if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                    return None
+        return str(execution_runtime)
+    except (KeyError, OSError, TypeError, ValueError):
+        return None
+
+
+def _child_environment(
+    candidate: dict, source: Mapping[str, str], lane: Lane, *, source_candidate: dict | None = None,
+) -> dict[str, str] | None:
     environment = dict(BASE_ENVIRONMENT)
     node_requirement = _node_install_requirement(lane)
     if node_requirement is not None and node_requirement[0]:
@@ -2717,6 +2745,17 @@ def _child_environment(candidate: dict, source: Mapping[str, str], lane: Lane) -
     for name in _required_environment(lane):
         if source.get(name):
             environment[name] = source[name]
+    if lane.name in {
+        "admin-course-mode-assignment-new", "admin-course-mode-assignment-rollback",
+    } and source.get("TASK4_ASSIGNMENT_RUNTIME_ROOT"):
+        runtime_root = _assignment_runtime_root(
+            source_candidate if source_candidate is not None else candidate,
+            candidate,
+            source["TASK4_ASSIGNMENT_RUNTIME_ROOT"],
+        )
+        if runtime_root is None:
+            return None
+        environment["TASK4_ASSIGNMENT_RUNTIME_ROOT"] = runtime_root
     if lane.name == LIVE_DB_LANE.name:
         environment["COURSE_MODE_V5_SOURCE_ROOT"] = candidate["repositories"]["adminEsp"]["path"]
     assignment = _assignment_candidate_environment(candidate, lane)
@@ -3385,6 +3424,17 @@ def run_gate(
                         report["verdict"] = "BLOCKED"
                         report["failedLane"] = "snapshot"
                     break
+                lane_environment = _child_environment(
+                    execution_candidate, lane_source, lane, source_candidate=candidate,
+                )
+                if lane_environment is None:
+                    report["lanes"].append({
+                        "name": lane.name, "exitCode": None, "durationMs": 0,
+                    })
+                    report["verdict"] = "BLOCKED"
+                    report["failedLane"] = lane.name
+                    _cleanup_gate_owned(report, lane_execution, execution_stage)
+                    break
                 command = _resolve_candidate_command(lane_command, execution_candidate, lane) if lane_command else None
                 if command is None:
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
@@ -3439,7 +3489,7 @@ def run_gate(
                     command = sandboxed
                 backend_binding: BackendSnapshotBinding | None = None
                 try:
-                    child_environment = _child_environment(execution_candidate, lane_source, lane)
+                    child_environment = lane_environment
                     child_environment.update(lane_execution.environment)
                     container_authority = (
                         not _container_tools_required(lane)

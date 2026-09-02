@@ -2268,6 +2268,68 @@ def test_assignment_environment_uses_image_ids_not_mutable_tags(candidate_file: 
     assert environment["TBOT_LESSON_STUDIO_WEB_IMAGE"] == candidate["images"]["lessonStudioWeb"]["id"]
 
 
+def test_assignment_runtime_root_is_rebased_to_lane_execution_snapshot(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(item for item in gate.FULL_LANES if item.name == "admin-course-mode-assignment-new")
+    source_runtime = (
+        Path(candidate["repositories"]["adminEsp"]["path"])
+        / "main/manager-web/output/task4-candidate"
+    )
+    stage = gate.stage_execution_candidate(candidate, ())
+    execution = None
+    try:
+        execution = stage.create_lane_execution()
+
+        environment = gate._child_environment(
+            execution.candidate,
+            {"TASK4_ASSIGNMENT_RUNTIME_ROOT": str(source_runtime)},
+            lane,
+            source_candidate=candidate,
+        )
+
+        assert environment is not None
+        expected = (
+            Path(execution.candidate["repositories"]["adminEsp"]["path"])
+            / "main/manager-web/output/task4-candidate"
+        )
+        assert environment["TASK4_ASSIGNMENT_RUNTIME_ROOT"] == str(expected)
+    finally:
+        if execution is not None:
+            assert execution.cleanup() is True
+        assert stage.cleanup() is True
+
+
+@pytest.mark.parametrize("runtime", ["outside", "lexical-escape", "symlink-escape"])
+def test_assignment_runtime_root_rebase_fails_closed(
+    candidate_file: Path, tmp_path: Path, runtime: str,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(item for item in gate.FULL_LANES if item.name == "admin-course-mode-assignment-new")
+    admin = Path(candidate["repositories"]["adminEsp"]["path"])
+    if runtime == "outside":
+        source_runtime = tmp_path / "outside-task4"
+    elif runtime == "lexical-escape":
+        source_runtime = Path(
+            f"{admin}/main/manager-web/output/../outside-task4"
+        )
+    else:
+        output = admin / "main/manager-web/output"
+        output.mkdir(parents=True)
+        source_runtime = output / "task4-link"
+        source_runtime.symlink_to(tmp_path / "outside-task4", target_is_directory=True)
+
+    environment = gate._child_environment(
+        candidate,
+        {"TASK4_ASSIGNMENT_RUNTIME_ROOT": str(source_runtime)},
+        lane,
+        source_candidate=candidate,
+    )
+
+    assert environment is None
+
+
 def test_snapshot_rejects_tree_over_entry_limit(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
