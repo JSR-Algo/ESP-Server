@@ -2925,6 +2925,27 @@ def build_candidate_journeys(args, *, protected_input=None):
     sequence = 0
     cleanup_called = False
 
+    def own_task(coroutine, name):
+        task = asyncio.create_task(coroutine, name=name)
+        _OWNED_CLEANUP_TASKS.add(task)
+        task.add_done_callback(_release_owned_cleanup_task)
+        return task
+
+    async def wait_bounded(task):
+        try:
+            timeout = float(getattr(args, "cleanup_timeout_sec", 2.0))
+        except (TypeError, ValueError):
+            timeout = 2.0
+        if not math.isfinite(timeout) or timeout <= 0:
+            timeout = 2.0
+        await asyncio.wait({task}, timeout=timeout)
+
+    async def cleanup_ambiguous_enrollment(journey_url):
+        try:
+            await _candidate_control_json(args, "DELETE", journey_url)
+        except BaseException:
+            pass
+
     async def run_lifecycle(
         _args,
         *,
@@ -2953,7 +2974,9 @@ def build_candidate_journeys(args, *, protected_input=None):
         output_root = Path(getattr(args, "produce_candidate_evidence")).parent
         output_path = output_root / "executions" / f"{sequence:02d}-{name}.json"
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        enrolled = False
+        enrollment_attempted = False
+        enrollment_post_task = None
+        terminal_finalized = False
         try:
             semantic_proof = None
             semantic_key = None
@@ -2992,24 +3015,35 @@ def build_candidate_journeys(args, *, protected_input=None):
             }
             if semantic_proof is not None:
                 enrollment_payload["semanticProof"] = semantic_proof
+
+            async def post_enrollment():
+                try:
+                    return await _candidate_control_json(
+                        args,
+                        "POST",
+                        collection_url,
+                        enrollment_payload,
+                    )
+                finally:
+                    proof = enrollment_payload.get("semanticProof")
+                    if isinstance(proof, dict) and "hmacKeyBase64" in proof:
+                        proof["hmacKeyBase64"] = ""
+                        for item in proof.get("intentPlan", ()):
+                            if isinstance(item, dict):
+                                item["expectedMac"] = ""
+
             try:
-                await _candidate_control_json(
-                    args,
-                    "POST",
-                    collection_url,
-                    enrollment_payload,
+                enrollment_attempted = True
+                enrollment_post_task = own_task(
+                    post_enrollment(),
+                    "google-live-candidate-enrollment-post",
                 )
+                await asyncio.shield(enrollment_post_task)
             finally:
                 if semantic_key is not None:
                     sealed_plan.zeroize()
                     semantic_key = None
-                if isinstance(semantic_proof, dict) and "hmacKeyBase64" in semantic_proof:
-                    semantic_proof["hmacKeyBase64"] = ""
-                    for item in semantic_proof.get("intentPlan", ()):
-                        if isinstance(item, dict):
-                            item["expectedMac"] = ""
             semantic_proof = None
-            enrolled = True
             await _candidate_control_json(
                 args,
                 "PUT",
@@ -3051,6 +3085,7 @@ def build_candidate_journeys(args, *, protected_input=None):
                 journey_id=journey_id,
                 stage=name,
             )
+            terminal_finalized = True
             log_evidence = await _analyze_candidate_journey(
                 args, journey_id, output_path
             )
@@ -3129,13 +3164,15 @@ def build_candidate_journeys(args, *, protected_input=None):
         except BaseException:
             if semantic_key is not None:
                 sealed_plan.zeroize()
-            if enrolled:
+            if enrollment_attempted and not terminal_finalized:
+                enrollment_cleanup_task = own_task(
+                    cleanup_ambiguous_enrollment(journey_url),
+                    "google-live-candidate-enrollment-cleanup",
+                )
                 try:
-                    await asyncio.shield(
-                        _candidate_control_json(args, "DELETE", journey_url)
-                    )
-                except BaseException:
-                    pass
+                    await asyncio.shield(wait_bounded(enrollment_cleanup_task))
+                except asyncio.CancelledError:
+                    await wait_bounded(enrollment_cleanup_task)
             raise
 
     async def execute(_args, *, name, index, label=None, **_kwargs):

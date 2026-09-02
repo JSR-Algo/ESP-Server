@@ -3354,6 +3354,133 @@ def test_candidate_factory_enrolls_binds_runs_finalizes_then_analyzes(tmp_path):
     assert "secret" not in json.dumps(events)
 
 
+def test_candidate_enrollment_cancel_after_ambiguous_commit_deletes_once_and_propagates(tmp_path):
+    stream, _private = _protected_candidate_input(tmp_path)
+    protected = robot_soak._read_candidate_protected_input(
+        stream, output_paths=(), sample_rate=24000
+    )
+    committed = asyncio.Event()
+    release_response = asyncio.Event()
+    deletes = 0
+    registry = set()
+
+    async def control(method, url, payload=None):
+        nonlocal deletes
+        if method == "POST":
+            registry.add(payload["journeyId"])
+            committed.set()
+            await release_response.wait()
+            return {"status": "PASS"}
+        if method == "DELETE":
+            deletes += 1
+            registry.discard(url.rsplit("/", 1)[-1])
+            return {"status": "PASS"}
+        return {"status": "PASS"}
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=control,
+        cleanup_timeout_sec=0.05,
+    )
+    journeys = build_candidate_journeys(args, protected_input=protected)
+    attempted_plan = protected.bargein_plans[0]
+
+    async def cancel():
+        task = asyncio.create_task(journeys["bargein"](args, name="bargein", index=1))
+        await committed.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert deletes == 1
+        assert registry == set()
+        assert not any(attempted_plan.key)
+        assert not args.produce_candidate_evidence.exists()
+        release_response.set()
+        await asyncio.sleep(0)
+
+    asyncio.run(cancel())
+
+
+def test_candidate_ambiguous_enrollment_delete_timeout_is_bounded(tmp_path):
+    post_started = asyncio.Event()
+    release_post = asyncio.Event()
+    delete_started = asyncio.Event()
+    release_delete = asyncio.Event()
+
+    async def control(method, _url, _payload=None):
+        if method == "POST":
+            post_started.set()
+            await release_post.wait()
+        elif method == "DELETE":
+            delete_started.set()
+            try:
+                await release_delete.wait()
+            except asyncio.CancelledError:
+                await release_delete.wait()
+        return {"status": "PASS"}
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=control,
+        cleanup_timeout_sec=0.01,
+    )
+    journey = build_candidate_journeys(args)["conversation"]
+
+    async def cancel():
+        task = asyncio.create_task(journey(args, name="conversation", index=1))
+        await post_started.wait()
+        started = asyncio.get_running_loop().time()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert asyncio.get_running_loop().time() - started < 0.2
+        assert delete_started.is_set()
+        release_post.set()
+        release_delete.set()
+        await asyncio.sleep(0)
+
+    asyncio.run(cancel())
+
+
+def test_candidate_failed_post_treats_delete_not_found_as_safe_cleanup(tmp_path):
+    deletes = 0
+
+    async def control(method, _url, _payload=None):
+        nonlocal deletes
+        if method == "POST":
+            raise RuntimeError("post did not commit")
+        if method == "DELETE":
+            deletes += 1
+            raise RuntimeError("not found")
+        return {"status": "PASS"}
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=control,
+    )
+
+    with pytest.raises(RuntimeError, match="post did not commit"):
+        asyncio.run(
+            build_candidate_journeys(args)["conversation"](
+                args, name="conversation", index=1
+            )
+        )
+    assert deletes == 1
+    assert not args.produce_candidate_evidence.exists()
+
+
 @pytest.mark.parametrize(
     "case",
     [
