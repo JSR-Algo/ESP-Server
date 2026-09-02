@@ -375,6 +375,28 @@ def test_release_rejects_rebound_double_encoded_credential_without_leaking(
     assert "private" not in json.dumps(verdict)
 
 
+def test_release_rejects_rebound_compact_bearer_credential_without_leaking(
+    tmp_path: Path,
+) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    junit = paths["deterministic_junit"]
+    secret = "abcdefghijklmnop1234"
+    junit.write_bytes(
+        junit.read_bytes().replace(
+            b'name="pytest tests"',
+            f'name="Bearer {secret}"'.encode(),
+            1,
+        )
+    )
+    digest = hashlib.sha256(junit.read_bytes()).hexdigest()
+    checksums["deterministic_junit"] = digest
+    _rewrite(paths["deterministic"], lambda report: report["coverageProof"].update(junitSha256=digest))
+    checksums["deterministic"] = hashlib.sha256(paths["deterministic"].read_bytes()).hexdigest()
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+    assert verdict["status"] == "FAIL"
+    assert secret not in json.dumps(verdict)
+
+
 @pytest.mark.parametrize("missing_layer", REQUIRED_LAYERS)
 def test_release_fails_closed_for_missing_layer(tmp_path: Path, missing_layer: str) -> None:
     paths, checksums, _ = _write_evidence(tmp_path)

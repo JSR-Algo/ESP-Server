@@ -42,7 +42,7 @@ _SENSITIVE_JUNIT_VALUE = re.compile(
     r"\bAIza[0-9A-Za-z_-]{20,}|\bsk-(?:proj-)?[0-9A-Za-z_-]{20,})"
 )
 _BASIC_AUTH_PAYLOAD = re.compile(r"\bbasic\s+([a-z0-9+/]+={0,2})(?![a-z0-9+/=])", re.IGNORECASE)
-_BEARER_AUTH_PAYLOAD = re.compile(r"\bbearer\s+([a-z0-9._~+/-]+)", re.IGNORECASE)
+_BEARER_AUTH_PAYLOAD = re.compile(r"\bbearer\s+([a-z0-9._~+/=-]+)", re.IGNORECASE)
 APPROVED_TEST_FILES = (
     "tests/test_google_live_lifecycle_e2e.py",
     "tests/test_google_live_client.py",
@@ -222,6 +222,25 @@ def _looks_like_basic_credential(scan_value: str) -> bool:
     return False
 
 
+def _looks_like_word_segment(segment: str) -> bool:
+    return (
+        re.fullmatch(r"[a-z]{2,20}", segment) is not None
+        and re.search(r"[aeiouy]", segment) is not None
+        and re.search(r"[^aeiouy]{5}", segment) is None
+    )
+
+
+def _looks_like_natural_slug(payload: str) -> bool:
+    if payload != payload.casefold() or any(character in payload for character in "_~+/="):
+        return False
+    segments = re.split(r"[-.]", payload)
+    if segments[-1].isdigit() and len(segments[-1]) <= 4:
+        segments = segments[:-1]
+    if len(segments) < 3:
+        return False
+    return all(_looks_like_word_segment(segment) for segment in segments)
+
+
 def _looks_like_bearer_credential(scan_value: str) -> bool:
     for match in _BEARER_AUTH_PAYLOAD.finditer(scan_value):
         payload = match.group(1)
@@ -245,11 +264,36 @@ def _looks_like_bearer_credential(scan_value: str) -> bool:
                 else:
                     if isinstance(parsed_header, dict):
                         return True
+        if _looks_like_natural_slug(payload):
+            continue
+        if re.fullmatch(
+            r"(?:gh[pousr]_|github_pat_|glpat-|ya29\.)[a-z0-9._~-]{12,}",
+            payload,
+            re.IGNORECASE,
+        ):
+            return True
+        if re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            payload,
+            re.IGNORECASE,
+        ):
+            return True
+        if len(payload) >= 20 and re.fullmatch(r"[0-9a-f]+", payload, re.IGNORECASE):
+            return True
+        if len(payload) >= 16 and (
+            payload.endswith("=") or any(character in payload for character in "_+/")
+        ):
+            return True
         if (
-            len(payload) >= 32
-            and len(set(payload)) >= 12
+            len(payload) >= 20
+            and re.search(r"[a-z]", payload, re.IGNORECASE)
             and re.search(r"[0-9]", payload)
             and re.fullmatch(r"[a-z0-9._~+/-]+", payload, re.IGNORECASE)
+        ):
+            return True
+        segments = re.split(r"[-.]", payload)
+        if len(payload) >= 20 and 2 <= len(segments) <= 4 and any(
+            not _looks_like_word_segment(segment) for segment in segments
         ):
             return True
     return False

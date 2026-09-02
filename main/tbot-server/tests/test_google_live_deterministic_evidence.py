@@ -350,6 +350,10 @@ def test_sensitive_key_grammar_allows_benign_embedded_pairs(benign: str) -> None
         "bearer extraordinarilybeautifulwildflowers",
         "bearer plants.are.beautiful",
         "bearer extraordinarily-beautiful-wildflowers",
+        "Bearer plants-are-beautiful-in-spring-2026",
+        "Bearer release-candidate-conversation-number-12",
+        "Bearer abc123",
+        "Bearer short-opaque-7",
         "coverage is 100% complete",
         "coverage reached 100%",
         "literal percent % text",
@@ -371,6 +375,16 @@ def test_sensitive_scheme_grammar_allows_benign_language(benign: str) -> None:
         "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature",
         "Ｂｅａｒｅｒ　eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature",
         "Bearer abcdefghijklmnopqrstuvwxyz0123456789_-",
+        "Bearer abcdefghijklmnop1234",
+        "Bearer 0123456789abcdef0123456789abcdef",
+        "Bearer 123e4567-e89b-12d3-a456-426614174000",
+        "Bearer dXNlcjpwYXNzd29yZA==",
+        "Bearer ghp_0123456789abcdef",
+        "Bearer AIza0123456789abcdefghij",
+        "Bearer qzmxncbv-asdfghjkl-qwertyuiop123",
+        "Bearer qzmxncbv-asdfghjkl-qwertyuiop",
+        "Ｂｅａｒｅｒ　ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐ１２３４",
+        "Bearer%20abcdefghijklmnop1234",
         "access%255Ftoken%253Dprivate",
         "access%25255Ftoken%25253Dprivate",
     ],
@@ -389,7 +403,16 @@ def test_sensitive_grammar_fails_closed_for_invalid_or_nonconvergent_percent_enc
     assert deterministic._junit_value_is_sensitive(invalid)
 
 
-@pytest.mark.parametrize("topic", ["basic geometry", "basic-auth concepts", "bearer plants"])
+@pytest.mark.parametrize(
+    "topic",
+    [
+        "basic geometry",
+        "basic-auth concepts",
+        "bearer plants",
+        "Bearer plants-are-beautiful-in-spring-2026",
+        "Bearer release-candidate-conversation-number-12",
+    ],
+)
 def test_junit_allows_benign_parametrized_nodeid_language(topic: str) -> None:
     node = f"tests/test_a.py::test_topic[{topic}]"
     assert deterministic.parse_passing_junit(_junit([node]), [node])["tests"] == 1
