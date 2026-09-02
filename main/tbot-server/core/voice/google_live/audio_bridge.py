@@ -104,6 +104,7 @@ class GoogleLiveAudioBridge:
             model_output_delivery_failed_handler
         )
         self._pending_output_deliveries = {}
+        self._buffered_output_deliveries = []
         self._aec_processor = self._build_aec_processor()
         self._aec_reference_resampler_rates = None
         self._aec_reference_resampler_state = None
@@ -358,7 +359,12 @@ class GoogleLiveAudioBridge:
                 self._active_response_id = None
                 self._clear_lesson_prompt_output_gate()
                 return True
-            flushed_packets = await self._flush_output_audio()
+            flush_failed = False
+            try:
+                flushed_packets = await self._flush_output_audio()
+            except Exception:
+                flushed_packets = 0
+                flush_failed = True
             delivery_ok = await self._wait_for_output_deliveries()
             chunks = self._output_chunk_count
             byte_count = self._output_byte_count
@@ -373,7 +379,7 @@ class GoogleLiveAudioBridge:
             self.conn.google_live_audio_out_started_at = None
             self._active_response_id = None
             await self._send_tts_message("stop")
-            if not delivery_ok:
+            if flush_failed or not delivery_ok:
                 raise RuntimeError("Google Live model output delivery failed")
             # Lesson step prompts can span multiple Live turn segments (e.g. a
             # short filler "Tuyệt vời!" then the real greeting). Clearing the
@@ -1148,12 +1154,13 @@ class GoogleLiveAudioBridge:
             or self.conn.websocket is None
             or getattr(self.conn, "client_abort", False)
         ):
+            delivery = self._new_output_delivery(response_generation)
+            delivery[1](RuntimeError("audio delivery unavailable"))
             return 0
         from core.handle.sendAudioHandle import sendAudio
 
-        delivery = self._new_output_delivery(response_generation)
-
         if audio_format == "pcm16" or (mime_type and "audio/pcm" in mime_type):
+            delivery = self._new_output_delivery(response_generation)
             include_preroll = self._should_send_lesson_output_preroll()
             if include_preroll:
                 self._output_preroll_sent = True
@@ -1164,29 +1171,72 @@ class GoogleLiveAudioBridge:
                     ),
                     self._LESSON_OUTPUT_PREROLL_SILENCE_MS,
                 )
-            packets = await self._run_audio_cpu(
-                self._encode_output_audio_packets,
-                audio_bytes,
-                mime_type,
-                include_preroll,
-            )
+            try:
+                encoded = await self._run_audio_cpu(
+                    self._encode_output_audio_packets,
+                    audio_bytes,
+                    mime_type,
+                    include_preroll,
+                )
+            except BaseException as exc:
+                delivery[1](exc)
+                raise
+            if (
+                isinstance(encoded, tuple)
+                and len(encoded) == 2
+                and isinstance(encoded[1], int)
+            ):
+                packets, source_packet_count = encoded
+            else:
+                packets = encoded
+                source_packet_count = len(packets)
+            self._buffered_output_deliveries.append(delivery)
             if packets and not getattr(self.conn, "client_abort", False):
+                if source_packet_count > 0:
+                    completions = self._take_buffered_output_deliveries()
+                    on_delivery_complete = self._complete_output_deliveries(
+                        completions
+                    )
+                    on_delivery_failed = self._fail_output_deliveries(completions)
+                else:
+                    completions = ()
+                    on_delivery_complete = lambda _packet_count: None
+                    on_delivery_failed = self._fail_buffered_output_deliveries
+                try:
+                    await sendAudio(
+                        self.conn,
+                        packets,
+                        on_delivery_complete=on_delivery_complete,
+                        on_delivery_failed=on_delivery_failed,
+                    )
+                except BaseException as exc:
+                    if completions:
+                        self._fail_output_deliveries(completions)(exc)
+                    else:
+                        self._fail_buffered_output_deliveries(exc)
+                    raise
+                return len(packets)
+            if getattr(self.conn, "client_abort", False):
+                self._fail_buffered_output_deliveries(
+                    RuntimeError("audio delivery suppressed")
+                )
+            elif not self._output_encoder_has_buffered_pcm():
+                self._fail_buffered_output_deliveries(
+                    RuntimeError("audio encoder retained no output")
+                )
+            return 0
+        if audio_bytes:
+            delivery = self._new_output_delivery(response_generation)
+            try:
                 await sendAudio(
                     self.conn,
-                    packets,
+                    audio_bytes,
                     on_delivery_complete=delivery[0],
                     on_delivery_failed=delivery[1],
                 )
-                return len(packets)
-            delivery[1](RuntimeError("audio delivery suppressed"))
-            return 0
-        if audio_bytes:
-            await sendAudio(
-                self.conn,
-                audio_bytes,
-                on_delivery_complete=delivery[0],
-                on_delivery_failed=delivery[1],
-            )
+            except BaseException as exc:
+                delivery[1](exc)
+                raise
             return 1
         delivery[1](RuntimeError("audio delivery empty"))
         return 0
@@ -1240,6 +1290,38 @@ class GoogleLiveAudioBridge:
 
         return complete, fail
 
+    def _take_buffered_output_deliveries(self):
+        deliveries = tuple(self._buffered_output_deliveries)
+        self._buffered_output_deliveries = []
+        return deliveries
+
+    @staticmethod
+    def _complete_output_deliveries(deliveries):
+        def complete(packet_count):
+            for source_complete, _source_fail in deliveries:
+                source_complete(packet_count)
+
+        return complete
+
+    @staticmethod
+    def _fail_output_deliveries(deliveries):
+        def fail(error):
+            for _source_complete, source_fail in deliveries:
+                source_fail(error)
+
+        return fail
+
+    def _fail_buffered_output_deliveries(self, error):
+        deliveries = self._take_buffered_output_deliveries()
+        self._fail_output_deliveries(deliveries)(error)
+
+    def _output_encoder_has_buffered_pcm(self):
+        buffer = getattr(self._output_encoder, "buffer", None)
+        try:
+            return len(buffer) > 0
+        except (TypeError, ValueError):
+            return False
+
     def _settle_output_delivery_failure(self, receipt, response_generation):
         if receipt.done():
             return
@@ -1251,6 +1333,7 @@ class GoogleLiveAudioBridge:
                 pass
 
     def _invalidate_pending_output_deliveries(self):
+        self._buffered_output_deliveries = []
         pending = self._pending_output_deliveries
         self._pending_output_deliveries = {}
         for receipt, generation in pending.items():
@@ -1297,8 +1380,9 @@ class GoogleLiveAudioBridge:
         packets = []
         if include_preroll:
             packets.extend(self._encode_lesson_output_preroll(mime_type))
-        packets.extend(self._encode_output_audio(audio_bytes, mime_type))
-        return packets
+        source_packets = self._encode_output_audio(audio_bytes, mime_type)
+        packets.extend(source_packets)
+        return packets, len(source_packets)
 
     def _encode_lesson_output_preroll(self, mime_type=None):
         source_rate = self._extract_sample_rate_from_mime(mime_type)
@@ -1328,19 +1412,38 @@ class GoogleLiveAudioBridge:
 
     async def _flush_output_audio(self):
         if self.conn.websocket is None or self._output_encoder is None:
+            self._fail_buffered_output_deliveries(
+                RuntimeError("buffered audio delivery unavailable")
+            )
             return 0
         from core.handle.sendAudioHandle import sendAudio
 
-        packets = await self._run_audio_cpu(self._flush_output_audio_sync)
+        try:
+            packets = await self._run_audio_cpu(self._flush_output_audio_sync)
+        except BaseException as exc:
+            self._fail_buffered_output_deliveries(exc)
+            raise
+        deliveries = self._take_buffered_output_deliveries()
         if packets:
-            delivery = self._new_output_delivery(
-                self._active_response_id, emit_proof=False
-            )
-            await sendAudio(
-                self.conn,
-                packets,
-                on_delivery_complete=delivery[0],
-                on_delivery_failed=delivery[1],
+            if not deliveries:
+                deliveries = (
+                    self._new_output_delivery(
+                        self._active_response_id, emit_proof=False
+                    ),
+                )
+            try:
+                await sendAudio(
+                    self.conn,
+                    packets,
+                    on_delivery_complete=self._complete_output_deliveries(deliveries),
+                    on_delivery_failed=self._fail_output_deliveries(deliveries),
+                )
+            except BaseException as exc:
+                self._fail_output_deliveries(deliveries)(exc)
+                raise
+        elif deliveries:
+            self._fail_output_deliveries(deliveries)(
+                RuntimeError("buffered audio flush produced no packets")
             )
         return len(packets)
 
@@ -1672,6 +1775,7 @@ class GoogleLiveAudioBridge:
             return 0
 
     def _reset_output_encoder(self):
+        self._invalidate_pending_output_deliveries()
         self._output_encoder = None
         self._output_preroll_sent = False
         self._output_chunk_count = 0
