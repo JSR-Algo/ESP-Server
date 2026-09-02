@@ -70,6 +70,7 @@ def _valid_playwright_contract() -> dict:
             "rollbackCommand": "node scripts/run-task4-assignment-phase.cjs rollback",
             "sourcePaths": [
                 "docs/docker/task4-admin-assignment/bootstrap.cjs",
+                "docs/docker/task4-admin-assignment/copy-file.cjs",
                 "docs/docker/task4-admin-assignment/docker-compose.new.yml",
                 "docs/docker/task4-admin-assignment/docker-compose.rollback.yml",
                 "docs/docker/task4-admin-assignment/serve-media.cjs",
@@ -158,6 +159,7 @@ def _commit_playwright_fixture(
     )
     assignment_files = {
         "docs/docker/task4-admin-assignment/bootstrap.cjs": "module.exports = {};\n",
+        "docs/docker/task4-admin-assignment/copy-file.cjs": "module.exports = {};\n",
         "docs/docker/task4-admin-assignment/docker-compose.new.yml": "services: {}\n",
         "docs/docker/task4-admin-assignment/docker-compose.rollback.yml": "services: {}\n",
         "docs/docker/task4-admin-assignment/serve-media.cjs": "module.exports = {};\n",

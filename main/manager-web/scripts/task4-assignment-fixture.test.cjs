@@ -1,5 +1,7 @@
 const assert = require('node:assert/strict');
 const { existsSync, readFileSync } = require('node:fs');
+const { link, mkdtemp, readFile, rm, stat, writeFile } = require('node:fs/promises');
+const { tmpdir } = require('node:os');
 const { resolve } = require('node:path');
 const test = require('node:test');
 const {
@@ -8,6 +10,7 @@ const {
 } = require('./task4-image-identity.cjs');
 
 const fixturePath = resolve(__dirname, '../../../docs/docker/task4-admin-assignment/bootstrap.cjs');
+const copyHelperPath = resolve(__dirname, '../../../docs/docker/task4-admin-assignment/copy-file.cjs');
 const rollbackSpecPath = resolve(__dirname, '../e2e/lesson-studio/assignment-rollback-phase.spec.js');
 const playwrightConfigPath = resolve(__dirname, '../playwright.assignment-rollback.config.js');
 const orchestratorPath = resolve(__dirname, 'run-task4-assignment-phase.cjs');
@@ -61,6 +64,7 @@ test('Task 4 assignment fixture uses canonical backend authoring and rollout cod
 
 test('Task 4 assignment fixture declares exact graph and READY derivative invariants', () => {
   const source = readFileSync(fixturePath, 'utf8');
+  const copyHelperSource = readFileSync(copyHelperPath, 'utf8');
 
   assert.match(source, /sharedVisualAssets:\s*7/);
   assert.match(source, /lessonSteps:\s*2/);
@@ -78,13 +82,75 @@ test('Task 4 assignment fixture declares exact graph and READY derivative invari
   assert.match(source, /writeTbotRgb565File/);
   assert.match(source, /validateTbotRgb565File/);
   assert.match(source, /createHash\('sha256'\)/);
-  assert.match(source, /const \{ copyFile, mkdir, open, rm, stat \} = require\('node:fs\/promises'\);/);
+  assert.match(source, /const \{ replaceWithCopy \} = require\('\/task4-fixture\/copy-file\.cjs'\);/);
   assert.doesNotMatch(source, /\blink\b|replaceWithLink/);
   assert.equal((source.match(/await replaceWithCopy\(/g) || []).length, 2);
-  assert.match(source, /async function replaceWithCopy\(source, destination\) \{[\s\S]*await stat\(source\);[\s\S]*await rm\(destination, \{ force: true \}\);[\s\S]*await copyFile\(source, destination\);[\s\S]*\}/);
+  assert.match(copyHelperSource, /const \{ copyFile, rm, stat \} = require\('node:fs\/promises'\);/);
+  assert.doesNotMatch(copyHelperSource, /\blink\b|replaceWithLink/);
+  assert.match(copyHelperSource, /async function replaceWithCopy\(source, destination[\s\S]*await stat\(source\);[\s\S]*await rm\(destination, \{ force: true \}\);[\s\S]*await copy\(source, destination\);[\s\S]*\}/);
   assert.doesNotMatch(source, /fixture\.local/);
   assert.doesNotMatch(source, /output_bytes=1/);
   assert.doesNotMatch(source, /preview:\$\{row\.derivative_id\}/);
+});
+
+test('replaceWithCopy creates independent bytes that cannot mutate the source', async (t) => {
+  const root = await mkdtemp(resolve(tmpdir(), 'task4-copy-file-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = resolve(root, 'source.bin');
+  const destination = resolve(root, 'destination.bin');
+  const expected = Buffer.from('canonical derivative bytes');
+  await writeFile(source, expected);
+
+  const { replaceWithCopy } = require(copyHelperPath);
+  await replaceWithCopy(source, destination);
+
+  assert.deepEqual(await readFile(destination), expected);
+  assert.notEqual((await stat(destination)).ino, (await stat(source)).ino);
+  await writeFile(destination, 'mutated destination');
+  assert.deepEqual(await readFile(source), expected);
+  await rm(destination);
+  assert.deepEqual(await readFile(source), expected);
+});
+
+test('replaceWithCopy replaces hard-linked and stale destinations on rerun', async (t) => {
+  const root = await mkdtemp(resolve(tmpdir(), 'task4-copy-file-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = resolve(root, 'source.bin');
+  const destination = resolve(root, 'destination.bin');
+  await writeFile(source, 'current derivative');
+  await link(source, destination);
+  assert.equal((await stat(destination)).ino, (await stat(source)).ino);
+
+  const { replaceWithCopy } = require(copyHelperPath);
+  await replaceWithCopy(source, destination);
+
+  assert.equal(await readFile(destination, 'utf8'), 'current derivative');
+  assert.notEqual((await stat(destination)).ino, (await stat(source)).ino);
+  await writeFile(destination, 'stale derivative');
+  await replaceWithCopy(source, destination);
+  assert.equal(await readFile(destination, 'utf8'), 'current derivative');
+  assert.notEqual((await stat(destination)).ino, (await stat(source)).ino);
+});
+
+test('replaceWithCopy leaves copy failures recoverable by the next rerun', async (t) => {
+  const root = await mkdtemp(resolve(tmpdir(), 'task4-copy-file-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = resolve(root, 'source.bin');
+  const destination = resolve(root, 'destination.bin');
+  await writeFile(source, 'recoverable source');
+  await writeFile(destination, 'stale destination');
+
+  const { replaceWithCopy } = require(copyHelperPath);
+  await assert.rejects(
+    replaceWithCopy(source, destination, async () => { throw new Error('injected copy failure'); }),
+    /injected copy failure/,
+  );
+  assert.equal(existsSync(destination), false);
+  assert.equal(await readFile(source, 'utf8'), 'recoverable source');
+
+  await replaceWithCopy(source, destination);
+  assert.equal(await readFile(destination, 'utf8'), 'recoverable source');
+  assert.notEqual((await stat(destination)).ino, (await stat(source)).ino);
 });
 
 test('Task 4 assignment phases recreate only the backend and preserve PostgreSQL state', () => {
@@ -96,6 +162,7 @@ test('Task 4 assignment phases recreate only the backend and preserve PostgreSQL
     assert.match(compose, /LESSON_ROLLOUT_DEVICE_ALLOWLIST:\s*91deb5af-c1c0-416b-956d-266d510eac5e/);
     assert.match(compose, /derivative-media:/);
     assert.match(compose, /TASK4_ASSIGNMENT_MEDIA_ROOT/);
+    assert.match(compose, /\.\/task4-admin-assignment\/copy-file\.cjs:\/task4-fixture\/copy-file\.cjs:ro/);
   }
 });
 

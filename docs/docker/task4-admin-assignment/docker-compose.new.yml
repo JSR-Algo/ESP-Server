@@ -14,6 +14,7 @@ services:
       TASK4_ASSIGNMENT_SOURCE_ROOT: /task4-source
     volumes:
       - ./task4-admin-assignment/bootstrap.cjs:/task4-fixture/bootstrap.cjs:ro
+      - ./task4-admin-assignment/copy-file.cjs:/task4-fixture/copy-file.cjs:ro
       - ${TASK4_ASSIGNMENT_MEDIA_ROOT:?set the Task4 runtime media directory}:/task4-media
       - ${TASK4_ASSIGNMENT_TLS_ROOT:?set the Task4 runtime TLS directory}:/task4-tls:ro
 

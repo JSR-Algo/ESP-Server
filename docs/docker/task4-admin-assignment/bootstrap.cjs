@@ -5,10 +5,11 @@ process.env.TVIDEO_FONT_BUNDLE_SHA256 ||= 'b'.repeat(64);
 
 const { createHash } = require('node:crypto');
 const { createReadStream, readFileSync } = require('node:fs');
-const { copyFile, mkdir, open, rm, stat } = require('node:fs/promises');
+const { mkdir, open, rm, stat } = require('node:fs/promises');
 const { get: httpsGet } = require('node:https');
 const { dirname, join } = require('node:path');
 const { Pool } = require('/app/node_modules/pg');
+const { replaceWithCopy } = require('/task4-fixture/copy-file.cjs');
 const { LessonAuthoringService } = require('/app/dist/lessons/authoring/lesson-authoring.service.js');
 const {
   FARM_V7_BOOTSTRAP_ASSETS,
@@ -394,12 +395,6 @@ async function ensureTbotTemplate(durationMs, frameCount) {
   await rm(raw, { force: true });
   await validateTbotRgb565File(template, frameCount);
   return template;
-}
-
-async function replaceWithCopy(source, destination) {
-  await stat(source);
-  await rm(destination, { force: true });
-  await copyFile(source, destination);
 }
 
 async function fileSha256(path) {
