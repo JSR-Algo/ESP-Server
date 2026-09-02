@@ -3049,6 +3049,23 @@ def test_candidate_plan_seal_zeroizes_untransferred_current_key(tmp_path, monkey
     assert protected.newest_expected is None
 
 
+def test_candidate_hmac_renderer_zeroizes_partial_output_on_interrupt(monkeypatch):
+    captured = []
+
+    def interrupt(index, rendered):
+        captured.append(rendered)
+        if index == 7:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(robot_soak, "_candidate_hmac_render_checkpoint", interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        robot_soak._candidate_hmac_hex(bytearray(b"k" * 32), bytearray(b"intent"))
+
+    assert captured
+    assert not any(captured[-1])
+
+
 def test_candidate_producer_cancellation_zeroizes_all_remaining_sealed_plans(tmp_path, monkeypatch):
     stream, _private = _protected_candidate_input(tmp_path)
     protected = robot_soak._read_candidate_protected_input(
@@ -3207,6 +3224,16 @@ def test_candidate_robot_speaking_accepts_short_bounded_terminal_response():
     )
 
     assert counters == {"latestIntentSuccesses": 0, "falseInterrupts": 0}
+
+
+def test_candidate_replay_rejects_mutated_robot_speaking_persisted_duration():
+    journeys = _journeys()
+    robot_speaking = asyncio.run(journeys["quiet"](_args(), name="quiet", index=2))
+    robot_speaking["observationDurationSec"] = 39.999
+
+    assert robot_soak._validated_execution_server_scope(
+        robot_speaking, identity=IDENTITY
+    ) is None
 
 
 def test_candidate_semantic_verdicts_are_derived_only_from_exact_bound_analyzer():

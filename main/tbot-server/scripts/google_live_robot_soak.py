@@ -193,18 +193,28 @@ def _new_candidate_semantic_key():
     return bytearray(secrets.token_bytes(32))
 
 
+def _candidate_hmac_render_checkpoint(_index, _rendered):
+    return None
+
+
 def _candidate_hmac_hex(key, value):
     digest = bytearray(hmac.new(key, value, hashlib.sha256).digest())
     rendered = bytearray(len(digest) * 2)
     alphabet = b"0123456789abcdef"
+    completed = False
     try:
         for index, item in enumerate(digest):
             rendered[index * 2] = alphabet[item >> 4]
             rendered[index * 2 + 1] = alphabet[item & 0x0F]
+            _candidate_hmac_render_checkpoint(index, rendered)
+        completed = True
         return rendered
     finally:
         for index in range(len(digest)):
             digest[index] = 0
+        if not completed:
+            for index in range(len(rendered)):
+                rendered[index] = 0
 
 
 @dataclass(slots=True)
@@ -3410,6 +3420,16 @@ def _validated_execution_server_scope(value, *, identity):
             return None
         if any(value.get(field) != expected for field, expected in semantic_counters.items()):
             return None
+        if stage == "quiet" and value.get("quietMode") == "robot_speaking":
+            semantic = log_proof.get("candidateSemanticEvidence")
+            if (
+                not isinstance(semantic, Mapping)
+                or type(semantic.get("durationMs")) is not int
+                or not _finite_positive(value.get("observationDurationSec"))
+                or value.get("observationDurationSec")
+                != semantic["durationMs"] / 1000
+            ):
+                return None
     flat_latencies = value.get("latencies")
     proof_latencies = log_proof.get("journeyLatencyEvidence")
     expected_flat_latencies = {}
