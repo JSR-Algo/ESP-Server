@@ -8,9 +8,11 @@ import hmac
 import json
 import os
 import re
-import subprocess
+import stat
 import sys
 from collections.abc import Mapping
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +40,7 @@ from scripts.google_live_reliability import (
     validate_log_reliability_contract,
     validate_real_api_pass_report,
 )
+from scripts.google_live_trusted_git import git_output as _trusted_git_output
 from scripts.physical_smoke_audit import validate_physical_candidate_report
 
 RELEASE_SCHEMA_VERSION = "google-live-release-verdict.v1"
@@ -63,6 +66,36 @@ CANONICAL_DETERMINISTIC_NODE_COUNT = 783
 CANONICAL_DETERMINISTIC_MANIFEST = Path(
     "main/tbot-server/tests/fixtures/google_live_deterministic_nodes.txt"
 )
+
+
+@dataclass(frozen=True)
+class BoundDirectory:
+    device: int
+    inode: int
+    size: int
+    modified_ns: int
+    changed_ns: int
+    mode: int
+    links: int
+
+
+@dataclass(frozen=True)
+class BoundReleaseInput:
+    path: Path
+    content: bytes
+    device: int
+    inode: int
+    size: int
+    modified_ns: int
+    changed_ns: int
+    mode: int
+    links: int
+    sha256: str
+    parent_chain: tuple[BoundDirectory, ...]
+
+
+class ReleaseEvidenceChanged(RuntimeError):
+    pass
 
 
 def _failure(code: str, layer: str | None = None, field: str | None = None) -> dict:
@@ -222,15 +255,7 @@ def validate_expected_identity(identity: Mapping[str, Any]) -> None:
 
 
 def _git_output(repo_root: Path, *arguments: str) -> bytes:
-    completed = subprocess.run(
-        ["git", *arguments],
-        cwd=repo_root,
-        check=False,
-        capture_output=True,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError("repository verification failed")
-    return completed.stdout
+    return _trusted_git_output(repo_root, *arguments)
 
 
 def _trusted_manifest_path() -> Path:
@@ -344,17 +369,170 @@ def _load_trusted_pytest_runtime_manifest(expected_git_sha: str) -> bytes:
     return content
 
 
-def load_checksum_manifest(
-    manifest_path: Path | str, layer_paths: Mapping[str, Path | str]
+def _absolute_input_path(path: Path | str) -> Path:
+    candidate = Path(path)
+    return candidate if candidate.is_absolute() else Path.cwd() / candidate
+
+
+def _directory_identity(opened: os.stat_result) -> BoundDirectory:
+    return BoundDirectory(
+        opened.st_dev,
+        opened.st_ino,
+        opened.st_size,
+        opened.st_mtime_ns,
+        opened.st_ctime_ns,
+        opened.st_mode,
+        opened.st_nlink,
+    )
+
+
+def _open_release_input_parent(
+    path: Path | str,
+) -> tuple[Path, int, tuple[BoundDirectory, ...]]:
+    absolute = _absolute_input_path(path)
+    parts = absolute.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts[1:]):
+        raise ValueError("release evidence path is invalid")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(parts[0], flags)
+    chain = []
+    try:
+        chain.append(_directory_identity(os.fstat(directory_fd)))
+        for component in parts[1:-1]:
+            next_fd = os.open(component, flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+            chain.append(_directory_identity(os.fstat(directory_fd)))
+        return absolute, directory_fd, tuple(chain)
+    except BaseException:
+        os.close(directory_fd)
+        raise
+
+
+def _read_bound_release_input(path: Path | str) -> BoundReleaseInput:
+    absolute, parent_fd, parent_chain = _open_release_input_parent(path)
+    descriptor = None
+    try:
+        descriptor = os.open(
+            absolute.name,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise RuntimeError("release evidence changed")
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        content = b"".join(chunks)
+        after = os.fstat(descriptor)
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+            before.st_mode,
+            before.st_nlink,
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+            after.st_mode,
+            after.st_nlink,
+        )
+        if (
+            _directory_identity(os.fstat(parent_fd)) != parent_chain[-1]
+            or before_identity != after_identity
+        ):
+            raise RuntimeError("release evidence changed")
+        return BoundReleaseInput(
+            absolute,
+            content,
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+            after.st_mode,
+            after.st_nlink,
+            hashlib.sha256(content).hexdigest(),
+            parent_chain,
+        )
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent_fd)
+
+
+def _require_release_input_unchanged(
+    bound: BoundReleaseInput,
+    *,
+    allowed_changed_directory: Path | None = None,
+) -> None:
+    current = _read_bound_release_input(bound.path)
+    allowed_index = None
+    if allowed_changed_directory is not None:
+        allowed = _absolute_input_path(allowed_changed_directory)
+        parent_parts = bound.path.parent.parts
+        allowed_parts = allowed.parts
+        if (
+            len(allowed_parts) <= len(parent_parts)
+            and parent_parts[: len(allowed_parts)] == allowed_parts
+        ):
+            allowed_index = len(allowed_parts) - 1
+    chain_matches = all(
+        observed == expected or index == allowed_index
+        for index, (observed, expected) in enumerate(
+            zip(current.parent_chain, bound.parent_chain, strict=True)
+        )
+    )
+    if not chain_matches or replace(current, parent_chain=bound.parent_chain) != bound:
+        raise ReleaseEvidenceChanged("release evidence changed")
+
+
+def _require_all_release_inputs_unchanged(
+    bindings: Mapping[str, BoundReleaseInput],
+    *,
+    allowed_changed_directory: Path | None = None,
+) -> None:
+    try:
+        for name, bound in bindings.items():
+            try:
+                _require_release_input_unchanged(
+                    bound,
+                    allowed_changed_directory=allowed_changed_directory,
+                )
+            except (OSError, ValueError, RuntimeError) as exc:
+                raise ReleaseEvidenceChanged(
+                    f"release evidence changed: {name}"
+                ) from exc
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ReleaseEvidenceChanged("release evidence changed") from exc
+
+
+def _parse_checksum_manifest_content(
+    content: bytes,
+    manifest_path: Path | str,
+    layer_paths: Mapping[str, Path | str],
 ) -> dict[str, str]:
-    """Map trusted GNU sha256sum rows to the exact required report paths."""
-    manifest = Path(manifest_path).resolve()
+    try:
+        lines = content.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ValueError("checksum manifest encoding is invalid") from exc
+    manifest = _absolute_input_path(manifest_path)
     root = manifest.parent
-    expected = {name: Path(path).resolve() for name, path in layer_paths.items()}
+    expected = {name: _absolute_input_path(path) for name, path in layer_paths.items()}
     by_path = {path: name for name, path in expected.items()}
     result = {}
     seen_paths = set()
-    for line in manifest.read_text(encoding="utf-8").splitlines():
+    for line in lines:
         if not line.strip():
             raise ValueError("checksum manifest row is malformed")
         if _junit_value_is_sensitive(line):
@@ -367,9 +545,7 @@ def load_checksum_manifest(
             raise ValueError("checksum manifest artifact path is invalid")
         if _junit_value_is_sensitive(relative):
             raise ValueError("checksum manifest violates the privacy contract")
-        candidate = (root / relative).resolve()
-        if root not in candidate.parents:
-            raise ValueError("checksum manifest path escapes its evidence root")
+        candidate = root.joinpath(*Path(relative).parts)
         if candidate not in by_path:
             raise ValueError("checksum manifest contains an undeclared artifact")
         if candidate in seen_paths:
@@ -381,10 +557,20 @@ def load_checksum_manifest(
     return result
 
 
+def load_checksum_manifest(
+    manifest_path: Path | str, layer_paths: Mapping[str, Path | str]
+) -> dict[str, str]:
+    """Map trusted GNU sha256sum rows to the exact required report paths."""
+    manifest = _read_bound_release_input(manifest_path)
+    return _parse_checksum_manifest_content(manifest.content, manifest.path, layer_paths)
+
+
 def aggregate_release_evidence(
     expected_identity: Mapping[str, Any],
     layer_paths: Mapping[str, Path | str],
     expected_checksums: Mapping[str, str],
+    *,
+    input_contents: Mapping[str, bytes] | None = None,
 ) -> dict[str, Any]:
     """Read and validate all required reports without executing any journey."""
     failures = []
@@ -409,8 +595,12 @@ def aggregate_release_evidence(
         else:
             path = Path(path_value)
             try:
-                content = path.read_bytes()
-            except OSError:
+                content = (
+                    input_contents[layer]
+                    if input_contents is not None
+                    else path.read_bytes()
+                )
+            except (KeyError, OSError):
                 layer_failures.append(_failure("LAYER_FILE_MISSING", layer))
                 content = None
             if content is not None and expected_checksum is not None:
@@ -500,8 +690,12 @@ def aggregate_release_evidence(
                 and _same_file(path, trusted_manifest_path)
             ):
                 raise OSError
-            content = path.read_bytes()
-        except OSError:
+            content = (
+                input_contents[support]
+                if input_contents is not None
+                else path.read_bytes()
+            )
+        except (KeyError, OSError):
             failures.append(_failure("DETERMINISTIC_SUPPORT_MISSING", "deterministic", support))
             continue
         if not hmac.compare_digest(hashlib.sha256(content).hexdigest(), checksum):
@@ -612,13 +806,92 @@ def _evidence_paths_alias(paths: list[Path]) -> bool:
 
 
 def _atomic_write(
-    path: Path, content: str, expected_parent_identity: tuple[int, int] | None = None
+    path: Path,
+    content: str,
+    expected_parent_identity: tuple[int, int] | None = None,
+    *,
+    pre_publish: Callable[[Path], None] | None = None,
+    post_publish: Callable[[], None] | None = None,
 ) -> None:
     atomic_write_exclusive(
         path,
         content.encode("utf-8"),
         expected_parent_identity=expected_parent_identity,
+        pre_publish=pre_publish,
+        post_publish=post_publish,
     )
+
+
+def produce_release_verdict(
+    expected_identity: Mapping[str, Any],
+    layer_paths: Mapping[str, Path | str],
+    checksum_path: Path | str,
+    output_path: Path,
+    *,
+    after_checksum_read: Callable[[], None] | None = None,
+    after_inputs_parsed: Callable[[], None] | None = None,
+    pre_publish: Callable[[], None] | None = None,
+    post_publish: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """Publish a verdict only while every validated input retains its identity."""
+    if set(layer_paths) != set(REQUIRED_LAYERS) | set(DETERMINISTIC_SUPPORTS):
+        raise ValueError("release evidence paths are incomplete")
+    evidence_paths = [Path(path) for path in layer_paths.values()]
+    if _evidence_paths_alias([*evidence_paths, Path(checksum_path)]):
+        raise ValueError("release evidence paths alias")
+    if _output_aliases_evidence(output_path, evidence_paths, Path(checksum_path)):
+        raise ValueError("output aliases release evidence")
+
+    bindings = {"checksums": _read_bound_release_input(checksum_path)}
+    bindings.update(
+        {name: _read_bound_release_input(path) for name, path in layer_paths.items()}
+    )
+    checksums = _parse_checksum_manifest_content(
+        bindings["checksums"].content,
+        bindings["checksums"].path,
+        layer_paths,
+    )
+    if after_checksum_read is not None:
+        after_checksum_read()
+    _require_all_release_inputs_unchanged(bindings)
+
+    contents = {name: bindings[name].content for name in layer_paths}
+    verdict = aggregate_release_evidence(
+        expected_identity,
+        layer_paths,
+        checksums,
+        input_contents=contents,
+    )
+    if after_inputs_parsed is not None:
+        after_inputs_parsed()
+    _require_all_release_inputs_unchanged(bindings)
+    rendered = json.dumps(verdict, indent=2, sort_keys=True) + "\n"
+    output_parent_identity = snapshot_output_parent(output_path)
+
+    def validate_pre_publish(_temporary_path: Path) -> None:
+        if pre_publish is not None:
+            pre_publish()
+        _require_all_release_inputs_unchanged(
+            bindings,
+            allowed_changed_directory=output_path.parent,
+        )
+
+    def validate_post_publish() -> None:
+        if post_publish is not None:
+            post_publish()
+        _require_all_release_inputs_unchanged(
+            bindings,
+            allowed_changed_directory=output_path.parent,
+        )
+
+    _atomic_write(
+        output_path,
+        rendered,
+        output_parent_identity,
+        pre_publish=validate_pre_publish,
+        post_publish=validate_post_publish,
+    )
+    return verdict
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -655,27 +928,34 @@ def main(argv: list[str] | None = None) -> int:
         _layer_path_candidates(args.layer) + _layer_path_candidates(args.support),
         args.checksums_file,
     )
-    try:
-        output_parent_identity = snapshot_output_parent(args.out) if output_safe else None
-    except (OSError, ValueError, RuntimeError):
-        output_parent_identity = None
-        output_safe = False
-    try:
-        if not output_safe:
-            raise ValueError("output aliases release evidence")
-        if not parse_valid:
-            raise ValueError("layer arguments are malformed")
-        if _evidence_paths_alias([*paths.values(), args.checksums_file]):
-            raise ValueError("release evidence paths alias")
-        checksums = load_checksum_manifest(args.checksums_file, paths)
-    except (OSError, UnicodeError, ValueError):
-        paths = {}
-        checksums = {}
-    verdict = aggregate_release_evidence(identity, paths, checksums)
+    if output_safe and parse_valid:
+        try:
+            verdict = produce_release_verdict(
+                identity,
+                paths,
+                args.checksums_file,
+                args.out,
+            )
+        except ReleaseEvidenceChanged:
+            verdict = aggregate_release_evidence(identity, {}, {})
+            print(json.dumps(verdict, indent=2, sort_keys=True) + "\n", end="")
+            return 1
+        except (OSError, UnicodeError, ValueError):
+            verdict = aggregate_release_evidence(identity, {}, {})
+        except RuntimeError:
+            verdict = aggregate_release_evidence(identity, {}, {})
+            print(json.dumps(verdict, indent=2, sort_keys=True) + "\n", end="")
+            return 1
+        else:
+            rendered = json.dumps(verdict, indent=2, sort_keys=True) + "\n"
+            print(rendered, end="")
+            return 0 if verdict["status"] == "PASS" else 1
+    else:
+        verdict = aggregate_release_evidence(identity, {}, {})
     rendered = json.dumps(verdict, indent=2, sort_keys=True) + "\n"
     if output_safe:
         try:
-            _atomic_write(args.out, rendered, output_parent_identity)
+            _atomic_write(args.out, rendered)
         except (OSError, ValueError, RuntimeError):
             print(rendered, end="")
             return 1

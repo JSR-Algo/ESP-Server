@@ -1024,6 +1024,7 @@ def test_cli_writes_failure_atomically_for_malformed_checksum_manifest(
     completed = _run_cli(paths, manifest, out)
 
     assert completed.returncode == 1
+    assert out.exists(), completed.stderr
     verdict = json.loads(out.read_text(encoding="utf-8"))
     assert verdict["status"] == "FAIL"
     assert json.loads(completed.stdout) == verdict
@@ -1106,6 +1107,94 @@ def _run_cli(paths: dict[str, Path], manifest: Path, out: Path) -> subprocess.Co
     command.extend(["--support", f"deterministic_manifest={paths['deterministic'].parent / 'node-manifest.txt'}"])
     command.extend(["--support", f"deterministic_junit={paths['deterministic'].parent / 'pytest.xml'}"])
     return subprocess.run(command, text=True, capture_output=True, check=False)
+
+
+def test_bound_release_verdict_publishes_valid_exact_inputs(tmp_path: Path) -> None:
+    paths, _, manifest = _write_evidence(tmp_path)
+    out = tmp_path / "release-verdict.json"
+
+    verdict = release_gate.produce_release_verdict(
+        IDENTITY, paths, manifest, out
+    )
+
+    assert verdict["status"] == "PASS"
+    assert json.loads(out.read_text(encoding="utf-8")) == verdict
+
+
+@pytest.mark.parametrize(
+    ("hook_name", "mutation"),
+    [
+        ("after_checksum_read", "replace"),
+        ("after_inputs_parsed", "delete"),
+        ("pre_publish", "symlink"),
+        ("post_publish", "hardlink"),
+        ("pre_publish", "restore_bytes"),
+        ("post_publish", "aba"),
+    ],
+)
+def test_bound_release_verdict_rolls_back_when_inputs_drift(
+    tmp_path: Path,
+    hook_name: str,
+    mutation: str,
+) -> None:
+    paths, _, manifest = _write_evidence(tmp_path)
+    target = paths["real_api"]
+    original = target.read_bytes()
+    out = tmp_path / "release-verdict.json"
+
+    def mutate() -> None:
+        if mutation == "replace":
+            replacement = tmp_path / "replacement.json"
+            replacement.write_bytes(original)
+            os.replace(replacement, target)
+        elif mutation == "delete":
+            target.unlink()
+        elif mutation == "symlink":
+            moved = tmp_path / "moved-real-api.json"
+            target.rename(moved)
+            target.symlink_to(moved)
+        elif mutation == "hardlink":
+            os.link(target, tmp_path / "real-api-alias.json")
+        elif mutation == "restore_bytes":
+            target.write_bytes(original + b" ")
+            target.write_bytes(original)
+        elif mutation == "aba":
+            moved = tmp_path / "aba-original.json"
+            replacement = tmp_path / "aba-replacement.json"
+            target.rename(moved)
+            replacement.write_bytes(original)
+            replacement.rename(target)
+            target.unlink()
+            moved.rename(target)
+        else:  # pragma: no cover - the parametrization is exhaustive.
+            raise AssertionError(mutation)
+
+    hooks = {hook_name: mutate}
+    with pytest.raises(RuntimeError, match="release evidence changed"):
+        release_gate.produce_release_verdict(
+            IDENTITY,
+            paths,
+            manifest,
+            out,
+            **hooks,
+        )
+
+    assert not out.exists()
+
+
+def test_bound_release_input_detects_parent_directory_aba(tmp_path: Path) -> None:
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    evidence = evidence_dir / "report.json"
+    evidence.write_bytes(b"evidence")
+    bound = release_gate._read_bound_release_input(evidence)
+    moved = tmp_path / "moved-evidence"
+
+    evidence_dir.rename(moved)
+    moved.rename(evidence_dir)
+
+    with pytest.raises(RuntimeError, match="release evidence changed"):
+        release_gate._require_release_input_unchanged(bound)
 
 
 @pytest.mark.parametrize("support_name", ["node-manifest.txt", "pytest.xml"])

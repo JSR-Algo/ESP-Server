@@ -31,6 +31,7 @@ if __package__ in {None, ""}:
 
 from scripts import google_live_deterministic_nodeid_plugin as nodeid_plugin
 from scripts.google_live_reliability import SCHEMA_VERSION
+from scripts.google_live_trusted_git import git_output as _trusted_git_output
 
 MANIFEST_SCHEMA = "google-live-deterministic-nodes.v1"
 PYTEST_RUNTIME_SCHEMA = "google-live-pytest-runtime.v1"
@@ -1310,12 +1311,7 @@ def _pytest_command(runtime: Mapping[str, Any], *arguments: str) -> list[str]:
 
 
 def _git_output(repo_root: Path, *arguments: str) -> bytes:
-    completed = subprocess.run(
-        ["git", *arguments], cwd=repo_root, check=False, capture_output=True
-    )
-    if completed.returncode != 0:
-        raise RuntimeError("git repository verification failed")
-    return completed.stdout
+    return _trusted_git_output(repo_root, *arguments)
 
 
 def _read_candidate_tracked_file(
