@@ -6,6 +6,7 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -691,10 +692,13 @@ def test_producer_uses_isolated_allowlisted_pytest_process(
     assert all(isinstance(command, list) for command, _kwargs in calls)
     for command, kwargs in calls:
         assert command[:3] == [sys.executable, "-I", "-c"]
-        assert "run_module('pytest'" in command[3]
-        assert str(tmp_path.resolve()) in json.loads(command[4])
-        assert command.count("pytest_asyncio.plugin") == 1
-        assert command.count("scripts.google_live_deterministic_nodeid_plugin") == 1
+        assert "pytest.main" in command[3]
+        runtime = json.loads(command[4])
+        assert runtime["repo"] == str(tmp_path.resolve())
+        assert len(runtime["trusted"]) == 1
+        assert runtime["trusted"][0] not in report.read_text(encoding="utf-8")
+        assert command[3].count("pytest_asyncio.plugin") == 1
+        assert command[3].count("scripts.google_live_deterministic_nodeid_plugin") == 1
         assert kwargs["cwd"] == tmp_path.resolve()
         assert kwargs["env"]["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
         assert kwargs["env"]["PYTHONNOUSERSITE"] == "1"
@@ -703,6 +707,7 @@ def test_producer_uses_isolated_allowlisted_pytest_process(
     assert json.loads(report.read_text(encoding="utf-8"))["status"] == "PASS"
     assert sentinel not in report.read_text(encoding="utf-8")
     assert deterministic.parse_passing_junit(junit.read_bytes(), nodes)["tests"] == 1
+    assert all(not Path(json.loads(command[4])["trusted"][0]).exists() for command, _ in calls)
 
 
 def test_isolated_pytest_process_ignores_environment_injection(tmp_path: Path) -> None:
@@ -734,18 +739,135 @@ def test_isolated_pytest_process_ignores_environment_injection(tmp_path: Path) -
     }
     repo_root = Path(__file__).parents[1].resolve()
 
-    completed = subprocess.run(
-        deterministic._pytest_command(repo_root, str(test_file), "-q"),
-        cwd=repo_root,
-        env=deterministic._pytest_child_environment(source),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    with deterministic._private_pytest_runtime(repo_root) as runtime:
+        completed = subprocess.run(
+            deterministic._pytest_command(runtime, str(test_file), "-q"),
+            cwd=repo_root,
+            env=deterministic._pytest_child_environment(source),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
 
     assert completed.returncode == 0
     assert "1 passed" in completed.stdout
     assert sentinel not in completed.stdout + completed.stderr
+    assert "PytestAssertRewriteWarning" not in completed.stderr
+
+
+def test_private_pytest_runtime_rejects_record_hash_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_root = tmp_path / "site-packages"
+    package_file = package_root / "pytest" / "__init__.py"
+    package_file.parent.mkdir(parents=True)
+    package_file.write_bytes(b"tampered")
+    fake_hash = SimpleNamespace(mode="sha256", value="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    package_path = SimpleNamespace(
+        parts=("pytest", "__init__.py"),
+        hash=fake_hash,
+        suffix=".py",
+        __fspath__=lambda: "pytest/__init__.py",
+    )
+    fake_distribution = SimpleNamespace(
+        files=[package_path],
+        locate_file=lambda path: package_root if path == "" else package_root / Path(*path.parts),
+    )
+    monkeypatch.setattr(deterministic, "_PYTEST_DISTRIBUTION_PACKAGES", {"pytest": {"pytest"}})
+    monkeypatch.setattr(deterministic, "_approved_package_roots", lambda: [package_root])
+    monkeypatch.setattr(deterministic, "distribution", lambda _name: fake_distribution)
+
+    with pytest.raises(RuntimeError, match="integrity"):
+        deterministic._copy_trusted_pytest_packages(tmp_path / "snapshot")
+
+
+def test_private_pytest_runtime_preimports_trusted_packages_before_candidate_repo(
+    tmp_path: Path,
+) -> None:
+    sentinel = "candidate pytest shadow executed"
+    (tmp_path / "pytest.py").write_text(f"raise RuntimeError({sentinel!r})\n", encoding="utf-8")
+    shadow_plugin = tmp_path / "pytest_asyncio" / "plugin.py"
+    shadow_plugin.parent.mkdir()
+    shadow_plugin.write_text(f"raise RuntimeError({sentinel!r})\n", encoding="utf-8")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "google_live_deterministic_nodeid_plugin.py").write_text("\n", encoding="utf-8")
+    test_file = tmp_path / "test_candidate.py"
+    test_file.write_text("def test_candidate():\n    assert True\n", encoding="utf-8")
+
+    with deterministic._private_pytest_runtime(tmp_path) as runtime:
+        completed = subprocess.run(
+            deterministic._pytest_command(runtime, str(test_file), "-q"),
+            cwd=tmp_path,
+            env=deterministic._pytest_child_environment(),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    assert completed.returncode == 0
+    assert "1 passed" in completed.stdout
+    assert sentinel not in completed.stdout + completed.stderr
+
+
+def test_candidate_canonical_manifest_uses_immutable_sha_across_head_aba(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_sha = "a" * 40
+    other_sha = "b" * 40
+    fixture = tmp_path / "tests" / "fixtures" / "google_live_deterministic_nodes.txt"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_bytes(b"tests/test_a.py::test_one\n")
+    manifest = tmp_path / "node-manifest.txt"
+    manifest.write_bytes(fixture.read_bytes())
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    junit = evidence_root / "deterministic" / "pytest.xml"
+    report = junit.with_name("report.json")
+    show_objects = []
+
+    def git_output(_repo_root: Path, *arguments: str) -> bytes:
+        if arguments[0] == "ls-files":
+            return b"tests/fixtures/google_live_deterministic_nodes.txt\n"
+        if arguments[0] == "show":
+            show_objects.append(arguments[1])
+            if arguments[1].startswith(f"{other_sha}:") or arguments[1].startswith("HEAD:"):
+                return b"tests/test_b.py::test_other\n"
+            return fixture.read_bytes()
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(deterministic, "_git_output", git_output)
+
+    def run(command, **kwargs):
+        if "--collect-only" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="tests/test_a.py::test_one\n",
+                stderr="",
+            )
+        junit_arg = next(value for value in command if value.startswith("--junitxml="))
+        Path(junit_arg.split("=", 1)[1]).write_bytes(_junit(["tests/test_a.py::test_one"]))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    deterministic.produce(
+        manifest_path=manifest,
+        junit_out=junit,
+        report_path=report,
+        identity=IDENTITY,
+        repo_root=tmp_path,
+        run=run,
+        git_status=lambda: b"",
+        git_head=lambda: candidate_sha,
+        approved_test_files=("tests/test_a.py",),
+    )
+
+    assert report.exists()
+    assert show_objects == [
+        f"{candidate_sha}:tests/fixtures/google_live_deterministic_nodes.txt"
+    ]
 
 
 def test_producer_does_not_publish_report_for_failed_pytest(tmp_path: Path) -> None:

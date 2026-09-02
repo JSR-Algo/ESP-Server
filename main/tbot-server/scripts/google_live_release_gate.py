@@ -289,7 +289,11 @@ def _load_trusted_deterministic_manifest(expected_git_sha: str) -> bytes:
         after_read_stat.st_nlink,
     ):
         raise ValueError("canonical deterministic manifest changed while being read")
-    committed_content = _git_output(repo_root, "show", f"HEAD:{relative.as_posix()}")
+    committed_content = _git_output(
+        repo_root,
+        "show",
+        f"{expected_git_sha}:{relative.as_posix()}",
+    )
     if worktree_content != committed_content:
         raise ValueError("canonical deterministic manifest differs from candidate Git object")
     _validate_canonical_nodes(committed_content)

@@ -323,7 +323,7 @@ def test_release_rejects_canonical_fixture_alias_as_supplied_manifest(
     assert any(item["code"].startswith("DETERMINISTIC_SUPPORT") for item in verdict["failures"])
 
 
-@pytest.mark.parametrize("drift", ["head", "status", "untracked", "content"])
+@pytest.mark.parametrize("drift", ["head", "status", "untracked", "content", "missing_blob"])
 def test_trusted_manifest_loader_rejects_repository_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -346,6 +346,9 @@ def test_trusted_manifest_loader_rejects_repository_drift(
                 raise RuntimeError("not tracked")
             return str(fixture.relative_to(tmp_path)).encode() + b"\n"
         if arguments[0] == "show":
+            assert arguments[1].startswith(f"{expected_sha}:")
+            if drift == "missing_blob":
+                raise RuntimeError("missing candidate object")
             return b"tests/test_a.py::test_one\n" if drift == "content" else CANONICAL_MANIFEST
         raise AssertionError(arguments)
 
@@ -354,6 +357,42 @@ def test_trusted_manifest_loader_rejects_repository_drift(
 
     with pytest.raises((RuntimeError, ValueError)):
         REAL_LOAD_TRUSTED_MANIFEST(expected_sha)
+
+
+def test_trusted_manifest_loader_uses_immutable_sha_across_head_aba(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = tmp_path / "main/tbot-server/tests/fixtures/google_live_deterministic_nodes.txt"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_bytes(CANONICAL_MANIFEST)
+    candidate_sha = "a" * 40
+    other_sha = "b" * 40
+    show_objects = []
+
+    def git_output(_repo_root: Path, *arguments: str) -> bytes:
+        if arguments[:2] == ("rev-parse", "--show-toplevel"):
+            return str(tmp_path).encode() + b"\n"
+        if arguments == ("rev-parse", "HEAD"):
+            return candidate_sha.encode() + b"\n"
+        if arguments[0] == "status":
+            return b""
+        if arguments[0] == "ls-files":
+            return str(fixture.relative_to(tmp_path)).encode() + b"\n"
+        if arguments[0] == "show":
+            show_objects.append(arguments[1])
+            if arguments[1].startswith(f"{other_sha}:") or arguments[1].startswith("HEAD:"):
+                return b"tests/test_a.py::test_one\n"
+            return CANONICAL_MANIFEST
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(release_gate, "_trusted_manifest_path", lambda: fixture)
+    monkeypatch.setattr(release_gate, "_git_output", git_output)
+
+    assert REAL_LOAD_TRUSTED_MANIFEST(candidate_sha) == CANONICAL_MANIFEST
+    assert show_objects == [
+        f"{candidate_sha}:main/tbot-server/tests/fixtures/google_live_deterministic_nodes.txt"
+    ]
 
 
 @pytest.mark.parametrize("support_name", ["node-manifest.txt", "pytest.xml"])

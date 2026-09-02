@@ -6,11 +6,11 @@ import argparse
 import base64
 import binascii
 import hashlib
-import importlib.util
 import json
 import os
 import re
 import secrets
+import shutil
 import site
 import stat
 import subprocess
@@ -20,7 +20,9 @@ import unicodedata
 import urllib.parse
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from typing import Any
 
@@ -54,15 +56,24 @@ _PYTEST_CHILD_ENV_ALLOWLIST = (
     "TMPDIR",
     "TZ",
 )
-_PYTEST_PLUGINS = (
-    "pytest_asyncio.plugin",
-    "scripts.google_live_deterministic_nodeid_plugin",
-)
+_PYTEST_DISTRIBUTION_PACKAGES = {
+    "pytest": {"pytest", "_pytest"},
+    "pytest-asyncio": {"pytest_asyncio"},
+    "pluggy": {"pluggy"},
+    "iniconfig": {"iniconfig"},
+    "packaging": {"packaging"},
+    "pygments": {"pygments"},
+}
 _PYTEST_BOOTSTRAP = (
-    "import json,runpy,sys;"
-    "sys.path[:0]=json.loads(sys.argv.pop(1));"
+    "import importlib,json,sys;"
+    "p=json.loads(sys.argv.pop(1));"
+    "sys.path[:0]=p['trusted']+p['dependencies'];"
+    "pytest=importlib.import_module('pytest');"
+    "a=importlib.import_module('pytest_asyncio.plugin');"
+    "sys.path[:]=p['trusted']+[p['repo']]+p['dependencies']+sys.path[len(p['trusted'])+len(p['dependencies']):];"
+    "n=importlib.import_module('scripts.google_live_deterministic_nodeid_plugin');"
     "sys.argv[0]='pytest';"
-    "runpy.run_module('pytest',run_name='__main__')"
+    "raise SystemExit(pytest.main(sys.argv[1:],plugins=[a,n]))"
 )
 APPROVED_TEST_FILES = (
     "tests/test_google_live_lifecycle_e2e.py",
@@ -815,42 +826,135 @@ def _pytest_child_environment(source: Mapping[str, str] | None = None) -> dict[s
     return child
 
 
-def _pytest_import_roots(repo_root: Path) -> list[str]:
-    roots = [str(repo_root)]
-    allowed_package_roots = {
+def _approved_package_roots() -> list[Path]:
+    return [
         Path(path).resolve(strict=True)
         for path in (*site.getsitepackages(), site.getusersitepackages())
         if Path(path).is_dir()
-    }
-    for module_name in ("pytest", "pytest_asyncio"):
-        specification = importlib.util.find_spec(module_name)
-        if specification is None or specification.origin is None:
-            raise RuntimeError("required pytest plugin is unavailable")
-        origin = Path(specification.origin).resolve(strict=True)
-        package_root_path = next(
-            (root for root in allowed_package_roots if root == origin.parent or root in origin.parents),
-            None,
+    ]
+
+
+def _record_sha256(package_path: Any) -> bytes:
+    recorded_hash = getattr(package_path, "hash", None)
+    if recorded_hash is None or recorded_hash.mode != "sha256":
+        raise RuntimeError("required pytest package integrity metadata is unavailable")
+    try:
+        padding = "=" * (-len(recorded_hash.value) % 4)
+        digest = base64.b64decode(
+            recorded_hash.value + padding,
+            altchars=b"-_",
+            validate=True,
         )
-        if package_root_path is None:
-            raise RuntimeError("required pytest plugin is outside approved package roots")
-        package_root = str(package_root_path)
-        if package_root not in roots:
-            roots.append(package_root)
-    return roots
+    except (binascii.Error, ValueError) as exc:
+        raise RuntimeError("required pytest package integrity metadata is invalid") from exc
+    if len(digest) != hashlib.sha256().digest_size:
+        raise RuntimeError("required pytest package integrity metadata is invalid")
+    return digest
 
 
-def _pytest_command(repo_root: Path, *arguments: str) -> list[str]:
-    command = [
+def _write_private_snapshot_file(path: Path, content: bytes) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        remaining = memoryview(content)
+        while remaining:
+            count = os.write(descriptor, remaining)
+            if count <= 0:
+                raise OSError("trusted pytest snapshot write failed")
+            remaining = remaining[count:]
+    finally:
+        os.close(descriptor)
+
+
+def _copy_trusted_pytest_packages(destination: Path) -> None:
+    approved_roots = _approved_package_roots()
+    destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+    copied_packages = set()
+    for distribution_name, package_names in _PYTEST_DISTRIBUTION_PACKAGES.items():
+        try:
+            package_distribution = distribution(distribution_name)
+        except PackageNotFoundError as exc:
+            raise RuntimeError("required pytest distribution is unavailable") from exc
+        distribution_root = Path(package_distribution.locate_file("")).resolve(strict=True)
+        if distribution_root not in approved_roots:
+            raise RuntimeError("required pytest distribution is outside approved package roots")
+        package_files = package_distribution.files
+        if package_files is None:
+            raise RuntimeError("required pytest package integrity metadata is unavailable")
+        for package_path in package_files:
+            parts = tuple(package_path.parts)
+            if (
+                not parts
+                or parts[0] not in package_names
+                or "__pycache__" in parts
+                or package_path.suffix in {".pyc", ".pyo"}
+            ):
+                continue
+            if any(part in {"", ".", ".."} for part in parts):
+                raise RuntimeError("required pytest package path is invalid")
+            source = Path(package_distribution.locate_file(package_path))
+            try:
+                resolved_source = source.resolve(strict=True)
+                resolved_source.relative_to(distribution_root)
+            except (OSError, ValueError) as exc:
+                raise RuntimeError("required pytest package path is invalid") from exc
+            if resolved_source != source.absolute():
+                raise RuntimeError("required pytest package path is invalid")
+            before = source.stat(follow_symlinks=False)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                raise RuntimeError("required pytest package path is invalid")
+            bound = read_bound_file(source)
+            after = source.stat(follow_symlinks=False)
+            if (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_nlink,
+            ) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_nlink,
+            ):
+                raise RuntimeError("required pytest package changed while being read")
+            if hashlib.sha256(bound.content).digest() != _record_sha256(package_path):
+                raise RuntimeError("required pytest package integrity check failed")
+            _write_private_snapshot_file(destination.joinpath(*parts), bound.content)
+            copied_packages.add(parts[0])
+    if copied_packages != set().union(*_PYTEST_DISTRIBUTION_PACKAGES.values()):
+        raise RuntimeError("trusted pytest package set is incomplete")
+
+
+@contextmanager
+def _private_pytest_runtime(repo_root: Path):
+    temporary = Path(tempfile.mkdtemp(prefix="google-live-pytest-runtime-"))
+    try:
+        packages = temporary / "packages"
+        _copy_trusted_pytest_packages(packages)
+        yield {
+            "trusted": [str(packages)],
+            "repo": str(repo_root),
+            "dependencies": [str(path) for path in _approved_package_roots()],
+        }
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
+def _pytest_command(runtime: Mapping[str, Any], *arguments: str) -> list[str]:
+    return [
         sys.executable,
         "-I",
         "-c",
         _PYTEST_BOOTSTRAP,
-        json.dumps(_pytest_import_roots(repo_root), separators=(",", ":")),
+        json.dumps(runtime, separators=(",", ":")),
+        *arguments,
     ]
-    for plugin in _PYTEST_PLUGINS:
-        command.extend(["-p", plugin])
-    command.extend(arguments)
-    return command
 
 
 def _git_output(repo_root: Path, *arguments: str) -> bytes:
@@ -860,6 +964,51 @@ def _git_output(repo_root: Path, *arguments: str) -> bytes:
     if completed.returncode != 0:
         raise RuntimeError("git repository verification failed")
     return completed.stdout
+
+
+def _read_candidate_tracked_file(
+    repo_root: Path,
+    path: Path,
+    expected_git_sha: str,
+) -> BoundFile:
+    try:
+        relative = path.absolute().relative_to(repo_root)
+    except ValueError as exc:
+        raise ValueError("candidate tracked file path is invalid") from exc
+    ancestors = []
+    current = path.parent
+    while current != repo_root:
+        ancestors.append(current)
+        if current == current.parent:
+            raise ValueError("candidate tracked file path is invalid")
+        current = current.parent
+    file_stat = path.stat(follow_symlinks=False)
+    if (
+        path.is_symlink()
+        or any(parent.is_symlink() for parent in ancestors)
+        or not stat.S_ISREG(file_stat.st_mode)
+        or file_stat.st_nlink != 1
+    ):
+        raise ValueError("candidate tracked file path is invalid")
+    tracked = _git_output(
+        repo_root,
+        "ls-files",
+        "--error-unmatch",
+        "--",
+        relative.as_posix(),
+    )
+    if tracked != relative.as_posix().encode() + b"\n":
+        raise ValueError("candidate tracked file path is invalid")
+    bound = read_bound_file(path)
+    committed = _git_output(
+        repo_root,
+        "show",
+        f"{expected_git_sha}:{relative.as_posix()}",
+    )
+    require_file_unchanged(path, bound)
+    if bound.content != committed:
+        raise ValueError("candidate tracked file differs from candidate Git object")
+    return bound
 
 
 def produce(
@@ -918,76 +1067,93 @@ def produce(
     canonical_path = canonical_manifest_path or (
         repo_root / "tests" / "fixtures" / "google_live_deterministic_nodes.txt"
     )
-    canonical_bound = read_bound_file(canonical_path)
+    canonical_bound = (
+        read_bound_file(canonical_path)
+        if canonical_manifest_path is not None
+        else _read_candidate_tracked_file(repo_root, canonical_path, identity["gitSha"])
+    )
     if manifest_bound.content != canonical_bound.content:
         raise ValueError("manifest does not match the checked-in canonical manifest")
     nodes = parse_manifest(manifest_bound.content)
-    child_environment = _pytest_child_environment()
-    collect = run(
-        _pytest_command(repo_root, *approved_test_files, "--collect-only", "-qq"),
-        cwd=repo_root,
-        env=child_environment,
-    )
-    if collect.returncode != 0:
-        raise RuntimeError("pytest collection failed")
     verify_repository()
-    collected = [line for line in collect.stdout.splitlines() if NODE_PATTERN.fullmatch(line)]
-    require_exact_nodes(collected, nodes, label="collection")
-    output_parent_identity = snapshot_output_parent(junit_out)
-    descriptor, temporary = tempfile.mkstemp(dir=junit_out.parent, prefix=".pytest.", suffix=".xml")
-    os.close(descriptor)
-    temporary_path = Path(temporary)
-    temporary_path.unlink()
-    published_junit: BoundFile | None = None
-    completed_successfully = False
-    try:
-        completed = run(
+    child_environment = _pytest_child_environment()
+    with _private_pytest_runtime(repo_root) as pytest_runtime:
+        collect = run(
             _pytest_command(
-                repo_root,
-                *nodes,
-                f"--junitxml={temporary_path}",
-                "-q",
+                pytest_runtime,
+                *approved_test_files,
+                "--collect-only",
+                "-qq",
             ),
             cwd=repo_root,
             env=child_environment,
         )
-        if completed.returncode != 0:
-            raise RuntimeError("pytest failed; deterministic evidence was not published")
-        normalized = canonicalize_junit_summary(read_bound_file(temporary_path).content)
-        parse_passing_junit(normalized, nodes)
-        verify_repository(temporary_path)
-        require_file_unchanged(manifest_path, manifest_bound)
-        require_file_unchanged(canonical_path, canonical_bound)
-        verify_repository(temporary_path)
-        atomic_write_exclusive(
-            junit_out,
-            normalized,
-            pre_publish=lambda publish_temp: verify_repository(
-                temporary_path, publish_temp
-            ),
-            post_publish=lambda: verify_repository(temporary_path, junit_out),
-            expected_parent_identity=output_parent_identity,
+        if collect.returncode != 0:
+            raise RuntimeError("pytest collection failed")
+        verify_repository()
+        collected = [
+            line for line in collect.stdout.splitlines() if NODE_PATTERN.fullmatch(line)
+        ]
+        require_exact_nodes(collected, nodes, label="collection")
+        output_parent_identity = snapshot_output_parent(junit_out)
+        descriptor, temporary = tempfile.mkstemp(
+            dir=junit_out.parent,
+            prefix=".pytest.",
+            suffix=".xml",
         )
+        os.close(descriptor)
+        temporary_path = Path(temporary)
         temporary_path.unlink()
-        published_junit = read_bound_file(junit_out)
-        report = build_report(identity, manifest_bound.content, published_junit.content)
-        require_file_unchanged(junit_out, published_junit)
-        atomic_write_exclusive(
-            report_path,
-            (json.dumps(report, indent=2, sort_keys=True) + "\n").encode(),
-            pre_publish=lambda publish_temp: verify_repository(
-                junit_out, publish_temp
-            ),
-            post_publish=lambda: verify_repository(junit_out, report_path),
-            expected_parent_identity=output_parent_identity,
-        )
-        completed_successfully = True
-        return report
-    finally:
-        if temporary_path.exists():
+        published_junit: BoundFile | None = None
+        completed_successfully = False
+        try:
+            completed = run(
+                _pytest_command(
+                    pytest_runtime,
+                    *nodes,
+                    f"--junitxml={temporary_path}",
+                    "-q",
+                ),
+                cwd=repo_root,
+                env=child_environment,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError("pytest failed; deterministic evidence was not published")
+            normalized = canonicalize_junit_summary(read_bound_file(temporary_path).content)
+            parse_passing_junit(normalized, nodes)
+            verify_repository(temporary_path)
+            require_file_unchanged(manifest_path, manifest_bound)
+            require_file_unchanged(canonical_path, canonical_bound)
+            verify_repository(temporary_path)
+            atomic_write_exclusive(
+                junit_out,
+                normalized,
+                pre_publish=lambda publish_temp: verify_repository(
+                    temporary_path, publish_temp
+                ),
+                post_publish=lambda: verify_repository(temporary_path, junit_out),
+                expected_parent_identity=output_parent_identity,
+            )
             temporary_path.unlink()
-        if not completed_successfully and published_junit is not None:
-            _unlink_if_bound(junit_out, published_junit)
+            published_junit = read_bound_file(junit_out)
+            report = build_report(identity, manifest_bound.content, published_junit.content)
+            require_file_unchanged(junit_out, published_junit)
+            atomic_write_exclusive(
+                report_path,
+                (json.dumps(report, indent=2, sort_keys=True) + "\n").encode(),
+                pre_publish=lambda publish_temp: verify_repository(
+                    junit_out, publish_temp
+                ),
+                post_publish=lambda: verify_repository(junit_out, report_path),
+                expected_parent_identity=output_parent_identity,
+            )
+            completed_successfully = True
+            return report
+        finally:
+            if temporary_path.exists():
+                temporary_path.unlink()
+            if not completed_successfully and published_junit is not None:
+                _unlink_if_bound(junit_out, published_junit)
 
 
 def main(argv: list[str] | None = None) -> int:
