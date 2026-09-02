@@ -1149,22 +1149,30 @@ class GoogleLiveAudioBridge:
         mime_type=None,
         response_generation=None,
     ):
-        if not isinstance(response_generation, int) or isinstance(
-            response_generation, bool
-        ):
-            response_generation = self._active_response_id
+        raw_generation_valid = (
+            type(response_generation) is int and response_generation >= 0
+        )
+        effective_generation = (
+            response_generation
+            if raw_generation_valid
+            else self._active_response_id
+        )
         if (
             not audio_bytes
             or self.conn.websocket is None
             or getattr(self.conn, "client_abort", False)
         ):
-            delivery = self._new_output_delivery(response_generation)
+            delivery = self._new_output_delivery(
+                effective_generation, proof_eligible=raw_generation_valid
+            )
             delivery[1](RuntimeError("audio delivery unavailable"))
             return 0
         from core.handle.sendAudioHandle import sendAudio
 
         if audio_format == "pcm16" or (mime_type and "audio/pcm" in mime_type):
-            delivery = self._new_output_delivery(response_generation)
+            delivery = self._new_output_delivery(
+                effective_generation, proof_eligible=raw_generation_valid
+            )
             include_preroll = self._should_send_lesson_output_preroll()
             if include_preroll:
                 self._output_preroll_sent = True
@@ -1230,7 +1238,9 @@ class GoogleLiveAudioBridge:
                 )
             return 0
         if audio_bytes:
-            delivery = self._new_output_delivery(response_generation)
+            delivery = self._new_output_delivery(
+                effective_generation, proof_eligible=raw_generation_valid
+            )
             try:
                 await sendAudio(
                     self.conn,
@@ -1245,10 +1255,20 @@ class GoogleLiveAudioBridge:
         delivery[1](RuntimeError("audio delivery empty"))
         return 0
 
-    def _new_output_delivery(self, response_generation, *, emit_proof=True):
+    def _new_output_delivery(
+        self,
+        response_generation,
+        *,
+        emit_proof=True,
+        proof_eligible=None,
+    ):
         loop = asyncio.get_running_loop()
         receipt = loop.create_future()
         self._pending_output_deliveries[receipt] = response_generation
+        if proof_eligible is None:
+            proof_eligible = (
+                type(response_generation) is int and response_generation >= 0
+            )
 
         def complete(_packet_count):
             if receipt.done():
@@ -1264,13 +1284,17 @@ class GoogleLiveAudioBridge:
             if not generation_valid:
                 fail(RuntimeError("stale audio delivery completion"))
                 return
-            receipt.set_result(True)
-            exact_generation = isinstance(response_generation, int) and not isinstance(
-                response_generation, bool
-            )
             if (
                 emit_proof
-                and exact_generation
+                and not proof_eligible
+                and self._candidate_output_proof_required()
+            ):
+                fail(RuntimeError("ineligible audio delivery proof"))
+                return
+            receipt.set_result(True)
+            if (
+                emit_proof
+                and proof_eligible
                 and callable(self._model_output_forwarded_handler)
             ):
                 try:
@@ -1282,7 +1306,7 @@ class GoogleLiveAudioBridge:
             )
             if (
                 emit_proof
-                and exact_generation
+                and proof_eligible
                 and isinstance(journey_id, str)
                 and journey_id
             ):
@@ -1308,6 +1332,17 @@ class GoogleLiveAudioBridge:
             self._settle_output_delivery_failure(receipt, response_generation)
 
         return complete, fail
+
+    def _candidate_output_proof_required(self):
+        journey_id = getattr(self.conn, "google_live_evidence_journey_id", None)
+        return bool(
+            isinstance(journey_id, str)
+            and journey_id
+            and getattr(
+                self.conn, "google_live_evidence_proof_profile", None
+            )
+            == "candidate-lifecycle"
+        )
 
     def _take_buffered_output_deliveries(self):
         deliveries = tuple(self._buffered_output_deliveries)

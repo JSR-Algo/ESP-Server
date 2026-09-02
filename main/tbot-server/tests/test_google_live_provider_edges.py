@@ -1054,6 +1054,18 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
                 {"type": "audio", "audio": b"valid", "response_generation": 1},
                 {"type": "audio_end", "response_generation": 1},
             ],
+            "bool_generation": [
+                {"type": "audio_start", "response_generation": 1},
+                {"type": "audio", "audio": b"invalid", "response_generation": True},
+                {"type": "audio", "audio": b"valid", "response_generation": 1},
+                {"type": "audio_end", "response_generation": 1},
+            ],
+            "negative_generation": [
+                {"type": "audio_start", "response_generation": 1},
+                {"type": "audio", "audio": b"invalid", "response_generation": -1},
+                {"type": "audio", "audio": b"valid", "response_generation": 1},
+                {"type": "audio_end", "response_generation": 1},
+            ],
         }
         for suffix, events in scenarios.items():
             with self.subTest(scenario=suffix):
