@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +18,7 @@ from scripts.google_live_release_gate import (
     aggregate_release_evidence,
     load_checksum_manifest,
 )
+from scripts.google_live_deterministic_evidence import MANIFEST_SCHEMA
 
 _PHYSICAL_CASE = physical_fixture.PhysicalSmokeAuditTest()
 _OPTIONS = _PHYSICAL_CASE._candidate_audit_options()
@@ -109,11 +111,13 @@ def _reports() -> dict[str, dict]:
             "name": "deterministic",
             "status": "PASS",
             "candidateIdentity": copy.deepcopy(IDENTITY),
+            "coverageProof": {},
             "testVerdict": {
                 "status": "PASS",
-                "total": 646,
+                "total": 2,
                 "failed": 0,
                 "skipped": 0,
+                "errors": 0,
                 "failures": [],
             },
             "failures": [],
@@ -165,17 +169,46 @@ def _reports() -> dict[str, dict]:
 
 
 def _write_evidence(root: Path) -> tuple[dict[str, Path], dict[str, str], Path]:
+    deterministic_dir = root / "deterministic"
+    deterministic_dir.mkdir(parents=True)
+    nodes = ["tests/test_a.py::test_one", "tests/test_b.py::test_two"]
+    node_manifest = deterministic_dir / "node-manifest.txt"
+    node_manifest.write_text("\n".join(nodes) + "\n", encoding="utf-8")
+    junit = deterministic_dir / "pytest.xml"
+    cases = "".join(
+        f'<testcase classname="suite" name="{node.rsplit("::", 1)[-1]}"><properties>'
+        f'<property name="google_live_nodeid" value="{node}" /></properties></testcase>'
+        for node in nodes
+    )
+    junit.write_text(
+        f'<testsuites><testsuite tests="2" failures="0" errors="0" skipped="0">{cases}</testsuite></testsuites>',
+        encoding="utf-8",
+    )
+    reports = _reports()
+    reports["deterministic"]["coverageProof"] = {
+        "manifestSchema": MANIFEST_SCHEMA,
+        "manifestSha256": hashlib.sha256(node_manifest.read_bytes()).hexdigest(),
+        "manifestNodeCount": 2,
+        "executedNodeCount": 2,
+        "junitSha256": hashlib.sha256(junit.read_bytes()).hexdigest(),
+    }
     paths = {}
     checksums = {}
     rows = []
-    for layer, report in _reports().items():
+    for layer, report in reports.items():
         path = root / layer.replace("_", "-") / "report.json"
-        path.parent.mkdir(parents=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(report, sort_keys=True), encoding="utf-8")
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         paths[layer] = path
         checksums[layer] = digest
         rows.append(f"{digest}  {path.relative_to(root)}")
+    for support in (node_manifest, junit):
+        name = "deterministic_manifest" if support == node_manifest else "deterministic_junit"
+        digest = hashlib.sha256(support.read_bytes()).hexdigest()
+        paths[name] = support
+        checksums[name] = digest
+        rows.append(f"{digest}  {support.relative_to(root)}")
     manifest = root / "checksums.sha256"
     manifest.write_text("\n".join(rows) + "\n", encoding="utf-8")
     return paths, checksums, manifest
@@ -196,6 +229,16 @@ def test_release_passes_only_real_exact_candidate_contracts(tmp_path: Path) -> N
     assert verdict["candidateIdentity"] == IDENTITY
     assert [item["name"] for item in verdict["layers"]] == list(REQUIRED_LAYERS)
     assert verdict["failures"] == []
+
+
+@pytest.mark.parametrize("support_name", ["node-manifest.txt", "pytest.xml"])
+def test_release_rejects_tampered_deterministic_support(tmp_path: Path, support_name: str) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    support = paths["deterministic"].parent / support_name
+    support.write_bytes(support.read_bytes() + b"tampered")
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+    assert verdict["status"] == "FAIL"
+    assert any(item["code"].startswith("DETERMINISTIC_") for item in verdict["failures"])
 
 
 @pytest.mark.parametrize("missing_layer", REQUIRED_LAYERS)
@@ -677,4 +720,24 @@ def _run_cli(paths: dict[str, Path], manifest: Path, out: Path) -> subprocess.Co
     command = [sys.executable, str(script), "--expected-git-sha", IDENTITY["gitSha"], "--expected-image-digest", IDENTITY["imageDigest"], "--expected-firmware-identity", IDENTITY["firmwareIdentity"], "--expected-config-fingerprint", IDENTITY["configFingerprint"], "--expected-fixture-sha256", IDENTITY["fixtureSha256"], "--checksums-file", str(manifest), "--out", str(out)]
     for layer in REQUIRED_LAYERS:
         command.extend(["--layer", f"{layer}={paths[layer]}"])
+    command.extend(["--support", f"deterministic_manifest={paths['deterministic'].parent / 'node-manifest.txt'}"])
+    command.extend(["--support", f"deterministic_junit={paths['deterministic'].parent / 'pytest.xml'}"])
     return subprocess.run(command, text=True, capture_output=True, check=False)
+
+
+@pytest.mark.parametrize("support_name", ["node-manifest.txt", "pytest.xml"])
+@pytest.mark.parametrize("alias_kind", ["direct", "symlink", "hardlink"])
+def test_cli_never_overwrites_deterministic_support_through_output_alias(
+    tmp_path: Path, support_name: str, alias_kind: str
+) -> None:
+    paths, _, manifest = _write_evidence(tmp_path)
+    support = paths["deterministic"].parent / support_name
+    original = support.read_bytes()
+    if alias_kind == "direct":
+        out = support
+    else:
+        out = tmp_path / f"{alias_kind}-out.json"
+        out.symlink_to(support) if alias_kind == "symlink" else os.link(support, out)
+    completed = _run_cli(paths, manifest, out)
+    assert completed.returncode == 1
+    assert support.read_bytes() == original

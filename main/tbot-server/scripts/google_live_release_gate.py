@@ -18,6 +18,11 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.analyze_google_live_log import correlate_websocket_bargein_evidence
+from scripts.google_live_deterministic_evidence import (
+    MANIFEST_SCHEMA,
+    parse_manifest,
+    parse_passing_junit,
+)
 from scripts.google_live_reliability import (
     SCHEMA_VERSION,
     forbidden_report_fields,
@@ -36,6 +41,7 @@ REQUIRED_LAYERS = (
     "physical",
     "candidate_soak",
 )
+DETERMINISTIC_SUPPORTS = ("deterministic_manifest", "deterministic_junit")
 IDENTITY_FIELDS = (
     "gitSha",
     "imageDigest",
@@ -82,6 +88,7 @@ def _deterministic_valid(report: Any) -> bool:
     if not _generic_report_valid(report, "deterministic"):
         return False
     verdict = report.get("testVerdict")
+    coverage = report.get("coverageProof")
     return (
         isinstance(verdict, Mapping)
         and verdict.get("status") == "PASS"
@@ -91,7 +98,19 @@ def _deterministic_valid(report: Any) -> bool:
         and type(verdict.get("failed")) is int
         and verdict.get("skipped") == 0
         and type(verdict.get("skipped")) is int
+        and verdict.get("errors") == 0
+        and type(verdict.get("errors")) is int
         and verdict.get("failures") == []
+        and isinstance(coverage, Mapping)
+        and set(coverage)
+        == {
+            "manifestSchema",
+            "manifestSha256",
+            "manifestNodeCount",
+            "executedNodeCount",
+            "junitSha256",
+        }
+        and coverage.get("manifestSchema") == MANIFEST_SCHEMA
     )
 
 
@@ -228,7 +247,7 @@ def aggregate_release_evidence(
         validate_expected_identity(expected_identity)
     except ValueError:
         failures.append(_failure("EXPECTED_CANDIDATE_IDENTITY_INVALID"))
-    for name in sorted(set(layer_paths) - set(REQUIRED_LAYERS)):
+    for name in sorted(set(layer_paths) - set(REQUIRED_LAYERS) - set(DETERMINISTIC_SUPPORTS)):
         failures.append(_failure("UNEXPECTED_LAYER", name))
 
     for layer in REQUIRED_LAYERS:
@@ -288,6 +307,54 @@ def aggregate_release_evidence(
             if item["name"] == "physical":
                 item["status"] = "FAIL"
                 break
+    deterministic = loaded_reports.get("deterministic")
+    coverage = deterministic.get("coverageProof") if isinstance(deterministic, Mapping) else None
+    support_contents: dict[str, bytes] = {}
+    for support in DETERMINISTIC_SUPPORTS:
+        path_value = layer_paths.get(support)
+        checksum = expected_checksums.get(support)
+        if path_value is None or type(checksum) is not str or SHA256.fullmatch(checksum) is None:
+            failures.append(_failure("DETERMINISTIC_SUPPORT_MISSING", "deterministic", support))
+            continue
+        path = Path(path_value)
+        try:
+            if path.is_symlink() or not path.is_file():
+                raise OSError
+            content = path.read_bytes()
+        except OSError:
+            failures.append(_failure("DETERMINISTIC_SUPPORT_MISSING", "deterministic", support))
+            continue
+        if not hmac.compare_digest(hashlib.sha256(content).hexdigest(), checksum):
+            failures.append(_failure("DETERMINISTIC_SUPPORT_CHECKSUM_MISMATCH", "deterministic", support))
+        support_contents[support] = content
+    try:
+        manifest_content = support_contents["deterministic_manifest"]
+        junit_content = support_contents["deterministic_junit"]
+        nodes = parse_manifest(manifest_content)
+        totals = parse_passing_junit(junit_content, nodes)
+        expected_coverage = {
+            "manifestSchema": MANIFEST_SCHEMA,
+            "manifestSha256": hashlib.sha256(manifest_content).hexdigest(),
+            "manifestNodeCount": len(nodes),
+            "executedNodeCount": len(nodes),
+            "junitSha256": hashlib.sha256(junit_content).hexdigest(),
+        }
+        if coverage != expected_coverage or not isinstance(deterministic, Mapping) or deterministic.get("testVerdict") != {
+            "status": "PASS",
+            "total": totals["tests"],
+            "failed": 0,
+            "skipped": 0,
+            "errors": 0,
+            "failures": [],
+        }:
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        failures.append(_failure("DETERMINISTIC_SUPPORT_CONTRACT_INVALID", "deterministic"))
+    if any(item.get("layer") == "deterministic" for item in failures):
+        for item in layers:
+            if item["name"] == "deterministic":
+                item["status"] = "FAIL"
+                break
     return {
         "schemaVersion": RELEASE_SCHEMA_VERSION,
         "status": "PASS" if not failures else "FAIL",
@@ -336,6 +403,16 @@ def _output_aliases_evidence(
     )
 
 
+def _evidence_paths_alias(paths: list[Path]) -> bool:
+    if any(path.is_symlink() for path in paths):
+        return True
+    return any(
+        _same_file(left, right)
+        for index, left in enumerate(paths)
+        for right in paths[index + 1 :]
+    )
+
+
 def _atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
@@ -361,6 +438,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-config-fingerprint", required=True)
     parser.add_argument("--expected-fixture-sha256", required=True)
     parser.add_argument("--layer", action="append", default=[])
+    parser.add_argument("--support", action="append", default=[])
     parser.add_argument("--checksums-file", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -373,18 +451,26 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         paths = _parse_layers(args.layer)
+        supports = _parse_layers(args.support)
+        if set(paths) & set(supports) or set(supports) != set(DETERMINISTIC_SUPPORTS):
+            raise ValueError("support arguments are malformed")
+        paths.update(supports)
         parse_valid = True
     except ValueError:
         paths = {}
         parse_valid = False
     output_safe = not _output_aliases_evidence(
-        args.out, _layer_path_candidates(args.layer), args.checksums_file
+        args.out,
+        _layer_path_candidates(args.layer) + _layer_path_candidates(args.support),
+        args.checksums_file,
     )
     try:
         if not output_safe:
             raise ValueError("output aliases release evidence")
         if not parse_valid:
             raise ValueError("layer arguments are malformed")
+        if _evidence_paths_alias([*paths.values(), args.checksums_file]):
+            raise ValueError("release evidence paths alias")
         checksums = load_checksum_manifest(args.checksums_file, paths)
     except (OSError, UnicodeError, ValueError):
         paths = {}
