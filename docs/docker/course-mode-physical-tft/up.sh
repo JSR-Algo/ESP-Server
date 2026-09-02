@@ -110,6 +110,7 @@ docker run --rm --entrypoint node "${MATERIALIZER_IMAGE}" \
 echo "[course-mode-physical-tft] building ${WEB_IMAGE} from reviewed ESP source"
 docker build --pull=false \
   --build-arg "WEB_NODE_IMAGE=node:20" \
+  --build-arg "VUE_APP_NEST_AUTH_DISABLED=false" \
   --label "org.opencontainers.image.revision=${ESP_SHA}" \
   --label "com.tbot.course-mode.build-source=reviewed-clean-git-worktree" \
   -f "${ESP_BUILD_CONTEXT}/Dockerfile-web" \

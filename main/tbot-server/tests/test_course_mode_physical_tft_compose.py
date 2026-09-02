@@ -446,7 +446,8 @@ def test_physical_tft_up_builds_exact_sha_image_before_render_or_start(tmp_path)
     )
     web_image = f"local/tbot-server-web:course-mode-physical-tft-{sha}"
     assert calls[4].startswith(
-        "docker build --pull=false --build-arg WEB_NODE_IMAGE=node:20 --label "
+        "docker build --pull=false --build-arg WEB_NODE_IMAGE=node:20 --build-arg "
+        "VUE_APP_NEST_AUTH_DISABLED=false --label "
         f"org.opencontainers.image.revision={sha} --label "
         "com.tbot.course-mode.build-source=reviewed-clean-git-worktree -f "
     )
