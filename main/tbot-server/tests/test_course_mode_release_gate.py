@@ -279,6 +279,57 @@ def _add_node_install(candidate: dict, repository_name: str, relative_cwd: str, 
     return install
 
 
+def _configure_backend_build_fixture(
+    candidate: dict, *, omit: str | None = None, escape: str | Path | None = None,
+    unix_socket: Path | None = None,
+) -> None:
+    descriptor = candidate["tools"]["node"]["backend"]
+    npm_entrypoint = Path(descriptor["npm"]["entrypoint"])
+    escape_source = (
+        "(root.parent / 'adminEsp/build-escape.txt').write_text('escaped')\n"
+        if escape == "adminEsp"
+        else f"pathlib.Path({str(escape)!r}).write_text('escaped')\n"
+        if isinstance(escape, Path)
+        else ""
+    )
+    socket_source = (
+        "import socket\n"
+        "client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+        f"client.connect({str(unix_socket)!r})\n"
+        "client.sendall(b'candidate-build-message')\n"
+        "client.close()\n"
+        if unix_socket is not None else ""
+    )
+    npm_entrypoint.write_text(
+        "import os, pathlib, sys\n"
+        "assert sys.argv[1:] == ['run', 'build']\n"
+        "assert pathlib.Path(os.environ['HOME']).parts[-2:] == ('build-runtime', 'home')\n"
+        "assert pathlib.Path(os.environ['TMPDIR']).parts[-2:] == ('build-runtime', 'tmp')\n"
+        "assert pathlib.Path(os.environ['XDG_CACHE_HOME']).parts[-2:] == ('build-runtime', 'cache')\n"
+        "assert os.environ['CI'] == '1'\n"
+        "assert 'HOST_BUILD_POISON' not in os.environ\n"
+        "root = pathlib.Path.cwd()\n"
+        "outputs = {\n"
+        " 'curriculum-course-mode.js': 'candidate curriculum',\n"
+        " 'curriculum-6month.js': 'candidate six month',\n"
+        " 'course-mode.contract.js': 'candidate contract',\n"
+        "}\n"
+        "target = root / 'dist/lessons/course-mode'\n"
+        "target.mkdir(parents=True, exist_ok=True)\n"
+        f"{escape_source}"
+        f"{socket_source}"
+        f"outputs.pop({omit!r}, None)\n"
+        "for name, value in outputs.items(): (target / name).write_text(value)\n",
+        encoding="utf-8",
+    )
+    descriptor["npm"]["sha256"] = hashlib.sha256(npm_entrypoint.read_bytes()).hexdigest()
+    package_root = Path(descriptor["packageRoot"])
+    package_tree = gate._manifest.secure_node_package_tree_descriptor(package_root)
+    assert package_tree is not None
+    descriptor["packageRootMode"] = package_tree["rootMode"]
+    descriptor["packageTreeSha256"] = package_tree["sha256"]
+
+
 @pytest.fixture
 def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     repositories = {}
@@ -2789,6 +2840,8 @@ def test_admin_browser_snapshot_preserves_playwright_platform_layout(candidate_f
 def test_playwright_lane_stages_candidate_bound_container_tools(candidate_file: Path) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    _add_node_install(candidate, "backend", ".", "backend")
+    _configure_backend_build_fixture(candidate)
     lane = next(
         lane for lane in gate.FULL_LANES
         if lane.name == "admin-course-mode-playwright-chromium-desktop"
@@ -2821,11 +2874,268 @@ def test_playwright_lane_stages_candidate_bound_container_tools(candidate_file: 
         assert stage.cleanup() is True
 
 
+def test_playwright_lane_builds_candidate_backend_before_read_only_authority(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    _add_node_install(candidate, "backend", ".", "backend")
+    _configure_backend_build_fixture(candidate)
+    backend_source = Path(candidate["repositories"]["backend"]["path"])
+    ignored = backend_source / ".gitignore"
+    ignored.write_text(ignored.read_text(encoding="utf-8") + "dist/\n", encoding="utf-8")
+    _git(backend_source, "add", ".gitignore")
+    _git(backend_source, "commit", "-m", "ignore compiler output")
+    candidate["repositories"]["backend"].update(_repository(backend_source))
+    _refresh_image_reference(candidate, "backend")
+    host_output = backend_source / "dist/lessons/course-mode/curriculum-course-mode.js"
+    host_output.parent.mkdir(parents=True)
+    host_output.write_text("ambient host output", encoding="utf-8")
+    monkeypatch.setenv("HOST_BUILD_POISON", "must-not-reach-build")
+    build_calls: list[tuple[list[str], Path, dict[str, str]]] = []
+    original_run = gate._manifest.run_bounded_command
+
+    def capture_build(command, **kwargs):
+        if command[-2:] == ["run", "build"]:
+            build_calls.append((command, kwargs["cwd"], kwargs["env"]))
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(gate._manifest, "run_bounded_command", capture_build)
+    lane = next(
+        item for item in gate.FULL_LANES
+        if item.name == "admin-course-mode-playwright-chromium-desktop"
+    )
+
+    stage = gate.stage_execution_candidate(candidate, (lane,))
+    try:
+        staged_backend = Path(stage.candidate["repositories"]["backend"]["path"])
+        staged_node = stage.candidate["tools"]["node"]["backend"]
+        build_runtime = stage.root / "build-runtime"
+        assert build_calls == [(
+            [
+                "/usr/bin/sandbox-exec", "-p", gate.BACKEND_BUILD_SANDBOX_PROFILE,
+                "-D", f"BACKEND_ROOT={staged_backend}",
+                "-D", f"BUILD_RUNTIME={build_runtime}",
+                staged_node["executable"], staged_node["npm"]["entrypoint"], "run", "build",
+            ],
+            staged_backend,
+            {
+                **gate.BASE_ENVIRONMENT,
+                "PATH": f"{Path(staged_node['executable']).parent}:{gate.SECURE_PATH}",
+                "HOME": str(build_runtime / "home"),
+                "TMPDIR": str(build_runtime / "tmp"),
+                "XDG_CACHE_HOME": str(build_runtime / "cache"),
+                "npm_config_cache": str(build_runtime / "cache/npm"),
+            },
+        )]
+        output_root = staged_backend / "dist/lessons/course-mode"
+        assert (output_root / "curriculum-course-mode.js").read_text() == "candidate curriculum"
+        assert (output_root / "curriculum-6month.js").read_text() == "candidate six month"
+        assert (output_root / "course-mode.contract.js").read_text() == "candidate contract"
+        assert host_output.read_text(encoding="utf-8") == "ambient host output"
+        assert all(
+            path.is_file() and not path.is_symlink() and not path.stat().st_mode & 0o222
+            for path in output_root.iterdir()
+        )
+        assert gate._backend_snapshot_environment(stage) is not None
+    finally:
+        assert stage.cleanup() is True
+
+
+def test_playwright_lane_uses_stable_backend_authority_environment(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    _add_node_install(candidate, "backend", ".", "backend")
+    _configure_backend_build_fixture(candidate)
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    lane = gate.Lane(
+        "admin-course-mode-playwright-stable-backend", "adminEsp", "main/manager-web",
+        ("node", "probe.js"), 5.0,
+    )
+    observed: dict[str, str] = {}
+
+    def capture_lane(_command, **kwargs):
+        observed.update(kwargs["env"])
+        return gate._manifest.BoundedCommandResult(0, "", None)
+
+    monkeypatch.setattr(gate, "playwright_browsers_authorized", lambda _candidate: True)
+    monkeypatch.setattr(gate, "run_bounded_command", capture_lane)
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "PASS", result
+    stable_backend = Path(observed["TBOT_BACKEND_WORKTREE"])
+    assert stable_backend == Path(observed["COURSE_MODE_BACKEND_ROOT"])
+    assert stable_backend.parent.parent.name.startswith("course-mode-stage-")
+    assert not stable_backend.is_relative_to(Path(observed["HOME"]).parents[1])
+    assert observed["COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY_SHA256"]
+
+
+def test_assignment_lane_rejects_missing_staged_backend_compiler_output(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    _add_node_install(candidate, "backend", ".", "backend")
+    _configure_backend_build_fixture(candidate, omit="course-mode.contract.js")
+    lane = next(
+        item for item in gate.FULL_LANES
+        if item.name == "admin-course-mode-assignment-new"
+    )
+
+    with pytest.raises(ValueError, match="staged backend compiler output mismatch"):
+        gate.stage_execution_candidate(candidate, (lane,))
+
+
+def test_playwright_backend_build_cannot_write_staged_admin_repository(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    _add_node_install(candidate, "backend", ".", "backend")
+    _configure_backend_build_fixture(candidate, escape="adminEsp")
+    lane = next(
+        item for item in gate.FULL_LANES
+        if item.name == "admin-course-mode-playwright-chromium-desktop"
+    )
+    stage = None
+    try:
+        with pytest.raises(ValueError, match="staged backend compiler failed"):
+            stage = gate.stage_execution_candidate(candidate, (lane,))
+    finally:
+        if stage is not None:
+            assert stage.cleanup() is True
+
+
+def test_playwright_backend_build_cannot_write_external_sentinel(
+    candidate_file: Path, tmp_path: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    _add_node_install(candidate, "backend", ".", "backend")
+    sentinel = tmp_path / "outside-stage-sentinel"
+    _configure_backend_build_fixture(candidate, escape=sentinel)
+    lane = next(
+        item for item in gate.FULL_LANES
+        if item.name == "admin-course-mode-playwright-chromium-desktop"
+    )
+    stage = None
+    try:
+        with pytest.raises(ValueError, match="staged backend compiler failed"):
+            stage = gate.stage_execution_candidate(candidate, (lane,))
+    finally:
+        if stage is not None:
+            assert stage.cleanup() is True
+    assert not sentinel.exists()
+
+
+def test_playwright_backend_build_cannot_reach_unix_socket(
+    candidate_file: Path,
+) -> None:
+    socket_root = Path(tempfile.mkdtemp(prefix="course-mode-build-socket-", dir="/private/tmp"))
+    socket_path = socket_root / "listener.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(socket_path))
+    listener.listen(1)
+    listener.settimeout(0.25)
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    _add_node_install(candidate, "backend", ".", "backend")
+    _configure_backend_build_fixture(candidate, unix_socket=socket_path)
+    lane = next(
+        item for item in gate.FULL_LANES
+        if item.name == "admin-course-mode-playwright-chromium-desktop"
+    )
+    stage = None
+    error = None
+    received = b""
+    try:
+        try:
+            stage = gate.stage_execution_candidate(candidate, (lane,))
+        except ValueError as build_error:
+            error = build_error
+        try:
+            connection, _ = listener.accept()
+        except TimeoutError:
+            pass
+        else:
+            with connection:
+                received = connection.recv(1024)
+    finally:
+        if stage is not None:
+            assert stage.cleanup() is True
+        listener.close()
+        shutil.rmtree(socket_root)
+
+    assert error is not None and "staged backend compiler failed" in str(error)
+    assert received == b""
+
+
+def test_playwright_backend_build_fails_closed_without_supported_sandbox(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    _add_node_install(candidate, "backend", ".", "backend")
+    _configure_backend_build_fixture(candidate)
+    lane = next(
+        item for item in gate.FULL_LANES
+        if item.name == "admin-course-mode-playwright-chromium-desktop"
+    )
+    monkeypatch.setattr(gate.sys, "platform", "linux")
+    assert gate._sandboxed_backend_build_command(
+        ("node", "npm-cli.js", "run", "build"),
+        Path("/private/tmp/course-mode-stage-test/repositories/backend"),
+        Path("/private/tmp/course-mode-stage-test/build-runtime"),
+    ) is None
+    monkeypatch.setattr(gate.sys, "platform", "darwin")
+    monkeypatch.setattr(gate, "_sandboxed_backend_build_command", lambda *_args: None)
+
+    with pytest.raises(ValueError, match="staged backend compiler sandbox unavailable"):
+        gate.stage_execution_candidate(candidate, (lane,))
+
+
+def test_playwright_lane_blocks_post_run_stable_backend_mutation(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    _add_node_install(candidate, "backend", ".", "backend")
+    _configure_backend_build_fixture(candidate)
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    lane = gate.Lane(
+        "admin-course-mode-playwright-post-mutation", "adminEsp", "main/manager-web",
+        ("node", "probe.js"), 5.0,
+    )
+
+    def mutate_backend(_command, **kwargs):
+        output = (
+            Path(kwargs["env"]["TBOT_BACKEND_WORKTREE"])
+            / "dist/lessons/course-mode/course-mode.contract.js"
+        )
+        output.chmod(0o644)
+        output.write_text("mutated after authority", encoding="utf-8")
+        return gate._manifest.BoundedCommandResult(0, "", None)
+
+    monkeypatch.setattr(gate, "playwright_browsers_authorized", lambda _candidate: True)
+    monkeypatch.setattr(gate, "run_bounded_command", mutate_backend)
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "BLOCKED", result
+    assert result["failedLane"] == lane.name
+    assert result["lanes"][0]["exitCode"] is None
+
+
 def test_playwright_lane_stages_bound_browser_cache_and_sets_only_its_environment(
     candidate_file: Path,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    _add_node_install(candidate, "backend", ".", "backend")
+    _configure_backend_build_fixture(candidate)
     lane = next(
         lane for lane in gate.FULL_LANES
         if lane.name == "admin-course-mode-playwright-webkit-desktop"
@@ -2863,6 +3173,8 @@ def test_playwright_browser_authority_survives_stage_read_only_normalization(
     install = _add_node_install(
         candidate, "adminEsp", "main/manager-web", "adminManagerWeb",
     )
+    _add_node_install(candidate, "backend", ".", "backend")
+    _configure_backend_build_fixture(candidate)
     metadata = install / "playwright-core/browsers.json"
     metadata.parent.mkdir(parents=True)
     metadata.write_text(json.dumps({"browsers": [

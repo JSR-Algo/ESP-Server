@@ -56,6 +56,17 @@ PYTHON_LANE_SANDBOX_PROFILE = """(version 1)
     (literal (param "LANE_ROOT"))
     (subpath (param "LANE_ROOT")))
 """
+BACKEND_BUILD_SANDBOX_PROFILE = """(version 1)
+(allow default)
+(deny file-write*)
+(deny network*)
+(allow file-write*
+    (literal "/dev/null")
+    (literal (param "BACKEND_ROOT"))
+    (subpath (param "BACKEND_ROOT"))
+    (literal (param "BUILD_RUNTIME"))
+    (subpath (param "BUILD_RUNTIME")))
+"""
 BASE_ENVIRONMENT = {
     "PATH": SECURE_PATH,
     "HOME": "/nonexistent",
@@ -84,6 +95,11 @@ MAX_SNAPSHOT_DEPTH = 256
 MAX_GIT_ARCHIVE_LISTING_BYTES = 64 * 1024 * 1024
 GIT_BLOB_CHUNK_BYTES = 1024 * 1024
 MAX_GIT_SYMLINK_BYTES = 16 * 1024
+BACKEND_COMPILER_OUTPUTS = (
+    "dist/lessons/course-mode/curriculum-course-mode.js",
+    "dist/lessons/course-mode/curriculum-6month.js",
+    "dist/lessons/course-mode/course-mode.contract.js",
+)
 NODE_TREE_SCHEMA = "sha256-path-mode-bytes-symlink-v1"
 ROBOT_PREVIEW_BROWSER_ENVIRONMENT = {
     "root": "TBOT_ROBOT_PREVIEW_BROWSER_ROOT",
@@ -1211,6 +1227,8 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
             requirement for lane in lanes
             if (requirement := _node_install_requirement(lane)) is not None and requirement[0]
         }
+        if any(_backend_compiler_required(lane) for lane in lanes):
+            requirements.add(("backend", "."))
         required_node_tools = {key for key, _ in requirements}
         for key, descriptor in candidate["tools"]["node"].items():
             if key not in required_node_tools:
@@ -1257,6 +1275,48 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
             if not _json_exact_equal(observed, expected):
                 raise ValueError("staged Node installation descriptor mismatch")
             staged["tools"]["nodeInstalls"][key] = observed
+        if any(_backend_compiler_required(lane) for lane in lanes):
+            backend_root = Path(staged["repositories"]["backend"]["path"])
+            backend_node = staged["tools"]["node"]["backend"]
+            build_runtime = root / "build-runtime"
+            build_home = build_runtime / "home"
+            build_tmp = build_runtime / "tmp"
+            build_cache = build_runtime / "cache"
+            for directory in (build_home, build_tmp, build_cache):
+                directory.mkdir(parents=True, exist_ok=True)
+            build_command = _sandboxed_backend_build_command(
+                [
+                    backend_node["executable"], backend_node["npm"]["entrypoint"],
+                    "run", "build",
+                ],
+                backend_root, build_runtime,
+            )
+            if build_command is None:
+                raise ValueError("staged backend compiler sandbox unavailable")
+            build = _manifest.run_bounded_command(
+                list(build_command),
+                cwd=backend_root,
+                timeout_sec=300.0,
+                max_output_bytes=MAX_LANE_OUTPUT_BYTES,
+                env={
+                    **BASE_ENVIRONMENT,
+                    "PATH": f"{Path(backend_node['executable']).parent}:{SECURE_PATH}",
+                    "HOME": str(build_home),
+                    "TMPDIR": str(build_tmp),
+                    "XDG_CACHE_HOME": str(build_cache),
+                    "npm_config_cache": str(build_cache / "npm"),
+                },
+            )
+            if build.error or build.returncode != 0:
+                raise ValueError("staged backend compiler failed")
+            for relative in BACKEND_COMPILER_OUTPUTS:
+                output = backend_root / relative
+                try:
+                    metadata = output.lstat()
+                except OSError as error:
+                    raise ValueError("staged backend compiler output mismatch") from error
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise ValueError("staged backend compiler output mismatch")
         if any(_playwright_browsers_required(lane) for lane in lanes):
             browser_cache = tools_root / "playwright-browsers"
             browser_cache.mkdir()
@@ -1283,7 +1343,10 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
             if error or observed != browser["treeDigest"]:
                 raise ValueError("staged browser descriptor mismatch")
             staged["tools"]["robotPreviewBrowser"]["root"] = str(browser_target)
-        if any(_python_test_runtime_required(lane) for lane in lanes):
+        if any(
+            _python_test_runtime_required(lane) or _backend_compiler_required(lane)
+            for lane in lanes
+        ):
             backend_root = Path(staged["repositories"]["backend"]["path"])
             _make_tree_read_only(backend_root)
             source_tree, source_tree_error = _manifest.secure_backend_snapshot_tree_descriptor(
@@ -2087,6 +2150,10 @@ def _playwright_browsers_required(lane: Lane) -> bool:
     )
 
 
+def _backend_compiler_required(lane: Lane) -> bool:
+    return _playwright_browsers_required(lane)
+
+
 def _container_tools_authorized(candidate: dict) -> bool:
     try:
         for name in ("docker", "dockerCompose"):
@@ -2546,6 +2613,31 @@ def _sandboxed_python_lane_command(
     return (
         str(executable), "-p", PYTHON_LANE_SANDBOX_PROFILE,
         "-D", f"LANE_ROOT={lane_root}", *command,
+    )
+
+
+def _sandboxed_backend_build_command(
+    command: Sequence[str], backend_root: Path, build_runtime: Path,
+) -> tuple[str, ...] | None:
+    if sys.platform != "darwin":
+        return None
+    executable = _manifest._trusted_sandbox_executable()
+    if executable is None:
+        return None
+    try:
+        if (
+            not backend_root.is_absolute() or not build_runtime.is_absolute()
+            or backend_root.parent.parent != build_runtime.parent
+            or backend_root.parent.parent.parent != Path("/private/tmp")
+            or "\0" in str(backend_root) or "\0" in str(build_runtime)
+        ):
+            return None
+    except OSError:
+        return None
+    return (
+        str(executable), "-p", BACKEND_BUILD_SANDBOX_PROFILE,
+        "-D", f"BACKEND_ROOT={backend_root}",
+        "-D", f"BUILD_RUNTIME={build_runtime}", *command,
     )
 
 
@@ -3345,6 +3437,7 @@ def run_gate(
                         _cleanup_gate_owned(report, lane_execution, execution_stage)
                         break
                     command = sandboxed
+                backend_binding: BackendSnapshotBinding | None = None
                 try:
                     child_environment = _child_environment(execution_candidate, lane_source, lane)
                     child_environment.update(lane_execution.environment)
@@ -3358,12 +3451,16 @@ def run_gate(
                     )
                     if not container_authority or not browser_authority:
                         result = _manifest.BoundedCommandResult(None, "", "authority")
-                    elif _python_test_runtime_required(lane):
+                    elif _python_test_runtime_required(lane) or _backend_compiler_required(lane):
                         backend_binding = _backend_snapshot_environment(execution_stage)
                         if backend_binding is None:
                             result = _manifest.BoundedCommandResult(None, "", "authority")
                         else:
                             child_environment.update(backend_binding.environment)
+                            if _backend_compiler_required(lane):
+                                child_environment["TBOT_BACKEND_WORKTREE"] = (
+                                    backend_binding.environment["COURSE_MODE_BACKEND_ROOT"]
+                                )
                             result = run_bounded_command(
                                 list(command), cwd=resolved_cwd, timeout_sec=lane.timeout_sec,
                                 max_output_bytes=max_output_bytes, env=child_environment,
@@ -3374,7 +3471,7 @@ def run_gate(
                             max_output_bytes=max_output_bytes, env=child_environment,
                         )
                     if (
-                        _python_test_runtime_required(lane)
+                        (_python_test_runtime_required(lane) or _backend_compiler_required(lane))
                         and (
                             backend_binding is None
                             or not _backend_execution_snapshot_matches(execution_stage, backend_binding)
