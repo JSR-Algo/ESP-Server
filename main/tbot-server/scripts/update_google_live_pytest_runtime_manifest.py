@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import platform
 import stat
 import sys
@@ -66,12 +65,10 @@ def build_manifest(repo_root: Path) -> dict[str, object]:
     candidates = [
         Path(value)
         for value in (
-            os.environ.get("OPUS_LIB_PATH", ""),
             "/opt/homebrew/lib/libopus.dylib",
             "/usr/local/lib/libopus.dylib",
             "/usr/lib/x86_64-linux-gnu/libopus.so.0",
         )
-        if value
     ]
     native_path = next((path.resolve(strict=True) for path in candidates if path.exists()), None)
     if native_path is None:
@@ -81,18 +78,23 @@ def build_manifest(repo_root: Path) -> dict[str, object]:
         raise RuntimeError("required opus native library is invalid")
     return {
         "distributions": distributions,
-        "nativeLibrary": {
-            "device": native_stat.st_dev,
-            "inode": native_stat.st_ino,
-            "machine": platform.machine(),
-            "mode": stat.S_IMODE(native_stat.st_mode),
-            "name": "opus",
-            "path": str(native_path),
-            "sha256": _sha256(native_path),
-            "system": platform.system(),
-            "uid": native_stat.st_uid,
-        },
-        "platform": "any",
+        "platformVariants": [
+            {
+                "key": f"{platform.system().lower()}-{platform.machine().lower()}-cp{sys.version_info.major}{sys.version_info.minor}",
+                "machine": platform.machine().lower(),
+                "nativeLibraries": [
+                    {
+                        "basename": native_path.name,
+                        "format": "mach-o" if platform.system() == "Darwin" else "elf",
+                        "name": "opus",
+                        "sha256": _sha256(native_path),
+                        "size": native_stat.st_size,
+                    }
+                ],
+                "pythonAbi": f"cp{sys.version_info.major}{sys.version_info.minor}",
+                "system": platform.system().lower(),
+            }
+        ],
         "plugin": {
             "path": NODEID_PLUGIN_GIT_PATH,
             "sha256": _sha256(plugin_path),

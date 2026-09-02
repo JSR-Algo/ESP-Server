@@ -67,15 +67,14 @@ def _runtime_manifest_bytes(*, plugin_sha256: str = "e" * 64) -> bytes:
         )
     value = {
         "distributions": distributions,
-        "nativeLibrary": json.loads(PINNED_RUNTIME_MANIFEST)["nativeLibrary"],
-        "platform": "any",
+        "platformVariants": json.loads(PINNED_RUNTIME_MANIFEST)["platformVariants"],
         "plugin": {
             "path": "main/tbot-server/scripts/google_live_deterministic_nodeid_plugin.py",
             "sha256": plugin_sha256,
         },
         "pythonImplementation": "cpython",
         "pythonMajorMinor": "3.14",
-        "schemaVersion": "google-live-pytest-runtime.v1",
+        "schemaVersion": "google-live-pytest-runtime.v2",
     }
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
@@ -557,7 +556,7 @@ def test_build_report_binds_manifest_and_junit_hashes_and_exact_counts() -> None
         "junitSha256": hashlib.sha256(junit).hexdigest(),
         "nodeidPluginSha256": runtime["plugin"]["sha256"],
         "pytestRuntimeManifestSha256": hashlib.sha256(PINNED_RUNTIME_MANIFEST).hexdigest(),
-        "pytestRuntimeSchema": "google-live-pytest-runtime.v1",
+        "pytestRuntimeSchema": "google-live-pytest-runtime.v2",
     }
     assert report["testVerdict"] == {
         "status": "PASS", "total": 2, "failed": 0, "skipped": 0, "errors": 0, "failures": []
@@ -1158,7 +1157,7 @@ def test_pytest_runtime_manifest_loader_uses_exact_candidate_sha_across_head_aba
     )
 
     assert content == canonical
-    assert manifest["schemaVersion"] == "google-live-pytest-runtime.v1"
+    assert manifest["schemaVersion"] == "google-live-pytest-runtime.v2"
     assert objects == [
         f"{candidate_sha}:main/tbot-server/tests/fixtures/google_live_pytest_runtime_manifest.json"
     ]
@@ -1196,7 +1195,70 @@ def test_checked_in_runtime_manifest_pins_opus_python_and_native_runtime() -> No
 
     assert opus["importNames"] == ["opuslib_next"]
     assert any(entry["path"] == "opuslib_next/api/__init__.py" for entry in opus["files"])
-    assert manifest["nativeLibrary"]["name"] == "opus"
+    variant = deterministic._runtime_platform_variant(manifest)
+    assert variant["key"] == "darwin-arm64-cp314"
+    assert variant["nativeLibraries"][0]["name"] == "opus"
+    serialized = json.dumps(manifest["platformVariants"])
+    assert all(field not in serialized for field in ('"path"', '"device"', '"inode"', '"uid"'))
+
+
+def test_runtime_manifest_rejects_missing_current_platform_variant() -> None:
+    manifest = json.loads(PINNED_RUNTIME_MANIFEST)
+    manifest["platformVariants"][0]["key"] = "linux-x86_64-cp314"
+    parsed = deterministic.parse_pytest_runtime_manifest(
+        (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    )
+
+    with pytest.raises(RuntimeError, match="platform is unsupported"):
+        deterministic._runtime_platform_variant(parsed)
+
+
+def test_native_discovery_accepts_identical_binary_at_alternate_trusted_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    variant = deterministic._runtime_platform_variant(
+        deterministic.parse_pytest_runtime_manifest(PINNED_RUNTIME_MANIFEST)
+    )
+    _source, installed = deterministic._load_native_library(variant)
+    alternate = tmp_path / variant["nativeLibraries"][0]["basename"]
+    alternate.write_bytes(installed.content)
+    alternate.chmod(0o444)
+    monkeypatch.setattr(
+        deterministic,
+        "_native_library_candidates",
+        lambda *_args: (alternate,),
+    )
+
+    discovered, bound = deterministic._load_native_library(variant)
+
+    assert discovered == alternate
+    assert bound.content == installed.content
+
+
+@pytest.mark.parametrize("mutation", ["tampered", "wrong_arch", "writable_parent"])
+def test_native_discovery_rejects_untrusted_or_invalid_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    manifest = deterministic.parse_pytest_runtime_manifest(PINNED_RUNTIME_MANIFEST)
+    variant = json.loads(json.dumps(deterministic._runtime_platform_variant(manifest)))
+    directory = tmp_path / "native"
+    directory.mkdir()
+    source = directory / variant["nativeLibraries"][0]["basename"]
+    _source, installed = deterministic._load_native_library(variant)
+    content = installed.content
+    if mutation == "tampered":
+        content = content[:-1] + bytes([content[-1] ^ 1])
+    elif mutation == "wrong_arch":
+        content = b"not-a-mach-o" + content[12:]
+        variant["nativeLibraries"][0]["sha256"] = hashlib.sha256(content).hexdigest()
+    source.write_bytes(content)
+    source.chmod(0o444)
+    if mutation == "writable_parent":
+        directory.chmod(0o777)
+    monkeypatch.setattr(deterministic, "_native_library_candidates", lambda *_args: (source,))
+
+    with pytest.raises(RuntimeError, match="native library"):
+        deterministic._load_native_library(variant)
 
 
 def test_private_runtime_uses_pinned_opus_origin_and_nonexistent_pycache(tmp_path: Path) -> None:
@@ -1266,7 +1328,7 @@ def test_private_runtime_rejects_native_platform_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(deterministic.platform, "machine", lambda: "wrong-architecture")
-    with pytest.raises(RuntimeError, match="platform constraint"):
+    with pytest.raises(RuntimeError, match="platform is unsupported"):
         with deterministic._private_pytest_runtime(MODULE_ROOT, "unused"):
             pass
 

@@ -40,7 +40,7 @@ from scripts.google_live_trusted_git import (
 )
 
 MANIFEST_SCHEMA = "google-live-deterministic-nodes.v1"
-PYTEST_RUNTIME_SCHEMA = "google-live-pytest-runtime.v1"
+PYTEST_RUNTIME_SCHEMA = "google-live-pytest-runtime.v2"
 PYTEST_RUNTIME_MANIFEST_GIT_PATH = (
     "main/tbot-server/tests/fixtures/google_live_pytest_runtime_manifest.json"
 )
@@ -235,9 +235,8 @@ def parse_pytest_runtime_manifest(content: bytes) -> dict[str, Any]:
         raise ValueError("pytest runtime manifest is not canonical")
     if set(value) != {
         "distributions",
-        "platform",
+        "platformVariants",
         "plugin",
-        "nativeLibrary",
         "pythonImplementation",
         "pythonMajorMinor",
         "schemaVersion",
@@ -245,7 +244,6 @@ def parse_pytest_runtime_manifest(content: bytes) -> dict[str, Any]:
         raise ValueError("pytest runtime manifest structure is invalid")
     if (
         value.get("schemaVersion") != PYTEST_RUNTIME_SCHEMA
-        or value.get("platform") != "any"
         or value.get("pythonImplementation") != "cpython"
         or type(value.get("pythonMajorMinor")) is not str
         or re.fullmatch(r"[0-9]+\.[0-9]+", value["pythonMajorMinor"]) is None
@@ -336,20 +334,38 @@ def parse_pytest_runtime_manifest(content: bytes) -> dict[str, Any]:
         or _SHA256_HEX.fullmatch(plugin["sha256"]) is None
     ):
         raise ValueError("pytest runtime manifest plugin is invalid")
-    native = value.get("nativeLibrary")
-    if (
-        not isinstance(native, dict)
-        or set(native) != {"device", "inode", "machine", "mode", "name", "path", "sha256", "system", "uid"}
-        or native.get("name") != "opus"
-        or type(native.get("path")) is not str
-        or not Path(native["path"]).is_absolute()
-        or type(native.get("sha256")) is not str
-        or _SHA256_HEX.fullmatch(native["sha256"]) is None
-        or any(type(native.get(key)) is not int or native[key] < 0 for key in ("device", "inode", "mode", "uid"))
-        or type(native.get("system")) is not str
-        or type(native.get("machine")) is not str
-    ):
-        raise ValueError("pytest runtime manifest native library is invalid")
+    variants = value.get("platformVariants")
+    if not isinstance(variants, list) or not variants:
+        raise ValueError("pytest runtime manifest platform variants are invalid")
+    keys = []
+    for variant in variants:
+        if not isinstance(variant, dict) or set(variant) != {"key", "machine", "nativeLibraries", "pythonAbi", "system"}:
+            raise ValueError("pytest runtime manifest platform variant is invalid")
+        libraries = variant.get("nativeLibraries")
+        if (
+            any(type(variant.get(key)) is not str or not variant[key] for key in ("key", "machine", "pythonAbi", "system"))
+            or not isinstance(libraries, list)
+            or len(libraries) != 1
+        ):
+            raise ValueError("pytest runtime manifest platform variant is invalid")
+        if variant["key"] != f"{variant['system']}-{variant['machine']}-{variant['pythonAbi']}":
+            raise ValueError("pytest runtime manifest platform variant is invalid")
+        native = libraries[0]
+        if (
+            not isinstance(native, dict)
+            or set(native) != {"basename", "format", "name", "sha256", "size"}
+            or native.get("name") != "opus"
+            or type(native.get("basename")) is not str
+            or native.get("format") not in {"mach-o", "elf"}
+            or type(native.get("sha256")) is not str
+            or _SHA256_HEX.fullmatch(native["sha256"]) is None
+            or type(native.get("size")) is not int
+            or native["size"] <= 0
+        ):
+            raise ValueError("pytest runtime manifest native library is invalid")
+        keys.append(variant["key"])
+    if keys != sorted(keys) or len(keys) != len(set(keys)):
+        raise ValueError("pytest runtime manifest platform variants are ambiguous")
     return value
 
 
@@ -1288,6 +1304,71 @@ def _make_runtime_writable(root: Path) -> None:
             pass
 
 
+def _python_abi() -> str:
+    return f"cp{sys.version_info.major}{sys.version_info.minor}"
+
+
+def _runtime_platform_variant(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    key = f"{system}-{machine}-{_python_abi()}"
+    matches = [item for item in manifest["platformVariants"] if item["key"] == key]
+    if len(matches) != 1:
+        raise RuntimeError("trusted pytest runtime platform is unsupported")
+    return matches[0]
+
+
+def _native_library_candidates(system: str, machine: str, name: str) -> tuple[Path, ...]:
+    if (system, machine, name) == ("darwin", "arm64", "opus"):
+        return (
+            Path("/opt/homebrew/lib/libopus.dylib"),
+            Path("/opt/homebrew/opt/opus/lib/libopus.dylib"),
+            Path("/usr/local/lib/libopus.dylib"),
+        )
+    if (system, machine, name) == ("linux", "x86_64", "opus"):
+        return (Path("/usr/lib/x86_64-linux-gnu/libopus.so.0"), Path("/usr/local/lib/libopus.so.0"))
+    return ()
+
+
+def _native_format_matches(content: bytes, format_name: str, machine: str) -> bool:
+    if format_name == "mach-o" and machine == "arm64":
+        return len(content) >= 8 and content[:4] == b"\xcf\xfa\xed\xfe" and int.from_bytes(content[4:8], "little") == 0x0100000C
+    if format_name == "elf" and machine == "x86_64":
+        return len(content) >= 20 and content[:5] == b"\x7fELF\x02" and int.from_bytes(content[18:20], "little") == 62
+    return False
+
+
+def _load_native_library(variant: Mapping[str, Any]) -> tuple[Path, BoundFile]:
+    expected = variant["nativeLibraries"][0]
+    for candidate in _native_library_candidates(
+        variant["system"], variant["machine"], expected["name"]
+    ):
+        try:
+            source = candidate.resolve(strict=True)
+            opened = source.stat(follow_symlinks=False)
+            parent = source.parent.stat(follow_symlinks=False)
+            if (
+                source.is_symlink()
+                or not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or source.name != expected["basename"]
+                or stat.S_IMODE(opened.st_mode) & 0o022
+                or stat.S_IMODE(parent.st_mode) & 0o022
+                or opened.st_uid != parent.st_uid
+            ):
+                continue
+            bound = read_bound_file(source)
+        except OSError:
+            continue
+        if (
+            len(bound.content) == expected["size"]
+            and secrets.compare_digest(_sha256(bound.content), expected["sha256"])
+            and _native_format_matches(bound.content, expected["format"], variant["machine"])
+        ):
+            return source, bound
+    raise RuntimeError("required native library is unavailable")
+
+
 def _git_blob_digest(content: bytes, algorithm: str) -> str:
     digest = hashlib.new(algorithm)
     digest.update(f"blob {len(content)}\0".encode("ascii"))
@@ -1548,27 +1629,11 @@ def _private_pytest_runtime(
             or manifest["pythonMajorMinor"] != f"{sys.version_info.major}.{sys.version_info.minor}"
         ):
             raise RuntimeError("trusted pytest runtime Python constraint does not match")
-        native = manifest["nativeLibrary"]
-        if native["system"] != platform.system() or native["machine"] != platform.machine():
-            raise RuntimeError("trusted pytest runtime platform constraint does not match")
+        variant = _runtime_platform_variant(manifest)
         packages = temporary / "packages"
         _copy_trusted_pytest_packages(packages, manifest)
-        native_source = Path(native["path"])
-        native_stat = native_source.stat(follow_symlinks=False)
-        if (
-            native_source.is_symlink()
-            or not stat.S_ISREG(native_stat.st_mode)
-            or native_stat.st_nlink != 1
-            or native_stat.st_dev != native["device"]
-            or native_stat.st_ino != native["inode"]
-            or native_stat.st_uid != native["uid"]
-            or stat.S_IMODE(native_stat.st_mode) != native["mode"]
-        ):
-            raise RuntimeError("required opus native library identity does not match")
-        native_bound = read_bound_file(native_source)
-        if not secrets.compare_digest(_sha256(native_bound.content), native["sha256"]):
-            raise RuntimeError("required opus native library integrity check failed")
-        private_native = temporary / "native" / native_source.name
+        native_source, native_bound = _load_native_library(variant)
+        private_native = temporary / "native" / variant["nativeLibraries"][0]["basename"]
         _write_private_snapshot_file(private_native, native_bound.content)
         plugin = temporary / "control" / "pinned_nodeid_plugin.py"
         plugin_content = _load_trusted_nodeid_plugin(
