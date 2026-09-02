@@ -176,6 +176,29 @@ for (const protectedName of ['admin', 'backend', 'firmware']) {
   });
 }
 
+test('assignment runtime capsule rejects the filesystem root as a protected ancestor', async (t) => {
+  const capsule = await createAssignmentRuntimeCapsule(t);
+  assert.throws(
+    () => validateAssignmentRuntimeCapsule(
+      capsuleEnvironment(capsule.capsuleRoot, capsule.runtimeRoot),
+      ['/'],
+    ),
+    /protected root/,
+  );
+});
+
+test('assignment runtime capsule accepts a similarly prefixed protected sibling', async (t) => {
+  const capsule = await createAssignmentRuntimeCapsule(t);
+  const protectedSibling = `${capsule.capsuleRoot}-protected`;
+  await mkdir(protectedSibling, { mode: 0o700 });
+  t.after(() => rm(protectedSibling, { recursive: true, force: true }));
+
+  assert.doesNotThrow(() => validateAssignmentRuntimeCapsule(
+    capsuleEnvironment(capsule.capsuleRoot, capsule.runtimeRoot),
+    [protectedSibling],
+  ));
+});
+
 for (const [label, value] of [
   ['empty', ''],
   ['relative', 'relative/runtime'],

@@ -1,5 +1,5 @@
 const { lstatSync, realpathSync } = require('node:fs');
-const { basename, isAbsolute, resolve, sep } = require('node:path');
+const { basename, isAbsolute, relative, resolve, sep } = require('node:path');
 
 const OWNER_KEY = 'TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT';
 const RUNTIME_KEY = 'TASK4_ASSIGNMENT_RUNTIME_ROOT';
@@ -22,8 +22,14 @@ function inspectDirectory(pathValue, label) {
   return metadata;
 }
 
+function isWithinOrEqual(pathValue, root) {
+  const relativePath = relative(root, pathValue);
+  return relativePath === ''
+    || (relativePath !== '..' && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath));
+}
+
 function pathsOverlap(left, right) {
-  return left === right || left.startsWith(`${right}${sep}`) || right.startsWith(`${left}${sep}`);
+  return isWithinOrEqual(left, right) || isWithinOrEqual(right, left);
 }
 
 function validateAssignmentRuntimeCapsule(
