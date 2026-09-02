@@ -3007,13 +3007,7 @@ def build_candidate_journeys(args, *, protected_input=None):
         _OWNED_CLEANUP_TASKS.add(task)
 
         def release(owned):
-            _release_owned_cleanup_task(owned)
-            if unresolved_key is None:
-                return
-            if owned.cancelled() or owned.exception() is not None:
-                _UNRESOLVED_CANDIDATE_CLEANUPS.add(unresolved_key)
-            else:
-                _UNRESOLVED_CANDIDATE_CLEANUPS.discard(unresolved_key)
+            _publish_owned_cleanup_task(owned, unresolved_key=unresolved_key)
 
         task.add_done_callback(release)
         return task
@@ -3210,9 +3204,7 @@ def build_candidate_journeys(args, *, protected_input=None):
         duration_sec=None,
     ):
         nonlocal sequence
-        if _UNRESOLVED_CANDIDATE_CLEANUPS or any(
-            not task.done() for task in _OWNED_CLEANUP_TASKS
-        ):
+        if _UNRESOLVED_CANDIDATE_CLEANUPS or _OWNED_CLEANUP_TASKS:
             raise RuntimeError("candidate cleanup obligations are unresolved")
         quiet_duration_sec = None
         if name == "quiet":
@@ -3473,9 +3465,7 @@ def build_candidate_journeys(args, *, protected_input=None):
                     unresolved_key=journey_id,
                 )
                 try:
-                    cleanup_complete = await asyncio.shield(
-                        wait_bounded(enrollment_cleanup_task)
-                    )
+                    cleanup_complete = await wait_bounded(enrollment_cleanup_task)
                 except asyncio.CancelledError:
                     raise
                 except BaseException:
@@ -3676,10 +3666,27 @@ def _strict_candidate_latency_metrics(value):
     )
 
 
-def _release_owned_cleanup_task(task):
+def _publish_owned_cleanup_task(task, *, unresolved_key=None):
+    failed = task.cancelled()
+    if not failed:
+        try:
+            task.result()
+        except BaseException:
+            failed = True
+    if unresolved_key is not None:
+        if failed:
+            _UNRESOLVED_CANDIDATE_CLEANUPS.add(unresolved_key)
+        else:
+            _UNRESOLVED_CANDIDATE_CLEANUPS.discard(unresolved_key)
     _OWNED_CLEANUP_TASKS.discard(task)
-    if not task.cancelled():
-        task.exception()
+
+
+def _release_owned_cleanup_task(task):
+    _publish_owned_cleanup_task(task)
+
+
+def _actual_pending_cleanup_tasks():
+    return len(_OWNED_CLEANUP_TASKS) + len(_UNRESOLVED_CANDIDATE_CLEANUPS)
 
 
 def _evidence_reuse_key(*, journey_id, connection_id, log_window):
@@ -4397,9 +4404,7 @@ async def _run_candidate_soak_impl(
         and final_sample[field] >= 0
         for field in required_sample_fields
     )
-    actual_pending_cleanup_tasks = sum(
-        1 for task in _OWNED_CLEANUP_TASKS if not task.done()
-    ) + len(_UNRESOLVED_CANDIDATE_CLEANUPS)
+    actual_pending_cleanup_tasks = _actual_pending_cleanup_tasks()
     cleanup_pass = (
         isinstance(cleanup_evidence, Mapping)
         and not _forbidden_evidence_fields(cleanup_evidence)

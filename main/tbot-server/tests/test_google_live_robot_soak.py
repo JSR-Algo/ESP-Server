@@ -4460,6 +4460,161 @@ def test_candidate_cleanup_timeout_is_explicit_and_reconciliation_drains(
     asyncio.run(run())
 
 
+def test_done_cleanup_obligation_blocks_next_enrollment_until_publication(tmp_path):
+    posts = 0
+    journey_id = "candidate-soak.20260831T100000Z.1"
+    terminal = {
+        "journeyId": journey_id,
+        "journeyType": "conversation",
+        "proofProfile": "candidate-lifecycle",
+        "status": "FAIL",
+        "failureCode": "OPERATOR_CANCELLED",
+    }
+
+    async def control(method, _url, payload=None):
+        nonlocal posts
+        if method == "POST":
+            posts += 1
+            return {"data": {"registered": True, "journeyId": payload["journeyId"]}}
+        if method in {"DELETE", "GET"}:
+            return dict(terminal)
+        return {"status": "PASS"}
+
+    async def driver(_args, **_context):
+        raise RuntimeError("journey failed")
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=control,
+        candidate_journey_driver=driver,
+    )
+    journey = build_candidate_journeys(args)["conversation"]
+
+    async def run():
+        completed = asyncio.create_task(asyncio.sleep(0))
+        await completed
+        robot_soak._OWNED_CLEANUP_TASKS.add(completed)
+        assert completed.done()
+        assert robot_soak._actual_pending_cleanup_tasks() == 1
+
+        with pytest.raises(
+            RuntimeError, match="candidate cleanup obligations are unresolved"
+        ):
+            await journey(args, name="conversation", index=2)
+        assert posts == 0
+
+        robot_soak._publish_owned_cleanup_task(completed)
+        assert robot_soak._actual_pending_cleanup_tasks() == 0
+        with pytest.raises(RuntimeError, match="journey failed"):
+            await journey(args, name="conversation", index=2)
+
+    asyncio.run(run())
+    assert posts == 1
+    assert not robot_soak._OWNED_CLEANUP_TASKS
+
+
+def test_failed_done_cleanup_publishes_sticky_unresolved_before_release(tmp_path):
+    args = _args(run_id="20260831T100000Z")
+    journey = build_candidate_journeys(args)["conversation"]
+    journey_id = "candidate-soak.20260831T100000Z.cleanup"
+
+    async def fail():
+        raise RuntimeError("late cleanup failed")
+
+    async def run():
+        failed = asyncio.create_task(fail())
+        await asyncio.gather(failed, return_exceptions=True)
+        robot_soak._OWNED_CLEANUP_TASKS.add(failed)
+
+        robot_soak._publish_owned_cleanup_task(
+            failed, unresolved_key=journey_id
+        )
+
+        assert not robot_soak._OWNED_CLEANUP_TASKS
+        assert robot_soak._UNRESOLVED_CANDIDATE_CLEANUPS == {journey_id}
+        assert robot_soak._actual_pending_cleanup_tasks() == 1
+        with pytest.raises(
+            RuntimeError, match="candidate cleanup obligations are unresolved"
+        ):
+            await journey(args, name="conversation", index=2)
+
+    try:
+        asyncio.run(run())
+    finally:
+        robot_soak._UNRESOLVED_CANDIDATE_CLEANUPS.clear()
+
+
+def test_cancelled_cleanup_wait_consumes_late_cleanup_exception(tmp_path):
+    delete_started = asyncio.Event()
+    release_delete = asyncio.Event()
+    journey_id = "candidate-soak.20260831T100000Z.1"
+    active = {
+        "journeyId": journey_id,
+        "journeyType": "conversation",
+        "proofProfile": "candidate-lifecycle",
+        "status": "ACTIVE",
+    }
+
+    async def control(method, _url, payload=None):
+        if method == "POST":
+            return {"data": {"registered": True, "journeyId": payload["journeyId"]}}
+        if method == "DELETE":
+            delete_started.set()
+            await release_delete.wait()
+            raise RuntimeError("delete failed")
+        if method == "GET":
+            return dict(active)
+        return {"status": "PASS"}
+
+    async def driver(_args, **_context):
+        raise RuntimeError("journey failed")
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=control,
+        candidate_journey_driver=driver,
+        cleanup_timeout_sec=0.03,
+    )
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        unhandled = []
+        loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+        lifecycle = asyncio.create_task(
+            build_candidate_journeys(args)["conversation"](
+                args, name="conversation", index=1
+            )
+        )
+        await delete_started.wait()
+        lifecycle.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await lifecycle
+        release_delete.set()
+        for _attempt in range(100):
+            if not robot_soak._OWNED_CLEANUP_TASKS:
+                break
+            await asyncio.sleep(0.001)
+        await asyncio.sleep(0)
+        assert not robot_soak._OWNED_CLEANUP_TASKS
+        assert not [
+            item for item in unhandled
+            if "exception was never retrieved" in item.get("message", "").lower()
+        ]
+
+    try:
+        asyncio.run(run())
+    finally:
+        robot_soak._UNRESOLVED_CANDIDATE_CLEANUPS.clear()
+
+
 def test_candidate_active_cleanup_retries_delete_until_terminal(tmp_path):
     journey_id = "candidate-soak.20260831T100000Z.1"
     active = {

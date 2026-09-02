@@ -185,19 +185,32 @@ class GoogleLiveEventMappingTest(unittest.IsolatedAsyncioTestCase):
                 stub_conn.clearSpeakStatus()
             await stub_conn.websocket.send(json.dumps(message))
 
-        async def sendAudio(stub_conn, audios, frame_duration=60):
+        async def sendAudio(
+            stub_conn,
+            audios,
+            frame_duration=60,
+            on_delivery_complete=None,
+            on_delivery_failed=None,
+        ):
             audio_packets = [audios] if isinstance(audios, bytes) else list(audios)
-            for index, packet in enumerate(audio_packets):
-                if stub_conn.conn_from_mqtt_gateway:
-                    header = bytearray(16)
-                    header[0] = 1
-                    header[2:4] = len(packet).to_bytes(2, "big")
-                    header[4:8] = index.to_bytes(4, "big")
-                    header[8:12] = (1000 + index).to_bytes(4, "big")
-                    header[12:16] = len(packet).to_bytes(4, "big")
-                    await stub_conn.websocket.send(bytes(header) + packet)
-                else:
-                    await stub_conn.websocket.send(packet)
+            try:
+                for index, packet in enumerate(audio_packets):
+                    if stub_conn.conn_from_mqtt_gateway:
+                        header = bytearray(16)
+                        header[0] = 1
+                        header[2:4] = len(packet).to_bytes(2, "big")
+                        header[4:8] = index.to_bytes(4, "big")
+                        header[8:12] = (1000 + index).to_bytes(4, "big")
+                        header[12:16] = len(packet).to_bytes(4, "big")
+                        await stub_conn.websocket.send(bytes(header) + packet)
+                    else:
+                        await stub_conn.websocket.send(packet)
+            except BaseException as exc:
+                if callable(on_delivery_failed):
+                    on_delivery_failed(exc)
+                raise
+            if callable(on_delivery_complete):
+                on_delivery_complete(len(audio_packets))
 
         stub_module.send_display_message = send_display_message
         stub_module.send_tts_message = send_tts_message

@@ -1149,6 +1149,10 @@ class GoogleLiveAudioBridge:
         mime_type=None,
         response_generation=None,
     ):
+        if not isinstance(response_generation, int) or isinstance(
+            response_generation, bool
+        ):
+            response_generation = self._active_response_id
         if (
             not audio_bytes
             or self.conn.websocket is None
@@ -1250,7 +1254,10 @@ class GoogleLiveAudioBridge:
             if receipt.done():
                 return
             generation_valid = bool(
-                isinstance(response_generation, int)
+                response_generation is None
+                and self._active_response_id is None
+                or isinstance(response_generation, int)
+                and not isinstance(response_generation, bool)
                 and response_generation == self._active_response_id
                 and not self._response_cancelled_checker(response_generation)
             )
@@ -1258,7 +1265,14 @@ class GoogleLiveAudioBridge:
                 fail(RuntimeError("stale audio delivery completion"))
                 return
             receipt.set_result(True)
-            if emit_proof and callable(self._model_output_forwarded_handler):
+            exact_generation = isinstance(response_generation, int) and not isinstance(
+                response_generation, bool
+            )
+            if (
+                emit_proof
+                and exact_generation
+                and callable(self._model_output_forwarded_handler)
+            ):
                 try:
                     self._model_output_forwarded_handler(response_generation)
                 except Exception:
@@ -1266,7 +1280,12 @@ class GoogleLiveAudioBridge:
             journey_id = getattr(
                 self.conn, "google_live_evidence_journey_id", None
             )
-            if emit_proof and isinstance(journey_id, str) and journey_id:
+            if (
+                emit_proof
+                and exact_generation
+                and isinstance(journey_id, str)
+                and journey_id
+            ):
                 try:
                     self.logger.bind(tag="GoogleLive").info(
                         "Google Live model_output_chunk_forwarded journey_id={} "
