@@ -6,6 +6,7 @@ import argparse
 import base64
 import binascii
 import hashlib
+import io
 import json
 import os
 import re
@@ -16,11 +17,12 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tarfile
 import unicodedata
 import urllib.parse
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
@@ -80,20 +82,23 @@ _PYTEST_DISTRIBUTION_PACKAGES = {
     "pygments": {"pygments"},
 }
 _PYTEST_BOOTSTRAP = (
-    "import importlib,json,sys;"
+    "import importlib,json,pathlib,sys;"
     "from importlib.util import module_from_spec,spec_from_file_location;"
     "p=json.loads(sys.argv.pop(1));"
     "exec(\"def audit():\\n import pathlib\\n roots=[pathlib.Path(x).resolve() for x in p['trusted']]\\n for name,module in tuple(sys.modules.items()):\\n  if not any(name==x or name.startswith(x+'.') for x in p['controlImportNames']):continue\\n  origin=getattr(module,'__file__',None)\\n  if not origin:raise RuntimeError('pytest runtime import origin invalid')\\n  resolved=pathlib.Path(origin).resolve()\\n  if not any(resolved==root or root in resolved.parents for root in roots):raise RuntimeError('pytest runtime import origin invalid')\",globals());"
+    "exec(\"def audit_candidate():\\n import pathlib\\n root=pathlib.Path(p['repo']).resolve();live=pathlib.Path(p['liveRepo']).resolve()\\n for name,module in tuple(sys.modules.items()):\\n  origin=getattr(module,'__file__',None)\\n  if not origin:continue\\n  resolved=pathlib.Path(origin).resolve();top=name.split('.',1)[0]\\n  if live!=root and (resolved==live or live in resolved.parents):raise RuntimeError('candidate import origin invalid')\\n  if top in p['candidateImportNames'] and top not in p['controlImportNames'] and not (resolved==root or root in resolved.parents):raise RuntimeError('candidate import origin invalid')\",globals());"
     "sys.path[:0]=p['trusted']+p['dependencies'];"
     "pytest=importlib.import_module('pytest');"
     "a=importlib.import_module('pytest_asyncio.plugin');"
     "audit();"
-    "sys.path[:]=p['trusted']+[p['repo']]+p['dependencies']+sys.path[len(p['trusted'])+len(p['dependencies']):];"
+    "exec(\"def safe_path(value):\\n resolved=pathlib.Path(value).resolve();root=pathlib.Path(p['repo']).resolve();live=pathlib.Path(p['liveRepo']).resolve()\\n return live==root or resolved==root or root in resolved.parents or not (resolved==live or live in resolved.parents)\",globals());"
+    "sys.path[:]=[str(pathlib.Path(x).resolve()) for x in p['trusted']+[p['repo']]+p['dependencies']+sys.path[len(p['trusted'])+len(p['dependencies']):] if x and safe_path(x)];"
     "s=spec_from_file_location('_google_live_pinned_nodeid_plugin',p['plugin']);"
     "n=module_from_spec(s);s.loader.exec_module(n);"
     "audit();"
     "sys.argv[0]='pytest';"
-    "rc=pytest.main(sys.argv[1:],plugins=[a,n]);audit();raise SystemExit(rc)"
+    "sys.argv[1:1]=['-p','no:cacheprovider'];"
+    "rc=pytest.main(sys.argv[1:],plugins=[a,n]);audit();audit_candidate();raise SystemExit(rc)"
 )
 APPROVED_TEST_FILES = (
     "tests/test_google_live_lifecycle_e2e.py",
@@ -130,6 +135,14 @@ class PrivatePytestRuntime(dict[str, Any]):
     directories: dict[Path, tuple[int, int, int, int, int]]
     manifest_content: bytes
     manifest: dict[str, Any]
+
+
+@dataclass
+class PrivateCandidateSnapshot:
+    root: Path
+    bindings: dict[Path, BoundFile]
+    directories: dict[Path, tuple[int, int, int, int, int]]
+    scratch: tuple[Path, ...]
 
 
 def _sha256(content: bytes) -> str:
@@ -1002,6 +1015,7 @@ def _pytest_child_environment(source: Mapping[str, str] | None = None) -> dict[s
             "PATH": os.defpath,
             "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
             "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
         }
     )
     return child
@@ -1250,13 +1264,201 @@ def _make_runtime_writable(root: Path) -> None:
             pass
 
 
+def _git_blob_digest(content: bytes, algorithm: str) -> str:
+    digest = hashlib.new(algorithm)
+    digest.update(f"blob {len(content)}\0".encode("ascii"))
+    digest.update(content)
+    return digest.hexdigest()
+
+
+def _candidate_tree_entries(
+    repo_root: Path,
+    expected_git_sha: str,
+    module_path: Path,
+) -> tuple[str, dict[str, tuple[str, int]]]:
+    prefix = module_path.as_posix().rstrip("/")
+    object_format = _git_output(
+        repo_root, "rev-parse", "--show-object-format"
+    ).decode("ascii").strip()
+    if object_format not in {"sha1", "sha256"}:
+        raise RuntimeError("candidate Git object format is invalid")
+    listing = _git_output(
+        repo_root,
+        "ls-tree",
+        "-rz",
+        "--full-tree",
+        expected_git_sha,
+        "--",
+        prefix,
+    )
+    entries = {}
+    for record in listing.split(b"\0"):
+        if not record:
+            continue
+        metadata, separator, raw_path = record.partition(b"\t")
+        fields = metadata.split()
+        if not separator or len(fields) != 3:
+            raise RuntimeError("candidate Git tree is invalid")
+        mode, object_type, object_id = fields
+        try:
+            path = raw_path.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise RuntimeError("candidate Git tree path is invalid") from exc
+        if path == f"{prefix}/.venv311" or path.startswith(f"{prefix}/.venv311/"):
+            continue
+        if (
+            mode not in {b"100644", b"100755"}
+            or object_type != b"blob"
+            or not path.startswith(prefix + "/")
+            or path in entries
+            or any(part in {"", ".", ".."} for part in Path(path).parts)
+        ):
+            raise RuntimeError("candidate Git tree is invalid")
+        relative = Path(path).relative_to(module_path).as_posix()
+        if relative.endswith((".pyc", ".pyo", ".so", ".dylib", ".dll", ".pyd")):
+            raise RuntimeError("candidate Git tree contains executable artifacts")
+        entries[path] = (object_id.decode("ascii"), int(mode, 8))
+    if not entries:
+        raise RuntimeError("candidate Git tree is empty")
+    return object_format, entries
+
+
+def _seal_candidate_snapshot(root: Path) -> PrivateCandidateSnapshot:
+    scratch = tuple(root / name for name in ("tmp", "data"))
+    for path in scratch:
+        path.mkdir(mode=0o700, exist_ok=True)
+    files = sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file()
+    )
+    directories = sorted(
+        [
+            root,
+            *(path for path in root.rglob("*") if path.is_dir() and path not in scratch),
+        ],
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for path in files:
+        path.chmod(0o400)
+    for path in directories:
+        path.chmod(0o500)
+    return PrivateCandidateSnapshot(
+        root,
+        {path: read_bound_file(path) for path in files},
+        {path: _runtime_directory_identity(path) for path in directories},
+        scratch,
+    )
+
+
+def _verify_candidate_snapshot(snapshot: PrivateCandidateSnapshot) -> None:
+    try:
+        observed_files = {
+            path
+            for path in snapshot.root.rglob("*")
+            if path.is_file()
+        }
+        observed_directories = {
+            snapshot.root,
+            *(
+                path
+                for path in snapshot.root.rglob("*")
+                if path.is_dir() and path not in snapshot.scratch
+            ),
+        }
+        unexpected_files = observed_files - set(snapshot.bindings)
+        unexpected_directories = observed_directories - set(snapshot.directories)
+        if (
+            set(snapshot.bindings) - observed_files
+            or set(snapshot.directories) - observed_directories
+            or any(
+                not any(item == path or item in path.parents for item in snapshot.scratch)
+                for path in unexpected_files | unexpected_directories
+            )
+        ):
+            raise RuntimeError
+        for path, bound in snapshot.bindings.items():
+            require_file_unchanged(path, bound)
+        for path, identity in snapshot.directories.items():
+            if _runtime_directory_identity(path) != identity:
+                raise RuntimeError
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError("candidate snapshot changed") from exc
+
+
+@contextmanager
+def _private_candidate_snapshot(
+    repo_root: Path,
+    expected_git_sha: str,
+    module_path: Path,
+):
+    temporary = Path(tempfile.mkdtemp(prefix="google-live-candidate-"))
+    snapshot_root = temporary / "candidate"
+    try:
+        object_format, entries = _candidate_tree_entries(
+            repo_root, expected_git_sha, module_path
+        )
+        prefix = module_path.as_posix().rstrip("/")
+        archive = _git_output(
+            repo_root,
+            "archive",
+            "--format=tar",
+            expected_git_sha,
+            prefix,
+            f":(exclude){prefix}/.venv311",
+        )
+        extracted = set()
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as stream:
+            for member in stream.getmembers():
+                if member.isdir():
+                    continue
+                if not member.isfile() or member.name not in entries:
+                    raise RuntimeError("candidate Git archive is invalid")
+                source = stream.extractfile(member)
+                if source is None:
+                    raise RuntimeError("candidate Git archive is invalid")
+                content = source.read()
+                object_id, _mode = entries[member.name]
+                if (
+                    _git_blob_digest(content, object_format) != object_id
+                    or content.startswith(b"version https://git-lfs.github.com/spec/v1\n")
+                ):
+                    raise RuntimeError("candidate Git archive content is invalid")
+                relative = Path(member.name).relative_to(module_path)
+                _write_private_snapshot_file(snapshot_root / relative, content)
+                extracted.add(member.name)
+        if extracted != set(entries):
+            raise RuntimeError("candidate Git archive is incomplete")
+        snapshot = _seal_candidate_snapshot(snapshot_root)
+        _verify_candidate_snapshot(snapshot)
+        yield snapshot_root
+        _verify_candidate_snapshot(snapshot)
+    finally:
+        _make_runtime_writable(temporary)
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
 @contextmanager
 def _private_pytest_runtime(
     repo_root: Path,
     expected_git_sha: str,
+    *,
+    candidate_root: Path | None = None,
 ):
     temporary = Path(tempfile.mkdtemp(prefix="google-live-pytest-runtime-"))
+    pycache = Path(tempfile.mkdtemp(prefix="google-live-pycache-"))
     try:
+        candidate = candidate_root or repo_root
+        candidate_import_names = set()
+        for source in candidate.rglob("*.py"):
+            relative = source.relative_to(candidate)
+            if "__pycache__" in relative.parts:
+                continue
+            candidate_import_names.add(
+                relative.stem if len(relative.parts) == 1 else relative.parts[0]
+            )
+        candidate_import_names.discard("opuslib_next")
         manifest_content, manifest = _load_trusted_pytest_runtime_manifest(
             repo_root,
             expected_git_sha,
@@ -1287,9 +1489,12 @@ def _private_pytest_runtime(
                 }
             ),
             "trusted": [str(packages)],
-            "repo": str(repo_root),
+            "repo": str(candidate),
+            "liveRepo": str(repo_root),
+            "candidateImportNames": sorted(candidate_import_names),
             "dependencies": [str(path) for path in _approved_package_roots()],
             "plugin": str(plugin),
+            "pycache": str(pycache),
         })
         runtime.manifest_content = manifest_content
         runtime.manifest = manifest
@@ -1300,12 +1505,15 @@ def _private_pytest_runtime(
     finally:
         _make_runtime_writable(temporary)
         shutil.rmtree(temporary, ignore_errors=True)
+        shutil.rmtree(pycache, ignore_errors=True)
 
 
 def _pytest_command(runtime: Mapping[str, Any], *arguments: str) -> list[str]:
     return [
         sys.executable,
         "-I",
+        "-X",
+        f"pycache_prefix={runtime['pycache']}",
         "-c",
         _PYTEST_BOOTSTRAP,
         json.dumps(runtime, separators=(",", ":")),
@@ -1431,23 +1639,39 @@ def _produce(
     nodes = parse_manifest(manifest_bound.content)
     verify_repository()
     child_environment = _pytest_child_environment()
-    with _private_pytest_runtime(
-        repo_root,
-        identity["gitSha"],
-    ) as pytest_runtime:
-        runtime_manifest_content = pytest_runtime.manifest_content
-        collect = run(
-            _pytest_command(
-                pytest_runtime,
-                *approved_test_files,
-                "--collect-only",
-                "-qq",
-            ),
-            cwd=repo_root,
-            env=child_environment,
-        )
-        if collect.returncode != 0:
-            raise RuntimeError("pytest collection failed")
+    if run is _default_run:
+        git_root = Path(
+            _git_output(repo_root, "rev-parse", "--show-toplevel").decode().strip()
+        ).resolve(strict=True)
+        module_path = repo_root.relative_to(git_root)
+    else:
+        git_root = repo_root
+        module_path = Path(".")
+
+    def candidate_snapshot():
+        if run is _default_run:
+            return _private_candidate_snapshot(git_root, identity["gitSha"], module_path)
+        return nullcontext(repo_root)
+
+    with candidate_snapshot() as candidate_root:
+        with _private_pytest_runtime(
+            repo_root,
+            identity["gitSha"],
+            candidate_root=candidate_root,
+        ) as pytest_runtime:
+            runtime_manifest_content = pytest_runtime.manifest_content
+            collect = run(
+                _pytest_command(
+                    pytest_runtime,
+                    *approved_test_files,
+                    "--collect-only",
+                    "-qq",
+                ),
+                cwd=candidate_root,
+                env=child_environment,
+            )
+            if collect.returncode != 0:
+                raise RuntimeError("pytest collection failed")
     verify_repository()
     collected = [
         line for line in collect.stdout.splitlines() if NODE_PATTERN.fullmatch(line)
@@ -1465,25 +1689,27 @@ def _produce(
     published_junit: BoundFile | None = None
     completed_successfully = False
     try:
-        with _private_pytest_runtime(
-            repo_root,
-            identity["gitSha"],
-        ) as pytest_runtime:
-            if not secrets.compare_digest(
-                runtime_manifest_content,
-                pytest_runtime.manifest_content,
-            ):
-                raise RuntimeError("trusted pytest runtime manifest changed")
-            completed = run(
-                _pytest_command(
-                    pytest_runtime,
-                    *nodes,
-                    f"--junitxml={temporary_path}",
-                    "-q",
-                ),
-                cwd=repo_root,
-                env=child_environment,
-            )
+        with candidate_snapshot() as candidate_root:
+            with _private_pytest_runtime(
+                repo_root,
+                identity["gitSha"],
+                candidate_root=candidate_root,
+            ) as pytest_runtime:
+                if not secrets.compare_digest(
+                    runtime_manifest_content,
+                    pytest_runtime.manifest_content,
+                ):
+                    raise RuntimeError("trusted pytest runtime manifest changed")
+                completed = run(
+                    _pytest_command(
+                        pytest_runtime,
+                        *nodes,
+                        f"--junitxml={temporary_path}",
+                        "-q",
+                    ),
+                    cwd=candidate_root,
+                    env=child_environment,
+                )
         if completed.returncode != 0:
             raise RuntimeError("pytest failed; deterministic evidence was not published")
         normalized = canonicalize_junit_summary(read_bound_file(temporary_path).content)
