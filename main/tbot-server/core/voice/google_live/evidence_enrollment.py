@@ -157,6 +157,7 @@ class _EvidenceEnrollmentState:
     quiet_setup_response_generation: int | None = field(default=None, repr=False)
     quiet_response_started_generation: int | None = field(default=None, repr=False)
     quiet_response_completed_generation: int | None = field(default=None, repr=False)
+    quiet_forwarded_output_chunks: int = 0
     quiet_semantic_eligible: bool = True
 
 
@@ -661,6 +662,26 @@ class EvidenceEnrollmentRegistry:
         return valid
 
     @_synchronized
+    def record_quiet_forwarded_output(
+        self, journey_id: str, *, response_generation: int
+    ) -> bool:
+        self._prepare()
+        enrollment = self._active.get(journey_id)
+        if enrollment is None or enrollment.semantic_kind != "quiet":
+            return False
+        valid = bool(
+            enrollment.quiet_semantic_eligible
+            and enrollment.quiet_response_started_generation
+            == response_generation
+            and enrollment.quiet_response_completed_generation is None
+        )
+        if not valid:
+            enrollment.quiet_semantic_eligible = False
+            return False
+        enrollment.quiet_forwarded_output_chunks += 1
+        return True
+
+    @_synchronized
     def record_candidate_interrupt(
         self,
         journey_id: str,
@@ -1017,6 +1038,7 @@ class EvidenceEnrollmentRegistry:
                 "quietSetupResponseGeneration": enrollment.quiet_setup_response_generation,
                 "quietResponseStartedGeneration": enrollment.quiet_response_started_generation,
                 "quietResponseCompletedGeneration": enrollment.quiet_response_completed_generation,
+                "quietForwardedOutputChunks": enrollment.quiet_forwarded_output_chunks,
                 "quietSemanticEligible": enrollment.quiet_semantic_eligible,
             }
         return {}

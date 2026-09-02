@@ -510,12 +510,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 mode = "invalid"
             observation_end = self._evidence_candidate_observation_ended_at
             duration_ms = (
-                max(
-                    1,
-                    int(
-                        (observation_end - self._evidence_candidate_scope_started_at)
-                        * 1000
-                    ),
+                int(
+                    (observation_end - self._evidence_candidate_scope_started_at)
+                    * 1000
                 )
                 if isinstance(observation_end, (int, float))
                 and observation_end >= self._evidence_candidate_scope_started_at
@@ -577,15 +574,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
         except Exception:
             snapshot = {}
             mode = "invalid"
-        duration_ms = max(
-            1,
-            int(
-                (
-                    (self._evidence_candidate_observation_ended_at or 0)
-                    - self._evidence_candidate_scope_started_at
-                )
-                * 1000
-            ),
+        observation_end = self._evidence_candidate_observation_ended_at
+        duration_ms = (
+            int((observation_end - self._evidence_candidate_scope_started_at) * 1000)
+            if isinstance(observation_end, (int, float))
+            and observation_end >= self._evidence_candidate_scope_started_at
+            else 0
         )
         response_duration_ms = (
             max(
@@ -602,7 +596,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             and isinstance(self._evidence_quiet_response_ended_at, (int, float))
             else 0
         )
-        output_chunks = int(getattr(self, "_evidence_quiet_output_chunks", 0) or 0)
+        output_chunks = int(snapshot.get("quietForwardedOutputChunks", 0) or 0)
         forbidden_zero = all(
             counters.get(name) == 0
             for name in (
@@ -1233,9 +1227,6 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self._ensure_evidence_live_identity()
             if self._evidence_candidate_observation_ended_at is None:
                 self._evidence_candidate_observation_ended_at = time.monotonic()
-                self._evidence_quiet_output_chunks = int(
-                    getattr(self._bridge, "_output_chunk_count", 0) or 0
-                )
             cleanup_result = await self._close_live_resources(
                 evidence_finalize=True
             )
@@ -2343,6 +2334,24 @@ class GoogleLiveProvider(VoiceSessionProvider):
         ):
             return None
         return registry, journey_id
+
+    def _record_quiet_forwarded_output(self, response_generation):
+        registry = getattr(self.conn, "evidence_registry", None)
+        journey_id = getattr(self.conn, "google_live_evidence_journey_id", None)
+        if (
+            registry is None
+            or not isinstance(journey_id, str)
+            or not isinstance(response_generation, int)
+        ):
+            return False
+        try:
+            return bool(
+                registry.record_quiet_forwarded_output(
+                    journey_id, response_generation=response_generation
+                )
+            )
+        except Exception:
+            return False
 
     def _record_candidate_interrupt(self, old_generation, new_generation):
         scope = self._candidate_semantic_registry_scope()
@@ -4113,6 +4122,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             tool_call_handler=self._handle_tool_call_event,
             tool_call_cancellation_handler=self._handle_tool_call_cancellation_event,
             model_output_unblocked_handler=self._on_model_output_unblocked,
+            model_output_forwarded_handler=self._record_quiet_forwarded_output,
             output_judge=self._build_output_judge(),
         )
         self._ensure_required_aec_ready()

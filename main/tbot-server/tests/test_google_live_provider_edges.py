@@ -930,33 +930,59 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._interaction.start_live_connection("live-quiet")
         provider._reset_candidate_scope_measurements()
         provider._close_live_resources = AsyncMock(return_value=None)
-        provider._bridge = SimpleNamespace(_output_chunk_count=1)
+        conn.google_live_live_connection_id = "live-quiet"
+        provider._bridge = google_live_module.GoogleLiveAudioBridge(
+            conn,
+            _Client(),
+            conn.logger,
+            response_id_getter=provider.current_response_id,
+            response_cancelled_checker=provider.is_response_cancelled,
+            model_output_forwarded_handler=provider._record_quiet_forwarded_output,
+        )
+        provider._bridge._send_binary_audio_message = AsyncMock()
+        provider._bridge._send_tts_message = AsyncMock()
 
         provider._mark_clean_user_turn_opened("audio_input")
         response_clock = [10.0]
+        provider._evidence_candidate_scope_started_at = 9.0
         with patch.object(
             google_live_module.time, "monotonic", side_effect=lambda: response_clock[0]
         ):
-            await provider._handle_live_event(
-                {"type": "audio_start", "response_generation": 1}
-            )
+            start = {"type": "audio_start", "response_generation": 1}
+            await provider._handle_live_event(start)
+            await provider._bridge.handle_event(start)
+            chunk = {
+                "type": "audio",
+                "response_generation": 1,
+                "audio": b"pcm",
+            }
+            await provider._handle_live_event(chunk)
+            await provider._bridge.handle_event(chunk)
             response_clock[0] = 12.4
-            await provider._handle_live_event(
-                {"type": "audio_end", "response_generation": 1}
-            )
+            end = {"type": "audio_end", "response_generation": 1}
+            await provider._handle_live_event(end)
+            await provider._bridge.handle_event(end)
+            result = await provider.finalize_evidence()
         causal = registry.safe_snapshot("candidate.quiet-1")
         self.assertTrue(causal["quietSetupTurnConsumed"], causal)
         self.assertTrue(causal["quietSemanticEligible"], causal)
         self.assertEqual(causal["quietSetupResponseGeneration"], 1)
         self.assertEqual(causal["quietResponseStartedGeneration"], 1)
         self.assertEqual(causal["quietResponseCompletedGeneration"], 1)
-        result = await provider.finalize_evidence()
-
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(
             result["quietSemanticEvidence"]["status"],
             "PASS",
             result["quietSemanticEvidence"],
+        )
+        provider._evidence_candidate_observation_ended_at = (
+            provider._evidence_candidate_scope_started_at
+        )
+        self.assertEqual(
+            provider._candidate_quiet_semantic_evidence(
+                dict(provider._evidence_candidate_counters)
+            )["status"],
+            "FAIL",
         )
         rendered = [
             (args[0].format(*args[1:]) if len(args) > 1 else str(args[0]))

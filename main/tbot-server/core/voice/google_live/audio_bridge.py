@@ -79,6 +79,7 @@ class GoogleLiveAudioBridge:
         tool_call_handler=None,
         tool_call_cancellation_handler=None,
         model_output_unblocked_handler=None,
+        model_output_forwarded_handler=None,
         output_judge=None,
     ):
         self.conn = conn
@@ -97,6 +98,7 @@ class GoogleLiveAudioBridge:
         self._tool_call_handler = tool_call_handler
         self._tool_call_cancellation_handler = tool_call_cancellation_handler
         self._model_output_unblocked_handler = model_output_unblocked_handler
+        self._model_output_forwarded_handler = model_output_forwarded_handler
         self._aec_processor = self._build_aec_processor()
         self._aec_reference_resampler_rates = None
         self._aec_reference_resampler_state = None
@@ -318,6 +320,8 @@ class GoogleLiveAudioBridge:
                 audio_format=event.get("audio_format"),
                 mime_type=event.get("mime_type"),
             )
+            if callable(self._model_output_forwarded_handler):
+                self._model_output_forwarded_handler(self._active_response_id)
             journey_id = getattr(
                 self.conn, "google_live_evidence_journey_id", None
             )
