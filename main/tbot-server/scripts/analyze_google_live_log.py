@@ -341,9 +341,7 @@ P_EVIDENCE_CANDIDATE_FALLBACK = re.compile(
     r"journey_id=(?P<journey_id>[A-Za-z0-9._:-]{1,64}) "
     r"fallbacks=(?P<fallbacks>\d+)$"
 )
-_CANDIDATE_SEMANTIC_HINT = re.compile(
-    r"Google Live evidence_candidate_(?:intent_match|intent_replacement|quiet|fallback)\b"
-)
+_CANDIDATE_SEMANTIC_HINT = re.compile(r"Google Live evidence_candidate_")
 _CANDIDATE_SEMANTIC_PATTERNS = (
     P_EVIDENCE_CANDIDATE_INTENT_MATCH,
     P_EVIDENCE_CANDIDATE_INTENT_REPLACEMENT,
@@ -1564,6 +1562,68 @@ def _bounded_server_window(lines: list[str], journey_id: str) -> list[str]:
     ):
         raise ValueError("requested reliability anchors are not server scoped")
     target_connection_id = start.group("connection_id")
+
+    def authenticated_semantic_foreign_window(
+        foreign_start_index: int,
+        foreign_end_index: int,
+        foreign_match: re.Match[str],
+    ) -> bool:
+        foreign_end_match = P_RELIABILITY_WINDOW_END.search(
+            lines[foreign_end_index]
+        )
+        try:
+            identity = json.loads(foreign_match.group("candidate_identity"))
+        except json.JSONDecodeError:
+            return False
+        foreign_journey = foreign_match.group("journey_id")
+        foreign_server_start = _parse_utc_iso(
+            foreign_match.group("server_start_utc")
+        )
+        foreign_server_end = (
+            _parse_utc_iso(foreign_end_match.group("server_end_utc"))
+            if foreign_end_match is not None
+            else None
+        )
+        kind = foreign_match.group("semantic_proof_kind")
+        mode = foreign_match.group("quiet_mode")
+        semantic_claim_valid = (
+            foreign_match.group("journeys") == "bargein"
+            and kind == "bargein-intent"
+            and mode == "none"
+        ) or (
+            foreign_match.group("journeys") == "quiet"
+            and kind == "quiet"
+            and mode in {"silence", "robot_speaking"}
+        )
+        return bool(
+            foreign_end_match
+            and foreign_journey
+            and foreign_match.group("window_id") == foreign_journey
+            and foreign_end_match.group("window_id") == foreign_journey
+            and foreign_match.group("proof_profile") == "candidate-lifecycle"
+            and foreign_match.group("server_issued") == "true"
+            and foreign_match.group("connection_id")
+            and foreign_match.group("live_connection_id")
+            and foreign_match.group("initial_live_connection_id")
+            and foreign_match.group("peer_identity_hash")
+            and foreign_server_start
+            and foreign_server_end
+            and foreign_server_end >= foreign_server_start
+            and _candidate_identity_valid(identity)
+            and semantic_claim_valid
+            and foreign_start_index < foreign_end_index
+        )
+
+    authenticated_semantic_foreign_intervals = [
+        (foreign_start, foreign_end, foreign_match.group("journey_id"))
+        for foreign_start, foreign_end, foreign_match in intervals
+        if foreign_match.group("journey_id") != journey_id
+        and foreign_start < end_index
+        and foreign_end > start_index
+        and authenticated_semantic_foreign_window(
+            foreign_start, foreign_end, foreign_match
+        )
+    ]
     foreign_intervals = [
         (
             foreign_start,
@@ -1593,11 +1653,7 @@ def _bounded_server_window(lines: list[str], journey_id: str) -> list[str]:
         foreign_end = P_RELIABILITY_WINDOW_END.search(line)
         if foreign_start or foreign_end:
             continue
-        scoped_marker, scoped_valid = _scoped_marker_validation(line)
-        if scoped_marker and not scoped_valid:
-            raise ValueError("malformed scoped evidence marker")
         marker_journey = re.search(r"\bjourney_id=([A-Za-z0-9._:-]+)", line)
-        marker_connection = re.search(r"\bconnection_id=([A-Za-z0-9._:-]+)", line)
         semantic_marker = next(
             (
                 match
@@ -1606,6 +1662,23 @@ def _bounded_server_window(lines: list[str], journey_id: str) -> list[str]:
             ),
             None,
         )
+        if _CANDIDATE_SEMANTIC_HINT.search(line) is not None:
+            semantic_foreign_owners = [
+                foreign_journey
+                for foreign_start_index, foreign_end_index, foreign_journey
+                in authenticated_semantic_foreign_intervals
+                if foreign_start_index < index < foreign_end_index
+                and marker_journey is not None
+                and foreign_journey == marker_journey.group(1)
+            ]
+            if len(semantic_foreign_owners) == 1 and semantic_marker is not None:
+                continue
+            if len(semantic_foreign_owners) > 1:
+                raise ValueError("ambiguous foreign candidate semantic marker")
+        scoped_marker, scoped_valid = _scoped_marker_validation(line)
+        if scoped_marker and not scoped_valid:
+            raise ValueError("malformed scoped evidence marker")
+        marker_connection = re.search(r"\bconnection_id=([A-Za-z0-9._:-]+)", line)
         server_transition = P_SERVER_CONNECTION_TRANSITION.search(line)
         if server_transition is not None:
             if server_transition.group("to_journey_id") != journey_id:
@@ -1739,6 +1812,8 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
     receive_loops_active = 0
     max_receive_loops_active = 0
     response_starts: dict[Any, int] = defaultdict(int)
+    response_start_lines: dict[tuple[str, str, int], int] = {}
+    response_end_lines: dict[tuple[str, str, int], int] = {}
     replay_counts_by_reopen: dict[str, int] = {}
     current_reopen: str | None = None
     current_reopen_ready = False
@@ -2361,6 +2436,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     int(scoped_start.group("response_id")),
                 )
                 response_starts[response_key] += 1
+                response_start_lines.setdefault(response_key, line_number)
                 response_scope = response_key[:2]
                 active_response_id = scoped_active_responses.get(response_scope)
                 if active_response_id is not None:
@@ -2399,6 +2475,9 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                     scoped_end.group("live_connection_id"),
                 )
                 response_id = int(scoped_end.group("response_id"))
+                response_end_lines.setdefault(
+                    (*response_scope, response_id), line_number
+                )
                 if scoped_active_responses.get(response_scope) != response_id:
                     failures.append(
                         _failure(
@@ -2495,6 +2574,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         "ownerMigrationCount": 0,
                         "cancelledResponseId": int(scoped_interrupt_start.group("cancelled")),
                         "replacementResponseId": int(scoped_interrupt_start.group("next")),
+                        "line": line_number,
                         "phase": 0,
                         "orderInvalid": False,
                     }
@@ -3911,11 +3991,57 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             if len(candidate_intent_replacements) == 1
             else None
         )
+        correlated = (
+            reported_correlations[0]
+            if len(reported_correlations) == 1
+            and reported_correlations[0].get("status") == "PASS"
+            else None
+        )
+        old_start_line = None
+        replacement_start_line = None
+        replacement_end_line = None
+        interrupt_line = None
+        if correlated is not None:
+            old_key = (
+                correlated["connectionId"],
+                correlated["cancelledLiveConnectionId"],
+                correlated["cancelledResponseId"],
+            )
+            replacement_key = (
+                correlated["connectionId"],
+                correlated["replacementLiveConnectionId"],
+                correlated["replacementResponseId"],
+            )
+            old_start_line = response_start_lines.get(old_key)
+            replacement_start_line = response_start_lines.get(replacement_key)
+            replacement_end_line = response_end_lines.get(replacement_key)
+            interrupt_line = next(
+                (
+                    item["line"]
+                    for item in scoped_interrupts
+                    if item["connectionId"] == correlated["connectionId"]
+                    and item["cancelledLiveConnectionId"]
+                    == correlated["cancelledLiveConnectionId"]
+                    and item["replacementLiveConnectionId"]
+                    == correlated["replacementLiveConnectionId"]
+                    and item["cancelledResponseId"]
+                    == correlated["cancelledResponseId"]
+                    and item["replacementResponseId"]
+                    == correlated["replacementResponseId"]
+                ),
+                None,
+            )
         ordering_valid = bool(
             initial
             and newest
             and replacement
-            and initial["line"] < newest["line"] < replacement["line"]
+            and old_start_line is not None
+            and replacement_start_line is not None
+            and replacement_end_line is not None
+            and interrupt_line is not None
+            and initial["line"] < old_start_line < newest["line"] < interrupt_line
+            and interrupt_line < replacement_start_line
+            and replacement_start_line < replacement_end_line < replacement["line"]
         )
         initial_matched = bool(initial and initial["matched"])
         newest_matched = bool(

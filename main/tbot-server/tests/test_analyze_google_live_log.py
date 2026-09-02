@@ -716,6 +716,42 @@ def test_cli_reliability_window_reads_opened_inode_after_path_replacement(tmp_pa
     assert json.loads(out.read_text(encoding="utf-8"))["status"] == "PASS"
 
 
+def test_cli_interleaved_authenticated_semantic_windows_are_attributed_independently(tmp_path):
+    windows = {
+        "bargein-journey-1": _candidate_semantic_bargein_window(),
+        "quiet-journey-1": _candidate_semantic_quiet_window(),
+    }
+    for target_id, foreign_id in (
+        ("bargein-journey-1", "quiet-journey-1"),
+        ("quiet-journey-1", "bargein-journey-1"),
+    ):
+        target = windows[target_id]
+        foreign = windows[foreign_id]
+        log = tmp_path / f"{target_id}.log"
+        out = tmp_path / f"{target_id}.json"
+        log.write_text(
+            "\n".join(
+                [target[0], foreign[0], *foreign[1:-1], foreign[-1], *target[1:]]
+            ),
+            encoding="utf-8",
+        )
+
+        exit_code = main(
+            [
+                "--log",
+                str(log),
+                "--reliability-window",
+                "--journey-id",
+                target_id,
+                "--out-json",
+                str(out),
+            ]
+        )
+
+        assert exit_code == 0, json.loads(out.read_text(encoding="utf-8"))
+        assert json.loads(out.read_text(encoding="utf-8"))["status"] == "PASS"
+
+
 def _valid_log_verdict(**overrides):
     verdict = {
         "schemaVersion": "google-live-reliability.v1",
@@ -845,6 +881,27 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                 "replacementOwnedByNewestGeneration": True,
             },
         )
+
+    def test_candidate_semantic_unknown_namespace_family_fails_closed_without_leaking(self):
+        private_value = "PRIVATE-TRANSCRIPT-VALUE"
+        lines = _candidate_semantic_bargein_window()
+        lines.insert(
+            -1,
+            _provider_info(
+                20,
+                "Google Live evidence_candidate_intent_match_v2 "
+                f"journey_id=bargein-journey-1 raw_text={private_value}",
+            ),
+        )
+
+        verdict = self._analyze(lines)
+
+        self.assertEqual(verdict["status"], "FAIL", verdict)
+        self.assertIn(
+            "MALFORMED_CANDIDATE_SEMANTIC_MARKER",
+            [item["code"] for item in verdict["failures"]],
+        )
+        self.assertNotIn(private_value, json.dumps(verdict))
 
     def test_authenticated_candidate_stages_fail_closed_without_semantic_markers(self):
         for journey_type in ("bargein", "quiet"):
@@ -1072,6 +1129,69 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                 self.assertEqual(verdict["status"], "FAIL", verdict)
                 self.assertFalse(
                     verdict["candidateSemanticEvidence"]["latestIntentMatched"]
+                )
+
+    def test_candidate_bargein_semantic_markers_must_follow_lifecycle_causality(self):
+        base = _candidate_semantic_bargein_window()
+        initial_index = next(
+            index for index, line in enumerate(base) if "role=initial" in line
+        )
+        old_start_index = next(
+            index
+            for index, line in enumerate(base)
+            if "evidence_response_started" in line and "response_id=7" in line
+        )
+        replacement_index = next(
+            index
+            for index, line in enumerate(base)
+            if "evidence_candidate_intent_replacement" in line
+        )
+        interrupt_index = next(
+            index for index, line in enumerate(base) if "user_interrupt_started" in line
+        )
+        replacement_end_index = next(
+            index
+            for index, line in enumerate(base)
+            if "evidence_response_ended" in line and "response_id=8" in line
+        )
+
+        cases = {}
+        initial_late = list(base)
+        initial_marker = initial_late.pop(initial_index)
+        old_start_index = next(
+            index
+            for index, line in enumerate(initial_late)
+            if "evidence_response_started" in line and "response_id=7" in line
+        )
+        initial_late.insert(old_start_index + 1, initial_marker)
+        cases["initial-after-old-start"] = initial_late
+
+        replacement_before_interrupt = list(base)
+        marker = replacement_before_interrupt.pop(replacement_index)
+        interrupt_index = next(
+            index
+            for index, line in enumerate(replacement_before_interrupt)
+            if "user_interrupt_started" in line
+        )
+        replacement_before_interrupt.insert(interrupt_index, marker)
+        cases["replacement-before-interrupt"] = replacement_before_interrupt
+
+        replacement_before_end = list(base)
+        marker = replacement_before_end.pop(replacement_index)
+        replacement_end_index = next(
+            index
+            for index, line in enumerate(replacement_before_end)
+            if "evidence_response_ended" in line and "response_id=8" in line
+        )
+        replacement_before_end.insert(replacement_end_index, marker)
+        cases["replacement-before-end"] = replacement_before_end
+
+        for name, lines in cases.items():
+            with self.subTest(name=name):
+                verdict = self._analyze(lines)
+                self.assertEqual(verdict["status"], "FAIL", verdict)
+                self.assertFalse(
+                    verdict["candidateSemanticEvidence"]["orderingValid"]
                 )
 
     def test_candidate_quiet_semantic_evidence_passes_for_both_exact_modes(self):
