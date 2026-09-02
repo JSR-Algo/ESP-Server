@@ -555,6 +555,9 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "set(IDF_VERSION_MAJOR 5)\nset(IDF_VERSION_MINOR 5)\nset(IDF_VERSION_PATCH 4)\n",
         encoding="utf-8",
     )
+    cjson_source = esp_idf / "components/json/cJSON/cJSON.c"
+    cjson_source.parent.mkdir(parents=True)
+    cjson_source.write_text("/* candidate ESP-IDF cJSON fixture */\n", encoding="utf-8")
     _git(esp_idf, "init", "-b", "candidate")
     _git(esp_idf, "config", "user.email", "candidate@example.invalid")
     _git(esp_idf, "config", "user.name", "Candidate Test")
@@ -6573,6 +6576,124 @@ def test_full_esp_lane_maps_task06_roots_and_rejects_skips(candidate_file: Path)
     assert environment["TASK06_BACKEND_ROOT"] == candidate["repositories"]["backend"]["path"]
     assert environment["TASK06_FIRMWARE_ROOT"] == candidate["repositories"]["firmware"]["path"]
     assert lane.reject_pytest_skips is True
+
+
+def test_firmware_handler_environment_binds_candidate_esp_idf_cjson(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    cjson = Path(candidate["tools"]["espIdf"]["root"]) / "components/json/cJSON"
+
+    environment = gate._child_environment(
+        candidate, {"CJSON_DIR": "/hostile/ambient/cjson"}, lane,
+    )
+
+    assert environment is not None
+    assert environment["CJSON_DIR"] == str(cjson.resolve(strict=True))
+
+
+@pytest.mark.parametrize("lane_name", ["firmware-renderer", "firmware-backward-compatibility"])
+def test_non_handler_firmware_environment_does_not_receive_cjson(
+    candidate_file: Path, lane_name: str,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(item for item in gate.FULL_LANES if item.name == lane_name)
+
+    environment = gate._child_environment(
+        candidate, {"CJSON_DIR": "/hostile/ambient/cjson"}, lane,
+    )
+
+    assert environment is not None
+    assert "CJSON_DIR" not in environment
+
+
+def test_firmware_handler_environment_rejects_missing_cjson_source(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    cjson_source = (
+        Path(candidate["tools"]["espIdf"]["root"]) / "components/json/cJSON/cJSON.c"
+    )
+    cjson_source.unlink()
+
+    assert gate._child_environment(candidate, {}, lane) is None
+
+
+def test_firmware_handler_environment_rejects_cjson_directory_symlink(
+    candidate_file: Path, tmp_path: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    cjson = Path(candidate["tools"]["espIdf"]["root"]) / "components/json/cJSON"
+    cjson.rename(cjson.with_name("real-cjson"))
+    cjson.symlink_to(cjson.with_name("real-cjson"), target_is_directory=True)
+
+    assert gate._child_environment(candidate, {}, lane) is None
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "directory"])
+def test_firmware_handler_environment_rejects_non_regular_cjson_source(
+    candidate_file: Path, tmp_path: Path, replacement: str,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    cjson_source = (
+        Path(candidate["tools"]["espIdf"]["root"]) / "components/json/cJSON/cJSON.c"
+    )
+    cjson_source.unlink()
+    if replacement == "symlink":
+        target = tmp_path / "other-cJSON.c"
+        target.write_text("/* hostile replacement */\n", encoding="utf-8")
+        cjson_source.symlink_to(target)
+    else:
+        cjson_source.mkdir()
+
+    assert gate._child_environment(candidate, {}, lane) is None
+
+
+@pytest.mark.parametrize("root_kind", ["relative", "symlink"])
+def test_firmware_handler_environment_rejects_noncanonical_esp_idf_root(
+    candidate_file: Path, tmp_path: Path, root_kind: str,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    esp_idf = Path(candidate["tools"]["espIdf"]["root"])
+    if root_kind == "relative":
+        candidate["tools"]["espIdf"]["root"] = "relative/esp-idf"
+    else:
+        alias = tmp_path / "esp-idf-alias"
+        alias.symlink_to(esp_idf, target_is_directory=True)
+        candidate["tools"]["espIdf"]["root"] = str(alias)
+
+    assert gate._child_environment(candidate, {}, lane) is None
+
+
+def test_firmware_handler_command_receives_usable_candidate_cjson_with_nonexistent_home(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    expected_cjson = (
+        Path(candidate["tools"]["espIdf"]["root"]) / "components/json/cJSON"
+    ).resolve(strict=True)
+    command = (
+        sys.executable, "-c",
+        "import os,pathlib;"
+        "root=pathlib.Path(os.environ['CJSON_DIR']);"
+        "print(os.environ['HOME']);"
+        "print(root.resolve(strict=True));"
+        "print((root/'cJSON.c').read_text().strip())",
+    )
+    environment = gate._child_environment(candidate, {}, lane)
+    result = gate.run_bounded_command(
+        list(command), cwd=Path(candidate["repositories"]["firmware"]["path"]),
+        timeout_sec=5.0, max_output_bytes=4096, env=environment,
+    )
+
+    assert result.error is None and result.returncode == 0
+    assert result.stdout.splitlines() == [
+        "/nonexistent", str(expected_cjson), "/* candidate ESP-IDF cJSON fixture */",
+    ]
 
 
 def test_assignment_lane_identity_is_derived_only_from_candidate(

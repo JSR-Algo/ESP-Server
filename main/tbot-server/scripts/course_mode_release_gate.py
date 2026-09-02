@@ -3096,6 +3096,32 @@ def _assignment_runtime_root(
         return None
 
 
+def _firmware_handler_cjson_directory(candidate: dict) -> str | None:
+    try:
+        value = candidate["tools"]["espIdf"]["root"]
+        if not isinstance(value, str) or not value:
+            return None
+        root = Path(value)
+        if not root.is_absolute() or root.is_symlink():
+            return None
+        resolved_root = root.resolve(strict=True)
+        if root != resolved_root or not root.is_dir():
+            return None
+        cjson = root / "components/json/cJSON"
+        if cjson.is_symlink():
+            return None
+        resolved_cjson = cjson.resolve(strict=True)
+        if cjson != resolved_cjson or not cjson.is_dir():
+            return None
+        source = cjson / "cJSON.c"
+        metadata = source.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            return None
+        return str(cjson)
+    except (KeyError, OSError, TypeError, ValueError):
+        return None
+
+
 def _child_environment(
     candidate: dict,
     source: Mapping[str, str],
@@ -3122,6 +3148,11 @@ def _child_environment(
             Path(candidate["repositories"]["backend"]["path"]) / "contracts"
         ),
     })
+    if lane.name == "firmware-handler":
+        cjson_directory = _firmware_handler_cjson_directory(candidate)
+        if cjson_directory is None:
+            return None
+        environment["CJSON_DIR"] = cjson_directory
     required_environment = {}
     for name in _required_environment(lane):
         value = source.get(name)
