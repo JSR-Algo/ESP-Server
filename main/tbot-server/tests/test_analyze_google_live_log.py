@@ -232,6 +232,7 @@ def _candidate_semantic_quiet_window(mode="silence", **counts):
         "reconnects": 0,
         "fallbacks": 0,
         "stale_audio": 0,
+        "delivery_failures": 0,
     }
     expected.update(counts)
     scope = {**EVIDENCE_SCOPE, "journeyId": "quiet-journey-1"}
@@ -1287,6 +1288,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             "reconnect": {"reconnects": 1},
             "fallback": {"fallbacks": 1},
             "stale": {"stale_audio": 1},
+            "delivery-failure": {"delivery_failures": 1},
             "response": {"response_starts": 1},
         }
         for name, counts in cases.items():

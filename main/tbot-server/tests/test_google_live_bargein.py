@@ -616,8 +616,11 @@ class TurnIsolationBarrierTest(unittest.IsolatedAsyncioTestCase):
         bridge = _PrerollCapturingBridge(conn, _Client(), _Logger())
         sent_packets = []
 
-        async def fake_send_audio(_conn, packets):
+        async def fake_send_audio(_conn, packets, **kwargs):
             sent_packets.extend(packets if not isinstance(packets, bytes) else [packets])
+            kwargs["on_delivery_complete"](
+                len(packets) if not isinstance(packets, bytes) else 1
+            )
 
         with patch("core.handle.sendAudioHandle.sendAudio", fake_send_audio):
             await bridge.handle_event({"type": "audio_start"})

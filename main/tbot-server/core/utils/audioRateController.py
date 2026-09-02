@@ -97,19 +97,22 @@ class AudioRateController:
             self.pending_send_task.cancel()
             # After task cancellation, task will nextEventClean up during loop, no blocking wait
 
-        self.queue.clear()
+        self._drain_queue(RuntimeError("audio delivery reset"))
         self.play_position = 0
         self.start_timestamp = None  # Set by first audio packet
         self._last_queue_empty_time = 0  # Reset Time
         # RelatedEventProcess
         self._sync_queue_events()
 
-    def _drain_queue(self):
-        self.queue.clear()
+    def _drain_queue(self, error=None):
+        while self.queue:
+            item = self.queue.popleft()
+            if item[0] == "audio" and len(item) > 3 and callable(item[3]):
+                item[3](error or RuntimeError("audio delivery cancelled"))
         self._sync_queue_events()
         self._last_queue_empty_time = time.monotonic()
 
-    def add_audio(self, opus_packet):
+    def add_audio(self, opus_packet, on_sent=None, on_failed=None):
         """Add audio packet to queue"""
         # If queue was empty before, need adjustTimestampKeep playback time continuous
         # This way, during tool call wait, newly added audio will not play early
@@ -123,7 +126,10 @@ class AudioRateController:
                     f"Queue recovered from empty, reset timestamp, current play position: {self.play_position}ms, interval: {elapsed_since_empty:.0f}ms"
                 )
 
-        self.queue.append(("audio", opus_packet))
+        if on_sent is None and on_failed is None:
+            self.queue.append(("audio", opus_packet))
+        else:
+            self.queue.append(("audio", opus_packet, on_sent, on_failed))
         # RelatedEventProcess
         self._sync_queue_events()
 
@@ -181,7 +187,13 @@ class AudioRateController:
                 if self.start_timestamp is None:
                     self.start_timestamp = time.monotonic()
 
-                _, opus_packet = item
+                _, opus_packet, *delivery_callbacks = item
+                on_sent = (
+                    delivery_callbacks[0] if len(delivery_callbacks) > 0 else None
+                )
+                on_failed = (
+                    delivery_callbacks[1] if len(delivery_callbacks) > 1 else None
+                )
 
                 # Loop wait until time reached
                 while True:
@@ -209,13 +221,26 @@ class AudioRateController:
                 self.play_position += self.frame_duration
                 try:
                     await send_audio_callback(opus_packet)
-                except _NORMAL_TRANSPORT_CLOSE_EXCEPTIONS:
+                except asyncio.CancelledError as e:
+                    if callable(on_failed):
+                        on_failed(e)
                     raise
-                except _TRANSPORT_CLOSE_EXCEPTIONS:
+                except _NORMAL_TRANSPORT_CLOSE_EXCEPTIONS as e:
+                    if callable(on_failed):
+                        on_failed(e)
+                    raise
+                except _TRANSPORT_CLOSE_EXCEPTIONS as e:
+                    if callable(on_failed):
+                        on_failed(e)
                     raise
                 except Exception as e:
+                    if callable(on_failed):
+                        on_failed(e)
                     self.logger.bind(tag=TAG).error(f"Failed to send audio: {e}")
                     raise
+                else:
+                    if callable(on_sent):
+                        on_sent()
 
         # Clear after queue processedEvent
         self._drain_queue()
@@ -241,21 +266,21 @@ class AudioRateController:
                     await self.queue_has_data_event.wait()
 
                     await self.check_queue(send_audio_callback)
-            except asyncio.CancelledError:
-                self._drain_queue()
+            except asyncio.CancelledError as e:
+                self._drain_queue(e)
                 self.logger.bind(tag=TAG).debug("Audio sending loop stopped")
             except _NORMAL_TRANSPORT_CLOSE_EXCEPTIONS as e:
-                self._drain_queue()
+                self._drain_queue(e)
                 self.logger.bind(tag=TAG).info(
                     f"audio_output_transport_closed reason=normal_close detail={e}"
                 )
             except _TRANSPORT_CLOSE_EXCEPTIONS as e:
-                self._drain_queue()
+                self._drain_queue(e)
                 self.logger.bind(tag=TAG).warning(
                     f"audio_output_transport_closed reason=connection_closed detail={e}"
                 )
             except Exception as e:
-                self._drain_queue()
+                self._drain_queue(e)
                 self.logger.bind(tag=TAG).error(f"Audio send loop exception: {e}")
             finally:
                 if self.pending_send_task is current_task:

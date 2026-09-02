@@ -336,7 +336,8 @@ P_EVIDENCE_CANDIDATE_QUIET = re.compile(
     r"user_turns=(?P<user_turns>\d+) response_starts=(?P<response_starts>\d+) "
     r"response_ends=(?P<response_ends>\d+) interrupts=(?P<interrupts>\d+) "
     r"replacements=(?P<replacements>\d+) reconnects=(?P<reconnects>\d+) "
-    r"fallbacks=(?P<fallbacks>\d+) stale_audio=(?P<stale_audio>\d+)$"
+    r"fallbacks=(?P<fallbacks>\d+) stale_audio=(?P<stale_audio>\d+) "
+    r"delivery_failures=(?P<delivery_failures>\d+)$"
 )
 P_EVIDENCE_CANDIDATE_FALLBACK = re.compile(
     _CANDIDATE_PROVIDER_INFO_PREFIX
@@ -2315,6 +2316,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                         "reconnects",
                         "fallbacks",
                         "stale_audio",
+                        "delivery_failures",
                     )
                     numeric = {
                         name: parse_semantic_uint(groups, name)
@@ -4174,6 +4176,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             and quiet["reconnects"] == 0
             and quiet["fallbacks"] == 0
             and quiet["stale_audio"] == 0
+            and quiet["delivery_failures"] == 0
             and len(candidate_fallback_observations) == 1
             and candidate_fallback_observations[0]["fallbacks"] == 0
             and semantic_cleanup_valid

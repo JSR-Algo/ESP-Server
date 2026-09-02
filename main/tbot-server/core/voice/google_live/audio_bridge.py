@@ -80,6 +80,7 @@ class GoogleLiveAudioBridge:
         tool_call_cancellation_handler=None,
         model_output_unblocked_handler=None,
         model_output_forwarded_handler=None,
+        model_output_delivery_failed_handler=None,
         output_judge=None,
     ):
         self.conn = conn
@@ -99,6 +100,10 @@ class GoogleLiveAudioBridge:
         self._tool_call_cancellation_handler = tool_call_cancellation_handler
         self._model_output_unblocked_handler = model_output_unblocked_handler
         self._model_output_forwarded_handler = model_output_forwarded_handler
+        self._model_output_delivery_failed_handler = (
+            model_output_delivery_failed_handler
+        )
+        self._pending_output_deliveries = {}
         self._aec_processor = self._build_aec_processor()
         self._aec_reference_resampler_rates = None
         self._aec_reference_resampler_state = None
@@ -315,40 +320,12 @@ class GoogleLiveAudioBridge:
             self._output_byte_count += len(audio_bytes)
             self._log_first_audio_out_latency()
             self._record_turn_first_audio_latency()
-            forwarded_packet_count = await self._send_binary_audio_message(
+            await self._send_binary_audio_message(
                 audio_bytes,
                 audio_format=event.get("audio_format"),
                 mime_type=event.get("mime_type"),
+                response_generation=event.get("response_generation"),
             )
-            output_forwarded = bool(
-                isinstance(forwarded_packet_count, int)
-                and not isinstance(forwarded_packet_count, bool)
-                and forwarded_packet_count > 0
-            )
-            if output_forwarded and callable(self._model_output_forwarded_handler):
-                self._model_output_forwarded_handler(event.get("response_generation"))
-            journey_id = getattr(
-                self.conn, "google_live_evidence_journey_id", None
-            )
-            if (
-                output_forwarded
-                and isinstance(journey_id, str)
-                and journey_id
-            ):
-                self.logger.bind(tag="GoogleLive").info(
-                    "Google Live model_output_chunk_forwarded journey_id={} "
-                    "connection_id={} live_connection_id={} response_id={}",
-                    journey_id,
-                    str(getattr(self.conn, "session_id", "unknown")),
-                    str(
-                        getattr(
-                            self.conn,
-                            "google_live_live_connection_id",
-                            "none",
-                        )
-                    ),
-                    self._active_response_id,
-                )
             return True
 
         if event_type == "audio_end":
@@ -382,6 +359,7 @@ class GoogleLiveAudioBridge:
                 self._clear_lesson_prompt_output_gate()
                 return True
             flushed_packets = await self._flush_output_audio()
+            delivery_ok = await self._wait_for_output_deliveries()
             chunks = self._output_chunk_count
             byte_count = self._output_byte_count
             self.logger.bind(tag="GoogleLive").info(
@@ -395,6 +373,8 @@ class GoogleLiveAudioBridge:
             self.conn.google_live_audio_out_started_at = None
             self._active_response_id = None
             await self._send_tts_message("stop")
+            if not delivery_ok:
+                raise RuntimeError("Google Live model output delivery failed")
             # Lesson step prompts can span multiple Live turn segments (e.g. a
             # short filler "Tuyệt vời!" then the real greeting). Clearing the
             # gate on the first audio_end drops the introduction audio with
@@ -584,6 +564,7 @@ class GoogleLiveAudioBridge:
 
     async def close(self):
         self._cancel_unblock_timer()
+        self._invalidate_pending_output_deliveries()
         if not self._audio_executor_closed:
             self._audio_executor_closed = True
             self._audio_executor.shutdown(wait=False, cancel_futures=True)
@@ -1160,6 +1141,7 @@ class GoogleLiveAudioBridge:
         audio_bytes,
         audio_format=None,
         mime_type=None,
+        response_generation=None,
     ):
         if (
             not audio_bytes
@@ -1168,6 +1150,8 @@ class GoogleLiveAudioBridge:
         ):
             return 0
         from core.handle.sendAudioHandle import sendAudio
+
+        delivery = self._new_output_delivery(response_generation)
 
         if audio_format == "pcm16" or (mime_type and "audio/pcm" in mime_type):
             include_preroll = self._should_send_lesson_output_preroll()
@@ -1187,13 +1171,117 @@ class GoogleLiveAudioBridge:
                 include_preroll,
             )
             if packets and not getattr(self.conn, "client_abort", False):
-                await sendAudio(self.conn, packets)
+                await sendAudio(
+                    self.conn,
+                    packets,
+                    on_delivery_complete=delivery[0],
+                    on_delivery_failed=delivery[1],
+                )
                 return len(packets)
+            delivery[1](RuntimeError("audio delivery suppressed"))
             return 0
         if audio_bytes:
-            await sendAudio(self.conn, audio_bytes)
+            await sendAudio(
+                self.conn,
+                audio_bytes,
+                on_delivery_complete=delivery[0],
+                on_delivery_failed=delivery[1],
+            )
             return 1
+        delivery[1](RuntimeError("audio delivery empty"))
         return 0
+
+    def _new_output_delivery(self, response_generation, *, emit_proof=True):
+        loop = asyncio.get_running_loop()
+        receipt = loop.create_future()
+        self._pending_output_deliveries[receipt] = response_generation
+
+        def complete(_packet_count):
+            if receipt.done():
+                return
+            generation_valid = bool(
+                isinstance(response_generation, int)
+                and response_generation == self._active_response_id
+                and not self._response_cancelled_checker(response_generation)
+            )
+            if not generation_valid:
+                fail(RuntimeError("stale audio delivery completion"))
+                return
+            receipt.set_result(True)
+            if emit_proof and callable(self._model_output_forwarded_handler):
+                try:
+                    self._model_output_forwarded_handler(response_generation)
+                except Exception:
+                    pass
+            journey_id = getattr(
+                self.conn, "google_live_evidence_journey_id", None
+            )
+            if emit_proof and isinstance(journey_id, str) and journey_id:
+                try:
+                    self.logger.bind(tag="GoogleLive").info(
+                        "Google Live model_output_chunk_forwarded journey_id={} "
+                        "connection_id={} live_connection_id={} response_id={}",
+                        journey_id,
+                        str(getattr(self.conn, "session_id", "unknown")),
+                        str(
+                            getattr(
+                                self.conn,
+                                "google_live_live_connection_id",
+                                "none",
+                            )
+                        ),
+                        response_generation,
+                    )
+                except Exception:
+                    pass
+
+        def fail(_error):
+            self._settle_output_delivery_failure(receipt, response_generation)
+
+        return complete, fail
+
+    def _settle_output_delivery_failure(self, receipt, response_generation):
+        if receipt.done():
+            return
+        receipt.set_result(False)
+        if callable(self._model_output_delivery_failed_handler):
+            try:
+                self._model_output_delivery_failed_handler(response_generation)
+            except Exception:
+                pass
+
+    def _invalidate_pending_output_deliveries(self):
+        pending = self._pending_output_deliveries
+        self._pending_output_deliveries = {}
+        for receipt, generation in pending.items():
+            self._settle_output_delivery_failure(receipt, generation)
+
+    async def _wait_for_output_deliveries(self):
+        pending = tuple(
+            receipt
+            for receipt in self._pending_output_deliveries
+            if not receipt.done()
+        )
+        if pending:
+            timeout = float(self._google_live_config().get("event_timeout_sec", 30.0))
+            _done, still_pending = await asyncio.wait(
+                pending, timeout=max(0.01, timeout)
+            )
+            for receipt in still_pending:
+                generation = self._pending_output_deliveries.get(receipt)
+                self._settle_output_delivery_failure(receipt, generation)
+        completed = tuple(
+            receipt
+            for receipt in self._pending_output_deliveries
+            if receipt.done()
+        )
+        delivery_ok = all(receipt.result() is True for receipt in completed)
+        self._pending_output_deliveries = {
+            receipt: generation
+            for receipt, generation in self._pending_output_deliveries.items()
+            if not receipt.done()
+        }
+        return delivery_ok
 
     def _should_send_lesson_output_preroll(self):
         if self._output_preroll_sent:
@@ -1245,7 +1333,15 @@ class GoogleLiveAudioBridge:
 
         packets = await self._run_audio_cpu(self._flush_output_audio_sync)
         if packets:
-            await sendAudio(self.conn, packets)
+            delivery = self._new_output_delivery(
+                self._active_response_id, emit_proof=False
+            )
+            await sendAudio(
+                self.conn,
+                packets,
+                on_delivery_complete=delivery[0],
+                on_delivery_failed=delivery[1],
+            )
         return len(packets)
 
     def _flush_output_audio_sync(self):

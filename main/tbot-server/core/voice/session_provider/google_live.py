@@ -472,6 +472,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             "reconnects": 0,
             "fallbacks": 0,
             "stale_audio": 0,
+            "delivery_failures": 0,
         }
         self._evidence_candidate_interrupt_pending = False
         self._evidence_candidate_final_markers_logged = False
@@ -542,7 +543,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 "duration_ms={} response_generation={} response_duration_ms={} "
                 "setup_consumed={} "
                 "user_turns={} response_starts={} response_ends={} "
-                "interrupts={} replacements={} reconnects={} fallbacks={} stale_audio={}",
+                "interrupts={} replacements={} reconnects={} fallbacks={} "
+                "stale_audio={} delivery_failures={}",
                 journey_id,
                 mode,
                 duration_ms,
@@ -557,6 +559,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 counters["reconnects"],
                 counters["fallbacks"],
                 counters["stale_audio"],
+                counters["delivery_failures"],
             )
         self._evidence_candidate_final_markers_logged = True
 
@@ -603,6 +606,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             for name in (
                 "user_turns", "interrupts", "replacements", "reconnects",
                 "fallbacks", "stale_audio",
+                "delivery_failures",
             )
         )
         valid = bool(
@@ -2360,6 +2364,15 @@ class GoogleLiveProvider(VoiceSessionProvider):
         except Exception:
             return False
 
+    def _record_model_output_delivery_failure(self, response_generation):
+        self._increment_candidate_counter("delivery_failures")
+        self._record_quiet_forwarded_output(-1)
+        self.conn.logger.bind(tag="GoogleLive").warning(
+            "Google Live model_output_delivery_failed response_id={} failures={}",
+            response_generation,
+            self._evidence_candidate_counters.get("delivery_failures", 0),
+        )
+
     def _record_candidate_interrupt(self, old_generation, new_generation):
         scope = self._candidate_semantic_registry_scope()
         if scope is None:
@@ -3703,8 +3716,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 ):
                     self._handle_session_resumption_update(event)
                     continue
-                await self._handle_live_event(event)
-                await self._bridge.handle_event(event)
+                if isinstance(event, dict) and event.get("type") == "audio_end":
+                    await self._bridge.handle_event(event)
+                    await self._handle_live_event(event)
+                else:
+                    await self._handle_live_event(event)
+                    await self._bridge.handle_event(event)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -4130,6 +4147,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
             tool_call_cancellation_handler=self._handle_tool_call_cancellation_event,
             model_output_unblocked_handler=self._on_model_output_unblocked,
             model_output_forwarded_handler=self._record_quiet_forwarded_output,
+            model_output_delivery_failed_handler=(
+                self._record_model_output_delivery_failure
+            ),
             output_judge=self._build_output_judge(),
         )
         self._ensure_required_aec_ready()

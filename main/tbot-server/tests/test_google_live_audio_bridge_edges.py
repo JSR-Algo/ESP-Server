@@ -217,11 +217,23 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
             logger=logger,
             response_id_getter=lambda: 9,
         )
-        bridge._send_binary_audio_message = AsyncMock(return_value=1)
 
-        await bridge.handle_event({"type": "audio_start"})
-        await bridge.handle_event({"type": "audio", "audio": b"one"})
-        await bridge.handle_event({"type": "audio", "audio": b"two"})
+        async def deliver(_audio, **kwargs):
+            complete, _fail = bridge._new_output_delivery(
+                kwargs.get("response_generation")
+            )
+            complete(1)
+            return 1
+
+        bridge._send_binary_audio_message = deliver
+
+        await bridge.handle_event({"type": "audio_start", "response_generation": 9})
+        await bridge.handle_event(
+            {"type": "audio", "audio": b"one", "response_generation": 9}
+        )
+        await bridge.handle_event(
+            {"type": "audio", "audio": b"two", "response_generation": 9}
+        )
 
         markers = [
             args
@@ -245,7 +257,14 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
             logger=normal_logger,
             response_id_getter=lambda: 9,
         )
-        normal_bridge._send_binary_audio_message = AsyncMock(return_value=1)
+        async def normal_deliver(_audio, **kwargs):
+            complete, _fail = normal_bridge._new_output_delivery(
+                kwargs.get("response_generation")
+            )
+            complete(1)
+            return 1
+
+        normal_bridge._send_binary_audio_message = normal_deliver
         await normal_bridge.handle_event({"type": "audio_start"})
         await normal_bridge.handle_event({"type": "audio", "audio": b"normal"})
         self.assertFalse(
@@ -328,12 +347,23 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         forwarded = MagicMock()
         bridge = self.make_bridge(
             conn=_Conn(websocket=_WebSocket()),
-            response_id_getter=lambda: 1,
+            response_id_getter=lambda: 7,
             model_output_forwarded_handler=forwarded,
         )
         bridge._send_tts_message = AsyncMock()
-        bridge._send_binary_audio_message = AsyncMock(side_effect=[0, 2])
-        await bridge.handle_event({"type": "audio_start", "response_generation": 1})
+        deliveries = iter((0, 2))
+
+        async def deliver(_audio, **kwargs):
+            count = next(deliveries)
+            if count:
+                complete, _fail = bridge._new_output_delivery(
+                    kwargs.get("response_generation")
+                )
+                complete(count)
+            return count
+
+        bridge._send_binary_audio_message = deliver
+        await bridge.handle_event({"type": "audio_start", "response_generation": 7})
 
         await bridge.handle_event(
             {"type": "audio", "audio": b"empty", "response_generation": 1}
@@ -343,6 +373,166 @@ class GoogleLiveAudioBridgeEdgeTest(unittest.IsolatedAsyncioTestCase):
         )
 
         forwarded.assert_called_once_with(7)
+
+    async def test_background_delivery_failure_invalidates_proof_before_audio_end(self):
+        forwarded = MagicMock()
+        failed = MagicMock(side_effect=RuntimeError("handler failed"))
+
+        class FailingWebSocket(_WebSocket):
+            async def send(self, payload):
+                if isinstance(payload, bytes) and len(self.sent) >= 5:
+                    raise RuntimeError("background send failed")
+                self.sent.append(payload)
+
+        conn = _Conn(websocket=FailingWebSocket())
+        conn.sentence_id = "sentence-1"
+        conn.conn_from_mqtt_gateway = False
+        bridge = self.make_bridge(
+            conn=conn,
+            response_id_getter=lambda: 7,
+            model_output_forwarded_handler=forwarded,
+            model_output_delivery_failed_handler=failed,
+        )
+        bridge._send_tts_message = AsyncMock()
+        bridge._run_audio_cpu = AsyncMock(
+            return_value=[b"packet"] * 6
+        )
+
+        await bridge.handle_event({"type": "audio_start", "response_generation": 7})
+        await bridge.handle_event(
+            {
+                "type": "audio",
+                "audio": b"pcm",
+                "audio_format": "pcm16",
+                "response_generation": 7,
+            }
+        )
+        with self.assertRaisesRegex(RuntimeError, "delivery failed"):
+            await bridge.handle_event(
+                {"type": "audio_end", "response_generation": 7}
+            )
+
+        forwarded.assert_not_called()
+        failed.assert_called_once_with(7)
+        bridge._send_tts_message.assert_awaited_with("stop")
+
+    async def test_audio_end_waits_for_delayed_background_delivery_completion(self):
+        forwarded = MagicMock()
+        release = asyncio.Event()
+
+        class DelayedWebSocket(_WebSocket):
+            async def send(self, payload):
+                if isinstance(payload, bytes) and len(self.sent) >= 5:
+                    await release.wait()
+                self.sent.append(payload)
+
+        conn = _Conn(websocket=DelayedWebSocket())
+        conn.sentence_id = "sentence-1"
+        conn.conn_from_mqtt_gateway = False
+        bridge = self.make_bridge(
+            conn=conn,
+            response_id_getter=lambda: 7,
+            model_output_forwarded_handler=forwarded,
+        )
+        bridge._send_tts_message = AsyncMock()
+        bridge._run_audio_cpu = AsyncMock(return_value=[b"packet"] * 6)
+        await bridge.handle_event({"type": "audio_start", "response_generation": 7})
+        await bridge.handle_event(
+            {
+                "type": "audio",
+                "audio": b"pcm",
+                "audio_format": "pcm16",
+                "response_generation": 7,
+            }
+        )
+
+        ending = asyncio.create_task(
+            bridge.handle_event({"type": "audio_end", "response_generation": 7})
+        )
+        await asyncio.sleep(0)
+        self.assertFalse(ending.done())
+        forwarded.assert_not_called()
+        release.set()
+        self.assertTrue(await ending)
+        forwarded.assert_called_once_with(7)
+
+    async def test_close_invalidates_pending_output_delivery_receipts(self):
+        failed = MagicMock()
+        bridge = self.make_bridge(
+            conn=_Conn(websocket=_WebSocket()),
+            response_id_getter=lambda: 7,
+            model_output_delivery_failed_handler=failed,
+        )
+        bridge._new_output_delivery(7)
+
+        await bridge.close()
+
+        self.assertEqual(bridge._pending_output_deliveries, {})
+        failed.assert_called_once_with(7)
+
+    async def test_audio_end_timeout_fails_pending_receipt_without_cancellation_leak(self):
+        failed = MagicMock(side_effect=RuntimeError("handler failed"))
+        conn = _Conn(
+            websocket=_WebSocket(),
+            config={"google_live": {"event_timeout_sec": 0.01}},
+        )
+        bridge = self.make_bridge(
+            conn=conn,
+            response_id_getter=lambda: 7,
+            model_output_delivery_failed_handler=failed,
+        )
+        bridge._send_tts_message = AsyncMock()
+        await bridge.handle_event({"type": "audio_start", "response_generation": 7})
+        bridge._new_output_delivery(7)
+
+        with self.assertRaisesRegex(RuntimeError, "delivery failed"):
+            await bridge.handle_event(
+                {"type": "audio_end", "response_generation": 7}
+            )
+
+        failed.assert_called_once_with(7)
+        self.assertEqual(bridge._pending_output_deliveries, {})
+        bridge._send_tts_message.assert_awaited_with("stop")
+
+    async def test_delivery_receipt_settles_when_proof_callback_raises(self):
+        forwarded = MagicMock(side_effect=RuntimeError("handler failed"))
+        bridge = self.make_bridge(
+            conn=_Conn(websocket=_WebSocket()),
+            response_id_getter=lambda: 7,
+            model_output_forwarded_handler=forwarded,
+        )
+        bridge._active_response_id = 7
+        complete, _fail = bridge._new_output_delivery(7)
+
+        complete(1)
+
+        self.assertTrue(await bridge._wait_for_output_deliveries())
+        forwarded.assert_called_once_with(7)
+        self.assertEqual(bridge._pending_output_deliveries, {})
+
+    async def test_stale_generation_delivery_completion_fails_closed(self):
+        forwarded = MagicMock()
+        failed = MagicMock()
+        conn = _Conn(websocket=_WebSocket())
+        conn.sentence_id = "sentence-1"
+        conn.conn_from_mqtt_gateway = False
+        bridge = self.make_bridge(
+            conn=conn,
+            response_id_getter=lambda: 7,
+            model_output_forwarded_handler=forwarded,
+            model_output_delivery_failed_handler=failed,
+        )
+        bridge._send_tts_message = AsyncMock()
+        await bridge.handle_event({"type": "audio_start", "response_generation": 7})
+        await bridge.handle_event(
+            {"type": "audio", "audio": b"opus", "response_generation": 6}
+        )
+        with self.assertRaisesRegex(RuntimeError, "delivery failed"):
+            await bridge.handle_event(
+                {"type": "audio_end", "response_generation": 7}
+            )
+        forwarded.assert_not_called()
+        failed.assert_called_once_with(6)
 
     async def test_abort_during_pcm_encode_does_not_emit_forwarded_proof(self):
         forwarded = MagicMock()

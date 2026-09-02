@@ -943,8 +943,18 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             response_id_getter=provider.current_response_id,
             response_cancelled_checker=provider.is_response_cancelled,
             model_output_forwarded_handler=provider._record_quiet_forwarded_output,
+            model_output_delivery_failed_handler=(
+                provider._record_model_output_delivery_failure
+            ),
         )
-        provider._bridge._send_binary_audio_message = AsyncMock(return_value=1)
+        async def deliver(_audio, **kwargs):
+            complete, _fail = provider._bridge._new_output_delivery(
+                kwargs.get("response_generation")
+            )
+            complete(1)
+            return 1
+
+        provider._bridge._send_binary_audio_message = deliver
         provider._bridge._send_tts_message = AsyncMock()
 
         provider._mark_clean_user_turn_opened("audio_input")
@@ -1061,15 +1071,28 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
                     response_id_getter=provider.current_response_id,
                     response_cancelled_checker=provider.is_response_cancelled,
                     model_output_forwarded_handler=provider._record_quiet_forwarded_output,
+                    model_output_delivery_failed_handler=(
+                        provider._record_model_output_delivery_failure
+                    ),
                 )
-                provider._bridge._send_binary_audio_message = AsyncMock(return_value=1)
+                async def deliver(_audio, **kwargs):
+                    complete, _fail = provider._bridge._new_output_delivery(
+                        kwargs.get("response_generation")
+                    )
+                    complete(1)
+                    return 1
+
+                provider._bridge._send_binary_audio_message = deliver
                 provider._bridge._send_tts_message = AsyncMock()
                 provider._mark_clean_user_turn_opened("audio_input")
                 provider._evidence_candidate_scope_started_at = 9.0
 
                 for event in events:
                     await provider._handle_live_event(event)
-                    await provider._bridge.handle_event(event)
+                    try:
+                        await provider._bridge.handle_event(event)
+                    except RuntimeError as exc:
+                        self.assertIn("delivery failed", str(exc))
                 provider._evidence_candidate_observation_ended_at = 12.0
                 result = await provider.finalize_evidence()
 
@@ -1256,7 +1279,11 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         quiet = next(item for item in rendered if "evidence_candidate_quiet" in item)
         self.assertIn("mode=silence", quiet)
         self.assertIn("user_turns=0 response_starts=0 response_ends=0", quiet)
-        self.assertIn("interrupts=0 replacements=0 reconnects=0 fallbacks=0 stale_audio=0", quiet)
+        self.assertIn(
+            "interrupts=0 replacements=0 reconnects=0 fallbacks=0 "
+            "stale_audio=0 delivery_failures=0",
+            quiet,
+        )
 
     async def test_candidate_quiet_marker_waits_for_quiescence_and_retry_uses_fresh_counters(self):
         conn = _Conn()

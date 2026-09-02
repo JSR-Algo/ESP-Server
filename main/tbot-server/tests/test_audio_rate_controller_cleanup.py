@@ -79,6 +79,45 @@ class AudioRateControllerCleanupTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(controller.queue_empty_event.is_set())
         self.assertFalse(controller.queue_has_data_event.is_set())
 
+    async def test_reset_fails_each_queued_delivery_receipt_once(self):
+        controller = AudioRateController()
+        failures = []
+        controller.add_audio(
+            b"packet-1", on_failed=lambda error: failures.append((1, error))
+        )
+        controller.add_audio(
+            b"packet-2", on_failed=lambda error: failures.append((2, error))
+        )
+
+        controller.reset()
+        controller.reset()
+
+        self.assertEqual([packet for packet, _error in failures], [1, 2])
+        self.assertTrue(
+            all("reset" in str(error) for _packet, error in failures)
+        )
+
+    async def test_send_failure_fails_current_and_drained_receipts_once(self):
+        controller = AudioRateController(frame_duration=1)
+        failures = []
+
+        async def fail_send(_packet):
+            raise RuntimeError("transport failed")
+
+        task = controller.start_sending(fail_send)
+        controller.add_audio(
+            b"packet-1", on_failed=lambda error: failures.append((1, error))
+        )
+        controller.add_audio(
+            b"packet-2", on_failed=lambda error: failures.append((2, error))
+        )
+        await task
+
+        self.assertEqual([packet for packet, _error in failures], [1, 2])
+        self.assertTrue(
+            all("transport failed" in str(error) for _packet, error in failures)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

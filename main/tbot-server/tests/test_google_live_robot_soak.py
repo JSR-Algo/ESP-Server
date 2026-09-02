@@ -5222,6 +5222,98 @@ def test_candidate_factory_posts_fresh_semantic_plans_and_derives_safe_verdicts(
     assert quiet["quietMode"] == "silence"
 
 
+@pytest.mark.parametrize("observed_binary_frames", [0, 1])
+def test_candidate_robot_speaking_requires_client_observed_binary_frames(
+    tmp_path, observed_binary_frames
+):
+    stream, _private = _protected_candidate_input(tmp_path)
+    protected = robot_soak._read_candidate_protected_input(
+        stream,
+        output_paths=(tmp_path / "evidence.json",),
+        sample_rate=24000,
+    )
+    posts = []
+
+    async def control(method, url, payload=None):
+        if method == "POST" and isinstance(payload, dict) and "clientId" in payload:
+            posts.append(deepcopy(payload))
+        if url.endswith("/finalize"):
+            body = posts[-1]
+            return _candidate_finalize(
+                _candidate_scope(body["journeyId"], body["journeyType"])
+            )
+        return {"status": "PASS"}
+
+    async def driver(_args, **context):
+        scope = _candidate_scope(context["journey_id"], context["name"])
+        return {
+            "name": context["name"],
+            "status": "PASS",
+            "evidenceScope": scope,
+            "logWindow": {
+                "windowId": context["journey_id"],
+                "start": scope["serverStartUtc"],
+                "end": "2026-08-31T10:00:03+00:00",
+            },
+            "_observedBinaryFrames": observed_binary_frames,
+        }
+
+    async def analyzer(*, journey_id, **_kwargs):
+        return {
+            "name": "google_live_log_reliability",
+            "status": "PASS",
+            "journeyType": "quiet",
+            "candidateIdentity": IDENTITY,
+            "serverIssued": True,
+            "evidenceScope": _candidate_scope(journey_id, "quiet"),
+            "logWindow": {
+                "windowId": journey_id,
+                "start": "2026-08-31T10:00:00+00:00",
+                "end": "2026-08-31T10:00:03+00:00",
+            },
+            "candidateSemanticEvidence": {
+                "status": "PASS",
+                "kind": "quiet",
+                "mode": "robot_speaking",
+                "durationMs": 2400,
+                "responseGeneration": 1,
+                "responseDurationMs": 2400,
+                "outputChunks": 1,
+                "setupTurnConsumed": True,
+                "falseInterrupts": 0,
+                "responseStarts": 1,
+                "responseEnds": 1,
+                "replacements": 0,
+                "fallbacks": 0,
+            },
+            "journeyLatencyEvidence": {},
+        }
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=control,
+        candidate_journey_driver=driver,
+        candidate_log_analyzer=analyzer,
+        idle_duration_sec=60.0,
+    )
+    journey = build_candidate_journeys(args, protected_input=protected)["quiet"]
+
+    if observed_binary_frames == 0:
+        with pytest.raises(RuntimeError, match="semantic evidence scope"):
+            asyncio.run(journey(args, name="quiet", index=2))
+        return
+
+    result = asyncio.run(journey(args, name="quiet", index=2))
+
+    assert result["status"] == "PASS"
+    assert result["quietMode"] == "robot_speaking"
+    assert "_observedBinaryFrames" not in result
+
+
 def test_candidate_factory_monitor_uses_enrolled_lifecycle_window(tmp_path):
     events = []
     journey_id = "candidate-soak.20260831T100000Z.1"

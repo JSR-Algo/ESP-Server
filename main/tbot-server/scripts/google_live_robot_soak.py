@@ -2564,6 +2564,7 @@ async def _run_candidate_websocket_journey(args, **context):
     headers = _build_headers(args)
     started = time.monotonic()
     binary_chunks = 0
+    response_binary_frames = 0
     bargein_stop_ms = None
     state = getattr(args, "_candidate_websocket_state", None)
     if not isinstance(state, dict):
@@ -2685,6 +2686,7 @@ async def _run_candidate_websocket_journey(args, **context):
                     args.settle_timeout_sec,
                 )
                 binary_chunks += observed
+                response_binary_frames = observed
                 if stopped is None:
                     raise RuntimeError("candidate tts stop timeout")
         await websocket.send(
@@ -2733,6 +2735,7 @@ async def _run_candidate_websocket_journey(args, **context):
         "latencies": {} if operation == "monitor" else {"firstAudioMs": [first_audio_ms]},
         "_scopeFinalized": True,
         "_finalizeResult": dict(finalized),
+        "_observedBinaryFrames": response_binary_frames,
     }
     if name == "quiet" and context.get("quiet_mode") in {"silence", "robot_speaking"}:
         result["quietMode"] = context["quiet_mode"]
@@ -3328,6 +3331,11 @@ def build_candidate_journeys(args, *, protected_input=None):
                 quiet_mode=quiet_mode,
             )
             driver_result = dict(result) if isinstance(result, Mapping) else None
+            observed_binary_frames = (
+                driver_result.pop("_observedBinaryFrames", None)
+                if driver_result is not None
+                else None
+            )
             embedded_finalize = (
                 driver_result.pop("_finalizeResult", None)
                 if driver_result is not None
@@ -3384,6 +3392,13 @@ def build_candidate_journeys(args, *, protected_input=None):
                 or log_evidence.get("candidateIdentity") != _candidate_identity(args)
                 or log_evidence.get("logWindow") != combined.get("logWindow")
                 or log_evidence.get("serverIssued") is not True
+                or name == "quiet"
+                and quiet_mode == "robot_speaking"
+                and (
+                    not isinstance(observed_binary_frames, int)
+                    or isinstance(observed_binary_frames, bool)
+                    or observed_binary_frames <= 0
+                )
             ):
                 raise RuntimeError("candidate semantic evidence scope is invalid")
             combined["task5LogEvidence"] = log_evidence
