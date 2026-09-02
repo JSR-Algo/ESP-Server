@@ -469,7 +469,7 @@ class AssignmentRuntimeCapsule:
         try:
             root.chmod(0o700)
             identity = _owned_tree_identity(root)
-            if any(_path_overlaps(root, path) for path in protected):
+            if any(_path_overlaps(root, path.resolve()) for path in protected):
                 raise ValueError("assignment runtime overlaps protected path")
             (root / "media").mkdir(mode=0o700)
             (root / "tls").mkdir(mode=0o700)

@@ -1580,6 +1580,22 @@ def test_assignment_runtime_capsule_rejects_path_replacement(
     capsule.root.rmdir()
 
 
+def test_assignment_runtime_capsule_rejects_canonical_protected_overlap() -> None:
+    temporary_root = Path(tempfile.gettempdir())
+    before_roots = set(temporary_root.glob("course-mode-assignment-runtime-*"))
+    before_descriptors = len(os.listdir("/dev/fd"))
+    unexpected: list[gate.AssignmentRuntimeCapsule] = []
+    try:
+        with pytest.raises(ValueError, match="assignment runtime overlaps protected path"):
+            unexpected.append(gate.AssignmentRuntimeCapsule.create((temporary_root,)))
+    finally:
+        for capsule in unexpected:
+            capsule.cleanup()
+
+    assert set(temporary_root.glob("course-mode-assignment-runtime-*")) == before_roots
+    assert len(os.listdir("/dev/fd")) == before_descriptors
+
+
 def test_lane_cleanup_removes_zero_mode_runtime_directories(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
