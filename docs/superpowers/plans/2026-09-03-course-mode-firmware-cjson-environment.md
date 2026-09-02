@@ -4,7 +4,7 @@
 
 **Goal:** Bind the firmware handler's cJSON include/source directory to the candidate-verified ESP-IDF checkout without exposing the real home directory.
 
-**Architecture:** The Python release gate derives one lane-specific `CJSON_DIR` from `tools.espIdf.root` and validates the named filesystem objects before command execution. Firmware source remains immutable; invalid or operator-controlled paths fail closed.
+**Architecture:** The Python release gate snapshots the cJSON subtree from the exact `tools.espIdf.commit` Git objects into the gate-owned execution stage, then derives one lane-specific `CJSON_DIR` from that staged root. Firmware source remains immutable; mutable external working-tree paths and operator-controlled values are never used by the handler.
 
 **Tech Stack:** Python 3.11, pytest, POSIX filesystem metadata, Bash host-native firmware tests.
 
@@ -65,14 +65,35 @@ def _firmware_handler_cjson_dir(candidate: dict, lane: Lane) -> Path | None:
 
 Catch only expected key/path/type/filesystem errors. In `_child_environment`,
 for `firmware-handler`, require the helper result and set `CJSON_DIR` from it.
-Do not copy `CJSON_DIR` from `source`; do not change `HOME` or any firmware file.
+Do not copy `CJSON_DIR` from `source`; do not expose the real user `HOME`, alter
+the existing lane-runtime HOME behavior, or change any firmware file.
+
+Before this environment step, extend `stage_execution_candidate` for the
+`firmware-handler` lane. Verify the candidate ESP-IDF commit, resolve the exact
+`components/json/cJSON` tree object from that commit, and archive only that tree
+through the existing bounded Git object-copy machinery into
+`<stage>/tools/esp-idf/components/json/cJSON`. Set the staged candidate's
+`tools.espIdf.root` to `<stage>/tools/esp-idf`. Do not copy bytes from the
+external working tree and do not archive the full ESP-IDF checkout.
+
+Refactor the body that lists a tree with trusted `git ls-tree` and copies blobs
+with `git cat-file --batch` into a private helper accepting an already verified
+treeish. Keep `_archive_repository` behavior unchanged by calling that helper
+with the verified repository commit. For cJSON, use trusted bounded
+`git rev-parse <esp-idf-commit>:components/json/cJSON`, require one lowercase
+40-hex object ID, require `git cat-file -t <id>` to return `tree`, and pass that
+tree ID to the same archive helper. This preserves the existing path, symlink,
+entry-count, byte-limit, file-mode, and descriptor checks.
 
 - [ ] **Step 4: Add a command-level regression**
 
-Use a temporary candidate ESP-IDF fixture containing `cJSON.c` and a temporary
-firmware handler command that asserts `HOME == /nonexistent`, reads the exact
-candidate-derived `CJSON_DIR`, and exits zero. Run it through the real gate lane
-environment without physical interfaces.
+Use a temporary candidate ESP-IDF fixture containing committed `cJSON.c`.
+Create an execution stage for the real handler lane, mutate or replace the
+external working-tree `cJSON.c` after staging, then run a temporary handler
+command through the staged candidate/lane environment. Assert it reads the
+committed staged bytes, not the hostile external bytes; the staged path is
+inside the lane execution, the real home is not exposed, and cleanup removes
+the stage. Add a failure case for a missing/non-tree committed subtree.
 
 - [ ] **Step 5: Verify GREEN and qualify source**
 
