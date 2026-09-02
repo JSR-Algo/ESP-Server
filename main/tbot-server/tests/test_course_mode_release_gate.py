@@ -1878,7 +1878,7 @@ def test_assignment_lanes_share_capsule_then_remove_it(
 
 
 def test_assignment_runner_accepts_gate_owned_capsule(
-    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     admin_root = Path(candidate["repositories"]["adminEsp"]["path"])
@@ -1892,9 +1892,11 @@ def test_assignment_runner_accepts_gate_owned_capsule(
         "  return Object.freeze({ capsuleRoot: realOwner, runtimeRoot: realRuntime });",
         "  require('node:fs').writeFileSync(resolve(realRuntime, 'validated.marker'), "
         "`${realOwner}\\n${realRuntime}\\n${__filename}`);\n"
-        "  process.exit(0);",
+        "  return Object.freeze({ capsuleRoot: realOwner, runtimeRoot: realRuntime });",
     )
     assert instrumented_helper != helper_source
+    assert "return Object.freeze({ capsuleRoot: realOwner, runtimeRoot: realRuntime });" in instrumented_helper
+    forbidden_docker_marker = tmp_path / "docker-was-invoked"
     (scripts / "task4-assignment-runtime.cjs").write_text(
         instrumented_helper, encoding="utf-8",
     )
@@ -1905,12 +1907,27 @@ def test_assignment_runner_accepts_gate_owned_capsule(
         encoding="utf-8",
     )
     (scripts / "task4-image-identity.cjs").write_text(
-        "module.exports = { inspectAndPinCandidateImages() {}, "
-        "verifyStartedServiceImages() {} };\n",
+        "const { statSync, writeFileSync } = require('node:fs');\n"
+        "const { resolve } = require('node:path');\n"
+        "module.exports = {\n"
+        "  inspectAndPinCandidateImages() {\n"
+        "    const runtimeRoot = process.env.TASK4_ASSIGNMENT_RUNTIME_ROOT;\n"
+        "    const mediaRoot = resolve(runtimeRoot, 'media');\n"
+        "    const tlsRoot = resolve(runtimeRoot, 'tls');\n"
+        "    if (!statSync(mediaRoot).isDirectory() || !statSync(tlsRoot).isDirectory()) {\n"
+        "      throw new Error('runner did not create capsule media and TLS roots');\n"
+        "    }\n"
+        "    writeFileSync(resolve(runtimeRoot, 'roots.marker'), "
+        "`${mediaRoot}\\n${tlsRoot}`);\n"
+        "    process.exit(0);\n"
+        "  },\n"
+        "  verifyStartedServiceImages() {},\n"
+        "};\n",
         encoding="utf-8",
     )
     (scripts / "reset-lesson-studio-e2e-state.cjs").write_text(
-        "module.exports = { composeExecutableFromEnvironment() { return '/unused'; } };\n",
+        "module.exports = { composeExecutableFromEnvironment(environment) { "
+        "return environment.TBOT_DOCKER_COMPOSE_EXECUTABLE; } };\n",
         encoding="utf-8",
     )
     web_root = admin_root / "main/manager-web"
@@ -1923,7 +1940,49 @@ def test_assignment_runner_accepts_gate_owned_capsule(
     _git(admin_root, "commit", "-m", "add assignment capsule probe")
     candidate["repositories"]["adminEsp"].update(_repository(admin_root))
     _refresh_image_reference(candidate, "adminEsp")
+    backend_root = Path(candidate["repositories"]["backend"]["path"])
+    backend_output = backend_root / "dist/lessons/course-mode/curriculum-course-mode.js"
+    backend_output.parent.mkdir(parents=True, exist_ok=True)
+    backend_output.write_text("module.exports = {};\n", encoding="utf-8")
+    _git(backend_root, "add", str(backend_output.relative_to(backend_root)))
+    _git(backend_root, "commit", "-m", "add assignment runner build output")
+    candidate["repositories"]["backend"].update(_repository(backend_root))
+    _refresh_image_reference(candidate, "backend")
+    firmware_root = Path(candidate["repositories"]["firmware"]["path"])
+    for relative in (
+        "lesson/assets/background/barn-round-field-poster.jpg",
+        "lesson/assets/robot/poses/bright-teach.png",
+        "lesson/assets/robot/poses/bright-listening.png",
+        "lesson/assets/robot/poses/bright-celebrate.png",
+    ):
+        asset = firmware_root / relative
+        asset.parent.mkdir(parents=True, exist_ok=True)
+        asset.write_bytes(b"candidate asset\n")
+    _git(firmware_root, "add", "lesson/assets")
+    _git(firmware_root, "commit", "-m", "add assignment runner assets")
+    candidate["repositories"]["firmware"].update(_repository(firmware_root))
+    evidence_path = Path(candidate["firmware"]["evidenceManifestPath"])
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    evidence["sourceCommit"] = candidate["repositories"]["firmware"]["sha"]
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    candidate["firmware"]["evidenceManifestSha256"] = hashlib.sha256(
+        evidence_path.read_bytes(),
+    ).hexdigest()
     _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    for tool_name in ("docker", "dockerCompose"):
+        descriptor = candidate["tools"][tool_name]
+        executable = Path(descriptor["path"])
+        lines = executable.read_text(encoding="utf-8").splitlines(keepends=True)
+        lines.insert(
+            1,
+            "import os,pathlib,sys\n"
+            "if os.environ.get('TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT'):\n"
+            f" pathlib.Path({str(forbidden_docker_marker)!r}).write_text({tool_name!r})\n"
+            " sys.exit(97)\n",
+        )
+        executable.write_text("".join(lines), encoding="utf-8")
+        executable.chmod(0o755)
+        descriptor["sha256"] = hashlib.sha256(executable.read_bytes()).hexdigest()
     node_path = shutil.which("node")
     assert node_path is not None
     node = Path(node_path).resolve()
@@ -1965,7 +2024,7 @@ def test_assignment_runner_accepts_gate_owned_capsule(
         item for item in gate.FULL_LANES
         if item.name == "admin-course-mode-assignment-new"
     )
-    observed: list[tuple[Path, Path, list[str]]] = []
+    observed: list[tuple[Path, Path, list[str], list[str]]] = []
     original_run = gate.run_bounded_command
 
     def observe_marker(command, **kwargs):
@@ -1973,8 +2032,10 @@ def test_assignment_runner_accepts_gate_owned_capsule(
         capsule_root = Path(kwargs["env"]["TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT"])
         runtime_root = Path(kwargs["env"]["TASK4_ASSIGNMENT_RUNTIME_ROOT"])
         marker = runtime_root / "validated.marker"
+        roots_marker = runtime_root / "roots.marker"
         observed.append((
             capsule_root, runtime_root, marker.read_text(encoding="utf-8").splitlines(),
+            roots_marker.read_text(encoding="utf-8").splitlines(),
         ))
         return result
 
@@ -1989,11 +2050,13 @@ def test_assignment_runner_accepts_gate_owned_capsule(
 
     assert result["verdict"] == "PASS", result
     assert len(observed) == 1
-    capsule_root, runtime_root, marker = observed[0]
+    capsule_root, runtime_root, marker, roots = observed[0]
     assert runtime_root == capsule_root / "runtime"
     assert marker[:2] == [str(capsule_root), str(runtime_root)]
     assert marker[2].endswith("/main/manager-web/scripts/task4-assignment-runtime.cjs")
     assert marker[2].startswith(str(admin_root.parent)) is False
+    assert roots == [str(runtime_root / "media"), str(runtime_root / "tls")]
+    assert not forbidden_docker_marker.exists()
     assert not capsule_root.exists()
 
 
