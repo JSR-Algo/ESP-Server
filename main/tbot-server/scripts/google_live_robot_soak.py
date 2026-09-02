@@ -2812,6 +2812,19 @@ async def _candidate_control_json(
     if callable(override):
         value = override(method, url, payload)
         return await value if inspect.isawaitable(value) else value
+    return await asyncio.to_thread(
+        _candidate_control_request,
+        args,
+        method,
+        url,
+        payload,
+        request_timeout_sec,
+    )
+
+
+def _candidate_control_request(
+    args, method, url, payload=None, request_timeout_sec=None
+):
     secret_name = str(
         getattr(args, "evidence_mint_secret_env", "TBOT_DEVICE_MINT_SECRET")
     )
@@ -2819,32 +2832,52 @@ async def _candidate_control_json(
     if not secret:
         raise RuntimeError("evidence mint secret is unavailable")
 
-    def request():
-        body = None if payload is None else json.dumps(payload).encode("utf-8")
-        headers = {"X-Mint-Secret": secret, "Accept": "application/json"}
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-        timeout = (
-            float(request_timeout_sec)
-            if request_timeout_sec is not None
-            else float(getattr(args, "event_timeout_sec", 30.0))
-        )
-        try:
-            with urllib.request.urlopen(
-                urllib.request.Request(url, data=body, headers=headers, method=method),
-                timeout=timeout,
-            ) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                raise _EvidenceControlNotFound(
-                    "evidence control journey not found"
-                ) from exc
-            raise RuntimeError("evidence control request failed") from exc
-        except (urllib.error.URLError, json.JSONDecodeError) as exc:
-            raise RuntimeError("evidence control request failed") from exc
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {"X-Mint-Secret": secret, "Accept": "application/json"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    timeout = (
+        float(request_timeout_sec)
+        if request_timeout_sec is not None
+        else float(getattr(args, "event_timeout_sec", 30.0))
+    )
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(url, data=body, headers=headers, method=method),
+            timeout=timeout,
+        ) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise _EvidenceControlNotFound(
+                "evidence control journey not found"
+            ) from exc
+        raise RuntimeError("evidence control request failed") from exc
+    except (urllib.error.URLError, json.JSONDecodeError) as exc:
+        raise RuntimeError("evidence control request failed") from exc
 
-    return await asyncio.to_thread(request)
+
+async def _candidate_control_json_uncancelled(
+    args, method, url, payload=None, *, request_timeout_sec=None
+):
+    loop = asyncio.get_running_loop()
+    worker = loop.run_in_executor(
+        None,
+        _candidate_control_request,
+        args,
+        method,
+        url,
+        payload,
+        request_timeout_sec,
+    )
+    while True:
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None:
+                while current.cancelling():
+                    current.uncancel()
 
 
 async def _analyze_candidate_journey(args, journey_id, output_path):
@@ -2989,8 +3022,23 @@ def build_candidate_journeys(args, *, protected_input=None):
         return False
 
     async def cleanup_ambiguous_enrollment(
-        post_task, journey_url, *, journey_id, journey_type
+        post_task,
+        journey_url,
+        *,
+        journey_id,
+        journey_type,
+        finalize_task=None,
+        driver_result=None,
     ):
+        loop = asyncio.get_running_loop()
+        clock = getattr(args, "candidate_cleanup_clock", None)
+        if not callable(clock):
+            clock = loop.time
+        deadline = clock() + cleanup_timeout()
+
+        def remaining_budget():
+            return deadline - clock()
+
         def defer_current_cancellation():
             current = asyncio.current_task()
             if current is None:
@@ -3012,14 +3060,31 @@ def build_candidate_journeys(args, *, protected_input=None):
                     post_task.result()
                 except BaseException:
                     pass
-        loop = asyncio.get_running_loop()
-        clock = getattr(args, "candidate_cleanup_clock", None)
-        if not callable(clock):
-            clock = loop.time
-        deadline = clock() + cleanup_timeout()
-
-        def remaining_budget():
-            return deadline - clock()
+        if remaining_budget() <= 0:
+            raise RuntimeError("candidate enrollment cleanup failed")
+        if finalize_task is not None:
+            while not finalize_task.done():
+                try:
+                    await asyncio.shield(finalize_task)
+                except asyncio.CancelledError:
+                    defer_current_cancellation()
+                    continue
+                except BaseException:
+                    break
+            if remaining_budget() <= 0:
+                raise RuntimeError("candidate enrollment cleanup failed")
+            try:
+                finalized = finalize_task.result()
+                _validate_candidate_finalization(
+                    finalized,
+                    result=driver_result,
+                    journey_id=journey_id,
+                    stage=journey_type,
+                )
+            except BaseException:
+                pass
+            else:
+                return
 
         async def cancellation_resistant_step(coroutine_factory):
             while True:
@@ -3050,15 +3115,22 @@ def build_candidate_journeys(args, *, protected_input=None):
                     deadline_cancel.cancel()
 
         async def control_before_deadline(method):
-            async def control(remaining):
-                if callable(getattr(args, "candidate_control_json", None)):
-                    return await _candidate_control_json(args, method, journey_url)
-                return await _candidate_control_json(
+            remaining = remaining_budget()
+            if remaining <= 0:
+                raise _CleanupDeadlineExceeded
+            if not callable(getattr(args, "candidate_control_json", None)):
+                result = await _candidate_control_json_uncancelled(
                     args,
                     method,
                     journey_url,
                     request_timeout_sec=remaining,
                 )
+                if remaining_budget() <= 0:
+                    raise _CleanupDeadlineExceeded
+                return result
+
+            async def control(remaining):
+                return await _candidate_control_json(args, method, journey_url)
 
             return await cancellation_resistant_step(control)
 
@@ -3149,7 +3221,9 @@ def build_candidate_journeys(args, *, protected_input=None):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         enrollment_attempted = False
         enrollment_post_task = None
+        finalize_post_task = None
         terminal_finalized = False
+        driver_result = None
         try:
             semantic_proof = None
             semantic_key = None
@@ -3191,7 +3265,14 @@ def build_candidate_journeys(args, *, protected_input=None):
 
             async def post_enrollment():
                 try:
-                    return await _candidate_control_json(
+                    if callable(getattr(args, "candidate_control_json", None)):
+                        return await _candidate_control_json(
+                            args,
+                            "POST",
+                            collection_url,
+                            enrollment_payload,
+                        )
+                    return await _candidate_control_json_uncancelled(
                         args,
                         "POST",
                         collection_url,
@@ -3248,10 +3329,24 @@ def build_candidate_journeys(args, *, protected_input=None):
             finalized = (
                 embedded_finalize
                 if scope_finalized
-                else await _candidate_control_json(
-                    args, "POST", f"{journey_url}/finalize", {}
-                )
+                else None
             )
+            if not scope_finalized:
+                if callable(getattr(args, "candidate_control_json", None)):
+                    finalized = await _candidate_control_json(
+                        args, "POST", f"{journey_url}/finalize", {}
+                    )
+                else:
+                    finalize_post_task = own_task(
+                        _candidate_control_json_uncancelled(
+                            args,
+                            "POST",
+                            f"{journey_url}/finalize",
+                            {},
+                        ),
+                        "google-live-candidate-finalize-post",
+                    )
+                    finalized = await asyncio.shield(finalize_post_task)
             finalized = _validate_candidate_finalization(
                 finalized,
                 result=driver_result,
@@ -3344,6 +3439,8 @@ def build_candidate_journeys(args, *, protected_input=None):
                         journey_url,
                         journey_id=journey_id,
                         journey_type=name,
+                        finalize_task=finalize_post_task,
+                        driver_result=driver_result,
                     ),
                     "google-live-candidate-enrollment-cleanup",
                 )
