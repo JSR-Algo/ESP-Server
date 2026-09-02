@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import fcntl
 import hashlib
 import importlib
@@ -16,7 +17,10 @@ import posixpath
 import queue
 import re
 import secrets
+import select
+import selectors
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -38,7 +42,6 @@ except ModuleNotFoundError:
 MAX_CANDIDATE_BYTES = _manifest.MAX_CANDIDATE_BYTES
 _repository_matches_candidate = _manifest._repository_matches_candidate
 read_secure_regular = _manifest.read_secure_regular
-run_bounded_command = _manifest.run_bounded_command
 strict_json_loads = _manifest.strict_json_loads
 validate_candidate = _manifest.validate_candidate
 _candidate_git = _manifest._git
@@ -46,6 +49,155 @@ secure_browser_bundle_descriptor = _manifest.secure_browser_bundle_descriptor
 secure_playwright_browser_bundle_descriptor = (
     _manifest.secure_playwright_browser_bundle_descriptor
 )
+
+
+def _assignment_process_group_quiescent(process_group: int) -> bool:
+    try:
+        os.killpg(process_group, 0)
+    except OSError as error:
+        if error.errno in {errno.EPERM, errno.ESRCH}:
+            return True
+        raise
+    return False
+
+
+def _terminate_assignment_process_group(process_group: int) -> bool:
+    try:
+        os.killpg(process_group, signal.SIGTERM)
+    except OSError as error:
+        if error.errno in {errno.EPERM, errno.ESRCH}:
+            return True
+        return False
+    deadline = time.monotonic() + 0.25
+    while time.monotonic() < deadline:
+        try:
+            if _assignment_process_group_quiescent(process_group):
+                return True
+        except OSError:
+            return False
+        time.sleep(0.01)
+    try:
+        os.killpg(process_group, signal.SIGKILL)
+    except OSError as error:
+        if error.errno in {errno.EPERM, errno.ESRCH}:
+            return True
+        return False
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        try:
+            if _assignment_process_group_quiescent(process_group):
+                return True
+        except OSError:
+            return False
+        time.sleep(0.01)
+    return False
+
+
+def run_assignment_bounded_command(
+    command: list[str], *, cwd: Path, timeout_sec: float, max_output_bytes: int,
+    env: dict[str, str] | None = None,
+) -> _manifest.BoundedCommandResult:
+    if (
+        not isinstance(timeout_sec, (int, float))
+        or not math.isfinite(timeout_sec)
+        or timeout_sec <= 0
+    ):
+        return _manifest.BoundedCommandResult(None, "", "invalid_timeout")
+    if not all(hasattr(select, name) for name in ("kqueue", "kevent", "KQ_FILTER_PROC")):
+        return _manifest.BoundedCommandResult(None, "", "containment")
+    try:
+        selector = selectors.DefaultSelector()
+        exit_events = select.kqueue()
+    except OSError:
+        return _manifest.BoundedCommandResult(None, "", "containment")
+    try:
+        process = subprocess.Popen(
+            command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+        )
+    except OSError:
+        exit_events.close()
+        selector.close()
+        return _manifest.BoundedCommandResult(None, "", "not_found")
+    assert process.stdout is not None and process.stderr is not None
+    buffers = {process.stdout: bytearray(), process.stderr: bytearray()}
+    error = None
+    leader_exited = False
+    try:
+        exit_events.control([
+            select.kevent(
+                process.pid,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE,
+                fflags=select.KQ_NOTE_EXIT,
+            ),
+        ], 0, 0)
+        for stream in buffers:
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ)
+        deadline = time.monotonic() + timeout_sec
+        while not leader_exited:
+            if time.monotonic() >= deadline:
+                error = "timeout"
+                break
+            leader_exited = bool(exit_events.control(None, 1, 0))
+            for key, _ in selector.select(min(0.05, max(0.0, deadline - time.monotonic()))):
+                stream = key.fileobj
+                try:
+                    chunk = os.read(stream.fileno(), 65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(stream)
+                    continue
+                buffers[stream].extend(chunk)
+                if sum(len(value) for value in buffers.values()) > max_output_bytes:
+                    error = "output"
+                    break
+            if error:
+                break
+        if error:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
+        elif not _terminate_assignment_process_group(process.pid):
+            error = "containment"
+        # Reap only after teardown so the numeric process-group ID cannot be reused first.
+        try:
+            returncode = process.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            returncode = process.returncode
+            error = error or "run"
+    except OSError:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+        returncode = process.returncode
+        error = error or "containment"
+    finally:
+        exit_events.close()
+        selector.close()
+        process.stdout.close()
+        process.stderr.close()
+    stdout = bytes(buffers[process.stdout]).decode("utf-8", errors="replace")
+    return _manifest.BoundedCommandResult(returncode, stdout, error)
+
+
+def run_bounded_command(
+    command: list[str], *, cwd: Path, timeout_sec: float, max_output_bytes: int,
+    env: dict[str, str] | None = None, contain_process_group: bool = False,
+) -> _manifest.BoundedCommandResult:
+    if contain_process_group:
+        return run_assignment_bounded_command(
+            command, cwd=cwd, timeout_sec=timeout_sec,
+            max_output_bytes=max_output_bytes, env=env,
+        )
+    return _manifest.run_bounded_command(
+        command, cwd=cwd, timeout_sec=timeout_sec,
+        max_output_bytes=max_output_bytes, env=env,
+    )
 
 
 SECURE_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -191,6 +343,10 @@ TASK4_ASSIGNMENT_CANDIDATE_ENV = (
     "LESSON_STUDIO_E2E_BACKEND_HOST_PORT", "LESSON_STUDIO_E2E_WEB_HOST_PORT",
     "TASK4_ASSIGNMENT_MEDIA_HOST_PORT",
 )
+STATEFUL_ASSIGNMENT_LANES = frozenset({
+    "admin-course-mode-assignment-new",
+    "admin-course-mode-assignment-rollback",
+})
 TASK4_ASSIGNMENT_PORT_ENV = (
     "LESSON_STUDIO_E2E_BACKEND_HOST_PORT", "LESSON_STUDIO_E2E_WEB_HOST_PORT",
     "TASK4_ASSIGNMENT_MEDIA_HOST_PORT",
@@ -2243,9 +2399,7 @@ def _container_tools_required(lane: Lane) -> bool:
 def _playwright_browsers_required(lane: Lane) -> bool:
     return (
         lane.name.startswith("admin-course-mode-playwright-")
-        or lane.name in {
-            "admin-course-mode-assignment-new", "admin-course-mode-assignment-rollback",
-        }
+        or lane.name in STATEFUL_ASSIGNMENT_LANES
     )
 
 
@@ -2822,7 +2976,12 @@ def _assignment_runtime_root(
 
 
 def _child_environment(
-    candidate: dict, source: Mapping[str, str], lane: Lane, *, source_candidate: dict | None = None,
+    candidate: dict,
+    source: Mapping[str, str],
+    lane: Lane,
+    *,
+    source_candidate: dict | None = None,
+    assignment_runtime_root: Path | None = None,
 ) -> dict[str, str] | None:
     environment = dict(BASE_ENVIRONMENT)
     node_requirement = _node_install_requirement(lane)
@@ -2851,9 +3010,10 @@ def _child_environment(
     if assignment_ports is None:
         return None
     environment.update(assignment_ports)
-    if lane.name in {
-        "admin-course-mode-assignment-new", "admin-course-mode-assignment-rollback",
-    } and required_environment.get("TASK4_ASSIGNMENT_RUNTIME_ROOT"):
+    if (
+        lane.name in STATEFUL_ASSIGNMENT_LANES
+        and required_environment.get("TASK4_ASSIGNMENT_RUNTIME_ROOT")
+    ):
         runtime_root = _assignment_runtime_root(
             source_candidate if source_candidate is not None else candidate,
             candidate,
@@ -2861,7 +3021,9 @@ def _child_environment(
         )
         if runtime_root is None:
             return None
-        environment["TASK4_ASSIGNMENT_RUNTIME_ROOT"] = runtime_root
+        environment["TASK4_ASSIGNMENT_RUNTIME_ROOT"] = str(
+            assignment_runtime_root if assignment_runtime_root is not None else runtime_root
+        )
     if lane.name == LIVE_DB_LANE.name:
         environment["COURSE_MODE_V5_SOURCE_ROOT"] = candidate["repositories"]["adminEsp"]["path"]
     assignment = _assignment_candidate_environment(candidate, lane)
@@ -3034,10 +3196,21 @@ def _live_db_source_snapshot(source: Mapping[str, str]) -> dict[str, str] | None
     return snapshot
 
 
+def _assignment_source_snapshot(source: Mapping[str, str]) -> dict[str, str] | None:
+    missing = object()
+    snapshot = {}
+    try:
+        for name in TASK4_ASSIGNMENT_CANDIDATE_ENV:
+            value = source.get(name, missing)
+            if value is not missing:
+                snapshot[name] = value
+    except (AttributeError, KeyError, RuntimeError, TypeError):
+        return None
+    return snapshot
+
+
 def _assignment_candidate_environment(candidate: dict, lane: Lane) -> dict[str, str] | None:
-    if lane.name not in {
-        "admin-course-mode-assignment-new", "admin-course-mode-assignment-rollback",
-    }:
+    if lane.name not in STATEFUL_ASSIGNMENT_LANES:
         return {}
     try:
         images = candidate["images"]
@@ -3065,9 +3238,7 @@ def _assignment_candidate_environment(candidate: dict, lane: Lane) -> dict[str, 
 def _assignment_port_environment(
     environment: Mapping[str, str], lane: Lane,
 ) -> dict[str, str] | None:
-    if lane.name not in {
-        "admin-course-mode-assignment-new", "admin-course-mode-assignment-rollback",
-    }:
+    if lane.name not in STATEFUL_ASSIGNMENT_LANES:
         return {}
     values = {name: environment.get(name) for name in TASK4_ASSIGNMENT_PORT_ENV}
     if any(
@@ -3480,6 +3651,19 @@ def run_gate(
             report = {
                 "candidateId": candidate_id, "verdict": "PASS", "lanes": [], "failedLane": None,
             }
+            assignment_source = (
+                _assignment_source_snapshot(source)
+                if any(lane.name in STATEFUL_ASSIGNMENT_LANES for lane in selected)
+                else None
+            )
+            assignment_runtime: AssignmentRuntimeCapsule | None = None
+            last_assignment_name = next(
+                (
+                    lane.name for lane in reversed(selected)
+                    if lane.name in STATEFUL_ASSIGNMENT_LANES
+                ),
+                None,
+            )
             if not release_state_matches(
                 candidate_path, candidate, selected, runtime_root, require_runtime,
             ):
@@ -3491,7 +3675,16 @@ def run_gate(
             for lane in selected if report["verdict"] == "PASS" else ():
                 execution_stage = None
                 lane_execution = None
-                lane_source = source
+                lane_source = (
+                    assignment_source if lane.name in STATEFUL_ASSIGNMENT_LANES else source
+                )
+                if lane_source is None:
+                    report["lanes"].append({
+                        "name": lane.name, "exitCode": None, "durationMs": 0,
+                    })
+                    report["verdict"] = "BLOCKED"
+                    report["failedLane"] = lane.name
+                    break
                 if lane.name == LIVE_DB_LANE.name:
                     live_db_source = _live_db_source_snapshot(source)
                     if live_db_source is None:
@@ -3526,9 +3719,10 @@ def run_gate(
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
                     break
-                if lane.name in {
-                    "admin-course-mode-assignment-new", "admin-course-mode-assignment-rollback",
-                } and not assignment_input_sources_ready(candidate):
+                if (
+                    lane.name in STATEFUL_ASSIGNMENT_LANES
+                    and not assignment_input_sources_ready(candidate)
+                ):
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
@@ -3543,6 +3737,27 @@ def run_gate(
                     break
                 lane_command = _command_for_lane(lane, candidate)
                 try:
+                    if lane.name in STATEFUL_ASSIGNMENT_LANES:
+                        if assignment_runtime is None:
+                            protected = tuple(
+                                Path(item["path"])
+                                for item in candidate["repositories"].values()
+                            ) + (
+                                candidate_path,
+                                Path(required_source["TASK4_ASSIGNMENT_RUNTIME_ROOT"]),
+                                *(tuple([report_path]) if report_path is not None else ()),
+                                *(
+                                    tuple([operator_binding.path])
+                                    if operator_binding is not None else ()
+                                ),
+                            )
+                            assignment_runtime = AssignmentRuntimeCapsule.create(protected)
+                        if not assignment_runtime.usable():
+                            report["verdict"] = "BLOCKED"
+                            report["failedLane"] = "cleanup"
+                            _cleanup_gate_owned(report, assignment_runtime)
+                            assignment_runtime = None
+                            break
                     execution_stage = stage_execution_candidate(candidate, (lane,))
                     lane_execution = execution_stage.create_lane_execution()
                     execution_candidate = lane_execution.candidate
@@ -3561,7 +3776,13 @@ def run_gate(
                         report["failedLane"] = "snapshot"
                     break
                 lane_environment = _child_environment(
-                    execution_candidate, required_source, lane, source_candidate=candidate,
+                    execution_candidate,
+                    required_source,
+                    lane,
+                    source_candidate=candidate,
+                    assignment_runtime_root=(
+                        assignment_runtime.root if assignment_runtime is not None else None
+                    ),
                 )
                 if lane_environment is None:
                     report["lanes"].append({
@@ -3650,11 +3871,13 @@ def run_gate(
                             result = run_bounded_command(
                                 list(command), cwd=resolved_cwd, timeout_sec=lane.timeout_sec,
                                 max_output_bytes=max_output_bytes, env=child_environment,
+                                contain_process_group=lane.name in STATEFUL_ASSIGNMENT_LANES,
                             )
                     else:
                         result = run_bounded_command(
                             list(command), cwd=resolved_cwd, timeout_sec=lane.timeout_sec,
                             max_output_bytes=max_output_bytes, env=child_environment,
+                            contain_process_group=lane.name in STATEFUL_ASSIGNMENT_LANES,
                         )
                     if (
                         (_python_test_runtime_required(lane) or _backend_compiler_required(lane))
@@ -3677,12 +3900,16 @@ def run_gate(
                     skip_state = pytest_report_has_skips(junit_path) if junit_path else False
                 except BaseException:
                     try:
-                        _cleanup_gate_owned_or_raise(lane_execution, execution_stage)
+                        _cleanup_gate_owned_or_raise(
+                            lane_execution, execution_stage, assignment_runtime,
+                        )
+                        assignment_runtime = None
                     except RetainedStagingError as error:
                         report["verdict"] = "BLOCKED"
                         report["failedLane"] = "cleanup"
                         report["retainedOwner"] = "current-process"
                         report["retainedPaths"] = list(error.paths)
+                        assignment_runtime = None
                         break
                     raise
                 finally:
@@ -3696,6 +3923,11 @@ def run_gate(
                 })
                 if not _cleanup_gate_owned(report, lane_execution, execution_stage):
                     break
+                if lane.name == last_assignment_name:
+                    if not _cleanup_gate_owned(report, assignment_runtime):
+                        assignment_runtime = None
+                        break
+                    assignment_runtime = None
                 if operator_binding is not None and _operator_attestation_binding(
                     candidate, source,
                 ) != operator_binding:
@@ -3707,13 +3939,20 @@ def run_gate(
                     report["failedLane"] = lane.name
                     break
                 if result.error or result.returncode != 0:
-                    report["verdict"] = "BLOCKED" if result.error == "authority" else "FAIL"
+                    report["verdict"] = (
+                        "BLOCKED"
+                        if result.error in {"authority", "containment"}
+                        else "FAIL"
+                    )
                     report["failedLane"] = lane.name
                     break
                 if skip_state is not False:
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
                     break
+            if assignment_runtime is not None:
+                _cleanup_gate_owned(report, assignment_runtime)
+                assignment_runtime = None
             if report["verdict"] == "PASS":
                 if operator_binding is not None and _operator_attestation_binding(
                     candidate, source,

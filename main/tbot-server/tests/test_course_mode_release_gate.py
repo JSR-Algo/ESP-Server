@@ -1706,6 +1706,325 @@ def test_assignment_runtime_capsule_post_open_failure_closes_exact_descriptor(
     assert roots and all(not root.exists() for root in roots)
 
 
+def _stateful_assignment_lane(name: str, code: str) -> gate.Lane:
+    return gate.Lane(
+        name, "adminEsp", ".", (sys.executable, "-c", code), 5.0,
+        gate.TASK4_ASSIGNMENT_CANDIDATE_ENV,
+    )
+
+
+def _record_assignment_capsules(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    roots: list[Path] = []
+    original = gate.AssignmentRuntimeCapsule.create
+
+    def create(protected):
+        capsule = original(protected)
+        roots.append(capsule.root)
+        return capsule
+
+    monkeypatch.setattr(gate.AssignmentRuntimeCapsule, "create", create)
+    return roots
+
+
+def _authorize_assignment_test_lane(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(gate, "assignment_input_sources_ready", lambda _candidate: True)
+    monkeypatch.setattr(gate, "_container_tools_authorized", lambda _candidate: True)
+    monkeypatch.setattr(gate, "playwright_browsers_authorized", lambda _candidate: True)
+    monkeypatch.setattr(gate, "_backend_compiler_required", lambda _lane: False)
+
+
+def test_assignment_lanes_share_capsule_then_remove_it(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _assignment_source(candidate_file)
+    observed: list[Path] = []
+    commands = {
+        "admin-course-mode-assignment-new": (
+            sys.executable, "-c",
+            "import os;from pathlib import Path;"
+            "p=Path(os.environ['TASK4_ASSIGNMENT_RUNTIME_ROOT']);"
+            "(p/'media').mkdir(parents=True,exist_ok=True);"
+            "(p/'media'/'handoff.bin').write_bytes(b'new')",
+        ),
+        "admin-course-mode-assignment-rollback": (
+            sys.executable, "-c",
+            "import os;from pathlib import Path;"
+            "p=Path(os.environ['TASK4_ASSIGNMENT_RUNTIME_ROOT']);"
+            "assert (p/'media'/'handoff.bin').read_bytes()==b'new'",
+        ),
+    }
+    lanes = tuple(
+        gate.Lane(
+            name, "adminEsp", ".", commands[name], 5.0,
+            gate.TASK4_ASSIGNMENT_CANDIDATE_ENV,
+        )
+        for name in commands
+    )
+    original_run = gate.run_bounded_command
+
+    def record_runtime(command, **kwargs):
+        observed.append(Path(kwargs["env"]["TASK4_ASSIGNMENT_RUNTIME_ROOT"]))
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(gate, "run_bounded_command", record_runtime)
+    _authorize_assignment_test_lane(monkeypatch)
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=lanes, source_environment=source,
+    )
+
+    assert result["verdict"] == "PASS", result
+    assert len(observed) == 2 and observed[0] == observed[1]
+    assert not observed[0].exists()
+
+
+def test_assignment_capsule_is_cleaned_after_new_failure(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roots = _record_assignment_capsules(monkeypatch)
+    _authorize_assignment_test_lane(monkeypatch)
+    lane = _stateful_assignment_lane(
+        "admin-course-mode-assignment-new", "raise SystemExit(7)",
+    )
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=(lane,),
+        source_environment=_assignment_source(candidate_file),
+    )
+
+    assert result["verdict"] == "FAIL"
+    assert roots and not roots[0].exists()
+
+
+def test_assignment_capsule_is_cleaned_after_rollback_failure(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roots = _record_assignment_capsules(monkeypatch)
+    _authorize_assignment_test_lane(monkeypatch)
+    lanes = (
+        _stateful_assignment_lane("admin-course-mode-assignment-new", "pass"),
+        _stateful_assignment_lane(
+            "admin-course-mode-assignment-rollback", "raise SystemExit(8)",
+        ),
+    )
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=lanes,
+        source_environment=_assignment_source(candidate_file),
+    )
+
+    assert result["verdict"] == "FAIL"
+    assert roots and not roots[0].exists()
+
+
+def test_assignment_capsule_single_selected_lane_does_not_leak(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roots = _record_assignment_capsules(monkeypatch)
+    _authorize_assignment_test_lane(monkeypatch)
+    lane = _stateful_assignment_lane("admin-course-mode-assignment-new", "pass")
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=(lane,),
+        source_environment=_assignment_source(candidate_file),
+    )
+
+    assert result["verdict"] == "PASS"
+    assert roots and not roots[0].exists()
+
+
+def test_assignment_capsule_is_never_sent_to_non_assignment_lane(
+    candidate_file: Path, tmp_path: Path,
+) -> None:
+    marker = tmp_path / "assignment-env-present"
+    lane = _lane(
+        "ordinary", "import os;from pathlib import Path;"
+        f"Path({str(marker)!r}).touch() if "
+        "'TASK4_ASSIGNMENT_RUNTIME_ROOT' in os.environ else None",
+    )
+
+    result = gate.run_gate(
+        candidate_file, "quick", lanes=(lane,),
+        source_environment=_assignment_source(candidate_file),
+    )
+
+    assert result["verdict"] == "PASS"
+    assert not marker.exists()
+
+
+def test_assignment_capsule_is_cleaned_after_snapshot_failure(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roots = _record_assignment_capsules(monkeypatch)
+    _authorize_assignment_test_lane(monkeypatch)
+    original_stage = gate.stage_execution_candidate
+    calls = 0
+
+    def fail_rollback_snapshot(candidate: dict, lanes):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("rollback snapshot")
+        return original_stage(candidate, lanes)
+
+    monkeypatch.setattr(gate, "stage_execution_candidate", fail_rollback_snapshot)
+    lanes = (
+        _stateful_assignment_lane("admin-course-mode-assignment-new", "pass"),
+        _stateful_assignment_lane("admin-course-mode-assignment-rollback", "pass"),
+    )
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=lanes,
+        source_environment=_assignment_source(candidate_file),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "snapshot"
+    assert roots and not roots[0].exists()
+
+
+def test_assignment_lane_background_process_cannot_race_next_lane(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _authorize_assignment_test_lane(monkeypatch)
+    new_code = (
+        "import os,subprocess,sys,time;from pathlib import Path;"
+        "p=Path(os.environ['TASK4_ASSIGNMENT_RUNTIME_ROOT']);"
+        "child=\"import os,signal,time;from pathlib import Path;"
+        "p=Path(os.environ['TASK4_ASSIGNMENT_RUNTIME_ROOT']);"
+        "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+        "(p/'descendant-ready').touch();time.sleep(.5);"
+        "(p/'descendant-raced').touch();time.sleep(10)\";"
+        "subprocess.Popen([sys.executable,'-c',child],"
+        "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);"
+        "deadline=time.monotonic()+2;"
+        "exec(\"while not (p/'descendant-ready').exists():\\n"
+        " assert time.monotonic()<deadline\\n time.sleep(.01)\");"
+        "(p/'leader-finished').touch()"
+    )
+    rollback_code = (
+        "import os,time;from pathlib import Path;"
+        "p=Path(os.environ['TASK4_ASSIGNMENT_RUNTIME_ROOT']);"
+        "assert (p/'leader-finished').is_file();time.sleep(.7);"
+        "assert not (p/'descendant-raced').exists()"
+    )
+    lanes = (
+        _stateful_assignment_lane("admin-course-mode-assignment-new", new_code),
+        _stateful_assignment_lane("admin-course-mode-assignment-rollback", rollback_code),
+    )
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=lanes,
+        source_environment=_assignment_source(candidate_file),
+    )
+
+    assert result["verdict"] == "PASS", result
+
+
+def test_assignment_capsule_cleanup_failure_overrides_lane_failure(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _authorize_assignment_test_lane(monkeypatch)
+    capsules: list[gate.AssignmentRuntimeCapsule] = []
+    original_create = gate.AssignmentRuntimeCapsule.create
+    original_remove = gate._remove_owned_tree
+
+    def record_create(protected):
+        capsule = original_create(protected)
+        capsules.append(capsule)
+        return capsule
+
+    def fail_capsule_cleanup(path: Path, identity=None) -> bool:
+        if path.name.startswith("course-mode-assignment-runtime-"):
+            return False
+        return original_remove(path, identity)
+
+    monkeypatch.setattr(gate.AssignmentRuntimeCapsule, "create", record_create)
+    monkeypatch.setattr(gate, "_remove_owned_tree", fail_capsule_cleanup)
+    lane = _stateful_assignment_lane(
+        "admin-course-mode-assignment-new", "raise SystemExit(7)",
+    )
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=(lane,),
+        source_environment=_assignment_source(candidate_file),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "cleanup"
+    assert result["retainedOwner"] == "current-process"
+    assert result["retainedPaths"] == [str(capsules[0].root)]
+    monkeypatch.setattr(gate, "_remove_owned_tree", original_remove)
+    original_remove(capsules[0].root, capsules[0].identity)
+
+
+def test_assignment_lanes_snapshot_mutable_source_once(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    _authorize_assignment_test_lane(monkeypatch)
+    valid_source = _assignment_source(candidate_file)
+    attacker_runtime = tmp_path / "attacker-runtime"
+
+    class MutableAssignmentSource(dict[str, str]):
+        runtime_reads = 0
+
+        def get(self, key, default=None):
+            if key == "TASK4_ASSIGNMENT_RUNTIME_ROOT":
+                self.runtime_reads += 1
+                return (
+                    valid_source[key]
+                    if self.runtime_reads == 1
+                    else str(attacker_runtime)
+                )
+            return super().get(key, default)
+
+    source = MutableAssignmentSource(valid_source)
+    observed: list[Path] = []
+    original_run = gate.run_bounded_command
+
+    def record_runtime(command, **kwargs):
+        observed.append(Path(kwargs["env"]["TASK4_ASSIGNMENT_RUNTIME_ROOT"]))
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(gate, "run_bounded_command", record_runtime)
+    lanes = (
+        _stateful_assignment_lane("admin-course-mode-assignment-new", "pass"),
+        _stateful_assignment_lane("admin-course-mode-assignment-rollback", "pass"),
+    )
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=lanes, source_environment=source,
+    )
+
+    assert result["verdict"] == "PASS", result
+    assert source.runtime_reads == 1
+    assert len(observed) == 2 and observed[0] == observed[1]
+    assert not attacker_runtime.exists()
+
+
+def test_assignment_lane_blocks_when_process_containment_cannot_be_proven(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _authorize_assignment_test_lane(monkeypatch)
+    monkeypatch.setattr(
+        gate,
+        "run_assignment_bounded_command",
+        lambda *_args, **_kwargs: gate._manifest.BoundedCommandResult(
+            0, "", "containment",
+        ),
+    )
+    lane = _stateful_assignment_lane("admin-course-mode-assignment-new", "pass")
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=(lane,),
+        source_environment=_assignment_source(candidate_file),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == lane.name
+
+
 def test_lane_cleanup_removes_zero_mode_runtime_directories(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
