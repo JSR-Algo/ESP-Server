@@ -1116,6 +1116,70 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["quietForwardedOutputChunks"], 0)
         self.assertEqual(result["quietSemanticEvidence"]["status"], "FAIL")
 
+    async def test_candidate_quiet_distinct_text_during_setup_audio_fails_closed(self):
+        conn = _Conn()
+        registry = self._bind_candidate_quiet(conn, "candidate.quiet-mixed-input")
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-quiet")
+        provider._reset_candidate_scope_measurements()
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._should_interrupt_for_input = lambda _audio: False
+        provider._should_drop_input_during_output = lambda: False
+        provider._should_drop_conversation_start_noise = lambda _audio: False
+
+        self.assertTrue(await provider.handle_audio_bytes(b"setup-one"))
+        self.assertTrue(await provider.handle_audio_bytes(b"setup-two"))
+        before_text = registry.safe_snapshot("candidate.quiet-mixed-input")
+        self.assertTrue(before_text["quietSemanticEligible"], before_text)
+        self.assertEqual(provider._evidence_candidate_counters["user_turns"], 0)
+        self.assertTrue(
+            await provider.handle_text_message(
+                '{"type":"listen","state":"detect","text":" "}'
+            )
+        )
+        self.assertTrue(
+            registry.safe_snapshot("candidate.quiet-mixed-input")[
+                "quietSemanticEligible"
+            ]
+        )
+
+        distinct_text = '{"type":"text","text":"distinct accepted input"}'
+        self.assertTrue(await provider.handle_text_message(distinct_text))
+
+        after_text = registry.safe_snapshot("candidate.quiet-mixed-input")
+        self.assertFalse(after_text["quietSemanticEligible"], after_text)
+        self.assertEqual(provider._evidence_candidate_counters["user_turns"], 1)
+        self.assertEqual(provider._response_generation, 2)
+        self.assertTrue(await provider.handle_text_message(distinct_text))
+        self.assertEqual(provider._evidence_candidate_counters["user_turns"], 2)
+
+    async def test_candidate_quiet_second_audio_stream_is_not_frame_deduped(self):
+        conn = _Conn()
+        registry = self._bind_candidate_quiet(conn, "candidate.quiet-second-audio")
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-quiet")
+        provider._reset_candidate_scope_measurements()
+        provider._should_interrupt_for_input = lambda _audio: False
+        provider._should_drop_input_during_output = lambda: False
+        provider._should_drop_conversation_start_noise = lambda _audio: False
+        provider._waiting_model_retry_audio_can_resume = lambda _audio: True
+
+        self.assertTrue(await provider.handle_audio_bytes(b"setup"))
+        self.assertTrue(
+            await provider.handle_text_message('{"type":"listen","state":"stop"}')
+        )
+        self.assertTrue(await provider.handle_audio_bytes(b"second-turn"))
+
+        snapshot = registry.safe_snapshot("candidate.quiet-second-audio")
+        self.assertFalse(snapshot["quietSemanticEligible"], snapshot)
+        self.assertEqual(provider._evidence_candidate_counters["user_turns"], 1)
+
     async def test_candidate_quiet_silence_duration_excludes_successful_teardown(self):
         conn = _Conn()
         registry = EvidenceEnrollmentRegistry()

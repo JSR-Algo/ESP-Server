@@ -431,6 +431,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._last_waiting_model_retry_prompt_at = 0.0
         self._echo_bypass_pending_interrupt = False
         self._last_clean_user_turn_response_id = None
+        self._last_clean_user_turn_source = None
         self._suppress_start_lesson_tool_call_until = 0.0
         self._skip_next_session_resumption_restore = False
         self._session_resumption_persist_tasks = set()
@@ -5004,6 +5005,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._user_stream_last_speech_at = None
         self._user_stream_frames = 0
         self._last_clean_user_turn_response_id = None
+        self._last_clean_user_turn_source = None
 
     def _record_user_stream_audio(self, decoded_audio):
         now = time.monotonic()
@@ -6490,7 +6492,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
         self._interaction.transition(InteractionState.USER_STREAMING)
         if self._bridge is not None and hasattr(self._bridge, "allow_model_output"):
             self._bridge.allow_model_output()
-        if self._last_clean_user_turn_response_id == self._response_generation:
+        if (
+            reason == "audio_input"
+            and self._last_clean_user_turn_source == "audio_input"
+            and self._last_clean_user_turn_response_id == self._response_generation
+        ):
             return
         setup_turn_consumed = False
         if self._candidate_counter_enabled():
@@ -6532,6 +6538,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     sorted(self._cancelled_response_ids)[-10:]
                 )
         self._last_clean_user_turn_response_id = self._response_generation
+        self._last_clean_user_turn_source = reason
         if setup_turn_consumed:
             try:
                 registry.bind_quiet_setup_response(

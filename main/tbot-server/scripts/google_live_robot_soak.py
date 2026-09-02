@@ -2991,11 +2991,19 @@ def build_candidate_journeys(args, *, protected_input=None):
     async def cleanup_ambiguous_enrollment(
         post_task, journey_url, *, journey_id, journey_type
     ):
+        def defer_current_cancellation():
+            current = asyncio.current_task()
+            if current is None:
+                return
+            while current.cancelling():
+                current.uncancel()
+
         if post_task is not None:
             while not post_task.done():
                 try:
                     await asyncio.shield(post_task)
                 except asyncio.CancelledError:
+                    defer_current_cancellation()
                     continue
                 except BaseException:
                     break
@@ -3013,24 +3021,46 @@ def build_candidate_journeys(args, *, protected_input=None):
         def remaining_budget():
             return deadline - clock()
 
+        async def cancellation_resistant_step(coroutine_factory):
+            while True:
+                remaining = remaining_budget()
+                if remaining <= 0:
+                    raise _CleanupDeadlineExceeded
+                operation = asyncio.create_task(coroutine_factory(remaining))
+                timed_out = False
+
+                def cancel_at_deadline():
+                    nonlocal timed_out
+                    timed_out = True
+                    operation.cancel()
+
+                deadline_cancel = loop.call_later(remaining, cancel_at_deadline)
+                try:
+                    while True:
+                        try:
+                            return await asyncio.shield(operation)
+                        except asyncio.CancelledError:
+                            defer_current_cancellation()
+                            if operation.done():
+                                break
+                            loop.call_soon(operation.cancel)
+                    if timed_out or remaining_budget() <= 0:
+                        raise _CleanupDeadlineExceeded
+                finally:
+                    deadline_cancel.cancel()
+
         async def control_before_deadline(method):
-            remaining = remaining_budget()
-            if remaining <= 0:
-                raise _CleanupDeadlineExceeded
-            try:
+            async def control(remaining):
                 if callable(getattr(args, "candidate_control_json", None)):
-                    return await asyncio.wait_for(
-                        _candidate_control_json(args, method, journey_url),
-                        timeout=remaining,
-                    )
+                    return await _candidate_control_json(args, method, journey_url)
                 return await _candidate_control_json(
                     args,
                     method,
                     journey_url,
                     request_timeout_sec=remaining,
                 )
-            except asyncio.TimeoutError as exc:
-                raise _CleanupDeadlineExceeded from exc
+
+            return await cancellation_resistant_step(control)
 
         expected = {
             "journeyId": journey_id,
@@ -3084,7 +3114,10 @@ def build_candidate_journeys(args, *, protected_input=None):
             remaining = remaining_budget()
             if attempt == 2 or remaining <= 0:
                 raise RuntimeError("candidate enrollment cleanup failed")
-            await asyncio.sleep(min(0.01 * (attempt + 1), remaining))
+            try:
+                await asyncio.sleep(min(0.01 * (attempt + 1), remaining))
+            except asyncio.CancelledError:
+                defer_current_cancellation()
 
     async def run_lifecycle(
         _args,
