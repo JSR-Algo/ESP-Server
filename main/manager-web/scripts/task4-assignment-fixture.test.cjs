@@ -78,6 +78,10 @@ test('Task 4 assignment fixture declares exact graph and READY derivative invari
   assert.match(source, /writeTbotRgb565File/);
   assert.match(source, /validateTbotRgb565File/);
   assert.match(source, /createHash\('sha256'\)/);
+  assert.match(source, /const \{ copyFile, mkdir, open, rm, stat \} = require\('node:fs\/promises'\);/);
+  assert.doesNotMatch(source, /\blink\b|replaceWithLink/);
+  assert.equal((source.match(/await replaceWithCopy\(/g) || []).length, 2);
+  assert.match(source, /async function replaceWithCopy\(source, destination\) \{[\s\S]*await stat\(source\);[\s\S]*await rm\(destination, \{ force: true \}\);[\s\S]*await copyFile\(source, destination\);[\s\S]*\}/);
   assert.doesNotMatch(source, /fixture\.local/);
   assert.doesNotMatch(source, /output_bytes=1/);
   assert.doesNotMatch(source, /preview:\$\{row\.derivative_id\}/);

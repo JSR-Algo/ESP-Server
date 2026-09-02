@@ -5,7 +5,7 @@ process.env.TVIDEO_FONT_BUNDLE_SHA256 ||= 'b'.repeat(64);
 
 const { createHash } = require('node:crypto');
 const { createReadStream, readFileSync } = require('node:fs');
-const { copyFile, link, mkdir, open, rm, stat } = require('node:fs/promises');
+const { copyFile, mkdir, open, rm, stat } = require('node:fs/promises');
 const { get: httpsGet } = require('node:https');
 const { dirname, join } = require('node:path');
 const { Pool } = require('/app/node_modules/pg');
@@ -338,9 +338,9 @@ async function materializeReadyDerivatives(pool, lessonId, lessonVersion) {
     const previewPath = join(MEDIA_ROOT, previewRelative);
     const devicePath = join(MEDIA_ROOT, deviceRelative);
     await mkdir(dirname(previewPath), { recursive: true });
-    await replaceWithLink(join(MEDIA_ROOT, 'templates', `${durationMs}.mp4`), previewPath);
+    await replaceWithCopy(join(MEDIA_ROOT, 'templates', `${durationMs}.mp4`), previewPath);
     const trgbTemplate = await ensureTbotTemplate(durationMs, frames);
-    await replaceWithLink(trgbTemplate, devicePath);
+    await replaceWithCopy(trgbTemplate, devicePath);
     const parsed = await validateTbotRgb565File(devicePath, frames);
     const [previewInfo, deviceInfo, previewSha, deviceSha] = await Promise.all([
       stat(previewPath), stat(devicePath), fileSha256(previewPath), fileSha256(devicePath),
@@ -396,15 +396,10 @@ async function ensureTbotTemplate(durationMs, frameCount) {
   return template;
 }
 
-async function replaceWithLink(source, destination) {
+async function replaceWithCopy(source, destination) {
   await stat(source);
   await rm(destination, { force: true });
-  try {
-    await link(source, destination);
-  } catch (error) {
-    if (!['EXDEV', 'EPERM'].includes(error.code)) throw error;
-    await copyFile(source, destination);
-  }
+  await copyFile(source, destination);
 }
 
 async function fileSha256(path) {
