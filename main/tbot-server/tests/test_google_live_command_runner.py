@@ -154,6 +154,48 @@ def test_rejects_paths_outside_evidence_root_and_input_output_aliases(tmp_path: 
             )
 
 
+def test_rejects_cwd_symlink_to_outside_without_execution(tmp_path: Path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    escaped = outside / "escaped"
+    linked = tmp_path / "linked-cwd"
+    linked.symlink_to(outside, target_is_directory=True)
+    spec = _spec(
+        tmp_path,
+        f"from pathlib import Path; Path({str(escaped)!r}).write_text('bad')",
+        cwd=linked,
+        outputs=(),
+    )
+    with pytest.raises((ValueError, RuntimeError)):
+        execute_and_record(spec, provenance=tmp_path / "commands.jsonl")
+    assert not escaped.exists()
+
+
+def test_cwd_parent_swap_before_spawn_fails_without_outside_execution(tmp_path: Path) -> None:
+    cwd = tmp_path / "safe-cwd"
+    cwd.mkdir()
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-swap"
+    outside.mkdir()
+    escaped = outside / "escaped"
+
+    def swap() -> None:
+        cwd.rename(tmp_path / "moved-cwd")
+        cwd.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="cwd changed"):
+        execute_and_record(
+            _spec(
+                tmp_path,
+                f"from pathlib import Path; Path({str(escaped)!r}).write_text('bad')",
+                cwd=cwd,
+                outputs=(),
+            ),
+            provenance=tmp_path / "commands.jsonl",
+            _before_spawn=swap,
+        )
+    assert not escaped.exists()
+
+
 def test_nonzero_exit_is_recorded_only_when_expected(tmp_path: Path) -> None:
     expected = _spec(tmp_path, "raise SystemExit(7)", outputs=(), expected_exit_codes=(7,))
     result = execute_and_record(expected, provenance=tmp_path / "commands.jsonl")

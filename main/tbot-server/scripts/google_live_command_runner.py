@@ -11,6 +11,7 @@ import secrets
 import signal
 import stat
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -55,6 +56,11 @@ _EXACT_TERMINAL_FIELDS = {
     "satisfied",
     "timeoutSec",
 }
+_FCHDIR_EXEC = (
+    "import os,sys;"
+    "fd=int(sys.argv[1]);argv=sys.argv[2:];"
+    "os.fchdir(fd);os.execve(argv[0],argv,os.environ)"
+)
 
 
 def _immutable_identity(value: Mapping[str, str] | None) -> Mapping[str, str]:
@@ -103,6 +109,8 @@ class CommandSpec:
             raise TypeError("argv must be a non-empty tuple")
         if any(type(item) is not str or not item or "\x00" in item for item in self.argv):
             raise ValueError("argv contains an invalid argument")
+        if not Path(self.argv[0]).is_absolute():
+            raise ValueError("command executable must be absolute")
         if any(_unsafe_recorded_value(item) for item in self.argv):
             raise ValueError("argv violates the privacy contract")
         for name, values in (
@@ -147,6 +155,13 @@ class CommandResult:
     policy_satisfied: bool
     spec_digest: str
     output_hashes: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class BoundWorkingDirectory:
+    path: Path
+    descriptor: int
+    chain: tuple[tuple[int, int, int, int], ...]
 
 
 def _unsafe_recorded_value(value: str) -> bool:
@@ -202,6 +217,52 @@ def _directory_chain(path: Path) -> tuple[tuple[int, int], ...]:
             raise RuntimeError("evidence parent is invalid")
         result.append((opened.st_dev, opened.st_ino))
     return tuple(result)
+
+
+def _open_bound_working_directory(root: Path, cwd: Path) -> BoundWorkingDirectory:
+    _absolute_clean(root)
+    _absolute_clean(cwd)
+    if cwd != root and not _inside(root, cwd):
+        raise ValueError("cwd must be the evidence root or a descendant")
+    if cwd.parts[: len(root.parts)] != root.parts:
+        raise ValueError("cwd must be contained by the evidence root")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(cwd.anchor, flags)
+    chain = []
+    try:
+        opened = os.fstat(descriptor)
+        chain.append((opened.st_dev, opened.st_ino, opened.st_mode, opened.st_ctime_ns))
+        for component in cwd.parts[1:]:
+            next_descriptor = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+            opened = os.fstat(descriptor)
+            if not stat.S_ISDIR(opened.st_mode):
+                raise RuntimeError("cwd component is not a directory")
+            chain.append((opened.st_dev, opened.st_ino, opened.st_mode, opened.st_ctime_ns))
+        root_index = len(root.parts) - 1
+        if root_index >= len(chain):
+            raise RuntimeError("cwd is outside the evidence root")
+        return BoundWorkingDirectory(cwd, descriptor, tuple(chain))
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _require_working_directory_unchanged(
+    bound: BoundWorkingDirectory, *, require_ctime: bool
+) -> None:
+    try:
+        current = _open_bound_working_directory(bound.path, bound.path)
+    except OSError as exc:
+        raise RuntimeError("cwd changed") from exc
+    try:
+        observed = current.chain if require_ctime else tuple(item[:3] for item in current.chain)
+        expected = bound.chain if require_ctime else tuple(item[:3] for item in bound.chain)
+        if observed != expected:
+            raise RuntimeError("cwd changed")
+    finally:
+        os.close(current.descriptor)
 
 
 def _prepare_paths(
@@ -299,6 +360,15 @@ def _child_environment(spec: CommandSpec, source: Mapping[str, str] | None) -> d
     return result
 
 
+def _validate_executable(path: str) -> None:
+    try:
+        opened = os.stat(path)
+    except OSError as exc:
+        raise RuntimeError("spawn_failed") from exc
+    if not stat.S_ISREG(opened.st_mode) or not os.access(path, os.X_OK):
+        raise RuntimeError("spawn_failed")
+
+
 def _terminate_group(process: subprocess.Popen[bytes], pgid: int, grace: float) -> None:
     try:
         os.killpg(pgid, signal.SIGTERM)
@@ -325,17 +395,19 @@ def _run_process(
     child_env: Mapping[str, str],
     stdin_bytes: bytes | None,
     cancel_event: threading.Event | None,
+    cwd_descriptor: int,
 ) -> tuple[int | None, str, bool]:
     try:
         process = subprocess.Popen(
-            list(spec.argv),
+            [sys.executable, "-c", _FCHDIR_EXEC, str(cwd_descriptor), *spec.argv],
             shell=False,
-            cwd=spec.cwd,
+            cwd=None,
             env=dict(child_env),
             stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
+            pass_fds=(cwd_descriptor,),
         )
     except (OSError, ValueError) as exc:
         raise RuntimeError("spawn_failed") from exc
@@ -654,6 +726,7 @@ def execute_and_record(
     env: Mapping[str, str] | None = None,
     stdin_bytes: bytes | None = None,
     cancel_event: threading.Event | None = None,
+    _before_spawn: Any | None = None,
 ) -> CommandResult:
     if type(spec) is not CommandSpec:
         raise TypeError("spec must be an immutable CommandSpec")
@@ -667,27 +740,37 @@ def execute_and_record(
     }
     if any(path in control_paths or any(_same_file(path, item) for item in control_paths) for path in (*spec.inputs, *spec.outputs)):
         raise ValueError("command artifacts alias provenance control files")
-    if spec.cwd != root and not _inside(root, spec.cwd):
-        raise ValueError("cwd must be the evidence root or a descendant")
     if (stdin_bytes is None) != (spec.stdin_source is None):
         raise ValueError("protected stdin bytes and source must be supplied together")
     if stdin_bytes is not None and type(stdin_bytes) is not bytes:
         raise TypeError("protected stdin must be bytes")
     _preflight_provenance(provenance, spec.command_id)
     inputs, output_parents = _prepare_paths(spec, root)
-    canonical_spec = _canonical_spec(spec, root)
-    spec_digest = _spec_digest(spec)
-    child_env = _child_environment(spec, env)
-    started = _utc_now()
-    interrupted = False
     try:
-        exit_code, classification, satisfied = _run_process(
-            spec, child_env, stdin_bytes, cancel_event
-        )
-    except KeyboardInterrupt:
-        exit_code, classification, satisfied = None, "keyboard_interrupt", False
-        interrupted = True
-    ended = _utc_now()
+        bound_cwd = _open_bound_working_directory(root, spec.cwd)
+    except OSError as exc:
+        raise RuntimeError("cwd is invalid") from exc
+    try:
+        canonical_spec = _canonical_spec(spec, root)
+        spec_digest = _spec_digest(spec)
+        child_env = _child_environment(spec, env)
+        _validate_executable(spec.argv[0])
+        started = _utc_now()
+        interrupted = False
+        if _before_spawn is not None:
+            _before_spawn()
+        _require_working_directory_unchanged(bound_cwd, require_ctime=True)
+        try:
+            exit_code, classification, satisfied = _run_process(
+                spec, child_env, stdin_bytes, cancel_event, bound_cwd.descriptor
+            )
+        except KeyboardInterrupt:
+            exit_code, classification, satisfied = None, "keyboard_interrupt", False
+            interrupted = True
+        ended = _utc_now()
+        _require_working_directory_unchanged(bound_cwd, require_ctime=False)
+    finally:
+        os.close(bound_cwd.descriptor)
     for path, (bound, parent_chain) in inputs.items():
         if _directory_chain(path.parent) != parent_chain:
             raise RuntimeError("evidence input parent changed")

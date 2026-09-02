@@ -258,20 +258,26 @@ def _write_evidence(
         paths[name] = support
         checksums[name] = digest
         rows.append(f"{digest}  {support.relative_to(root)}")
+    journey_evidence = root / "candidate-soak" / "journey-evidence.json"
+    journey_evidence.write_text('{"closed":true}\n', encoding="utf-8")
+    journey_evidence_artifact = {
+        "label": str(journey_evidence.relative_to(root)),
+        "sha256": hashlib.sha256(journey_evidence.read_bytes()).hexdigest(),
+    }
     command_outputs = {
         "deterministic.produce": ("deterministic", "deterministic_manifest", "deterministic_junit"),
         "real_api.round_trip": ("real_api",),
         "websocket.transport": (),
         "websocket.log_analysis": ("server_regression",),
         "websocket.correlation": ("websocket_e2e",),
-        "candidate_soak.produce": ("candidate_soak",),
-        "candidate_soak.replay": (),
+        "candidate_soak.produce": (),
+        "candidate_soak.replay": ("candidate_soak",),
         "physical.capture_and_audit": ("server_regression", "physical"),
     }
     commands = []
     for index, (command_id, output_names) in enumerate(command_outputs.items()):
         secret_sources = (
-            ["<env:GOOGLE_LIVE_EVIDENCE_MINT_SECRET>"]
+            ["<env:TBOT_DEVICE_MINT_SECRET>"]
             if command_id in {"websocket.transport", "candidate_soak.produce", "physical.capture_and_audit"}
             else []
         )
@@ -285,14 +291,15 @@ def _write_evidence(
                 "environmentSources": [],
                 "exitCode": 0,
                 "inputs": (
-                    [{"label": str(paths["candidate_soak"].relative_to(root)), "sha256": checksums["candidate_soak"]}]
+                    [copy.deepcopy(journey_evidence_artifact)]
                     if command_id == "candidate_soak.replay"
                     else []
                 ),
                 "outputs": [
                     {"label": str(paths[name].relative_to(root)), "sha256": checksums[name]}
                     for name in output_names
-                ],
+                ]
+                + ([copy.deepcopy(journey_evidence_artifact)] if command_id == "candidate_soak.produce" else []),
                 "schemaVersion": COMMAND_PROVENANCE_SCHEMA,
                 "secretSources": secret_sources,
                 "specSha256": hashlib.sha256(command_id.encode()).hexdigest(),
@@ -396,6 +403,69 @@ def test_release_rejects_command_provenance_mismatch_or_tamper(tmp_path: Path, m
     encoded = json.dumps(verdict)
     assert verdict["status"] == "FAIL"
     assert "must-never-leak" not in encoded
+    assert any(item["code"] == "COMMAND_PROVENANCE_INVALID" for item in verdict["failures"])
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "producer_final",
+        "replay_missing_output",
+        "replay_self_input",
+        "intermediate_digest",
+        "intermediate_file",
+    ],
+)
+def test_release_binds_candidate_soak_producer_intermediate_and_replay(
+    tmp_path: Path, mutation: str
+) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    entries = [json.loads(line) for line in paths["command_provenance"].read_text().splitlines()]
+    by_id = {entry["commandId"]: entry for entry in entries}
+    producer = by_id["candidate_soak.produce"]
+    replay = by_id["candidate_soak.replay"]
+    final = next(item for item in replay["outputs"] if item["label"].endswith("report.json"))
+    if mutation == "producer_final":
+        producer["outputs"] = [copy.deepcopy(final)]
+    elif mutation == "replay_missing_output":
+        replay["outputs"] = []
+    elif mutation == "replay_self_input":
+        replay["inputs"] = [copy.deepcopy(final)]
+    elif mutation == "intermediate_digest":
+        replay["inputs"][0]["sha256"] = "f" * 64
+    else:
+        (paths["command_provenance"].parent / producer["outputs"][0]["label"]).write_text(
+            '{"closed":false}\n', encoding="utf-8"
+        )
+    content = render_provenance(entries)
+    paths["command_provenance"].write_bytes(content)
+    checksums["command_provenance"] = hashlib.sha256(content).hexdigest()
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+    assert verdict["status"] == "FAIL"
+    assert any(item["code"] == "COMMAND_PROVENANCE_INVALID" for item in verdict["failures"])
+
+
+@pytest.mark.parametrize(
+    ("command_id", "field", "value"),
+    [
+        ("websocket.transport", "secretSources", []),
+        ("websocket.transport", "secretSources", ["<env:TBOT_DEVICE_MINT_SECRET>", "<env:EXTRA_SECRET>"]),
+        ("candidate_soak.replay", "secretSources", ["<env:TBOT_DEVICE_MINT_SECRET>"]),
+        ("real_api.round_trip", "stdinSource", "<stdin:protected_transcript_plan>"),
+        ("physical.capture_and_audit", "stdinSource", None),
+    ],
+)
+def test_release_requires_exact_secret_and_stdin_assignment(
+    tmp_path: Path, command_id: str, field: str, value
+) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    entries = [json.loads(line) for line in paths["command_provenance"].read_text().splitlines()]
+    next(entry for entry in entries if entry["commandId"] == command_id)[field] = value
+    content = render_provenance(entries)
+    paths["command_provenance"].write_bytes(content)
+    checksums["command_provenance"] = hashlib.sha256(content).hexdigest()
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+    assert verdict["status"] == "FAIL"
     assert any(item["code"] == "COMMAND_PROVENANCE_INVALID" for item in verdict["failures"])
 
 

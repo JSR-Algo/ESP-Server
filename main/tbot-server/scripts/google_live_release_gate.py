@@ -813,7 +813,7 @@ def aggregate_release_evidence(
             },
             "real_api.round_trip": {"real_api"},
             "websocket.correlation": {"websocket_e2e"},
-            "candidate_soak.produce": {"candidate_soak"},
+            "candidate_soak.replay": {"candidate_soak"},
             "physical.capture_and_audit": {"server_regression", "physical"},
         }
         for command_id, names in expected_output_bindings.items():
@@ -822,17 +822,38 @@ def aggregate_release_evidence(
                 for name in names
             ):
                 raise ValueError
-        if artifact_by_name["candidate_soak"] not in by_id["candidate_soak.replay"]["inputs"]:
+        producer_outputs = by_id["candidate_soak.produce"]["outputs"]
+        replay_inputs = by_id["candidate_soak.replay"]["inputs"]
+        if (
+            len(producer_outputs) != 1
+            or len(replay_inputs) != 1
+            or producer_outputs != replay_inputs
+            or producer_outputs[0]["label"] != "candidate-soak/journey-evidence.json"
+            or producer_outputs[0] == artifact_by_name["candidate_soak"]
+            or artifact_by_name["candidate_soak"] in replay_inputs
+        ):
             raise ValueError
-        for command_id in {
+        intermediate = _read_bound_release_input(root / producer_outputs[0]["label"])
+        if not hmac.compare_digest(intermediate.sha256, producer_outputs[0]["sha256"]):
+            raise ValueError
+        exact_mint_source = ["<env:TBOT_DEVICE_MINT_SECRET>"]
+        mint_commands = {
             "websocket.transport",
             "candidate_soak.produce",
             "physical.capture_and_audit",
-        }:
-            if "<env:GOOGLE_LIVE_EVIDENCE_MINT_SECRET>" not in by_id[command_id]["secretSources"]:
+        }
+        for command_id in REQUIRED_COMMAND_IDS:
+            expected_secrets = exact_mint_source if command_id in mint_commands else []
+            expected_stdin = (
+                "<stdin:protected_transcript_plan>"
+                if command_id == "physical.capture_and_audit"
+                else None
+            )
+            if (
+                by_id[command_id]["secretSources"] != expected_secrets
+                or by_id[command_id]["stdinSource"] != expected_stdin
+            ):
                 raise ValueError
-        if by_id["physical.capture_and_audit"]["stdinSource"] != "<stdin:protected_transcript_plan>":
-            raise ValueError
     except (KeyError, OSError, RuntimeError, TypeError, UnicodeError, ValueError):
         failures.append(_failure("COMMAND_PROVENANCE_INVALID"))
     return {
@@ -933,6 +954,25 @@ def _produce_release_verdict(
     bindings = {"checksums": _read_bound_release_input(checksum_path)}
     bindings.update(
         {name: _read_bound_release_input(path) for name, path in layer_paths.items()}
+    )
+    provenance_entries = parse_provenance(bindings[COMMAND_PROVENANCE_SUPPORT].content)
+    producer_entry = next(
+        (
+            entry
+            for entry in provenance_entries
+            if entry["commandId"] == "candidate_soak.produce"
+        ),
+        None,
+    )
+    if not isinstance(producer_entry, Mapping) or len(producer_entry["outputs"]) != 1:
+        raise ValueError("candidate soak intermediate provenance is invalid")
+    intermediate_path = Path(layer_paths[COMMAND_PROVENANCE_SUPPORT]).parent / producer_entry[
+        "outputs"
+    ][0]["label"]
+    if _evidence_paths_alias([*evidence_paths, Path(checksum_path), intermediate_path]):
+        raise ValueError("release evidence paths alias")
+    bindings["candidate_soak_intermediate"] = _read_bound_release_input(
+        intermediate_path
     )
     checksums = _parse_checksum_manifest_content(
         bindings["checksums"].content,
