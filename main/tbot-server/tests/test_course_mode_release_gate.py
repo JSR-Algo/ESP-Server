@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import errno
 import gc
 import hashlib
@@ -8,11 +9,13 @@ import importlib
 import json
 import os
 import shutil
+import signal
 import socket
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -1557,8 +1560,15 @@ def test_assignment_runtime_capsule_is_private_and_identity_bound() -> None:
     assert root.name.startswith("course-mode-assignment-runtime-")
     assert stat.S_IMODE(metadata.st_mode) == 0o700
     assert capsule.identity == (metadata.st_dev, metadata.st_ino)
-    assert (root / "media").is_dir()
-    assert (root / "tls").is_dir()
+    assert capsule.runtime_root == root / "runtime"
+    runtime_metadata = capsule.runtime_root.stat()
+    assert stat.S_IMODE(runtime_metadata.st_mode) == 0o700
+    assert capsule.runtime_identity == (
+        runtime_metadata.st_dev, runtime_metadata.st_ino,
+    )
+    assert capsule.runtime_descriptor is not None
+    assert (capsule.runtime_root / "media").is_dir()
+    assert (capsule.runtime_root / "tls").is_dir()
     assert capsule.usable() is True
     assert capsule.cleanup() is True
     assert not root.exists()
@@ -1776,6 +1786,8 @@ def test_assignment_lanes_share_capsule_then_remove_it(
 
     assert result["verdict"] == "PASS", result
     assert len(observed) == 2 and observed[0] == observed[1]
+    assert observed[0].name == "runtime"
+    assert observed[0].parent.name.startswith("course-mode-assignment-runtime-")
     assert not observed[0].exists()
 
 
@@ -1959,6 +1971,94 @@ def test_assignment_capsule_cleanup_failure_overrides_lane_failure(
     original_remove(capsules[0].root, capsules[0].identity)
 
 
+def test_assignment_cleanup_preserves_lane_and_capsule_retained_paths(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _authorize_assignment_test_lane(monkeypatch)
+    capsules: list[gate.AssignmentRuntimeCapsule] = []
+    lane_executions: list[gate.LaneExecution] = []
+    original_capsule_create = gate.AssignmentRuntimeCapsule.create
+    original_lane_create = gate.ExecutionStage.create_lane_execution
+    original_remove = gate._remove_owned_tree
+
+    def record_capsule(protected):
+        capsule = original_capsule_create(protected)
+        capsules.append(capsule)
+        return capsule
+
+    def record_lane(self):
+        execution = original_lane_create(self)
+        lane_executions.append(execution)
+        return execution
+
+    def fail_lane_and_capsule(path: Path, identity=None) -> bool:
+        if (
+            path.name.startswith("course-mode-lane-")
+            or path.name.startswith("course-mode-assignment-runtime-")
+        ):
+            return False
+        return original_remove(path, identity)
+
+    monkeypatch.setattr(gate.AssignmentRuntimeCapsule, "create", record_capsule)
+    monkeypatch.setattr(gate.ExecutionStage, "create_lane_execution", record_lane)
+    monkeypatch.setattr(gate, "_remove_owned_tree", fail_lane_and_capsule)
+    lane = _stateful_assignment_lane("admin-course-mode-assignment-new", "pass")
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=(lane,),
+        source_environment=_assignment_source(candidate_file),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "cleanup"
+    assert result["retainedPaths"] == sorted([
+        str(capsules[0].root), str(lane_executions[0].root),
+    ])
+    monkeypatch.setattr(gate, "_remove_owned_tree", original_remove)
+    original_remove(lane_executions[0].root, lane_executions[0].identity)
+    original_remove(capsules[0].root, capsules[0].identity)
+
+
+@pytest.mark.parametrize("failure_point", ["snapshot", "environment", "command"])
+def test_assignment_capsule_finally_cleans_after_interrupt(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, failure_point: str,
+) -> None:
+    _authorize_assignment_test_lane(monkeypatch)
+    capsules: list[gate.AssignmentRuntimeCapsule] = []
+    original_create = gate.AssignmentRuntimeCapsule.create
+
+    def record_capsule(protected):
+        capsule = original_create(protected)
+        capsules.append(capsule)
+        return capsule
+
+    monkeypatch.setattr(gate.AssignmentRuntimeCapsule, "create", record_capsule)
+    if failure_point == "snapshot":
+        monkeypatch.setattr(
+            gate, "stage_execution_candidate",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+    elif failure_point == "environment":
+        monkeypatch.setattr(
+            gate, "_child_environment",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+    else:
+        monkeypatch.setattr(
+            gate, "_resolve_candidate_command",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+    lane = _stateful_assignment_lane("admin-course-mode-assignment-new", "pass")
+
+    with pytest.raises(KeyboardInterrupt):
+        gate.run_gate(
+            candidate_file, "full", lanes=(lane,),
+            source_environment=_assignment_source(candidate_file),
+        )
+
+    assert capsules and not capsules[0].root.exists()
+
+
 def test_assignment_lanes_snapshot_mutable_source_once(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
@@ -2023,6 +2123,237 @@ def test_assignment_lane_blocks_when_process_containment_cannot_be_proven(
 
     assert result["verdict"] == "BLOCKED"
     assert result["failedLane"] == lane.name
+
+
+def _wait_for_pid_file(path: Path) -> int:
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            return int(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, ValueError):
+            time.sleep(0.01)
+    raise AssertionError(f"process did not publish PID: {path}")
+
+
+def _pid_is_absent(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+
+
+@pytest.mark.parametrize("failure_source", ["kqueue", "selector"])
+def test_assignment_runner_reaps_group_and_closes_fds_after_runtime_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_source: str,
+) -> None:
+    child_pid_file = tmp_path / "child.pid"
+    processes: list[subprocess.Popen] = []
+    descriptors: list[int] = []
+    original_popen = gate.subprocess.Popen
+    original_kqueue = gate.select.kqueue
+    original_selector = gate.selectors.DefaultSelector
+
+    class RaisingKqueue:
+        def __init__(self) -> None:
+            self.inner = original_kqueue()
+            descriptors.append(self.inner.fileno())
+            self.calls = 0
+
+        def control(self, *args):
+            self.calls += 1
+            if self.calls > 1:
+                _wait_for_pid_file(child_pid_file)
+                raise RuntimeError("kqueue runtime failure")
+            return self.inner.control(*args)
+
+        def close(self) -> None:
+            self.inner.close()
+
+    class RaisingSelector:
+        def __init__(self) -> None:
+            self.inner = original_selector()
+            backend = getattr(self.inner, "_selector", None)
+            if backend is not None:
+                descriptors.append(backend.fileno())
+
+        def register(self, *args, **kwargs):
+            return self.inner.register(*args, **kwargs)
+
+        def select(self, *_args, **_kwargs):
+            _wait_for_pid_file(child_pid_file)
+            raise RuntimeError("selector runtime failure")
+
+        def close(self) -> None:
+            self.inner.close()
+
+    def record_popen(*args, **kwargs):
+        process = original_popen(*args, **kwargs)
+        processes.append(process)
+        assert process.stdout is not None and process.stderr is not None
+        descriptors.extend((process.stdout.fileno(), process.stderr.fileno()))
+        return process
+
+    monkeypatch.setattr(gate.subprocess, "Popen", record_popen)
+    if failure_source == "kqueue":
+        stable_selector = RaisingSelector()
+        stable_selector.select = stable_selector.inner.select
+        monkeypatch.setattr(gate.selectors, "DefaultSelector", lambda: stable_selector)
+        monkeypatch.setattr(gate.select, "kqueue", RaisingKqueue)
+    else:
+        monkeypatch.setattr(gate.selectors, "DefaultSelector", RaisingSelector)
+    child_code = "import time;time.sleep(10)"
+    leader_code = (
+        "import subprocess,sys,time;from pathlib import Path;"
+        f"p=subprocess.Popen([sys.executable,'-c',{child_code!r}],"
+        "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);"
+        f"Path({str(child_pid_file)!r}).write_text(str(p.pid));time.sleep(10)"
+    )
+    child_pid = None
+    try:
+        result = gate.run_assignment_bounded_command(
+            [sys.executable, "-c", leader_code], cwd=tmp_path,
+            timeout_sec=5, max_output_bytes=1024,
+        )
+        child_pid = _wait_for_pid_file(child_pid_file)
+        assert result.error == "containment"
+        assert processes[0].returncode is not None
+        assert _pid_is_absent(child_pid)
+        for descriptor in descriptors:
+            with pytest.raises(OSError) as caught:
+                os.fstat(descriptor)
+            assert caught.value.errno == errno.EBADF
+    finally:
+        if processes and processes[0].returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(processes[0].pid, signal.SIGKILL)
+            processes[0].wait()
+        if child_pid is None and child_pid_file.exists():
+            child_pid = _wait_for_pid_file(child_pid_file)
+        if child_pid is not None and not _pid_is_absent(child_pid):
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child_pid, signal.SIGKILL)
+
+
+def test_assignment_runner_closes_partial_resources_when_kqueue_init_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed = False
+
+    class PartialSelector:
+        def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    monkeypatch.setattr(gate.selectors, "DefaultSelector", PartialSelector)
+    monkeypatch.setattr(
+        gate.select, "kqueue", lambda: (_ for _ in ()).throw(RuntimeError("kqueue init")),
+    )
+
+    with pytest.raises(RuntimeError, match="kqueue init"):
+        gate.run_assignment_bounded_command(
+            [sys.executable, "-c", "pass"], cwd=Path.cwd(),
+            timeout_sec=5, max_output_bytes=1024,
+        )
+
+    assert closed is True
+
+
+def test_assignment_runner_closes_resources_when_popen_raises_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptors: list[int] = []
+    original_selector = gate.selectors.DefaultSelector
+    original_kqueue = gate.select.kqueue
+
+    def selector_factory():
+        selector = original_selector()
+        descriptors.append(selector._selector.fileno())
+        return selector
+
+    def kqueue_factory():
+        events = original_kqueue()
+        descriptors.append(events.fileno())
+        return events
+
+    monkeypatch.setattr(gate.selectors, "DefaultSelector", selector_factory)
+    monkeypatch.setattr(gate.select, "kqueue", kqueue_factory)
+    monkeypatch.setattr(
+        gate.subprocess, "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("popen runtime")),
+    )
+
+    with pytest.raises(RuntimeError, match="popen runtime"):
+        gate.run_assignment_bounded_command(
+            [sys.executable, "-c", "pass"], cwd=Path.cwd(),
+            timeout_sec=5, max_output_bytes=1024,
+        )
+
+    for descriptor in descriptors:
+        with pytest.raises(OSError) as caught:
+            os.fstat(descriptor)
+        assert caught.value.errno == errno.EBADF
+
+
+def test_assignment_post_reap_eperm_is_not_absence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gate.os, "killpg",
+        lambda *_args: (_ for _ in ()).throw(PermissionError(errno.EPERM, "surviving group")),
+    )
+    monotonic = iter((0.0, 2.0))
+    monkeypatch.setattr(gate.time, "monotonic", lambda: next(monotonic))
+
+    assert gate._assignment_process_group_absent_after_reap(12345) is False
+
+
+def test_assignment_runner_blocks_when_post_reap_absence_is_not_proven(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gate, "_assignment_process_group_absent_after_reap", lambda _group: False,
+    )
+
+    result = gate.run_assignment_bounded_command(
+        [sys.executable, "-c", "pass"], cwd=tmp_path,
+        timeout_sec=5, max_output_bytes=1024,
+    )
+
+    assert result.returncode == 0
+    assert result.error == "containment"
+
+
+@pytest.mark.parametrize(
+    ("leader_action", "expected_error"),
+    [
+        ("time.sleep(10)", "timeout"),
+        ("print('x'*4096)", "output"),
+    ],
+)
+def test_assignment_runner_failure_paths_leave_no_process_group(
+    tmp_path: Path, leader_action: str, expected_error: str,
+) -> None:
+    child_pid_file = tmp_path / f"{expected_error}-child.pid"
+    child_code = "import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(10)"
+    leader_code = (
+        "import subprocess,sys,time;from pathlib import Path;"
+        f"p=subprocess.Popen([sys.executable,'-c',{child_code!r}],"
+        "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);"
+        f"Path({str(child_pid_file)!r}).write_text(str(p.pid));{leader_action}"
+    )
+
+    result = gate.run_assignment_bounded_command(
+        [sys.executable, "-c", leader_code], cwd=tmp_path,
+        timeout_sec=0.2 if expected_error == "timeout" else 5,
+        max_output_bytes=1024,
+    )
+
+    child_pid = _wait_for_pid_file(child_pid_file)
+    assert result.error == expected_error
+    assert _pid_is_absent(child_pid)
 
 
 def test_lane_cleanup_removes_zero_mode_runtime_directories(

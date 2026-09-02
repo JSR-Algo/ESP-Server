@@ -51,46 +51,42 @@ secure_playwright_browser_bundle_descriptor = (
 )
 
 
-def _assignment_process_group_quiescent(process_group: int) -> bool:
-    try:
-        os.killpg(process_group, 0)
-    except OSError as error:
-        if error.errno in {errno.EPERM, errno.ESRCH}:
-            return True
-        raise
-    return False
-
-
 def _terminate_assignment_process_group(process_group: int) -> bool:
     try:
         os.killpg(process_group, signal.SIGTERM)
     except OSError as error:
-        if error.errno in {errno.EPERM, errno.ESRCH}:
-            return True
-        return False
+        if error.errno not in {errno.EPERM, errno.ESRCH}:
+            return False
     deadline = time.monotonic() + 0.25
     while time.monotonic() < deadline:
         try:
-            if _assignment_process_group_quiescent(process_group):
-                return True
-        except OSError:
+            os.killpg(process_group, 0)
+        except OSError as error:
+            if error.errno in {errno.EPERM, errno.ESRCH}:
+                break
             return False
         time.sleep(0.01)
     try:
         os.killpg(process_group, signal.SIGKILL)
     except OSError as error:
-        if error.errno in {errno.EPERM, errno.ESRCH}:
-            return True
-        return False
+        if error.errno not in {errno.EPERM, errno.ESRCH}:
+            return False
+    return True
+
+
+def _assignment_process_group_absent_after_reap(process_group: int) -> bool:
     deadline = time.monotonic() + 1.0
-    while time.monotonic() < deadline:
+    while True:
         try:
-            if _assignment_process_group_quiescent(process_group):
+            os.killpg(process_group, 0)
+        except OSError as error:
+            if error.errno == errno.ESRCH:
                 return True
-        except OSError:
+            if error.errno != errno.EPERM:
+                return False
+        if time.monotonic() >= deadline:
             return False
         time.sleep(0.01)
-    return False
 
 
 def run_assignment_bounded_command(
@@ -105,25 +101,24 @@ def run_assignment_bounded_command(
         return _manifest.BoundedCommandResult(None, "", "invalid_timeout")
     if not all(hasattr(select, name) for name in ("kqueue", "kevent", "KQ_FILTER_PROC")):
         return _manifest.BoundedCommandResult(None, "", "containment")
+    selector = None
+    exit_events = None
+    process = None
+    buffers = {}
     try:
         selector = selectors.DefaultSelector()
         exit_events = select.kqueue()
-    except OSError:
-        return _manifest.BoundedCommandResult(None, "", "containment")
-    try:
-        process = subprocess.Popen(
-            command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
-        )
-    except OSError:
-        exit_events.close()
-        selector.close()
-        return _manifest.BoundedCommandResult(None, "", "not_found")
-    assert process.stdout is not None and process.stderr is not None
-    buffers = {process.stdout: bytearray(), process.stderr: bytearray()}
-    error = None
-    leader_exited = False
-    try:
+        try:
+            process = subprocess.Popen(
+                command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+            )
+        except OSError:
+            return _manifest.BoundedCommandResult(None, "", "not_found")
+        assert process.stdout is not None and process.stderr is not None
+        buffers = {process.stdout: bytearray(), process.stderr: bytearray()}
+        error = None
+        leader_exited = False
         exit_events.control([
             select.kevent(
                 process.pid,
@@ -156,31 +151,53 @@ def run_assignment_bounded_command(
                     break
             if error:
                 break
-        if error:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(process.pid, signal.SIGKILL)
-        elif not _terminate_assignment_process_group(process.pid):
-            error = "containment"
-        # Reap only after teardown so the numeric process-group ID cannot be reused first.
-        try:
-            returncode = process.wait(timeout=1)
-        except (OSError, subprocess.TimeoutExpired):
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
-            returncode = process.returncode
-            error = error or "run"
-    except OSError:
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(process.pid, signal.SIGKILL)
-        process.wait()
-        returncode = process.returncode
-        error = error or "containment"
+    except BaseException:
+        if process is None:
+            raise
+        error = "containment"
     finally:
-        exit_events.close()
-        selector.close()
-        process.stdout.close()
-        process.stderr.close()
+        try:
+            if process is not None:
+                if not _terminate_assignment_process_group(process.pid):
+                    error = "containment"
+                # Reap before the final non-signaling absence proof.
+                try:
+                    returncode = process.wait(timeout=1)
+                except (OSError, subprocess.TimeoutExpired):
+                    with contextlib.suppress(ProcessLookupError):
+                        process.kill()
+                    try:
+                        process.wait(timeout=1)
+                    except (OSError, subprocess.TimeoutExpired):
+                        error = "containment"
+                    returncode = process.returncode
+                if not _assignment_process_group_absent_after_reap(process.pid):
+                    error = "containment"
+        except BaseException:
+            if process is not None and process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+                with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                    process.wait(timeout=1)
+            if process is not None:
+                returncode = process.returncode
+                error = "containment"
+        finally:
+            if process is not None:
+                if process.stdout is not None:
+                    with contextlib.suppress(Exception):
+                        process.stdout.close()
+                if process.stderr is not None:
+                    with contextlib.suppress(Exception):
+                        process.stderr.close()
+            if exit_events is not None:
+                with contextlib.suppress(Exception):
+                    exit_events.close()
+            if selector is not None:
+                with contextlib.suppress(Exception):
+                    selector.close()
+    if process is None:
+        return _manifest.BoundedCommandResult(None, "", "containment")
     stdout = bytes(buffers[process.stdout]).decode("utf-8", errors="replace")
     return _manifest.BoundedCommandResult(returncode, stdout, error)
 
@@ -614,6 +631,9 @@ class AssignmentRuntimeCapsule:
     root: Path
     identity: tuple[int, int]
     descriptor: int | None
+    runtime_root: Path
+    runtime_identity: tuple[int, int]
+    runtime_descriptor: int | None
     _retained_path: Path | None = None
     _cleanup_succeeded: bool | None = None
 
@@ -622,16 +642,27 @@ class AssignmentRuntimeCapsule:
         root = Path(tempfile.mkdtemp(prefix="course-mode-assignment-runtime-")).resolve()
         identity: tuple[int, int] | None = None
         descriptor: int | None = None
+        runtime_root = root / "runtime"
+        runtime_identity: tuple[int, int] | None = None
+        runtime_descriptor: int | None = None
         try:
             root.chmod(0o700)
             identity = _owned_tree_identity(root)
             if any(_path_overlaps(root, path.resolve()) for path in protected):
                 raise ValueError("assignment runtime overlaps protected path")
-            (root / "media").mkdir(mode=0o700)
-            (root / "tls").mkdir(mode=0o700)
             descriptor = _open_snapshot_directory(root)
-            return cls(root, identity, descriptor)
+            runtime_root.mkdir(mode=0o700)
+            runtime_identity = _owned_tree_identity(runtime_root)
+            (runtime_root / "media").mkdir(mode=0o700)
+            (runtime_root / "tls").mkdir(mode=0o700)
+            runtime_descriptor = _open_snapshot_directory(runtime_root)
+            return cls(
+                root, identity, descriptor,
+                runtime_root, runtime_identity, runtime_descriptor,
+            )
         except Exception:
+            if runtime_descriptor is not None:
+                os.close(runtime_descriptor)
             if descriptor is not None:
                 os.close(descriptor)
             if os.path.lexists(root) and not _remove_owned_tree(root, identity):
@@ -639,36 +670,57 @@ class AssignmentRuntimeCapsule:
             raise
 
     def usable(self) -> bool:
-        if self.descriptor is None:
+        if self.descriptor is None or self.runtime_descriptor is None:
             return False
         try:
-            before = _directory_fd_path(self.descriptor)
-            opened = os.fstat(self.descriptor)
-            named = self.root.lstat()
-            after = _directory_fd_path(self.descriptor)
+            owner_before = _directory_fd_path(self.descriptor)
+            owner_opened = os.fstat(self.descriptor)
+            owner_named = self.root.lstat()
+            runtime_before = _directory_fd_path(self.runtime_descriptor)
+            runtime_opened = os.fstat(self.runtime_descriptor)
+            runtime_named = self.runtime_root.lstat()
+            owner_after = _directory_fd_path(self.descriptor)
+            runtime_after = _directory_fd_path(self.runtime_descriptor)
         except OSError:
             return False
         return (
-            before == self.root == after
-            and stat.S_ISDIR(opened.st_mode)
-            and (opened.st_dev, opened.st_ino) == self.identity
-            and stat.S_ISDIR(named.st_mode)
-            and (named.st_dev, named.st_ino) == self.identity
+            owner_before == self.root == owner_after
+            and stat.S_ISDIR(owner_opened.st_mode)
+            and (owner_opened.st_dev, owner_opened.st_ino) == self.identity
+            and stat.S_ISDIR(owner_named.st_mode)
+            and (owner_named.st_dev, owner_named.st_ino) == self.identity
+            and runtime_before == self.runtime_root == runtime_after
+            and stat.S_ISDIR(runtime_opened.st_mode)
+            and (runtime_opened.st_dev, runtime_opened.st_ino) == self.runtime_identity
+            and stat.S_ISDIR(runtime_named.st_mode)
+            and (runtime_named.st_dev, runtime_named.st_ino) == self.runtime_identity
         )
 
     def cleanup(self) -> bool:
-        if self.descriptor is None:
+        if self.descriptor is None and self.runtime_descriptor is None:
             return self._cleanup_succeeded is True
-        actual = _directory_fd_path(self.descriptor)
-        if actual is not None and actual != self.root:
-            self._retained_path = actual
-            os.close(self.descriptor)
+        owner_actual = (
+            _directory_fd_path(self.descriptor) if self.descriptor is not None else None
+        )
+        runtime_actual = (
+            _directory_fd_path(self.runtime_descriptor)
+            if self.runtime_descriptor is not None else None
+        )
+        if owner_actual != self.root or runtime_actual != self.runtime_root:
+            self._retained_path = (
+                owner_actual if owner_actual != self.root else runtime_actual
+            ) or self.root
+            if self.runtime_descriptor is not None:
+                os.close(self.runtime_descriptor)
+            if self.descriptor is not None:
+                os.close(self.descriptor)
+            self.runtime_descriptor = None
             self.descriptor = None
             self._cleanup_succeeded = False
             return False
         removed = _remove_owned_tree(self.root, self.identity)
         if not removed:
-            retained = _directory_fd_path(self.descriptor)
+            retained = owner_actual
             try:
                 retained_metadata = retained.lstat() if retained is not None else None
             except OSError:
@@ -683,7 +735,9 @@ class AssignmentRuntimeCapsule:
                 retained or _find_owned_tree(self.root.parent, self.identity) or self.root
             )
         os.close(self.descriptor)
+        os.close(self.runtime_descriptor)
         self.descriptor = None
+        self.runtime_descriptor = None
         self._cleanup_succeeded = removed
         return removed
 
@@ -940,7 +994,7 @@ def _cleanup_gate_owned(
     report: dict,
     *owned: ExecutionStage | LaneExecution | AssignmentRuntimeCapsule | None,
 ) -> bool:
-    retained = []
+    retained = list(report.get("retainedPaths", ()))
     for item in owned:
         if item is not None and not item.cleanup():
             retained.append(str(item.retained_path()))
@@ -951,6 +1005,26 @@ def _cleanup_gate_owned(
         report["retainedPaths"] = sorted(set(retained))
         return False
     return True
+
+
+@dataclass
+class AssignmentRuntimeGuard:
+    capsule: AssignmentRuntimeCapsule | None = None
+    report: dict | None = None
+
+    def own(self, capsule: AssignmentRuntimeCapsule, report: dict) -> None:
+        self.capsule = capsule
+        self.report = report
+
+    def release(self) -> None:
+        self.capsule = None
+        self.report = None
+
+    def cleanup(self) -> None:
+        if self.capsule is not None:
+            assert self.report is not None
+            _cleanup_gate_owned(self.report, self.capsule)
+            self.release()
 
 
 def _cleanup_gate_owned_or_raise(
@@ -3599,10 +3673,11 @@ def _close_report_destination(destination: ReportDestination) -> None:
     os.close(destination.parent_fd)
 
 
-def run_gate(
+def _run_gate_impl(
     candidate_path: Path,
     mode: str,
     *,
+    assignment_guard: AssignmentRuntimeGuard,
     lanes: Sequence[Lane] | None = None,
     source_environment: Mapping[str, str] | None = None,
     max_output_bytes: int = MAX_LANE_OUTPUT_BYTES,
@@ -3752,11 +3827,13 @@ def run_gate(
                                 ),
                             )
                             assignment_runtime = AssignmentRuntimeCapsule.create(protected)
+                            assignment_guard.own(assignment_runtime, report)
                         if not assignment_runtime.usable():
                             report["verdict"] = "BLOCKED"
                             report["failedLane"] = "cleanup"
                             _cleanup_gate_owned(report, assignment_runtime)
                             assignment_runtime = None
+                            assignment_guard.release()
                             break
                     execution_stage = stage_execution_candidate(candidate, (lane,))
                     lane_execution = execution_stage.create_lane_execution()
@@ -3781,7 +3858,8 @@ def run_gate(
                     lane,
                     source_candidate=candidate,
                     assignment_runtime_root=(
-                        assignment_runtime.root if assignment_runtime is not None else None
+                        assignment_runtime.runtime_root
+                        if assignment_runtime is not None else None
                     ),
                 )
                 if lane_environment is None:
@@ -3904,12 +3982,14 @@ def run_gate(
                             lane_execution, execution_stage, assignment_runtime,
                         )
                         assignment_runtime = None
+                        assignment_guard.release()
                     except RetainedStagingError as error:
                         report["verdict"] = "BLOCKED"
                         report["failedLane"] = "cleanup"
                         report["retainedOwner"] = "current-process"
                         report["retainedPaths"] = list(error.paths)
                         assignment_runtime = None
+                        assignment_guard.release()
                         break
                     raise
                 finally:
@@ -3926,8 +4006,10 @@ def run_gate(
                 if lane.name == last_assignment_name:
                     if not _cleanup_gate_owned(report, assignment_runtime):
                         assignment_runtime = None
+                        assignment_guard.release()
                         break
                     assignment_runtime = None
+                    assignment_guard.release()
                 if operator_binding is not None and _operator_attestation_binding(
                     candidate, source,
                 ) != operator_binding:
@@ -3953,6 +4035,7 @@ def run_gate(
             if assignment_runtime is not None:
                 _cleanup_gate_owned(report, assignment_runtime)
                 assignment_runtime = None
+                assignment_guard.release()
             if report["verdict"] == "PASS":
                 if operator_binding is not None and _operator_attestation_binding(
                     candidate, source,
@@ -3995,6 +4078,32 @@ def run_gate(
                 return _blocked(candidate_id, "report")
         _close_report_destination(report_destination)
     return report
+
+
+def run_gate(
+    candidate_path: Path,
+    mode: str,
+    *,
+    lanes: Sequence[Lane] | None = None,
+    source_environment: Mapping[str, str] | None = None,
+    max_output_bytes: int = MAX_LANE_OUTPUT_BYTES,
+    report_path: Path | None = None,
+    runtime_root: Path | None = None,
+) -> dict:
+    assignment_guard = AssignmentRuntimeGuard()
+    try:
+        return _run_gate_impl(
+            candidate_path,
+            mode,
+            assignment_guard=assignment_guard,
+            lanes=lanes,
+            source_environment=source_environment,
+            max_output_bytes=max_output_bytes,
+            report_path=report_path,
+            runtime_root=runtime_root,
+        )
+    finally:
+        assignment_guard.cleanup()
 
 
 def _emit(report: dict) -> None:
