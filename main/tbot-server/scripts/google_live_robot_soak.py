@@ -2956,13 +2956,17 @@ def build_candidate_journeys(args, *, protected_input=None):
         task.add_done_callback(_release_owned_cleanup_task)
         return task
 
-    async def wait_bounded(task):
+    def cleanup_timeout():
         try:
             timeout = float(getattr(args, "cleanup_timeout_sec", 2.0))
         except (TypeError, ValueError):
             timeout = 2.0
         if not math.isfinite(timeout) or timeout <= 0:
             timeout = 2.0
+        return timeout
+
+    async def wait_bounded(task):
+        timeout = cleanup_timeout()
         done, _pending = await asyncio.wait({task}, timeout=timeout)
         if task in done:
             task.result()
@@ -2985,13 +2989,7 @@ def build_candidate_journeys(args, *, protected_input=None):
                     post_task.result()
                 except BaseException:
                     pass
-        delete_ambiguous = False
-        try:
-            deleted = await _candidate_control_json(args, "DELETE", journey_url)
-        except _EvidenceControlNotFound:
-            delete_ambiguous = True
-        except BaseException:
-            delete_ambiguous = True
+        deadline = asyncio.get_running_loop().time() + cleanup_timeout()
         expected = {
             "journeyId": journey_id,
             "journeyType": journey_type,
@@ -2999,23 +2997,48 @@ def build_candidate_journeys(args, *, protected_input=None):
             "status": "FAIL",
             "failureCode": "OPERATOR_CANCELLED",
         }
-        if not delete_ambiguous and (
-            not isinstance(deleted, Mapping)
-            or any(deleted.get(key) != value for key, value in expected.items())
-        ):
-            raise RuntimeError("candidate enrollment cleanup failed")
-        try:
-            terminal = await _candidate_control_json(args, "GET", journey_url)
-        except _EvidenceControlNotFound:
-            return
-        except BaseException:
-            raise RuntimeError("candidate enrollment cleanup failed") from None
-        if (
-            not isinstance(terminal, Mapping)
-            or any(terminal.get(key) != value for key, value in expected.items())
-            or terminal.get("status") == "ACTIVE"
-        ):
-            raise RuntimeError("candidate enrollment cleanup failed")
+        active_expected = {
+            "journeyId": journey_id,
+            "journeyType": journey_type,
+            "proofProfile": "candidate-lifecycle",
+            "status": "ACTIVE",
+        }
+        for attempt in range(3):
+            delete_ambiguous = False
+            try:
+                deleted = await _candidate_control_json(
+                    args, "DELETE", journey_url
+                )
+            except Exception:
+                delete_ambiguous = True
+            if not delete_ambiguous and (
+                not isinstance(deleted, Mapping)
+                or any(
+                    deleted.get(key) != value
+                    for key, value in expected.items()
+                )
+            ):
+                raise RuntimeError("candidate enrollment cleanup failed")
+            try:
+                terminal = await _candidate_control_json(args, "GET", journey_url)
+            except _EvidenceControlNotFound:
+                return
+            except Exception:
+                raise RuntimeError("candidate enrollment cleanup failed") from None
+            if isinstance(terminal, Mapping) and all(
+                terminal.get(key) == value for key, value in expected.items()
+            ):
+                return
+            active_matches = isinstance(terminal, Mapping) and all(
+                terminal.get(key) == value
+                for key, value in active_expected.items()
+            )
+            if not active_matches:
+                raise RuntimeError("candidate enrollment cleanup failed")
+            remaining = deadline - asyncio.get_running_loop().time()
+            if attempt == 2 or remaining <= 0:
+                raise RuntimeError("candidate enrollment cleanup failed")
+            await asyncio.sleep(min(0.01 * (attempt + 1), remaining))
 
     async def run_lifecycle(
         _args,

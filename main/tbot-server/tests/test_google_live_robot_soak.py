@@ -3616,8 +3616,10 @@ def test_candidate_ambiguous_enrollment_cleanup_requires_verified_terminal_state
             )
         )
 
-    assert calls.count("DELETE") == 1
-    assert calls.count("GET") == (0 if case == "malformed_delete" else 1)
+    assert calls.count("DELETE") == (3 if case == "get_active" else 1)
+    assert calls.count("GET") == (
+        0 if case == "malformed_delete" else 3 if case == "get_active" else 1
+    )
     assert not args.produce_candidate_evidence.exists()
 
 
@@ -3678,8 +3680,9 @@ def test_candidate_post_commit_with_local_failure_always_reconciles_get(
             )
         )
 
-    assert calls.count("DELETE") == 1
-    assert calls.count("GET") == 1
+    expected_attempts = 3 if get_case == "active" else 1
+    assert calls.count("DELETE") == expected_attempts
+    assert calls.count("GET") == expected_attempts
     if get_case == "terminal":
         assert registry[journey_id] == "FAIL"
 
@@ -3744,6 +3747,178 @@ def test_candidate_cleanup_timeout_is_explicit_and_reconciliation_stays_owned(
             task.get_name() == "google-live-candidate-enrollment-cleanup"
             for task in robot_soak._OWNED_CLEANUP_TASKS
         )
+
+    asyncio.run(run())
+
+
+def test_candidate_active_cleanup_retries_delete_until_terminal(tmp_path):
+    journey_id = "candidate-soak.20260831T100000Z.1"
+    active = {
+        "journeyId": journey_id,
+        "journeyType": "conversation",
+        "proofProfile": "candidate-lifecycle",
+        "status": "ACTIVE",
+    }
+    terminal = {
+        **active,
+        "status": "FAIL",
+        "failureCode": "OPERATOR_CANCELLED",
+    }
+    deletes = 0
+    gets = 0
+
+    async def control(method, _url, payload=None):
+        nonlocal deletes, gets
+        if method == "POST":
+            return {"data": {"registered": True, "journeyId": payload["journeyId"]}}
+        if method == "DELETE":
+            deletes += 1
+            if deletes == 1:
+                raise RuntimeError("transport failed before server")
+            return dict(terminal)
+        if method == "GET":
+            gets += 1
+            return dict(active if deletes == 1 else terminal)
+        return {"status": "PASS"}
+
+    async def driver(_args, **_context):
+        raise RuntimeError("journey failed")
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=control,
+        candidate_journey_driver=driver,
+        cleanup_timeout_sec=0.2,
+    )
+
+    with pytest.raises(RuntimeError, match="journey failed"):
+        asyncio.run(
+            build_candidate_journeys(args)["conversation"](
+                args, name="conversation", index=1
+            )
+        )
+
+    assert deletes == 2
+    assert gets == 2
+
+
+def test_candidate_active_cleanup_retry_exhaustion_is_explicit(tmp_path):
+    journey_id = "candidate-soak.20260831T100000Z.1"
+    active = {
+        "journeyId": journey_id,
+        "journeyType": "conversation",
+        "proofProfile": "candidate-lifecycle",
+        "status": "ACTIVE",
+    }
+    deletes = 0
+
+    async def control(method, _url, payload=None):
+        nonlocal deletes
+        if method == "POST":
+            return {"data": {"registered": True, "journeyId": payload["journeyId"]}}
+        if method == "DELETE":
+            deletes += 1
+            raise RuntimeError("delete unavailable")
+        if method == "GET":
+            return dict(active)
+        return {"status": "PASS"}
+
+    async def driver(_args, **_context):
+        raise RuntimeError("journey failed")
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=control,
+        candidate_journey_driver=driver,
+        cleanup_timeout_sec=0.05,
+    )
+
+    with pytest.raises(RuntimeError, match="candidate enrollment cleanup failed"):
+        asyncio.run(
+            build_candidate_journeys(args)["conversation"](
+                args, name="conversation", index=1
+            )
+        )
+
+    assert 1 < deletes <= 4
+    assert not robot_soak._OWNED_CLEANUP_TASKS
+
+
+def test_candidate_cancellation_during_active_retry_keeps_cleanup_owned(tmp_path):
+    journey_id = "candidate-soak.20260831T100000Z.1"
+    active = {
+        "journeyId": journey_id,
+        "journeyType": "conversation",
+        "proofProfile": "candidate-lifecycle",
+        "status": "ACTIVE",
+    }
+    terminal = {
+        **active,
+        "status": "FAIL",
+        "failureCode": "OPERATOR_CANCELLED",
+    }
+    retry_started = asyncio.Event()
+    release_retry = asyncio.Event()
+    deletes = 0
+
+    async def control(method, _url, payload=None):
+        nonlocal deletes
+        if method == "POST":
+            return {"data": {"registered": True, "journeyId": payload["journeyId"]}}
+        if method == "DELETE":
+            deletes += 1
+            if deletes == 1:
+                raise RuntimeError("first delete failed")
+            retry_started.set()
+            await release_retry.wait()
+            return dict(terminal)
+        if method == "GET":
+            return dict(active if deletes == 1 else terminal)
+        return {"status": "PASS"}
+
+    async def driver(_args, **_context):
+        raise RuntimeError("journey failed")
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=control,
+        candidate_journey_driver=driver,
+        cleanup_timeout_sec=0.2,
+    )
+
+    async def run():
+        task = asyncio.create_task(
+            build_candidate_journeys(args)["conversation"](
+                args, name="conversation", index=1
+            )
+        )
+        await retry_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert any(
+            owned.get_name() == "google-live-candidate-enrollment-cleanup"
+            for owned in robot_soak._OWNED_CLEANUP_TASKS
+        )
+        release_retry.set()
+        for _attempt in range(20):
+            if not robot_soak._OWNED_CLEANUP_TASKS:
+                break
+            await asyncio.sleep(0)
+        assert not robot_soak._OWNED_CLEANUP_TASKS
+        assert deletes == 2
 
     asyncio.run(run())
 
