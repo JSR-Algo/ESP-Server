@@ -1,7 +1,7 @@
 const { lstatSync, realpathSync } = require('node:fs');
 const { basename, isAbsolute, resolve, sep } = require('node:path');
 
-const OWNER_KEY = 'TASK4_ASSIGNMENT_CAPSULE_ROOT';
+const OWNER_KEY = 'TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT';
 const RUNTIME_KEY = 'TASK4_ASSIGNMENT_RUNTIME_ROOT';
 const OWNER_PREFIX = 'course-mode-assignment-runtime-';
 
@@ -48,10 +48,10 @@ function validateAssignmentRuntimeCapsule(
   if (!basename(realOwner).startsWith(OWNER_PREFIX)) {
     throw new Error(`assignment capsule owner must start with ${OWNER_PREFIX}`);
   }
-  if ((capsuleMetadata.mode & 0o777) !== 0o700) {
+  if ((capsuleMetadata.mode & 0o7777) !== 0o700) {
     throw new Error('assignment capsule owner mode must be 0700');
   }
-  if ((runtimeMetadata.mode & 0o777) !== 0o700) {
+  if ((runtimeMetadata.mode & 0o7777) !== 0o700) {
     throw new Error('assignment runtime mode must be 0700');
   }
   const ownershipMismatches = [];

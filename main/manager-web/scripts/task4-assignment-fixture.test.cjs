@@ -31,7 +31,7 @@ async function createAssignmentRuntimeCapsule(t, prefix = 'course-mode-assignmen
 
 function capsuleEnvironment(capsuleRoot, runtimeRoot) {
   return {
-    TASK4_ASSIGNMENT_CAPSULE_ROOT: capsuleRoot,
+    TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT: capsuleRoot,
     TASK4_ASSIGNMENT_RUNTIME_ROOT: runtimeRoot,
   };
 }
@@ -56,7 +56,18 @@ test('assignment runtime capsule rejects a missing owner variable', async (t) =>
   const capsule = await createAssignmentRuntimeCapsule(t);
   assert.throws(
     () => validateAssignmentRuntimeCapsule({ TASK4_ASSIGNMENT_RUNTIME_ROOT: capsule.runtimeRoot }, []),
-    /TASK4_ASSIGNMENT_CAPSULE_ROOT/,
+    /TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT/,
+  );
+});
+
+test('assignment runtime capsule rejects the obsolete owner variable name', async (t) => {
+  const capsule = await createAssignmentRuntimeCapsule(t);
+  assert.throws(
+    () => validateAssignmentRuntimeCapsule({
+      TASK4_ASSIGNMENT_CAPSULE_ROOT: capsule.capsuleRoot,
+      TASK4_ASSIGNMENT_RUNTIME_ROOT: capsule.runtimeRoot,
+    }, []),
+    /TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT/,
   );
 });
 
@@ -100,6 +111,21 @@ for (const [target, mode] of [['owner', 0o755], ['runtime', 0o755]]) {
   test(`assignment runtime capsule rejects ${target} mode 0755`, async (t) => {
     const capsule = await createAssignmentRuntimeCapsule(t);
     await chmod(target === 'owner' ? capsule.capsuleRoot : capsule.runtimeRoot, mode);
+    assert.throws(
+      () => validateAssignmentRuntimeCapsule(capsuleEnvironment(capsule.capsuleRoot, capsule.runtimeRoot), []),
+      /0700/,
+    );
+  });
+}
+
+for (const target of ['owner', 'runtime']) {
+  test(`assignment runtime capsule rejects sticky-bit ${target} mode 01700`, async (t) => {
+    const capsule = await createAssignmentRuntimeCapsule(t);
+    const targetPath = target === 'owner' ? capsule.capsuleRoot : capsule.runtimeRoot;
+    await chmod(targetPath, 0o1700);
+    const observedMode = (await stat(targetPath)).mode & 0o7777;
+    assert.equal(observedMode, 0o1700, 'filesystem must preserve the sticky mode bit for this test');
+
     assert.throws(
       () => validateAssignmentRuntimeCapsule(capsuleEnvironment(capsule.capsuleRoot, capsule.runtimeRoot), []),
       /0700/,
@@ -157,7 +183,7 @@ for (const [label, value] of [
 ]) {
   test(`assignment runtime capsule rejects ${label} paths`, async (t) => {
     const capsule = await createAssignmentRuntimeCapsule(t);
-    for (const key of ['TASK4_ASSIGNMENT_CAPSULE_ROOT', 'TASK4_ASSIGNMENT_RUNTIME_ROOT']) {
+    for (const key of ['TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT', 'TASK4_ASSIGNMENT_RUNTIME_ROOT']) {
       const environment = capsuleEnvironment(capsule.capsuleRoot, capsule.runtimeRoot);
       environment[key] = value;
       assert.throws(() => validateAssignmentRuntimeCapsule(environment, []), /absolute|NUL|nonempty/);
