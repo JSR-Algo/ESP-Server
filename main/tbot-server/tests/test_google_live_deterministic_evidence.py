@@ -67,6 +67,7 @@ def _runtime_manifest_bytes(*, plugin_sha256: str = "e" * 64) -> bytes:
         )
     value = {
         "distributions": distributions,
+        "nativeLibrary": json.loads(PINNED_RUNTIME_MANIFEST)["nativeLibrary"],
         "platform": "any",
         "plugin": {
             "path": "main/tbot-server/scripts/google_live_deterministic_nodeid_plugin.py",
@@ -752,15 +753,15 @@ def test_producer_uses_isolated_allowlisted_pytest_process(
     )
     assert all(isinstance(command, list) for command, _kwargs in calls)
     for command, kwargs in calls:
-        assert command[:3] == [sys.executable, "-I", "-X"]
-        assert command[3].startswith("pycache_prefix=")
-        assert "pytest.main" in command[5]
-        runtime = json.loads(command[6])
+        assert command[:4] == [sys.executable, "-I", "-B", "-X"]
+        assert command[4].startswith("pycache_prefix=")
+        assert "pytest.main" in command[6]
+        runtime = json.loads(command[7])
         assert runtime["repo"] == str(tmp_path.resolve())
         assert len(runtime["trusted"]) == 1
         assert runtime["trusted"][0] not in report.read_text(encoding="utf-8")
-        assert command[5].count("pytest_asyncio.plugin") == 1
-        assert command[5].count("_google_live_pinned_nodeid_plugin") == 1
+        assert command[6].count("pytest_asyncio.plugin") == 1
+        assert command[6].count("_google_live_pinned_nodeid_plugin") == 1
         assert runtime["plugin"].endswith("/control/pinned_nodeid_plugin.py")
         assert kwargs["cwd"] == tmp_path.resolve()
         assert kwargs["env"]["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
@@ -771,8 +772,8 @@ def test_producer_uses_isolated_allowlisted_pytest_process(
     assert json.loads(report.read_text(encoding="utf-8"))["status"] == "PASS"
     assert sentinel not in report.read_text(encoding="utf-8")
     assert deterministic.parse_passing_junit(junit.read_bytes(), nodes)["tests"] == 1
-    assert len({json.loads(command[6])["trusted"][0] for command, _ in calls}) == 2
-    assert all(not Path(json.loads(command[6])["trusted"][0]).exists() for command, _ in calls)
+    assert len({json.loads(command[7])["trusted"][0] for command, _ in calls}) == 2
+    assert all(not Path(json.loads(command[7])["trusted"][0]).exists() for command, _ in calls)
 
 
 def test_isolated_pytest_process_ignores_environment_injection(tmp_path: Path) -> None:
@@ -968,6 +969,43 @@ def test_candidate_snapshot_detects_tracked_scratch_file_mutation(tmp_path: Path
             target.write_text('{"value":"mutated"}\n', encoding="utf-8")
 
 
+@pytest.mark.parametrize("suffix", [".PYC", ".So", ".pYD"])
+def test_candidate_tree_rejects_mixed_case_executable_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str
+) -> None:
+    listing = f"100644 blob {'a' * 40}\tmain/tbot-server/hostile{suffix}\0".encode()
+    monkeypatch.setattr(
+        deterministic,
+        "_git_output",
+        lambda _root, *args: b"sha1\n" if args[0] == "rev-parse" else listing,
+    )
+    with pytest.raises(RuntimeError, match="executable artifacts"):
+        deterministic._candidate_tree_entries(tmp_path, "b" * 40, Path("main/tbot-server"))
+
+
+@pytest.mark.parametrize(
+    "paths",
+    [
+        ("Module.py", "module.py"),
+        ("caf\u00e9.py", "cafe\u0301.py"),
+    ],
+)
+def test_candidate_tree_rejects_case_or_unicode_filesystem_collisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, paths: tuple[str, str]
+) -> None:
+    listing = b"".join(
+        f"100644 blob {index:040x}\tmain/tbot-server/{path}\0".encode()
+        for index, path in enumerate(paths, 1)
+    )
+    monkeypatch.setattr(
+        deterministic,
+        "_git_output",
+        lambda _root, *args: b"sha1\n" if args[0] == "rev-parse" else listing,
+    )
+    with pytest.raises(RuntimeError, match="Git tree"):
+        deterministic._candidate_tree_entries(tmp_path, "b" * 40, Path("main/tbot-server"))
+
+
 def test_private_pytest_runtime_rejects_record_hash_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1092,6 +1130,38 @@ def test_checked_in_runtime_manifest_pins_pytest_top_level_py_module() -> None:
 
     assert "py" in pytest_distribution["importNames"]
     assert any(entry["path"] == "py.py" for entry in pytest_distribution["files"])
+
+
+def test_checked_in_runtime_manifest_pins_opus_python_and_native_runtime() -> None:
+    manifest = deterministic.parse_pytest_runtime_manifest(PINNED_RUNTIME_MANIFEST)
+    opus = next(item for item in manifest["distributions"] if item["name"] == "opuslib-next")
+
+    assert opus["importNames"] == ["opuslib_next"]
+    assert any(entry["path"] == "opuslib_next/api/__init__.py" for entry in opus["files"])
+    assert manifest["nativeLibrary"]["name"] == "opus"
+
+
+def test_private_runtime_uses_pinned_opus_origin_and_nonexistent_pycache(tmp_path: Path) -> None:
+    test_file = tmp_path / "test_origins.py"
+    test_file.write_text(
+        "from pathlib import Path\nimport opuslib_next\n"
+        "def test_origins():\n"
+        " assert 'google-live-pytest-runtime-' in str(Path(opuslib_next.__file__))\n",
+        encoding="utf-8",
+    )
+    with deterministic._private_pytest_runtime(MODULE_ROOT, "unused") as runtime:
+        assert not Path(runtime["pycache"]).exists()
+        completed = subprocess.run(
+            deterministic._pytest_command(runtime, str(test_file), "-q"),
+            cwd=tmp_path,
+            env=deterministic._pytest_child_environment(),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert not Path(runtime["pycache"]).exists()
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_private_runtime_shadows_injected_live_top_level_py_module(tmp_path: Path) -> None:
@@ -1272,7 +1342,7 @@ def test_producer_rejects_private_runtime_mutation_even_when_candidate_restores_
         calls.append(command)
         is_collect = "--collect-only" in command
         if (phase == "collect" and is_collect) or (phase == "run" and not is_collect):
-            runtime = json.loads(command[6])
+            runtime = json.loads(command[7])
             target = Path(runtime["trusted"][0]) / "pytest" / "__init__.py"
             original = target.read_bytes()
             target.chmod(0o600)

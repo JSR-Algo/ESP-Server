@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import platform
 import stat
 import sys
 from importlib.metadata import distribution
@@ -61,8 +63,35 @@ def build_manifest(repo_root: Path) -> dict[str, object]:
             }
         )
     plugin_path = repo_root / NODEID_PLUGIN_GIT_PATH
+    candidates = [
+        Path(value)
+        for value in (
+            os.environ.get("OPUS_LIB_PATH", ""),
+            "/opt/homebrew/lib/libopus.dylib",
+            "/usr/local/lib/libopus.dylib",
+            "/usr/lib/x86_64-linux-gnu/libopus.so.0",
+        )
+        if value
+    ]
+    native_path = next((path.resolve(strict=True) for path in candidates if path.exists()), None)
+    if native_path is None:
+        raise RuntimeError("required opus native library is unavailable")
+    native_stat = native_path.stat(follow_symlinks=False)
+    if not stat.S_ISREG(native_stat.st_mode) or native_stat.st_nlink != 1:
+        raise RuntimeError("required opus native library is invalid")
     return {
         "distributions": distributions,
+        "nativeLibrary": {
+            "device": native_stat.st_dev,
+            "inode": native_stat.st_ino,
+            "machine": platform.machine(),
+            "mode": stat.S_IMODE(native_stat.st_mode),
+            "name": "opus",
+            "path": str(native_path),
+            "sha256": _sha256(native_path),
+            "system": platform.system(),
+            "uid": native_stat.st_uid,
+        },
         "platform": "any",
         "plugin": {
             "path": NODEID_PLUGIN_GIT_PATH,

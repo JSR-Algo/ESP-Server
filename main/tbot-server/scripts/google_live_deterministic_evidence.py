@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import re
 import secrets
 import shutil
@@ -74,6 +75,7 @@ _PYTEST_CHILD_ENV_ALLOWLIST = (
     "TZ",
 )
 _PYTEST_DISTRIBUTION_PACKAGES = {
+    "opuslib-next": {"opuslib_next"},
     "pytest": {"pytest", "_pytest"},
     "pytest-asyncio": {"pytest_asyncio"},
     "pluggy": {"pluggy"},
@@ -82,15 +84,16 @@ _PYTEST_DISTRIBUTION_PACKAGES = {
     "pygments": {"pygments"},
 }
 _PYTEST_BOOTSTRAP = (
-    "import importlib,json,pathlib,sys;"
+    "import importlib,json,os,pathlib,sys;"
     "from importlib.util import module_from_spec,spec_from_file_location;"
     "p=json.loads(sys.argv.pop(1));"
     "exec(\"def audit():\\n import pathlib\\n roots=[pathlib.Path(x).resolve() for x in p['trusted']]\\n for name,module in tuple(sys.modules.items()):\\n  if not any(name==x or name.startswith(x+'.') for x in p['controlImportNames']):continue\\n  origin=getattr(module,'__file__',None)\\n  if not origin:raise RuntimeError('pytest runtime import origin invalid')\\n  resolved=pathlib.Path(origin).resolve()\\n  if not any(resolved==root or root in resolved.parents for root in roots):raise RuntimeError('pytest runtime import origin invalid')\",globals());"
-    "exec(\"def audit_candidate():\\n import pathlib\\n root=pathlib.Path(p['repo']).resolve();live=pathlib.Path(p['liveRepo']).resolve()\\n for name,module in tuple(sys.modules.items()):\\n  origin=getattr(module,'__file__',None)\\n  if not origin:continue\\n  resolved=pathlib.Path(origin).resolve();top=name.split('.',1)[0]\\n  if live!=root and (resolved==live or live in resolved.parents):raise RuntimeError('candidate import origin invalid')\\n  if top in p['candidateImportNames'] and top not in p['controlImportNames'] and not (resolved==root or root in resolved.parents):raise RuntimeError('candidate import origin invalid')\",globals());"
+    "exec(\"def audit_candidate():\\n import pathlib\\n root=pathlib.Path(p['repo']).resolve();live=pathlib.Path(p['liveRepo']).resolve();cache=pathlib.Path(p['pycache']).resolve()\\n if cache.exists():raise RuntimeError('bytecode cache invalid')\\n for name,module in tuple(sys.modules.items()):\\n  cached=getattr(module,'__cached__',None)\\n  if cached and pathlib.Path(cached).exists():raise RuntimeError('bytecode cache invalid')\\n  origin=getattr(module,'__file__',None)\\n  if not origin:continue\\n  resolved=pathlib.Path(origin).resolve();top=name.split('.',1)[0]\\n  if live!=root and (resolved==live or live in resolved.parents):raise RuntimeError('candidate import origin invalid')\\n  if top in p['candidateImportNames'] and top not in p['controlImportNames'] and not (resolved==root or root in resolved.parents):raise RuntimeError('candidate import origin invalid')\",globals());"
     "sys.path[:0]=p['trusted']+p['dependencies'];"
     "pytest=importlib.import_module('pytest');"
     "a=importlib.import_module('pytest_asyncio.plugin');"
     "audit();"
+    "os.environ['OPUS_LIB_PATH']=p['opusLibrary'];"
     "exec(\"def safe_path(value):\\n resolved=pathlib.Path(value).resolve();root=pathlib.Path(p['repo']).resolve();live=pathlib.Path(p['liveRepo']).resolve()\\n return live==root or resolved==root or root in resolved.parents or not (resolved==live or live in resolved.parents)\",globals());"
     "sys.path[:]=[str(pathlib.Path(x).resolve()) for x in p['trusted']+[p['repo']]+p['dependencies']+sys.path[len(p['trusted'])+len(p['dependencies']):] if x and safe_path(x)];"
     "s=spec_from_file_location('_google_live_pinned_nodeid_plugin',p['plugin']);"
@@ -135,6 +138,7 @@ class PrivatePytestRuntime(dict[str, Any]):
     directories: dict[Path, tuple[int, int, int, int, int]]
     manifest_content: bytes
     manifest: dict[str, Any]
+    external_bindings: dict[Path, BoundFile]
 
 
 @dataclass
@@ -232,6 +236,7 @@ def parse_pytest_runtime_manifest(content: bytes) -> dict[str, Any]:
         "distributions",
         "platform",
         "plugin",
+        "nativeLibrary",
         "pythonImplementation",
         "pythonMajorMinor",
         "schemaVersion",
@@ -330,6 +335,20 @@ def parse_pytest_runtime_manifest(content: bytes) -> dict[str, Any]:
         or _SHA256_HEX.fullmatch(plugin["sha256"]) is None
     ):
         raise ValueError("pytest runtime manifest plugin is invalid")
+    native = value.get("nativeLibrary")
+    if (
+        not isinstance(native, dict)
+        or set(native) != {"device", "inode", "machine", "mode", "name", "path", "sha256", "system", "uid"}
+        or native.get("name") != "opus"
+        or type(native.get("path")) is not str
+        or not Path(native["path"]).is_absolute()
+        or type(native.get("sha256")) is not str
+        or _SHA256_HEX.fullmatch(native["sha256"]) is None
+        or any(type(native.get(key)) is not int or native[key] < 0 for key in ("device", "inode", "mode", "uid"))
+        or type(native.get("system")) is not str
+        or type(native.get("machine")) is not str
+    ):
+        raise ValueError("pytest runtime manifest native library is invalid")
     return value
 
 
@@ -1242,7 +1261,11 @@ def _seal_private_pytest_runtime(runtime: PrivatePytestRuntime, root: Path) -> N
 
 def _verify_private_pytest_runtime(runtime: PrivatePytestRuntime) -> None:
     try:
+        if Path(runtime["pycache"]).exists():
+            raise RuntimeError
         for path, binding in runtime.bindings.items():
+            require_file_unchanged(path, binding)
+        for path, binding in runtime.external_bindings.items():
             require_file_unchanged(path, binding)
         for path, identity in runtime.directories.items():
             if _runtime_directory_identity(path) != identity:
@@ -1292,6 +1315,7 @@ def _candidate_tree_entries(
         prefix,
     )
     entries = {}
+    filesystem_names = set()
     for record in listing.split(b"\0"):
         if not record:
             continue
@@ -1315,7 +1339,11 @@ def _candidate_tree_entries(
         ):
             raise RuntimeError("candidate Git tree is invalid")
         relative = Path(path).relative_to(module_path).as_posix()
-        if relative.endswith((".pyc", ".pyo", ".so", ".dylib", ".dll", ".pyd")):
+        filesystem_name = unicodedata.normalize("NFC", relative).casefold()
+        if filesystem_name in filesystem_names:
+            raise RuntimeError("candidate Git tree is invalid")
+        filesystem_names.add(filesystem_name)
+        if Path(relative).suffix.casefold() in {".pyc", ".pyo", ".so", ".dylib", ".dll", ".pyd"}:
             raise RuntimeError("candidate Git tree contains executable artifacts")
         entries[path] = (object_id.decode("ascii"), int(mode, 8))
     if not entries:
@@ -1447,7 +1475,6 @@ def _private_pytest_runtime(
     candidate_root: Path | None = None,
 ):
     temporary = Path(tempfile.mkdtemp(prefix="google-live-pytest-runtime-"))
-    pycache = Path(tempfile.mkdtemp(prefix="google-live-pycache-"))
     try:
         candidate = candidate_root or repo_root
         candidate_import_names = set()
@@ -1458,7 +1485,6 @@ def _private_pytest_runtime(
             candidate_import_names.add(
                 relative.stem if len(relative.parts) == 1 else relative.parts[0]
             )
-        candidate_import_names.discard("opuslib_next")
         manifest_content, manifest = _load_trusted_pytest_runtime_manifest(
             repo_root,
             expected_git_sha,
@@ -1468,8 +1494,28 @@ def _private_pytest_runtime(
             or manifest["pythonMajorMinor"] != f"{sys.version_info.major}.{sys.version_info.minor}"
         ):
             raise RuntimeError("trusted pytest runtime Python constraint does not match")
+        native = manifest["nativeLibrary"]
+        if native["system"] != platform.system() or native["machine"] != platform.machine():
+            raise RuntimeError("trusted pytest runtime platform constraint does not match")
         packages = temporary / "packages"
         _copy_trusted_pytest_packages(packages, manifest)
+        native_source = Path(native["path"])
+        native_stat = native_source.stat(follow_symlinks=False)
+        if (
+            native_source.is_symlink()
+            or not stat.S_ISREG(native_stat.st_mode)
+            or native_stat.st_nlink != 1
+            or native_stat.st_dev != native["device"]
+            or native_stat.st_ino != native["inode"]
+            or native_stat.st_uid != native["uid"]
+            or stat.S_IMODE(native_stat.st_mode) != native["mode"]
+        ):
+            raise RuntimeError("required opus native library identity does not match")
+        native_bound = read_bound_file(native_source)
+        if not secrets.compare_digest(_sha256(native_bound.content), native["sha256"]):
+            raise RuntimeError("required opus native library integrity check failed")
+        private_native = temporary / "native" / native_source.name
+        _write_private_snapshot_file(private_native, native_bound.content)
         plugin = temporary / "control" / "pinned_nodeid_plugin.py"
         plugin_content = _load_trusted_nodeid_plugin(
             repo_root,
@@ -1494,10 +1540,12 @@ def _private_pytest_runtime(
             "candidateImportNames": sorted(candidate_import_names),
             "dependencies": [str(path) for path in _approved_package_roots()],
             "plugin": str(plugin),
-            "pycache": str(pycache),
+            "opusLibrary": str(private_native),
+            "pycache": str(temporary / "blocked-pycache"),
         })
         runtime.manifest_content = manifest_content
         runtime.manifest = manifest
+        runtime.external_bindings = {native_source: native_bound}
         _seal_private_pytest_runtime(runtime, temporary)
         _verify_private_pytest_runtime(runtime)
         yield runtime
@@ -1505,13 +1553,13 @@ def _private_pytest_runtime(
     finally:
         _make_runtime_writable(temporary)
         shutil.rmtree(temporary, ignore_errors=True)
-        shutil.rmtree(pycache, ignore_errors=True)
 
 
 def _pytest_command(runtime: Mapping[str, Any], *arguments: str) -> list[str]:
     return [
         sys.executable,
         "-I",
+        "-B",
         "-X",
         f"pycache_prefix={runtime['pycache']}",
         "-c",
