@@ -19,7 +19,12 @@ from scripts.google_live_release_gate import (
     aggregate_release_evidence,
     load_checksum_manifest,
 )
-from scripts.google_live_deterministic_evidence import MANIFEST_SCHEMA, parse_manifest
+from scripts.google_live_deterministic_evidence import (
+    MANIFEST_SCHEMA,
+    PYTEST_RUNTIME_SCHEMA,
+    parse_manifest,
+    parse_pytest_runtime_manifest,
+)
 
 _PHYSICAL_CASE = physical_fixture.PhysicalSmokeAuditTest()
 _OPTIONS = _PHYSICAL_CASE._candidate_audit_options()
@@ -29,6 +34,10 @@ CANONICAL_MANIFEST_PATH = (
 )
 CANONICAL_MANIFEST = CANONICAL_MANIFEST_PATH.read_bytes()
 CANONICAL_NODES = parse_manifest(CANONICAL_MANIFEST)
+PYTEST_RUNTIME_MANIFEST = (
+    Path(__file__).parent / "fixtures" / "google_live_pytest_runtime_manifest.json"
+).read_bytes()
+PYTEST_RUNTIME = parse_pytest_runtime_manifest(PYTEST_RUNTIME_MANIFEST)
 REAL_LOAD_TRUSTED_MANIFEST = release_gate._load_trusted_deterministic_manifest
 
 
@@ -38,6 +47,12 @@ def _pin_release_manifest_loader(monkeypatch: pytest.MonkeyPatch) -> None:
         release_gate,
         "_load_trusted_deterministic_manifest",
         lambda _expected_git_sha: CANONICAL_MANIFEST,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        release_gate,
+        "_load_trusted_pytest_runtime_manifest",
+        lambda _expected_git_sha: PYTEST_RUNTIME_MANIFEST,
         raising=False,
     )
 
@@ -218,6 +233,9 @@ def _write_evidence(
         "manifestNodeCount": len(nodes),
         "executedNodeCount": len(nodes),
         "junitSha256": hashlib.sha256(junit.read_bytes()).hexdigest(),
+        "nodeidPluginSha256": PYTEST_RUNTIME["plugin"]["sha256"],
+        "pytestRuntimeManifestSha256": hashlib.sha256(PYTEST_RUNTIME_MANIFEST).hexdigest(),
+        "pytestRuntimeSchema": PYTEST_RUNTIME_SCHEMA,
     }
     paths = {}
     checksums = {}

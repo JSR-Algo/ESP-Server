@@ -20,6 +20,61 @@ IDENTITY = {
     "configFingerprint": "sha256:" + "c" * 64,
     "fixtureSha256": "d" * 64,
 }
+MODULE_ROOT = Path(__file__).parents[1].resolve()
+PINNED_RUNTIME_MANIFEST = (
+    MODULE_ROOT / "tests/fixtures/google_live_pytest_runtime_manifest.json"
+).read_bytes()
+PINNED_NODEID_PLUGIN = (
+    MODULE_ROOT / "scripts/google_live_deterministic_nodeid_plugin.py"
+).read_bytes()
+REAL_LOAD_RUNTIME_MANIFEST = deterministic._load_trusted_pytest_runtime_manifest
+REAL_LOAD_NODEID_PLUGIN = deterministic._load_trusted_nodeid_plugin
+
+
+@pytest.fixture(autouse=True)
+def _pin_runtime_control_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        deterministic,
+        "_load_trusted_pytest_runtime_manifest",
+        lambda _repo_root, _git_sha: (
+            PINNED_RUNTIME_MANIFEST,
+            deterministic.parse_pytest_runtime_manifest(PINNED_RUNTIME_MANIFEST),
+        ),
+    )
+    monkeypatch.setattr(
+        deterministic,
+        "_load_trusted_nodeid_plugin",
+        lambda _repo_root, _git_sha, _manifest: PINNED_NODEID_PLUGIN,
+    )
+
+
+def _runtime_manifest_bytes(*, plugin_sha256: str = "e" * 64) -> bytes:
+    distributions = []
+    for name, packages in sorted(deterministic._PYTEST_DISTRIBUTION_PACKAGES.items()):
+        files = [
+            {"path": f"{package}/__init__.py", "sha256": hashlib.sha256(package.encode()).hexdigest()}
+            for package in sorted(packages)
+        ]
+        distributions.append(
+            {
+                "files": files,
+                "name": name,
+                "packages": sorted(packages),
+                "version": "1.0",
+            }
+        )
+    value = {
+        "distributions": distributions,
+        "platform": "any",
+        "plugin": {
+            "path": "main/tbot-server/scripts/google_live_deterministic_nodeid_plugin.py",
+            "sha256": plugin_sha256,
+        },
+        "pythonImplementation": "cpython",
+        "pythonMajorMinor": "3.14",
+        "schemaVersion": "google-live-pytest-runtime.v1",
+    }
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
 def _junit(nodes: list[str], *, status: str = "pass") -> bytes:
@@ -489,13 +544,17 @@ def test_build_report_binds_manifest_and_junit_hashes_and_exact_counts() -> None
     nodes = ["tests/test_a.py::test_one", "tests/test_b.py::test_two"]
     manifest = ("\n".join(nodes) + "\n").encode()
     junit = _junit(nodes)
-    report = deterministic.build_report(IDENTITY, manifest, junit)
+    report = deterministic.build_report(IDENTITY, manifest, junit, PINNED_RUNTIME_MANIFEST)
+    runtime = deterministic.parse_pytest_runtime_manifest(PINNED_RUNTIME_MANIFEST)
     assert report["coverageProof"] == {
         "manifestSchema": "google-live-deterministic-nodes.v1",
         "manifestSha256": hashlib.sha256(manifest).hexdigest(),
         "manifestNodeCount": 2,
         "executedNodeCount": 2,
         "junitSha256": hashlib.sha256(junit).hexdigest(),
+        "nodeidPluginSha256": runtime["plugin"]["sha256"],
+        "pytestRuntimeManifestSha256": hashlib.sha256(PINNED_RUNTIME_MANIFEST).hexdigest(),
+        "pytestRuntimeSchema": "google-live-pytest-runtime.v1",
     }
     assert report["testVerdict"] == {
         "status": "PASS", "total": 2, "failed": 0, "skipped": 0, "errors": 0, "failures": []
@@ -698,7 +757,8 @@ def test_producer_uses_isolated_allowlisted_pytest_process(
         assert len(runtime["trusted"]) == 1
         assert runtime["trusted"][0] not in report.read_text(encoding="utf-8")
         assert command[3].count("pytest_asyncio.plugin") == 1
-        assert command[3].count("scripts.google_live_deterministic_nodeid_plugin") == 1
+        assert command[3].count("_google_live_pinned_nodeid_plugin") == 1
+        assert runtime["plugin"].endswith("/control/pinned_nodeid_plugin.py")
         assert kwargs["cwd"] == tmp_path.resolve()
         assert kwargs["env"]["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
         assert kwargs["env"]["PYTHONNOUSERSITE"] == "1"
@@ -707,6 +767,7 @@ def test_producer_uses_isolated_allowlisted_pytest_process(
     assert json.loads(report.read_text(encoding="utf-8"))["status"] == "PASS"
     assert sentinel not in report.read_text(encoding="utf-8")
     assert deterministic.parse_passing_junit(junit.read_bytes(), nodes)["tests"] == 1
+    assert len({json.loads(command[4])["trusted"][0] for command, _ in calls}) == 2
     assert all(not Path(json.loads(command[4])["trusted"][0]).exists() for command, _ in calls)
 
 
@@ -739,7 +800,14 @@ def test_isolated_pytest_process_ignores_environment_injection(tmp_path: Path) -
     }
     repo_root = Path(__file__).parents[1].resolve()
 
-    with deterministic._private_pytest_runtime(repo_root) as runtime:
+    git_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    with deterministic._private_pytest_runtime(repo_root, git_sha) as runtime:
         completed = subprocess.run(
             deterministic._pytest_command(runtime, str(test_file), "-q"),
             cwd=repo_root,
@@ -772,14 +840,174 @@ def test_private_pytest_runtime_rejects_record_hash_mismatch(
     )
     fake_distribution = SimpleNamespace(
         files=[package_path],
+        version="1.0",
         locate_file=lambda path: package_root if path == "" else package_root / Path(*path.parts),
     )
     monkeypatch.setattr(deterministic, "_PYTEST_DISTRIBUTION_PACKAGES", {"pytest": {"pytest"}})
     monkeypatch.setattr(deterministic, "_approved_package_roots", lambda: [package_root])
     monkeypatch.setattr(deterministic, "distribution", lambda _name: fake_distribution)
 
+    manifest = json.loads(_runtime_manifest_bytes())
+    manifest["distributions"] = [
+        {
+            "files": [
+                {
+                    "path": "pytest/__init__.py",
+                    "sha256": hashlib.sha256(b"expected").hexdigest(),
+                }
+            ],
+            "name": "pytest",
+            "packages": ["pytest"],
+            "version": "1.0",
+        }
+    ]
     with pytest.raises(RuntimeError, match="integrity"):
-        deterministic._copy_trusted_pytest_packages(tmp_path / "snapshot")
+        deterministic._copy_trusted_pytest_packages(tmp_path / "snapshot", manifest)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["duplicate_file", "duplicate_package", "traversal", "noncanonical", "privacy"],
+)
+def test_pytest_runtime_manifest_rejects_ambiguous_or_unsafe_content(mutation: str) -> None:
+    value = json.loads(_runtime_manifest_bytes())
+    if mutation == "duplicate_file":
+        value["distributions"][0]["files"].append(value["distributions"][0]["files"][0])
+    elif mutation == "duplicate_package":
+        value["distributions"][0]["packages"].append(value["distributions"][0]["packages"][0])
+    elif mutation == "traversal":
+        value["distributions"][0]["files"][0]["path"] = "../pytest.py"
+    elif mutation == "privacy":
+        value["plugin"]["path"] = "Authorization=Bearer secret"
+    content = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    if mutation == "noncanonical":
+        content = json.dumps(value, indent=2).encode()
+
+    with pytest.raises(ValueError, match="runtime manifest") as error:
+        deterministic.parse_pytest_runtime_manifest(content)
+
+    assert "secret" not in str(error.value).lower()
+
+
+def test_pytest_runtime_manifest_loader_uses_exact_candidate_sha_across_head_aba(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_sha = "a" * 40
+    other_sha = "b" * 40
+    canonical = _runtime_manifest_bytes()
+    objects = []
+
+    def git_output(_repo_root: Path, *arguments: str) -> bytes:
+        if arguments[:2] == ("rev-parse", "--show-toplevel"):
+            return str(tmp_path).encode() + b"\n"
+        if arguments[0] == "show":
+            objects.append(arguments[1])
+            if arguments[1].startswith("HEAD:") or arguments[1].startswith(f"{other_sha}:"):
+                return b"{}\n"
+            return canonical
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(deterministic, "_git_output", git_output)
+
+    content, manifest = REAL_LOAD_RUNTIME_MANIFEST(
+        tmp_path,
+        candidate_sha,
+    )
+
+    assert content == canonical
+    assert manifest["schemaVersion"] == "google-live-pytest-runtime.v1"
+    assert objects == [
+        f"{candidate_sha}:main/tbot-server/tests/fixtures/google_live_pytest_runtime_manifest.json"
+    ]
+
+
+def test_checked_in_runtime_manifest_and_plugin_are_bound_to_current_git_object() -> None:
+    git_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=MODULE_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    content, manifest = REAL_LOAD_RUNTIME_MANIFEST(MODULE_ROOT, git_sha)
+    plugin = REAL_LOAD_NODEID_PLUGIN(MODULE_ROOT, git_sha, manifest)
+
+    assert content == PINNED_RUNTIME_MANIFEST
+    assert plugin == PINNED_NODEID_PLUGIN
+
+
+def test_runtime_source_rejects_package_and_rewritten_record_against_git_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_root = tmp_path / "site-packages"
+    package_file = package_root / "pytest" / "__init__.py"
+    package_file.parent.mkdir(parents=True)
+    original = b"trusted"
+    package_file.write_bytes(original)
+    manifest = json.loads(_runtime_manifest_bytes())
+    manifest["distributions"] = [
+        {
+            "files": [
+                {"path": "pytest/__init__.py", "sha256": hashlib.sha256(original).hexdigest()}
+            ],
+            "name": "pytest",
+            "packages": ["pytest"],
+            "version": "1.0",
+        }
+    ]
+    package_file.write_bytes(b"attacker")
+    rewritten_record_hash = SimpleNamespace(
+        mode="sha256",
+        value="ignored-because-record-is-not-a-trust-anchor",
+    )
+    package_path = SimpleNamespace(
+        parts=("pytest", "__init__.py"),
+        hash=rewritten_record_hash,
+        suffix=".py",
+    )
+    fake_distribution = SimpleNamespace(
+        files=[package_path],
+        version="1.0",
+        locate_file=lambda path: package_root if path == "" else package_root / Path(*path.parts),
+    )
+    monkeypatch.setattr(deterministic, "_approved_package_roots", lambda: [package_root])
+    monkeypatch.setattr(deterministic, "distribution", lambda _name: fake_distribution)
+
+    with pytest.raises(RuntimeError, match="integrity"):
+        deterministic._copy_trusted_pytest_packages(tmp_path / "snapshot", manifest)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "tampered"])
+def test_nodeid_plugin_loader_fails_closed_on_missing_or_tampered_git_blob(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    candidate_sha = "a" * 40
+    plugin = b"def pytest_collection_modifyitems(session, items):\n    pass\n"
+    manifest = json.loads(_runtime_manifest_bytes(plugin_sha256=hashlib.sha256(plugin).hexdigest()))
+    objects = []
+
+    def git_output(_repo_root: Path, *arguments: str) -> bytes:
+        if arguments[:2] == ("rev-parse", "--show-toplevel"):
+            return str(tmp_path).encode() + b"\n"
+        assert arguments[0] == "show"
+        objects.append(arguments[1])
+        if mutation == "missing":
+            raise RuntimeError("missing")
+        return plugin + b"# attacker\n"
+
+    monkeypatch.setattr(deterministic, "_git_output", git_output)
+
+    with pytest.raises(RuntimeError, match="plugin"):
+        REAL_LOAD_NODEID_PLUGIN(tmp_path, candidate_sha, manifest)
+
+    assert objects == [
+        f"{candidate_sha}:main/tbot-server/scripts/google_live_deterministic_nodeid_plugin.py"
+    ]
 
 
 def test_private_pytest_runtime_preimports_trusted_packages_before_candidate_repo(
@@ -792,11 +1020,14 @@ def test_private_pytest_runtime_preimports_trusted_packages_before_candidate_rep
     shadow_plugin.write_text(f"raise RuntimeError({sentinel!r})\n", encoding="utf-8")
     scripts = tmp_path / "scripts"
     scripts.mkdir()
-    (scripts / "google_live_deterministic_nodeid_plugin.py").write_text("\n", encoding="utf-8")
+    (scripts / "google_live_deterministic_nodeid_plugin.py").write_text(
+        f"raise RuntimeError({sentinel!r})\n",
+        encoding="utf-8",
+    )
     test_file = tmp_path / "test_candidate.py"
     test_file.write_text("def test_candidate():\n    assert True\n", encoding="utf-8")
 
-    with deterministic._private_pytest_runtime(tmp_path) as runtime:
+    with deterministic._private_pytest_runtime(tmp_path, IDENTITY["gitSha"]) as runtime:
         completed = subprocess.run(
             deterministic._pytest_command(runtime, str(test_file), "-q"),
             cwd=tmp_path,
@@ -811,26 +1042,152 @@ def test_private_pytest_runtime_preimports_trusted_packages_before_candidate_rep
     assert sentinel not in completed.stdout + completed.stderr
 
 
+@pytest.mark.parametrize("phase", ["collect", "run"])
+def test_producer_rejects_private_runtime_mutation_even_when_candidate_restores_bytes(
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    node = "tests/test_a.py::test_one"
+    manifest = tmp_path / "node-manifest.txt"
+    manifest.write_text(node + "\n", encoding="utf-8")
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    junit = evidence_root / "deterministic" / "pytest.xml"
+    report = junit.with_name("report.json")
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        is_collect = "--collect-only" in command
+        if (phase == "collect" and is_collect) or (phase == "run" and not is_collect):
+            runtime = json.loads(command[4])
+            target = Path(runtime["trusted"][0]) / "pytest" / "__init__.py"
+            original = target.read_bytes()
+            target.chmod(0o600)
+            target.write_bytes(b"raise RuntimeError('candidate mutation')\n")
+            target.write_bytes(original)
+            target.chmod(0o400)
+        if is_collect:
+            return subprocess.CompletedProcess(command, 0, stdout=node + "\n", stderr="")
+        junit_arg = next(value for value in command if value.startswith("--junitxml="))
+        Path(junit_arg.split("=", 1)[1]).write_bytes(_junit([node]))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    with pytest.raises(RuntimeError, match="private pytest runtime") as error:
+        deterministic.produce(
+            manifest_path=manifest,
+            junit_out=junit,
+            report_path=report,
+            identity=IDENTITY,
+            repo_root=tmp_path,
+            run=run,
+            git_status=lambda: b"",
+            git_head=lambda: IDENTITY["gitSha"],
+            approved_test_files=("tests/test_a.py",),
+            canonical_manifest_path=manifest,
+        )
+
+    assert "candidate mutation" not in str(error.value)
+    assert len(calls) == (1 if phase == "collect" else 2)
+    assert not junit.exists()
+    assert not report.exists()
+
+
+def test_verified_snapshot_is_unchanged_when_live_package_changes_after_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_root = tmp_path / "site-packages"
+    package_file = package_root / "pytest" / "__init__.py"
+    package_file.parent.mkdir(parents=True)
+    trusted = b"trusted runtime\n"
+    package_file.write_bytes(trusted)
+    manifest = json.loads(_runtime_manifest_bytes())
+    manifest["distributions"] = [
+        {
+            "files": [
+                {"path": "pytest/__init__.py", "sha256": hashlib.sha256(trusted).hexdigest()}
+            ],
+            "name": "pytest",
+            "packages": ["pytest"],
+            "version": "1.0",
+        }
+    ]
+    fake_distribution = SimpleNamespace(
+        version="1.0",
+        locate_file=lambda path: package_root,
+    )
+    monkeypatch.setattr(deterministic, "_approved_package_roots", lambda: [package_root])
+    monkeypatch.setattr(deterministic, "distribution", lambda _name: fake_distribution)
+    snapshot = tmp_path / "snapshot"
+
+    deterministic._copy_trusted_pytest_packages(snapshot, manifest)
+    package_file.write_bytes(b"attacker replacement\n")
+
+    assert (snapshot / "pytest" / "__init__.py").read_bytes() == trusted
+
+
+@pytest.mark.parametrize("mutation", ["missing", "extra_python", "extra_native"])
+def test_runtime_source_rejects_missing_or_extra_executable_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    package_root = tmp_path / "site-packages"
+    package_file = package_root / "pytest" / "__init__.py"
+    package_file.parent.mkdir(parents=True)
+    trusted = b"trusted runtime\n"
+    package_file.write_bytes(trusted)
+    manifest = json.loads(_runtime_manifest_bytes())
+    manifest["distributions"] = [
+        {
+            "files": [
+                {"path": "pytest/__init__.py", "sha256": hashlib.sha256(trusted).hexdigest()}
+            ],
+            "name": "pytest",
+            "packages": ["pytest"],
+            "version": "1.0",
+        }
+    ]
+    if mutation == "missing":
+        package_file.unlink()
+    else:
+        suffix = ".py" if mutation == "extra_python" else ".so"
+        package_file.with_name("attacker" + suffix).write_bytes(b"attacker")
+    fake_distribution = SimpleNamespace(
+        version="1.0",
+        locate_file=lambda path: package_root,
+    )
+    monkeypatch.setattr(deterministic, "_approved_package_roots", lambda: [package_root])
+    monkeypatch.setattr(deterministic, "distribution", lambda _name: fake_distribution)
+
+    with pytest.raises(RuntimeError, match="file set"):
+        deterministic._copy_trusted_pytest_packages(tmp_path / "snapshot", manifest)
+
+
 def test_candidate_canonical_manifest_uses_immutable_sha_across_head_aba(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate_sha = "a" * 40
     other_sha = "b" * 40
-    fixture = tmp_path / "tests" / "fixtures" / "google_live_deterministic_nodes.txt"
+    repo_root = tmp_path / "main" / "tbot-server"
+    fixture = repo_root / "tests" / "fixtures" / "google_live_deterministic_nodes.txt"
     fixture.parent.mkdir(parents=True)
     fixture.write_bytes(b"tests/test_a.py::test_one\n")
-    manifest = tmp_path / "node-manifest.txt"
+    manifest = repo_root / "node-manifest.txt"
     manifest.write_bytes(fixture.read_bytes())
-    evidence_root = tmp_path / "evidence"
+    evidence_root = repo_root / "evidence"
     evidence_root.mkdir()
     junit = evidence_root / "deterministic" / "pytest.xml"
     report = junit.with_name("report.json")
     show_objects = []
 
     def git_output(_repo_root: Path, *arguments: str) -> bytes:
+        if arguments[:2] == ("rev-parse", "--show-toplevel"):
+            return str(tmp_path).encode() + b"\n"
         if arguments[0] == "ls-files":
-            return b"tests/fixtures/google_live_deterministic_nodes.txt\n"
+            return b"main/tbot-server/tests/fixtures/google_live_deterministic_nodes.txt\n"
         if arguments[0] == "show":
             show_objects.append(arguments[1])
             if arguments[1].startswith(f"{other_sha}:") or arguments[1].startswith("HEAD:"):
@@ -857,7 +1214,7 @@ def test_candidate_canonical_manifest_uses_immutable_sha_across_head_aba(
         junit_out=junit,
         report_path=report,
         identity=IDENTITY,
-        repo_root=tmp_path,
+        repo_root=repo_root,
         run=run,
         git_status=lambda: b"",
         git_head=lambda: candidate_sha,
@@ -866,7 +1223,7 @@ def test_candidate_canonical_manifest_uses_immutable_sha_across_head_aba(
 
     assert report.exists()
     assert show_objects == [
-        f"{candidate_sha}:tests/fixtures/google_live_deterministic_nodes.txt"
+        f"{candidate_sha}:main/tbot-server/tests/fixtures/google_live_deterministic_nodes.txt"
     ]
 
 

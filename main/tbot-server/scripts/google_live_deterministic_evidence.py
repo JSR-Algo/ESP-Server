@@ -33,7 +33,18 @@ from scripts import google_live_deterministic_nodeid_plugin as nodeid_plugin
 from scripts.google_live_reliability import SCHEMA_VERSION
 
 MANIFEST_SCHEMA = "google-live-deterministic-nodes.v1"
+PYTEST_RUNTIME_SCHEMA = "google-live-pytest-runtime.v1"
+PYTEST_RUNTIME_MANIFEST_GIT_PATH = (
+    "main/tbot-server/tests/fixtures/google_live_pytest_runtime_manifest.json"
+)
+NODEID_PLUGIN_GIT_PATH = (
+    "main/tbot-server/scripts/google_live_deterministic_nodeid_plugin.py"
+)
 NODE_PATTERN = re.compile(r"tests/[A-Za-z0-9_./-]+\.py::[^\r\n]+")
+_RUNTIME_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_RUNTIME_PACKAGE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_RUNTIME_PATH = re.compile(r"[A-Za-z0-9_./-]+")
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 _XML_DECLARATIONS = (
     '<?xml version="1.0" encoding="utf-8"?>',
     "<?xml version='1.0' encoding='utf-8'?>",
@@ -66,12 +77,14 @@ _PYTEST_DISTRIBUTION_PACKAGES = {
 }
 _PYTEST_BOOTSTRAP = (
     "import importlib,json,sys;"
+    "from importlib.util import module_from_spec,spec_from_file_location;"
     "p=json.loads(sys.argv.pop(1));"
     "sys.path[:0]=p['trusted']+p['dependencies'];"
     "pytest=importlib.import_module('pytest');"
     "a=importlib.import_module('pytest_asyncio.plugin');"
     "sys.path[:]=p['trusted']+[p['repo']]+p['dependencies']+sys.path[len(p['trusted'])+len(p['dependencies']):];"
-    "n=importlib.import_module('scripts.google_live_deterministic_nodeid_plugin');"
+    "s=spec_from_file_location('_google_live_pinned_nodeid_plugin',p['plugin']);"
+    "n=module_from_spec(s);s.loader.exec_module(n);"
     "sys.argv[0]='pytest';"
     "raise SystemExit(pytest.main(sys.argv[1:],plugins=[a,n]))"
 )
@@ -100,6 +113,16 @@ class BoundFile:
     inode: int
     size: int
     modified_ns: int
+    changed_ns: int
+    mode: int
+    links: int
+
+
+class PrivatePytestRuntime(dict[str, Any]):
+    bindings: dict[Path, BoundFile]
+    directories: dict[Path, tuple[int, int, int, int, int]]
+    manifest_content: bytes
+    manifest: dict[str, Any]
 
 
 def _sha256(content: bytes) -> str:
@@ -120,11 +143,34 @@ def read_bound_file(path: Path) -> BoundFile:
         after = os.fstat(descriptor)
     finally:
         os.close(descriptor)
-    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
-        after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+    if (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+        before.st_mode,
+        before.st_nlink,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+        after.st_mode,
+        after.st_nlink,
     ):
         raise RuntimeError("evidence file changed while being read")
-    return BoundFile(content, after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+    return BoundFile(
+        content,
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+        after.st_mode,
+        after.st_nlink,
+    )
 
 
 def require_file_unchanged(path: Path, bound: BoundFile) -> None:
@@ -146,6 +192,106 @@ def parse_manifest(content: bytes) -> list[str]:
     if len(nodes) != len(set(nodes)):
         raise ValueError("manifest contains duplicate node IDs")
     return nodes
+
+
+def parse_pytest_runtime_manifest(content: bytes) -> dict[str, Any]:
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("pytest runtime manifest encoding is invalid") from exc
+    if not text.endswith("\n") or "\r" in text or _junit_value_is_sensitive(text):
+        raise ValueError("pytest runtime manifest violates the canonical contract")
+    try:
+        value = json.loads(text)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("pytest runtime manifest is invalid") from exc
+    canonical = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    if canonical != content or not isinstance(value, dict):
+        raise ValueError("pytest runtime manifest is not canonical")
+    if set(value) != {
+        "distributions",
+        "platform",
+        "plugin",
+        "pythonImplementation",
+        "pythonMajorMinor",
+        "schemaVersion",
+    }:
+        raise ValueError("pytest runtime manifest structure is invalid")
+    if (
+        value.get("schemaVersion") != PYTEST_RUNTIME_SCHEMA
+        or value.get("platform") != "any"
+        or value.get("pythonImplementation") != "cpython"
+        or type(value.get("pythonMajorMinor")) is not str
+        or re.fullmatch(r"[0-9]+\.[0-9]+", value["pythonMajorMinor"]) is None
+    ):
+        raise ValueError("pytest runtime manifest constraints are invalid")
+    distributions = value.get("distributions")
+    if not isinstance(distributions, list) or not distributions:
+        raise ValueError("pytest runtime manifest distributions are invalid")
+    names = []
+    for item in distributions:
+        if not isinstance(item, dict) or set(item) != {"files", "name", "packages", "version"}:
+            raise ValueError("pytest runtime manifest distribution is invalid")
+        name = item.get("name")
+        version = item.get("version")
+        packages = item.get("packages")
+        files = item.get("files")
+        if (
+            type(name) is not str
+            or _RUNTIME_NAME.fullmatch(name) is None
+            or type(version) is not str
+            or _RUNTIME_NAME.fullmatch(version) is None
+            or not isinstance(packages, list)
+            or not packages
+            or packages != sorted(packages)
+            or len(packages) != len(set(packages))
+            or any(
+                type(package) is not str or _RUNTIME_PACKAGE.fullmatch(package) is None
+                for package in packages
+            )
+            or not isinstance(files, list)
+            or not files
+        ):
+            raise ValueError("pytest runtime manifest distribution is invalid")
+        paths = []
+        for entry in files:
+            if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
+                raise ValueError("pytest runtime manifest file is invalid")
+            path = entry.get("path")
+            digest = entry.get("sha256")
+            if (
+                type(path) is not str
+                or _RUNTIME_PATH.fullmatch(path) is None
+                or path.startswith("/")
+                or any(part in {"", ".", ".."} for part in path.split("/"))
+                or path.split("/", 1)[0] not in packages
+                or type(digest) is not str
+                or _SHA256_HEX.fullmatch(digest) is None
+                or Path(path).suffix.lower() in {".so", ".dylib", ".dll", ".pyd"}
+            ):
+                raise ValueError("pytest runtime manifest file is invalid")
+            paths.append(path)
+        if paths != sorted(paths) or len(paths) != len(set(paths)):
+            raise ValueError("pytest runtime manifest files are ambiguous")
+        if set(packages) != {path.split("/", 1)[0] for path in paths}:
+            raise ValueError("pytest runtime manifest package is incomplete")
+        names.append(name)
+    expected = sorted(_PYTEST_DISTRIBUTION_PACKAGES)
+    if names != expected or len(names) != len(set(names)):
+        raise ValueError("pytest runtime manifest distribution set is invalid")
+    for item in distributions:
+        if item["packages"] != sorted(_PYTEST_DISTRIBUTION_PACKAGES[item["name"]]):
+            raise ValueError("pytest runtime manifest package set is invalid")
+    plugin = value.get("plugin")
+    if (
+        not isinstance(plugin, dict)
+        or set(plugin) != {"path", "sha256"}
+        or plugin.get("path") != NODEID_PLUGIN_GIT_PATH
+        or type(plugin.get("sha256")) is not str
+        or _SHA256_HEX.fullmatch(plugin["sha256"]) is None
+    ):
+        raise ValueError("pytest runtime manifest plugin is invalid")
+    return value
 
 
 def require_exact_nodes(observed: Sequence[str], expected: Sequence[str], *, label: str) -> None:
@@ -527,9 +673,15 @@ def canonicalize_junit_summary(content: bytes) -> bytes:
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
-def build_report(identity: Mapping[str, str], manifest: bytes, junit: bytes) -> dict[str, Any]:
+def build_report(
+    identity: Mapping[str, str],
+    manifest: bytes,
+    junit: bytes,
+    pytest_runtime_manifest: bytes,
+) -> dict[str, Any]:
     nodes = parse_manifest(manifest)
     totals = parse_passing_junit(junit, nodes)
+    runtime = parse_pytest_runtime_manifest(pytest_runtime_manifest)
     return {
         "schemaVersion": SCHEMA_VERSION,
         "name": "deterministic",
@@ -541,6 +693,9 @@ def build_report(identity: Mapping[str, str], manifest: bytes, junit: bytes) -> 
             "manifestNodeCount": len(nodes),
             "executedNodeCount": len(nodes),
             "junitSha256": _sha256(junit),
+            "nodeidPluginSha256": runtime["plugin"]["sha256"],
+            "pytestRuntimeManifestSha256": _sha256(pytest_runtime_manifest),
+            "pytestRuntimeSchema": PYTEST_RUNTIME_SCHEMA,
         },
         "testVerdict": {
             "status": "PASS",
@@ -834,24 +989,6 @@ def _approved_package_roots() -> list[Path]:
     ]
 
 
-def _record_sha256(package_path: Any) -> bytes:
-    recorded_hash = getattr(package_path, "hash", None)
-    if recorded_hash is None or recorded_hash.mode != "sha256":
-        raise RuntimeError("required pytest package integrity metadata is unavailable")
-    try:
-        padding = "=" * (-len(recorded_hash.value) % 4)
-        digest = base64.b64decode(
-            recorded_hash.value + padding,
-            altchars=b"-_",
-            validate=True,
-        )
-    except (binascii.Error, ValueError) as exc:
-        raise RuntimeError("required pytest package integrity metadata is invalid") from exc
-    if len(digest) != hashlib.sha256().digest_size:
-        raise RuntimeError("required pytest package integrity metadata is invalid")
-    return digest
-
-
 def _write_private_snapshot_file(path: Path, content: bytes) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     descriptor = os.open(
@@ -870,33 +1007,47 @@ def _write_private_snapshot_file(path: Path, content: bytes) -> None:
         os.close(descriptor)
 
 
-def _copy_trusted_pytest_packages(destination: Path) -> None:
+def _runtime_package_files(package_root: Path) -> list[Path]:
+    if package_root.is_symlink() or not package_root.is_dir():
+        raise RuntimeError("required pytest package path is invalid")
+    files = []
+    for candidate in package_root.rglob("*"):
+        if candidate.is_symlink():
+            raise RuntimeError("required pytest package path is invalid")
+        if candidate.is_dir():
+            continue
+        if "__pycache__" in candidate.parts or candidate.suffix in {".pyc", ".pyo"}:
+            continue
+        files.append(candidate)
+    return sorted(files)
+
+
+def _copy_trusted_pytest_packages(destination: Path, manifest: Mapping[str, Any]) -> None:
     approved_roots = _approved_package_roots()
     destination.mkdir(mode=0o700, parents=True, exist_ok=True)
     copied_packages = set()
-    for distribution_name, package_names in _PYTEST_DISTRIBUTION_PACKAGES.items():
+    for expected_distribution in manifest["distributions"]:
+        distribution_name = expected_distribution["name"]
+        package_names = expected_distribution["packages"]
         try:
             package_distribution = distribution(distribution_name)
         except PackageNotFoundError as exc:
             raise RuntimeError("required pytest distribution is unavailable") from exc
+        if package_distribution.version != expected_distribution["version"]:
+            raise RuntimeError("required pytest distribution version does not match")
         distribution_root = Path(package_distribution.locate_file("")).resolve(strict=True)
         if distribution_root not in approved_roots:
             raise RuntimeError("required pytest distribution is outside approved package roots")
-        package_files = package_distribution.files
-        if package_files is None:
-            raise RuntimeError("required pytest package integrity metadata is unavailable")
-        for package_path in package_files:
-            parts = tuple(package_path.parts)
-            if (
-                not parts
-                or parts[0] not in package_names
-                or "__pycache__" in parts
-                or package_path.suffix in {".pyc", ".pyo"}
-            ):
-                continue
-            if any(part in {"", ".", ".."} for part in parts):
-                raise RuntimeError("required pytest package path is invalid")
-            source = Path(package_distribution.locate_file(package_path))
+        expected_files = {
+            entry["path"]: entry["sha256"] for entry in expected_distribution["files"]
+        }
+        observed_files = []
+        for package_name in package_names:
+            observed_files.extend(_runtime_package_files(distribution_root / package_name))
+        observed_relative = [path.relative_to(distribution_root).as_posix() for path in observed_files]
+        if observed_relative != sorted(expected_files):
+            raise RuntimeError("required pytest package file set does not match")
+        for source, relative in zip(observed_files, observed_relative, strict=True):
             try:
                 resolved_source = source.resolve(strict=True)
                 resolved_source.relative_to(distribution_root)
@@ -923,26 +1074,160 @@ def _copy_trusted_pytest_packages(destination: Path) -> None:
                 after.st_nlink,
             ):
                 raise RuntimeError("required pytest package changed while being read")
-            if hashlib.sha256(bound.content).digest() != _record_sha256(package_path):
+            if not secrets.compare_digest(_sha256(bound.content), expected_files[relative]):
                 raise RuntimeError("required pytest package integrity check failed")
-            _write_private_snapshot_file(destination.joinpath(*parts), bound.content)
-            copied_packages.add(parts[0])
-    if copied_packages != set().union(*_PYTEST_DISTRIBUTION_PACKAGES.values()):
+            _write_private_snapshot_file(destination / relative, bound.content)
+            copied_packages.add(relative.split("/", 1)[0])
+        observed_after = []
+        for package_name in package_names:
+            observed_after.extend(_runtime_package_files(distribution_root / package_name))
+        if [path.relative_to(distribution_root).as_posix() for path in observed_after] != observed_relative:
+            raise RuntimeError("required pytest package changed during snapshot")
+    expected_packages = {
+        package
+        for expected_distribution in manifest["distributions"]
+        for package in expected_distribution["packages"]
+    }
+    if copied_packages != expected_packages:
         raise RuntimeError("trusted pytest package set is incomplete")
 
 
+def _load_trusted_pytest_runtime_manifest(
+    repo_root: Path,
+    expected_git_sha: str,
+) -> tuple[bytes, dict[str, Any]]:
+    git_root = Path(
+        _git_output(repo_root, "rev-parse", "--show-toplevel").decode().strip()
+    ).resolve(strict=True)
+    try:
+        content = _git_output(
+            git_root,
+            "show",
+            f"{expected_git_sha}:{PYTEST_RUNTIME_MANIFEST_GIT_PATH}",
+        )
+    except RuntimeError as exc:
+        raise RuntimeError("trusted pytest runtime manifest is unavailable") from exc
+    return content, parse_pytest_runtime_manifest(content)
+
+
+def _load_trusted_nodeid_plugin(
+    repo_root: Path,
+    expected_git_sha: str,
+    manifest: Mapping[str, Any],
+) -> bytes:
+    git_root = Path(
+        _git_output(repo_root, "rev-parse", "--show-toplevel").decode().strip()
+    ).resolve(strict=True)
+    try:
+        content = _git_output(
+            git_root,
+            "show",
+            f"{expected_git_sha}:{manifest['plugin']['path']}",
+        )
+    except (KeyError, RuntimeError) as exc:
+        raise RuntimeError("trusted pytest nodeid plugin is unavailable") from exc
+    if not secrets.compare_digest(_sha256(content), manifest["plugin"]["sha256"]):
+        raise RuntimeError("trusted pytest nodeid plugin integrity check failed")
+    return content
+
+
+def _runtime_directory_identity(path: Path) -> tuple[int, int, int, int, int]:
+    opened = path.stat(follow_symlinks=False)
+    if not stat.S_ISDIR(opened.st_mode) or path.is_symlink():
+        raise RuntimeError("private pytest runtime directory is invalid")
+    return (
+        opened.st_dev,
+        opened.st_ino,
+        opened.st_mtime_ns,
+        opened.st_ctime_ns,
+        opened.st_mode,
+    )
+
+
+def _seal_private_pytest_runtime(runtime: PrivatePytestRuntime, root: Path) -> None:
+    all_files = sorted(path for path in root.rglob("*") if path.is_file())
+    for path in all_files:
+        path.chmod(0o400)
+    all_directories = sorted(
+        (path for path in root.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for path in all_directories:
+        path.chmod(0o500)
+    root.chmod(0o500)
+    runtime.bindings = {path: read_bound_file(path) for path in all_files}
+    runtime.directories = {
+        path: _runtime_directory_identity(path) for path in [root, *all_directories]
+    }
+
+
+def _verify_private_pytest_runtime(runtime: PrivatePytestRuntime) -> None:
+    try:
+        for path, binding in runtime.bindings.items():
+            require_file_unchanged(path, binding)
+        for path, identity in runtime.directories.items():
+            if _runtime_directory_identity(path) != identity:
+                raise RuntimeError
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError("private pytest runtime changed") from exc
+
+
+def _make_runtime_writable(root: Path) -> None:
+    if not root.exists():
+        return
+    for path in [root, *root.rglob("*")]:
+        try:
+            if path.is_dir():
+                path.chmod(0o700)
+            else:
+                path.chmod(0o600)
+        except OSError:
+            pass
+
+
 @contextmanager
-def _private_pytest_runtime(repo_root: Path):
+def _private_pytest_runtime(
+    repo_root: Path,
+    expected_git_sha: str,
+):
     temporary = Path(tempfile.mkdtemp(prefix="google-live-pytest-runtime-"))
     try:
+        manifest_content, manifest = _load_trusted_pytest_runtime_manifest(
+            repo_root,
+            expected_git_sha,
+        )
+        if (
+            manifest["pythonImplementation"] != sys.implementation.name
+            or manifest["pythonMajorMinor"] != f"{sys.version_info.major}.{sys.version_info.minor}"
+        ):
+            raise RuntimeError("trusted pytest runtime Python constraint does not match")
         packages = temporary / "packages"
-        _copy_trusted_pytest_packages(packages)
-        yield {
+        _copy_trusted_pytest_packages(packages, manifest)
+        plugin = temporary / "control" / "pinned_nodeid_plugin.py"
+        plugin_content = _load_trusted_nodeid_plugin(
+            repo_root,
+            expected_git_sha,
+            manifest,
+        )
+        _write_private_snapshot_file(
+            plugin,
+            plugin_content,
+        )
+        runtime = PrivatePytestRuntime({
             "trusted": [str(packages)],
             "repo": str(repo_root),
             "dependencies": [str(path) for path in _approved_package_roots()],
-        }
+            "plugin": str(plugin),
+        })
+        runtime.manifest_content = manifest_content
+        runtime.manifest = manifest
+        _seal_private_pytest_runtime(runtime, temporary)
+        _verify_private_pytest_runtime(runtime)
+        yield runtime
+        _verify_private_pytest_runtime(runtime)
     finally:
+        _make_runtime_writable(temporary)
         shutil.rmtree(temporary, ignore_errors=True)
 
 
@@ -971,13 +1256,16 @@ def _read_candidate_tracked_file(
     path: Path,
     expected_git_sha: str,
 ) -> BoundFile:
+    git_root = Path(
+        _git_output(repo_root, "rev-parse", "--show-toplevel").decode().strip()
+    ).resolve(strict=True)
     try:
-        relative = path.absolute().relative_to(repo_root)
+        relative = path.absolute().relative_to(git_root)
     except ValueError as exc:
         raise ValueError("candidate tracked file path is invalid") from exc
     ancestors = []
     current = path.parent
-    while current != repo_root:
+    while current != git_root:
         ancestors.append(current)
         if current == current.parent:
             raise ValueError("candidate tracked file path is invalid")
@@ -991,7 +1279,7 @@ def _read_candidate_tracked_file(
     ):
         raise ValueError("candidate tracked file path is invalid")
     tracked = _git_output(
-        repo_root,
+        git_root,
         "ls-files",
         "--error-unmatch",
         "--",
@@ -1001,7 +1289,7 @@ def _read_candidate_tracked_file(
         raise ValueError("candidate tracked file path is invalid")
     bound = read_bound_file(path)
     committed = _git_output(
-        repo_root,
+        git_root,
         "show",
         f"{expected_git_sha}:{relative.as_posix()}",
     )
@@ -1077,7 +1365,11 @@ def produce(
     nodes = parse_manifest(manifest_bound.content)
     verify_repository()
     child_environment = _pytest_child_environment()
-    with _private_pytest_runtime(repo_root) as pytest_runtime:
+    with _private_pytest_runtime(
+        repo_root,
+        identity["gitSha"],
+    ) as pytest_runtime:
+        runtime_manifest_content = pytest_runtime.manifest_content
         collect = run(
             _pytest_command(
                 pytest_runtime,
@@ -1090,23 +1382,32 @@ def produce(
         )
         if collect.returncode != 0:
             raise RuntimeError("pytest collection failed")
-        verify_repository()
-        collected = [
-            line for line in collect.stdout.splitlines() if NODE_PATTERN.fullmatch(line)
-        ]
-        require_exact_nodes(collected, nodes, label="collection")
-        output_parent_identity = snapshot_output_parent(junit_out)
-        descriptor, temporary = tempfile.mkstemp(
-            dir=junit_out.parent,
-            prefix=".pytest.",
-            suffix=".xml",
-        )
-        os.close(descriptor)
-        temporary_path = Path(temporary)
-        temporary_path.unlink()
-        published_junit: BoundFile | None = None
-        completed_successfully = False
-        try:
+    verify_repository()
+    collected = [
+        line for line in collect.stdout.splitlines() if NODE_PATTERN.fullmatch(line)
+    ]
+    require_exact_nodes(collected, nodes, label="collection")
+    output_parent_identity = snapshot_output_parent(junit_out)
+    descriptor, temporary = tempfile.mkstemp(
+        dir=junit_out.parent,
+        prefix=".pytest.",
+        suffix=".xml",
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary)
+    temporary_path.unlink()
+    published_junit: BoundFile | None = None
+    completed_successfully = False
+    try:
+        with _private_pytest_runtime(
+            repo_root,
+            identity["gitSha"],
+        ) as pytest_runtime:
+            if not secrets.compare_digest(
+                runtime_manifest_content,
+                pytest_runtime.manifest_content,
+            ):
+                raise RuntimeError("trusted pytest runtime manifest changed")
             completed = run(
                 _pytest_command(
                     pytest_runtime,
@@ -1117,43 +1418,48 @@ def produce(
                 cwd=repo_root,
                 env=child_environment,
             )
-            if completed.returncode != 0:
-                raise RuntimeError("pytest failed; deterministic evidence was not published")
-            normalized = canonicalize_junit_summary(read_bound_file(temporary_path).content)
-            parse_passing_junit(normalized, nodes)
-            verify_repository(temporary_path)
-            require_file_unchanged(manifest_path, manifest_bound)
-            require_file_unchanged(canonical_path, canonical_bound)
-            verify_repository(temporary_path)
-            atomic_write_exclusive(
-                junit_out,
-                normalized,
-                pre_publish=lambda publish_temp: verify_repository(
-                    temporary_path, publish_temp
-                ),
-                post_publish=lambda: verify_repository(temporary_path, junit_out),
-                expected_parent_identity=output_parent_identity,
-            )
+        if completed.returncode != 0:
+            raise RuntimeError("pytest failed; deterministic evidence was not published")
+        normalized = canonicalize_junit_summary(read_bound_file(temporary_path).content)
+        parse_passing_junit(normalized, nodes)
+        verify_repository(temporary_path)
+        require_file_unchanged(manifest_path, manifest_bound)
+        require_file_unchanged(canonical_path, canonical_bound)
+        verify_repository(temporary_path)
+        atomic_write_exclusive(
+            junit_out,
+            normalized,
+            pre_publish=lambda publish_temp: verify_repository(
+                temporary_path, publish_temp
+            ),
+            post_publish=lambda: verify_repository(temporary_path, junit_out),
+            expected_parent_identity=output_parent_identity,
+        )
+        temporary_path.unlink()
+        published_junit = read_bound_file(junit_out)
+        report = build_report(
+            identity,
+            manifest_bound.content,
+            published_junit.content,
+            runtime_manifest_content,
+        )
+        require_file_unchanged(junit_out, published_junit)
+        atomic_write_exclusive(
+            report_path,
+            (json.dumps(report, indent=2, sort_keys=True) + "\n").encode(),
+            pre_publish=lambda publish_temp: verify_repository(
+                junit_out, publish_temp
+            ),
+            post_publish=lambda: verify_repository(junit_out, report_path),
+            expected_parent_identity=output_parent_identity,
+        )
+        completed_successfully = True
+        return report
+    finally:
+        if temporary_path.exists():
             temporary_path.unlink()
-            published_junit = read_bound_file(junit_out)
-            report = build_report(identity, manifest_bound.content, published_junit.content)
-            require_file_unchanged(junit_out, published_junit)
-            atomic_write_exclusive(
-                report_path,
-                (json.dumps(report, indent=2, sort_keys=True) + "\n").encode(),
-                pre_publish=lambda publish_temp: verify_repository(
-                    junit_out, publish_temp
-                ),
-                post_publish=lambda: verify_repository(junit_out, report_path),
-                expected_parent_identity=output_parent_identity,
-            )
-            completed_successfully = True
-            return report
-        finally:
-            if temporary_path.exists():
-                temporary_path.unlink()
-            if not completed_successfully and published_junit is not None:
-                _unlink_if_bound(junit_out, published_junit)
+        if not completed_successfully and published_junit is not None:
+            _unlink_if_bound(junit_out, published_junit)
 
 
 def main(argv: list[str] | None = None) -> int:

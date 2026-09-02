@@ -21,10 +21,14 @@ from scripts.analyze_google_live_log import correlate_websocket_bargein_evidence
 from scripts.google_live_deterministic_evidence import (
     APPROVED_TEST_FILES,
     MANIFEST_SCHEMA,
+    NODEID_PLUGIN_GIT_PATH,
+    PYTEST_RUNTIME_MANIFEST_GIT_PATH,
+    PYTEST_RUNTIME_SCHEMA,
     _junit_value_is_sensitive,
     atomic_write_exclusive,
     parse_manifest,
     parse_passing_junit,
+    parse_pytest_runtime_manifest,
     snapshot_output_parent,
 )
 from scripts.google_live_reliability import (
@@ -117,6 +121,9 @@ def _deterministic_valid(report: Any) -> bool:
             "manifestNodeCount",
             "executedNodeCount",
             "junitSha256",
+            "nodeidPluginSha256",
+            "pytestRuntimeManifestSha256",
+            "pytestRuntimeSchema",
         }
         and coverage.get("manifestSchema") == MANIFEST_SCHEMA
     )
@@ -307,6 +314,36 @@ def _load_trusted_deterministic_manifest(expected_git_sha: str) -> bytes:
     return committed_content
 
 
+def _load_trusted_pytest_runtime_manifest(expected_git_sha: str) -> bytes:
+    fixture_path = _trusted_manifest_path()
+    repo_root = Path(
+        _git_output(fixture_path.parent, "rev-parse", "--show-toplevel").decode().strip()
+    ).resolve(strict=True)
+    if _git_output(repo_root, "rev-parse", "HEAD").decode().strip() != expected_git_sha:
+        raise ValueError("candidate git SHA does not match repository HEAD")
+    if _git_output(repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=no"):
+        raise ValueError("candidate worktree contains tracked or staged modifications")
+    content = _git_output(
+        repo_root,
+        "show",
+        f"{expected_git_sha}:{PYTEST_RUNTIME_MANIFEST_GIT_PATH}",
+    )
+    manifest = parse_pytest_runtime_manifest(content)
+    plugin = _git_output(
+        repo_root,
+        "show",
+        f"{expected_git_sha}:{NODEID_PLUGIN_GIT_PATH}",
+    )
+    if not hmac.compare_digest(hashlib.sha256(plugin).hexdigest(), manifest["plugin"]["sha256"]):
+        raise ValueError("trusted pytest runtime plugin is invalid")
+    if (
+        _git_output(repo_root, "rev-parse", "HEAD").decode().strip() != expected_git_sha
+        or _git_output(repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=no")
+    ):
+        raise ValueError("candidate repository changed during runtime validation")
+    return content
+
+
 def load_checksum_manifest(
     manifest_path: Path | str, layer_paths: Mapping[str, Path | str]
 ) -> dict[str, str]:
@@ -424,9 +461,15 @@ def aggregate_release_evidence(
         trusted_manifest_content = _load_trusted_deterministic_manifest(
             str(expected_identity.get("gitSha", ""))
         )
+        trusted_runtime_content = _load_trusted_pytest_runtime_manifest(
+            str(expected_identity.get("gitSha", ""))
+        )
+        trusted_runtime = parse_pytest_runtime_manifest(trusted_runtime_content)
     except (OSError, RuntimeError, UnicodeError, ValueError):
         trusted_manifest_path = None
         trusted_manifest_content = None
+        trusted_runtime_content = None
+        trusted_runtime = None
         failures.append(_failure("DETERMINISTIC_TRUSTED_MANIFEST_INVALID", "deterministic"))
     support_contents: dict[str, bytes] = {}
     supplied_support_paths = [
@@ -483,6 +526,11 @@ def aggregate_release_evidence(
             "manifestNodeCount": len(nodes),
             "executedNodeCount": len(nodes),
             "junitSha256": hashlib.sha256(junit_content).hexdigest(),
+            "nodeidPluginSha256": trusted_runtime["plugin"]["sha256"],
+            "pytestRuntimeManifestSha256": hashlib.sha256(
+                trusted_runtime_content
+            ).hexdigest(),
+            "pytestRuntimeSchema": PYTEST_RUNTIME_SCHEMA,
         }
         if coverage != expected_coverage or not isinstance(deterministic, Mapping) or deterministic.get("testVerdict") != {
             "status": "PASS",
