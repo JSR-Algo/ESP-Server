@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -32,8 +33,9 @@ _XML_DECLARATIONS = (
 )
 _XML_CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _SENSITIVE_JUNIT_VALUE = re.compile(
-    r"(?i)(?:\bbearer\s+\S+|\bauthorization\s*[:=]|\b(?:set-)?cookie\s*[:=]|"
+    r"(?i)(?:\b(?:bearer|basic)\s+\S+|\bauthorization\s*[:=]|\b(?:set-)?cookie\s*[:=]|"
     r"\b(?:google[\s_-]*)?api[\s_-]*key\s*[:=]|\b(?:secret|token)\s*[:=]|"
+    r"\b(?:credential|session[\s_-]*(?:id|handle|resumption[\s_-]*handle))\s*[:=]|"
     r"\bAIza[0-9A-Za-z_-]{20,}|\bsk-(?:proj-)?[0-9A-Za-z_-]{20,})"
 )
 APPROVED_TEST_FILES = (
@@ -127,7 +129,11 @@ def _decode_strict_junit_xml(content: bytes) -> str:
         text = content.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("JUnit XML encoding is invalid") from exc
-    if _XML_CONTROL_CHARACTERS.search(text):
+    if _XML_CONTROL_CHARACTERS.search(text) or any(
+        unicodedata.category(character) in {"Cc", "Cf"}
+        and character not in {"\t", "\n", "\r"}
+        for character in text
+    ):
         raise ValueError("JUnit XML contains invalid characters")
     remainder = text
     if remainder.startswith("<?xml"):
@@ -140,9 +146,19 @@ def _decode_strict_junit_xml(content: bytes) -> str:
         remainder = remainder[len(declaration) :]
     if "<?" in remainder or "<!" in remainder:
         raise ValueError("JUnit XML contains unsupported markup")
-    if _SENSITIVE_JUNIT_VALUE.search(text):
+    if _junit_value_is_sensitive(text):
         raise ValueError("JUnit XML violates the privacy contract")
     return text
+
+
+def _junit_value_is_sensitive(value: str) -> bool:
+    compatibility = unicodedata.normalize("NFKC", value).casefold()
+    scan_value = "".join(
+        character
+        for character in unicodedata.normalize("NFKD", compatibility)
+        if unicodedata.category(character) not in {"Mn", "Mc", "Me"}
+    )
+    return _SENSITIVE_JUNIT_VALUE.search(scan_value) is not None
 
 
 def _parse_clean_junit(
@@ -179,7 +195,7 @@ def _parse_clean_junit(
     if any(set(element.attrib) - allowed_attributes[element.tag] for element in elements):
         raise ValueError("JUnit contains unknown or namespaced attributes")
     if any(
-        _SENSITIVE_JUNIT_VALUE.search(value)
+        _junit_value_is_sensitive(value)
         for element in elements
         for value in element.attrib.values()
     ):

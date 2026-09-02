@@ -251,6 +251,39 @@ def test_junit_rejects_suite_level_properties_even_when_benign() -> None:
         deterministic.parse_passing_junit(xml, [node])
 
 
+@pytest.mark.parametrize(
+    "sensitive",
+    [
+        "ＧＯＯＧＬＥ＿ＡＰＩ＿ＫＥＹ＝secret",
+        "ＡＵＴＨＯＲＩＺＡＴＩＯＮ：Ｂｅａｒｅｒ private",
+        "ＳＥＣＲＥＴ＝private",
+        "𝔾𝕆𝕆𝔾𝕃𝔼_𝔸ℙ𝕀_𝕂𝔼𝕐=private",
+        "S\u0332ECRET=private",
+        "token\u00a0=private",
+    ],
+)
+def test_junit_privacy_normalizes_allowed_attribute_values(sensitive: str) -> None:
+    node = "tests/test_a.py::test_one"
+    xml = _junit([node]).replace(b'classname="suite"', f'classname="{sensitive}"'.encode())
+    with pytest.raises(ValueError) as error:
+        deterministic.parse_passing_junit(xml, [node])
+    assert "private" not in str(error.value).lower()
+
+
+@pytest.mark.parametrize("invisible", ["\u200b", "\u200e", "\u202e", "\u2066", "\u0085"])
+def test_junit_rejects_invisible_bidi_and_unicode_controls(invisible: str) -> None:
+    node = "tests/test_a.py::test_one"
+    xml = _junit([node]).replace(b'classname="suite"', f'classname="safe{invisible}value"'.encode())
+    with pytest.raises(ValueError):
+        deterministic.parse_passing_junit(xml, [node])
+
+
+def test_junit_allows_benign_non_ascii_attribute_value() -> None:
+    node = "tests/test_a.py::test_one"
+    xml = _junit([node]).replace(b'classname="suite"', 'classname="café"'.encode())
+    assert deterministic.parse_passing_junit(xml, [node])["tests"] == 1
+
+
 def test_build_report_binds_manifest_and_junit_hashes_and_exact_counts() -> None:
     nodes = ["tests/test_a.py::test_one", "tests/test_b.py::test_two"]
     manifest = ("\n".join(nodes) + "\n").encode()
