@@ -4,4 +4,4 @@
 def pytest_collection_modifyitems(session, items) -> None:
     del session
     for item in items:
-        item.user_properties.append(("google_live_nodeid", item.nodeid))
+        item.user_properties[:] = [("google_live_nodeid", item.nodeid)]

@@ -279,6 +279,23 @@ def test_release_independently_rejects_secret_junit_without_leaking(
     assert "secret" not in json.dumps(verdict).lower()
 
 
+def test_release_rejects_rebound_junit_sensitive_property_pair_without_leaking(
+    tmp_path: Path,
+) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    junit = paths["deterministic_junit"]
+    secret = "my-real-credential"
+    extra = f'<property name="GOOGLE_API_KEY" value="{secret}" />'.encode()
+    junit.write_bytes(junit.read_bytes().replace(b"</properties>", extra + b"</properties>", 1))
+    digest = hashlib.sha256(junit.read_bytes()).hexdigest()
+    checksums["deterministic_junit"] = digest
+    _rewrite(paths["deterministic"], lambda report: report["coverageProof"].update(junitSha256=digest))
+    checksums["deterministic"] = hashlib.sha256(paths["deterministic"].read_bytes()).hexdigest()
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+    assert verdict["status"] == "FAIL"
+    assert secret not in json.dumps(verdict)
+
+
 @pytest.mark.parametrize("missing_layer", REQUIRED_LAYERS)
 def test_release_fails_closed_for_missing_layer(tmp_path: Path, missing_layer: str) -> None:
     paths, checksums, _ = _write_evidence(tmp_path)

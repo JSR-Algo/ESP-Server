@@ -200,7 +200,7 @@ def _parse_clean_junit(
             if _strict_nonnegative_int(raw, name) != 0:
                 raise ValueError("JUnit contains a nonzero outcome counter")
     suite_children = list(suite)
-    if any(child.tag not in {"properties", "testcase"} for child in suite_children):
+    if any(child.tag != "testcase" for child in suite_children):
         raise ValueError("JUnit suite contains an ambiguous child")
     testcases = [child for child in suite_children if child.tag == "testcase"]
     if len(testcases) != len(list(root.iter("testcase"))):
@@ -214,19 +214,21 @@ def _parse_clean_junit(
         if len(property_groups) != 1:
             raise ValueError("each JUnit testcase must contain one property group")
         properties = list(property_groups[0])
-        if any(prop.tag != "property" or list(prop) for prop in properties):
+        if len(properties) != 1 or any(
+            prop.tag != "property" or list(prop) for prop in properties
+        ):
             raise ValueError("JUnit property structure is invalid")
         property_names = [prop.get("name") for prop in properties]
         if any(name is None for name in property_names) or len(property_names) != len(set(property_names)):
             raise ValueError("JUnit testcase properties must have unique names")
-        properties = [
-            prop.get("value")
-            for prop in properties
-            if prop.get("name") == "google_live_nodeid"
-        ]
-        if len(properties) != 1 or type(properties[0]) is not str:
+        property_node = properties[0]
+        if (
+            property_node.get("name") != "google_live_nodeid"
+            or set(property_node.attrib) != {"name", "value"}
+            or type(property_node.get("value")) is not str
+        ):
             raise ValueError("each JUnit testcase must contain exactly one node ID property")
-        node = properties[0]
+        node = property_node.get("value")
         if testcase.get("name") != node.rsplit("::", 1)[-1]:
             raise ValueError("JUnit testcase name does not match its node ID")
         observed.append(node)

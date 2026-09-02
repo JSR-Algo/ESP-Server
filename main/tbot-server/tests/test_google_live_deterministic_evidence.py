@@ -67,10 +67,7 @@ def test_plugin_adds_exactly_one_nodeid_property() -> None:
 
     item = Item()
     deterministic.nodeid_plugin.pytest_collection_modifyitems(None, [item])
-    assert item.user_properties == [
-        ("existing", "safe"),
-        ("google_live_nodeid", item.nodeid),
-    ]
+    assert item.user_properties == [("google_live_nodeid", item.nodeid)]
 
 
 @pytest.mark.parametrize("mutation", ["missing_property", "duplicate_property", "name_mismatch", "count_mismatch", "skip", "failure", "error"])
@@ -214,6 +211,44 @@ def test_junit_privacy_scan_catches_case_whitespace_and_character_reference_obfu
         with pytest.raises(ValueError) as error:
             deterministic.parse_passing_junit(xml, [node])
         assert "secret" not in str(error.value).lower()
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("GOOGLE_API_KEY", "my-real-credential"),
+        ("google api-key", "my-real-credential"),
+        ("ＧＯＯＧＬＥ＿ＡＰＩ＿ＫＥＹ", "my-real-credential"),
+        ("authorization", "Basic dXNlcjpwYXNz"),
+        ("set-cookie", "sessionid=private"),
+        ("session_resumption_handle", "private"),
+        ("token", "private"),
+        ("benign_property", "safe-value"),
+    ],
+)
+def test_junit_allows_only_the_exact_nodeid_property_pair(name: str, value: str) -> None:
+    node = "tests/test_a.py::test_one"
+    extra = f'<property name="{name}" value="{value}" />'.encode()
+    xml = _junit([node]).replace(b"</properties>", extra + b"</properties>")
+    with pytest.raises(ValueError) as error:
+        deterministic.parse_passing_junit(xml, [node])
+    assert value.lower() not in str(error.value).lower()
+
+
+def test_junit_rejects_character_reference_sensitive_property_name() -> None:
+    node = "tests/test_a.py::test_one"
+    extra = b'<property name="GOOGLE&#95;API&#95;KEY" value="private" />'
+    xml = _junit([node]).replace(b"</properties>", extra + b"</properties>")
+    with pytest.raises(ValueError):
+        deterministic.parse_passing_junit(xml, [node])
+
+
+def test_junit_rejects_suite_level_properties_even_when_benign() -> None:
+    node = "tests/test_a.py::test_one"
+    extra = b'<properties><property name="environment" value="test" /></properties>'
+    xml = _junit([node]).replace(b"<testcase", extra + b"<testcase", 1)
+    with pytest.raises(ValueError):
+        deterministic.parse_passing_junit(xml, [node])
 
 
 def test_build_report_binds_manifest_and_junit_hashes_and_exact_counts() -> None:
