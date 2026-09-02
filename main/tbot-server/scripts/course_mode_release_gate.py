@@ -1416,21 +1416,17 @@ def _copy_snapshot_file(
         os.close(parent_fd)
 
 
-def _archive_repository(source: Path, sha: str, destination: Path, state: dict[str, int]) -> None:
+def _archive_git_tree(
+    source: Path, treeish: str, destination: Path, state: dict[str, int],
+) -> None:
     base = [
         str(_manifest.TRUSTED_GIT_EXECUTABLE), "--no-replace-objects", "--no-optional-locks",
         "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
         "-c", "credential.helper=",
     ]
     try:
-        resolved = _manifest.run_bounded_command(
-            [*base, "rev-parse", "--verify", f"{sha}^{{commit}}"], cwd=source,
-            env=_manifest.SECURE_ENV, timeout_sec=60, max_output_bytes=1024,
-        )
-        if resolved.error or resolved.returncode != 0 or resolved.stdout.strip() != sha:
-            raise ValueError("candidate archive failed")
         listing = _manifest.run_bounded_command(
-            [*base, "ls-tree", "-r", "-z", "-t", "--full-tree", sha], cwd=source,
+            [*base, "ls-tree", "-r", "-z", "-t", "--full-tree", treeish], cwd=source,
             env=_manifest.SECURE_ENV, timeout_sec=60,
             max_output_bytes=MAX_GIT_ARCHIVE_LISTING_BYTES,
         )
@@ -1540,6 +1536,26 @@ def _archive_repository(source: Path, sha: str, destination: Path, state: dict[s
         raise ValueError("candidate archive failed") from error
 
 
+def _archive_repository(source: Path, sha: str, destination: Path, state: dict[str, int]) -> None:
+    base = [
+        str(_manifest.TRUSTED_GIT_EXECUTABLE), "--no-replace-objects", "--no-optional-locks",
+        "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+        "-c", "credential.helper=",
+    ]
+    try:
+        resolved = _manifest.run_bounded_command(
+            [*base, "rev-parse", "--verify", f"{sha}^{{commit}}"], cwd=source,
+            env=_manifest.SECURE_ENV, timeout_sec=60, max_output_bytes=1024,
+        )
+        if resolved.error or resolved.returncode != 0 or resolved.stdout.strip() != sha:
+            raise ValueError("candidate archive failed")
+        _archive_git_tree(source, sha, destination, state)
+    except ValueError:
+        raise
+    except (OSError, subprocess.SubprocessError, UnicodeError) as error:
+        raise ValueError("candidate archive failed") from error
+
+
 def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> ExecutionStage:
     temporary_parent = Path("/private/tmp") if sys.platform == "darwin" else Path(tempfile.gettempdir())
     root = Path(tempfile.mkdtemp(prefix="course-mode-stage-", dir=temporary_parent))
@@ -1563,6 +1579,59 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
                 )
             staged["repositories"][name]["path"] = str(destination)
         tools_root = root / "tools"
+        if any(lane.name == "firmware-handler" for lane in lanes):
+            descriptor = candidate["tools"]["espIdf"]
+            source_value = descriptor["root"]
+            commit = descriptor["commit"]
+            if not isinstance(source_value, str) or not isinstance(commit, str):
+                raise ValueError("candidate archive failed")
+            source = Path(source_value)
+            if (
+                not source.is_absolute() or source.is_symlink()
+                or source != source.resolve(strict=True) or not source.is_dir()
+            ):
+                raise ValueError("candidate archive failed")
+            base = [
+                str(_manifest.TRUSTED_GIT_EXECUTABLE), "--no-replace-objects",
+                "--no-optional-locks", "-c", "core.fsmonitor=false",
+                "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=",
+            ]
+            resolved_commit = _manifest.run_bounded_command(
+                [*base, "rev-parse", "--verify", f"{commit}^{{commit}}"], cwd=source,
+                env=_manifest.SECURE_ENV, timeout_sec=60, max_output_bytes=1024,
+            )
+            if (
+                resolved_commit.error or resolved_commit.returncode != 0
+                or resolved_commit.stdout.strip() != commit
+            ):
+                raise ValueError("candidate archive failed")
+            subtree = _manifest.run_bounded_command(
+                [
+                    *base, "rev-parse", "--verify",
+                    f"{commit}:components/json/cJSON",
+                ],
+                cwd=source, env=_manifest.SECURE_ENV, timeout_sec=60,
+                max_output_bytes=1024,
+            )
+            object_id = subtree.stdout.strip()
+            if (
+                subtree.error or subtree.returncode != 0
+                or re.fullmatch(r"[0-9a-f]{40}", object_id) is None
+            ):
+                raise ValueError("candidate archive failed")
+            object_type = _manifest.run_bounded_command(
+                [*base, "cat-file", "-t", object_id], cwd=source,
+                env=_manifest.SECURE_ENV, timeout_sec=60, max_output_bytes=1024,
+            )
+            if (
+                object_type.error or object_type.returncode != 0
+                or object_type.stdout.strip() != "tree"
+            ):
+                raise ValueError("candidate archive failed")
+            cjson_parent = tools_root / "esp-idf/components/json"
+            cjson_parent.mkdir(parents=True)
+            _archive_git_tree(source, object_id, cjson_parent / "cJSON", state)
+            staged["tools"]["espIdf"]["root"] = str(tools_root / "esp-idf")
         if any(_container_tools_required(lane) for lane in lanes):
             tools_root.mkdir(exist_ok=True)
             for name, basename in (("docker", "docker"), ("dockerCompose", "docker-compose")):

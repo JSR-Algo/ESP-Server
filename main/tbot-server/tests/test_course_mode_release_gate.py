@@ -6714,6 +6714,73 @@ def test_firmware_handler_command_receives_usable_candidate_cjson_with_nonexiste
     ]
 
 
+@pytest.mark.parametrize("external_change", ["mutate", "unlink", "symlink"])
+def test_firmware_handler_lane_reads_staged_committed_cjson_after_external_change(
+    candidate_file: Path, tmp_path: Path, external_change: str,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    external_source = (
+        Path(candidate["tools"]["espIdf"]["root"]) / "components/json/cJSON/cJSON.c"
+    )
+    stage = gate.stage_execution_candidate(candidate, (lane,))
+    execution = None
+    try:
+        if external_change == "mutate":
+            external_source.write_text("hostile external bytes\n", encoding="utf-8")
+        else:
+            external_source.unlink()
+            if external_change == "symlink":
+                hostile = tmp_path / "hostile-cJSON.c"
+                hostile.write_text("hostile symlink bytes\n", encoding="utf-8")
+                external_source.symlink_to(hostile)
+        execution = stage.create_lane_execution()
+        environment = gate._child_environment(execution.candidate, {}, lane)
+        staged_cjson = Path(environment["CJSON_DIR"])
+        command = (
+            sys.executable, "-c",
+            "import os,pathlib;"
+            "root=pathlib.Path(os.environ['CJSON_DIR']);"
+            "print(root);print((root/'cJSON.c').read_text().strip())",
+        )
+
+        result = gate.run_bounded_command(
+            list(command),
+            cwd=Path(execution.candidate["repositories"]["firmware"]["path"]),
+            timeout_sec=5.0, max_output_bytes=4096, env=environment,
+        )
+
+        assert staged_cjson.is_relative_to(execution.root / "candidate")
+        assert result.error is None and result.returncode == 0
+        assert result.stdout.splitlines() == [
+            str(staged_cjson), "/* candidate ESP-IDF cJSON fixture */",
+        ]
+        assert "hostile" not in result.stdout
+    finally:
+        if execution is not None:
+            assert execution.cleanup() is True
+        assert stage.cleanup() is True
+
+
+@pytest.mark.parametrize("subtree_kind", ["missing", "blob"])
+def test_firmware_handler_staging_rejects_invalid_committed_cjson_subtree(
+    candidate_file: Path, subtree_kind: str,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    esp_idf = Path(candidate["tools"]["espIdf"]["root"])
+    cjson = esp_idf / "components/json/cJSON"
+    shutil.rmtree(cjson)
+    if subtree_kind == "blob":
+        cjson.write_text("not a tree\n", encoding="utf-8")
+    _git(esp_idf, "add", "-A")
+    _git(esp_idf, "commit", "-m", f"make cJSON subtree {subtree_kind}")
+    candidate["tools"]["espIdf"]["commit"] = _git(esp_idf, "rev-parse", "HEAD")
+
+    with pytest.raises(ValueError, match="candidate archive failed"):
+        gate.stage_execution_candidate(candidate, (lane,))
+
+
 def test_assignment_lane_identity_is_derived_only_from_candidate(
     candidate_file: Path, tmp_path: Path,
 ) -> None:
