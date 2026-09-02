@@ -380,7 +380,7 @@ def test_release_rejects_rebound_compact_bearer_credential_without_leaking(
 ) -> None:
     paths, checksums, _ = _write_evidence(tmp_path)
     junit = paths["deterministic_junit"]
-    secret = "abcdefghijklmnop1234"
+    secret = "abcdefghijklmnopqrst"
     junit.write_bytes(
         junit.read_bytes().replace(
             b'name="pytest tests"',

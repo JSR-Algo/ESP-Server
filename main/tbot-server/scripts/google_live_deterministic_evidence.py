@@ -234,7 +234,9 @@ def _looks_like_natural_slug(payload: str) -> bool:
     if payload != payload.casefold() or any(character in payload for character in "_~+/="):
         return False
     segments = re.split(r"[-.]", payload)
-    if segments[-1].isdigit() and len(segments[-1]) <= 4:
+    if (
+        segments[-1].isdigit() and len(segments[-1]) <= 4
+    ) or re.fullmatch(r"v[0-9]+", segments[-1]):
         segments = segments[:-1]
     if len(segments) < 3:
         return False
@@ -266,6 +268,8 @@ def _looks_like_bearer_credential(scan_value: str) -> bool:
                         return True
         if _looks_like_natural_slug(payload):
             continue
+        if len(payload) >= 20 and re.fullmatch(r"[a-z0-9]+", payload, re.IGNORECASE):
+            return True
         if re.fullmatch(
             r"(?:gh[pousr]_|github_pat_|glpat-|ya29\.)[a-z0-9._~-]{12,}",
             payload,
