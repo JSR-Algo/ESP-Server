@@ -214,7 +214,11 @@ def test_junit_rejects_dtd_entities_markup_and_encoding_ambiguity(mutation: str)
 
 def test_junit_privacy_scan_catches_case_whitespace_and_character_reference_obfuscation() -> None:
     node = "tests/test_a.py::test_one"
-    for secret in ("google Api Key = secret", "Bearer abc123", "GOOGLE&#95;API&#95;KEY=secret"):
+    for secret in (
+        "google Api Key = secret",
+        "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature",
+        "GOOGLE&#95;API&#95;KEY=secret",
+    ):
         xml = _junit([node]).replace(b'classname="tests.test_a"', f'classname="{secret}"'.encode())
         with pytest.raises(ValueError) as error:
             deterministic.parse_passing_junit(xml, [node])
@@ -335,6 +339,60 @@ def test_sensitive_key_grammar_scans_every_embedded_pair(sensitive: str) -> None
 )
 def test_sensitive_key_grammar_allows_benign_embedded_pairs(benign: str) -> None:
     assert not deterministic._junit_value_is_sensitive(benign)
+
+
+@pytest.mark.parametrize(
+    "benign",
+    [
+        "basic geometry",
+        "basic-auth concepts",
+        "bearer plants",
+        "bearer extraordinarilybeautifulwildflowers",
+        "bearer plants.are.beautiful",
+        "bearer extraordinarily-beautiful-wildflowers",
+        "coverage is 100% complete",
+        "coverage reached 100%",
+        "literal percent % text",
+        "basic%20geometry",
+        "count%253D1",
+    ],
+)
+def test_sensitive_scheme_grammar_allows_benign_language(benign: str) -> None:
+    assert not deterministic._junit_value_is_sensitive(benign)
+
+
+@pytest.mark.parametrize(
+    "sensitive",
+    [
+        "Authorization: Basic dXNlcjpwYXNzd29yZA==",
+        "Authorization: Basic ordinarywords",
+        "authorization = Basic dXNlcjpwYXNzd29yZA==",
+        "Basic dXNlcjpwYXNzd29yZA==",
+        "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature",
+        "Ｂｅａｒｅｒ　eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature",
+        "Bearer abcdefghijklmnopqrstuvwxyz0123456789_-",
+        "access%255Ftoken%253Dprivate",
+        "access%25255Ftoken%25253Dprivate",
+    ],
+)
+def test_sensitive_scheme_and_encoded_credential_grammar(sensitive: str) -> None:
+    assert deterministic._junit_value_is_sensitive(sensitive)
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ["bad%2", "bad%GG", "%C3%28", "%252525255F", "%25252525GG"],
+)
+def test_sensitive_grammar_fails_closed_for_invalid_or_nonconvergent_percent_encoding(
+    invalid: str,
+) -> None:
+    assert deterministic._junit_value_is_sensitive(invalid)
+
+
+@pytest.mark.parametrize("topic", ["basic geometry", "basic-auth concepts", "bearer plants"])
+def test_junit_allows_benign_parametrized_nodeid_language(topic: str) -> None:
+    node = f"tests/test_a.py::test_topic[{topic}]"
+    assert deterministic.parse_passing_junit(_junit([node]), [node])["tests"] == 1
 
 
 def test_canonicalizer_strips_freeform_pytest_suite_metadata() -> None:

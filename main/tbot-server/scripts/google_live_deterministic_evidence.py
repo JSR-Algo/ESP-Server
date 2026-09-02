@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -34,11 +36,13 @@ _XML_DECLARATIONS = (
 )
 _XML_CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _SENSITIVE_JUNIT_VALUE = re.compile(
-    r"(?i)(?:\b(?:bearer|basic)\s+\S+|\bauthorization\s*[:=]|\b(?:set-)?cookie\s*[:=]|"
+    r"(?i)(?:\bauthorization\s*[:=]|\b(?:set-)?cookie\s*[:=]|"
     r"\b(?:google[\s_-]*)?api[\s_-]*key\s*[:=]|\b(?:secret|token)\s*[:=]|"
     r"\b(?:credential|session[\s_-]*(?:id|handle|resumption[\s_-]*handle))\s*[:=]|"
     r"\bAIza[0-9A-Za-z_-]{20,}|\bsk-(?:proj-)?[0-9A-Za-z_-]{20,})"
 )
+_BASIC_AUTH_PAYLOAD = re.compile(r"\bbasic\s+([a-z0-9+/]+={0,2})(?![a-z0-9+/=])", re.IGNORECASE)
+_BEARER_AUTH_PAYLOAD = re.compile(r"\bbearer\s+([a-z0-9._~+/-]+)", re.IGNORECASE)
 APPROVED_TEST_FILES = (
     "tests/test_google_live_lifecycle_e2e.py",
     "tests/test_google_live_client.py",
@@ -152,15 +156,111 @@ def _decode_strict_junit_xml(content: bytes) -> str:
     return text
 
 
-def _junit_value_is_sensitive(value: str) -> bool:
-    compatibility = unicodedata.normalize("NFKC", urllib.parse.unquote(value)).casefold()
-    scan_value = "".join(
+def _contains_percent_escape(value: str) -> bool | None:
+    valid_escape = False
+    index = 0
+    while index < len(value):
+        if value[index] != "%":
+            index += 1
+            continue
+        candidate = value[index + 1 : index + 3]
+        if len(candidate) == 2 and all(
+            character in "0123456789abcdefABCDEF" for character in candidate
+        ):
+            valid_escape = True
+            index += 3
+            continue
+        if index + 1 == len(value) or value[index + 1].isspace():
+            index += 1
+            continue
+        return None
+    return valid_escape
+
+
+def _percent_decode_scan_stages(value: str) -> list[str] | None:
+    current = unicodedata.normalize("NFKC", value)
+    stages = []
+    for _ in range(4):
+        stages.append(current)
+        escape_state = _contains_percent_escape(current)
+        if escape_state is None:
+            return None
+        if not escape_state:
+            return stages
+        try:
+            decoded = urllib.parse.unquote(current, errors="strict")
+        except UnicodeDecodeError:
+            return None
+        if decoded == current:
+            return stages
+        current = unicodedata.normalize("NFKC", decoded)
+    stages.append(current)
+    if _contains_percent_escape(current) is not False:
+        return None
+    return stages
+
+
+def _normalized_junit_scan_value(value: str) -> str:
+    return "".join(
         character
-        for character in unicodedata.normalize("NFKD", compatibility)
+        for character in unicodedata.normalize("NFKD", value)
         if unicodedata.category(character) not in {"Mn", "Mc", "Me"}
     )
+
+
+def _looks_like_basic_credential(scan_value: str) -> bool:
+    for match in _BASIC_AUTH_PAYLOAD.finditer(scan_value):
+        payload = match.group(1)
+        if len(payload) < 12 or len(payload) % 4:
+            continue
+        try:
+            decoded = base64.b64decode(payload, validate=True)
+        except (binascii.Error, ValueError):
+            continue
+        if b":" in decoded:
+            return True
+    return False
+
+
+def _looks_like_bearer_credential(scan_value: str) -> bool:
+    for match in _BEARER_AUTH_PAYLOAD.finditer(scan_value):
+        payload = match.group(1)
+        if len(payload) < 20:
+            continue
+        segments = payload.split(".")
+        if len(segments) == 3 and all(segments):
+            try:
+                header = base64.b64decode(
+                    segments[0] + "=" * (-len(segments[0]) % 4),
+                    altchars=b"-_",
+                    validate=True,
+                )
+            except (binascii.Error, ValueError):
+                pass
+            else:
+                try:
+                    parsed_header = json.loads(header)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    pass
+                else:
+                    if isinstance(parsed_header, dict):
+                        return True
+        if (
+            len(payload) >= 32
+            and len(set(payload)) >= 12
+            and re.search(r"[0-9]", payload)
+            and re.fullmatch(r"[a-z0-9._~+/-]+", payload, re.IGNORECASE)
+        ):
+            return True
+    return False
+
+
+def _normalized_junit_value_is_sensitive(scan_value: str) -> bool:
     if _SENSITIVE_JUNIT_VALUE.search(scan_value) is not None:
         return True
+    if _looks_like_basic_credential(scan_value) or _looks_like_bearer_credential(scan_value):
+        return True
+    folded_scan_value = scan_value.casefold()
     direct = {
         "apikey", "authorization", "bearertoken", "clientsecret", "cookie",
         "credentials", "credential", "password", "secret", "setcookie",
@@ -173,9 +273,9 @@ def _junit_value_is_sensitive(value: str) -> bool:
         "api", "auth", "access", "refresh", "session", "client", "private", "public",
         "google", "xgoogle",
     )
-    for match in re.finditer(r"[:=]", scan_value):
+    for match in re.finditer(r"[:=]", folded_scan_value):
         key_start = max(0, match.start() - 100)
-        tokens = re.findall(r"[a-z0-9]+", scan_value[key_start : match.start()])
+        tokens = re.findall(r"[a-z0-9]+", folded_scan_value[key_start : match.start()])
         for index in range(len(tokens)):
             joined = "".join(tokens[index:])
             if joined in direct or (
@@ -184,6 +284,16 @@ def _junit_value_is_sensitive(value: str) -> bool:
             ):
                 return True
     return False
+
+
+def _junit_value_is_sensitive(value: str) -> bool:
+    stages = _percent_decode_scan_stages(value)
+    if stages is None:
+        return True
+    return any(
+        _normalized_junit_value_is_sensitive(_normalized_junit_scan_value(stage))
+        for stage in stages
+    )
 
 
 def _expected_junit_classname(node: str) -> str:
