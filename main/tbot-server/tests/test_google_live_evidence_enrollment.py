@@ -591,6 +591,78 @@ def test_quiet_semantic_claim_is_safe_and_survives_tombstoning_without_key_mater
     assert "hmackey" not in encoded and "expectedmac" not in encoded
 
 
+def test_robot_speaking_setup_binds_exact_response_lifecycle_sticky():
+    registry = EvidenceEnrollmentRegistry()
+    enrollment = _register_candidate(
+        registry,
+        journey_type="quiet",
+        semantic_kind="quiet",
+        quiet_mode="robot_speaking",
+    )
+    registry.claim(
+        device_id=enrollment.device_id,
+        client_id=enrollment.client_id,
+        journey_id=enrollment.journey_id,
+    )
+
+    assert registry.consume_quiet_setup_turn(
+        enrollment.journey_id, source="audio_input"
+    )
+    assert registry.bind_quiet_setup_response(
+        enrollment.journey_id, response_generation=4
+    )
+    assert registry.record_quiet_response_lifecycle(
+        enrollment.journey_id, response_generation=4, event="start"
+    )
+    assert registry.record_quiet_response_lifecycle(
+        enrollment.journey_id, response_generation=4, event="end"
+    )
+
+    snapshot = registry.safe_snapshot(enrollment.journey_id)
+    assert snapshot["quietSetupTurnConsumed"] is True
+    assert snapshot["quietSetupResponseGeneration"] == 4
+    assert snapshot["quietResponseStartedGeneration"] == 4
+    assert snapshot["quietResponseCompletedGeneration"] == 4
+    assert snapshot["quietSemanticEligible"] is True
+
+
+@pytest.mark.parametrize("case", ("response_before_setup", "wrong_generation", "duplicate", "foreign"))
+def test_robot_speaking_invalid_setup_response_relations_fail_sticky(case):
+    registry = EvidenceEnrollmentRegistry()
+    enrollment = _register_candidate(
+        registry,
+        journey_type="quiet",
+        semantic_kind="quiet",
+        quiet_mode="robot_speaking",
+    )
+    registry.claim(
+        device_id=enrollment.device_id,
+        client_id=enrollment.client_id,
+        journey_id=enrollment.journey_id,
+    )
+    if case == "response_before_setup":
+        registry.record_quiet_response_lifecycle(
+            enrollment.journey_id, response_generation=4, event="start"
+        )
+    elif case == "foreign":
+        registry.consume_quiet_setup_turn(enrollment.journey_id, source="text")
+    else:
+        registry.consume_quiet_setup_turn(enrollment.journey_id, source="audio_input")
+        registry.bind_quiet_setup_response(
+            enrollment.journey_id, response_generation=4
+        )
+        if case == "wrong_generation":
+            registry.record_quiet_response_lifecycle(
+                enrollment.journey_id, response_generation=5, event="start"
+            )
+        else:
+            registry.consume_quiet_setup_turn(
+                enrollment.journey_id, source="audio_input"
+            )
+
+    assert registry.safe_snapshot(enrollment.journey_id)["quietSemanticEligible"] is False
+
+
 @pytest.mark.parametrize(
     "overrides",
     [

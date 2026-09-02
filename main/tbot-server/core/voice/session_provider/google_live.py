@@ -542,6 +542,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             self.conn.logger.bind(tag="GoogleLive").info(
                 "Google Live evidence_candidate_quiet journey_id={} mode={} "
                 "duration_ms={} response_generation={} response_duration_ms={} "
+                "setup_consumed={} "
                 "user_turns={} response_starts={} response_ends={} "
                 "interrupts={} replacements={} reconnects={} fallbacks={} stale_audio={}",
                 journey_id,
@@ -549,6 +550,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 duration_ms,
                 response_generation if response_generation is not None else "none",
                 response_duration_ms,
+                str(bool(snapshot.get("quietSetupTurnConsumed"))).lower(),
                 counters["user_turns"],
                 counters["response_starts"],
                 counters["response_ends"],
@@ -568,13 +570,15 @@ class GoogleLiveProvider(VoiceSessionProvider):
         ):
             return None
         try:
-            mode = self.conn.evidence_registry.safe_snapshot(
+            snapshot = self.conn.evidence_registry.safe_snapshot(
                 self.conn.google_live_evidence_journey_id
-            )["quietMode"]
+            )
+            mode = snapshot["quietMode"]
         except Exception:
+            snapshot = {}
             mode = "invalid"
         duration_ms = max(
-            0,
+            1,
             int(
                 (
                     (self._evidence_candidate_observation_ended_at or 0)
@@ -613,12 +617,21 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 mode == "silence"
                 and counters.get("response_starts") == 0
                 and counters.get("response_ends") == 0
+                and snapshot.get("quietSetupTurnConsumed") is False
                 and self._evidence_quiet_response_generation is None
                 and response_duration_ms == 0
                 and output_chunks == 0
                 or mode == "robot_speaking"
                 and counters.get("response_starts") == 1
                 and counters.get("response_ends") == 1
+                and snapshot.get("quietSetupTurnConsumed") is True
+                and snapshot.get("quietSemanticEligible") is True
+                and snapshot.get("quietSetupResponseGeneration")
+                == self._evidence_quiet_response_generation
+                and snapshot.get("quietResponseStartedGeneration")
+                == self._evidence_quiet_response_generation
+                and snapshot.get("quietResponseCompletedGeneration")
+                == self._evidence_quiet_response_generation
                 and isinstance(self._evidence_quiet_response_generation, int)
                 and response_duration_ms > 0
                 and output_chunks > 0
@@ -631,6 +644,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             "responseGeneration": self._evidence_quiet_response_generation,
             "responseDurationMs": response_duration_ms,
             "outputChunks": output_chunks,
+            "setupTurnConsumed": snapshot.get("quietSetupTurnConsumed") is True,
         }
 
     async def start_session(self):
@@ -5708,6 +5722,17 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 else self._response_generation
             )
             self._evidence_active_response_generation = exact_response_generation
+            registry = getattr(self.conn, "evidence_registry", None)
+            journey_id = getattr(self.conn, "google_live_evidence_journey_id", None)
+            if registry is not None and isinstance(journey_id, str):
+                try:
+                    registry.record_quiet_response_lifecycle(
+                        journey_id,
+                        response_generation=exact_response_generation,
+                        event="start",
+                    )
+                except Exception:
+                    pass
             if (
                 self._candidate_counter_enabled()
                 and getattr(self.conn, "google_live_evidence_journey_type", None)
@@ -5759,6 +5784,17 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 if isinstance(event_generation, int)
                 else self._response_generation
             )
+            registry = getattr(self.conn, "evidence_registry", None)
+            journey_id = getattr(self.conn, "google_live_evidence_journey_id", None)
+            if registry is not None and isinstance(journey_id, str):
+                try:
+                    registry.record_quiet_response_lifecycle(
+                        journey_id,
+                        response_generation=exact_response_generation,
+                        event="end",
+                    )
+                except Exception:
+                    pass
             if (
                 self._evidence_quiet_response_generation
                 == exact_response_generation
@@ -6480,6 +6516,14 @@ class GoogleLiveProvider(VoiceSessionProvider):
                     sorted(self._cancelled_response_ids)[-10:]
                 )
         self._last_clean_user_turn_response_id = self._response_generation
+        if setup_turn_consumed:
+            try:
+                registry.bind_quiet_setup_response(
+                    self.conn.google_live_evidence_journey_id,
+                    response_generation=self._response_generation,
+                )
+            except Exception:
+                pass
         self.conn.google_live_turn_started_at = time.monotonic()
         self.conn.logger.bind(tag="GoogleLive").info(
             "Google Live clean_user_turn_opened reason={} response_id={}",

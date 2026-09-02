@@ -264,6 +264,7 @@ def _candidate_semantic_quiet_window(mode="silence", **counts):
             "Google Live evidence_candidate_quiet journey_id=quiet-journey-1 "
             f"mode={mode} duration_ms=1500 response_generation={'1' if mode == 'robot_speaking' else 'none'} "
             f"response_duration_ms={1000 if mode == 'robot_speaking' else 0} "
+            f"setup_consumed={'true' if mode == 'robot_speaking' else 'false'} "
             + " ".join(f"{key}={value}" for key, value in expected.items()),
         ),
         "2026-08-31 10:00:04 Google Live evidence_receive_loop_stopped "
@@ -1240,6 +1241,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
                         "responseGeneration": 1 if mode == "robot_speaking" else None,
                         "responseDurationMs": 1000 if mode == "robot_speaking" else 0,
                         "outputChunks": response_count,
+                        "setupTurnConsumed": mode == "robot_speaking",
                         "falseInterrupts": 0,
                         "responseStarts": response_count,
                         "responseEnds": response_count,
@@ -1318,6 +1320,7 @@ class AnalyzeGoogleLiveReliabilityWindowTest(unittest.TestCase):
             "zero-output": [line for line in base if "model_output_chunk_forwarded" not in line],
             "wrong-generation": [line.replace("response_generation=1", "response_generation=2") for line in base],
             "stale-output": [line.replace("response_id=1 bytes=320", "response_id=2 bytes=320") for line in base],
+            "missing-setup": [line.replace("setup_consumed=true", "setup_consumed=false") for line in base],
         }
         for name, lines in cases.items():
             with self.subTest(name=name):

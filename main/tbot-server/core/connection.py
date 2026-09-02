@@ -1411,12 +1411,39 @@ class ConnectionHandler:
                     and proof_snapshot.get("semanticProofKind") == "quiet"
                 ):
                     quiet_semantic = result.get("quietSemanticEvidence")
-                    if (
-                        not isinstance(quiet_semantic, dict)
-                        or quiet_semantic.get("status") != "PASS"
-                        or quiet_semantic.get("mode")
-                        != proof_snapshot.get("quietMode")
-                    ):
+                    quiet_mode = proof_snapshot.get("quietMode")
+                    quiet_shape_valid = bool(
+                        isinstance(quiet_semantic, dict)
+                        and set(quiet_semantic)
+                        == {
+                            "status", "mode", "durationMs", "responseGeneration",
+                            "responseDurationMs", "outputChunks",
+                            "setupTurnConsumed",
+                        }
+                        and quiet_semantic.get("status") == "PASS"
+                        and quiet_semantic.get("mode") == quiet_mode
+                        and type(quiet_semantic.get("durationMs")) is int
+                        and quiet_semantic.get("durationMs") > 0
+                    )
+                    mode_valid = bool(
+                        quiet_shape_valid
+                        and (
+                            quiet_mode == "silence"
+                            and quiet_semantic.get("responseGeneration") is None
+                            and quiet_semantic.get("responseDurationMs") == 0
+                            and quiet_semantic.get("outputChunks") == 0
+                            and quiet_semantic.get("setupTurnConsumed") is False
+                            or quiet_mode == "robot_speaking"
+                            and type(quiet_semantic.get("responseGeneration")) is int
+                            and quiet_semantic.get("responseGeneration") >= 0
+                            and type(quiet_semantic.get("responseDurationMs")) is int
+                            and quiet_semantic.get("responseDurationMs") > 0
+                            and type(quiet_semantic.get("outputChunks")) is int
+                            and quiet_semantic.get("outputChunks") > 0
+                            and quiet_semantic.get("setupTurnConsumed") is True
+                        )
+                    )
+                    if not mode_valid:
                         proof_failure_code = "EVIDENCE_SEMANTIC_INVALID"
                 if proof_profile == "candidate-lifecycle" and not cleanup_verified:
                     if finalize_task.done():

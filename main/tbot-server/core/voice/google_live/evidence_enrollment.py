@@ -154,6 +154,10 @@ class _EvidenceEnrollmentState:
     semantic_replacement_completed: bool = False
     semantic_stale_old_audio_count: int = 0
     quiet_setup_turn_consumed: bool = False
+    quiet_setup_response_generation: int | None = field(default=None, repr=False)
+    quiet_response_started_generation: int | None = field(default=None, repr=False)
+    quiet_response_completed_generation: int | None = field(default=None, repr=False)
+    quiet_semantic_eligible: bool = True
 
 
 class EvidenceEnrollmentRegistry:
@@ -581,19 +585,80 @@ class EvidenceEnrollmentRegistry:
     def consume_quiet_setup_turn(self, journey_id: str, *, source: str) -> bool:
         self._prepare()
         enrollment = self._active.get(journey_id)
-        if (
+        invalid_scope = bool(
             enrollment is None
             or not enrollment.connected
             or enrollment.proof_profile != CANDIDATE_LIFECYCLE_PROFILE
             or enrollment.journey_type != "quiet"
             or enrollment.semantic_kind != "quiet"
             or enrollment.quiet_mode != "robot_speaking"
-            or source != "audio_input"
-            or enrollment.quiet_setup_turn_consumed
-        ):
+        )
+        if invalid_scope:
+            return False
+        if source != "audio_input" or enrollment.quiet_setup_turn_consumed:
+            enrollment.quiet_semantic_eligible = False
             return False
         enrollment.quiet_setup_turn_consumed = True
         return True
+
+    @_synchronized
+    def bind_quiet_setup_response(
+        self, journey_id: str, *, response_generation: int
+    ) -> bool:
+        self._prepare()
+        enrollment = self._active.get(journey_id)
+        valid = bool(
+            enrollment is not None
+            and enrollment.connected
+            and enrollment.semantic_kind == "quiet"
+            and enrollment.quiet_mode == "robot_speaking"
+            and enrollment.quiet_setup_turn_consumed
+            and enrollment.quiet_semantic_eligible
+            and enrollment.quiet_setup_response_generation is None
+            and isinstance(response_generation, int)
+            and not isinstance(response_generation, bool)
+            and response_generation >= 0
+        )
+        if enrollment is None:
+            return False
+        if not valid:
+            enrollment.quiet_semantic_eligible = False
+            return False
+        enrollment.quiet_setup_response_generation = response_generation
+        return True
+
+    @_synchronized
+    def record_quiet_response_lifecycle(
+        self, journey_id: str, *, response_generation: int, event: str
+    ) -> bool:
+        self._prepare()
+        enrollment = self._active.get(journey_id)
+        if enrollment is None or enrollment.semantic_kind != "quiet":
+            return False
+        if event == "start":
+            valid = bool(
+                enrollment.quiet_semantic_eligible
+                and enrollment.quiet_setup_turn_consumed
+                and enrollment.quiet_setup_response_generation
+                == response_generation
+                and enrollment.quiet_response_started_generation is None
+            )
+            if valid:
+                enrollment.quiet_response_started_generation = response_generation
+        elif event == "end":
+            valid = bool(
+                enrollment.quiet_semantic_eligible
+                and enrollment.quiet_response_started_generation
+                == response_generation
+                and enrollment.quiet_response_completed_generation is None
+            )
+            if valid:
+                enrollment.quiet_response_completed_generation = response_generation
+        else:
+            valid = False
+        if not valid:
+            enrollment.quiet_semantic_eligible = False
+        return valid
 
     @_synchronized
     def record_candidate_interrupt(
@@ -948,6 +1013,11 @@ class EvidenceEnrollmentRegistry:
             return {
                 "semanticProofKind": "quiet",
                 "quietMode": enrollment.quiet_mode,
+                "quietSetupTurnConsumed": enrollment.quiet_setup_turn_consumed,
+                "quietSetupResponseGeneration": enrollment.quiet_setup_response_generation,
+                "quietResponseStartedGeneration": enrollment.quiet_response_started_generation,
+                "quietResponseCompletedGeneration": enrollment.quiet_response_completed_generation,
+                "quietSemanticEligible": enrollment.quiet_semantic_eligible,
             }
         return {}
 

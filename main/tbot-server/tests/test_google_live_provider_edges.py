@@ -930,6 +930,7 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._interaction.start_live_connection("live-quiet")
         provider._reset_candidate_scope_measurements()
         provider._close_live_resources = AsyncMock(return_value=None)
+        provider._bridge = SimpleNamespace(_output_chunk_count=1)
 
         provider._mark_clean_user_turn_opened("audio_input")
         response_clock = [10.0]
@@ -943,9 +944,20 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             await provider._handle_live_event(
                 {"type": "audio_end", "response_generation": 1}
             )
+        causal = registry.safe_snapshot("candidate.quiet-1")
+        self.assertTrue(causal["quietSetupTurnConsumed"], causal)
+        self.assertTrue(causal["quietSemanticEligible"], causal)
+        self.assertEqual(causal["quietSetupResponseGeneration"], 1)
+        self.assertEqual(causal["quietResponseStartedGeneration"], 1)
+        self.assertEqual(causal["quietResponseCompletedGeneration"], 1)
         result = await provider.finalize_evidence()
 
         self.assertEqual(result["status"], "PASS")
+        self.assertEqual(
+            result["quietSemanticEvidence"]["status"],
+            "PASS",
+            result["quietSemanticEvidence"],
+        )
         rendered = [
             (args[0].format(*args[1:]) if len(args) > 1 else str(args[0]))
             for _, args, _ in conn.logger.messages

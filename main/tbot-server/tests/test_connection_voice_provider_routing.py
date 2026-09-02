@@ -1616,6 +1616,11 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
                             "quietSemanticEvidence": {
                                 "status": semantic_status,
                                 "mode": "silence",
+                                "durationMs": 1000,
+                                "responseGeneration": None,
+                                "responseDurationMs": 0,
+                                "outputChunks": 0,
+                                "setupTurnConsumed": False,
                             },
                         }
                     )

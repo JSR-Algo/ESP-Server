@@ -332,6 +332,7 @@ P_EVIDENCE_CANDIDATE_QUIET = re.compile(
     r"mode=(?P<mode>silence|robot_speaking) duration_ms=(?P<duration_ms>\d+) "
     r"response_generation=(?P<response_generation>none|\d+) "
     r"response_duration_ms=(?P<response_duration_ms>\d+) "
+    r"setup_consumed=(?P<setup_consumed>true|false) "
     r"user_turns=(?P<user_turns>\d+) response_starts=(?P<response_starts>\d+) "
     r"response_ends=(?P<response_ends>\d+) interrupts=(?P<interrupts>\d+) "
     r"replacements=(?P<replacements>\d+) reconnects=(?P<reconnects>\d+) "
@@ -2337,6 +2338,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
                                 if groups["response_generation"] == "none"
                                 else int(groups["response_generation"])
                             ),
+                            "setup_consumed": groups["setup_consumed"] == "true",
                             **numeric,
                         }
                     )
@@ -4141,6 +4143,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
         if mode == "silence" and quiet:
             response_proof_valid = bool(
                 response_generation is None
+                and quiet["setup_consumed"] is False
                 and quiet["response_duration_ms"] == 0
                 and not forwarded_counts
             )
@@ -4148,6 +4151,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             response_proof_valid = bool(
                 quiet
                 and exact_response_key is not None
+                and quiet["setup_consumed"] is True
                 and quiet["response_duration_ms"] > 0
                 and quiet["response_duration_ms"] <= quiet["duration_ms"]
                 and exact_response_key in response_start_lines
@@ -4187,6 +4191,7 @@ def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
             "responseGeneration": response_generation,
             "responseDurationMs": quiet["response_duration_ms"] if quiet else 0,
             "outputChunks": output_chunks,
+            "setupTurnConsumed": quiet["setup_consumed"] if quiet else False,
             "falseInterrupts": 0 if quiet_pass else None,
             "responseStarts": quiet["response_starts"] if quiet else 0,
             "responseEnds": quiet["response_ends"] if quiet else 0,

@@ -561,6 +561,7 @@ def _candidate_semantic_counters(
             == {
                 "status", "kind", "mode", "durationMs", "falseInterrupts",
                 "responseGeneration", "responseDurationMs", "outputChunks",
+                "setupTurnConsumed",
                 "responseStarts", "responseEnds", "replacements", "fallbacks",
             }
             and semantic.get("status") == "PASS"
@@ -572,11 +573,13 @@ def _candidate_semantic_counters(
             and semantic.get("responseEnds") == expected_responses
             and (
                 semantic.get("responseGeneration") is None
+                and semantic.get("setupTurnConsumed") is False
                 and semantic.get("responseDurationMs") == 0
                 and semantic.get("outputChunks") == 0
                 if quiet_mode == "silence"
                 else (
                     type(semantic.get("responseGeneration")) is int
+                    and semantic.get("setupTurnConsumed") is True
                     and semantic.get("responseGeneration") >= 0
                     and type(semantic.get("responseDurationMs")) is int
                     and 0 < semantic.get("responseDurationMs") <= observed_duration_ms
