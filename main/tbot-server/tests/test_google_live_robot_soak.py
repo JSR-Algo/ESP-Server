@@ -3395,12 +3395,17 @@ def test_candidate_enrollment_cancel_after_ambiguous_commit_deletes_once_and_pro
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert deletes == 1
-        assert registry == set()
+        assert deletes == 0
+        assert registry
         assert not any(attempted_plan.key)
         assert not args.produce_candidate_evidence.exists()
         release_response.set()
-        await asyncio.sleep(0)
+        for _attempt in range(20):
+            if not registry:
+                break
+            await asyncio.sleep(0)
+        assert deletes == 1
+        assert registry == set()
 
     asyncio.run(cancel())
 
@@ -3442,10 +3447,68 @@ def test_candidate_ambiguous_enrollment_delete_timeout_is_bounded(tmp_path):
         with pytest.raises(asyncio.CancelledError):
             await task
         assert asyncio.get_running_loop().time() - started < 0.2
-        assert delete_started.is_set()
+        assert not delete_started.is_set()
         release_post.set()
+        await asyncio.wait_for(delete_started.wait(), timeout=0.2)
         release_delete.set()
         await asyncio.sleep(0)
+
+    asyncio.run(cancel())
+
+
+def test_candidate_reconciliation_deletes_after_late_post_commit(tmp_path):
+    post_started = asyncio.Event()
+    release_commit = asyncio.Event()
+    registry = set()
+    deletes = 0
+
+    async def control(method, url, payload=None):
+        nonlocal deletes
+        if method == "POST":
+            post_started.set()
+            await release_commit.wait()
+            registry.add(payload["journeyId"])
+            return {"status": "PASS"}
+        if method == "DELETE":
+            deletes += 1
+            registry.discard(url.rsplit("/", 1)[-1])
+            return {"status": "PASS"}
+        return {"status": "PASS"}
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=control,
+        cleanup_timeout_sec=0.01,
+    )
+    journey = build_candidate_journeys(args)["conversation"]
+
+    async def cancel():
+        task = asyncio.create_task(journey(args, name="conversation", index=1))
+        await post_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert deletes == 0
+        assert any(
+            owned.get_name() == "google-live-candidate-enrollment-cleanup"
+            for owned in robot_soak._OWNED_CLEANUP_TASKS
+        )
+        release_commit.set()
+        for _attempt in range(20):
+            if deletes:
+                break
+            await asyncio.sleep(0)
+        assert deletes == 1
+        assert registry == set()
+        await asyncio.sleep(0)
+        assert not any(
+            owned.get_name() == "google-live-candidate-enrollment-cleanup"
+            for owned in robot_soak._OWNED_CLEANUP_TASKS
+        )
 
     asyncio.run(cancel())
 

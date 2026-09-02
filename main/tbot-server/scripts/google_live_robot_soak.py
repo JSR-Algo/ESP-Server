@@ -2940,7 +2940,20 @@ def build_candidate_journeys(args, *, protected_input=None):
             timeout = 2.0
         await asyncio.wait({task}, timeout=timeout)
 
-    async def cleanup_ambiguous_enrollment(journey_url):
+    async def cleanup_ambiguous_enrollment(post_task, journey_url):
+        if post_task is not None:
+            while not post_task.done():
+                try:
+                    await asyncio.shield(post_task)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:
+                    break
+            if post_task.done():
+                try:
+                    post_task.result()
+                except BaseException:
+                    pass
         try:
             await _candidate_control_json(args, "DELETE", journey_url)
         except BaseException:
@@ -3166,7 +3179,10 @@ def build_candidate_journeys(args, *, protected_input=None):
                 sealed_plan.zeroize()
             if enrollment_attempted and not terminal_finalized:
                 enrollment_cleanup_task = own_task(
-                    cleanup_ambiguous_enrollment(journey_url),
+                    cleanup_ambiguous_enrollment(
+                        enrollment_post_task,
+                        journey_url,
+                    ),
                     "google-live-candidate-enrollment-cleanup",
                 )
                 try:
