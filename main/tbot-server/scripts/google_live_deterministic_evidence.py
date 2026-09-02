@@ -158,7 +158,34 @@ def _junit_value_is_sensitive(value: str) -> bool:
         for character in unicodedata.normalize("NFKD", compatibility)
         if unicodedata.category(character) not in {"Mn", "Mc", "Me"}
     )
-    return _SENSITIVE_JUNIT_VALUE.search(scan_value) is not None
+    if _SENSITIVE_JUNIT_VALUE.search(scan_value) is not None:
+        return True
+    match = re.search(r"[:=]", scan_value)
+    if match is None:
+        return False
+    key = scan_value[: match.start()]
+    tokens = re.findall(r"[a-z0-9]+", key)
+    joined = "".join(tokens)
+    direct = {
+        "apikey", "authorization", "bearertoken", "clientsecret", "cookie",
+        "credentials", "credential", "password", "secret", "setcookie",
+        "sessionid", "sessionhandle", "sessionresumptionhandle", "token",
+    }
+    if joined in direct:
+        return True
+    suffixes = ("token", "secret", "key", "credential", "credentials", "password", "cookie", "handle")
+    prefixes = ("api", "auth", "access", "refresh", "session", "client", "private", "public", "google", "xgoogle")
+    return any(joined.endswith(suffix) for suffix in suffixes) and any(
+        joined.startswith(prefix) for prefix in prefixes
+    )
+
+
+def _expected_junit_classname(node: str) -> str:
+    parts = node.split("::")
+    classname = parts[0][:-3].replace("/", ".")
+    if len(parts) > 2:
+        classname += "." + ".".join(parts[1:-1])
+    return classname
 
 
 def _parse_clean_junit(
@@ -245,8 +272,14 @@ def _parse_clean_junit(
         ):
             raise ValueError("each JUnit testcase must contain exactly one node ID property")
         node = property_node.get("value")
-        if testcase.get("name") != node.rsplit("::", 1)[-1]:
-            raise ValueError("JUnit testcase name does not match its node ID")
+        if (
+            testcase.get("name") != node.rsplit("::", 1)[-1]
+            or testcase.get("classname") != _expected_junit_classname(node)
+        ):
+            raise ValueError("JUnit testcase identity does not match its node ID")
+        testcase_time = testcase.get("time")
+        if testcase_time is not None and re.fullmatch(r"0|[0-9]+\.[0-9]+", testcase_time) is None:
+            raise ValueError("JUnit testcase time is invalid")
         observed.append(node)
     if expected_nodes is not None:
         require_exact_nodes(observed, expected_nodes, label="JUnit")

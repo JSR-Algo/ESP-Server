@@ -176,7 +176,8 @@ def _write_evidence(root: Path) -> tuple[dict[str, Path], dict[str, str], Path]:
     node_manifest.write_text("\n".join(nodes) + "\n", encoding="utf-8")
     junit = deterministic_dir / "pytest.xml"
     cases = "".join(
-        f'<testcase classname="suite" name="{node.rsplit("::", 1)[-1]}"><properties>'
+        f'<testcase classname="{node.split("::", 1)[0][:-3].replace("/", ".")}" '
+        f'name="{node.rsplit("::", 1)[-1]}"><properties>'
         f'<property name="google_live_nodeid" value="{node}" /></properties></testcase>'
         for node in nodes
     )
@@ -304,7 +305,7 @@ def test_release_rejects_rebound_fullwidth_sensitive_allowed_attribute(
     secret = "private"
     sensitive = f"ＧＯＯＧＬＥ＿ＡＰＩ＿ＫＥＹ＝{secret}"
     junit.write_bytes(
-        junit.read_bytes().replace(b'classname="suite"', f'classname="{sensitive}"'.encode(), 1)
+        junit.read_bytes().replace(b'classname="tests.test_a"', f'classname="{sensitive}"'.encode(), 1)
     )
     digest = hashlib.sha256(junit.read_bytes()).hexdigest()
     checksums["deterministic_junit"] = digest

@@ -21,9 +21,13 @@ IDENTITY = {
 def _junit(nodes: list[str], *, status: str = "pass") -> bytes:
     cases = []
     for node in nodes:
+        parts = node.split("::")
+        classname = parts[0][:-3].replace("/", ".")
+        if len(parts) > 2:
+            classname += "." + ".".join(parts[1:-1])
         child = "" if status == "pass" else f"<{status} message=\"no details\" />"
         cases.append(
-            f'<testcase classname="suite" name="{node.rsplit("::", 1)[-1]}">'
+            f'<testcase classname="{classname}" name="{node.rsplit("::", 1)[-1]}">'
             f'<properties><property name="google_live_nodeid" value="{node}" />'
             f"</properties>{child}</testcase>"
         )
@@ -207,7 +211,7 @@ def test_junit_rejects_dtd_entities_markup_and_encoding_ambiguity(mutation: str)
 def test_junit_privacy_scan_catches_case_whitespace_and_character_reference_obfuscation() -> None:
     node = "tests/test_a.py::test_one"
     for secret in ("google Api Key = secret", "Bearer abc123", "GOOGLE&#95;API&#95;KEY=secret"):
-        xml = _junit([node]).replace(b'classname="suite"', f'classname="{secret}"'.encode())
+        xml = _junit([node]).replace(b'classname="tests.test_a"', f'classname="{secret}"'.encode())
         with pytest.raises(ValueError) as error:
             deterministic.parse_passing_junit(xml, [node])
         assert "secret" not in str(error.value).lower()
@@ -264,7 +268,7 @@ def test_junit_rejects_suite_level_properties_even_when_benign() -> None:
 )
 def test_junit_privacy_normalizes_allowed_attribute_values(sensitive: str) -> None:
     node = "tests/test_a.py::test_one"
-    xml = _junit([node]).replace(b'classname="suite"', f'classname="{sensitive}"'.encode())
+    xml = _junit([node]).replace(b'classname="tests.test_a"', f'classname="{sensitive}"'.encode())
     with pytest.raises(ValueError) as error:
         deterministic.parse_passing_junit(xml, [node])
     assert "private" not in str(error.value).lower()
@@ -273,15 +277,54 @@ def test_junit_privacy_normalizes_allowed_attribute_values(sensitive: str) -> No
 @pytest.mark.parametrize("invisible", ["\u200b", "\u200e", "\u202e", "\u2066", "\u0085"])
 def test_junit_rejects_invisible_bidi_and_unicode_controls(invisible: str) -> None:
     node = "tests/test_a.py::test_one"
-    xml = _junit([node]).replace(b'classname="suite"', f'classname="safe{invisible}value"'.encode())
+    xml = _junit([node]).replace(b'classname="tests.test_a"', f'classname="safe{invisible}value"'.encode())
     with pytest.raises(ValueError):
         deterministic.parse_passing_junit(xml, [node])
 
 
 def test_junit_allows_benign_non_ascii_attribute_value() -> None:
     node = "tests/test_a.py::test_one"
-    xml = _junit([node]).replace(b'classname="suite"', 'classname="café"'.encode())
+    xml = _junit([node])
     assert deterministic.parse_passing_junit(xml, [node])["tests"] == 1
+
+
+@pytest.mark.parametrize(
+    "sensitive",
+    [
+        "credentials=private", "access_token=private", "refresh-token:private",
+        "SESSION TOKEN = private", "auth_token=private", "client_secret=private",
+        "public key=private", "private-key:private", "password=private",
+        "cookie=sessionid", "session_handle=private", "ＡＣＣＥＳＳ＿ＴＯＫＥＮ＝private",
+    ],
+)
+def test_normalized_sensitive_key_grammar_covers_compound_credentials(sensitive: str) -> None:
+    assert deterministic._junit_value_is_sensitive(sensitive)
+
+
+@pytest.mark.parametrize(
+    "benign", ["tokenCount", "secretary", "public-keynote", "cookiejar", "handleCount"]
+)
+def test_normalized_sensitive_key_grammar_avoids_benign_near_misses(benign: str) -> None:
+    assert not deterministic._junit_value_is_sensitive(benign)
+
+
+def test_junit_binds_classname_to_exact_nodeid_module_and_class() -> None:
+    node = "tests/test_a.py::TestA::test_one"
+    xml = _junit([node])
+    assert deterministic.parse_passing_junit(xml, [node])["tests"] == 1
+    with pytest.raises(ValueError):
+        deterministic.parse_passing_junit(
+            xml.replace(b'tests.test_a.TestA', b'credentials=private'), [node]
+        )
+
+
+@pytest.mark.parametrize("bad_time", ["nan", "inf", "-1", "1e9", "credentials=private"])
+def test_junit_requires_canonical_nonnegative_testcase_time(bad_time: str) -> None:
+    node = "tests/test_a.py::test_one"
+    xml = _junit([node])
+    xml = xml.replace(b'<testcase ', f'<testcase time="{bad_time}" '.encode(), 1)
+    with pytest.raises(ValueError):
+        deterministic.parse_passing_junit(xml, [node])
 
 
 def test_build_report_binds_manifest_and_junit_hashes_and_exact_counts() -> None:
