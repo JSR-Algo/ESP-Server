@@ -453,6 +453,66 @@ class LaneExecution:
             self.cleanup()
 
 
+@dataclass
+class AssignmentRuntimeCapsule:
+    root: Path
+    identity: tuple[int, int]
+    descriptor: int | None
+    _retained_path: Path | None = None
+    _cleanup_succeeded: bool | None = None
+
+    @classmethod
+    def create(cls, protected: Sequence[Path]) -> AssignmentRuntimeCapsule:
+        root = Path(tempfile.mkdtemp(prefix="course-mode-assignment-runtime-")).resolve()
+        identity: tuple[int, int] | None = None
+        descriptor: int | None = None
+        try:
+            root.chmod(0o700)
+            identity = _owned_tree_identity(root)
+            if any(_path_overlaps(root, path) for path in protected):
+                raise ValueError("assignment runtime overlaps protected path")
+            (root / "media").mkdir(mode=0o700)
+            (root / "tls").mkdir(mode=0o700)
+            descriptor = _open_snapshot_directory(root)
+            return cls(root, identity, descriptor)
+        except Exception:
+            if descriptor is not None:
+                os.close(descriptor)
+            if os.path.lexists(root) and not _remove_owned_tree(root, identity):
+                raise RetainedStagingError(root)
+            raise
+
+    def usable(self) -> bool:
+        if self.descriptor is None:
+            return False
+        actual = _directory_fd_path(self.descriptor)
+        opened = os.fstat(self.descriptor)
+        return actual == self.root and (opened.st_dev, opened.st_ino) == self.identity
+
+    def cleanup(self) -> bool:
+        if self.descriptor is None:
+            return self._cleanup_succeeded is True
+        actual = _directory_fd_path(self.descriptor)
+        if actual is not None and actual != self.root:
+            self._retained_path = actual
+            os.close(self.descriptor)
+            self.descriptor = None
+            self._cleanup_succeeded = False
+            return False
+        removed = _remove_owned_tree(self.root, self.identity)
+        if not removed:
+            self._retained_path = actual or _find_owned_tree(
+                self.root.parent, self.identity,
+            ) or self.root
+        os.close(self.descriptor)
+        self.descriptor = None
+        self._cleanup_succeeded = removed
+        return removed
+
+    def retained_path(self) -> Path:
+        return self._retained_path or self.root
+
+
 @dataclass(frozen=True)
 class BackendSnapshotBinding:
     environment: dict[str, str]
@@ -694,7 +754,10 @@ def _remove_owned_tree(root: Path, expected_identity: tuple[int, int] | None = N
     return expected_identity is None and not os.path.lexists(root)
 
 
-def _cleanup_gate_owned(report: dict, *owned: ExecutionStage | LaneExecution | None) -> bool:
+def _cleanup_gate_owned(
+    report: dict,
+    *owned: ExecutionStage | LaneExecution | AssignmentRuntimeCapsule | None,
+) -> bool:
     retained = []
     for item in owned:
         if item is not None and not item.cleanup():
@@ -708,7 +771,9 @@ def _cleanup_gate_owned(report: dict, *owned: ExecutionStage | LaneExecution | N
     return True
 
 
-def _cleanup_gate_owned_or_raise(*owned: ExecutionStage | LaneExecution | None) -> None:
+def _cleanup_gate_owned_or_raise(
+    *owned: ExecutionStage | LaneExecution | AssignmentRuntimeCapsule | None,
+) -> None:
     retained = []
     for item in owned:
         if item is not None and not item.cleanup():

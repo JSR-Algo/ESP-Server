@@ -1550,6 +1550,36 @@ def test_snapshot_cleanup_runs_after_lane_failure(candidate_file: Path, monkeypa
     assert observed and not observed[0].exists()
 
 
+def test_assignment_runtime_capsule_is_private_and_identity_bound() -> None:
+    capsule = gate.AssignmentRuntimeCapsule.create(())
+    root = capsule.root
+    metadata = root.stat()
+    assert root.name.startswith("course-mode-assignment-runtime-")
+    assert stat.S_IMODE(metadata.st_mode) == 0o700
+    assert capsule.identity == (metadata.st_dev, metadata.st_ino)
+    assert (root / "media").is_dir()
+    assert (root / "tls").is_dir()
+    assert capsule.usable() is True
+    assert capsule.cleanup() is True
+    assert not root.exists()
+    assert capsule.cleanup() is True
+
+
+def test_assignment_runtime_capsule_rejects_path_replacement(
+    tmp_path: Path,
+) -> None:
+    capsule = gate.AssignmentRuntimeCapsule.create(())
+    original_remove = gate._remove_owned_tree
+    moved = capsule.root.with_name(capsule.root.name + "-moved")
+    capsule.root.rename(moved)
+    capsule.root.mkdir(mode=0o700)
+    assert capsule.usable() is False
+    assert capsule.cleanup() is False
+    assert capsule.retained_path() == moved
+    original_remove(moved, capsule.identity)
+    capsule.root.rmdir()
+
+
 def test_lane_cleanup_removes_zero_mode_runtime_directories(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
