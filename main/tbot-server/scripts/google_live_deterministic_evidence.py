@@ -79,14 +79,17 @@ _PYTEST_BOOTSTRAP = (
     "import importlib,json,sys;"
     "from importlib.util import module_from_spec,spec_from_file_location;"
     "p=json.loads(sys.argv.pop(1));"
+    "exec(\"def audit():\\n import pathlib\\n roots=[pathlib.Path(x).resolve() for x in p['trusted']]\\n for name,module in tuple(sys.modules.items()):\\n  if not any(name==x or name.startswith(x+'.') for x in p['controlImportNames']):continue\\n  origin=getattr(module,'__file__',None)\\n  if not origin:raise RuntimeError('pytest runtime import origin invalid')\\n  resolved=pathlib.Path(origin).resolve()\\n  if not any(resolved==root or root in resolved.parents for root in roots):raise RuntimeError('pytest runtime import origin invalid')\",globals());"
     "sys.path[:0]=p['trusted']+p['dependencies'];"
     "pytest=importlib.import_module('pytest');"
     "a=importlib.import_module('pytest_asyncio.plugin');"
+    "audit();"
     "sys.path[:]=p['trusted']+[p['repo']]+p['dependencies']+sys.path[len(p['trusted'])+len(p['dependencies']):];"
     "s=spec_from_file_location('_google_live_pinned_nodeid_plugin',p['plugin']);"
     "n=module_from_spec(s);s.loader.exec_module(n);"
+    "audit();"
     "sys.argv[0]='pytest';"
-    "raise SystemExit(pytest.main(sys.argv[1:],plugins=[a,n]))"
+    "rc=pytest.main(sys.argv[1:],plugins=[a,n]);audit();raise SystemExit(rc)"
 )
 APPROVED_TEST_FILES = (
     "tests/test_google_live_lifecycle_e2e.py",
@@ -230,11 +233,18 @@ def parse_pytest_runtime_manifest(content: bytes) -> dict[str, Any]:
         raise ValueError("pytest runtime manifest distributions are invalid")
     names = []
     for item in distributions:
-        if not isinstance(item, dict) or set(item) != {"files", "name", "packages", "version"}:
+        if not isinstance(item, dict) or set(item) != {
+            "files",
+            "importNames",
+            "name",
+            "packages",
+            "version",
+        }:
             raise ValueError("pytest runtime manifest distribution is invalid")
         name = item.get("name")
         version = item.get("version")
         packages = item.get("packages")
+        import_names = item.get("importNames")
         files = item.get("files")
         if (
             type(name) is not str
@@ -248,6 +258,15 @@ def parse_pytest_runtime_manifest(content: bytes) -> dict[str, Any]:
             or any(
                 type(package) is not str or _RUNTIME_PACKAGE.fullmatch(package) is None
                 for package in packages
+            )
+            or not isinstance(import_names, list)
+            or not import_names
+            or import_names != sorted(import_names)
+            or len(import_names) != len(set(import_names))
+            or any(
+                type(import_name) is not str
+                or _RUNTIME_PACKAGE.fullmatch(import_name) is None
+                for import_name in import_names
             )
             or not isinstance(files, list)
             or not files
@@ -264,7 +283,7 @@ def parse_pytest_runtime_manifest(content: bytes) -> dict[str, Any]:
                 or _RUNTIME_PATH.fullmatch(path) is None
                 or path.startswith("/")
                 or any(part in {"", ".", ".."} for part in path.split("/"))
-                or path.split("/", 1)[0] not in packages
+                or path.split("/", 1)[0].removesuffix(".py") not in import_names
                 or type(digest) is not str
                 or _SHA256_HEX.fullmatch(digest) is None
                 or Path(path).suffix.lower() in {".so", ".dylib", ".dll", ".pyd"}
@@ -273,7 +292,10 @@ def parse_pytest_runtime_manifest(content: bytes) -> dict[str, Any]:
             paths.append(path)
         if paths != sorted(paths) or len(paths) != len(set(paths)):
             raise ValueError("pytest runtime manifest files are ambiguous")
-        if set(packages) != {path.split("/", 1)[0] for path in paths}:
+        file_import_names = {
+            path.split("/", 1)[0].removesuffix(".py") for path in paths
+        }
+        if not set(packages).issubset(file_import_names) or set(import_names) != file_import_names:
             raise ValueError("pytest runtime manifest package is incomplete")
         names.append(name)
     expected = sorted(_PYTEST_DISTRIBUTION_PACKAGES)
@@ -1022,6 +1044,30 @@ def _runtime_package_files(package_root: Path) -> list[Path]:
     return sorted(files)
 
 
+def _distribution_owned_runtime_files(package_distribution: Any, root: Path) -> list[Path]:
+    if package_distribution.files is None:
+        raise RuntimeError("required pytest distribution file metadata is unavailable")
+    files = []
+    for owned_path in package_distribution.files:
+        if "__pycache__" in owned_path.parts or owned_path.suffix in {".pyc", ".pyo"}:
+            continue
+        source = Path(package_distribution.locate_file(owned_path))
+        try:
+            resolved = source.resolve(strict=True)
+        except OSError as exc:
+            if source.absolute().is_relative_to(root):
+                raise RuntimeError("required pytest package file is unavailable") from exc
+            continue
+        try:
+            relative = resolved.relative_to(root)
+        except ValueError:
+            continue
+        if any(part.endswith(".dist-info") for part in relative.parts):
+            continue
+        files.append(source)
+    return sorted(files)
+
+
 def _copy_trusted_pytest_packages(destination: Path, manifest: Mapping[str, Any]) -> None:
     approved_roots = _approved_package_roots()
     destination.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1041,11 +1087,24 @@ def _copy_trusted_pytest_packages(destination: Path, manifest: Mapping[str, Any]
         expected_files = {
             entry["path"]: entry["sha256"] for entry in expected_distribution["files"]
         }
-        observed_files = []
+        observed_files = _distribution_owned_runtime_files(
+            package_distribution,
+            distribution_root,
+        )
+        package_directory_files = []
         for package_name in package_names:
-            observed_files.extend(_runtime_package_files(distribution_root / package_name))
+            package_directory_files.extend(
+                _runtime_package_files(distribution_root / package_name)
+            )
         observed_relative = [path.relative_to(distribution_root).as_posix() for path in observed_files]
-        if observed_relative != sorted(expected_files):
+        package_directory_relative = {
+            path.relative_to(distribution_root).as_posix()
+            for path in package_directory_files
+        }
+        if (
+            observed_relative != sorted(expected_files)
+            or not package_directory_relative.issubset(expected_files)
+        ):
             raise RuntimeError("required pytest package file set does not match")
         for source, relative in zip(observed_files, observed_relative, strict=True):
             try:
@@ -1077,16 +1136,17 @@ def _copy_trusted_pytest_packages(destination: Path, manifest: Mapping[str, Any]
             if not secrets.compare_digest(_sha256(bound.content), expected_files[relative]):
                 raise RuntimeError("required pytest package integrity check failed")
             _write_private_snapshot_file(destination / relative, bound.content)
-            copied_packages.add(relative.split("/", 1)[0])
-        observed_after = []
-        for package_name in package_names:
-            observed_after.extend(_runtime_package_files(distribution_root / package_name))
+            copied_packages.add(relative.split("/", 1)[0].removesuffix(".py"))
+        observed_after = _distribution_owned_runtime_files(
+            package_distribution,
+            distribution_root,
+        )
         if [path.relative_to(distribution_root).as_posix() for path in observed_after] != observed_relative:
             raise RuntimeError("required pytest package changed during snapshot")
     expected_packages = {
-        package
+        import_name
         for expected_distribution in manifest["distributions"]
-        for package in expected_distribution["packages"]
+        for import_name in expected_distribution["importNames"]
     }
     if copied_packages != expected_packages:
         raise RuntimeError("trusted pytest package set is incomplete")
@@ -1215,6 +1275,13 @@ def _private_pytest_runtime(
             plugin_content,
         )
         runtime = PrivatePytestRuntime({
+            "controlImportNames": sorted(
+                {
+                    import_name
+                    for expected_distribution in manifest["distributions"]
+                    for import_name in expected_distribution["importNames"]
+                }
+            ),
             "trusted": [str(packages)],
             "repo": str(repo_root),
             "dependencies": [str(path) for path in _approved_package_roots()],

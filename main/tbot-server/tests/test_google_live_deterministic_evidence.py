@@ -58,6 +58,7 @@ def _runtime_manifest_bytes(*, plugin_sha256: str = "e" * 64) -> bytes:
         distributions.append(
             {
                 "files": files,
+                "importNames": sorted(packages),
                 "name": name,
                 "packages": sorted(packages),
                 "version": "1.0",
@@ -856,6 +857,7 @@ def test_private_pytest_runtime_rejects_record_hash_mismatch(
                     "sha256": hashlib.sha256(b"expected").hexdigest(),
                 }
             ],
+            "importNames": ["pytest"],
             "name": "pytest",
             "packages": ["pytest"],
             "version": "1.0",
@@ -938,6 +940,71 @@ def test_checked_in_runtime_manifest_and_plugin_are_bound_to_current_git_object(
     assert plugin == PINNED_NODEID_PLUGIN
 
 
+def test_checked_in_runtime_manifest_pins_pytest_top_level_py_module() -> None:
+    manifest = deterministic.parse_pytest_runtime_manifest(PINNED_RUNTIME_MANIFEST)
+    pytest_distribution = next(
+        item for item in manifest["distributions"] if item["name"] == "pytest"
+    )
+
+    assert "py" in pytest_distribution["importNames"]
+    assert any(entry["path"] == "py.py" for entry in pytest_distribution["files"])
+
+
+def test_private_runtime_shadows_injected_live_top_level_py_module(tmp_path: Path) -> None:
+    sentinel = "live py.py injection executed"
+    injection = tmp_path / "injection"
+    injection.mkdir()
+    (injection / "py.py").write_text(f"raise RuntimeError({sentinel!r})\n", encoding="utf-8")
+    test_file = tmp_path / "test_py_origin.py"
+    test_file.write_text(
+        "from pathlib import Path\n"
+        "import py\n"
+        "def test_py_is_private():\n"
+        "    assert 'google-live-pytest-runtime-' in str(Path(py.__file__))\n",
+        encoding="utf-8",
+    )
+
+    with deterministic._private_pytest_runtime(tmp_path, IDENTITY["gitSha"]) as runtime:
+        runtime["dependencies"].insert(0, str(injection))
+        completed = subprocess.run(
+            deterministic._pytest_command(runtime, str(test_file), "-q"),
+            cwd=tmp_path,
+            env=deterministic._pytest_child_environment(),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    assert completed.returncode == 0
+    assert "1 passed" in completed.stdout
+    assert sentinel not in completed.stdout + completed.stderr
+
+
+def test_private_runtime_origin_audit_rejects_control_module_outside_snapshot(
+    tmp_path: Path,
+) -> None:
+    test_file = tmp_path / "test_origin_escape.py"
+    test_file.write_text(
+        "import py\n"
+        "def test_escape():\n"
+        "    py.__file__ = '/attacker/live-site-packages/py.py'\n",
+        encoding="utf-8",
+    )
+
+    with deterministic._private_pytest_runtime(tmp_path, IDENTITY["gitSha"]) as runtime:
+        completed = subprocess.run(
+            deterministic._pytest_command(runtime, str(test_file), "-q"),
+            cwd=tmp_path,
+            env=deterministic._pytest_child_environment(),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    assert completed.returncode != 0
+    assert "attacker" not in completed.stdout + completed.stderr
+
+
 def test_runtime_source_rejects_package_and_rewritten_record_against_git_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -953,6 +1020,7 @@ def test_runtime_source_rejects_package_and_rewritten_record_against_git_manifes
             "files": [
                 {"path": "pytest/__init__.py", "sha256": hashlib.sha256(original).hexdigest()}
             ],
+            "importNames": ["pytest"],
             "name": "pytest",
             "packages": ["pytest"],
             "version": "1.0",
@@ -1108,14 +1176,16 @@ def test_verified_snapshot_is_unchanged_when_live_package_changes_after_copy(
             "files": [
                 {"path": "pytest/__init__.py", "sha256": hashlib.sha256(trusted).hexdigest()}
             ],
+            "importNames": ["pytest"],
             "name": "pytest",
             "packages": ["pytest"],
             "version": "1.0",
         }
     ]
     fake_distribution = SimpleNamespace(
+        files=[SimpleNamespace(parts=("pytest", "__init__.py"), suffix=".py")],
         version="1.0",
-        locate_file=lambda path: package_root,
+        locate_file=lambda path: package_root if path == "" else package_root / Path(*path.parts),
     )
     monkeypatch.setattr(deterministic, "_approved_package_roots", lambda: [package_root])
     monkeypatch.setattr(deterministic, "distribution", lambda _name: fake_distribution)
@@ -1144,6 +1214,7 @@ def test_runtime_source_rejects_missing_or_extra_executable_files(
             "files": [
                 {"path": "pytest/__init__.py", "sha256": hashlib.sha256(trusted).hexdigest()}
             ],
+            "importNames": ["pytest"],
             "name": "pytest",
             "packages": ["pytest"],
             "version": "1.0",
@@ -1151,17 +1222,23 @@ def test_runtime_source_rejects_missing_or_extra_executable_files(
     ]
     if mutation == "missing":
         package_file.unlink()
+        owned_files = [SimpleNamespace(parts=("pytest", "__init__.py"), suffix=".py")]
     else:
         suffix = ".py" if mutation == "extra_python" else ".so"
         package_file.with_name("attacker" + suffix).write_bytes(b"attacker")
+        owned_files = [
+            SimpleNamespace(parts=("pytest", "__init__.py"), suffix=".py"),
+            SimpleNamespace(parts=("pytest", "attacker" + suffix), suffix=suffix),
+        ]
     fake_distribution = SimpleNamespace(
+        files=owned_files,
         version="1.0",
-        locate_file=lambda path: package_root,
+        locate_file=lambda path: package_root if path == "" else package_root / Path(*path.parts),
     )
     monkeypatch.setattr(deterministic, "_approved_package_roots", lambda: [package_root])
     monkeypatch.setattr(deterministic, "distribution", lambda _name: fake_distribution)
 
-    with pytest.raises(RuntimeError, match="file set"):
+    with pytest.raises(RuntimeError, match="file set|unavailable"):
         deterministic._copy_trusted_pytest_packages(tmp_path / "snapshot", manifest)
 
 
