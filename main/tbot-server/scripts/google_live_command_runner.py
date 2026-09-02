@@ -56,11 +56,23 @@ _EXACT_TERMINAL_FIELDS = {
     "satisfied",
     "timeoutSec",
 }
-_FCHDIR_EXEC = (
-    "import os,sys;"
-    "fd=int(sys.argv[1]);argv=sys.argv[2:];"
-    "os.fchdir(fd);os.execve(argv[0],argv,os.environ)"
-)
+_FCHDIR_EXEC = """import os, sys
+cwd = int(sys.argv[1])
+keep = [int(value) for value in sys.argv[2].split(",") if value]
+argv = sys.argv[3:]
+try:
+    os.fchdir(cwd)
+    os.close(cwd)
+    cwd = -1
+    os.execve(argv[0], argv, os.environ)
+except BaseException:
+    for descriptor in [cwd, *keep]:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    os._exit(126)
+"""
 
 
 def _immutable_identity(value: Mapping[str, str] | None) -> Mapping[str, str]:
@@ -162,6 +174,13 @@ class BoundWorkingDirectory:
     path: Path
     descriptor: int
     chain: tuple[tuple[int, int, int, int], ...]
+
+
+@dataclass(frozen=True)
+class BoundArgumentArtifacts:
+    argv: tuple[str, ...]
+    descriptors: tuple[int, ...]
+    identities: Mapping[Path, tuple[int, int]]
 
 
 def _unsafe_recorded_value(value: str) -> bool:
@@ -293,6 +312,77 @@ def _prepare_paths(
     return inputs, parents
 
 
+def _bind_argument_artifacts(
+    spec: CommandSpec,
+    root: Path,
+    inputs: Mapping[Path, tuple[Any, tuple[tuple[int, int], ...]]],
+) -> BoundArgumentArtifacts:
+    declared = {*spec.inputs, *spec.outputs}
+    descriptors: dict[Path, int] = {}
+    argv = []
+    try:
+        for index, argument in enumerate(spec.argv):
+            candidate = Path(argument)
+            if index == 0 or not candidate.is_absolute():
+                argv.append(argument)
+                continue
+            if candidate not in declared:
+                raise ValueError("absolute command argument must be an exact declared artifact")
+            if candidate in descriptors:
+                argv.append(f"/dev/fd/{descriptors[candidate]}")
+                continue
+            parent = _open_bound_working_directory(root, candidate.parent)
+            try:
+                if candidate in inputs:
+                    descriptor = os.open(
+                        candidate.name,
+                        os.O_RDONLY
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=parent.descriptor,
+                    )
+                    opened = os.fstat(descriptor)
+                    bound = inputs[candidate][0]
+                    if (
+                        not stat.S_ISREG(opened.st_mode)
+                        or opened.st_nlink != 1
+                        or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+                        != (bound.device, bound.inode, bound.size, bound.modified_ns)
+                    ):
+                        os.close(descriptor)
+                        raise RuntimeError("absolute input argument changed")
+                else:
+                    descriptor = os.open(
+                        candidate.name,
+                        os.O_RDWR
+                        | os.O_CREAT
+                        | os.O_EXCL
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        0o600,
+                        dir_fd=parent.descriptor,
+                    )
+                descriptors[candidate] = descriptor
+                argv.append(f"/dev/fd/{descriptor}")
+            finally:
+                os.close(parent.descriptor)
+        return BoundArgumentArtifacts(
+            tuple(argv),
+            tuple(descriptors.values()),
+            MappingProxyType(
+                {
+                    path: (opened.st_dev, opened.st_ino)
+                    for path, descriptor in descriptors.items()
+                    for opened in (os.fstat(descriptor),)
+                }
+            ),
+        )
+    except BaseException:
+        for descriptor in descriptors.values():
+            os.close(descriptor)
+        raise
+
+
 def _canonical_spec(spec: CommandSpec, root: Path) -> dict[str, Any]:
     recorded_argv = []
     for index, argument in enumerate(spec.argv):
@@ -396,10 +486,18 @@ def _run_process(
     stdin_bytes: bytes | None,
     cancel_event: threading.Event | None,
     cwd_descriptor: int,
+    argument_artifacts: BoundArgumentArtifacts,
 ) -> tuple[int | None, str, bool]:
     try:
         process = subprocess.Popen(
-            [sys.executable, "-c", _FCHDIR_EXEC, str(cwd_descriptor), *spec.argv],
+            [
+                sys.executable,
+                "-c",
+                _FCHDIR_EXEC,
+                str(cwd_descriptor),
+                ",".join(str(value) for value in argument_artifacts.descriptors),
+                *argument_artifacts.argv,
+            ],
             shell=False,
             cwd=None,
             env=dict(child_env),
@@ -407,7 +505,7 @@ def _run_process(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
-            pass_fds=(cwd_descriptor,),
+            pass_fds=(cwd_descriptor, *argument_artifacts.descriptors),
         )
     except (OSError, ValueError) as exc:
         raise RuntimeError("spawn_failed") from exc
@@ -456,6 +554,31 @@ def _artifact_rows(root: Path, paths: tuple[Path, ...]) -> list[dict[str, str]]:
         require_file_unchanged(path, first)
         result.append({"label": _label(root, path), "sha256": hashlib.sha256(first.content).hexdigest()})
     return result
+
+
+def _cleanup_declared_outputs(
+    outputs: tuple[Path, ...],
+    parents: Mapping[Path, tuple[tuple[int, int], ...]],
+) -> None:
+    for path in outputs:
+        try:
+            if _directory_chain(path.parent) != parents[path]:
+                continue
+            opened = os.stat(path, follow_symlinks=False)
+            if stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1:
+                path.unlink()
+        except (FileNotFoundError, OSError, RuntimeError):
+            continue
+
+
+def _require_argument_artifacts_unchanged(bound: BoundArgumentArtifacts) -> None:
+    for path, identity in bound.identities.items():
+        try:
+            opened = os.stat(path, follow_symlinks=False)
+        except OSError as exc:
+            raise RuntimeError("absolute argument artifact changed") from exc
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != identity:
+            raise RuntimeError("absolute argument artifact changed")
 
 
 def _parse_time(value: Any) -> None:
@@ -751,24 +874,43 @@ def execute_and_record(
     except OSError as exc:
         raise RuntimeError("cwd is invalid") from exc
     try:
-        canonical_spec = _canonical_spec(spec, root)
-        spec_digest = _spec_digest(spec)
-        child_env = _child_environment(spec, env)
-        _validate_executable(spec.argv[0])
-        started = _utc_now()
-        interrupted = False
-        if _before_spawn is not None:
-            _before_spawn()
-        _require_working_directory_unchanged(bound_cwd, require_ctime=True)
         try:
-            exit_code, classification, satisfied = _run_process(
-                spec, child_env, stdin_bytes, cancel_event, bound_cwd.descriptor
-            )
-        except KeyboardInterrupt:
-            exit_code, classification, satisfied = None, "keyboard_interrupt", False
-            interrupted = True
-        ended = _utc_now()
-        _require_working_directory_unchanged(bound_cwd, require_ctime=False)
+            argument_artifacts = _bind_argument_artifacts(spec, root, inputs)
+            canonical_spec = _canonical_spec(spec, root)
+            spec_digest = _spec_digest(spec)
+            child_env = _child_environment(spec, env)
+            _validate_executable(spec.argv[0])
+            started = _utc_now()
+            interrupted = False
+            if _before_spawn is not None:
+                _before_spawn()
+            _require_working_directory_unchanged(bound_cwd, require_ctime=True)
+            try:
+                exit_code, classification, satisfied = _run_process(
+                    spec,
+                    child_env,
+                    stdin_bytes,
+                    cancel_event,
+                    bound_cwd.descriptor,
+                    argument_artifacts,
+                )
+            except KeyboardInterrupt:
+                exit_code, classification, satisfied = None, "keyboard_interrupt", False
+                interrupted = True
+            ended = _utc_now()
+            _require_working_directory_unchanged(bound_cwd, require_ctime=False)
+            _require_argument_artifacts_unchanged(argument_artifacts)
+        finally:
+            if "argument_artifacts" in locals():
+                for descriptor in argument_artifacts.descriptors:
+                    try:
+                        os.fsync(descriptor)
+                    except OSError:
+                        pass
+                    os.close(descriptor)
+    except BaseException:
+        _cleanup_declared_outputs(spec.outputs, output_parents)
+        raise
     finally:
         os.close(bound_cwd.descriptor)
     for path, (bound, parent_chain) in inputs.items():
@@ -779,15 +921,7 @@ def execute_and_record(
         if _directory_chain(path.parent) != chain:
             raise RuntimeError("evidence output parent changed")
     if not satisfied:
-        for path, chain in output_parents.items():
-            if _directory_chain(path.parent) != chain:
-                continue
-            try:
-                opened = os.stat(path, follow_symlinks=False)
-                if stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1:
-                    path.unlink()
-            except FileNotFoundError:
-                pass
+        _cleanup_declared_outputs(spec.outputs, output_parents)
     output_rows = _artifact_rows(root, spec.outputs) if satisfied else []
     input_rows = [
         {"label": _label(root, path), "sha256": hashlib.sha256(bound.content).hexdigest()}

@@ -124,6 +124,118 @@ def test_absolute_evidence_arguments_are_recorded_as_relative_labels(tmp_path: P
     assert "<evidence:private-plan.json>" in entry["argv"]
 
 
+def test_absolute_input_argument_reads_bound_file(tmp_path: Path) -> None:
+    protected = tmp_path / "input.txt"
+    protected.write_text("bound-content")
+    output = tmp_path / "real-api" / "report.json"
+    code = (
+        "import pathlib,sys; data=pathlib.Path(sys.argv[1]).read_text(); "
+        "pathlib.Path(sys.argv[2]).write_text(data)"
+    )
+    execute_and_record(
+        _spec(
+            tmp_path,
+            code,
+            argv=(sys.executable, "-c", code, str(protected), str(output)),
+            inputs=(protected,),
+        ),
+        provenance=tmp_path / "commands.jsonl",
+    )
+    assert output.read_text() == "bound-content"
+
+
+def test_absolute_argument_must_be_an_exact_declared_artifact(tmp_path: Path) -> None:
+    undeclared = tmp_path / "undeclared.txt"
+    undeclared.write_text("no")
+    with pytest.raises(ValueError, match="declared artifact"):
+        execute_and_record(
+            _spec(
+                tmp_path,
+                "pass",
+                argv=(sys.executable, "-c", "pass", str(undeclared)),
+                outputs=(),
+            ),
+            provenance=tmp_path / "commands.jsonl",
+        )
+
+
+def test_absolute_input_parent_symlink_to_outside_is_rejected(tmp_path: Path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-argv-outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("outside-secret")
+    linked = tmp_path / "linked"
+    linked.symlink_to(outside, target_is_directory=True)
+    candidate = linked / "secret.txt"
+    with pytest.raises((ValueError, RuntimeError, OSError)):
+        execute_and_record(
+            _spec(
+                tmp_path,
+                "pass",
+                argv=(sys.executable, "-c", "pass", str(candidate)),
+                inputs=(candidate,),
+                outputs=(),
+            ),
+            provenance=tmp_path / "commands.jsonl",
+        )
+
+
+def test_absolute_input_parent_swap_cannot_change_child_bytes(tmp_path: Path) -> None:
+    parent = tmp_path / "inputs"
+    parent.mkdir()
+    source = parent / "value.txt"
+    source.write_text("approved")
+    outside = tmp_path / "replacement"
+    outside.mkdir()
+    (outside / "value.txt").write_text("outside")
+    observed = tmp_path / "real-api" / "report.json"
+    code = "import pathlib,sys; pathlib.Path(sys.argv[2]).write_text(pathlib.Path(sys.argv[1]).read_text())"
+
+    def swap() -> None:
+        parent.rename(tmp_path / "moved-inputs")
+        parent.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="(?:input parent|cwd) changed"):
+        execute_and_record(
+            _spec(
+                tmp_path,
+                code,
+                argv=(sys.executable, "-c", code, str(source), str(observed)),
+                inputs=(source,),
+            ),
+            provenance=tmp_path / "commands.jsonl",
+            _before_spawn=swap,
+        )
+    assert not observed.exists()
+
+
+def test_child_and_descendant_receive_no_directory_or_unrelated_fds(tmp_path: Path) -> None:
+    output = tmp_path / "real-api" / "report.json"
+    scan = (
+        "import os,stat\nresult=[]\n"
+        "for fd in range(3,128):\n"
+        " try:\n  opened=os.fstat(fd)\n"
+        " except OSError:\n  continue\n"
+        " if stat.S_ISDIR(opened.st_mode): result.append(fd)\n"
+        "print(result)\n"
+    )
+    code = (
+        "import json,os,pathlib,stat,subprocess,sys\n"
+        "fds=[]\n"
+        "for fd in range(3,128):\n"
+        " try:\n  opened=os.fstat(fd)\n"
+        " except OSError:\n  continue\n"
+        " if stat.S_ISDIR(opened.st_mode): fds.append(fd)\n"
+        f"child=subprocess.check_output([sys.executable,'-c',{scan!r}])\n"
+        "pathlib.Path(sys.argv[1]).write_text(json.dumps({'dirs':fds,'descendant':child.decode().strip()}))\n"
+    )
+    execute_and_record(
+        _spec(tmp_path, code, argv=(sys.executable, "-c", code, str(output))),
+        provenance=tmp_path / "commands.jsonl",
+    )
+    observed = json.loads(output.read_text())
+    assert observed == {"dirs": [], "descendant": "[]"}
+
+
 def test_rejects_absolute_command_argument_outside_evidence_root(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="absolute command argument"):
         execute_and_record(
