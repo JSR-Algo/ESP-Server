@@ -84,7 +84,7 @@ _PYTEST_DISTRIBUTION_PACKAGES = {
     "pygments": {"pygments"},
 }
 _PYTEST_BOOTSTRAP = (
-    "import importlib,json,os,pathlib,sys;"
+    "import ctypes.util,importlib,json,os,pathlib,sys;"
     "from importlib.util import module_from_spec,spec_from_file_location;"
     "p=json.loads(sys.argv.pop(1));"
     "exec(\"def audit():\\n import pathlib\\n roots=[pathlib.Path(x).resolve() for x in p['trusted']]\\n for name,module in tuple(sys.modules.items()):\\n  if not any(name==x or name.startswith(x+'.') for x in p['controlImportNames']):continue\\n  origin=getattr(module,'__file__',None)\\n  if not origin:raise RuntimeError('pytest runtime import origin invalid')\\n  resolved=pathlib.Path(origin).resolve()\\n  if not any(resolved==root or root in resolved.parents for root in roots):raise RuntimeError('pytest runtime import origin invalid')\",globals());"
@@ -94,6 +94,7 @@ _PYTEST_BOOTSTRAP = (
     "a=importlib.import_module('pytest_asyncio.plugin');"
     "audit();"
     "os.environ['OPUS_LIB_PATH']=p['opusLibrary'];"
+    "f=ctypes.util.find_library;ctypes.util.find_library=lambda name:p['opusLibrary'] if name=='opus' else f(name);"
     "exec(\"def safe_path(value):\\n resolved=pathlib.Path(value).resolve();root=pathlib.Path(p['repo']).resolve();live=pathlib.Path(p['liveRepo']).resolve()\\n return live==root or resolved==root or root in resolved.parents or not (resolved==live or live in resolved.parents)\",globals());"
     "sys.path[:]=[str(pathlib.Path(x).resolve()) for x in p['trusted']+[p['repo']]+p['dependencies']+sys.path[len(p['trusted'])+len(p['dependencies']):] if x and safe_path(x)];"
     "s=spec_from_file_location('_google_live_pinned_nodeid_plugin',p['plugin']);"

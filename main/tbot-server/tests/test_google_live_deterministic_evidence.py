@@ -1142,18 +1142,25 @@ def test_checked_in_runtime_manifest_pins_opus_python_and_native_runtime() -> No
 
 
 def test_private_runtime_uses_pinned_opus_origin_and_nonexistent_pycache(tmp_path: Path) -> None:
-    test_file = tmp_path / "test_origins.py"
+    candidate = tmp_path / "candidate"
+    shim = candidate / "opuslib_next/__init__.py"
+    shim.parent.mkdir(parents=True)
+    shim.write_bytes((MODULE_ROOT / "opuslib_next/__init__.py").read_bytes())
+    test_file = candidate / "test_origins.py"
     test_file.write_text(
-        "from pathlib import Path\nimport opuslib_next\n"
+        "from pathlib import Path\nimport opuslib_next\nimport opuslib_next.api\n"
         "def test_origins():\n"
-        " assert 'google-live-pytest-runtime-' in str(Path(opuslib_next.__file__))\n",
+        " assert 'google-live-pytest-runtime-' in str(Path(opuslib_next.__file__))\n"
+        " assert 'google-live-pytest-runtime-' in str(Path(opuslib_next.api.libopus._name))\n",
         encoding="utf-8",
     )
-    with deterministic._private_pytest_runtime(MODULE_ROOT, "unused") as runtime:
+    with deterministic._private_pytest_runtime(
+        MODULE_ROOT, "unused", candidate_root=candidate
+    ) as runtime:
         assert not Path(runtime["pycache"]).exists()
         completed = subprocess.run(
             deterministic._pytest_command(runtime, str(test_file), "-q"),
-            cwd=tmp_path,
+            cwd=candidate,
             env=deterministic._pytest_child_environment(),
             text=True,
             capture_output=True,
@@ -1162,6 +1169,48 @@ def test_private_runtime_uses_pinned_opus_origin_and_nonexistent_pycache(tmp_pat
         assert not Path(runtime["pycache"]).exists()
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_private_runtime_detects_attempted_pycache_creation(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="private pytest runtime changed"):
+        with deterministic._private_pytest_runtime(MODULE_ROOT, "unused") as runtime:
+            pycache = Path(runtime["pycache"])
+            pycache.parent.chmod(0o700)
+            pycache.mkdir()
+            (pycache / "injected.pyc").write_bytes(b"hostile")
+
+
+def test_child_rejects_existing_module_cached_artifact(tmp_path: Path) -> None:
+    test_file = tmp_path / "test_cached.py"
+    test_file.write_text(
+        "import sys\n"
+        "def test_cached():\n"
+        " sys.modules[__name__].__cached__ = __file__\n",
+        encoding="utf-8",
+    )
+    with deterministic._private_pytest_runtime(
+        MODULE_ROOT, "unused", candidate_root=tmp_path
+    ) as runtime:
+        completed = subprocess.run(
+            deterministic._pytest_command(runtime, str(test_file), "-q"),
+            cwd=tmp_path,
+            env=deterministic._pytest_child_environment(),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    assert completed.returncode != 0
+    assert "hostile" not in completed.stdout + completed.stderr
+
+
+def test_private_runtime_rejects_native_platform_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(deterministic.platform, "machine", lambda: "wrong-architecture")
+    with pytest.raises(RuntimeError, match="platform constraint"):
+        with deterministic._private_pytest_runtime(MODULE_ROOT, "unused"):
+            pass
 
 
 def test_private_runtime_shadows_injected_live_top_level_py_module(tmp_path: Path) -> None:
