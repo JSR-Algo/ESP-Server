@@ -1,6 +1,8 @@
 const assert = require('node:assert/strict');
 const { existsSync, readFileSync } = require('node:fs');
-const { link, mkdtemp, readFile, rm, stat, writeFile } = require('node:fs/promises');
+const {
+  chmod, link, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile,
+} = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { resolve } = require('node:path');
 const test = require('node:test');
@@ -8,6 +10,7 @@ const {
   inspectAndPinCandidateImages,
   verifyStartedServiceImages,
 } = require('./task4-image-identity.cjs');
+const { validateAssignmentRuntimeCapsule } = require('./task4-assignment-runtime.cjs');
 
 const fixturePath = resolve(__dirname, '../../../docs/docker/task4-admin-assignment/bootstrap.cjs');
 const copyHelperPath = resolve(__dirname, '../../../docs/docker/task4-admin-assignment/copy-file.cjs');
@@ -15,6 +18,152 @@ const rollbackSpecPath = resolve(__dirname, '../e2e/lesson-studio/assignment-rol
 const playwrightConfigPath = resolve(__dirname, '../playwright.assignment-rollback.config.js');
 const orchestratorPath = resolve(__dirname, 'run-task4-assignment-phase.cjs');
 const imageIdentityPath = resolve(__dirname, 'task4-image-identity.cjs');
+
+async function createAssignmentRuntimeCapsule(t, prefix = 'course-mode-assignment-runtime-') {
+  const capsuleRoot = await mkdtemp(resolve(tmpdir(), prefix));
+  const runtimeRoot = resolve(capsuleRoot, 'runtime');
+  await chmod(capsuleRoot, 0o700);
+  await mkdir(runtimeRoot, { mode: 0o700 });
+  await chmod(runtimeRoot, 0o700);
+  t.after(() => rm(capsuleRoot, { recursive: true, force: true }));
+  return { capsuleRoot, runtimeRoot };
+}
+
+function capsuleEnvironment(capsuleRoot, runtimeRoot) {
+  return {
+    TASK4_ASSIGNMENT_CAPSULE_ROOT: capsuleRoot,
+    TASK4_ASSIGNMENT_RUNTIME_ROOT: runtimeRoot,
+  };
+}
+
+test('assignment runtime capsule accepts an exact private owner and direct runtime child', async (t) => {
+  const capsule = await createAssignmentRuntimeCapsule(t);
+  const expected = {
+    capsuleRoot: await realpath(capsule.capsuleRoot),
+    runtimeRoot: await realpath(capsule.runtimeRoot),
+  };
+
+  const result = validateAssignmentRuntimeCapsule(
+    capsuleEnvironment(capsule.capsuleRoot, capsule.runtimeRoot),
+    [],
+  );
+
+  assert.deepEqual(result, expected);
+  assert.equal(Object.isFrozen(result), true);
+});
+
+test('assignment runtime capsule rejects a missing owner variable', async (t) => {
+  const capsule = await createAssignmentRuntimeCapsule(t);
+  assert.throws(
+    () => validateAssignmentRuntimeCapsule({ TASK4_ASSIGNMENT_RUNTIME_ROOT: capsule.runtimeRoot }, []),
+    /TASK4_ASSIGNMENT_CAPSULE_ROOT/,
+  );
+});
+
+test('assignment runtime capsule rejects a runtime that is not the exact direct child', async (t) => {
+  const capsule = await createAssignmentRuntimeCapsule(t);
+  const nestedRuntime = resolve(capsule.runtimeRoot, 'nested');
+  await mkdir(nestedRuntime, { mode: 0o700 });
+
+  assert.throws(
+    () => validateAssignmentRuntimeCapsule(capsuleEnvironment(capsule.capsuleRoot, nestedRuntime), []),
+    /runtime/,
+  );
+});
+
+test('assignment runtime capsule rejects an owner symlink', async (t) => {
+  const capsule = await createAssignmentRuntimeCapsule(t);
+  const linkRoot = `${capsule.capsuleRoot}-link`;
+  await symlink(capsule.capsuleRoot, linkRoot, 'dir');
+  t.after(() => rm(linkRoot, { force: true }));
+
+  assert.throws(
+    () => validateAssignmentRuntimeCapsule(capsuleEnvironment(linkRoot, resolve(linkRoot, 'runtime')), []),
+    /symlink/,
+  );
+});
+
+test('assignment runtime capsule rejects a runtime symlink', async (t) => {
+  const capsule = await createAssignmentRuntimeCapsule(t);
+  const realRuntime = resolve(capsule.capsuleRoot, 'real-runtime');
+  await mkdir(realRuntime, { mode: 0o700 });
+  await rm(capsule.runtimeRoot, { recursive: true });
+  await symlink(realRuntime, capsule.runtimeRoot, 'dir');
+
+  assert.throws(
+    () => validateAssignmentRuntimeCapsule(capsuleEnvironment(capsule.capsuleRoot, capsule.runtimeRoot), []),
+    /symlink/,
+  );
+});
+
+for (const [target, mode] of [['owner', 0o755], ['runtime', 0o755]]) {
+  test(`assignment runtime capsule rejects ${target} mode 0755`, async (t) => {
+    const capsule = await createAssignmentRuntimeCapsule(t);
+    await chmod(target === 'owner' ? capsule.capsuleRoot : capsule.runtimeRoot, mode);
+    assert.throws(
+      () => validateAssignmentRuntimeCapsule(capsuleEnvironment(capsule.capsuleRoot, capsule.runtimeRoot), []),
+      /0700/,
+    );
+  });
+}
+
+test('assignment runtime capsule rejects an owner prefix mismatch', async (t) => {
+  const capsule = await createAssignmentRuntimeCapsule(t, 'task4-assignment-runtime-');
+  assert.throws(
+    () => validateAssignmentRuntimeCapsule(capsuleEnvironment(capsule.capsuleRoot, capsule.runtimeRoot), []),
+    /course-mode-assignment-runtime-/,
+  );
+});
+
+for (const target of ['owner', 'runtime']) {
+  test(`assignment runtime capsule rejects ${target} UID mismatch`, async (t) => {
+    const capsule = await createAssignmentRuntimeCapsule(t);
+    const actualUid = (await stat(capsule.capsuleRoot)).uid;
+    assert.throws(
+      () => validateAssignmentRuntimeCapsule(
+        capsuleEnvironment(capsule.capsuleRoot, capsule.runtimeRoot),
+        [],
+        actualUid + 1,
+      ),
+      new RegExp(`${target} UID`),
+    );
+  });
+}
+
+for (const protectedName of ['admin', 'backend', 'firmware']) {
+  test(`assignment runtime capsule rejects overlap with the protected ${protectedName} root`, async (t) => {
+    const capsule = await createAssignmentRuntimeCapsule(t);
+    const protectedRoot = protectedName === 'admin'
+      ? capsule.capsuleRoot
+      : protectedName === 'backend'
+        ? capsule.runtimeRoot
+        : resolve(capsule.runtimeRoot, 'firmware');
+    if (protectedName === 'firmware') await mkdir(protectedRoot, { mode: 0o700 });
+
+    assert.throws(
+      () => validateAssignmentRuntimeCapsule(
+        capsuleEnvironment(capsule.capsuleRoot, capsule.runtimeRoot),
+        [protectedRoot],
+      ),
+      /protected root/,
+    );
+  });
+}
+
+for (const [label, value] of [
+  ['empty', ''],
+  ['relative', 'relative/runtime'],
+  ['NUL-containing', '/tmp/runtime\0suffix'],
+]) {
+  test(`assignment runtime capsule rejects ${label} paths`, async (t) => {
+    const capsule = await createAssignmentRuntimeCapsule(t);
+    for (const key of ['TASK4_ASSIGNMENT_CAPSULE_ROOT', 'TASK4_ASSIGNMENT_RUNTIME_ROOT']) {
+      const environment = capsuleEnvironment(capsule.capsuleRoot, capsule.runtimeRoot);
+      environment[key] = value;
+      assert.throws(() => validateAssignmentRuntimeCapsule(environment, []), /absolute|NUL|nonempty/);
+    }
+  });
+}
 
 test('Task 4 pins inspected image IDs and rejects retag or started-container drift', () => {
   const candidate = {
