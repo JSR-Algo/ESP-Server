@@ -313,7 +313,11 @@ def test_release_rejects_canonical_fixture_alias_as_supplied_manifest(
     else:
         os.link(CANONICAL_MANIFEST_PATH, supplied)
 
-    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+    try:
+        verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+    finally:
+        if alias_kind == "hardlink" and supplied.exists():
+            supplied.unlink()
 
     assert verdict["status"] == "FAIL"
     assert any(item["code"].startswith("DETERMINISTIC_SUPPORT") for item in verdict["failures"])
