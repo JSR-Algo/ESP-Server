@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
+import urllib.parse
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -152,7 +153,7 @@ def _decode_strict_junit_xml(content: bytes) -> str:
 
 
 def _junit_value_is_sensitive(value: str) -> bool:
-    compatibility = unicodedata.normalize("NFKC", value).casefold()
+    compatibility = unicodedata.normalize("NFKC", urllib.parse.unquote(value)).casefold()
     scan_value = "".join(
         character
         for character in unicodedata.normalize("NFKD", compatibility)
@@ -160,24 +161,29 @@ def _junit_value_is_sensitive(value: str) -> bool:
     )
     if _SENSITIVE_JUNIT_VALUE.search(scan_value) is not None:
         return True
-    match = re.search(r"[:=]", scan_value)
-    if match is None:
-        return False
-    key = scan_value[: match.start()]
-    tokens = re.findall(r"[a-z0-9]+", key)
-    joined = "".join(tokens)
     direct = {
         "apikey", "authorization", "bearertoken", "clientsecret", "cookie",
         "credentials", "credential", "password", "secret", "setcookie",
         "sessionid", "sessionhandle", "sessionresumptionhandle", "token",
     }
-    if joined in direct:
-        return True
-    suffixes = ("token", "secret", "key", "credential", "credentials", "password", "cookie", "handle")
-    prefixes = ("api", "auth", "access", "refresh", "session", "client", "private", "public", "google", "xgoogle")
-    return any(joined.endswith(suffix) for suffix in suffixes) and any(
-        joined.startswith(prefix) for prefix in prefixes
+    suffixes = (
+        "token", "secret", "key", "credential", "credentials", "password", "cookie", "handle",
     )
+    prefixes = (
+        "api", "auth", "access", "refresh", "session", "client", "private", "public",
+        "google", "xgoogle",
+    )
+    for match in re.finditer(r"[:=]", scan_value):
+        key_start = max(0, match.start() - 100)
+        tokens = re.findall(r"[a-z0-9]+", scan_value[key_start : match.start()])
+        for index in range(len(tokens)):
+            joined = "".join(tokens[index:])
+            if joined in direct or (
+                any(joined.endswith(suffix) for suffix in suffixes)
+                and any(joined.startswith(prefix) for prefix in prefixes)
+            ):
+                return True
+    return False
 
 
 def _expected_junit_classname(node: str) -> str:
@@ -228,9 +234,28 @@ def _parse_clean_junit(
     ):
         raise ValueError("JUnit XML violates the privacy contract")
     root_children = list(root)
+    if root.attrib != {"name": "pytest tests"}:
+        raise ValueError("JUnit root metadata is invalid")
     if len(root_children) != 1 or root_children[0].tag != "testsuite":
         raise ValueError("JUnit must contain exactly one direct test suite")
     suite = root_children[0]
+    canonical_suite_attributes = {"name", "tests", "failures", "errors", "skipped"}
+    raw_suite_attributes = canonical_suite_attributes | {"time", "timestamp", "hostname"}
+    suite_attribute_names = frozenset(suite.attrib)
+    permitted_suite_attributes = {frozenset(canonical_suite_attributes)}
+    if allow_suite_test_count_mismatch:
+        permitted_suite_attributes.add(frozenset(raw_suite_attributes))
+    if suite_attribute_names not in permitted_suite_attributes:
+        raise ValueError("JUnit suite metadata is invalid")
+    if suite.get("name") != "pytest":
+        raise ValueError("JUnit suite metadata is invalid")
+    if suite_attribute_names == frozenset(raw_suite_attributes):
+        if (
+            re.fullmatch(r"(?:0|[1-9][0-9]*)\.[0-9]{3}", suite.get("time", "")) is None
+            or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\s]+", suite.get("timestamp", "")) is None
+            or not suite.get("hostname")
+        ):
+            raise ValueError("JUnit suite metadata is invalid")
     if any(element.tag in {"failure", "error", "skipped"} for element in elements):
         raise ValueError("JUnit contains an outcome outside a passing testcase set")
     for owner, require_counts in ((root, False), (suite, True)):
@@ -250,6 +275,8 @@ def _parse_clean_junit(
         raise ValueError("JUnit contains nested or mixed testcase locations")
     observed = []
     for testcase in testcases:
+        if set(testcase.attrib) != {"classname", "name", "time"}:
+            raise ValueError("JUnit testcase attributes are invalid")
         children = list(testcase)
         if any(child.tag != "properties" for child in children):
             raise ValueError("JUnit testcase contains an ambiguous child")
@@ -278,7 +305,7 @@ def _parse_clean_junit(
         ):
             raise ValueError("JUnit testcase identity does not match its node ID")
         testcase_time = testcase.get("time")
-        if testcase_time is not None and re.fullmatch(r"0|[0-9]+\.[0-9]+", testcase_time) is None:
+        if re.fullmatch(r"(?:0|[1-9][0-9]*)\.[0-9]{3}", testcase_time) is None:
             raise ValueError("JUnit testcase time is invalid")
         observed.append(node)
     if expected_nodes is not None:
@@ -305,6 +332,8 @@ def canonicalize_junit_summary(content: bytes) -> bytes:
         content, None, allow_suite_test_count_mismatch=True
     )
     suite.set("tests", str(len(observed)))
+    for name in ("time", "timestamp", "hostname"):
+        suite.attrib.pop(name, None)
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 

@@ -1,7 +1,9 @@
 import hashlib
 import json
 import os
+import re
 import subprocess
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
@@ -27,7 +29,7 @@ def _junit(nodes: list[str], *, status: str = "pass") -> bytes:
             classname += "." + ".".join(parts[1:-1])
         child = "" if status == "pass" else f"<{status} message=\"no details\" />"
         cases.append(
-            f'<testcase classname="{classname}" name="{node.rsplit("::", 1)[-1]}">'
+            f'<testcase classname="{classname}" name="{node.rsplit("::", 1)[-1]}" time="0.000">'
             f'<properties><property name="google_live_nodeid" value="{node}" />'
             f"</properties>{child}</testcase>"
         )
@@ -35,8 +37,8 @@ def _junit(nodes: list[str], *, status: str = "pass") -> bytes:
     errors = len(nodes) if status == "error" else 0
     skipped = len(nodes) if status == "skipped" else 0
     return (
-        f'<testsuites tests="{len(nodes)}" failures="{failures}" errors="{errors}" skipped="{skipped}">'
-        f'<testsuite tests="{len(nodes)}" failures="{failures}" errors="{errors}" skipped="{skipped}">'
+        '<testsuites name="pytest tests">'
+        f'<testsuite name="pytest" tests="{len(nodes)}" failures="{failures}" errors="{errors}" skipped="{skipped}">'
         + "".join(cases)
         + "</testsuite></testsuites>"
     ).encode()
@@ -149,7 +151,9 @@ def test_junit_rejects_duplicate_property_names() -> None:
 def test_canonicalizer_allows_only_clean_pytest9_test_count_inaccuracy() -> None:
     node = "tests/test_a.py::test_one"
     raw = _junit([node]).replace(
-        b'<testsuite tests="1"', b'<testsuite tests="994"', 1
+        b'<testsuite name="pytest" tests="1"',
+        b'<testsuite name="pytest" tests="994"',
+        1,
     )
     canonical = deterministic.canonicalize_junit_summary(raw)
     assert deterministic.parse_passing_junit(canonical, [node]) == {
@@ -308,6 +312,52 @@ def test_normalized_sensitive_key_grammar_avoids_benign_near_misses(benign: str)
     assert not deterministic._junit_value_is_sensitive(benign)
 
 
+@pytest.mark.parametrize(
+    "sensitive",
+    [
+        "https://example.test/path?access_token=private",
+        "safe client_secret=private",
+        "prefix refresh_token=private",
+        "host?credentials=private",
+        "safe=1&session_token=private",
+        "path;auth-token:private",
+        "https://x/#access%5Ftoken=private",
+        "safe=1＆ＡＣＣＥＳＳ＿ＴＯＫＥＮ＝private",
+    ],
+)
+def test_sensitive_key_grammar_scans_every_embedded_pair(sensitive: str) -> None:
+    assert deterministic._junit_value_is_sensitive(sensitive)
+
+
+@pytest.mark.parametrize(
+    "benign",
+    ["https://example.test/?count=1", "safe client count=2", "path;refresh-rate=60"],
+)
+def test_sensitive_key_grammar_allows_benign_embedded_pairs(benign: str) -> None:
+    assert not deterministic._junit_value_is_sensitive(benign)
+
+
+def test_canonicalizer_strips_freeform_pytest_suite_metadata() -> None:
+    node = "tests/test_a.py::test_one"
+    raw = _junit([node]).replace(
+        b'<testsuite name="pytest" tests=',
+        b'<testsuite name="pytest" time="1.000" timestamp="2026-09-02T10:00:00+00:00" hostname="builder" tests=',
+        1,
+    )
+    canonical = deterministic.canonicalize_junit_summary(raw)
+    root = ET.fromstring(canonical)
+    suite = root.find("testsuite")
+    assert root.attrib == {"name": "pytest tests"}
+    assert suite is not None
+    assert suite.attrib == {
+        "name": "pytest",
+        "tests": "1",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+    }
+
+
 def test_junit_binds_classname_to_exact_nodeid_module_and_class() -> None:
     node = "tests/test_a.py::TestA::test_one"
     xml = _junit([node])
@@ -318,11 +368,29 @@ def test_junit_binds_classname_to_exact_nodeid_module_and_class() -> None:
         )
 
 
-@pytest.mark.parametrize("bad_time", ["nan", "inf", "-1", "1e9", "credentials=private"])
+@pytest.mark.parametrize(
+    "bad_time",
+    [
+        "", "0", "00.1", "01.000", "1.0", "1.0000", "nan", "inf", "-1.000",
+        "+1.000", "1e9", " 1.000", "credentials=private",
+    ],
+)
 def test_junit_requires_canonical_nonnegative_testcase_time(bad_time: str) -> None:
     node = "tests/test_a.py::test_one"
     xml = _junit([node])
-    xml = xml.replace(b'<testcase ', f'<testcase time="{bad_time}" '.encode(), 1)
+    xml = re.sub(rb'time="[^"]*"', f'time="{bad_time}"'.encode(), xml, count=1)
+    with pytest.raises(ValueError):
+        deterministic.parse_passing_junit(xml, [node])
+
+
+@pytest.mark.parametrize("mutation", ["missing_time", "extra_attr"])
+def test_junit_requires_exact_testcase_attribute_set(mutation: str) -> None:
+    node = "tests/test_a.py::test_one"
+    xml = _junit([node])
+    if mutation == "missing_time":
+        xml = xml.replace(b' time="0.000"', b"")
+    else:
+        xml = xml.replace(b'<testcase ', b'<testcase file="hidden" ', 1)
     with pytest.raises(ValueError):
         deterministic.parse_passing_junit(xml, [node])
 

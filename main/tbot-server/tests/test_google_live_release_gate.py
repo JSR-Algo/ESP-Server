@@ -177,12 +177,12 @@ def _write_evidence(root: Path) -> tuple[dict[str, Path], dict[str, str], Path]:
     junit = deterministic_dir / "pytest.xml"
     cases = "".join(
         f'<testcase classname="{node.split("::", 1)[0][:-3].replace("/", ".")}" '
-        f'name="{node.rsplit("::", 1)[-1]}"><properties>'
+        f'name="{node.rsplit("::", 1)[-1]}" time="0.000"><properties>'
         f'<property name="google_live_nodeid" value="{node}" /></properties></testcase>'
         for node in nodes
     )
     junit.write_text(
-        f'<testsuites><testsuite tests="2" failures="0" errors="0" skipped="0">{cases}</testsuite></testsuites>',
+        f'<testsuites name="pytest tests"><testsuite name="pytest" tests="2" failures="0" errors="0" skipped="0">{cases}</testsuite></testsuites>',
         encoding="utf-8",
     )
     reports = _reports()
@@ -249,8 +249,8 @@ def test_release_independently_rejects_suite_level_junit_error_even_with_rebound
     junit = paths["deterministic_junit"]
     junit.write_text(
         junit.read_text(encoding="utf-8").replace(
-            '<testsuite tests="2" failures="0" errors="0" skipped="0">',
-            '<testsuite tests="2" failures="0" errors="1" skipped="0"><error message="session crashed" />',
+            '<testsuite name="pytest" tests="2" failures="0" errors="0" skipped="0">',
+            '<testsuite name="pytest" tests="2" failures="0" errors="1" skipped="0"><error message="session crashed" />',
         ),
         encoding="utf-8",
     )
@@ -269,7 +269,11 @@ def test_release_independently_rejects_secret_junit_without_leaking(
     paths, checksums, _ = _write_evidence(tmp_path)
     junit = paths["deterministic_junit"]
     junit.write_bytes(
-        junit.read_bytes().replace(b'<testsuites>', b'<testsuites>GOOGLE_API_KEY=secret', 1)
+        junit.read_bytes().replace(
+            b'<testsuites name="pytest tests">',
+            b'<testsuites name="pytest tests">GOOGLE_API_KEY=secret',
+            1,
+        )
     )
     digest = hashlib.sha256(junit.read_bytes()).hexdigest()
     checksums["deterministic_junit"] = digest
@@ -306,6 +310,39 @@ def test_release_rejects_rebound_fullwidth_sensitive_allowed_attribute(
     sensitive = f"ＧＯＯＧＬＥ＿ＡＰＩ＿ＫＥＹ＝{secret}"
     junit.write_bytes(
         junit.read_bytes().replace(b'classname="tests.test_a"', f'classname="{sensitive}"'.encode(), 1)
+    )
+    digest = hashlib.sha256(junit.read_bytes()).hexdigest()
+    checksums["deterministic_junit"] = digest
+    _rewrite(paths["deterministic"], lambda report: report["coverageProof"].update(junitSha256=digest))
+    checksums["deterministic"] = hashlib.sha256(paths["deterministic"].read_bytes()).hexdigest()
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+    assert verdict["status"] == "FAIL"
+    assert secret not in json.dumps(verdict)
+
+
+def test_release_rejects_rebound_junit_missing_testcase_time(tmp_path: Path) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    junit = paths["deterministic_junit"]
+    junit.write_bytes(junit.read_bytes().replace(b' time="0.000"', b"", 1))
+    digest = hashlib.sha256(junit.read_bytes()).hexdigest()
+    checksums["deterministic_junit"] = digest
+    _rewrite(paths["deterministic"], lambda report: report["coverageProof"].update(junitSha256=digest))
+    checksums["deterministic"] = hashlib.sha256(paths["deterministic"].read_bytes()).hexdigest()
+    assert aggregate_release_evidence(IDENTITY, paths, checksums)["status"] == "FAIL"
+
+
+def test_release_rejects_rebound_embedded_credential_metadata_without_leaking(
+    tmp_path: Path,
+) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    junit = paths["deterministic_junit"]
+    secret = "private"
+    junit.write_bytes(
+        junit.read_bytes().replace(
+            b'name="pytest tests"',
+            f'name="safe client_secret={secret}"'.encode(),
+            1,
+        )
     )
     digest = hashlib.sha256(junit.read_bytes()).hexdigest()
     checksums["deterministic_junit"] = digest
