@@ -1006,6 +1006,64 @@ def test_candidate_tree_rejects_case_or_unicode_filesystem_collisions(
         deterministic._candidate_tree_entries(tmp_path, "b" * 40, Path("main/tbot-server"))
 
 
+@pytest.mark.parametrize(
+    "paths",
+    [
+        ("Dir/a.py", "dir/b.py"),
+        ("caf\u00e9/a.py", "cafe\u0301/b.py"),
+        ("x", "X/a.py"),
+    ],
+)
+def test_candidate_tree_rejects_parent_or_file_directory_aliases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, paths: tuple[str, str]
+) -> None:
+    listing = b"".join(
+        f"100644 blob {index:040x}\tmain/tbot-server/{path}\0".encode()
+        for index, path in enumerate(paths, 1)
+    )
+    monkeypatch.setattr(
+        deterministic,
+        "_git_output",
+        lambda _root, *args: b"sha1\n" if args[0] == "rev-parse" else listing,
+    )
+    with pytest.raises(RuntimeError, match="Git tree"):
+        deterministic._candidate_tree_entries(tmp_path, "b" * 40, Path("main/tbot-server"))
+
+
+def test_candidate_tree_allows_multiple_files_under_same_canonical_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listing = b"".join(
+        f"100644 blob {index:040x}\tmain/tbot-server/Dir/{name}\0".encode()
+        for index, name in enumerate(("a.py", "b.py"), 1)
+    )
+    monkeypatch.setattr(
+        deterministic,
+        "_git_output",
+        lambda _root, *args: b"sha1\n" if args[0] == "rev-parse" else listing,
+    )
+
+    _format, entries = deterministic._candidate_tree_entries(
+        tmp_path, "b" * 40, Path("main/tbot-server")
+    )
+
+    assert len(entries) == 2
+
+
+def test_candidate_tree_rejects_exact_duplicate_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = f"100644 blob {'a' * 40}\tmain/tbot-server/Dir/a.py\0".encode()
+    monkeypatch.setattr(
+        deterministic,
+        "_git_output",
+        lambda _root, *args: b"sha1\n" if args[0] == "rev-parse" else record + record,
+    )
+
+    with pytest.raises(RuntimeError, match="Git tree"):
+        deterministic._candidate_tree_entries(tmp_path, "b" * 40, Path("main/tbot-server"))
+
+
 def test_private_pytest_runtime_rejects_record_hash_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -1295,6 +1295,48 @@ def _git_blob_digest(content: bytes, algorithm: str) -> str:
     return digest.hexdigest()
 
 
+def _candidate_filesystem_component_key(component: str) -> str:
+    # Deterministic evidence targets the conservative default macOS profile,
+    # independent of whether the runner happens to use a case-sensitive volume.
+    return unicodedata.normalize("NFC", component).casefold()
+
+
+def _write_candidate_snapshot_file(root: Path, relative: Path, content: bytes) -> None:
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(root, os.O_RDONLY | directory_flag | nofollow_flag)
+    try:
+        for component in relative.parts[:-1]:
+            try:
+                os.mkdir(component, mode=0o700, dir_fd=descriptor)
+            except FileExistsError:
+                pass
+            child = os.open(
+                component,
+                os.O_RDONLY | directory_flag | nofollow_flag,
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = child
+        file_descriptor = os.open(
+            relative.name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow_flag,
+            0o600,
+            dir_fd=descriptor,
+        )
+        try:
+            remaining = memoryview(content)
+            while remaining:
+                count = os.write(file_descriptor, remaining)
+                if count <= 0:
+                    raise OSError("candidate snapshot write failed")
+                remaining = remaining[count:]
+        finally:
+            os.close(file_descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _candidate_tree_entries(
     repo_root: Path,
     expected_git_sha: str,
@@ -1316,7 +1358,7 @@ def _candidate_tree_entries(
         prefix,
     )
     entries = {}
-    filesystem_names = set()
+    filesystem_prefixes: dict[tuple[str, ...], tuple[tuple[str, ...], str]] = {}
     for record in listing.split(b"\0"):
         if not record:
             continue
@@ -1340,10 +1382,20 @@ def _candidate_tree_entries(
         ):
             raise RuntimeError("candidate Git tree is invalid")
         relative = Path(path).relative_to(module_path).as_posix()
-        filesystem_name = unicodedata.normalize("NFC", relative).casefold()
-        if filesystem_name in filesystem_names:
+        relative_parts = tuple(relative.split("/"))
+        for index in range(1, len(relative_parts)):
+            original = relative_parts[:index]
+            key = tuple(_candidate_filesystem_component_key(part) for part in original)
+            existing = filesystem_prefixes.get(key)
+            if existing is not None and (existing[0] != original or existing[1] != "directory"):
+                raise RuntimeError("candidate Git tree is invalid")
+            filesystem_prefixes[key] = (original, "directory")
+        file_key = tuple(
+            _candidate_filesystem_component_key(part) for part in relative_parts
+        )
+        if file_key in filesystem_prefixes:
             raise RuntimeError("candidate Git tree is invalid")
-        filesystem_names.add(filesystem_name)
+        filesystem_prefixes[file_key] = (relative_parts, "file")
         if Path(relative).suffix.casefold() in {".pyc", ".pyo", ".so", ".dylib", ".dll", ".pyd"}:
             raise RuntimeError("candidate Git tree contains executable artifacts")
         entries[path] = (object_id.decode("ascii"), int(mode, 8))
@@ -1425,6 +1477,7 @@ def _private_candidate_snapshot(
     temporary = Path(tempfile.mkdtemp(prefix="google-live-candidate-"))
     snapshot_root = temporary / "candidate"
     try:
+        snapshot_root.mkdir(mode=0o700)
         object_format, entries = _candidate_tree_entries(
             repo_root, expected_git_sha, module_path
         )
@@ -1455,7 +1508,7 @@ def _private_candidate_snapshot(
                 ):
                     raise RuntimeError("candidate Git archive content is invalid")
                 relative = Path(member.name).relative_to(module_path)
-                _write_private_snapshot_file(snapshot_root / relative, content)
+                _write_candidate_snapshot_file(snapshot_root, relative, content)
                 extracted.add(member.name)
         if extracted != set(entries):
             raise RuntimeError("candidate Git archive is incomplete")
