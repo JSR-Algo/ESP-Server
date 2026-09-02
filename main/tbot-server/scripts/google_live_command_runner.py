@@ -253,6 +253,28 @@ def _reject_component_alias(directory_fd: int, component: str) -> None:
             raise ValueError("evidence path component aliases an existing name")
 
 
+def _component_race_hook(stage: str, parent_fd: int, component: str) -> None:
+    del stage, parent_fd, component
+
+
+def _require_exact_opened_component(
+    parent_fd: int, component: str, child_fd: int
+) -> os.stat_result:
+    expected_key = _component_key(component)
+    matches = [
+        existing
+        for existing in os.listdir(parent_fd)
+        if unicodedata.normalize("NFC", existing).casefold() == expected_key
+    ]
+    if matches != [component]:
+        raise ValueError("evidence path component aliases an existing name")
+    linked = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+    opened = os.fstat(child_fd)
+    if (linked.st_dev, linked.st_ino) != (opened.st_dev, opened.st_ino):
+        raise RuntimeError("evidence path component changed")
+    return opened
+
+
 def _secure_materialize_directory(root: Path, path: Path) -> BoundWorkingDirectory:
     _absolute_clean(root)
     _absolute_clean(path)
@@ -264,6 +286,7 @@ def _secure_materialize_directory(root: Path, path: Path) -> BoundWorkingDirecto
     try:
         for component in path.relative_to(root).parts:
             _reject_component_alias(descriptor, component)
+            _component_race_hook("after_scan", descriptor, component)
             try:
                 next_descriptor = os.open(
                     component,
@@ -276,7 +299,7 @@ def _secure_materialize_directory(root: Path, path: Path) -> BoundWorkingDirecto
                 try:
                     os.mkdir(component, 0o700, dir_fd=descriptor)
                 except FileExistsError:
-                    pass
+                    _component_race_hook("after_eexist", descriptor, component)
                 next_descriptor = os.open(
                     component,
                     os.O_RDONLY
@@ -284,7 +307,14 @@ def _secure_materialize_directory(root: Path, path: Path) -> BoundWorkingDirecto
                     | getattr(os, "O_NOFOLLOW", 0),
                     dir_fd=descriptor,
                 )
-            opened = os.fstat(next_descriptor)
+            _component_race_hook("after_open", descriptor, component)
+            try:
+                opened = _require_exact_opened_component(
+                    descriptor, component, next_descriptor
+                )
+            except BaseException:
+                os.close(next_descriptor)
+                raise
             if (
                 not stat.S_ISDIR(opened.st_mode)
                 or opened.st_uid != os.geteuid()
@@ -292,6 +322,22 @@ def _secure_materialize_directory(root: Path, path: Path) -> BoundWorkingDirecto
             ):
                 os.close(next_descriptor)
                 raise RuntimeError("evidence directory is invalid")
+            _component_race_hook("before_return", descriptor, component)
+            try:
+                opened = _require_exact_opened_component(
+                    descriptor, component, next_descriptor
+                )
+            except BaseException:
+                os.close(next_descriptor)
+                raise
+            _component_race_hook("before_advance", descriptor, component)
+            try:
+                opened = _require_exact_opened_component(
+                    descriptor, component, next_descriptor
+                )
+            except BaseException:
+                os.close(next_descriptor)
+                raise
             os.close(descriptor)
             descriptor = next_descriptor
             chain.append(
@@ -847,23 +893,70 @@ def render_commands_projection(entries: list[dict[str, Any]]) -> bytes:
     return "".join(lines).encode()
 
 
-def _safe_existing(path: Path) -> bytes | None:
+def _provenance_read_hook(stage: str, directory_fd: int, name: str) -> None:
+    del stage, directory_fd, name
+
+
+def _provenance_file_identity(opened: os.stat_result) -> tuple[int, ...]:
+    return (
+        opened.st_dev,
+        opened.st_ino,
+        opened.st_mode,
+        opened.st_size,
+        opened.st_mtime_ns,
+        opened.st_ctime_ns,
+        opened.st_uid,
+        opened.st_nlink,
+    )
+
+
+def _read_existing_at(directory_fd: int, name: str) -> bytes | None:
     try:
-        bound = read_bound_file(path)
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
     except FileNotFoundError:
         return None
-    if not stat.S_ISREG(bound.mode) or bound.links != 1:
-        raise RuntimeError("provenance artifact alias detected")
-    return bound.content
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise RuntimeError("provenance artifact alias detected")
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        _provenance_read_hook("after_read", directory_fd, name)
+        observed = os.fstat(descriptor)
+        linked = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        content = b"".join(chunks)
+        if (
+            _provenance_file_identity(observed) != _provenance_file_identity(opened)
+            or (linked.st_dev, linked.st_ino) != (opened.st_dev, opened.st_ino)
+            or len(content) != opened.st_size
+        ):
+            raise RuntimeError("provenance artifact changed")
+        return content
+    finally:
+        os.close(descriptor)
 
 
-def _atomic_replace(path: Path, content: bytes) -> None:
-    parent = _open_bound_working_directory(path.parent, path.parent)
-    directory = parent.descriptor
-    name = f".{path.name}.{secrets.token_hex(12)}.tmp"
+def _atomic_replace_at(directory_fd: int, target_name: str, content: bytes) -> None:
+    name = f".{target_name}.{secrets.token_hex(12)}.tmp"
     descriptor = None
     try:
-        descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=directory)
+        descriptor = os.open(
+            name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
         remaining = memoryview(content)
         while remaining:
             count = os.write(descriptor, remaining)
@@ -874,18 +967,30 @@ def _atomic_replace(path: Path, content: bytes) -> None:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
             raise RuntimeError("provenance temporary file is invalid")
-        os.replace(name, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+        os.replace(
+            name,
+            target_name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
         name = ""
-        os.fsync(directory)
+        os.fsync(directory_fd)
     finally:
         if descriptor is not None:
             os.close(descriptor)
         if name:
             try:
-                os.unlink(name, dir_fd=directory)
+                os.unlink(name, dir_fd=directory_fd)
             except FileNotFoundError:
                 pass
-        os.close(directory)
+
+
+def _unlink_if_exists_at(directory_fd: int, name: str) -> None:
+    try:
+        os.unlink(name, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return
+    os.fsync(directory_fd)
 
 
 def _open_provenance_lock(directory_fd: int, name: str) -> int:
@@ -904,23 +1009,37 @@ def _open_provenance_lock(directory_fd: int, name: str) -> int:
             return os.open(name, flags, dir_fd=directory_fd)
 
 
+def _require_bound_lock(directory_fd: int, name: str, lock_fd: int) -> None:
+    opened = os.fstat(lock_fd)
+    if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+        raise RuntimeError("provenance lock is invalid")
+    linked = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    if (linked.st_dev, linked.st_ino) != (opened.st_dev, opened.st_ino):
+        raise RuntimeError("provenance lock changed")
+
+
+def _provenance_transaction_hook(stage: str) -> None:
+    del stage
+
+
 def _commit_entry(provenance: Path, entry: dict[str, Any]) -> None:
     projection = provenance.with_suffix(".txt")
     if projection == provenance:
         raise ValueError("provenance projection path aliases JSONL")
     lock_path = provenance.with_name(f".{provenance.name}.lock")
     parent = _open_bound_working_directory(provenance.parent, provenance.parent)
+    lock_fd = None
     try:
+        _require_working_directory_unchanged(parent, require_ctime=False)
         lock_fd = _open_provenance_lock(parent.descriptor, lock_path.name)
-    finally:
-        os.close(parent.descriptor)
-    try:
-        opened_lock = os.fstat(lock_fd)
-        if not stat.S_ISREG(opened_lock.st_mode) or opened_lock.st_nlink != 1:
-            raise RuntimeError("provenance lock is invalid")
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        old_jsonl = _safe_existing(provenance)
-        old_projection = _safe_existing(projection)
+        _require_bound_lock(parent.descriptor, lock_path.name, lock_fd)
+        _provenance_transaction_hook("after_lock")
+        _require_working_directory_unchanged(parent, require_ctime=False)
+        _provenance_transaction_hook("before_read")
+        _require_working_directory_unchanged(parent, require_ctime=False)
+        old_jsonl = _read_existing_at(parent.descriptor, provenance.name)
+        old_projection = _read_existing_at(parent.descriptor, projection.name)
         entries = parse_provenance(old_jsonl or b"")
         expected_old_projection = render_commands_projection(entries)
         if (old_jsonl is None) != (old_projection is None) or (
@@ -933,37 +1052,60 @@ def _commit_entry(provenance: Path, entry: dict[str, Any]) -> None:
         next_jsonl = render_provenance(next_entries)
         next_projection = render_commands_projection(next_entries)
         try:
-            _atomic_replace(provenance, next_jsonl)
-            _atomic_replace(projection, next_projection)
-            if _safe_existing(provenance) != next_jsonl or _safe_existing(projection) != next_projection:
+            _require_bound_lock(parent.descriptor, lock_path.name, lock_fd)
+            _atomic_replace_at(parent.descriptor, provenance.name, next_jsonl)
+            _provenance_transaction_hook("after_jsonl_replace")
+            _atomic_replace_at(parent.descriptor, projection.name, next_projection)
+            _provenance_transaction_hook("after_projection_replace")
+            if (
+                _read_existing_at(parent.descriptor, provenance.name) != next_jsonl
+                or _read_existing_at(parent.descriptor, projection.name)
+                != next_projection
+            ):
                 raise RuntimeError("provenance projection is inconsistent")
+            _provenance_transaction_hook("post_publish")
+            _require_bound_lock(parent.descriptor, lock_path.name, lock_fd)
+            _require_working_directory_unchanged(parent, require_ctime=False)
         except BaseException:
+            _provenance_transaction_hook("before_rollback")
             if old_jsonl is None:
-                provenance.unlink(missing_ok=True)
+                _unlink_if_exists_at(parent.descriptor, provenance.name)
             else:
-                _atomic_replace(provenance, old_jsonl)
+                _atomic_replace_at(parent.descriptor, provenance.name, old_jsonl)
             if old_projection is None:
-                projection.unlink(missing_ok=True)
+                _unlink_if_exists_at(parent.descriptor, projection.name)
             else:
-                _atomic_replace(projection, old_projection)
+                _atomic_replace_at(parent.descriptor, projection.name, old_projection)
+            if (
+                _read_existing_at(parent.descriptor, provenance.name) != old_jsonl
+                or _read_existing_at(parent.descriptor, projection.name)
+                != old_projection
+            ):
+                raise RuntimeError("provenance rollback failed")
             raise
     finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
+        if lock_fd is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+        os.close(parent.descriptor)
 
 
 def _preflight_provenance(provenance: Path, command_id: str) -> None:
     projection = provenance.with_suffix(".txt")
     lock_path = provenance.with_name(f".{provenance.name}.lock")
     parent = _open_bound_working_directory(provenance.parent, provenance.parent)
+    lock_fd = None
     try:
+        _require_working_directory_unchanged(parent, require_ctime=False)
         lock_fd = _open_provenance_lock(parent.descriptor, lock_path.name)
-    finally:
-        os.close(parent.descriptor)
-    try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        old_jsonl = _safe_existing(provenance)
-        old_projection = _safe_existing(projection)
+        _require_bound_lock(parent.descriptor, lock_path.name, lock_fd)
+        _provenance_transaction_hook("preflight_after_lock")
+        _require_working_directory_unchanged(parent, require_ctime=False)
+        _provenance_transaction_hook("preflight_before_read")
+        _require_working_directory_unchanged(parent, require_ctime=False)
+        old_jsonl = _read_existing_at(parent.descriptor, provenance.name)
+        old_projection = _read_existing_at(parent.descriptor, projection.name)
         entries = parse_provenance(old_jsonl or b"")
         if (old_jsonl is None) != (old_projection is None) or (
             old_projection is not None and old_projection != render_commands_projection(entries)
@@ -971,9 +1113,13 @@ def _preflight_provenance(provenance: Path, command_id: str) -> None:
             raise ValueError("provenance projection is inconsistent")
         if any(item["commandId"] == command_id for item in entries):
             raise ValueError("duplicate command ID")
+        _require_bound_lock(parent.descriptor, lock_path.name, lock_fd)
+        _require_working_directory_unchanged(parent, require_ctime=False)
     finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
+        if lock_fd is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+        os.close(parent.descriptor)
 
 
 def execute_and_record(

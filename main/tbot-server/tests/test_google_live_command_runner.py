@@ -313,6 +313,93 @@ def test_case_output_parent_alias_is_rejected(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("component", "alias"),
+    [("safe", "SAFE"), ("k", "\u212a")],
+)
+def test_output_parent_alias_created_after_scan_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    component: str,
+    alias: str,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    def create_alias(stage: str, parent_fd: int, observed: str) -> None:
+        if stage == "after_scan" and observed == component:
+            os.mkdir(alias, dir_fd=parent_fd)
+
+    monkeypatch.setattr(runner, "_component_race_hook", create_alias)
+    with pytest.raises((ValueError, RuntimeError, OSError), match="aliases|component"):
+        runner._secure_materialize_directory(tmp_path, tmp_path / component)
+
+
+def test_output_parent_alias_winning_mkdir_eexist_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    real_mkdir = runner.os.mkdir
+
+    def alias_then_eexist(name, mode=0o777, *, dir_fd=None):
+        if name == "safe":
+            real_mkdir("SAFE", mode, dir_fd=dir_fd)
+            raise FileExistsError(name)
+        return real_mkdir(name, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(runner.os, "mkdir", alias_then_eexist)
+    with pytest.raises((ValueError, RuntimeError, OSError), match="aliases|component"):
+        runner._secure_materialize_directory(tmp_path, tmp_path / "safe")
+
+
+def test_output_parent_renamed_to_alias_after_open_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    (tmp_path / "safe").mkdir()
+
+    def rename_alias(stage: str, parent_fd: int, component: str) -> None:
+        if stage == "after_open" and component == "safe":
+            os.rename("safe", "SAFE", src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+
+    monkeypatch.setattr(runner, "_component_race_hook", rename_alias)
+    with pytest.raises((ValueError, RuntimeError, OSError), match="aliases|component"):
+        runner._secure_materialize_directory(tmp_path, tmp_path / "safe")
+
+
+def test_output_parent_renamed_after_validation_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    (tmp_path / "safe").mkdir()
+
+    def rename_alias(stage: str, parent_fd: int, component: str) -> None:
+        if stage == "before_return" and component == "safe":
+            os.rename("safe", "SAFE", src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+
+    monkeypatch.setattr(runner, "_component_race_hook", rename_alias)
+    with pytest.raises((ValueError, RuntimeError, OSError), match="aliases|component"):
+        runner._secure_materialize_directory(tmp_path, tmp_path / "safe")
+
+
+def test_output_parent_renamed_before_advancing_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    (tmp_path / "safe").mkdir()
+
+    def rename_alias(stage: str, parent_fd: int, component: str) -> None:
+        if stage == "before_advance" and component == "safe":
+            os.rename("safe", "SAFE", src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+
+    monkeypatch.setattr(runner, "_component_race_hook", rename_alias)
+    with pytest.raises((ValueError, RuntimeError, OSError), match="aliases|component"):
+        runner._secure_materialize_directory(tmp_path, tmp_path / "safe" / "nested")
+
+
 def test_unicode_output_parent_component_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="component"):
         execute_and_record(
@@ -342,6 +429,143 @@ def test_provenance_parent_symlink_does_not_create_lock_outside(tmp_path: Path) 
             provenance=linked / "commands.jsonl",
         )
     assert list(outside.iterdir()) == []
+
+
+def _second_provenance_entry(provenance: Path) -> dict:
+    entry = json.loads(provenance.read_text())
+    entry["commandId"] = "diagnostic.second"
+    entry["specSha256"] = "e" * 64
+    return entry
+
+
+@pytest.mark.parametrize("mutation", ["append", "hardlink"])
+def test_provenance_read_rejects_file_mutation_after_initial_stat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    artifact = tmp_path / "commands.jsonl"
+    artifact.write_bytes(b"original")
+
+    def mutate(stage: str, directory_fd: int, name: str) -> None:
+        if stage != "after_read":
+            return
+        if mutation == "append":
+            descriptor = os.open(name, os.O_WRONLY | os.O_APPEND, dir_fd=directory_fd)
+            try:
+                os.write(descriptor, b"changed")
+            finally:
+                os.close(descriptor)
+        else:
+            os.link(
+                name,
+                "commands.alias",
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+
+    monkeypatch.setattr(runner, "_provenance_read_hook", mutate)
+    directory_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(RuntimeError, match="artifact"):
+            runner._read_existing_at(directory_fd, artifact.name)
+    finally:
+        os.close(directory_fd)
+
+
+@pytest.mark.parametrize(
+    "swap_stage",
+    [
+        "after_lock",
+        "before_read",
+        "after_jsonl_replace",
+        "after_projection_replace",
+        "post_publish",
+    ],
+)
+def test_provenance_parent_swap_never_targets_replacement_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, swap_stage: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    parent = tmp_path / "evidence"
+    parent.mkdir()
+    provenance = parent / "commands.jsonl"
+    execute_and_record(_spec(parent, "pass", outputs=()), provenance=provenance)
+    entry = _second_provenance_entry(provenance)
+    original_jsonl = provenance.read_bytes()
+    original_projection = provenance.with_suffix(".txt").read_bytes()
+    moved = tmp_path / "moved-evidence"
+    swapped = False
+
+    def swap(stage: str) -> None:
+        nonlocal swapped
+        if stage == swap_stage and not swapped:
+            swapped = True
+            parent.rename(moved)
+            parent.mkdir()
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", swap)
+    with pytest.raises(RuntimeError, match="cwd changed"):
+        runner._commit_entry(provenance, entry)
+
+    assert list(parent.iterdir()) == []
+    assert (moved / "commands.jsonl").read_bytes() == original_jsonl
+    assert (moved / "commands.txt").read_bytes() == original_projection
+
+
+def test_provenance_rollback_remains_bound_after_parent_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    parent = tmp_path / "evidence"
+    parent.mkdir()
+    provenance = parent / "commands.jsonl"
+    execute_and_record(_spec(parent, "pass", outputs=()), provenance=provenance)
+    entry = _second_provenance_entry(provenance)
+    original_jsonl = provenance.read_bytes()
+    original_projection = provenance.with_suffix(".txt").read_bytes()
+    moved = tmp_path / "moved-evidence"
+
+    def fail_then_swap(stage: str) -> None:
+        if stage == "after_jsonl_replace":
+            raise ValueError("injected publish failure")
+        if stage == "before_rollback":
+            parent.rename(moved)
+            parent.mkdir()
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", fail_then_swap)
+    with pytest.raises(ValueError, match="injected publish failure"):
+        runner._commit_entry(provenance, entry)
+
+    assert list(parent.iterdir()) == []
+    assert (moved / "commands.jsonl").read_bytes() == original_jsonl
+    assert (moved / "commands.txt").read_bytes() == original_projection
+
+
+def test_provenance_preflight_rejects_parent_swap_after_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    parent = tmp_path / "evidence"
+    parent.mkdir()
+    provenance = parent / "commands.jsonl"
+    execute_and_record(_spec(parent, "pass", outputs=()), provenance=provenance)
+    moved = tmp_path / "moved-evidence"
+
+    def swap(stage: str) -> None:
+        if stage == "preflight_after_lock":
+            parent.rename(moved)
+            parent.mkdir()
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", swap)
+    with pytest.raises(RuntimeError, match="cwd changed"):
+        runner._preflight_provenance(provenance, "diagnostic.second")
+
+    assert list(parent.iterdir()) == []
 
 
 def test_parent_swap_during_secure_mkdir_never_mutates_outside(
