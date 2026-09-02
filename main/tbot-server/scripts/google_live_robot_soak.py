@@ -2965,13 +2965,13 @@ def build_candidate_journeys(args, *, protected_input=None):
             timeout = 2.0
         done, _pending = await asyncio.wait({task}, timeout=timeout)
         if task in done:
-            return task.result()
-        return None
+            task.result()
+            return True
+        return False
 
     async def cleanup_ambiguous_enrollment(
         post_task, journey_url, *, journey_id, journey_type
     ):
-        post_committed = False
         if post_task is not None:
             while not post_task.done():
                 try:
@@ -2983,19 +2983,15 @@ def build_candidate_journeys(args, *, protected_input=None):
             if post_task.done():
                 try:
                     post_task.result()
-                    post_committed = True
                 except BaseException:
                     pass
+        delete_ambiguous = False
         try:
             deleted = await _candidate_control_json(args, "DELETE", journey_url)
         except _EvidenceControlNotFound:
-            if not post_committed:
-                return
-            raise RuntimeError("candidate enrollment cleanup failed") from None
+            delete_ambiguous = True
         except BaseException:
-            if not post_committed:
-                return
-            raise RuntimeError("candidate enrollment cleanup failed") from None
+            delete_ambiguous = True
         expected = {
             "journeyId": journey_id,
             "journeyType": journey_type,
@@ -3003,13 +2999,15 @@ def build_candidate_journeys(args, *, protected_input=None):
             "status": "FAIL",
             "failureCode": "OPERATOR_CANCELLED",
         }
-        if (
+        if not delete_ambiguous and (
             not isinstance(deleted, Mapping)
             or any(deleted.get(key) != value for key, value in expected.items())
         ):
             raise RuntimeError("candidate enrollment cleanup failed")
         try:
             terminal = await _candidate_control_json(args, "GET", journey_url)
+        except _EvidenceControlNotFound:
+            return
         except BaseException:
             raise RuntimeError("candidate enrollment cleanup failed") from None
         if (
@@ -3234,7 +3232,7 @@ def build_candidate_journeys(args, *, protected_input=None):
                     ]
                 }
             return [combined] if name == "quiet_padding" else combined
-        except BaseException:
+        except BaseException as lifecycle_error:
             if semantic_key is not None:
                 sealed_plan.zeroize()
             if enrollment_attempted and not terminal_finalized:
@@ -3248,12 +3246,20 @@ def build_candidate_journeys(args, *, protected_input=None):
                     "google-live-candidate-enrollment-cleanup",
                 )
                 try:
-                    await asyncio.shield(wait_bounded(enrollment_cleanup_task))
+                    cleanup_complete = await asyncio.shield(
+                        wait_bounded(enrollment_cleanup_task)
+                    )
                 except asyncio.CancelledError:
-                    try:
-                        await wait_bounded(enrollment_cleanup_task)
-                    except BaseException:
-                        pass
+                    raise
+                except BaseException:
+                    if isinstance(lifecycle_error, asyncio.CancelledError):
+                        raise lifecycle_error
+                    raise
+                if (
+                    not cleanup_complete
+                    and not isinstance(lifecycle_error, asyncio.CancelledError)
+                ):
+                    raise RuntimeError("candidate enrollment cleanup failed")
             raise
 
     async def execute(_args, *, name, index, label=None, **_kwargs):

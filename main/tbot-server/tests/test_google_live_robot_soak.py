@@ -3532,9 +3532,9 @@ def test_candidate_failed_post_treats_delete_not_found_as_safe_cleanup(tmp_path)
         nonlocal deletes
         if method == "POST":
             raise RuntimeError("post did not commit")
-        if method == "DELETE":
+        if method in {"DELETE", "GET"}:
             deletes += 1
-            raise RuntimeError("not found")
+            raise robot_soak._EvidenceControlNotFound("not found")
         return {"status": "PASS"}
 
     args = _args(
@@ -3552,16 +3552,21 @@ def test_candidate_failed_post_treats_delete_not_found_as_safe_cleanup(tmp_path)
                 args, name="conversation", index=1
             )
         )
-    assert deletes == 1
+    assert deletes == 2
     assert not args.produce_candidate_evidence.exists()
 
 
 @pytest.mark.parametrize(
-    "case",
-    ("delete_failure", "malformed_delete", "get_identity_mismatch", "get_active"),
+    ("case", "expected_error"),
+    (
+        ("delete_failure", "journey failed"),
+        ("malformed_delete", "candidate enrollment cleanup failed"),
+        ("get_identity_mismatch", "candidate enrollment cleanup failed"),
+        ("get_active", "candidate enrollment cleanup failed"),
+    ),
 )
 def test_candidate_ambiguous_enrollment_cleanup_requires_verified_terminal_state(
-    tmp_path, case
+    tmp_path, case, expected_error
 ):
     journey_id = "candidate-soak.20260831T100000Z.1"
     terminal = {
@@ -3604,7 +3609,7 @@ def test_candidate_ambiguous_enrollment_cleanup_requires_verified_terminal_state
         candidate_journey_driver=driver,
     )
 
-    with pytest.raises(RuntimeError, match="candidate enrollment cleanup failed"):
+    with pytest.raises(RuntimeError, match=expected_error):
         asyncio.run(
             build_candidate_journeys(args)["conversation"](
                 args, name="conversation", index=1
@@ -3612,8 +3617,135 @@ def test_candidate_ambiguous_enrollment_cleanup_requires_verified_terminal_state
         )
 
     assert calls.count("DELETE") == 1
-    assert calls.count("GET") == (0 if case in {"delete_failure", "malformed_delete"} else 1)
+    assert calls.count("GET") == (0 if case == "malformed_delete" else 1)
     assert not args.produce_candidate_evidence.exists()
+
+
+@pytest.mark.parametrize(
+    ("get_case", "expected_error"),
+    (
+        ("active", "candidate enrollment cleanup failed"),
+        ("malformed", "candidate enrollment cleanup failed"),
+        ("mismatch", "candidate enrollment cleanup failed"),
+        ("terminal", "post response lost"),
+    ),
+)
+def test_candidate_post_commit_with_local_failure_always_reconciles_get(
+    tmp_path, get_case, expected_error
+):
+    journey_id = "candidate-soak.20260831T100000Z.1"
+    terminal = {
+        "journeyId": journey_id,
+        "journeyType": "conversation",
+        "proofProfile": "candidate-lifecycle",
+        "status": "FAIL",
+        "failureCode": "OPERATOR_CANCELLED",
+    }
+    registry = {journey_id: "ACTIVE"}
+    calls = []
+
+    async def control(method, _url, payload=None):
+        calls.append(method)
+        if method == "POST":
+            registry[payload["journeyId"]] = "ACTIVE"
+            raise RuntimeError("post response lost")
+        if method == "DELETE":
+            raise robot_soak._EvidenceControlNotFound("delete response ambiguous")
+        if method == "GET":
+            if get_case == "active":
+                return {**terminal, "status": "ACTIVE"}
+            if get_case == "malformed":
+                return {"status": "FAIL"}
+            if get_case == "mismatch":
+                return {**terminal, "journeyId": "other"}
+            registry[journey_id] = "FAIL"
+            return dict(terminal)
+        return {"status": "PASS"}
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=control,
+    )
+
+    with pytest.raises(RuntimeError, match=expected_error):
+        asyncio.run(
+            build_candidate_journeys(args)["conversation"](
+                args, name="conversation", index=1
+            )
+        )
+
+    assert calls.count("DELETE") == 1
+    assert calls.count("GET") == 1
+    if get_case == "terminal":
+        assert registry[journey_id] == "FAIL"
+
+
+def test_candidate_cleanup_timeout_is_explicit_and_reconciliation_stays_owned(
+    tmp_path
+):
+    delete_started = asyncio.Event()
+    release_delete = asyncio.Event()
+    terminal = {
+        "journeyId": "candidate-soak.20260831T100000Z.1",
+        "journeyType": "conversation",
+        "proofProfile": "candidate-lifecycle",
+        "status": "FAIL",
+        "failureCode": "OPERATOR_CANCELLED",
+    }
+
+    async def control(method, _url, payload=None):
+        if method == "POST":
+            return {"data": {"registered": True, "journeyId": payload["journeyId"]}}
+        if method == "DELETE":
+            delete_started.set()
+            await release_delete.wait()
+            return dict(terminal)
+        if method == "GET":
+            return dict(terminal)
+        return {"status": "PASS"}
+
+    async def driver(_args, **_context):
+        raise RuntimeError("journey failed")
+
+    args = _args(
+        run_id="20260831T100000Z",
+        produce_candidate_evidence=tmp_path / "evidence.json",
+        evidence_control_url="http://server.test",
+        device_id="aa:bb",
+        client_id="robot-client",
+        candidate_control_json=control,
+        candidate_journey_driver=driver,
+        cleanup_timeout_sec=0.01,
+    )
+
+    async def run():
+        with pytest.raises(RuntimeError, match="candidate enrollment cleanup failed"):
+            await build_candidate_journeys(args)["conversation"](
+                args, name="conversation", index=1
+            )
+        assert delete_started.is_set()
+        assert any(
+            task.get_name() == "google-live-candidate-enrollment-cleanup"
+            for task in robot_soak._OWNED_CLEANUP_TASKS
+        )
+        release_delete.set()
+        for _attempt in range(20):
+            if not any(
+                task.get_name() == "google-live-candidate-enrollment-cleanup"
+                for task in robot_soak._OWNED_CLEANUP_TASKS
+            ):
+                break
+            await asyncio.sleep(0)
+        assert not any(
+            task.get_name() == "google-live-candidate-enrollment-cleanup"
+            for task in robot_soak._OWNED_CLEANUP_TASKS
+        )
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(
