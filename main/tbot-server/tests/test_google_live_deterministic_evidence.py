@@ -1204,7 +1204,8 @@ def test_checked_in_runtime_manifest_pins_opus_python_and_native_runtime() -> No
 
 def test_runtime_manifest_rejects_missing_current_platform_variant() -> None:
     manifest = json.loads(PINNED_RUNTIME_MANIFEST)
-    manifest["platformVariants"][0]["key"] = "linux-x86_64-cp314"
+    variant = manifest["platformVariants"][0]
+    variant.update(key="linux-x86_64-cp314", system="linux", machine="x86_64")
     parsed = deterministic.parse_pytest_runtime_manifest(
         (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
     )
