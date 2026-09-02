@@ -1580,10 +1580,85 @@ def test_assignment_runtime_capsule_rejects_path_replacement(
     capsule.root.rmdir()
 
 
+def test_assignment_runtime_capsule_usable_rejects_swap_during_path_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capsule = gate.AssignmentRuntimeCapsule.create(())
+    moved = capsule.root.with_name(capsule.root.name + "-moved")
+    original_lookup = gate._directory_fd_path
+    original_remove = gate._remove_owned_tree
+    swapped = False
+
+    def swap_during_lookup(descriptor: int) -> Path | None:
+        nonlocal swapped
+        actual = original_lookup(descriptor)
+        if not swapped:
+            swapped = True
+            capsule.root.rename(moved)
+            capsule.root.mkdir(mode=0o700)
+        return actual
+
+    monkeypatch.setattr(gate, "_directory_fd_path", swap_during_lookup)
+    try:
+        assert capsule.usable() is False
+    finally:
+        monkeypatch.setattr(gate, "_directory_fd_path", original_lookup)
+        capsule.cleanup()
+        original_remove(moved, capsule.identity)
+        capsule.root.rmdir()
+
+
+def test_assignment_runtime_capsule_cleanup_reports_moved_owned_inode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capsule = gate.AssignmentRuntimeCapsule.create(())
+    moved = capsule.root.with_name(capsule.root.name + "-moved")
+    original_remove = gate._remove_owned_tree
+
+    def move_and_recreate(path: Path, _identity: tuple[int, int] | None) -> bool:
+        path.rename(moved)
+        path.mkdir(mode=0o700)
+        return False
+
+    monkeypatch.setattr(gate, "_remove_owned_tree", move_and_recreate)
+    try:
+        assert capsule.cleanup() is False
+        assert capsule.retained_path() == moved
+    finally:
+        monkeypatch.setattr(gate, "_remove_owned_tree", original_remove)
+        original_remove(moved, capsule.identity)
+        capsule.root.rmdir()
+
+
+def test_assignment_runtime_capsule_gc_closes_descriptor_and_removes_root() -> None:
+    capsule = gate.AssignmentRuntimeCapsule.create(())
+    root = capsule.root
+    identity = capsule.identity
+    descriptor = capsule.descriptor
+    assert descriptor is not None
+
+    del capsule
+    gc.collect()
+
+    try:
+        assert not root.exists()
+        with pytest.raises(OSError) as caught:
+            os.fstat(descriptor)
+        assert caught.value.errno == errno.EBADF
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        gate._remove_owned_tree(root, identity)
+
+
 def test_assignment_runtime_capsule_rejects_canonical_protected_overlap() -> None:
-    temporary_root = Path(tempfile.gettempdir())
+    canonical_temporary_root = Path(tempfile.gettempdir()).resolve()
+    temporary_root = Path("/var") / canonical_temporary_root.relative_to("/private/var")
+    assert temporary_root != canonical_temporary_root
+    assert temporary_root.resolve() == canonical_temporary_root
     before_roots = set(temporary_root.glob("course-mode-assignment-runtime-*"))
-    before_descriptors = len(os.listdir("/dev/fd"))
     unexpected: list[gate.AssignmentRuntimeCapsule] = []
     try:
         with pytest.raises(ValueError, match="assignment runtime overlaps protected path"):
@@ -1593,7 +1668,42 @@ def test_assignment_runtime_capsule_rejects_canonical_protected_overlap() -> Non
             capsule.cleanup()
 
     assert set(temporary_root.glob("course-mode-assignment-runtime-*")) == before_roots
-    assert len(os.listdir("/dev/fd")) == before_descriptors
+
+
+def test_assignment_runtime_capsule_post_open_failure_closes_exact_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roots: list[Path] = []
+    descriptors: list[int] = []
+    original_mkdtemp = gate.tempfile.mkdtemp
+
+    def record_mkdtemp(*args, **kwargs) -> str:
+        root = Path(original_mkdtemp(*args, **kwargs))
+        roots.append(root)
+        return str(root)
+
+    def fail_construction(
+        self,
+        root: Path,
+        identity: tuple[int, int],
+        descriptor: int,
+        *_args,
+        **_kwargs,
+    ) -> None:
+        descriptors.append(descriptor)
+        raise OSError("forced capsule construction failure")
+
+    monkeypatch.setattr(gate.tempfile, "mkdtemp", record_mkdtemp)
+    monkeypatch.setattr(gate.AssignmentRuntimeCapsule, "__init__", fail_construction)
+
+    with pytest.raises(OSError, match="forced capsule construction failure"):
+        gate.AssignmentRuntimeCapsule.create(())
+
+    assert len(descriptors) == 1
+    with pytest.raises(OSError) as caught:
+        os.fstat(descriptors[0])
+    assert caught.value.errno == errno.EBADF
+    assert roots and all(not root.exists() for root in roots)
 
 
 def test_lane_cleanup_removes_zero_mode_runtime_directories(

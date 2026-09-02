@@ -485,9 +485,20 @@ class AssignmentRuntimeCapsule:
     def usable(self) -> bool:
         if self.descriptor is None:
             return False
-        actual = _directory_fd_path(self.descriptor)
-        opened = os.fstat(self.descriptor)
-        return actual == self.root and (opened.st_dev, opened.st_ino) == self.identity
+        try:
+            before = _directory_fd_path(self.descriptor)
+            opened = os.fstat(self.descriptor)
+            named = self.root.lstat()
+            after = _directory_fd_path(self.descriptor)
+        except OSError:
+            return False
+        return (
+            before == self.root == after
+            and stat.S_ISDIR(opened.st_mode)
+            and (opened.st_dev, opened.st_ino) == self.identity
+            and stat.S_ISDIR(named.st_mode)
+            and (named.st_dev, named.st_ino) == self.identity
+        )
 
     def cleanup(self) -> bool:
         if self.descriptor is None:
@@ -501,9 +512,20 @@ class AssignmentRuntimeCapsule:
             return False
         removed = _remove_owned_tree(self.root, self.identity)
         if not removed:
-            self._retained_path = actual or _find_owned_tree(
-                self.root.parent, self.identity,
-            ) or self.root
+            retained = _directory_fd_path(self.descriptor)
+            try:
+                retained_metadata = retained.lstat() if retained is not None else None
+            except OSError:
+                retained_metadata = None
+            if (
+                retained_metadata is None
+                or not stat.S_ISDIR(retained_metadata.st_mode)
+                or (retained_metadata.st_dev, retained_metadata.st_ino) != self.identity
+            ):
+                retained = None
+            self._retained_path = (
+                retained or _find_owned_tree(self.root.parent, self.identity) or self.root
+            )
         os.close(self.descriptor)
         self.descriptor = None
         self._cleanup_succeeded = removed
@@ -511,6 +533,10 @@ class AssignmentRuntimeCapsule:
 
     def retained_path(self) -> Path:
         return self._retained_path or self.root
+
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self.cleanup()
 
 
 @dataclass(frozen=True)
