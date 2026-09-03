@@ -197,6 +197,13 @@ def test_release_rejects_invalid_dependency_closure(
     )
     assert verdict["status"] == "FAIL"
     assert any(item["code"] == "DETERMINISTIC_TRUSTED_MANIFEST_INVALID" for item in verdict["failures"])
+
+
+def test_command_spec_digest_binds_runtime_closure_identity() -> None:
+    entry = {"argv": [sys.executable, "scripts/google_live_smoke.py"], "commandId": "real_api.round_trip", "cwd": ".", "environmentSources": [], "terminalPolicy": {"expectedExitCodes": [0], "timeoutSec": 1.0, "cleanupGraceSec": 0.1}, "inputs": [], "outputs": [], "secretSources": [], "stdinSource": None}
+    first = release_gate._recorded_command_spec_digest(entry, "a" * 64)
+    second = release_gate._recorded_command_spec_digest(entry, "b" * 64)
+    assert first != second
 def _reports(test_count: int = len(CANONICAL_NODES)) -> dict[str, dict]:
     physical_audit = _PHYSICAL_CASE._candidate_audit(
         _PHYSICAL_CASE._candidate_physical_log()

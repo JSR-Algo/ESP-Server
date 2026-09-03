@@ -69,6 +69,7 @@ REQUIRED_LAYERS = (
 DETERMINISTIC_SUPPORTS = ("deterministic_manifest", "deterministic_junit")
 COMMAND_PROVENANCE_SUPPORT = "command_provenance"
 REQUIRED_SUPPORTS = (*DETERMINISTIC_SUPPORTS, COMMAND_PROVENANCE_SUPPORT)
+RUNTIME_CLOSURE_SUPPORT = "runtime_closure_manifest"
 REQUIRED_COMMAND_IDS = (
     "deterministic.produce",
     "real_api.round_trip",
@@ -354,7 +355,7 @@ def _trusted_command_specs(identity: Mapping[str, Any]) -> dict[str, TrustedComm
     }
 
 
-def _recorded_command_spec_digest(entry: Mapping[str, Any]) -> str:
+def _recorded_command_spec_digest(entry: Mapping[str, Any], runtime_closure_sha256: str | None = None) -> str:
     stable = {
         "argv": entry["argv"],
         "commandId": entry["commandId"],
@@ -369,8 +370,14 @@ def _recorded_command_spec_digest(entry: Mapping[str, Any]) -> str:
         "cleanupGraceSec": entry["terminalPolicy"]["cleanupGraceSec"],
         "executionPolicy": COMMAND_EXECUTION_POLICY,
     }
+    if runtime_closure_sha256 is not None:
+        stable["runtimeClosureSha256"] = runtime_closure_sha256
     canonical = json.dumps(stable, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _runtime_closure_digest(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
 
 
 def parse_trusted_python_executable_manifest(content: bytes) -> dict[str, Any]:
