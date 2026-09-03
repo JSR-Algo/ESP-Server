@@ -51,11 +51,18 @@ Expected: FAIL because the current implementation accepts only object type
 - [ ] **Step 3: Add fail-closed gitlink regressions while still RED**
 
 Cover: missing initialized submodule directory; absent pinned commit in the
-submodule object database; `.git` redirection away from the canonical
+submodule object database; symlinked or noncanonical submodule root; symlinked
+or non-regular `.git`; `.git` redirection away from the canonical
 `<esp-idf>/.git/modules/components/json/cJSON`; symlinked or non-directory
-canonical Git directory; and superproject entry mode/type pairs other than
-`040000 tree` or `160000 commit`. Each test expects
+canonical Git directory; group/world-writable root, `.git`, or Git directory;
+wrong effective UID for each of those three inputs; and superproject entry
+mode/type pairs other than `040000 tree` or `160000 commit`. Each test expects
 `ValueError("candidate archive failed")` and proves no stage directory remains.
+
+Also configure a fixture Git directory as a hostile promisor/partial-clone
+repository whose missing-object transport or helper would create a marker.
+Staging must fail without creating that marker, proving lazy object fetching is
+disabled.
 
 Run:
 
@@ -122,9 +129,15 @@ submodule_git_dir = source / ".git/modules/components/json/cJSON"
 Require the root and Git directory to be absolute canonical real directories,
 owned by the effective UID, and not group/world writable. Require `.git` to be
 a regular non-symlink file with the same owner/mode restrictions, parse it with
-a bounded read, and require its declared target to equal `submodule_git_dir`.
+a bounded read as exactly one `gitdir: <target>` record. Reject empty, absolute,
+NUL-containing, oversized, or extra-line values. Resolve the real relative
+form against `submodule_root`, the directory containing `.git`, then require
+the canonical result to equal `submodule_git_dir`.
 
-Use explicit `--git-dir=<submodule_git_dir>` after validation. Require
+Use explicit `--git-dir=<submodule_git_dir>` after validation. Pass an isolated
+Git environment containing `GIT_NO_LAZY_FETCH=1` to every object command and
+add `-c protocol.ext.allow=never` as defense-in-depth, so hostile local
+promisor/transport configuration cannot fetch or execute helpers. Require
 `<gitlink>^{commit}` to resolve exactly to the gitlink OID, resolve
 `<gitlink>^{tree}` to a lowercase 40-hex tree ID, require type `tree`, then call:
 
@@ -148,7 +161,7 @@ Run:
 ```bash
 /Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-production-readiness/python-test-runtime-standalone-v2/bin/python3.11 \
   -m pytest -q main/tbot-server/tests/test_course_mode_release_gate.py \
-  -k 'cjson_gitlink or firmware_handler or archive_repository'
+  -k 'cjson_gitlink or firmware_handler or git_archive or snapshot_uses_commit_object'
 ```
 
 Expected: all selected tree and gitlink tests pass with cleanup intact.
