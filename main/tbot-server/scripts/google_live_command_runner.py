@@ -14,6 +14,7 @@ import os
 import platform
 import re
 import secrets
+import selectors
 import signal
 import stat
 import subprocess
@@ -234,6 +235,7 @@ exec(compile(source, source_path, "exec"), namespace, namespace)
 _MAX_PYTHON_SOURCE_ARCHIVE_BYTES = 64 * 1024 * 1024
 _MAX_PYTHON_SOURCE_FILE_BYTES = 16 * 1024 * 1024
 _MAX_PYTHON_SOURCE_MEMBERS = 5000
+_RESOURCE_ARCHIVE_TIMEOUT_SEC = 30.0
 
 
 def _candidate_resource_archive_bound(manifest: Mapping[str, Any]) -> int:
@@ -274,22 +276,56 @@ def _load_candidate_resource_archive(
                  "LANG": "C", "LC_ALL": "C", "PATH": os.defpath},
         )
         output = bytearray()
+        deadline = time.monotonic() + _RESOURCE_ARCHIVE_TIMEOUT_SEC
         try:
             assert process.stdout is not None
-            while True:
-                chunk = process.stdout.read(1024 * 1024)
-                if not chunk:
-                    break
-                output.extend(chunk)
-                if len(output) > cap:
-                    process.kill()
-                    process.wait()
-                    raise ValueError("candidate resource archive exceeds bound")
-            if process.wait(timeout=30) != 0:
+            try:
+                descriptor = process.stdout.fileno()
+            except (AttributeError, io.UnsupportedOperation):
+                descriptor = None
+            if descriptor is None:
+                while True:
+                    chunk = process.stdout.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    output.extend(chunk)
+                    if len(output) > cap:
+                        process.kill()
+                        process.wait()
+                        raise ValueError("candidate resource archive exceeds bound")
+            else:
+                os.set_blocking(descriptor, False)
+                with selectors.DefaultSelector() as selector:
+                    selector.register(descriptor, selectors.EVENT_READ)
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0 or not selector.select(remaining):
+                            raise TimeoutError
+                        chunk = os.read(descriptor, min(1024 * 1024, cap + 1 - len(output)))
+                        if not chunk:
+                            break
+                        output.extend(chunk)
+                        if len(output) > cap:
+                            raise OverflowError
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            if process.wait(timeout=remaining) != 0:
                 raise ValueError("candidate resource archive is unavailable")
+        except OverflowError:
+            process.kill()
+            process.wait(timeout=1)
+            raise ValueError("candidate resource archive exceeds bound") from None
+        except TimeoutError:
+            process.kill()
+            process.wait(timeout=1)
+            raise ValueError("candidate resource archive timed out") from None
         except (OSError, subprocess.TimeoutExpired) as exc:
             process.kill()
-            process.wait()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
             raise ValueError("candidate resource archive is unavailable") from exc
         if _trusted_git_output(code_root, "rev-parse", "HEAD").decode().strip() != expected_git_sha:
             raise ValueError("candidate repository changed during resource validation")
@@ -307,6 +343,21 @@ def _materialize_candidate_resources(
     if len(expected) != len(manifest["resources"]):
         raise ValueError("candidate resource archive has duplicate paths")
     destination.mkdir(mode=0o700)
+    os.chmod(destination, 0o700)
+
+    def ensure_directory(parts: tuple[str, ...]) -> Path:
+        current = destination
+        for part in parts:
+            current /= part
+            try:
+                current.mkdir(mode=0o700)
+            except FileExistsError:
+                opened = current.lstat()
+                if stat.S_ISLNK(opened.st_mode) or not stat.S_ISDIR(opened.st_mode):
+                    raise ValueError("candidate resource archive is invalid")
+            os.chmod(current, 0o700, follow_symlinks=False)
+        return current
+
     seen: set[str] = set()
     seen_members: set[str] = set()
     allowed_directories = {
@@ -332,8 +383,7 @@ def _materialize_candidate_resources(
                 if member.isdir():
                     if canonical_name not in allowed_directories:
                         raise ValueError("candidate resource archive is invalid")
-                    target = destination.joinpath(*path.parts)
-                    target.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    ensure_directory(path.parts)
                     continue
                 if len(seen) >= int(limits["maxResourceCount"]):
                     raise ValueError("candidate resource archive exceeds bound")
@@ -353,10 +403,10 @@ def _materialize_candidate_resources(
                 data = source.read(member.size + 1)
                 if len(data) != member.size or hashlib.sha256(data).hexdigest() != item["sha256"]:
                     raise ValueError("candidate resource archive digest mismatch")
-                target = destination.joinpath(*path.parts)
-                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                target = ensure_directory(path.parts[:-1]) / path.name
                 descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o400)
                 try:
+                    os.fchmod(descriptor, 0o400)
                     offset = 0
                     while offset < len(data):
                         written = os.write(descriptor, data[offset:])

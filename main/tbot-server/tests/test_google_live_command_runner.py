@@ -119,6 +119,46 @@ def test_runtime_closure_manifest_parser_accepts_canonical_inventory() -> None:
     assert parsed["resources"][0]["path"] == "config/server.yaml"
 
 
+def test_checked_runtime_closure_inventory_covers_existing_approved_commands() -> None:
+    import scripts.google_live_command_runner as runner
+
+    server_root = Path(__file__).resolve().parents[1]
+    manifest = json.loads(
+        (server_root / "tests/fixtures/google_live_runtime_closure_manifest.json").read_text()
+    )
+    paths = {resource["path"] for resource in manifest["resources"]}
+    required = {
+        "main/tbot-server/scripts/google_live_deterministic_evidence.py",
+        "main/tbot-server/scripts/google_live_deterministic_nodeid_plugin.py",
+        "main/tbot-server/scripts/google_live_smoke.py",
+        "main/tbot-server/scripts/voice_mode_websocket_audio_bargein.py",
+        "main/tbot-server/scripts/analyze_google_live_log.py",
+        "main/tbot-server/scripts/google_live_robot_soak.py",
+        "main/tbot-server/core/voice/google_live/client.py",
+        "main/tbot-server/core/utils/opus_encoder_utils.py",
+        "main/tbot-server/config/config_loader.py",
+        "main/tbot-server/config/server.yaml",
+        "main/tbot-server/config/voice.yaml",
+        "main/tbot-server/tests/fixtures/google_live_pytest_runtime_manifest.json",
+        "main/tbot-server/tests/fixtures/tvideo_farm_audio/adult_speech_24k_mono.wav",
+        "main/tbot-server/tests/fixtures/tvideo_farm_audio/synthetic_speech_24k_mono.wav",
+    }
+    assert required <= paths
+    assert "main/tbot-server/scripts/google_live_physical_evidence.py" not in paths
+    assert runner.RUNTIME_CLOSURE_MANIFEST_GIT_PATH not in paths
+    for relative_script in (
+        "scripts/google_live_deterministic_evidence.py",
+        "scripts/google_live_smoke.py",
+        "scripts/voice_mode_websocket_audio_bargein.py",
+        "scripts/analyze_google_live_log.py",
+        "scripts/google_live_robot_soak.py",
+    ):
+        project_root = runner._candidate_snapshot_project_root(
+            Path("/snapshot"), manifest, relative_script
+        )
+        assert project_root == Path("/snapshot/main/tbot-server")
+
+
 @pytest.mark.parametrize(
     "mutate, message",
     [
@@ -342,6 +382,25 @@ def test_materialize_candidate_resources_uses_archived_bytes_and_verifies_digest
     assert (destination / "config.json").read_bytes() == content
 
 
+def test_materialize_candidate_resources_sets_exact_modes_despite_umask(
+    tmp_path: Path,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    content = b"candidate"
+    archive = _resource_archive([("nested/config.json", content, None)])
+    destination = tmp_path / "snapshot"
+    previous = os.umask(0o777)
+    try:
+        runner._materialize_candidate_resources(
+            archive, destination, _resource_manifest({"nested/config.json": content})
+        )
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE((destination / "nested" / "config.json").stat().st_mode) == 0o400
+    assert stat.S_IMODE((destination / "nested").stat().st_mode) == 0o500
+
+
 def test_materialize_candidate_resources_rejects_symlink_member(tmp_path: Path) -> None:
     import scripts.google_live_command_runner as runner
 
@@ -536,6 +595,35 @@ def test_resource_archive_stdout_is_hard_bounded(
     with pytest.raises(ValueError, match="exceeds bound"):
         runner._load_candidate_resource_archive(expected_sha, manifest, code_root=tmp_path)
     assert process.killed
+
+
+def test_resource_archive_partial_stdout_timeout_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import contextlib
+    from types import SimpleNamespace
+    import scripts.google_live_command_runner as runner
+
+    expected_sha = "a" * 40
+    identity = SimpleNamespace(path=Path("/usr/bin/git"))
+    monkeypatch.setattr(runner, "trusted_git_session", lambda: contextlib.nullcontext(identity))
+    monkeypatch.setattr(runner, "_trusted_git_output", lambda *_args: (expected_sha + "\n").encode())
+    monkeypatch.setattr(
+        runner,
+        "_trusted_git_command",
+        lambda *_args: [
+            sys.executable,
+            "-c",
+            "import sys,time;sys.stdout.buffer.write(b'x');sys.stdout.flush();time.sleep(1)",
+        ],
+    )
+    monkeypatch.setattr(runner, "_RESOURCE_ARCHIVE_TIMEOUT_SEC", 0.1, raising=False)
+    started = time.monotonic()
+    with pytest.raises(ValueError, match="timed out"):
+        runner._load_candidate_resource_archive(
+            expected_sha, _resource_manifest({"x": b"x"}), code_root=tmp_path
+        )
+    assert time.monotonic() - started < 0.5
 
 
 def test_executes_argv_and_records_only_secret_source(tmp_path: Path) -> None:
