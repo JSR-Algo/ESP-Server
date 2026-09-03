@@ -234,7 +234,7 @@ def test_checked_runtime_closure_manifest_parses() -> None:
         manifest_path.read_bytes(), platform_name="darwin-arm64-cp314"
     )
     assert {item["name"] for item in parsed["distributions"]} >= {
-        "numpy", "websockets", "PyYAML", "opuslib-next"
+        "numpy", "websockets", "PyYAML", "opuslib_next"
     }
 
 
@@ -919,6 +919,41 @@ def test_relative_python_script_preserves_candidate_runtime_dependencies(
 
     assert result.classification == "expected_exit"
     assert (tmp_path / "real-api" / "report.json").read_text() == pytest.__version__
+
+
+def test_git_bound_python_is_isolated_before_sitecustomize(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path.parent / f"{tmp_path.name}-sitecustomize-marker"
+    user_site = tmp_path / "userbase" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    user_site.mkdir(parents=True)
+    (user_site / "sitecustomize.py").write_text(
+        "import os\nfrom pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text(os.environ.get('GOOGLE_API_KEY', 'missing'))\n"
+    )
+    archive = _python_source_archive({"entry.py": "raise SystemExit(0)\n"})
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
+    original_child_environment = runner._child_environment
+    monkeypatch.setattr(
+        runner,
+        "_child_environment",
+        lambda spec, env: {
+            **original_child_environment(spec, env),
+            "PYTHONUSERBASE": str(tmp_path / "userbase"),
+            "PYTHONPATH": str(user_site),
+            "GOOGLE_API_KEY": "secret-sentinel",
+        },
+    )
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "expected_exit"
+    assert not marker.exists()
 
 
 def test_nested_python_script_executes_candidate_git_source(

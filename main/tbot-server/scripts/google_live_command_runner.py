@@ -171,7 +171,12 @@ if dependency_roots:
         __import__('sysconfig').get_paths()['stdlib'],
         __import__('sysconfig').get_paths()['platstdlib']]
 else:
-    sys.path[:] = [source_root, *[item for item in sys.path if item and item != original_root]]
+    site_paths = [__import__('sysconfig').get_paths()['purelib']]
+    try:
+        site_paths.append(__import__('site').getusersitepackages())
+    except Exception:
+        pass
+    sys.path[:] = [source_root, *site_paths, *[item for item in sys.path if item and item != original_root]]
 if dependency_roots:
     os.environ['PYTHONNOUSERSITE'] = '1'
 original_popen = subprocess.Popen
@@ -1528,6 +1533,9 @@ def _git_bound_python_argv(
     )
     return (
         runtime_argv[0],
+        "-I",
+        "-S",
+        "-B",
         *runtime_argv[1:script_index],
         str(bootstrap_path),
         str(source_root),
@@ -1821,6 +1829,9 @@ def _run_process(
         process = subprocess.Popen(
             [
                 sys.executable,
+                "-I",
+                "-S",
+                "-B",
                 "-c",
                 _FCHDIR_EXEC,
                 str(cwd_descriptor),
