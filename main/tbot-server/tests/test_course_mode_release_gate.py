@@ -24,6 +24,30 @@ import pytest
 gate = importlib.import_module("scripts.course_mode_release_gate")
 
 
+def _fixture_host_python() -> Path:
+    for candidate in (
+        Path("/Library/Frameworks/Python.framework/Versions/3.14/bin/python3"),
+        Path("/usr/local/bin/python3"),
+        Path("/usr/bin/python3"),
+        Path(sys.executable),
+    ):
+        if candidate.is_absolute() and candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    raise RuntimeError("no executable Python interpreter is available for fixture scripts")
+
+
+def test_fixture_host_python_is_stable_and_not_standalone_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    standalone = "/tmp/python-build-standalone/bin/python3.11"
+    monkeypatch.setattr(sys, "executable", standalone)
+    interpreter = _fixture_host_python()
+    assert interpreter.is_absolute()
+    assert interpreter.is_file() and os.access(interpreter, os.X_OK)
+    assert interpreter != Path(standalone)
+    assert interpreter == Path("/Library/Frameworks/Python.framework/Versions/3.14/bin/python3")
+
+
 _PLAYWRIGHT_SOURCE_PATHS = [
     "docs/docker/docker-compose.lesson-studio-e2e.yml",
     "docs/docker/lesson-studio-e2e/seed-postgres.sql",
@@ -480,11 +504,12 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             "root": str(bundle_root), "executable": str(executable.relative_to(bundle_root)),
             "treeDigest": bundle_tree,
         }
+    fixture_python = _fixture_host_python()
     docker = tmp_path / "docker"
     backend_ref = f"local/tbot-backend:course-mode-physical-tft-{repositories['backend']['sha']}"
     web_ref = f"local/tbot-server-web:course-mode-physical-tft-{repositories['adminEsp']['sha']}"
     docker.write_text(
-        f"#!{sys.executable}\nimport json,sys\n"
+        f"#!{fixture_python}\nimport json,sys\n"
         f"backend_source={repositories['backend']['remoteUrl']!r}\n"
         f"web_source={repositories['adminEsp']['remoteUrl']!r}\n"
         "if sys.argv[1:] == ['--version']: print('Docker version fixture'); sys.exit(0)\n"
@@ -499,7 +524,7 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(gate._manifest, "TRUSTED_DOCKER_EXECUTABLE", docker)
     compose = tmp_path / "docker-compose"
     compose.write_text(
-        f"#!{sys.executable}\nimport sys\n"
+        f"#!{fixture_python}\nimport sys\n"
         "print('Docker Compose version fixture') if sys.argv[1:] == ['version'] else sys.exit(0)\n",
         encoding="utf-8",
     )
@@ -560,7 +585,7 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     python_executable = python_root / "bin/python3.11"
     python_executable.parent.mkdir(parents=True)
     python_executable.write_text(
-        f"#!{sys.executable}\nimport json,os,pathlib,runpy,subprocess,sys\n"
+        f"#!{fixture_python}\nimport json,os,pathlib,runpy,subprocess,sys\n"
         "def attack():\n"
         " target=pathlib.Path(__file__).resolve().parents[1]; parent=target.parent\n"
         " target_mode=target.stat().st_mode & 0o7777; parent_mode=parent.stat().st_mode & 0o7777\n"
