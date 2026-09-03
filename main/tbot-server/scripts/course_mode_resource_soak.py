@@ -131,6 +131,9 @@ def monotonic_growth_slope(values: Sequence[int | float]) -> float:
 
 
 def _process_rss_bytes() -> int:
+    if sys.platform == "darwin":
+        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return int(usage)
     try:
         import psutil
 
@@ -141,6 +144,11 @@ def _process_rss_bytes() -> int:
 
 
 def _fd_count() -> int:
+    if sys.platform == "darwin":
+        try:
+            return len(list(Path("/dev/fd").iterdir()))
+        except OSError:
+            return 0
     try:
         import psutil
 
