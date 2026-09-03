@@ -13,6 +13,7 @@ import test_physical_smoke_audit as physical_fixture
 
 from scripts.analyze_google_live_log import correlate_websocket_bargein_evidence
 from scripts import google_live_release_gate as release_gate
+from scripts import google_live_robot_soak as robot_soak
 from scripts.google_live_release_gate import (
     RELEASE_SCHEMA_VERSION,
     REQUIRED_LAYERS,
@@ -62,14 +63,23 @@ def _planned_command_argv(
         "--firmware-identity", identity["firmwareIdentity"],
         "--fixture-sha256", identity["fixtureSha256"],
     )
+    soak_support = (
+        "--baseline-report", "<evidence:baseline/report.json>",
+        "--real-api-report", "<evidence:real-api/report.json>",
+        "--transport-report", "<evidence:websocket-e2e/transport.json>",
+        "--correlated-transport-report", "<evidence:websocket-e2e/report.json>",
+        "--log-reliability-report", "<evidence:server-regression/report.json>",
+        "--lesson-manifest", "<evidence:lesson-manifest.json>",
+        "--config-json", None,
+    )
     common = {
         "deterministic.produce": (sys.executable, "scripts/google_live_deterministic_evidence.py", "--manifest", "<evidence:deterministic/node-manifest.txt>", "--junit-out", "<evidence:deterministic/pytest.xml>", "--report", "<evidence:deterministic/report.json>", *candidate[:6], "--config-fingerprint", identity["configFingerprint"], *candidate[6:]),
         "real_api.round_trip": (sys.executable, "scripts/google_live_smoke.py", "--round-trip", "--audio-file", "<evidence:fixture.wav>", "--report", "<evidence:real-api/report.json>", *candidate[:6], "--config-fingerprint", identity["configFingerprint"], *candidate[6:]),
         "websocket.transport": (sys.executable, "scripts/voice_mode_websocket_audio_bargein.py", "--websocket-url", None, "--device-id", None, "--client-id", None, "--journey-id", None, *candidate[:6], "--config-json", None, *candidate[6:], "--report", "<evidence:websocket-e2e/transport.json>"),
         "websocket.log_analysis": (sys.executable, "scripts/analyze_google_live_log.py", "--log", None, "--reliability-window", "--journey-id", None, "--out-json", "<evidence:server-regression/report.json>"),
         "websocket.correlation": (sys.executable, "scripts/analyze_google_live_log.py", "--log", None, "--correlate-transport", "<evidence:websocket-e2e/transport.json>", "--expected-candidate-json", None, "--out-json", "<evidence:websocket-e2e/report.json>"),
-        "candidate_soak.produce": (sys.executable, "scripts/google_live_robot_soak.py", "--mode", "candidate", "--produce-candidate-evidence", "<evidence:candidate-soak/journey-evidence.json>", "--evidence-control-url", None, "--server-log", None, "--run-id", None, *candidate),
-        "candidate_soak.replay": (sys.executable, "scripts/google_live_robot_soak.py", "--mode", "candidate", "--journey-evidence", "<evidence:candidate-soak/journey-evidence.json>", "--report", "<evidence:candidate-soak/report.json>", *candidate),
+        "candidate_soak.produce": (sys.executable, "scripts/google_live_robot_soak.py", "--mode", "candidate", "--produce-candidate-evidence", "<evidence:candidate-soak/journey-evidence.json>", "--evidence-control-url", None, "--server-log", None, "--run-id", None, *soak_support, *candidate),
+        "candidate_soak.replay": (sys.executable, "scripts/google_live_robot_soak.py", "--mode", "candidate", "--journey-evidence", "<evidence:candidate-soak/journey-evidence.json>", "--report", "<evidence:candidate-soak/report.json>", *soak_support, *candidate),
         "physical.capture_and_audit": (sys.executable, "scripts/google_live_physical_evidence.py", "--candidate-soak-report", "<evidence:candidate-soak/report.json>", "--server-report", "<evidence:server-regression/report.json>", "--report", "<evidence:physical/report.json>", *candidate),
     }
     return common[command_id]
@@ -306,6 +316,21 @@ def _write_evidence(
         "label": "websocket-e2e/transport.json",
         "sha256": hashlib.sha256(transport.read_bytes()).hexdigest(),
     }
+    baseline = root / "baseline" / "report.json"
+    baseline.parent.mkdir()
+    baseline.write_text('{}\n', encoding="utf-8")
+    baseline_artifact = {"label": "baseline/report.json", "sha256": hashlib.sha256(baseline.read_bytes()).hexdigest()}
+    lesson = root / "lesson-manifest.json"
+    lesson.write_text('{}\n', encoding="utf-8")
+    lesson_artifact = {"label": "lesson-manifest.json", "sha256": hashlib.sha256(lesson.read_bytes()).hexdigest()}
+    soak_inputs = [
+        copy.deepcopy(baseline_artifact),
+        {"label": "real-api/report.json", "sha256": checksums["real_api"]},
+        copy.deepcopy(transport_artifact),
+        {"label": "websocket-e2e/report.json", "sha256": checksums["websocket_e2e"]},
+        {"label": "server-regression/report.json", "sha256": checksums["server_regression"]},
+        copy.deepcopy(lesson_artifact),
+    ]
     command_outputs = {
         "deterministic.produce": ("deterministic", "deterministic_manifest", "deterministic_junit"),
         "real_api.round_trip": ("real_api",),
@@ -333,7 +358,8 @@ def _write_evidence(
                 copy.deepcopy(transport_artifact),
                 {"label": "server-regression/report.json", "sha256": checksums["server_regression"]},
             ],
-            "candidate_soak.replay": [copy.deepcopy(journey_evidence_artifact)],
+            "candidate_soak.produce": copy.deepcopy(soak_inputs),
+            "candidate_soak.replay": [copy.deepcopy(journey_evidence_artifact), *copy.deepcopy(soak_inputs)],
             "physical.capture_and_audit": [
                 {"label": "candidate-soak/report.json", "sha256": checksums["candidate_soak"]}
             ],
@@ -363,7 +389,11 @@ def _write_evidence(
                 "stdinSource": (
                     "<stdin:protected_transcript_plan>"
                     if command_id == "physical.capture_and_audit"
-                    else None
+                    else (
+                        "<stdin:protected_candidate_plan>"
+                        if command_id == "candidate_soak.produce"
+                        else None
+                    )
                 ),
                 "terminalPolicy": {
                     "classification": "expected_exit",
@@ -458,9 +488,15 @@ def test_release_accepts_planned_immutable_command_specs(
         inputs=inputs,
         outputs=outputs,
         expected_exit_codes=(0,),
-        stdin_source="protected_transcript_plan"
-        if command_id == "physical.capture_and_audit"
-        else None,
+        stdin_source=(
+            "protected_transcript_plan"
+            if command_id == "physical.capture_and_audit"
+            else (
+                "protected_candidate_plan"
+                if command_id == "candidate_soak.produce"
+                else None
+            )
+        ),
         timeout_sec=300.0,
         cleanup_grace_sec=2.0,
     )
@@ -482,7 +518,29 @@ def test_release_accepts_planned_immutable_command_specs(
         },
     }
 
-    assert release_gate._command_matches_trusted_spec(emitted, trusted)
+    assert release_gate._command_matches_trusted_spec(emitted, trusted, PYTEST_RUNTIME)
+
+
+@pytest.mark.parametrize("command_id", ["candidate_soak.produce", "candidate_soak.replay"])
+def test_candidate_soak_contract_satisfies_actual_parser(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command_id: str,
+) -> None:
+    values = []
+    for value in _planned_command_argv(command_id)[2:]:
+        if value is None:
+            values.append("{}" if values[-1] == "--config-json" else "runtime-value")
+        elif value.startswith("<evidence:"):
+            values.append(str(tmp_path / value.removeprefix("<evidence:").removesuffix(">")))
+        else:
+            values.append(value)
+    if command_id == "candidate_soak.produce":
+        monkeypatch.setenv("TBOT_DEVICE_MINT_SECRET", "test-secret")
+    parser = robot_soak._build_argument_parser()
+    args = parser.parse_args(values)
+
+    robot_soak._validate_candidate_args(parser, args)
 
 
 @pytest.mark.parametrize("mutation", ["missing", "reordered", "diagnostic_substitution"])
@@ -544,6 +602,58 @@ def test_release_rejects_deviation_from_planned_command_chain(
 
     assert verdict["status"] == "FAIL"
     assert any(item["code"] == "COMMAND_PROVENANCE_INVALID" for item in verdict["failures"])
+
+
+def test_release_accepts_approved_interpreter_symlink(tmp_path: Path) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    interpreter = tmp_path / f"python{PYTEST_RUNTIME['pythonMajorMinor']}"
+    interpreter.symlink_to(sys.executable)
+    entries = [json.loads(line) for line in paths["command_provenance"].read_text().splitlines()]
+    for entry in entries:
+        entry["argv"][0] = str(interpreter)
+        entry["specSha256"] = release_gate._recorded_command_spec_digest(entry)
+    content = render_provenance(entries)
+    paths["command_provenance"].write_bytes(content)
+    checksums["command_provenance"] = hashlib.sha256(content).hexdigest()
+
+    assert aggregate_release_evidence(IDENTITY, paths, checksums)["status"] == "PASS"
+
+
+def test_release_rejects_foreign_venv_interpreter_with_same_runtime_binary(
+    tmp_path: Path,
+) -> None:
+    foreign_venv = tmp_path / "foreign-venv"
+    foreign_venv.mkdir()
+    (foreign_venv / "pyvenv.cfg").write_text("home = /untrusted\n", encoding="utf-8")
+    bin_dir = foreign_venv / "bin"
+    bin_dir.mkdir()
+    interpreter = bin_dir / f"python{PYTEST_RUNTIME['pythonMajorMinor']}"
+    interpreter.symlink_to(sys.executable)
+
+    assert not release_gate._approved_python_executable(
+        str(interpreter), PYTEST_RUNTIME
+    )
+
+
+def test_release_rejects_interpreter_when_runtime_version_does_not_match() -> None:
+    mismatched_runtime = copy.deepcopy(PYTEST_RUNTIME)
+    mismatched_runtime["pythonMajorMinor"] = "0.0"
+
+    assert not release_gate._approved_python_executable(
+        sys.executable, mismatched_runtime
+    )
+
+
+def test_release_rejects_unapproved_interpreter_substitution(tmp_path: Path) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    entries = [json.loads(line) for line in paths["command_provenance"].read_text().splitlines()]
+    entries[0]["argv"][0] = "/bin/sh"
+    entries[0]["specSha256"] = release_gate._recorded_command_spec_digest(entries[0])
+    content = render_provenance(entries)
+    paths["command_provenance"].write_bytes(content)
+    checksums["command_provenance"] = hashlib.sha256(content).hexdigest()
+
+    assert aggregate_release_evidence(IDENTITY, paths, checksums)["status"] == "FAIL"
 
 
 def test_release_rejects_fresh_digest_for_trusted_command_spec(tmp_path: Path) -> None:

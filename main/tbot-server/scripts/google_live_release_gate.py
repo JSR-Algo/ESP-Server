@@ -128,7 +128,7 @@ class TrustedCommandSpec:
 def _trusted_command_argv_patterns(
     identity: Mapping[str, Any],
 ) -> dict[str, tuple[str | None, ...]]:
-    python = sys.executable
+    python = None
     candidate = (
         "--candidate-git-sha",
         str(identity["gitSha"]),
@@ -138,6 +138,22 @@ def _trusted_command_argv_patterns(
         str(identity["firmwareIdentity"]),
         "--fixture-sha256",
         str(identity["fixtureSha256"]),
+    )
+    soak_support = (
+        "--baseline-report",
+        "<evidence:baseline/report.json>",
+        "--real-api-report",
+        "<evidence:real-api/report.json>",
+        "--transport-report",
+        "<evidence:websocket-e2e/transport.json>",
+        "--correlated-transport-report",
+        "<evidence:websocket-e2e/report.json>",
+        "--log-reliability-report",
+        "<evidence:server-regression/report.json>",
+        "--lesson-manifest",
+        "<evidence:lesson-manifest.json>",
+        "--config-json",
+        None,
     )
     return {
         "deterministic.produce": (
@@ -221,6 +237,7 @@ def _trusted_command_argv_patterns(
             None,
             "--run-id",
             None,
+            *soak_support,
             *candidate,
         ),
         "candidate_soak.replay": (
@@ -232,6 +249,7 @@ def _trusted_command_argv_patterns(
             "<evidence:candidate-soak/journey-evidence.json>",
             "--report",
             "<evidence:candidate-soak/report.json>",
+            *soak_support,
             *candidate,
         ),
         "physical.capture_and_audit": (
@@ -283,7 +301,23 @@ def _trusted_command_specs(identity: Mapping[str, Any]) -> dict[str, TrustedComm
                     "websocket-e2e/transport.json",
                     "server-regression/report.json",
                 ),
-                "candidate_soak.replay": ("candidate-soak/journey-evidence.json",),
+                "candidate_soak.produce": (
+                    "baseline/report.json",
+                    "real-api/report.json",
+                    "websocket-e2e/transport.json",
+                    "websocket-e2e/report.json",
+                    "server-regression/report.json",
+                    "lesson-manifest.json",
+                ),
+                "candidate_soak.replay": (
+                    "candidate-soak/journey-evidence.json",
+                    "baseline/report.json",
+                    "real-api/report.json",
+                    "websocket-e2e/transport.json",
+                    "websocket-e2e/report.json",
+                    "server-regression/report.json",
+                    "lesson-manifest.json",
+                ),
                 "physical.capture_and_audit": ("candidate-soak/report.json",),
             }.get(command_id, ()),
             output_labels=outputs[command_id],
@@ -294,9 +328,15 @@ def _trusted_command_specs(identity: Mapping[str, Any]) -> dict[str, TrustedComm
                 if command_id in mint_commands
                 else ()
             ),
-            stdin_source="<stdin:protected_transcript_plan>"
-            if command_id == "physical.capture_and_audit"
-            else None,
+            stdin_source=(
+                "<stdin:protected_transcript_plan>"
+                if command_id == "physical.capture_and_audit"
+                else (
+                    "<stdin:protected_candidate_plan>"
+                    if command_id == "candidate_soak.produce"
+                    else None
+                )
+            ),
             timeout_sec=300.0,
             cleanup_grace_sec=2.0,
         )
@@ -322,13 +362,50 @@ def _recorded_command_spec_digest(entry: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def _command_matches_trusted_spec(entry: Mapping[str, Any], spec: TrustedCommandSpec) -> bool:
+def _approved_python_executable(value: Any, runtime: Mapping[str, Any]) -> bool:
+    if (
+        type(value) is not str
+        or not Path(value).is_absolute()
+        or not isinstance(runtime, Mapping)
+    ):
+        return False
+    expected_version = runtime.get("pythonMajorMinor")
+    if (
+        type(expected_version) is not str
+        or expected_version != f"{sys.version_info.major}.{sys.version_info.minor}"
+        or runtime.get("pythonImplementation") != sys.implementation.name
+    ):
+        return False
+    allowed_names = {"python", "python3", f"python{expected_version}"}
+    if Path(value).name not in allowed_names:
+        return False
+    environment_root = Path(value).parent.parent
+    if (environment_root / "pyvenv.cfg").exists():
+        try:
+            if environment_root.resolve(strict=True) != Path(sys.prefix).resolve(strict=True):
+                return False
+        except OSError:
+            return False
+    try:
+        return Path(value).resolve(strict=True) == Path(sys.executable).resolve(strict=True)
+    except OSError:
+        return False
+
+
+def _command_matches_trusted_spec(
+    entry: Mapping[str, Any],
+    spec: TrustedCommandSpec,
+    runtime: Mapping[str, Any],
+) -> bool:
     terminal = entry["terminalPolicy"]
     return (
         len(entry["argv"]) == len(spec.argv_pattern)
+        and _approved_python_executable(entry["argv"][0], runtime)
         and all(
-            expected is None or actual == expected
-            for actual, expected in zip(entry["argv"], spec.argv_pattern, strict=True)
+            index == 0 or expected is None or actual == expected
+            for index, (actual, expected) in enumerate(
+                zip(entry["argv"], spec.argv_pattern, strict=True)
+            )
         )
         and entry["cwd"] == spec.cwd
         and entry["environmentSources"] == list(spec.environment_sources)
@@ -1121,7 +1198,9 @@ def aggregate_release_evidence(
         by_id = {entry["commandId"]: entry for entry in required}
         trusted_specs = _trusted_command_specs(expected_identity)
         if any(
-            not _command_matches_trusted_spec(by_id[command_id], trusted_specs[command_id])
+            not _command_matches_trusted_spec(
+                by_id[command_id], trusted_specs[command_id], trusted_runtime
+            )
             for command_id in REQUIRED_COMMAND_IDS
         ):
             raise ValueError
@@ -1144,10 +1223,15 @@ def aggregate_release_evidence(
                 raise ValueError
         producer_outputs = by_id["candidate_soak.produce"]["outputs"]
         replay_inputs = by_id["candidate_soak.replay"]["inputs"]
+        journey_inputs = [
+            item
+            for item in replay_inputs
+            if item["label"] == "candidate-soak/journey-evidence.json"
+        ]
         if (
             len(producer_outputs) != 1
-            or len(replay_inputs) != 1
-            or producer_outputs != replay_inputs
+            or len(journey_inputs) != 1
+            or producer_outputs != journey_inputs
             or producer_outputs[0]["label"] != "candidate-soak/journey-evidence.json"
             or producer_outputs[0] == artifact_by_name["candidate_soak"]
             or artifact_by_name["candidate_soak"] in replay_inputs
@@ -1171,7 +1255,11 @@ def aggregate_release_evidence(
             expected_stdin = (
                 "<stdin:protected_transcript_plan>"
                 if command_id == "physical.capture_and_audit"
-                else None
+                else (
+                    "<stdin:protected_candidate_plan>"
+                    if command_id == "candidate_soak.produce"
+                    else None
+                )
             )
             if (
                 by_id[command_id]["secretSources"] != expected_secrets

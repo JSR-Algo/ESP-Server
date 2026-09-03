@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import fcntl
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -37,6 +39,7 @@ _MAX_PROVENANCE_ARTIFACT_BYTES = 16 * 1024 * 1024
 _MAX_GENERATION_FILES = 1024
 PAIR_SCHEMA = "google-live-command-provenance-pair.v1"
 PENDING_SCHEMA = "google-live-command-provenance-pending.v1"
+GENERATION_TOMBSTONE_SCHEMA = "google-live-command-provenance-tombstone.v1"
 GENERATION_ID = re.compile(r"[0-9a-f]{32}")
 GENERATION_FILE = re.compile(r"([0-9a-f]{32})\.(?:jsonl|txt)")
 GENERATION_QUARANTINE = re.compile(
@@ -160,7 +163,11 @@ class CommandSpec:
             raise ValueError("timeout must be positive")
         if type(self.cleanup_grace_sec) not in {int, float} or self.cleanup_grace_sec < 0:
             raise ValueError("cleanup grace must be non-negative")
-        if self.stdin_source not in {None, "protected_transcript_plan"}:
+        if self.stdin_source not in {
+            None,
+            "protected_transcript_plan",
+            "protected_candidate_plan",
+        }:
             raise ValueError("stdin source is invalid")
         cwd = Path.cwd() if self.cwd is None else self.cwd
         if not isinstance(cwd, Path) or not cwd.is_absolute():
@@ -939,7 +946,11 @@ def validate_provenance_entries(entries: Any) -> list[dict[str, Any]]:
                 raise ValueError("provenance source is invalid")
         if set(entry["environmentSources"]) & set(entry["secretSources"]):
             raise ValueError("provenance source is invalid")
-        if entry.get("stdinSource") not in {None, "<stdin:protected_transcript_plan>"}:
+        if entry.get("stdinSource") not in {
+            None,
+            "<stdin:protected_transcript_plan>",
+            "<stdin:protected_candidate_plan>",
+        }:
             raise ValueError("provenance stdin source is invalid")
         for field in ("inputs", "outputs"):
             artifacts = entry.get(field)
@@ -1392,12 +1403,34 @@ def _pending_generation_name(jsonl_name: str) -> str:
     return f".{jsonl_name}.pending"
 
 
-def _render_pending_generation(generation: str) -> bytes:
+def _render_pending_generation(
+    generation: str,
+    artifacts: Mapping[str, PublishedArtifact | None] | None = None,
+) -> bytes:
     if type(generation) is not str or GENERATION_ID.fullmatch(generation) is None:
         raise ValueError("provenance pending generation is invalid")
+    owned = {"jsonl": None, "txt": None} if artifacts is None else dict(artifacts)
+    if set(owned) != {"jsonl", "txt"}:
+        raise ValueError("provenance pending generation is invalid")
+    rendered = {}
+    for suffix, artifact in owned.items():
+        if artifact is None:
+            rendered[suffix] = None
+        elif isinstance(artifact, PublishedArtifact):
+            rendered[suffix] = {
+                "device": artifact.device,
+                "inode": artifact.inode,
+                "sha256": artifact.digest,
+            }
+        else:
+            raise ValueError("provenance pending generation is invalid")
     return (
         json.dumps(
-            {"generation": generation, "schemaVersion": PENDING_SCHEMA},
+            {
+                "artifacts": rendered,
+                "generation": generation,
+                "schemaVersion": PENDING_SCHEMA,
+            },
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -1405,19 +1438,42 @@ def _render_pending_generation(generation: str) -> bytes:
     ).encode()
 
 
-def _parse_pending_generation(content: bytes) -> str:
+def _parse_pending_generation(
+    content: bytes,
+) -> tuple[str, dict[str, PublishedArtifact | None]]:
     try:
         value = json.loads(content)
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise ValueError("provenance pending generation is invalid") from exc
     if (
         not isinstance(value, dict)
-        or set(value) != {"generation", "schemaVersion"}
+        or set(value) != {"artifacts", "generation", "schemaVersion"}
         or value.get("schemaVersion") != PENDING_SCHEMA
-        or _render_pending_generation(value.get("generation")) != content
+        or not isinstance(value.get("artifacts"), dict)
+        or set(value["artifacts"]) != {"jsonl", "txt"}
     ):
         raise ValueError("provenance pending generation is invalid")
-    return value["generation"]
+    artifacts = {}
+    for suffix, artifact in value["artifacts"].items():
+        if artifact is None:
+            artifacts[suffix] = None
+        elif (
+            isinstance(artifact, dict)
+            and set(artifact) == {"device", "inode", "sha256"}
+            and type(artifact.get("device")) is int
+            and type(artifact.get("inode")) is int
+            and type(artifact.get("sha256")) is str
+            and SHA256.fullmatch(artifact["sha256"]) is not None
+        ):
+            artifacts[suffix] = PublishedArtifact(
+                artifact["device"], artifact["inode"], artifact["sha256"]
+            )
+        else:
+            raise ValueError("provenance pending generation is invalid")
+    generation = value.get("generation")
+    if _render_pending_generation(generation, artifacts) != content:
+        raise ValueError("provenance pending generation is invalid")
+    return generation, artifacts
 
 
 def _open_generation_directory(
@@ -1656,6 +1712,7 @@ def _create_generation_pair_at(
 ) -> tuple[PairPointer, bytes]:
     generation = secrets.token_hex(16)
     generation_fd = _open_generation_directory(directory_fd, jsonl_name)
+    artifacts: dict[str, PublishedArtifact | None] = {"jsonl": None, "txt": None}
     try:
         _atomic_replace_at(
             directory_fd,
@@ -1663,8 +1720,32 @@ def _create_generation_pair_at(
             _render_pending_generation(generation),
         )
         _write_generation_at(generation_fd, f"{generation}.jsonl", jsonl)
+        _provenance_transaction_hook("after_generation_jsonl_before_journal")
+        jsonl_snapshot = _read_existing_snapshot_at(
+            generation_fd, f"{generation}.jsonl"
+        )
+        if jsonl_snapshot is None:
+            raise RuntimeError("provenance generation changed")
+        artifacts["jsonl"] = jsonl_snapshot.version
+        _atomic_replace_at(
+            directory_fd,
+            _pending_generation_name(jsonl_name),
+            _render_pending_generation(generation, artifacts),
+        )
         _provenance_transaction_hook("after_generation_jsonl")
         _write_generation_at(generation_fd, f"{generation}.txt", projection)
+        _provenance_transaction_hook("after_generation_projection_before_journal")
+        projection_snapshot = _read_existing_snapshot_at(
+            generation_fd, f"{generation}.txt"
+        )
+        if projection_snapshot is None:
+            raise RuntimeError("provenance generation changed")
+        artifacts["txt"] = projection_snapshot.version
+        _atomic_replace_at(
+            directory_fd,
+            _pending_generation_name(jsonl_name),
+            _render_pending_generation(generation, artifacts),
+        )
         _provenance_transaction_hook("after_generation_projection")
         os.fsync(generation_fd)
         _unlink_if_exists_at(directory_fd, _pending_generation_name(jsonl_name))
@@ -1693,40 +1774,6 @@ def _generation_quarantine_name(name: str, snapshot: PointerFileSnapshot) -> str
     )
 
 
-def _restore_quarantined_generation_at(
-    directory_fd: int,
-    quarantine: str,
-    original: str,
-) -> None:
-    snapshot = _read_existing_snapshot_at(directory_fd, quarantine)
-    if snapshot is None:
-        return
-    try:
-        os.link(
-            quarantine,
-            original,
-            src_dir_fd=directory_fd,
-            dst_dir_fd=directory_fd,
-            follow_symlinks=False,
-        )
-    except FileExistsError:
-        return
-    quarantine_stat = os.stat(
-        quarantine, dir_fd=directory_fd, follow_symlinks=False
-    )
-    original_stat = os.stat(original, dir_fd=directory_fd, follow_symlinks=False)
-    if (
-        (quarantine_stat.st_dev, quarantine_stat.st_ino)
-        != (snapshot.version.device, snapshot.version.inode)
-        or (original_stat.st_dev, original_stat.st_ino)
-        != (snapshot.version.device, snapshot.version.inode)
-        or quarantine_stat.st_nlink != 2
-        or original_stat.st_nlink != 2
-    ):
-        raise RuntimeError("provenance generation restore changed")
-    os.unlink(quarantine, dir_fd=directory_fd)
-
-
 def _generation_snapshot_identity_matches(
     observed: PointerFileSnapshot | None, expected: PointerFileSnapshot
 ) -> bool:
@@ -1739,14 +1786,128 @@ def _generation_snapshot_identity_matches(
     )
 
 
-def _unlink_generation_snapshot_at(
-    directory_fd: int, name: str, expected: PointerFileSnapshot
+def _rename_noreplace_at(
+    directory_fd: int, source: str, destination: str
 ) -> None:
-    if not _generation_snapshot_identity_matches(
-        _read_existing_snapshot_at(directory_fd, name), expected
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    if sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
+        result = libc.renameatx_np(
+            directory_fd,
+            source_bytes,
+            directory_fd,
+            destination_bytes,
+            0x00000004,
+        )
+    elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        result = libc.renameat2(
+            directory_fd,
+            source_bytes,
+            directory_fd,
+            destination_bytes,
+            0x00000001,
+        )
+    else:
+        raise RuntimeError("atomic no-replace rename is unavailable")
+    if result != 0:
+        error = ctypes.get_errno()
+        if error == errno.EEXIST:
+            raise FileExistsError(error, os.strerror(error), destination)
+        raise OSError(error, os.strerror(error), destination)
+
+
+def _render_generation_tombstone(artifact: PublishedArtifact) -> bytes:
+    return (
+        json.dumps(
+            {
+                "device": artifact.device,
+                "inode": artifact.inode,
+                "schemaVersion": GENERATION_TOMBSTONE_SCHEMA,
+                "sha256": artifact.digest,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
+
+
+def _generation_tombstone_matches(
+    snapshot: PointerFileSnapshot | None, artifact: PublishedArtifact
+) -> bool:
+    return snapshot is not None and (
+        snapshot.version.device == artifact.device
+        and snapshot.version.inode == artifact.inode
+        and snapshot.content == _render_generation_tombstone(artifact)
+        and stat.S_ISREG(snapshot.identity[2])
+        and stat.S_IMODE(snapshot.identity[2]) == 0o400
+        and snapshot.identity[6] == os.geteuid()
+        and snapshot.identity[7] == 1
+    )
+
+
+def _generation_quarantine_inode_is_owned(
+    snapshot: PointerFileSnapshot | None, artifact: PublishedArtifact
+) -> bool:
+    return snapshot is not None and (
+        snapshot.version.device == artifact.device
+        and snapshot.version.inode == artifact.inode
+        and stat.S_ISREG(snapshot.identity[2])
+        and stat.S_IMODE(snapshot.identity[2]) in {0o400, 0o600}
+        and snapshot.identity[6] == os.geteuid()
+        and snapshot.identity[7] == 1
+    )
+
+
+def _compact_generation_quarantine_at(
+    directory_fd: int,
+    quarantine: str,
+    expected: PointerFileSnapshot,
+) -> None:
+    readonly = os.open(
+        quarantine,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=directory_fd,
+    )
+    writable = None
+    try:
+        opened = os.fstat(readonly)
+        if (opened.st_dev, opened.st_ino) != (
+            expected.version.device,
+            expected.version.inode,
+        ):
+            raise RuntimeError("provenance generation changed before compaction")
+        os.fchmod(readonly, 0o600)
+        writable = os.open(
+            quarantine,
+            os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+        rebound = os.fstat(writable)
+        if (rebound.st_dev, rebound.st_ino) != (
+            expected.version.device,
+            expected.version.inode,
+        ):
+            raise RuntimeError("provenance generation changed during compaction")
+        content = _render_generation_tombstone(expected.version)
+        os.ftruncate(writable, 0)
+        remaining = memoryview(content)
+        while remaining:
+            count = os.write(writable, remaining)
+            if count <= 0:
+                raise OSError("provenance generation compaction failed")
+            remaining = remaining[count:]
+        os.fsync(writable)
+        os.fchmod(writable, 0o400)
+    finally:
+        if writable is not None:
+            os.close(writable)
+        os.close(readonly)
+    if not _generation_tombstone_matches(
+        _read_existing_snapshot_at(directory_fd, quarantine), expected.version
     ):
-        raise RuntimeError("provenance generation changed before unlink")
-    os.unlink(name, dir_fd=directory_fd)
+        raise RuntimeError("provenance generation changed after compaction")
 
 
 def _remove_generation_snapshot_at(
@@ -1755,28 +1916,41 @@ def _remove_generation_snapshot_at(
     expected: PointerFileSnapshot,
     *,
     hook_stage: str,
+    before_rename: Any | None = None,
+    after_rename: Any | None = None,
 ) -> None:
+    def require_safe_after_rename() -> None:
+        if after_rename is None:
+            return
+        try:
+            after_rename()
+        except BaseException:
+            observed = _read_existing_snapshot_at(directory_fd, quarantine)
+            if not _generation_snapshot_identity_matches(observed, expected):
+                raise RuntimeError(
+                    "provenance generation changed before rollback"
+                )
+            _rename_noreplace_at(directory_fd, quarantine, name)
+            raise
+
     quarantine = _generation_quarantine_name(name, expected)
     _generation_cleanup_hook(hook_stage, name)
-    os.rename(
-        name,
-        quarantine,
-        src_dir_fd=directory_fd,
-        dst_dir_fd=directory_fd,
-    )
+    if before_rename is not None:
+        before_rename()
+    _rename_noreplace_at(directory_fd, name, quarantine)
     after_stage = hook_stage.replace("_before_remove", "_after_quarantine")
     _generation_cleanup_hook(after_stage, name)
+    require_safe_after_rename()
     observed = _read_existing_snapshot_at(directory_fd, quarantine)
     if not _generation_snapshot_identity_matches(observed, expected):
-        _restore_quarantined_generation_at(directory_fd, quarantine, name)
         raise RuntimeError("provenance generation changed during cleanup")
-    before_unlink_stage = hook_stage.replace("_before_remove", "_before_unlink")
-    _generation_cleanup_hook(before_unlink_stage, name)
-    try:
-        _unlink_generation_snapshot_at(directory_fd, quarantine, expected)
-    except BaseException:
-        _restore_quarantined_generation_at(directory_fd, quarantine, name)
-        raise
+    _generation_cleanup_hook("generation_after_validation", name)
+    require_safe_after_rename()
+    if not _generation_snapshot_identity_matches(
+        _read_existing_snapshot_at(directory_fd, quarantine), expected
+    ):
+        raise RuntimeError("provenance generation changed after cleanup")
+    _compact_generation_quarantine_at(directory_fd, quarantine, expected)
 
 
 def _recover_generation_quarantines_at(
@@ -1791,12 +1965,38 @@ def _recover_generation_quarantines_at(
         if _read_existing_snapshot_at(generation_fd, original) is not None:
             raise RuntimeError("provenance generation recovery is ambiguous")
         snapshot = _read_existing_snapshot_at(generation_fd, name)
-        if snapshot is None or snapshot.version != PublishedArtifact(
-            int(device), int(inode), digest
-        ):
+        artifact = PublishedArtifact(int(device), int(inode), digest)
+        if snapshot is None:
             raise RuntimeError("provenance generation changed during recovery")
-        _generation_cleanup_hook("pending_quarantine_before_unlink", original)
-        _unlink_generation_snapshot_at(generation_fd, name, snapshot)
+        if snapshot.version == artifact:
+            _compact_generation_quarantine_at(generation_fd, name, snapshot)
+        elif _generation_quarantine_inode_is_owned(snapshot, artifact):
+            _compact_generation_quarantine_at(
+                generation_fd,
+                name,
+                PointerFileSnapshot(snapshot.content, artifact, snapshot.identity),
+            )
+        elif not _generation_tombstone_matches(snapshot, artifact):
+            raise RuntimeError("provenance generation changed during recovery")
+        _generation_cleanup_hook("pending_quarantine_after_validation", original)
+
+
+def _require_pending_generation_uncommitted_at(
+    directory_fd: int,
+    jsonl_name: str,
+    generation: str,
+    expected_pointer: PointerFileSnapshot | None,
+) -> None:
+    current = _read_pair_pointer_snapshot_at(
+        directory_fd, _pair_pointer_name(jsonl_name)
+    )
+    if current != expected_pointer:
+        if (
+            current is not None
+            and _parse_pair_pointer(current.content).generation == generation
+        ):
+            raise RuntimeError("provenance pending generation is committed")
+        raise RuntimeError("provenance pair pointer changed during recovery")
 
 
 def _recover_pending_generation_at(directory_fd: int, jsonl_name: str) -> None:
@@ -1804,7 +2004,7 @@ def _recover_pending_generation_at(directory_fd: int, jsonl_name: str) -> None:
     pending = _read_pair_pointer_snapshot_at(directory_fd, pending_name)
     if pending is None:
         return
-    generation = _parse_pending_generation(pending.content)
+    generation, owned_artifacts = _parse_pending_generation(pending.content)
     pointer_snapshot = _read_pair_pointer_snapshot_at(
         directory_fd, _pair_pointer_name(jsonl_name)
     )
@@ -1821,8 +2021,11 @@ def _recover_pending_generation_at(directory_fd: int, jsonl_name: str) -> None:
         for suffix in ("jsonl", "txt"):
             name = f"{generation}.{suffix}"
             snapshot = _read_existing_snapshot_at(generation_fd, name)
+            owned = owned_artifacts[suffix]
             if snapshot is not None and (
-                stat.S_IMODE(snapshot.identity[2]) != 0o400
+                owned is None
+                or snapshot.version != owned
+                or stat.S_IMODE(snapshot.identity[2]) != 0o400
                 or snapshot.identity[6] != os.geteuid()
             ):
                 raise RuntimeError("provenance pending generation is invalid")
@@ -1834,6 +2037,18 @@ def _recover_pending_generation_at(directory_fd: int, jsonl_name: str) -> None:
                     name,
                     snapshot,
                     hook_stage="pending_before_remove",
+                    before_rename=lambda: _require_pending_generation_uncommitted_at(
+                        directory_fd,
+                        jsonl_name,
+                        generation,
+                        pointer_snapshot,
+                    ),
+                    after_rename=lambda: _require_pending_generation_uncommitted_at(
+                        directory_fd,
+                        jsonl_name,
+                        generation,
+                        pointer_snapshot,
+                    ),
                 )
                 removed = True
         if removed:
@@ -1842,6 +2057,9 @@ def _recover_pending_generation_at(directory_fd: int, jsonl_name: str) -> None:
         os.close(generation_fd)
     if _read_pair_pointer_snapshot_at(directory_fd, pending_name) != pending:
         raise RuntimeError("provenance pending generation changed")
+    _require_pending_generation_uncommitted_at(
+        directory_fd, jsonl_name, generation, pointer_snapshot
+    )
     _unlink_if_exists_at(directory_fd, pending_name)
 
 
@@ -1851,15 +2069,26 @@ def _cleanup_generations_at(
     generation_fd = _open_generation_directory(directory_fd, jsonl_name)
     try:
         names = os.listdir(generation_fd)
-        if len(names) > _MAX_GENERATION_FILES:
-            raise RuntimeError("provenance generation inventory is too large")
+        generation_file_count = 0
         inventory: dict[str, set[str]] = {}
         for name in names:
             match = GENERATION_FILE.fullmatch(name)
             if match is None:
-                raise RuntimeError("provenance generation inventory is invalid")
+                quarantine = GENERATION_QUARANTINE.fullmatch(name)
+                if quarantine is None:
+                    raise RuntimeError("provenance generation inventory is invalid")
+                _generation, _suffix, device, inode, digest = quarantine.groups()
+                snapshot = _read_existing_snapshot_at(generation_fd, name)
+                if not _generation_tombstone_matches(
+                    snapshot, PublishedArtifact(int(device), int(inode), digest)
+                ):
+                    raise RuntimeError("provenance generation inventory is invalid")
+                continue
+            generation_file_count += 1
             generation, suffix = name.rsplit(".", 1)
             inventory.setdefault(generation, set()).add(suffix)
+        if generation_file_count > _MAX_GENERATION_FILES:
+            raise RuntimeError("provenance generation inventory is too large")
         removable = []
         for generation, suffixes in inventory.items():
             if suffixes != {"jsonl", "txt"}:
@@ -1886,20 +2115,26 @@ def _cleanup_generations_at(
             if generation not in keep_generations:
                 removable.append(generation)
         for generation in removable:
-            _atomic_replace_at(
-                directory_fd,
-                _pending_generation_name(jsonl_name),
-                _render_pending_generation(generation),
-            )
+            owned = {}
+            snapshots = {}
             for suffix in ("jsonl", "txt"):
                 name = f"{generation}.{suffix}"
                 snapshot = _read_existing_snapshot_at(generation_fd, name)
                 if snapshot is None:
                     raise RuntimeError("provenance generation pair changed")
+                snapshots[suffix] = snapshot
+                owned[suffix] = snapshot.version
+            _atomic_replace_at(
+                directory_fd,
+                _pending_generation_name(jsonl_name),
+                _render_pending_generation(generation, owned),
+            )
+            for suffix in ("jsonl", "txt"):
+                name = f"{generation}.{suffix}"
                 _remove_generation_snapshot_at(
                     generation_fd,
                     name,
-                    snapshot,
+                    snapshots[suffix],
                     hook_stage="stale_before_remove",
                 )
             os.fsync(generation_fd)

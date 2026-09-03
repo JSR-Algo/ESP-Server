@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import signal
@@ -677,7 +678,7 @@ def test_stale_generation_cleanup_never_deletes_racing_replacement(
     projection.chmod(0o400)
 
     def replace(stage: str, name: str) -> None:
-        if stage == "stale_before_unlink" and name == target.name:
+        if stage == "generation_after_validation" and name == target.name:
             quarantine = next(
                 path
                 for path in generation_dir.iterdir()
@@ -717,6 +718,34 @@ def test_failed_generation_write_is_recovered_before_retry(
     assert len(runner.parse_provenance(provenance.read_bytes())) == 1
 
 
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "after_generation_jsonl_before_journal",
+        "after_generation_projection_before_journal",
+    ],
+)
+def test_unjournaled_generation_component_is_preserved_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+
+    def crash(observed: str) -> None:
+        if observed == stage:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", crash)
+    with pytest.raises(RuntimeError, match="pending generation"):
+        execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    assert any(path.name.endswith((".jsonl", ".txt")) for path in generation_dir.iterdir())
+
+
 def test_pending_recovery_never_deletes_racing_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -729,12 +758,23 @@ def test_pending_recovery_never_deletes_racing_replacement(
     target = generation_dir / f"{generation}.jsonl"
     target.write_text("transaction")
     target.chmod(0o400)
+    directory_fd = os.open(generation_dir, os.O_RDONLY)
+    try:
+        snapshot = runner._read_existing_snapshot_at(directory_fd, target.name)
+    finally:
+        os.close(directory_fd)
+    assert snapshot is not None
     pending = tmp_path / ".commands.jsonl.pending"
-    pending.write_bytes(runner._render_pending_generation(generation))
+    pending.write_bytes(
+        runner._render_pending_generation(
+            generation,
+            {"jsonl": snapshot.version, "txt": None},
+        )
+    )
     pending.chmod(0o600)
 
     def replace(stage: str, name: str) -> None:
-        if stage == "pending_before_unlink" and name == target.name:
+        if stage == "generation_after_validation" and name == target.name:
             quarantine = next(
                 path
                 for path in generation_dir.iterdir()
@@ -749,6 +789,231 @@ def test_pending_recovery_never_deletes_racing_replacement(
         execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
 
     assert any(path.read_text() == "replacement" for path in generation_dir.iterdir())
+
+
+def test_pending_recovery_preserves_replacement_of_journal_owned_file(
+    tmp_path: Path,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    generation = "e" * 32
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    generation_dir.mkdir(mode=0o700)
+    target = generation_dir / f"{generation}.jsonl"
+    target.write_text("owned")
+    target.chmod(0o400)
+    directory_fd = os.open(generation_dir, os.O_RDONLY)
+    try:
+        snapshot = runner._read_existing_snapshot_at(directory_fd, target.name)
+    finally:
+        os.close(directory_fd)
+    assert snapshot is not None
+    pending = tmp_path / ".commands.jsonl.pending"
+    pending.write_bytes(
+        runner._render_pending_generation(
+            generation,
+            {"jsonl": snapshot.version, "txt": None},
+        )
+    )
+    pending.chmod(0o600)
+    target.unlink()
+    target.write_text("replacement")
+    target.chmod(0o400)
+
+    with pytest.raises(RuntimeError, match="pending generation"):
+        execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+
+    assert target.read_text() == "replacement"
+
+
+def test_pending_recovery_does_not_quarantine_generation_committed_mid_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    seed = tmp_path / "seed.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=seed)
+    generation = "e" * 32
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    generation_dir.mkdir(mode=0o700)
+    jsonl = generation_dir / f"{generation}.jsonl"
+    projection = generation_dir / f"{generation}.txt"
+    entries = [_provenance_entry(seed, "diagnostic.writer_a", "1")]
+    jsonl.write_bytes(runner.render_provenance(entries))
+    projection.write_bytes(runner.render_commands_projection(entries))
+    jsonl.chmod(0o400)
+    projection.chmod(0o400)
+    generation_fd = os.open(generation_dir, os.O_RDONLY)
+    try:
+        jsonl_snapshot = runner._read_existing_snapshot_at(generation_fd, jsonl.name)
+        projection_snapshot = runner._read_existing_snapshot_at(
+            generation_fd, projection.name
+        )
+    finally:
+        os.close(generation_fd)
+    assert jsonl_snapshot is not None
+    assert projection_snapshot is not None
+    pending = tmp_path / ".commands.jsonl.pending"
+    pending.write_bytes(
+        runner._render_pending_generation(
+            generation,
+            {
+                "jsonl": jsonl_snapshot.version,
+                "txt": projection_snapshot.version,
+            },
+        )
+    )
+    pending.chmod(0o600)
+    pointer = runner.PairPointer(
+        generation,
+        hashlib.sha256(jsonl.read_bytes()).hexdigest(),
+        hashlib.sha256(projection.read_bytes()).hexdigest(),
+        len(entries),
+        runner._spec_digest_summary(entries),
+    )
+
+    def publish_pointer(stage: str, _name: str) -> None:
+        if stage == "generation_after_validation":
+            path = tmp_path / ".commands.jsonl.pair"
+            path.write_bytes(runner._render_pair_pointer(pointer))
+            path.chmod(0o600)
+
+    monkeypatch.setattr(runner, "_generation_cleanup_hook", publish_pointer)
+
+    parent_fd = os.open(tmp_path, os.O_RDONLY)
+    try:
+        with pytest.raises(RuntimeError, match="pending generation is committed"):
+            runner._recover_pending_generation_at(parent_fd, provenance.name)
+    finally:
+        os.close(parent_fd)
+
+    assert jsonl.exists()
+    assert projection.exists()
+
+
+def test_interrupted_quarantine_compaction_resumes_from_owned_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    generation = "e" * 32
+    generation_dir = tmp_path / "generations"
+    generation_dir.mkdir(mode=0o700)
+    original = generation_dir / f"{generation}.jsonl"
+    original.write_bytes(b"owned generation payload\n")
+    original.chmod(0o400)
+    generation_fd = os.open(generation_dir, os.O_RDONLY)
+    try:
+        snapshot = runner._read_existing_snapshot_at(generation_fd, original.name)
+        assert snapshot is not None
+        quarantine = runner._generation_quarantine_name(original.name, snapshot)
+        runner._rename_noreplace_at(generation_fd, original.name, quarantine)
+        real_write = runner.os.write
+        interrupted = False
+
+        def interrupt_write(descriptor: int, content: bytes | memoryview) -> int:
+            nonlocal interrupted
+            if not interrupted:
+                interrupted = True
+                real_write(descriptor, bytes(content[:8]))
+                raise KeyboardInterrupt
+            return real_write(descriptor, content)
+
+        monkeypatch.setattr(runner.os, "write", interrupt_write)
+        with pytest.raises(KeyboardInterrupt):
+            runner._compact_generation_quarantine_at(
+                generation_fd, quarantine, snapshot
+            )
+        monkeypatch.setattr(runner.os, "write", real_write)
+
+        runner._recover_generation_quarantines_at(generation_fd, generation)
+        recovered = runner._read_existing_snapshot_at(generation_fd, quarantine)
+    finally:
+        os.close(generation_fd)
+
+    assert runner._generation_tombstone_matches(recovered, snapshot.version)
+
+
+def test_generation_quarantine_never_overwrites_racing_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    stale = "e" * 32
+    target = generation_dir / f"{stale}.jsonl"
+    projection = generation_dir / f"{stale}.txt"
+    target.write_bytes(provenance.read_bytes())
+    projection.write_bytes(provenance.with_suffix(".txt").read_bytes())
+    target.chmod(0o400)
+    projection.chmod(0o400)
+    replacement = b"racing destination must survive\n"
+
+    def occupy_destination(stage: str, name: str) -> None:
+        if stage != "stale_before_remove" or name != target.name:
+            return
+        generation_fd = os.open(generation_dir, os.O_RDONLY)
+        try:
+            snapshot = runner._read_existing_snapshot_at(generation_fd, name)
+        finally:
+            os.close(generation_fd)
+        assert snapshot is not None
+        destination = generation_dir / runner._generation_quarantine_name(name, snapshot)
+        destination.write_bytes(replacement)
+        destination.chmod(0o400)
+
+    monkeypatch.setattr(runner, "_generation_cleanup_hook", occupy_destination)
+
+    with pytest.raises((FileExistsError, RuntimeError)):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+        )
+
+    assert any(path.read_bytes() == replacement for path in generation_dir.iterdir())
+
+
+def test_compact_quarantines_do_not_exhaust_generation_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    stale = "e" * 32
+    (generation_dir / f"{stale}.jsonl").write_bytes(provenance.read_bytes())
+    (generation_dir / f"{stale}.txt").write_bytes(
+        provenance.with_suffix(".txt").read_bytes()
+    )
+    (generation_dir / f"{stale}.jsonl").chmod(0o400)
+    (generation_dir / f"{stale}.txt").chmod(0o400)
+    monkeypatch.setattr(runner, "_MAX_GENERATION_FILES", 6)
+    execute_and_record(
+        _spec(tmp_path, "pass", command_id="diagnostic.second", outputs=()),
+        provenance=provenance,
+    )
+    tombstones = [
+        path
+        for path in generation_dir.iterdir()
+        if runner.GENERATION_QUARANTINE.fullmatch(path.name)
+    ]
+    assert tombstones
+    assert all(path.stat().st_size < 256 for path in tombstones)
+
+    monkeypatch.setattr(runner, "_MAX_GENERATION_FILES", 4)
+    execute_and_record(
+        _spec(tmp_path, "pass", command_id="diagnostic.third", outputs=()),
+        provenance=provenance,
+    )
 
 
 def test_pending_journal_cannot_delete_committed_generation(tmp_path: Path) -> None:
