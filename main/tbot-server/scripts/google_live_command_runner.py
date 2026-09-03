@@ -56,6 +56,12 @@ RUNTIME_CLOSURE_SCHEMA = "google-live-runtime-closure.v1"
 RUNTIME_CLOSURE_MANIFEST_GIT_PATH = (
     "main/tbot-server/tests/fixtures/google_live_runtime_closure_manifest.json"
 )
+_MAX_CLOSURE_DISTRIBUTIONS = 32
+_MAX_CLOSURE_FILES_PER_DISTRIBUTION = 2048
+_MAX_CLOSURE_FILE_BYTES = 32 * 1024 * 1024
+_MAX_CLOSURE_TOTAL_FILES = 4096
+_MAX_CLOSURE_TOTAL_BYTES = 256 * 1024 * 1024
+_MAX_CLOSURE_PATH_DEPTH = 32
 _MAX_PROVENANCE_ARTIFACT_BYTES = 16 * 1024 * 1024
 _MAX_GENERATION_FILES = 1024
 PAIR_SCHEMA = "google-live-command-provenance-pair.v1"
@@ -544,7 +550,7 @@ def _parse_runtime_closure_manifest(
     ):
         raise ValueError("runtime closure limits are invalid")
     distributions = value.get("distributions")
-    if not isinstance(distributions, list) or len(distributions) > 128:
+    if not isinstance(distributions, list) or len(distributions) > _MAX_CLOSURE_DISTRIBUTIONS:
         raise ValueError("runtime closure distributions are invalid")
     distribution_names: list[str] = []
     for distribution in distributions:
@@ -562,7 +568,7 @@ def _parse_runtime_closure_manifest(
         ) or roots != sorted(set(roots))):
             raise ValueError("runtime closure import roots are invalid")
         files = distribution.get("files")
-        if not isinstance(files, list) or not files or len(files) > 10000:
+        if not isinstance(files, list) or not files or len(files) > _MAX_CLOSURE_FILES_PER_DISTRIBUTION:
             raise ValueError("runtime closure distribution files are invalid")
         paths: list[str] = []
         total = 0
@@ -572,8 +578,10 @@ def _parse_runtime_closure_manifest(
             path = item.get("path")
             if (not isinstance(path, str) or not path or Path(path).is_absolute()
                     or any(part in {"", ".", ".."} for part in Path(path).parts)
-                    or "\\" in path or SHA256.fullmatch(item.get("sha256", "")) is None
-                    or type(item.get("size")) is not int or item["size"] < 0):
+                    or "\\" in path or len(Path(path).parts) > _MAX_CLOSURE_PATH_DEPTH
+                    or SHA256.fullmatch(item.get("sha256", "")) is None
+                    or type(item.get("size")) is not int or item["size"] < 0
+                    or item["size"] > _MAX_CLOSURE_FILE_BYTES):
                 raise ValueError("runtime closure distribution file is invalid")
             if path.endswith(".pth") or "/direct_url.json" in path:
                 raise ValueError("runtime closure rejects editable or site injection")
@@ -583,7 +591,10 @@ def _parse_runtime_closure_manifest(
         if distribution["fileCount"] != len(files) or distribution["totalBytes"] != total:
             raise ValueError("runtime closure distribution totals are invalid")
         distribution_names.append(name.lower().replace("-", "_"))
-    if distribution_names != sorted(distribution_names) or len(distribution_names) != len(set(distribution_names)):
+    if (distribution_names != sorted(distribution_names)
+            or len(distribution_names) != len(set(distribution_names))
+            or sum(item["fileCount"] for item in distributions) > _MAX_CLOSURE_TOTAL_FILES
+            or sum(item["totalBytes"] for item in distributions) > _MAX_CLOSURE_TOTAL_BYTES):
         raise ValueError("runtime closure distributions are not sorted or unique")
     resources = value.get("resources")
     if (

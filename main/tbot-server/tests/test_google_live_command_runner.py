@@ -170,6 +170,21 @@ def test_runtime_closure_manifest_rejects_pth_and_editable_install(path: str) ->
         runner._parse_runtime_closure_manifest(_canonical_json(manifest), platform_name="darwin-arm64-cp314")
 
 
+def test_runtime_closure_manifest_rejects_oversized_distribution_file() -> None:
+    import scripts.google_live_command_runner as runner
+
+    resources = [{"gitBlob": "1" * 40, "kind": "python", "path": "scripts/example.py", "sha256": "b" * 64, "size": 3}]
+    manifest = _runtime_closure_manifest(resources)
+    manifest["distributions"] = [{
+        "name": "websockets", "version": "14.2", "importRoots": ["websockets"],
+        "root": "/immutable/site-packages", "fileCount": 1,
+        "totalBytes": 33 * 1024 * 1024,
+        "files": [{"path": "websockets/x.py", "sha256": "b" * 64, "size": 33 * 1024 * 1024}],
+    }]
+    with pytest.raises(ValueError, match="distribution file"):
+        runner._parse_runtime_closure_manifest(_canonical_json(manifest), platform_name="darwin-arm64-cp314")
+
+
 def test_checked_runtime_closure_inventory_covers_existing_approved_commands() -> None:
     import scripts.google_live_command_runner as runner
 
@@ -209,6 +224,18 @@ def test_checked_runtime_closure_inventory_covers_existing_approved_commands() -
             Path("/snapshot"), manifest, relative_script
         )
         assert project_root == Path("/snapshot/main/tbot-server")
+
+
+def test_checked_runtime_closure_manifest_parses() -> None:
+    import scripts.google_live_command_runner as runner
+
+    manifest_path = Path(__file__).parent / "fixtures" / "google_live_runtime_closure_manifest.json"
+    parsed = runner._parse_runtime_closure_manifest(
+        manifest_path.read_bytes(), platform_name="darwin-arm64-cp314"
+    )
+    assert {item["name"] for item in parsed["distributions"]} >= {
+        "numpy", "websockets", "PyYAML", "opuslib-next"
+    }
 
 
 @pytest.mark.parametrize(
