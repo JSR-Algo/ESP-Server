@@ -262,9 +262,7 @@ def test_checked_dependency_closure_imports_extension_backed_packages(
             capture_output=True, text=True, timeout=10,
         )
     except subprocess.TimeoutExpired as exc:
-        if module in {"yaml", "numpy", "google.genai"}:
-            pytest.skip(f"baseline-equivalent import hang: {exc}")
-        raise
+        pytest.fail(f"import {module} timed out: {exc}")
     assert completed.returncode == 0, completed.stderr
 
 

@@ -755,8 +755,10 @@ def _materialize_distribution_closure(
     if not manifest.get("distributions"):
         return []
     destination.mkdir(mode=0o700)
+    native_roots: list[str] = []
     for distribution in manifest.get("distributions", []):
         root = Path(distribution["root"]).resolve(strict=True)
+        has_native = any(item.get("kind") == "native" for item in distribution["files"])
         for item in distribution["files"]:
             path = root.joinpath(*item["path"].split("/"))
             if not path.is_file() or path.is_symlink() or path.stat().st_size != item["size"]:
@@ -765,6 +767,10 @@ def _materialize_distribution_closure(
             if hashlib.sha256(data).hexdigest() != item["sha256"]:
                 raise ValueError("runtime closure distribution file digest mismatch")
             target = destination.joinpath(*item["path"].split("/"))
+            if has_native:
+                if str(root) not in native_roots:
+                    native_roots.append(str(root))
+                continue
             target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             if target.exists():
                 if target.read_bytes() != data:
@@ -783,7 +789,10 @@ def _materialize_distribution_closure(
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
-    return [str(destination.resolve(strict=True))]
+    roots = native_roots
+    if any(not any(item.get("kind") == "native" for item in d["files"]) for d in manifest.get("distributions", [])):
+        roots.append(str(destination.resolve(strict=True)))
+    return roots
 
 
 def _immutable_identity(value: Mapping[str, str] | None) -> Mapping[str, str]:
