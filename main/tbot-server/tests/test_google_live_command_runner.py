@@ -1242,6 +1242,49 @@ def test_nested_shell_python_command_fails_closed(
     assert not marker.exists()
 
 
+def test_nested_shell_command_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / "shell-executed"
+    payload = (
+        "import subprocess; "
+        f"subprocess.run('touch {str(marker)}', shell=True, check=True)"
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, _python_source_archive({"entry.py": payload}))
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("spawn_name", ["posix_spawn", "posix_spawnp"])
+def test_nested_posix_spawn_escape_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawn_name: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / f"{spawn_name}-executed"
+    payload = (
+        "import os; "
+        f"os.{spawn_name}('/bin/sh', ['sh', '-c', 'touch {marker}'], os.environ)"
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, _python_source_archive({"entry.py": payload}))
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
 def test_nested_os_exec_escape_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

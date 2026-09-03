@@ -185,7 +185,10 @@ def blocked_process_escape(*args, **kwargs):
     del args, kwargs
     raise PermissionError("candidate process escape API is not approved")
 os.system = blocked_process_escape
-for _name in ("execv", "execve", "execvp", "execvpe", "execl", "execle", "execlp"):
+for _name in (
+    "execv", "execve", "execvp", "execvpe", "execl", "execle", "execlp",
+    "posix_spawn", "posix_spawnp",
+):
     if hasattr(os, _name):
         setattr(os, _name, blocked_process_escape)
 def python_script_index(arguments):
@@ -209,8 +212,10 @@ def python_script_index(arguments):
         return None
     return None
 def candidate_popen(arguments, *args, **kwargs):
+    if kwargs.get("shell", False):
+        raise PermissionError("shell execution is not approved")
     script_index = python_script_index(arguments) if isinstance(arguments, (list, tuple)) else None
-    if not kwargs.get("shell", False) and isinstance(arguments, (list, tuple)) and arguments:
+    if isinstance(arguments, (list, tuple)) and arguments:
         executable = os.path.abspath(os.fspath(arguments[0]))
         approved_executable = os.path.abspath(sys.executable)
         try:
@@ -234,8 +239,7 @@ def candidate_popen(arguments, *args, **kwargs):
         ):
             raise PermissionError("Python child execution requires an approved script")
     if (
-        not kwargs.get("shell", False)
-        and isinstance(arguments, (list, tuple))
+        isinstance(arguments, (list, tuple))
         and script_index is not None
         and os.path.abspath(os.fspath(arguments[0])) == os.path.abspath(sys.executable)
         and isinstance(arguments[script_index], (str, os.PathLike))
