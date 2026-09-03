@@ -144,6 +144,7 @@ def test_checked_runtime_closure_inventory_covers_existing_approved_commands() -
         "main/tbot-server/tests/fixtures/tvideo_farm_audio/synthetic_speech_24k_mono.wav",
     }
     assert required <= paths
+    assert not any("/.venv" in path or "/site-packages/" in path for path in paths)
     assert "main/tbot-server/scripts/google_live_physical_evidence.py" not in paths
     assert runner.RUNTIME_CLOSURE_MANIFEST_GIT_PATH not in paths
     for relative_script in (
@@ -399,6 +400,22 @@ def test_materialize_candidate_resources_sets_exact_modes_despite_umask(
         os.umask(previous)
     assert stat.S_IMODE((destination / "nested" / "config.json").stat().st_mode) == 0o400
     assert stat.S_IMODE((destination / "nested").stat().st_mode) == 0o500
+
+
+def test_materialized_resource_snapshot_can_be_cleaned_after_read_only_finalize(
+    tmp_path: Path,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    content = b"candidate"
+    destination = tmp_path / "snapshot"
+    runner._materialize_candidate_resources(
+        _resource_archive([("nested/config.json", content, None)]),
+        destination,
+        _resource_manifest({"nested/config.json": content}),
+    )
+    runner._cleanup_candidate_snapshot(destination)
+    assert not destination.exists()
 
 
 def test_materialize_candidate_resources_rejects_symlink_member(tmp_path: Path) -> None:

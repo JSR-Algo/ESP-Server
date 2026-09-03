@@ -26,6 +26,7 @@ import time
 import unicodedata
 import shutil
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -438,6 +439,32 @@ def _materialize_candidate_resources(
         finally:
             os.close(descriptor)
     os.chmod(destination, 0o500)
+
+
+def _cleanup_candidate_snapshot(destination: Path) -> None:
+    """Restore ownership-safe write bits before removing a read-only snapshot."""
+    if not destination.exists():
+        return
+    for directory, subdirectories, files in os.walk(destination, topdown=False):
+        for name in files:
+            os.chmod(Path(directory) / name, 0o600, follow_symlinks=False)
+        for name in subdirectories:
+            os.chmod(Path(directory) / name, 0o700, follow_symlinks=False)
+        os.chmod(directory, 0o700, follow_symlinks=False)
+    os.chmod(destination, 0o700, follow_symlinks=False)
+    shutil.rmtree(destination)
+
+
+@contextmanager
+def _candidate_execution_directory():
+    root = Path(tempfile.mkdtemp(prefix="google-live-exec-"))
+    try:
+        yield root
+    finally:
+        candidate = root / "candidate-source"
+        if candidate.exists():
+            _cleanup_candidate_snapshot(candidate)
+        shutil.rmtree(root)
 
 
 def _runtime_platform_tuple() -> str:
@@ -3708,8 +3735,7 @@ def execute_and_record(
                 if _before_spawn is not None:
                     _before_spawn()
                 _require_working_directory_unchanged(bound_cwd, require_ctime=True)
-                with tempfile.TemporaryDirectory(prefix="google-live-exec-") as snapshot_dir:
-                    snapshot_root = Path(snapshot_dir)
+                with _candidate_execution_directory() as snapshot_root:
                     executable_path = _write_python_executable_snapshot(
                         snapshot_root,
                         "command-python",
