@@ -113,7 +113,7 @@ class BoundReleaseInput:
 
 @dataclass(frozen=True)
 class TrustedCommandSpec:
-    argv: tuple[str, ...]
+    argv_pattern: tuple[str | None, ...]
     cwd: str
     environment_sources: tuple[str, ...]
     expected_exit_codes: tuple[int, ...]
@@ -125,7 +125,130 @@ class TrustedCommandSpec:
     cleanup_grace_sec: float
 
 
-def _trusted_command_specs() -> dict[str, TrustedCommandSpec]:
+def _trusted_command_argv_patterns(
+    identity: Mapping[str, Any],
+) -> dict[str, tuple[str | None, ...]]:
+    python = sys.executable
+    candidate = (
+        "--candidate-git-sha",
+        str(identity["gitSha"]),
+        "--candidate-image-digest",
+        str(identity["imageDigest"]),
+        "--firmware-identity",
+        str(identity["firmwareIdentity"]),
+        "--fixture-sha256",
+        str(identity["fixtureSha256"]),
+    )
+    return {
+        "deterministic.produce": (
+            python,
+            "scripts/google_live_deterministic_evidence.py",
+            "--manifest",
+            "<evidence:deterministic/node-manifest.txt>",
+            "--junit-out",
+            "<evidence:deterministic/pytest.xml>",
+            "--report",
+            "<evidence:deterministic/report.json>",
+            *candidate[:6],
+            "--config-fingerprint",
+            str(identity["configFingerprint"]),
+            *candidate[6:],
+        ),
+        "real_api.round_trip": (
+            python,
+            "scripts/google_live_smoke.py",
+            "--round-trip",
+            "--audio-file",
+            "<evidence:fixture.wav>",
+            "--report",
+            "<evidence:real-api/report.json>",
+            *candidate[:6],
+            "--config-fingerprint",
+            str(identity["configFingerprint"]),
+            *candidate[6:],
+        ),
+        "websocket.transport": (
+            python,
+            "scripts/voice_mode_websocket_audio_bargein.py",
+            "--websocket-url",
+            None,
+            "--device-id",
+            None,
+            "--client-id",
+            None,
+            "--journey-id",
+            None,
+            *candidate[:6],
+            "--config-json",
+            None,
+            *candidate[6:],
+            "--report",
+            "<evidence:websocket-e2e/transport.json>",
+        ),
+        "websocket.log_analysis": (
+            python,
+            "scripts/analyze_google_live_log.py",
+            "--log",
+            None,
+            "--reliability-window",
+            "--journey-id",
+            None,
+            "--out-json",
+            "<evidence:server-regression/report.json>",
+        ),
+        "websocket.correlation": (
+            python,
+            "scripts/analyze_google_live_log.py",
+            "--log",
+            None,
+            "--correlate-transport",
+            "<evidence:websocket-e2e/transport.json>",
+            "--expected-candidate-json",
+            None,
+            "--out-json",
+            "<evidence:websocket-e2e/report.json>",
+        ),
+        "candidate_soak.produce": (
+            python,
+            "scripts/google_live_robot_soak.py",
+            "--mode",
+            "candidate",
+            "--produce-candidate-evidence",
+            "<evidence:candidate-soak/journey-evidence.json>",
+            "--evidence-control-url",
+            None,
+            "--server-log",
+            None,
+            "--run-id",
+            None,
+            *candidate,
+        ),
+        "candidate_soak.replay": (
+            python,
+            "scripts/google_live_robot_soak.py",
+            "--mode",
+            "candidate",
+            "--journey-evidence",
+            "<evidence:candidate-soak/journey-evidence.json>",
+            "--report",
+            "<evidence:candidate-soak/report.json>",
+            *candidate,
+        ),
+        "physical.capture_and_audit": (
+            python,
+            "scripts/google_live_physical_evidence.py",
+            "--candidate-soak-report",
+            "<evidence:candidate-soak/report.json>",
+            "--server-report",
+            "<evidence:server-regression/report.json>",
+            "--report",
+            "<evidence:physical/report.json>",
+            *candidate,
+        ),
+    }
+
+
+def _trusted_command_specs(identity: Mapping[str, Any]) -> dict[str, TrustedCommandSpec]:
     outputs = {
         "deterministic.produce": (
             "deterministic/report.json",
@@ -133,7 +256,7 @@ def _trusted_command_specs() -> dict[str, TrustedCommandSpec]:
             "deterministic/pytest.xml",
         ),
         "real_api.round_trip": ("real-api/report.json",),
-        "websocket.transport": (),
+        "websocket.transport": ("websocket-e2e/transport.json",),
         "websocket.log_analysis": ("server-regression/report.json",),
         "websocket.correlation": ("websocket-e2e/report.json",),
         "candidate_soak.produce": ("candidate-soak/journey-evidence.json",),
@@ -150,17 +273,27 @@ def _trusted_command_specs() -> dict[str, TrustedCommandSpec]:
     }
     return {
         command_id: TrustedCommandSpec(
-            argv=(sys.executable, "-m", command_id),
+            argv_pattern=_trusted_command_argv_patterns(identity)[command_id],
             cwd=".",
             environment_sources=(),
             expected_exit_codes=(0,),
-            input_labels=("candidate-soak/journey-evidence.json",)
-            if command_id == "candidate_soak.replay"
-            else (),
+            input_labels={
+                "real_api.round_trip": ("fixture.wav",),
+                "websocket.correlation": (
+                    "websocket-e2e/transport.json",
+                    "server-regression/report.json",
+                ),
+                "candidate_soak.replay": ("candidate-soak/journey-evidence.json",),
+                "physical.capture_and_audit": ("candidate-soak/report.json",),
+            }.get(command_id, ()),
             output_labels=outputs[command_id],
-            secret_sources=("<env:TBOT_DEVICE_MINT_SECRET>",)
-            if command_id in mint_commands
-            else (),
+            secret_sources=("<env:GOOGLE_API_KEY>",)
+            if command_id == "real_api.round_trip"
+            else (
+                ("<env:TBOT_DEVICE_MINT_SECRET>",)
+                if command_id in mint_commands
+                else ()
+            ),
             stdin_source="<stdin:protected_transcript_plan>"
             if command_id == "physical.capture_and_audit"
             else None,
@@ -192,7 +325,11 @@ def _recorded_command_spec_digest(entry: Mapping[str, Any]) -> str:
 def _command_matches_trusted_spec(entry: Mapping[str, Any], spec: TrustedCommandSpec) -> bool:
     terminal = entry["terminalPolicy"]
     return (
-        entry["argv"] == list(spec.argv)
+        len(entry["argv"]) == len(spec.argv_pattern)
+        and all(
+            expected is None or actual == expected
+            for actual, expected in zip(entry["argv"], spec.argv_pattern, strict=True)
+        )
         and entry["cwd"] == spec.cwd
         and entry["environmentSources"] == list(spec.environment_sources)
         and terminal["expectedExitCodes"] == list(spec.expected_exit_codes)
@@ -982,7 +1119,7 @@ def aggregate_release_evidence(
             if name in (*REQUIRED_LAYERS, *DETERMINISTIC_SUPPORTS)
         }
         by_id = {entry["commandId"]: entry for entry in required}
-        trusted_specs = _trusted_command_specs()
+        trusted_specs = _trusted_command_specs(expected_identity)
         if any(
             not _command_matches_trusted_spec(by_id[command_id], trusted_specs[command_id])
             for command_id in REQUIRED_COMMAND_IDS
@@ -1026,7 +1163,11 @@ def aggregate_release_evidence(
             "physical.capture_and_audit",
         }
         for command_id in REQUIRED_COMMAND_IDS:
-            expected_secrets = exact_mint_source if command_id in mint_commands else []
+            expected_secrets = (
+                ["<env:GOOGLE_API_KEY>"]
+                if command_id == "real_api.round_trip"
+                else (exact_mint_source if command_id in mint_commands else [])
+            )
             expected_stdin = (
                 "<stdin:protected_transcript_plan>"
                 if command_id == "physical.capture_and_audit"

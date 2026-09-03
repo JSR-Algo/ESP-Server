@@ -39,6 +39,9 @@ PAIR_SCHEMA = "google-live-command-provenance-pair.v1"
 PENDING_SCHEMA = "google-live-command-provenance-pending.v1"
 GENERATION_ID = re.compile(r"[0-9a-f]{32}")
 GENERATION_FILE = re.compile(r"([0-9a-f]{32})\.(?:jsonl|txt)")
+GENERATION_QUARANTINE = re.compile(
+    r"\.([0-9a-f]{32})\.(jsonl|txt)\.([0-9]+)\.([0-9]+)\.([0-9a-f]{64})\.pending"
+)
 _EXACT_ENTRY_FIELDS = {
     "argv",
     "candidateIdentity",
@@ -1680,6 +1683,122 @@ def _create_generation_pair_at(
     return pointer, _render_pair_pointer(pointer)
 
 
+def _generation_quarantine_name(name: str, snapshot: PointerFileSnapshot) -> str:
+    generation, suffix = name.rsplit(".", 1)
+    if GENERATION_ID.fullmatch(generation) is None or suffix not in {"jsonl", "txt"}:
+        raise ValueError("provenance generation name is invalid")
+    return (
+        f".{generation}.{suffix}.{snapshot.version.device}."
+        f"{snapshot.version.inode}.{snapshot.version.digest}.pending"
+    )
+
+
+def _restore_quarantined_generation_at(
+    directory_fd: int,
+    quarantine: str,
+    original: str,
+) -> None:
+    snapshot = _read_existing_snapshot_at(directory_fd, quarantine)
+    if snapshot is None:
+        return
+    try:
+        os.link(
+            quarantine,
+            original,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    except FileExistsError:
+        return
+    quarantine_stat = os.stat(
+        quarantine, dir_fd=directory_fd, follow_symlinks=False
+    )
+    original_stat = os.stat(original, dir_fd=directory_fd, follow_symlinks=False)
+    if (
+        (quarantine_stat.st_dev, quarantine_stat.st_ino)
+        != (snapshot.version.device, snapshot.version.inode)
+        or (original_stat.st_dev, original_stat.st_ino)
+        != (snapshot.version.device, snapshot.version.inode)
+        or quarantine_stat.st_nlink != 2
+        or original_stat.st_nlink != 2
+    ):
+        raise RuntimeError("provenance generation restore changed")
+    os.unlink(quarantine, dir_fd=directory_fd)
+
+
+def _generation_snapshot_identity_matches(
+    observed: PointerFileSnapshot | None, expected: PointerFileSnapshot
+) -> bool:
+    return observed is not None and (
+        observed.version == expected.version
+        and observed.identity[2] == expected.identity[2]
+        and observed.identity[3] == expected.identity[3]
+        and observed.identity[6] == expected.identity[6]
+        and observed.identity[7] == expected.identity[7]
+    )
+
+
+def _unlink_generation_snapshot_at(
+    directory_fd: int, name: str, expected: PointerFileSnapshot
+) -> None:
+    if not _generation_snapshot_identity_matches(
+        _read_existing_snapshot_at(directory_fd, name), expected
+    ):
+        raise RuntimeError("provenance generation changed before unlink")
+    os.unlink(name, dir_fd=directory_fd)
+
+
+def _remove_generation_snapshot_at(
+    directory_fd: int,
+    name: str,
+    expected: PointerFileSnapshot,
+    *,
+    hook_stage: str,
+) -> None:
+    quarantine = _generation_quarantine_name(name, expected)
+    _generation_cleanup_hook(hook_stage, name)
+    os.rename(
+        name,
+        quarantine,
+        src_dir_fd=directory_fd,
+        dst_dir_fd=directory_fd,
+    )
+    after_stage = hook_stage.replace("_before_remove", "_after_quarantine")
+    _generation_cleanup_hook(after_stage, name)
+    observed = _read_existing_snapshot_at(directory_fd, quarantine)
+    if not _generation_snapshot_identity_matches(observed, expected):
+        _restore_quarantined_generation_at(directory_fd, quarantine, name)
+        raise RuntimeError("provenance generation changed during cleanup")
+    before_unlink_stage = hook_stage.replace("_before_remove", "_before_unlink")
+    _generation_cleanup_hook(before_unlink_stage, name)
+    try:
+        _unlink_generation_snapshot_at(directory_fd, quarantine, expected)
+    except BaseException:
+        _restore_quarantined_generation_at(directory_fd, quarantine, name)
+        raise
+
+
+def _recover_generation_quarantines_at(
+    generation_fd: int, generation: str
+) -> None:
+    for name in os.listdir(generation_fd):
+        match = GENERATION_QUARANTINE.fullmatch(name)
+        if match is None or match.group(1) != generation:
+            continue
+        _generation, suffix, device, inode, digest = match.groups()
+        original = f"{generation}.{suffix}"
+        if _read_existing_snapshot_at(generation_fd, original) is not None:
+            raise RuntimeError("provenance generation recovery is ambiguous")
+        snapshot = _read_existing_snapshot_at(generation_fd, name)
+        if snapshot is None or snapshot.version != PublishedArtifact(
+            int(device), int(inode), digest
+        ):
+            raise RuntimeError("provenance generation changed during recovery")
+        _generation_cleanup_hook("pending_quarantine_before_unlink", original)
+        _unlink_generation_snapshot_at(generation_fd, name, snapshot)
+
+
 def _recover_pending_generation_at(directory_fd: int, jsonl_name: str) -> None:
     pending_name = _pending_generation_name(jsonl_name)
     pending = _read_pair_pointer_snapshot_at(directory_fd, pending_name)
@@ -1697,6 +1816,7 @@ def _recover_pending_generation_at(directory_fd: int, jsonl_name: str) -> None:
     generation_fd = _open_generation_directory(directory_fd, jsonl_name, create=False)
     removed = False
     try:
+        _recover_generation_quarantines_at(generation_fd, generation)
         snapshots = {}
         for suffix in ("jsonl", "txt"):
             name = f"{generation}.{suffix}"
@@ -1709,7 +1829,12 @@ def _recover_pending_generation_at(directory_fd: int, jsonl_name: str) -> None:
             snapshots[name] = snapshot
         for name, snapshot in snapshots.items():
             if snapshot is not None:
-                os.unlink(name, dir_fd=generation_fd)
+                _remove_generation_snapshot_at(
+                    generation_fd,
+                    name,
+                    snapshot,
+                    hook_stage="pending_before_remove",
+                )
                 removed = True
         if removed:
             os.fsync(generation_fd)
@@ -1766,8 +1891,17 @@ def _cleanup_generations_at(
                 _pending_generation_name(jsonl_name),
                 _render_pending_generation(generation),
             )
-            os.unlink(f"{generation}.jsonl", dir_fd=generation_fd)
-            os.unlink(f"{generation}.txt", dir_fd=generation_fd)
+            for suffix in ("jsonl", "txt"):
+                name = f"{generation}.{suffix}"
+                snapshot = _read_existing_snapshot_at(generation_fd, name)
+                if snapshot is None:
+                    raise RuntimeError("provenance generation pair changed")
+                _remove_generation_snapshot_at(
+                    generation_fd,
+                    name,
+                    snapshot,
+                    hook_stage="stale_before_remove",
+                )
             os.fsync(generation_fd)
             _unlink_if_exists_at(directory_fd, _pending_generation_name(jsonl_name))
     finally:
@@ -1894,6 +2028,10 @@ def _rollback_published_at(
 
 def _provenance_transaction_hook(stage: str) -> None:
     del stage
+
+
+def _generation_cleanup_hook(stage: str, name: str) -> None:
+    del stage, name
 
 
 def _commit_entry(provenance: Path, entry: dict[str, Any]) -> None:
