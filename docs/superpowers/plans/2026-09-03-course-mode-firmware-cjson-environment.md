@@ -1,142 +1,228 @@
-# Course Mode Firmware cJSON Environment Implementation Plan
+# Course Mode Firmware cJSON Gitlink Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Bind the firmware handler's cJSON include/source directory to the candidate-verified ESP-IDF checkout without exposing the real home directory.
+**Goal:** Make the candidate-bound firmware handler archive cJSON from either a regular ESP-IDF Git tree or the exact cJSON gitlink commit used by ESP-IDF v5.5.4.
 
-**Architecture:** The Python release gate snapshots the cJSON subtree from the exact `tools.espIdf.commit` Git objects into the gate-owned execution stage, then derives one lane-specific `CJSON_DIR` from that staged root. Firmware source remains immutable; mutable external working-tree paths and operator-controlled values are never used by the handler.
+**Architecture:** Keep the current staged `CJSON_DIR` contract and candidate schema. Resolve the exact `components/json/cJSON` entry from the pinned ESP-IDF superproject commit; archive a normal tree from the superproject, or validate the initialized submodule repository and archive the gitlink commit tree through the same bounded Git-object copier. Never copy cJSON working-tree bytes.
 
-**Tech Stack:** Python 3.11, pytest, POSIX filesystem metadata, Bash host-native firmware tests.
+**Tech Stack:** Python 3.11, pytest, Git tree/gitlink objects, POSIX filesystem metadata, Bash host-native firmware tests.
 
 ---
 
-### Task 1: Inject Candidate-Bound cJSON Directory
+### Task 1: Support The Real ESP-IDF cJSON Gitlink
 
 **Files:**
 - Modify: `main/tbot-server/tests/test_course_mode_release_gate.py`
 - Modify: `main/tbot-server/scripts/course_mode_release_gate.py`
 
-- [ ] **Step 1: Add failing environment tests**
+- [ ] **Step 1: Add a real gitlink fixture helper**
 
-Add tests for the `firmware-handler` lane asserting that `_child_environment`
-sets `CJSON_DIR` to `<candidate tools.espIdf.root>/components/json/cJSON`, ignores
-a hostile source `CJSON_DIR`, and keeps the variable absent from another
-firmware lane. Add fail-closed cases for a missing `cJSON.c`, symlinked cJSON
-directory or file, non-regular file, relative root, and noncanonical root.
+Create a standalone cJSON Git repository, remove the fixture's existing
+regular-tree cJSON path, and add the repository at `components/json/cJSON` with
+`git -c protocol.file.allow=always submodule add`. Commit the ESP-IDF
+superproject, update `candidate["tools"]["espIdf"]["commit"]`, and assert:
 
-- [ ] **Step 2: Verify RED**
+```python
+entry = _git(esp_idf, "ls-tree", "HEAD", "components/json/cJSON")
+assert entry.split()[:2] == ["160000", "commit"]
+assert entry.split()[2] == pinned_commit
+```
+
+- [ ] **Step 2: Write and verify the primary RED regression**
+
+Add `test_firmware_handler_stages_exact_cjson_gitlink_commit`. Create commit A
+containing `pinned gitlink bytes`, add it as the gitlink, then create and check
+out commit B in the submodule with different bytes. Stage the handler and
+assert the staged `cJSON.c` contains commit A's bytes, lives inside the stage,
+and cleanup succeeds.
 
 Run:
 
 ```bash
 /Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-production-readiness/python-test-runtime-standalone-v2/bin/python3.11 \
   -m pytest -q main/tbot-server/tests/test_course_mode_release_gate.py \
-  -k 'firmware_handler_cjson or non_handler_never_receives_cjson'
+  -k 'stages_exact_cjson_gitlink_commit'
 ```
 
-Expected: FAIL because the gate does not currently derive or inject
-`CJSON_DIR`.
+Expected: FAIL because the current implementation accepts only object type
+`tree`, while the real topology provides mode `160000`, type `commit`.
 
-- [ ] **Step 3: Implement the narrow validator**
+- [ ] **Step 3: Add fail-closed gitlink regressions while still RED**
 
-Add a helper equivalent to:
+Cover: missing initialized submodule directory; absent pinned commit in the
+submodule object database; `.git` redirection away from the canonical
+`<esp-idf>/.git/modules/components/json/cJSON`; symlinked or non-directory
+canonical Git directory; and superproject entry mode/type pairs other than
+`040000 tree` or `160000 commit`. Each test expects
+`ValueError("candidate archive failed")` and proves no stage directory remains.
+
+Run:
+
+```bash
+/Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-production-readiness/python-test-runtime-standalone-v2/bin/python3.11 \
+  -m pytest -q main/tbot-server/tests/test_course_mode_release_gate.py \
+  -k 'cjson_gitlink'
+```
+
+Expected: valid gitlink support remains RED; invalid fixtures fail for their
+intended gate checks, not fixture setup or imports.
+
+- [ ] **Step 4: Extend the bounded archive helper**
+
+Add an optional keyword-only Git directory while keeping existing callers on
+the current default path:
 
 ```python
-def _firmware_handler_cjson_dir(candidate: dict, lane: Lane) -> Path | None:
-    if lane.name != "firmware-handler":
-        return None
-    root_value = candidate["tools"]["espIdf"]["root"]
-    root = Path(root_value)
-    if not root.is_absolute() or root.is_symlink():
-        return None
-    canonical_root = root.resolve(strict=True)
-    if root != canonical_root or not canonical_root.is_dir():
-        return None
-    cjson = canonical_root / "components/json/cJSON"
-    canonical_cjson = cjson.resolve(strict=True)
-    source = canonical_cjson / "cJSON.c"
-    if cjson != canonical_cjson or cjson.is_symlink() or not canonical_cjson.is_dir():
-        return None
-    metadata = source.lstat()
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        return None
-    return canonical_cjson
+def _archive_git_tree(
+    source: Path,
+    treeish: str,
+    destination: Path,
+    state: dict[str, int],
+    *,
+    git_dir: Path | None = None,
+) -> None:
+    base = [str(_manifest.TRUSTED_GIT_EXECUTABLE)]
+    if git_dir is not None:
+        base.append(f"--git-dir={git_dir}")
+    base.extend([
+        "--no-replace-objects", "--no-optional-locks",
+        "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+        "-c", "credential.helper=",
+    ])
 ```
 
-Catch only expected key/path/type/filesystem errors. In `_child_environment`,
-for `firmware-handler`, require the helper result and set `CJSON_DIR` from it.
-Do not copy `CJSON_DIR` from `source`; do not expose the real user `HOME`, alter
-the existing lane-runtime HOME behavior, or change any firmware file.
+Preserve all shared path, mode, symlink, entry-count, per-file byte, and total
+byte checks. `_archive_repository` must behave exactly as before.
 
-Before this environment step, extend `stage_execution_candidate` for the
-`firmware-handler` lane. Verify the candidate ESP-IDF commit, resolve the exact
-`components/json/cJSON` tree object from that commit, and archive only that tree
-through the existing bounded Git object-copy machinery into
-`<stage>/tools/esp-idf/components/json/cJSON`. Set the staged candidate's
-`tools.espIdf.root` to `<stage>/tools/esp-idf`. Do not copy bytes from the
-external working tree and do not archive the full ESP-IDF checkout.
+- [ ] **Step 5: Resolve the exact tree or gitlink entry**
 
-Refactor the body that lists a tree with trusted `git ls-tree` and copies blobs
-with `git cat-file --batch` into a private helper accepting an already verified
-treeish. Keep `_archive_repository` behavior unchanged by calling that helper
-with the verified repository commit. For cJSON, use trusted bounded
-`git rev-parse <esp-idf-commit>:components/json/cJSON`, require one lowercase
-40-hex object ID, require `git cat-file -t <id>` to return `tree`, and pass that
-tree ID to the same archive helper. This preserves the existing path, symlink,
-entry-count, byte-limit, file-mode, and descriptor checks.
+Replace the cJSON `rev-parse`/`cat-file -t` block with bounded
+`git ls-tree -z <commit> -- components/json/cJSON`. Parse exactly one
+NUL-terminated `<mode> <type> <40-hex>\t<exact path>` record. Accept only:
 
-- [ ] **Step 4: Add a command-level regression**
+```text
+040000 tree   -> archive from the ESP-IDF superproject
+160000 commit -> archive from the initialized cJSON submodule repository
+```
 
-Use a temporary candidate ESP-IDF fixture containing committed `cJSON.c`.
-Create an execution stage for the real handler lane, mutate or replace the
-external working-tree `cJSON.c` after staging, then run a temporary handler
-command through the staged candidate/lane environment. Assert it reads the
-committed staged bytes, not the hostile external bytes; the staged path is
-inside the lane execution, the real home is not exposed, and cleanup removes
-the stage. Add a failure case for a missing/non-tree committed subtree.
+Reject duplicate or unterminated records, a different path, non-lowercase hex,
+and every other mode/type combination.
 
-- [ ] **Step 5: Verify GREEN and qualify source**
+- [ ] **Step 6: Implement the gitlink branch**
 
-Run the focused tests, the assignment/capsule/process selector, the full
-canonical Python suite, combined Node source suites, `py_compile`, Node syntax
-checks, `git diff --check`, `git status --short`, and `git fsck --no-progress`.
-Expected: all tests exit zero with no skips/failures and the worktree is clean
-after commit.
+Derive:
 
-- [ ] **Step 6: Commit and review**
+```python
+submodule_root = source / "components/json/cJSON"
+submodule_git_file = submodule_root / ".git"
+submodule_git_dir = source / ".git/modules/components/json/cJSON"
+```
+
+Require the root and Git directory to be absolute canonical real directories,
+owned by the effective UID, and not group/world writable. Require `.git` to be
+a regular non-symlink file with the same owner/mode restrictions, parse it with
+a bounded read, and require its declared target to equal `submodule_git_dir`.
+
+Use explicit `--git-dir=<submodule_git_dir>` after validation. Require
+`<gitlink>^{commit}` to resolve exactly to the gitlink OID, resolve
+`<gitlink>^{tree}` to a lowercase 40-hex tree ID, require type `tree`, then call:
+
+```python
+_archive_git_tree(
+    submodule_root,
+    tree_id,
+    cjson_parent / "cJSON",
+    state,
+    git_dir=submodule_git_dir,
+)
+```
+
+Do not inspect, compare, or check out the submodule working-tree HEAD. The
+superproject gitlink is the authority.
+
+- [ ] **Step 7: Verify GREEN and the real path**
+
+Run:
+
+```bash
+/Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-production-readiness/python-test-runtime-standalone-v2/bin/python3.11 \
+  -m pytest -q main/tbot-server/tests/test_course_mode_release_gate.py \
+  -k 'cjson_gitlink or firmware_handler or archive_repository'
+```
+
+Expected: all selected tree and gitlink tests pass with cleanup intact.
+
+Then stage the real `.24` handler candidate without executing firmware:
+
+```bash
+cd /Users/manhhodinh/Documents/TBOT/robot/esp32-server/main/tbot-server
+umask 022
+/Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-production-readiness/python-test-runtime-standalone-v2/bin/python3.11 \
+  -I -s -c 'import json,pathlib,sys; sys.path.insert(0,str(pathlib.Path.cwd())); from scripts import course_mode_release_gate as m; c=json.loads(pathlib.Path("/Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-production-readiness/candidates/course-mode-2026-08-31.24.json").read_text()); lane=next(x for x in m.FULL_LANES if x.name=="firmware-handler"); stage=m.stage_execution_candidate(c,(lane,)); print((pathlib.Path(stage.candidate["tools"]["espIdf"]["root"])/"components/json/cJSON/cJSON.c").is_file()); print(stage.cleanup())'
+```
+
+Expected: `True` twice. This diagnostic does not mutate `.24` evidence or run
+firmware.
+
+- [ ] **Step 8: Commit the minimal source fix**
 
 ```bash
 git add main/tbot-server/scripts/course_mode_release_gate.py \
   main/tbot-server/tests/test_course_mode_release_gate.py
-git commit -m "fix(course-mode): bind firmware handler cjson"
+git commit -m "fix(course-mode): stage cjson gitlink commit"
 ```
 
-Obtain an independent spec review followed by an independent quality/security
-review. Resolve every finding test-first and repeat both reviews.
+Only those two files change. Firmware, production data, and `.24` remain
+unchanged.
 
-### Task 2: Freeze Candidate `.24` And Resume Qualification
+### Task 2: Qualify Source And Freeze Candidate `.25`
 
 **Files:**
-- Preserve: candidate `.23` and all `.23` reports/diagnostics as failure evidence
-- Create: candidate `.24`, validator, attestation, Quick, Full, and live-db evidence
+- Preserve: `/Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-production-readiness/candidates/course-mode-2026-08-31.24.json`
+- Preserve: `/Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-production-readiness/course-mode-2026-08-31.24/01-quick-gate.json`
+- Preserve: `/Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-production-readiness/diagnostics/course-mode-2026-08-31.24-runtime/firmware-facing.json`
+- Create: candidate `.25` and its software evidence
 
-- [ ] **Step 1: Freeze `.24`**
+- [ ] **Step 1: Run source qualification**
 
-Build the exact reviewed admin HEAD using the already approved
-`WEB_NODE_IMAGE=node:20` and existing required build arguments/labels. Copy
-`.23`, changing only candidate identity/timestamps/evidence root, reviewed admin
-SHA, and exact web image reference/ID. Preserve all backend, firmware, database,
-curriculum, and tool identities. Validate, attest, and lock artifacts to `0444`.
+Run the complete canonical 599-test command, combined 53-test Node command,
+`py_compile`, relevant `node --check` commands, `git diff --check`, clean
+`git status --short`, and `git fsck --no-progress`. Require zero failures and
+zero skips; dangling objects are informational only.
 
-- [ ] **Step 2: Resume sequential gates**
+- [ ] **Step 2: Obtain two independent reviews**
 
-Run `.24` Quick, then the four firmware-facing host-native lanes, then final
-Full and isolated PostgreSQL live-db. The previously successful `.23` isolated
-NEW-to-ROLLBACK result remains diagnostic evidence, but `.24` Full must execute
-the real assignment NEW and ROLLBACK lanes again. Stop on the first failure.
+Reviewer one checks spec compliance, tree/gitlink behavior, candidate-schema
+stability, and absence of firmware/production/physical changes. Reviewer two
+checks Git argument injection, `.git` redirection, canonical paths,
+ownership/modes, symlink and TOCTOU boundaries, object identity, archive limits,
+cleanup, and missing tests. Resolve findings test-first and repeat both reviews.
 
-- [ ] **Step 3: Audit and verdict**
+- [ ] **Step 3: Freeze candidate `.25`**
 
-Run the software-only evidence audit and two independent final reviews. Only
-then may the result be `SOFTWARE_GO_FOR_ATTENDED_FLASH`; physical actions still
-require a fresh point-of-use confirmation.
+Build the reviewed clean HEAD for `linux/arm64` with `WEB_NODE_IMAGE=node:20`,
+`VUE_APP_NEST_AUTH_DISABLED=false`, and the existing OCI labels. Copy `.24`,
+changing only candidate ID/timestamps/evidence root, admin SHA, and web image
+reference/ID. Preserve backend, firmware, database, curriculum, and tool
+identities. Validate, attest, and lock artifacts to `0444`, link count one.
+
+- [ ] **Step 4: Resume gates sequentially with runtime umask `022`**
+
+Run `.25` Quick; the exact ordered firmware-facing lanes `firmware-renderer`,
+`firmware-handler`, `firmware-backward-compatibility`, and
+`cross-contract-parity`; Full with all 20 lanes including real assignment NEW
+then ROLLBACK through one shared capsule and isolated `.25` resources; and the
+isolated PostgreSQL 16 live-db gate using two distinct loopback databases. Stop
+at the first failure and preserve its report.
+
+- [ ] **Step 5: Audit and issue the software verdict**
+
+Require immutable validator, attestation, Quick, Full, and live-db evidence;
+exact candidate/repository/tool/image/firmware identities; correct lane order;
+matching attestation hashes; no retained paths/resources; and no secrets,
+tokens, audio, or transcripts. Obtain two final independent reviews.
+
+Only then may the verdict be `SOFTWARE_GO_FOR_ATTENDED_FLASH`. It does not
+authorize serial access, flashing, reset, HIL, or robot motion; those still
+require fresh point-of-use user confirmation.
