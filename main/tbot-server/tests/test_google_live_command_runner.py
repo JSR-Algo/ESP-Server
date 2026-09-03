@@ -364,6 +364,43 @@ def test_nested_python_script_executes_candidate_git_source(
     assert not marker.exists()
 
 
+def test_absolute_nested_project_script_is_candidate_bound_regression(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    project_root = tmp_path.parent / f"{tmp_path.name}-candidate-repo"
+    scripts = project_root / "scripts"
+    scripts.mkdir(parents=True)
+    mutable = scripts / "analyze_google_live_log.py"
+    marker = tmp_path / "mutable-analyzer-executed"
+    mutable.write_text(
+        f"from pathlib import Path; Path({str(marker)!r}).write_text('mutable'); "
+        "Path('real-api').mkdir(exist_ok=True); Path('real-api/report.json').write_text('mutable')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "__file__", str(scripts / "google_live_command_runner.py"))
+    archive = _python_source_archive(
+        {
+            "scripts/google_live_robot_soak.py": (
+                "import subprocess, sys\n"
+                f"subprocess.run([sys.executable, {str(mutable)!r}], check=True)\n"
+            ),
+            "scripts/analyze_google_live_log.py": (
+                "from pathlib import Path; Path('real-api').mkdir(exist_ok=True); "
+                "Path('real-api/report.json').write_text('candidate')\n"
+            ),
+        }
+    )
+    monkeypatch.setattr(runner, "_load_candidate_python_archive", lambda _sha: archive)
+    execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "scripts/google_live_robot_soak.py")),
+        provenance=tmp_path / "commands.jsonl",
+    )
+    assert (tmp_path / "real-api" / "report.json").read_text() == "candidate"
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize("python_flag", ["-u", "-B"])
 def test_flagged_relative_python_script_executes_candidate_git_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, python_flag: str
