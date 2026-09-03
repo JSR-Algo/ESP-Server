@@ -48,6 +48,10 @@ PYTHON_EXECUTABLE_SCHEMA = "google-live-python-executables.v1"
 PYTHON_EXECUTABLE_MANIFEST_GIT_PATH = (
     "main/tbot-server/tests/fixtures/google_live_python_executable_manifest.json"
 )
+RUNTIME_CLOSURE_SCHEMA = "google-live-runtime-closure.v1"
+RUNTIME_CLOSURE_MANIFEST_GIT_PATH = (
+    "main/tbot-server/tests/fixtures/google_live_runtime_closure_manifest.json"
+)
 _MAX_PROVENANCE_ARTIFACT_BYTES = 16 * 1024 * 1024
 _MAX_GENERATION_FILES = 1024
 PAIR_SCHEMA = "google-live-command-provenance-pair.v1"
@@ -224,6 +228,200 @@ exec(compile(source, original_file, "exec"), namespace, namespace)
 _MAX_PYTHON_SOURCE_ARCHIVE_BYTES = 64 * 1024 * 1024
 _MAX_PYTHON_SOURCE_FILE_BYTES = 16 * 1024 * 1024
 _MAX_PYTHON_SOURCE_MEMBERS = 5000
+
+
+def _runtime_platform_tuple() -> str:
+    return (
+        f"{platform.system().lower()}-{platform.machine().lower()}-"
+        f"cp{sys.version_info.major}{sys.version_info.minor}"
+    )
+
+
+def _parse_runtime_closure_manifest(
+    content: bytes, *, platform_name: str | None = None
+) -> Mapping[str, Any]:
+    try:
+        value = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("runtime closure manifest is invalid") from exc
+    canonical = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    if canonical != content:
+        raise ValueError("runtime closure manifest is not canonical")
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {
+            "limits",
+            "platform",
+            "resourceInventorySha256",
+            "resources",
+            "runtime",
+            "schemaVersion",
+        }
+        or value.get("schemaVersion") != RUNTIME_CLOSURE_SCHEMA
+    ):
+        raise ValueError("runtime closure manifest is invalid")
+    expected_platform = platform_name or _runtime_platform_tuple()
+    if value.get("platform") != expected_platform:
+        raise ValueError("runtime closure platform is unsupported")
+    runtime = value.get("runtime")
+    if (
+        not isinstance(runtime, dict)
+        or set(runtime)
+        != {"interpreterSha256", "pythonImplementation", "pythonMajorMinor"}
+        or SHA256.fullmatch(runtime.get("interpreterSha256", "")) is None
+    ):
+        raise ValueError("runtime closure runtime binding is invalid")
+    if runtime.get("pythonImplementation") != sys.implementation.name:
+        raise ValueError("runtime closure runtime binding is invalid")
+    match = re.fullmatch(r"[^-]+-[^-]+-cp([0-9]{2,3})", expected_platform)
+    if (
+        match is None
+        or str(runtime.get("pythonMajorMinor", "")).replace(".", "")
+        != match.group(1)
+    ):
+        raise ValueError("runtime closure runtime binding is invalid")
+    limits = value.get("limits")
+    if (
+        not isinstance(limits, dict)
+        or set(limits)
+        != {
+            "maxPathDepth",
+            "maxResourceBytes",
+            "maxResourceCount",
+            "maxResourceFileBytes",
+        }
+        or any(type(limits.get(key)) is not int or limits[key] <= 0 for key in limits)
+        or limits["maxResourceCount"] > 5000
+        or limits["maxResourceFileBytes"] > 16 * 1024 * 1024
+        or limits["maxResourceBytes"] > 64 * 1024 * 1024
+        or limits["maxPathDepth"] > 64
+    ):
+        raise ValueError("runtime closure limits are invalid")
+    resources = value.get("resources")
+    if (
+        not isinstance(resources, list)
+        or not resources
+        or len(resources) > limits["maxResourceCount"]
+    ):
+        raise ValueError("runtime closure resource inventory is invalid")
+    paths: list[str] = []
+    total = 0
+    for resource in resources:
+        if not isinstance(resource, dict) or set(resource) != {
+            "gitBlob",
+            "kind",
+            "path",
+            "sha256",
+            "size",
+        }:
+            raise ValueError("runtime closure resource inventory is invalid")
+        path = resource.get("path")
+        if (
+            not isinstance(path, str) or not path or Path(path).is_absolute()
+            or any(part in {"", ".", ".."} for part in Path(path).parts)
+            or "\\" in path
+            or any(ord(character) < 32 or ord(character) > 126 for character in path)
+            or len(Path(path).parts) > limits["maxPathDepth"]
+        ):
+            raise ValueError("runtime closure resource path is not relative")
+        if resource.get("kind") not in {"python", "config", "wav", "json", "yaml"}:
+            raise ValueError("runtime closure resource kind is invalid")
+        if (
+            not isinstance(resource.get("gitBlob"), str)
+            or re.fullmatch(r"[0-9a-f]{40}", resource["gitBlob"]) is None
+        ):
+            raise ValueError("runtime closure resource blob is invalid")
+        if (
+            SHA256.fullmatch(resource.get("sha256", "")) is None
+            or type(resource.get("size")) is not int
+        ):
+            raise ValueError("runtime closure resource digest is invalid")
+        if resource["size"] < 0 or resource["size"] > limits["maxResourceFileBytes"]:
+            raise ValueError("runtime closure resource size is invalid")
+        paths.append(path)
+        total += resource["size"]
+    if paths != sorted(paths) or len(paths) != len(set(paths)):
+        raise ValueError("runtime closure resource inventory is not sorted or unique")
+    if total > limits["maxResourceBytes"]:
+        raise ValueError("runtime closure resource inventory exceeds bound")
+    inventory = json.dumps(resources, sort_keys=True, separators=(",", ":")).encode()
+    inventory_digest = value.get("resourceInventorySha256")
+    if (
+        not isinstance(inventory_digest, str)
+        or SHA256.fullmatch(inventory_digest) is None
+        or not hmac.compare_digest(
+            inventory_digest, hashlib.sha256(inventory).hexdigest()
+        )
+    ):
+        raise ValueError("runtime closure resource inventory digest mismatch")
+    return value
+
+
+def _load_runtime_closure_manifest(
+    expected_git_sha: str,
+    *,
+    code_root: Path | None = None,
+    platform_name: str | None = None,
+) -> Mapping[str, Any]:
+    code_root = (
+        Path(__file__).resolve().parents[1] if code_root is None else code_root
+    ).resolve(strict=True)
+    with trusted_git_session():
+        observed = _trusted_git_output(code_root, "rev-parse", "HEAD").decode().strip()
+        if observed != expected_git_sha:
+            raise ValueError("candidate git SHA does not match repository HEAD")
+        if _trusted_git_output(
+            code_root, "status", "--porcelain=v1", "-z", "--untracked-files=no"
+        ):
+            raise ValueError("candidate worktree contains tracked or staged modifications")
+        try:
+            content = _trusted_git_output(
+                code_root,
+                "show",
+                f"{expected_git_sha}:{RUNTIME_CLOSURE_MANIFEST_GIT_PATH}",
+            )
+        except Exception as exc:
+            raise ValueError("runtime closure manifest is missing from Git") from exc
+        manifest = _parse_runtime_closure_manifest(content, platform_name=platform_name)
+        for resource in manifest["resources"]:
+            spec = f"{expected_git_sha}:{resource['path']}"
+            try:
+                tree_entry = _trusted_git_output(
+                    code_root,
+                    "ls-tree",
+                    "-z",
+                    expected_git_sha,
+                    "--",
+                    resource["path"],
+                )
+                tree_meta, blob_name = tree_entry.rstrip(b"\0").decode().split("\t", 1)
+                mode, _type, tree_blob = tree_meta.split()
+                kind = _trusted_git_output(code_root, "cat-file", "-t", spec).decode().strip()
+                blob = _trusted_git_output(code_root, "rev-parse", spec).decode().strip()
+                data = _trusted_git_output(code_root, "show", spec)
+            except Exception as exc:
+                raise ValueError("runtime closure resource is missing from Git") from exc
+            if (
+                mode not in {"100644", "100755"}
+                or _type != "blob"
+                or tree_blob != resource["gitBlob"]
+                or blob_name != resource["path"]
+                or kind != "blob"
+                or blob != resource["gitBlob"]
+                or len(data) != resource["size"]
+                or hashlib.sha256(data).hexdigest() != resource["sha256"]
+            ):
+                raise ValueError("runtime closure resource is not a regular verified blob")
+        if (
+            _trusted_git_output(code_root, "rev-parse", "HEAD").decode().strip()
+            != expected_git_sha
+            or _trusted_git_output(
+                code_root, "status", "--porcelain=v1", "-z", "--untracked-files=no"
+            )
+        ):
+            raise ValueError("candidate repository changed during closure validation")
+    return manifest
 
 
 def _immutable_identity(value: Mapping[str, str] | None) -> Mapping[str, str]:

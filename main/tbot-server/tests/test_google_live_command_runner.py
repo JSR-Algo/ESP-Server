@@ -82,6 +82,171 @@ def _write_report_code(payload: str = "ok") -> str:
     )
 
 
+def _runtime_closure_manifest(resources: list[dict[str, object]]) -> dict[str, object]:
+    inventory = json.dumps(resources, sort_keys=True, separators=(",", ":")).encode()
+    return {
+        "limits": {
+            "maxPathDepth": 8,
+            "maxResourceBytes": 4096,
+            "maxResourceCount": 4,
+            "maxResourceFileBytes": 1024,
+        },
+        "platform": "darwin-arm64-cp314",
+        "resourceInventorySha256": hashlib.sha256(inventory).hexdigest(),
+        "resources": resources,
+        "runtime": {
+            "interpreterSha256": "c" * 64,
+            "pythonImplementation": "cpython",
+            "pythonMajorMinor": "3.14",
+        },
+        "schemaVersion": "google-live-runtime-closure.v1",
+    }
+
+
+def _canonical_json(value: object) -> bytes:
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def test_runtime_closure_manifest_parser_accepts_canonical_inventory() -> None:
+    import scripts.google_live_command_runner as runner
+
+    resources = [
+        {"gitBlob": "1" * 40, "kind": "config", "path": "config/server.yaml", "sha256": "a" * 64, "size": 2},
+        {"gitBlob": "2" * 40, "kind": "python", "path": "scripts/example.py", "sha256": "b" * 64, "size": 3},
+    ]
+    payload = _canonical_json(_runtime_closure_manifest(resources))
+    parsed = runner._parse_runtime_closure_manifest(payload, platform_name="darwin-arm64-cp314")
+    assert parsed["resources"][0]["path"] == "config/server.yaml"
+
+
+@pytest.mark.parametrize(
+    "mutate, message",
+    [
+        (lambda m: m["resources"].append(m["resources"][0].copy()), "inventory"),
+        (lambda m: m["resources"][0].update(path="../escape"), "relative"),
+        (lambda m: m.update(resourceInventorySha256="d" * 64), "digest"),
+        (lambda m: m.update(platform="linux-x86_64-cp314"), "platform"),
+        (lambda m: m["runtime"].update(pythonMajorMinor="3.13"), "runtime"),
+        (lambda m: m["limits"].update(maxResourceCount=1000000), "limits"),
+    ],
+)
+def test_runtime_closure_manifest_parser_rejects_invalid_inventory(
+    mutate, message: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    resources = [{"gitBlob": "1" * 40, "kind": "python", "path": "scripts/example.py", "sha256": "b" * 64, "size": 3}]
+    manifest = _runtime_closure_manifest(resources)
+    mutate(manifest)
+    payload = _canonical_json(manifest)
+    with pytest.raises(ValueError, match=message):
+        runner._parse_runtime_closure_manifest(payload, platform_name="darwin-arm64-cp314")
+
+
+def test_runtime_closure_manifest_rejects_noncanonical_json() -> None:
+    import scripts.google_live_command_runner as runner
+
+    resources = [{"gitBlob": "1" * 40, "kind": "python", "path": "scripts/example.py", "sha256": "b" * 64, "size": 3}]
+    with pytest.raises(ValueError, match="canonical"):
+        runner._parse_runtime_closure_manifest(json.dumps(_runtime_closure_manifest(resources), indent=2).encode(), platform_name="darwin-arm64-cp314")
+
+
+def _commit_runtime_manifest_repo(
+    tmp_path: Path,
+    *,
+    mode: str = "100644",
+    content: bytes = b"abc",
+    include_resource: bool = True,
+    resource_overrides: dict[str, object] | None = None,
+) -> tuple[Path, str]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    resource_path = "main/tbot-server/scripts/example.py"
+    blob = subprocess.check_output(["git", "hash-object", "-w", "--stdin"], cwd=repo, input=content, text=False).decode().strip()
+    sha256 = hashlib.sha256(content).hexdigest()
+    resource = {"gitBlob": blob, "kind": "python", "path": resource_path, "sha256": sha256, "size": len(content)}
+    resource.update(resource_overrides or {})
+    resources = [resource]
+    manifest = _canonical_json(_runtime_closure_manifest(resources))
+    manifest_blob = subprocess.check_output(["git", "hash-object", "-w", "--stdin"], cwd=repo, input=manifest).decode().strip()
+    index = tmp_path / "index"
+    env = {**os.environ, "GIT_INDEX_FILE": str(index)}
+    if include_resource:
+        subprocess.run(["git", "update-index", "--add", "--cacheinfo", mode, blob, resource_path], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "update-index", "--add", "--cacheinfo", "100644", manifest_blob, "main/tbot-server/tests/fixtures/google_live_runtime_closure_manifest.json"], cwd=repo, env=env, check=True)
+    tree = subprocess.check_output(["git", "write-tree"], cwd=repo, env=env).decode().strip()
+    commit = subprocess.check_output(["git", "commit-tree", tree, "-m", "fixture"], cwd=repo, env=env).decode().strip()
+    subprocess.run(["git", "update-ref", "refs/heads/main", commit], cwd=repo, check=True)
+    subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=repo, check=True)
+    return repo, commit
+
+
+def _ignore_temp_repo_worktree_status(
+    monkeypatch: pytest.MonkeyPatch, runner: object
+) -> None:
+    trusted_output = runner._trusted_git_output
+    monkeypatch.setattr(
+        runner,
+        "_trusted_git_output",
+        lambda root, *args: b""
+        if args[0] == "status"
+        else trusted_output(root, *args),
+    )
+
+
+def test_runtime_closure_manifest_loader_verifies_git_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    repo, commit = _commit_runtime_manifest_repo(tmp_path)
+    _ignore_temp_repo_worktree_status(monkeypatch, runner)
+    result = runner._load_runtime_closure_manifest(commit, code_root=repo, platform_name="darwin-arm64-cp314")
+    assert result["resources"][0]["gitBlob"]
+
+
+@pytest.mark.parametrize(
+    "include_resource, overrides, message",
+    [
+        (False, None, "missing"),
+        (True, {"gitBlob": "f" * 40}, "regular verified blob"),
+        (True, {"sha256": "f" * 64}, "regular verified blob"),
+    ],
+)
+def test_resource_inventory_rejects_missing_or_mismatched_git_member(
+    tmp_path: Path,
+    include_resource: bool,
+    overrides: dict[str, object] | None,
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    repo, commit = _commit_runtime_manifest_repo(
+        tmp_path, include_resource=include_resource, resource_overrides=overrides
+    )
+    _ignore_temp_repo_worktree_status(monkeypatch, runner)
+    with pytest.raises(ValueError, match=message):
+        runner._load_runtime_closure_manifest(
+            commit, code_root=repo, platform_name="darwin-arm64-cp314"
+        )
+
+
+@pytest.mark.parametrize("mode", ["120000", "160000"])
+def test_resource_inventory_rejects_symlink_or_nonregular_git_member(
+    tmp_path: Path, mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    repo, commit = _commit_runtime_manifest_repo(tmp_path, mode=mode)
+    _ignore_temp_repo_worktree_status(monkeypatch, runner)
+    with pytest.raises(ValueError, match="regular"):
+        runner._load_runtime_closure_manifest(commit, code_root=repo, platform_name="darwin-arm64-cp314")
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="Darwin snapshots use hardlinks")
 def test_executable_read_allows_concurrent_snapshot_hardlink(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
