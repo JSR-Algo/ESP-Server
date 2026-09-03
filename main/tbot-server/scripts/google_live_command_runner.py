@@ -3945,6 +3945,10 @@ def execute_and_record(
                                 False,
                             )
                             interrupted = True
+                    if closure_manifest is not None:
+                        _materialize_distribution_closure(
+                            closure_manifest, snapshot_root / "dependencies-recheck"
+                        )
                     current_snapshot = executable_path.stat()
                     if (
                         (
