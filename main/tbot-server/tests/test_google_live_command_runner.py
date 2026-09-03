@@ -1124,6 +1124,107 @@ def test_nested_python_script_outside_approved_roots_fails_closed(
     assert not marker.exists()
 
 
+def test_nested_python_command_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / "nested-command-executed"
+    nested_code = f"open({str(marker)!r}, 'w').write('executed')"
+    payload = (
+        "import subprocess, sys; "
+        f"subprocess.run([sys.executable, '-c', {nested_code!r}], check=True)"
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, _python_source_archive({"entry.py": payload}))
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_nested_python_module_escape_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / "nested-module-executed"
+    module_dir = tmp_path / "ambient"
+    module_dir.mkdir()
+    (module_dir / "escape_module.py").write_text(
+        f"open({str(marker)!r}, 'w').write('executed')\n"
+    )
+    payload = (
+        "import os, subprocess, sys; "
+        f"environment={{**os.environ, 'PYTHONPATH': {str(module_dir)!r}}}; "
+        "subprocess.run([sys.executable, '-m', 'escape_module'], env=environment, check=True)"
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, _python_source_archive({"entry.py": payload}))
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_nested_alternate_interpreter_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    alternate = tmp_path / "python-alternate"
+    alternate.symlink_to(sys.executable)
+    marker = tmp_path / "alternate-executed"
+    nested_code = f"open({str(marker)!r}, 'w').write('executed')"
+    payload = (
+        "import subprocess; "
+        f"subprocess.run([{str(alternate)!r}, '-c', {nested_code!r}], check=True)"
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, _python_source_archive({"entry.py": payload}))
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_nested_absolute_evidence_argument_is_preserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    evidence = tmp_path / "journey.json"
+    evidence.write_text("declared")
+    payload = (
+        "import subprocess, sys; from pathlib import Path; "
+        f"subprocess.run([sys.executable, 'child.py', {str(evidence)!r}], check=True)"
+    )
+    child = (
+        "import sys; from pathlib import Path; "
+        "Path('real-api').mkdir(exist_ok=True); "
+        "Path('real-api/report.json').write_text(Path(sys.argv[1]).read_text())"
+    )
+    _patch_candidate_resource_archive(
+        monkeypatch, runner, _python_source_archive({"entry.py": payload, "child.py": child})
+    )
+
+    execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py")),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert (tmp_path / "real-api" / "report.json").read_text() == "declared"
+
+
 @pytest.mark.parametrize("python_flag", ["-u", "-B"])
 def test_flagged_relative_python_script_executes_candidate_git_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, python_flag: str

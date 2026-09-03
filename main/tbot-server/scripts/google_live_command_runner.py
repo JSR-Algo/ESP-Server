@@ -203,6 +203,28 @@ def python_script_index(arguments):
     return None
 def candidate_popen(arguments, *args, **kwargs):
     script_index = python_script_index(arguments) if isinstance(arguments, (list, tuple)) else None
+    if not kwargs.get("shell", False) and isinstance(arguments, (list, tuple)) and arguments:
+        executable = os.path.abspath(os.fspath(arguments[0]))
+        approved_executable = os.path.abspath(sys.executable)
+        executable_name = os.path.basename(executable).lower()
+        try:
+            aliases_approved_interpreter = os.path.samefile(executable, approved_executable)
+        except OSError:
+            aliases_approved_interpreter = False
+        python_execution = (
+            executable == approved_executable
+            or aliases_approved_interpreter
+            or executable_name.startswith(("python", "pypy"))
+        )
+        if python_execution and executable != approved_executable:
+            raise PermissionError("Alternate Python interpreter is not approved")
+        if python_execution and script_index is None:
+            raise PermissionError("Python module and command execution are not approved")
+        if python_execution and (
+            not isinstance(arguments[script_index], (str, os.PathLike))
+            or not os.fspath(arguments[script_index]).endswith(".py")
+        ):
+            raise PermissionError("Python child execution requires an approved script")
     if (
         not kwargs.get("shell", False)
         and isinstance(arguments, (list, tuple))
