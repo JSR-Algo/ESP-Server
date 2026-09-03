@@ -788,6 +788,7 @@ def test_production_gate_blocks_without_operator_attestation(candidate_file: Pat
         candidate_file, "quick", runtime_root=_runtime_root(candidate_file),
     )
 
+    print(result)
     assert result["verdict"] == "BLOCKED"
     assert result["failedLane"] == "operator-precondition"
 
@@ -1128,6 +1129,53 @@ def test_production_gate_revalidates_operator_attestation_after_each_lane(
     assert calls == 1
     assert result["verdict"] == "BLOCKED"
     assert result["failedLane"] == "operator-precondition"
+
+
+def test_operator_drift_preserves_cleanup_metadata(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    lane = _lane("retained-lane", "raise SystemExit(0)")
+    monkeypatch.setattr(gate, "lanes_for_mode", lambda _mode: (lane,))
+    monkeypatch.setattr(gate, "validate_candidate", lambda _candidate: False)
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args, **_kwargs: True)
+    original_remove = gate._remove_owned_tree
+    retained: list[Path] = []
+
+    def refuse_cleanup(path: Path, identity=None) -> bool:
+        if path.name.startswith("course-mode-lane-"):
+            retained.append(path)
+            return False
+        return original_remove(path, identity)
+
+    def mutate_attestation(*_args, **_kwargs):
+        replacement = attestation.with_name("operator-attestation-late-race.json")
+        replacement.write_text(
+            json.dumps({**_operator_attestation_payload(candidate_file), "createdAt": "2099-01-02T00:00:00Z"}),
+            encoding="utf-8",
+        )
+        replacement.chmod(0o444)
+        replacement.replace(attestation)
+        return gate._manifest.BoundedCommandResult(0, "", None)
+
+    monkeypatch.setattr(gate, "_remove_owned_tree", refuse_cleanup)
+    monkeypatch.setattr(gate, "run_bounded_command", mutate_attestation)
+    try:
+        result = gate.run_gate(
+            candidate_file, "quick", runtime_root=_runtime_root(candidate_file),
+        )
+    finally:
+        monkeypatch.setattr(gate, "_remove_owned_tree", original_remove)
+        for path in retained:
+            original_remove(path)
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "operator-precondition"
+    assert result["cleanupFailed"] is True
+    assert result["retainedOwner"] == "current-process"
+    assert result["retainedPaths"] == [str(retained[0])]
+    assert result["lanes"][0]["name"] == lane.name
 
 
 def test_success_report_is_stable_and_machine_readable(candidate_file: Path) -> None:

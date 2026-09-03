@@ -4286,13 +4286,21 @@ def _run_gate_impl(
     if operator_binding is not None and _operator_attestation_binding(
         candidate, source,
     ) != operator_binding:
-        report = _blocked(candidate_id, "operator-precondition")
+        if report.get("failedLane") == "cleanup":
+            report["cleanupFailed"] = True
+        report["verdict"] = "BLOCKED"
+        report["failedLane"] = "operator-precondition"
+        report.pop("operatorAttestationSha256", None)
     if report_path is not None:
         assert report_destination is not None
         if operator_binding is not None and (
             _operator_attestation_binding(candidate, source) != operator_binding
         ):
-            report = _blocked(candidate_id, "operator-precondition")
+            if report.get("failedLane") == "cleanup":
+                report["cleanupFailed"] = True
+            report["verdict"] = "BLOCKED"
+            report["failedLane"] = "operator-precondition"
+            report.pop("operatorAttestationSha256", None)
         if not _write_report_atomic(report_path, report, report_destination):
             _invalidate_report(report_path, report_destination)
             _close_report_destination(report_destination)
