@@ -331,6 +331,7 @@ def _write_evidence(
     rows.append(f"{digest}  {provenance.relative_to(root)}")
     manifest = root / "checksums.sha256"
     manifest.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    _install_committed_provenance_pair(provenance)
     return paths, checksums, manifest
 
 
@@ -1385,7 +1386,6 @@ def test_bound_release_verdict_accepts_valid_committed_provenance_pair(
     tmp_path: Path,
 ) -> None:
     paths, _, manifest = _write_evidence(tmp_path)
-    _install_committed_provenance_pair(paths["command_provenance"])
     out = tmp_path / "release-verdict.json"
 
     verdict = release_gate.produce_release_verdict(
@@ -1400,7 +1400,7 @@ def test_bound_release_verdict_rejects_invalid_committed_provenance_pair(
     tmp_path: Path,
 ) -> None:
     paths, _, manifest = _write_evidence(tmp_path)
-    pointer = _install_committed_provenance_pair(paths["command_provenance"])
+    pointer = tmp_path / ".commands.jsonl.pair"
     generation = json.loads(pointer.read_text())["generation"]
     generation_jsonl = pointer.parent / ".commands.jsonl.generations" / f"{generation}.jsonl"
     generation_jsonl.chmod(0o600)
@@ -1414,6 +1414,20 @@ def test_bound_release_verdict_rejects_invalid_committed_provenance_pair(
             manifest,
             tmp_path / "release-verdict.json",
         )
+
+
+def test_bound_release_verdict_rejects_missing_provenance_pointer(
+    tmp_path: Path,
+) -> None:
+    paths, _, manifest = _write_evidence(tmp_path)
+    pointer = tmp_path / ".commands.jsonl.pair"
+    pointer.unlink()
+    out = tmp_path / "release-verdict.json"
+
+    with pytest.raises((OSError, RuntimeError, ValueError), match="pointer|provenance"):
+        release_gate.produce_release_verdict(IDENTITY, paths, manifest, out)
+
+    assert not out.exists()
 
 
 @pytest.mark.parametrize(

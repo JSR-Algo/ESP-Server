@@ -34,6 +34,7 @@ COMMAND_ID = re.compile(r"(?:diagnostic\.)?[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+
 ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 _MAX_PROVENANCE_ARTIFACT_BYTES = 16 * 1024 * 1024
+_MAX_GENERATION_FILES = 1024
 PAIR_SCHEMA = "google-live-command-provenance-pair.v1"
 GENERATION_ID = re.compile(r"[0-9a-f]{32}")
 GENERATION_FILE = re.compile(r"([0-9a-f]{32})\.(?:jsonl|txt)")
@@ -1384,9 +1385,12 @@ def _write_generation_at(directory_fd: int, name: str, content: bytes) -> None:
 
 
 def _read_committed_pair_at(
-    directory_fd: int, jsonl_name: str, projection_name: str
+    directory_fd: int,
+    jsonl_name: str,
+    projection_name: str,
+    *,
+    require_public: bool = True,
 ) -> CommittedPairSnapshot:
-    directory_epoch = os.fstat(directory_fd)
     pointer_name = _pair_pointer_name(jsonl_name)
     pointer_snapshot = _read_pair_pointer_snapshot_at(directory_fd, pointer_name)
     if pointer_snapshot is None:
@@ -1437,20 +1441,32 @@ def _read_committed_pair_at(
         or _spec_digest_summary(entries) != pointer.spec_digest_sha256
     ):
         raise RuntimeError("provenance committed pair is invalid")
+    pointer_epoch = os.fstat(directory_fd)
     _provenance_pair_hook(
         "before_pointer_recheck", directory_fd, jsonl_name, projection_name
     )
     rebound = _read_pair_pointer_snapshot_at(directory_fd, pointer_name)
-    if rebound != pointer_snapshot:
-        raise RuntimeError("provenance pair pointer changed")
-    public = _read_provenance_pair_at(directory_fd, jsonl_name, projection_name)
-    if (
-        public.jsonl is None
-        or public.projection is None
-        or public.jsonl.content != jsonl
-        or public.projection.content != projection
+    rebound_epoch = os.fstat(directory_fd)
+    if rebound != pointer_snapshot or (
+        rebound_epoch.st_dev,
+        rebound_epoch.st_ino,
+        rebound_epoch.st_ctime_ns,
+    ) != (
+        pointer_epoch.st_dev,
+        pointer_epoch.st_ino,
+        pointer_epoch.st_ctime_ns,
     ):
-        raise RuntimeError("provenance public pair is inconsistent")
+        raise RuntimeError("provenance pair pointer changed")
+    public = None
+    if require_public:
+        public = _read_provenance_pair_at(directory_fd, jsonl_name, projection_name)
+        if (
+            public.jsonl is None
+            or public.projection is None
+            or public.jsonl.content != jsonl
+            or public.projection.content != projection
+        ):
+            raise RuntimeError("provenance public pair is inconsistent")
     generation_fd = _open_generation_directory(directory_fd, jsonl_name, create=False)
     try:
         if (
@@ -1467,24 +1483,13 @@ def _read_committed_pair_at(
         os.close(generation_fd)
     if final_generation_pair != generation_pair:
         raise RuntimeError("provenance committed pair changed")
-    if _read_provenance_pair_at(
+    if require_public and _read_provenance_pair_at(
         directory_fd, jsonl_name, projection_name
     ) != public:
         raise RuntimeError("provenance public pair changed")
     final_pointer = _read_pair_pointer_snapshot_at(directory_fd, pointer_name)
     if final_pointer != pointer_snapshot:
         raise RuntimeError("provenance pair pointer changed")
-    final_epoch = os.fstat(directory_fd)
-    if (
-        final_epoch.st_dev,
-        final_epoch.st_ino,
-        final_epoch.st_ctime_ns,
-    ) != (
-        directory_epoch.st_dev,
-        directory_epoch.st_ino,
-        directory_epoch.st_ctime_ns,
-    ):
-        raise RuntimeError("provenance pair changed")
     return CommittedPairSnapshot(
         pointer, pointer_content, pointer_version, jsonl, projection
     )
@@ -1574,15 +1579,46 @@ def _cleanup_generations_at(
     directory_fd: int, jsonl_name: str, keep_generations: set[str]
 ) -> None:
     generation_fd = _open_generation_directory(directory_fd, jsonl_name)
-    changed = False
     try:
-        for name in os.listdir(generation_fd):
+        names = os.listdir(generation_fd)
+        if len(names) > _MAX_GENERATION_FILES:
+            raise RuntimeError("provenance generation inventory is too large")
+        inventory: dict[str, set[str]] = {}
+        for name in names:
             match = GENERATION_FILE.fullmatch(name)
-            if match is None or match.group(1) in keep_generations:
-                continue
-            os.unlink(name, dir_fd=generation_fd)
-            changed = True
-        if changed:
+            if match is None:
+                raise RuntimeError("provenance generation inventory is invalid")
+            generation, suffix = name.rsplit(".", 1)
+            inventory.setdefault(generation, set()).add(suffix)
+        removable = []
+        for generation, suffixes in inventory.items():
+            if suffixes != {"jsonl", "txt"}:
+                raise RuntimeError("provenance generation pair is incomplete")
+            try:
+                pair = _read_provenance_pair_at(
+                    generation_fd, f"{generation}.jsonl", f"{generation}.txt"
+                )
+                if pair.jsonl is None or pair.projection is None:
+                    raise RuntimeError("provenance generation pair is incomplete")
+                for artifact in (pair.jsonl, pair.projection):
+                    if (
+                        not stat.S_ISREG(artifact.identity[2])
+                        or stat.S_IMODE(artifact.identity[2]) != 0o400
+                        or artifact.identity[6] != os.geteuid()
+                        or artifact.identity[7] != 1
+                    ):
+                        raise RuntimeError("provenance generation pair is invalid")
+                entries = parse_provenance(pair.jsonl.content)
+                if pair.projection.content != render_commands_projection(entries):
+                    raise RuntimeError("provenance generation pair is invalid")
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise RuntimeError("provenance generation inventory is invalid") from exc
+            if generation not in keep_generations:
+                removable.append(generation)
+        for generation in removable:
+            os.unlink(f"{generation}.jsonl", dir_fd=generation_fd)
+            os.unlink(f"{generation}.txt", dir_fd=generation_fd)
+        if removable:
             os.fsync(generation_fd)
     finally:
         os.close(generation_fd)
@@ -1906,14 +1942,38 @@ def _preflight_provenance(provenance: Path, command_id: str) -> None:
         _require_transaction_binding(parent, lock_path.name, lock_fd)
         _provenance_transaction_hook("preflight_before_read")
         _require_transaction_binding(parent, lock_path.name, lock_fd)
-        try:
-            old_pair = _read_committed_pair_at(
-                parent.descriptor, provenance.name, projection.name
+        old_pair = _read_committed_pair_at(
+            parent.descriptor,
+            provenance.name,
+            projection.name,
+            require_public=False,
+        )
+        if old_pair.pointer is not None:
+            public = _read_provenance_pair_at(
+                parent.descriptor,
+                provenance.name,
+                projection.name,
+                require_complete=False,
             )
-        except RuntimeError as exc:
-            if str(exc) != "provenance public pair is inconsistent":
-                raise
-            raise ValueError("provenance projection is inconsistent") from exc
+            if (
+                public.jsonl is None
+                or public.projection is None
+                or public.jsonl.content != old_pair.jsonl
+                or public.projection.content != old_pair.projection
+            ):
+                _atomic_replace_at(
+                    parent.descriptor, provenance.name, old_pair.jsonl or b""
+                )
+                _provenance_transaction_hook("preflight_after_repair_jsonl")
+                _require_transaction_binding(parent, lock_path.name, lock_fd)
+                _atomic_replace_at(
+                    parent.descriptor, projection.name, old_pair.projection or b""
+                )
+                _provenance_transaction_hook("preflight_after_repair_projection")
+                _require_transaction_binding(parent, lock_path.name, lock_fd)
+                old_pair = _read_committed_pair_at(
+                    parent.descriptor, provenance.name, projection.name
+                )
         old_jsonl = old_pair.jsonl
         old_projection = old_pair.projection
         entries = parse_provenance(old_jsonl or b"")

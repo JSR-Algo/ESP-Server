@@ -490,6 +490,7 @@ def _read_bound_release_input(path: Path | str) -> BoundReleaseInput:
 def _require_release_input_unchanged(
     bound: BoundReleaseInput,
     *,
+    protected_root: Path | None = None,
     allowed_changed_directory: Path | None = None,
 ) -> None:
     current = _read_bound_release_input(bound.path)
@@ -503,12 +504,32 @@ def _require_release_input_unchanged(
             and parent_parts[: len(allowed_parts)] == allowed_parts
         ):
             allowed_index = len(allowed_parts) - 1
-    chain_matches = all(
-        observed == expected or index == allowed_index
-        for index, (observed, expected) in enumerate(
-            zip(current.parent_chain, bound.parent_chain, strict=True)
-        )
-    )
+    protected_index = len(
+        _absolute_input_path(protected_root or bound.path.parent).parts
+    ) - 1
+    chain_matches = True
+    for index, (observed, expected) in enumerate(
+        zip(current.parent_chain, bound.parent_chain, strict=True)
+    ):
+        if index == allowed_index:
+            matches = True
+        elif index < protected_index:
+            matches = (
+                observed.device,
+                observed.inode,
+                observed.mode,
+                observed.links,
+            ) == (
+                expected.device,
+                expected.inode,
+                expected.mode,
+                expected.links,
+            )
+        else:
+            matches = observed == expected
+        if not matches:
+            chain_matches = False
+            break
     if not chain_matches or replace(current, parent_chain=bound.parent_chain) != bound:
         raise ReleaseEvidenceChanged("release evidence changed")
 
@@ -518,11 +539,15 @@ def _require_all_release_inputs_unchanged(
     *,
     allowed_changed_directory: Path | None = None,
 ) -> None:
+    protected_root = Path(
+        os.path.commonpath([str(bound.path.parent) for bound in bindings.values()])
+    )
     try:
         for name, bound in bindings.items():
             try:
                 _require_release_input_unchanged(
                     bound,
+                    protected_root=protected_root,
                     allowed_changed_directory=allowed_changed_directory,
                 )
             except (OSError, ValueError, RuntimeError) as exc:
@@ -539,8 +564,8 @@ def _bind_committed_provenance_pair(
     pointer_path = provenance_path.with_name(f".{provenance_path.name}.pair")
     try:
         pointer_binding = _read_bound_release_input(pointer_path)
-    except FileNotFoundError:
-        return
+    except FileNotFoundError as exc:
+        raise ValueError("command provenance pointer is required") from exc
     parent_fd = os.open(
         provenance_path.parent,
         os.O_RDONLY

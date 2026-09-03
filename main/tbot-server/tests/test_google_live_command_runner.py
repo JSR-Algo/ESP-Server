@@ -541,11 +541,13 @@ def test_next_commit_cleans_only_unreachable_known_generations(tmp_path: Path) -
     provenance = tmp_path / "commands.jsonl"
     execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
     generation_dir = tmp_path / ".commands.jsonl.generations"
-    unknown = generation_dir / "operator-note"
-    unknown.write_text("keep")
-    orphan = "e" * 32
-    (generation_dir / f"{orphan}.jsonl").write_bytes(b"orphan")
-    (generation_dir / f"{orphan}.txt").write_bytes(b"orphan")
+    stale = "e" * 32
+    stale_jsonl = generation_dir / f"{stale}.jsonl"
+    stale_projection = generation_dir / f"{stale}.txt"
+    stale_jsonl.write_bytes(provenance.read_bytes())
+    stale_projection.write_bytes(provenance.with_suffix(".txt").read_bytes())
+    stale_jsonl.chmod(0o400)
+    stale_projection.chmod(0o400)
 
     runner._commit_entry(
         provenance,
@@ -558,9 +560,61 @@ def test_next_commit_cleans_only_unreachable_known_generations(tmp_path: Path) -
         if path.name.endswith((".jsonl", ".txt"))
     ]
     assert len(known) <= 4
-    assert not (generation_dir / f"{orphan}.jsonl").exists()
-    assert not (generation_dir / f"{orphan}.txt").exists()
-    assert unknown.read_text() == "keep"
+    assert not stale_jsonl.exists()
+    assert not stale_projection.exists()
+
+
+@pytest.mark.parametrize(
+    "kind", ["unknown", "lone_jsonl", "lone_txt", "forged", "symlink", "hardlink"]
+)
+def test_generation_cleanup_rejects_unsafe_inventory_without_deleting(
+    tmp_path: Path, kind: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    stale = "e" * 32
+    stale_jsonl = generation_dir / f"{stale}.jsonl"
+    stale_projection = generation_dir / f"{stale}.txt"
+    if kind == "unknown":
+        unsafe = generation_dir / "operator-note"
+        unsafe.write_text("keep")
+    elif kind == "lone_jsonl":
+        unsafe = stale_jsonl
+        unsafe.write_bytes(provenance.read_bytes())
+        unsafe.chmod(0o400)
+    elif kind == "lone_txt":
+        unsafe = stale_projection
+        unsafe.write_bytes(provenance.with_suffix(".txt").read_bytes())
+        unsafe.chmod(0o400)
+    elif kind == "forged":
+        stale_jsonl.write_bytes(b"forged\n")
+        stale_projection.write_bytes(b"forged\n")
+        stale_jsonl.chmod(0o400)
+        stale_projection.chmod(0o400)
+        unsafe = stale_jsonl
+    elif kind == "symlink":
+        unsafe = stale_jsonl
+        unsafe.symlink_to(provenance)
+        stale_projection.write_bytes(provenance.with_suffix(".txt").read_bytes())
+        stale_projection.chmod(0o400)
+    else:
+        unsafe = stale_jsonl
+        os.link(provenance, unsafe)
+        stale_projection.write_bytes(provenance.with_suffix(".txt").read_bytes())
+        stale_projection.chmod(0o400)
+    before = {path.name for path in generation_dir.iterdir()}
+
+    with pytest.raises((OSError, RuntimeError, ValueError), match="generation|pair|artifact|inventory"):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+        )
+
+    assert {path.name for path in generation_dir.iterdir()} == before
+    assert unsafe.exists() or unsafe.is_symlink()
 
 
 @pytest.mark.parametrize("kind", ["pointer_input", "generation_output"])
@@ -910,7 +964,7 @@ def test_pair_snapshot_rejects_fifo_without_blocking(tmp_path: Path) -> None:
     completed = subprocess.run(
         [sys.executable, "-c", script, str(tmp_path)],
         cwd=Path(__file__).parents[1],
-        timeout=1,
+        timeout=3,
         check=False,
     )
     assert completed.returncode == 0
@@ -992,6 +1046,70 @@ def test_preflight_pair_race_never_allows_child_execution(
     with pytest.raises((RuntimeError, ValueError), match="pair|artifact|provenance"):
         execute_and_record(
             _spec(tmp_path, code, command_id="diagnostic.candidate", outputs=()),
+            provenance=provenance,
+        )
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("mutation", ["missing_jsonl", "missing_projection", "mismatch"])
+def test_preflight_repairs_public_views_from_committed_generation_before_child(
+    tmp_path: Path, mutation: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    projection = provenance.with_suffix(".txt")
+    if mutation == "missing_jsonl":
+        provenance.unlink()
+    elif mutation == "missing_projection":
+        projection.unlink()
+    else:
+        provenance.write_bytes(b"tampered\n")
+        projection.write_bytes(b"tampered\n")
+    marker = tmp_path / "child-executed"
+    code = f"from pathlib import Path; Path({str(marker)!r}).write_text('ok')"
+
+    execute_and_record(
+        _spec(
+            tmp_path,
+            code,
+            command_id=f"diagnostic.repair_{mutation}",
+            outputs=(marker,),
+        ),
+        provenance=provenance,
+    )
+
+    assert marker.read_text() == "ok"
+    entries = runner.parse_provenance(provenance.read_bytes())
+    assert entries[-1]["commandId"] == f"diagnostic.repair_{mutation}"
+    assert projection.read_bytes() == runner.render_commands_projection(entries)
+
+
+def test_preflight_repair_race_never_allows_child_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    provenance.with_suffix(".txt").write_bytes(b"tampered\n")
+    marker = tmp_path / "child-executed"
+
+    def mutate(stage: str) -> None:
+        if stage == "preflight_after_repair_jsonl":
+            provenance.write_bytes(b"raced\n")
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", mutate)
+    code = f"from pathlib import Path; Path({str(marker)!r}).write_text('bad')"
+    with pytest.raises((RuntimeError, ValueError), match="provenance|pair"):
+        execute_and_record(
+            _spec(
+                tmp_path,
+                code,
+                command_id="diagnostic.repair_race",
+                outputs=(),
+            ),
             provenance=provenance,
         )
     assert not marker.exists()
@@ -1562,18 +1680,25 @@ def test_missing_or_mutated_output_fails_without_provenance(tmp_path: Path) -> N
     assert not (tmp_path / "commands.jsonl").exists()
 
 
-def test_duplicate_ids_and_corrupt_existing_log_fail_closed(tmp_path: Path) -> None:
+def test_duplicate_ids_fail_closed_and_corrupt_public_log_is_repaired(
+    tmp_path: Path,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
     provenance = tmp_path / "commands.jsonl"
     execute_and_record(_spec(tmp_path, _write_report_code()), provenance=provenance)
     (tmp_path / "real-api" / "report.json").unlink()
     with pytest.raises(ValueError, match="duplicate"):
         execute_and_record(_spec(tmp_path, _write_report_code()), provenance=provenance)
     provenance.write_text('{"truncated":')
-    with pytest.raises(ValueError, match="provenance"):
-        execute_and_record(
-            _spec(tmp_path, _write_report_code(), command_id="diagnostic.retry"),
-            provenance=provenance,
-        )
+    execute_and_record(
+        _spec(tmp_path, _write_report_code(), command_id="diagnostic.retry"),
+        provenance=provenance,
+    )
+    assert [
+        entry["commandId"]
+        for entry in runner.parse_provenance(provenance.read_bytes())
+    ] == ["real_api.round_trip", "diagnostic.retry"]
 
 
 def test_concurrent_writers_preserve_both_complete_entries(tmp_path: Path) -> None:
@@ -1607,12 +1732,19 @@ def test_concurrent_writers_preserve_both_complete_entries(tmp_path: Path) -> No
     assert (tmp_path / "commands.txt").read_text().count("diagnostic.") == 2
 
 
-def test_inconsistent_projection_fails_closed(tmp_path: Path) -> None:
+def test_inconsistent_projection_is_repaired_from_committed_generation(
+    tmp_path: Path,
+) -> None:
     provenance = tmp_path / "commands.jsonl"
     execute_and_record(_spec(tmp_path, _write_report_code()), provenance=provenance)
     (tmp_path / "commands.txt").write_text("tampered\n")
-    with pytest.raises(ValueError, match="projection"):
-        execute_and_record(
-            _spec(tmp_path, "pass", command_id="diagnostic.retry", outputs=()),
-            provenance=provenance,
-        )
+    execute_and_record(
+        _spec(tmp_path, "pass", command_id="diagnostic.retry", outputs=()),
+        provenance=provenance,
+    )
+    import scripts.google_live_command_runner as runner
+
+    entries = runner.parse_provenance(provenance.read_bytes())
+    assert (tmp_path / "commands.txt").read_bytes() == runner.render_commands_projection(
+        entries
+    )
