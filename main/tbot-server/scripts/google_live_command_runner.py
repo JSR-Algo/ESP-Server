@@ -181,6 +181,13 @@ else:
 if dependency_roots:
     os.environ['PYTHONNOUSERSITE'] = '1'
 original_popen = subprocess.Popen
+def blocked_process_escape(*args, **kwargs):
+    del args, kwargs
+    raise PermissionError("candidate process escape API is not approved")
+os.system = blocked_process_escape
+for _name in ("execv", "execve", "execvp", "execvpe", "execl", "execle", "execlp"):
+    if hasattr(os, _name):
+        setattr(os, _name, blocked_process_escape)
 def python_script_index(arguments):
     no_value = {"-b", "-B", "-d", "-E", "-i", "-I", "-O", "-OO", "-P", "-q", "-R", "-s", "-S", "-u", "-v", "-V", "-x"}
     with_value = {"-W", "-X", "--check-hash-based-pycs"}
@@ -206,16 +213,17 @@ def candidate_popen(arguments, *args, **kwargs):
     if not kwargs.get("shell", False) and isinstance(arguments, (list, tuple)) and arguments:
         executable = os.path.abspath(os.fspath(arguments[0]))
         approved_executable = os.path.abspath(sys.executable)
-        executable_name = os.path.basename(executable).lower()
         try:
             aliases_approved_interpreter = os.path.samefile(executable, approved_executable)
         except OSError:
             aliases_approved_interpreter = False
-        python_execution = (
-            executable == approved_executable
-            or aliases_approved_interpreter
-            or executable_name.startswith(("python", "pypy"))
+        script_shape = (
+            script_index is not None
+            and isinstance(arguments[script_index], (str, os.PathLike))
+            and os.fspath(arguments[script_index]).endswith(".py")
         )
+        module_shape = len(arguments) > 1 and arguments[1] in {"-c", "-m"}
+        python_execution = executable == approved_executable or aliases_approved_interpreter or script_shape or module_shape
         if python_execution and executable != approved_executable:
             raise PermissionError("Alternate Python interpreter is not approved")
         if python_execution and script_index is None:

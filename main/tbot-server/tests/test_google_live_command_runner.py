@@ -1197,6 +1197,72 @@ def test_nested_alternate_interpreter_fails_closed(
     assert not marker.exists()
 
 
+def test_nested_arbitrary_named_interpreter_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    alternate = tmp_path / "runner"
+    alternate.symlink_to(sys.executable)
+    marker = tmp_path / "arbitrary-interpreter-executed"
+    nested_code = f"open({str(marker)!r}, 'w').write('executed')"
+    payload = (
+        "import subprocess; "
+        f"subprocess.run([{str(alternate)!r}, '-c', {nested_code!r}], check=True)"
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, _python_source_archive({"entry.py": payload}))
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_nested_shell_python_command_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / "shell-python-executed"
+    payload = (
+        "import subprocess; "
+        f"subprocess.run('python -c \"open({str(marker)!r}, \'w\').write(\\\'executed\\\')\"', shell=True, check=True)"
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, _python_source_archive({"entry.py": payload}))
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_nested_os_exec_escape_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / "exec-executed"
+    payload = (
+        "import os; "
+        f"os.system(\"python -c 'open({str(marker)!r}, \\\'w\\\').write(\\\'executed\\\')\")"
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, _python_source_archive({"entry.py": payload}))
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
 def test_nested_absolute_evidence_argument_is_preserved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
