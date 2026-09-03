@@ -447,6 +447,345 @@ def _provenance_entry(provenance: Path, command_id: str, digest: str) -> dict:
     return entry
 
 
+def test_pair_pointer_is_canonical_and_binds_generation_hashes() -> None:
+    import scripts.google_live_command_runner as runner
+
+    pointer = runner.PairPointer(
+        generation="a" * 32,
+        jsonl_sha256="b" * 64,
+        projection_sha256="c" * 64,
+        entry_count=2,
+        spec_digest_sha256="d" * 64,
+    )
+    rendered = runner._render_pair_pointer(pointer)
+    assert runner._parse_pair_pointer(rendered) == pointer
+    assert rendered.endswith(b"\n")
+    for invalid in (
+        rendered.replace(b'"generation":"', b'"generation":"../', 1),
+        rendered.replace(b'"entryCount":2', b'"entryCount":-1', 1),
+        b" " + rendered,
+    ):
+        with pytest.raises(ValueError, match="pointer"):
+            runner._parse_pair_pointer(invalid)
+
+
+def test_successful_commit_creates_pointer_bound_immutable_generation(
+    tmp_path: Path,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    pointer = runner._parse_pair_pointer(
+        (tmp_path / ".commands.jsonl.pair").read_bytes()
+    )
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    jsonl_generation = generation_dir / f"{pointer.generation}.jsonl"
+    projection_generation = generation_dir / f"{pointer.generation}.txt"
+    assert jsonl_generation.read_bytes() == provenance.read_bytes()
+    assert projection_generation.read_bytes() == provenance.with_suffix(".txt").read_bytes()
+    assert stat.S_IMODE(jsonl_generation.stat().st_mode) == 0o400
+    assert stat.S_IMODE(projection_generation.stat().st_mode) == 0o400
+
+
+@pytest.mark.parametrize(
+    "failure_stage",
+    [
+        "after_generation_jsonl",
+        "after_generation_projection",
+        "after_public_jsonl",
+        "after_public_projection",
+        "before_pointer",
+        "after_pointer",
+    ],
+)
+def test_generation_commit_crash_boundaries_leave_complete_old_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    original_jsonl = provenance.read_bytes()
+    original_projection = provenance.with_suffix(".txt").read_bytes()
+
+    def fail(stage: str) -> None:
+        if stage == failure_stage:
+            raise RuntimeError(f"injected {failure_stage}")
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", fail)
+    with pytest.raises(RuntimeError, match="injected"):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+        )
+
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        committed = runner._read_committed_pair_at(
+            parent_fd, provenance.name, provenance.with_suffix(".txt").name
+        )
+    finally:
+        os.close(parent_fd)
+    assert committed.jsonl == original_jsonl
+    assert committed.projection == original_projection
+    assert provenance.read_bytes() == original_jsonl
+    assert provenance.with_suffix(".txt").read_bytes() == original_projection
+
+
+def test_next_commit_cleans_only_unreachable_known_generations(tmp_path: Path) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    unknown = generation_dir / "operator-note"
+    unknown.write_text("keep")
+    orphan = "e" * 32
+    (generation_dir / f"{orphan}.jsonl").write_bytes(b"orphan")
+    (generation_dir / f"{orphan}.txt").write_bytes(b"orphan")
+
+    runner._commit_entry(
+        provenance,
+        _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+    )
+
+    known = [
+        path
+        for path in generation_dir.iterdir()
+        if path.name.endswith((".jsonl", ".txt"))
+    ]
+    assert len(known) <= 4
+    assert not (generation_dir / f"{orphan}.jsonl").exists()
+    assert not (generation_dir / f"{orphan}.txt").exists()
+    assert unknown.read_text() == "keep"
+
+
+@pytest.mark.parametrize("kind", ["pointer_input", "generation_output"])
+def test_rejects_pointer_and_generation_control_artifacts(
+    tmp_path: Path, kind: str
+) -> None:
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    marker = tmp_path / "child-executed"
+    code = f"from pathlib import Path; Path({str(marker)!r}).write_text('bad')"
+    if kind == "pointer_input":
+        changes = {"inputs": (tmp_path / ".commands.jsonl.pair",), "outputs": ()}
+    else:
+        output = tmp_path / ".commands.jsonl.generations" / "command-output"
+        changes = {"inputs": (), "outputs": (output,)}
+        code += f"; Path({str(output)!r}).write_text('bad')"
+    with pytest.raises(ValueError, match="control"):
+        execute_and_record(
+            _spec(
+                tmp_path,
+                code,
+                command_id=f"diagnostic.{kind}",
+                **changes,
+            ),
+            provenance=provenance,
+        )
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("stage", "target_name"),
+    [
+        ("after_jsonl_final_check", "commands.jsonl"),
+        ("after_projection_final_check", "commands.txt"),
+    ],
+)
+def test_committed_pair_rejects_public_mutation_between_final_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    target_name: str,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    mutated = False
+
+    def mutate(
+        observed_stage: str,
+        directory_fd: int,
+        jsonl_name: str,
+        projection_name: str,
+    ) -> None:
+        nonlocal mutated
+        if (
+            observed_stage == stage
+            and jsonl_name == provenance.name
+            and not mutated
+        ):
+            mutated = True
+            name = target_name
+            descriptor = os.open(name, os.O_WRONLY | os.O_APPEND, dir_fd=directory_fd)
+            try:
+                os.write(descriptor, b"tampered")
+            finally:
+                os.close(descriptor)
+
+    monkeypatch.setattr(runner, "_provenance_pair_hook", mutate)
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(RuntimeError, match="pair|artifact|public"):
+            runner._read_committed_pair_at(
+                parent_fd, provenance.name, provenance.with_suffix(".txt").name
+            )
+    finally:
+        os.close(parent_fd)
+
+
+def test_committed_pair_rejects_pointer_aba_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    pointer = tmp_path / ".commands.jsonl.pair"
+    moved = tmp_path / ".commands.jsonl.pair.moved"
+    mutated = False
+
+    def aba(
+        stage: str,
+        directory_fd: int,
+        jsonl_name: str,
+        projection_name: str,
+    ) -> None:
+        del directory_fd, projection_name
+        nonlocal mutated
+        if stage == "before_pointer_recheck" and jsonl_name == provenance.name and not mutated:
+            mutated = True
+            pointer.rename(moved)
+            moved.rename(pointer)
+
+    monkeypatch.setattr(runner, "_provenance_pair_hook", aba)
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(RuntimeError, match="pointer|pair"):
+            runner._read_committed_pair_at(
+                parent_fd, provenance.name, provenance.with_suffix(".txt").name
+            )
+    finally:
+        os.close(parent_fd)
+
+
+def test_committed_pair_rejects_in_place_pointer_aba_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    pointer = tmp_path / ".commands.jsonl.pair"
+    original = pointer.read_bytes()
+    mutated = False
+
+    def aba(
+        stage: str,
+        directory_fd: int,
+        jsonl_name: str,
+        projection_name: str,
+    ) -> None:
+        del directory_fd, projection_name
+        nonlocal mutated
+        if stage == "before_pointer_recheck" and jsonl_name == provenance.name and not mutated:
+            mutated = True
+            pointer.write_bytes(b"tampered\n")
+            pointer.write_bytes(original)
+
+    monkeypatch.setattr(runner, "_provenance_pair_hook", aba)
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(RuntimeError, match="pointer|pair"):
+            runner._read_committed_pair_at(
+                parent_fd, provenance.name, provenance.with_suffix(".txt").name
+            )
+    finally:
+        os.close(parent_fd)
+
+
+def test_committed_read_does_not_create_missing_generation_directory(
+    tmp_path: Path,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    pointer = runner.PairPointer("a" * 32, "b" * 64, "c" * 64, 0, "d" * 64)
+    (tmp_path / ".commands.jsonl.pair").write_bytes(
+        runner._render_pair_pointer(pointer)
+    )
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises((FileNotFoundError, RuntimeError)):
+            runner._read_committed_pair_at(parent_fd, "commands.jsonl", "commands.txt")
+    finally:
+        os.close(parent_fd)
+    assert not (tmp_path / ".commands.jsonl.generations").exists()
+
+
+def test_committed_pair_rejects_pointer_wrong_mode(tmp_path: Path) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    (tmp_path / ".commands.jsonl.pair").chmod(0o644)
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(RuntimeError, match="pointer|artifact"):
+            runner._read_committed_pair_at(
+                parent_fd, provenance.name, provenance.with_suffix(".txt").name
+            )
+    finally:
+        os.close(parent_fd)
+
+
+def test_committed_pair_rejects_in_place_generation_aba_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    pointer = runner._parse_pair_pointer(
+        (tmp_path / ".commands.jsonl.pair").read_bytes()
+    )
+    generation = (
+        tmp_path / ".commands.jsonl.generations" / f"{pointer.generation}.jsonl"
+    )
+    original = generation.read_bytes()
+    mutated = False
+
+    def aba(
+        stage: str,
+        directory_fd: int,
+        jsonl_name: str,
+        projection_name: str,
+    ) -> None:
+        del directory_fd, projection_name
+        nonlocal mutated
+        if stage == "before_pointer_recheck" and jsonl_name == provenance.name and not mutated:
+            mutated = True
+            generation.chmod(0o600)
+            generation.write_bytes(b"tampered\n")
+            generation.write_bytes(original)
+            generation.chmod(0o400)
+
+    monkeypatch.setattr(runner, "_provenance_pair_hook", aba)
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(RuntimeError, match="committed|pair"):
+            runner._read_committed_pair_at(
+                parent_fd, provenance.name, provenance.with_suffix(".txt").name
+            )
+    finally:
+        os.close(parent_fd)
+
+
 @pytest.mark.parametrize("mutation", ["append", "hardlink"])
 def test_provenance_read_rejects_file_mutation_after_initial_stat(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
@@ -1004,6 +1343,40 @@ def test_directory_fsync_failure_during_rollback_still_restores_complete_pair(
     ) == original_jsonl
     projection = provenance.with_suffix(".txt")
     assert (projection.read_bytes() if projection.exists() else None) == original_projection
+
+
+def test_pointer_rollback_failure_still_restores_both_public_views(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    original_jsonl = provenance.read_bytes()
+    original_projection = provenance.with_suffix(".txt").read_bytes()
+    original_pointer = (tmp_path / ".commands.jsonl.pair").read_bytes()
+    real_replace = runner._atomic_replace_at
+
+    def fail_pointer_restore(directory_fd: int, name: str, content: bytes):
+        result = real_replace(directory_fd, name, content)
+        if name == ".commands.jsonl.pair" and content == original_pointer:
+            raise OSError("injected pointer rollback failure")
+        return result
+
+    def fail_after_pointer(stage: str) -> None:
+        if stage == "after_pointer":
+            raise ValueError("trigger rollback")
+
+    monkeypatch.setattr(runner, "_atomic_replace_at", fail_pointer_restore)
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", fail_after_pointer)
+    with pytest.raises(OSError, match="pointer rollback failure"):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+        )
+    assert provenance.read_bytes() == original_jsonl
+    assert provenance.with_suffix(".txt").read_bytes() == original_projection
+    assert (tmp_path / ".commands.jsonl.pair").read_bytes() == original_pointer
 
 
 def test_parent_swap_during_secure_mkdir_never_mutates_outside(

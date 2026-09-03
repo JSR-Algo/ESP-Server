@@ -33,7 +33,7 @@ from scripts.google_live_deterministic_evidence import (
     parse_pytest_runtime_manifest,
     snapshot_output_parent,
 )
-from scripts.google_live_command_runner import parse_provenance
+from scripts.google_live_command_runner import _read_committed_pair_at, parse_provenance
 from scripts.google_live_reliability import (
     SCHEMA_VERSION,
     forbidden_report_fields,
@@ -533,6 +533,54 @@ def _require_all_release_inputs_unchanged(
         raise ReleaseEvidenceChanged("release evidence changed") from exc
 
 
+def _bind_committed_provenance_pair(
+    bindings: dict[str, BoundReleaseInput], provenance_path: Path
+) -> None:
+    pointer_path = provenance_path.with_name(f".{provenance_path.name}.pair")
+    try:
+        pointer_binding = _read_bound_release_input(pointer_path)
+    except FileNotFoundError:
+        return
+    parent_fd = os.open(
+        provenance_path.parent,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        committed = _read_committed_pair_at(
+            parent_fd, provenance_path.name, provenance_path.with_suffix(".txt").name
+        )
+    finally:
+        os.close(parent_fd)
+    if committed.pointer is None or committed.pointer_content != pointer_binding.content:
+        raise ReleaseEvidenceChanged("release provenance pair changed")
+    generation_dir = provenance_path.parent / f".{provenance_path.name}.generations"
+    pair_bindings = {
+        "command_provenance_pointer": pointer_binding,
+        "command_provenance_projection": _read_bound_release_input(
+            provenance_path.with_suffix(".txt")
+        ),
+        "command_provenance_generation_jsonl": _read_bound_release_input(
+            generation_dir / f"{committed.pointer.generation}.jsonl"
+        ),
+        "command_provenance_generation_projection": _read_bound_release_input(
+            generation_dir / f"{committed.pointer.generation}.txt"
+        ),
+    }
+    if (
+        bindings[COMMAND_PROVENANCE_SUPPORT].content != committed.jsonl
+        or pair_bindings["command_provenance_projection"].content
+        != committed.projection
+        or pair_bindings["command_provenance_generation_jsonl"].content
+        != committed.jsonl
+        or pair_bindings["command_provenance_generation_projection"].content
+        != committed.projection
+    ):
+        raise ReleaseEvidenceChanged("release provenance pair changed")
+    bindings.update(pair_bindings)
+
+
 def _parse_checksum_manifest_content(
     content: bytes,
     manifest_path: Path | str,
@@ -954,6 +1002,9 @@ def _produce_release_verdict(
     bindings = {"checksums": _read_bound_release_input(checksum_path)}
     bindings.update(
         {name: _read_bound_release_input(path) for name, path in layer_paths.items()}
+    )
+    _bind_committed_provenance_pair(
+        bindings, Path(layer_paths[COMMAND_PROVENANCE_SUPPORT])
     )
     provenance_entries = parse_provenance(bindings[COMMAND_PROVENANCE_SUPPORT].content)
     producer_entry = next(

@@ -21,6 +21,11 @@ from scripts.google_live_release_gate import (
 )
 from scripts.google_live_command_runner import (
     COMMAND_PROVENANCE_SCHEMA,
+    PairPointer,
+    _render_pair_pointer,
+    _spec_digest_summary,
+    parse_provenance,
+    render_commands_projection,
     render_provenance,
 )
 from scripts.google_live_deterministic_evidence import (
@@ -1348,6 +1353,67 @@ def test_bound_release_verdict_publishes_valid_exact_inputs(tmp_path: Path) -> N
 
     assert verdict["status"] == "PASS"
     assert json.loads(out.read_text(encoding="utf-8")) == verdict
+
+
+def _install_committed_provenance_pair(provenance: Path) -> Path:
+    entries = parse_provenance(provenance.read_bytes())
+    projection = render_commands_projection(entries)
+    provenance.with_suffix(".txt").write_bytes(projection)
+    generation = "f" * 32
+    generation_dir = provenance.parent / f".{provenance.name}.generations"
+    generation_dir.mkdir(mode=0o700)
+    generation_jsonl = generation_dir / f"{generation}.jsonl"
+    generation_projection = generation_dir / f"{generation}.txt"
+    generation_jsonl.write_bytes(provenance.read_bytes())
+    generation_projection.write_bytes(projection)
+    generation_jsonl.chmod(0o400)
+    generation_projection.chmod(0o400)
+    pointer = PairPointer(
+        generation,
+        hashlib.sha256(provenance.read_bytes()).hexdigest(),
+        hashlib.sha256(projection).hexdigest(),
+        len(entries),
+        _spec_digest_summary(entries),
+    )
+    pointer_path = provenance.parent / f".{provenance.name}.pair"
+    pointer_path.write_bytes(_render_pair_pointer(pointer))
+    pointer_path.chmod(0o600)
+    return pointer_path
+
+
+def test_bound_release_verdict_accepts_valid_committed_provenance_pair(
+    tmp_path: Path,
+) -> None:
+    paths, _, manifest = _write_evidence(tmp_path)
+    _install_committed_provenance_pair(paths["command_provenance"])
+    out = tmp_path / "release-verdict.json"
+
+    verdict = release_gate.produce_release_verdict(
+        IDENTITY, paths, manifest, out
+    )
+
+    assert verdict["status"] == "PASS"
+    assert json.loads(out.read_text(encoding="utf-8")) == verdict
+
+
+def test_bound_release_verdict_rejects_invalid_committed_provenance_pair(
+    tmp_path: Path,
+) -> None:
+    paths, _, manifest = _write_evidence(tmp_path)
+    pointer = _install_committed_provenance_pair(paths["command_provenance"])
+    generation = json.loads(pointer.read_text())["generation"]
+    generation_jsonl = pointer.parent / ".commands.jsonl.generations" / f"{generation}.jsonl"
+    generation_jsonl.chmod(0o600)
+    generation_jsonl.write_bytes(b"tampered\n")
+    generation_jsonl.chmod(0o400)
+
+    with pytest.raises((RuntimeError, ValueError), match="provenance|release evidence"):
+        release_gate.produce_release_verdict(
+            IDENTITY,
+            paths,
+            manifest,
+            tmp_path / "release-verdict.json",
+        )
 
 
 @pytest.mark.parametrize(

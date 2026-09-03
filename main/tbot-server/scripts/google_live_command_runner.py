@@ -34,6 +34,9 @@ COMMAND_ID = re.compile(r"(?:diagnostic\.)?[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+
 ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 _MAX_PROVENANCE_ARTIFACT_BYTES = 16 * 1024 * 1024
+PAIR_SCHEMA = "google-live-command-provenance-pair.v1"
+GENERATION_ID = re.compile(r"[0-9a-f]{32}")
+GENERATION_FILE = re.compile(r"([0-9a-f]{32})\.(?:jsonl|txt)")
 _EXACT_ENTRY_FIELDS = {
     "argv",
     "candidateIdentity",
@@ -197,6 +200,31 @@ class ProvenanceFileSnapshot:
 class ProvenancePairSnapshot:
     jsonl: ProvenanceFileSnapshot | None
     projection: ProvenanceFileSnapshot | None
+
+
+@dataclass(frozen=True)
+class PointerFileSnapshot:
+    content: bytes
+    version: PublishedArtifact
+    identity: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class PairPointer:
+    generation: str
+    jsonl_sha256: str
+    projection_sha256: str
+    entry_count: int
+    spec_digest_sha256: str
+
+
+@dataclass(frozen=True)
+class CommittedPairSnapshot:
+    pointer: PairPointer | None
+    pointer_content: bytes | None
+    pointer_version: PublishedArtifact | None
+    jsonl: bytes | None
+    projection: bytes | None
 
 
 @dataclass(frozen=True)
@@ -914,6 +942,73 @@ def render_commands_projection(entries: list[dict[str, Any]]) -> bytes:
     return "".join(lines).encode()
 
 
+def _spec_digest_summary(entries: list[dict[str, Any]]) -> str:
+    joined = "\n".join(entry["specSha256"] for entry in entries).encode()
+    return hashlib.sha256(joined).hexdigest()
+
+
+def _render_pair_pointer(pointer: PairPointer) -> bytes:
+    if (
+        type(pointer.generation) is not str
+        or GENERATION_ID.fullmatch(pointer.generation) is None
+        or type(pointer.jsonl_sha256) is not str
+        or SHA256.fullmatch(pointer.jsonl_sha256) is None
+        or type(pointer.projection_sha256) is not str
+        or SHA256.fullmatch(pointer.projection_sha256) is None
+        or type(pointer.entry_count) is not int
+        or pointer.entry_count < 0
+        or type(pointer.spec_digest_sha256) is not str
+        or SHA256.fullmatch(pointer.spec_digest_sha256) is None
+    ):
+        raise ValueError("provenance pair pointer is invalid")
+    value = {
+        "entryCount": pointer.entry_count,
+        "generation": pointer.generation,
+        "jsonl": f"{pointer.generation}.jsonl",
+        "jsonlSha256": pointer.jsonl_sha256,
+        "projection": f"{pointer.generation}.txt",
+        "projectionSha256": pointer.projection_sha256,
+        "schemaVersion": PAIR_SCHEMA,
+        "specDigestSha256": pointer.spec_digest_sha256,
+    }
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def _parse_pair_pointer(content: bytes) -> PairPointer:
+    if len(content) > 4096 or not content.endswith(b"\n"):
+        raise ValueError("provenance pair pointer is invalid")
+    try:
+        value = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise ValueError("provenance pair pointer is invalid") from exc
+    if not isinstance(value, dict) or set(value) != {
+        "entryCount",
+        "generation",
+        "jsonl",
+        "jsonlSha256",
+        "projection",
+        "projectionSha256",
+        "schemaVersion",
+        "specDigestSha256",
+    }:
+        raise ValueError("provenance pair pointer is invalid")
+    pointer = PairPointer(
+        value.get("generation"),
+        value.get("jsonlSha256"),
+        value.get("projectionSha256"),
+        value.get("entryCount"),
+        value.get("specDigestSha256"),
+    )
+    if (
+        value.get("schemaVersion") != PAIR_SCHEMA
+        or value.get("jsonl") != f"{pointer.generation}.jsonl"
+        or value.get("projection") != f"{pointer.generation}.txt"
+        or _render_pair_pointer(pointer) != content
+    ):
+        raise ValueError("provenance pair pointer is invalid")
+    return pointer
+
+
 def _provenance_read_hook(stage: str, directory_fd: int, name: str) -> None:
     del stage, directory_fd, name
 
@@ -940,6 +1035,13 @@ def _provenance_file_identity(opened: os.stat_result) -> tuple[int, ...]:
 def _read_existing_version_at(
     directory_fd: int, name: str
 ) -> tuple[bytes, PublishedArtifact] | None:
+    snapshot = _read_existing_snapshot_at(directory_fd, name)
+    return None if snapshot is None else (snapshot.content, snapshot.version)
+
+
+def _read_existing_snapshot_at(
+    directory_fd: int, name: str
+) -> PointerFileSnapshot | None:
     try:
         descriptor = os.open(
             name,
@@ -966,14 +1068,18 @@ def _read_existing_version_at(
         content = b"".join(chunks)
         if (
             _provenance_file_identity(observed) != _provenance_file_identity(opened)
-            or (linked.st_dev, linked.st_ino) != (opened.st_dev, opened.st_ino)
+            or _provenance_file_identity(linked) != _provenance_file_identity(opened)
             or len(content) != opened.st_size
         ):
             raise RuntimeError("provenance artifact changed")
-        return content, PublishedArtifact(
-            opened.st_dev,
-            opened.st_ino,
-            hashlib.sha256(content).hexdigest(),
+        return PointerFileSnapshot(
+            content,
+            PublishedArtifact(
+                opened.st_dev,
+                opened.st_ino,
+                hashlib.sha256(content).hexdigest(),
+            ),
+            _provenance_file_identity(opened),
         )
     finally:
         os.close(descriptor)
@@ -1125,9 +1231,29 @@ def _read_provenance_pair_once_at(
             _require_open_snapshot_current(
                 directory_fd, jsonl_name, jsonl_fd, jsonl
             )
+            _provenance_pair_hook(
+                "after_jsonl_final_check",
+                directory_fd,
+                jsonl_name,
+                projection_name,
+            )
         if projection_fd is None:
             _require_absent_at(directory_fd, projection_name)
         else:
+            _require_open_snapshot_current(
+                directory_fd, projection_name, projection_fd, projection
+            )
+            _provenance_pair_hook(
+                "after_projection_final_check",
+                directory_fd,
+                jsonl_name,
+                projection_name,
+            )
+        if jsonl_fd is not None:
+            _require_open_snapshot_current(
+                directory_fd, jsonl_name, jsonl_fd, jsonl
+            )
+        if projection_fd is not None:
             _require_open_snapshot_current(
                 directory_fd, projection_name, projection_fd, projection
             )
@@ -1169,6 +1295,199 @@ def _read_provenance_pair_at(
 def _read_existing_at(directory_fd: int, name: str) -> bytes | None:
     existing = _read_existing_version_at(directory_fd, name)
     return None if existing is None else existing[0]
+
+
+def _read_pair_pointer_snapshot_at(
+    directory_fd: int, name: str
+) -> PointerFileSnapshot | None:
+    snapshot = _read_existing_snapshot_at(directory_fd, name)
+    if snapshot is None:
+        return None
+    mode = snapshot.identity[2]
+    uid = snapshot.identity[6]
+    if stat.S_IMODE(mode) != 0o600 or uid != os.geteuid():
+        raise RuntimeError("provenance pair pointer is invalid")
+    return snapshot
+
+
+def _pair_pointer_name(jsonl_name: str) -> str:
+    _component_key(jsonl_name)
+    return f".{jsonl_name}.pair"
+
+
+def _generation_directory_name(jsonl_name: str) -> str:
+    _component_key(jsonl_name)
+    return f".{jsonl_name}.generations"
+
+
+def _open_generation_directory(
+    directory_fd: int, jsonl_name: str, *, create: bool = True
+) -> int:
+    name = _generation_directory_name(jsonl_name)
+    _reject_component_alias(directory_fd, name)
+    if create:
+        try:
+            os.mkdir(name, 0o700, dir_fd=directory_fd)
+        except FileExistsError:
+            pass
+    descriptor = os.open(
+        name,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=directory_fd,
+    )
+    try:
+        opened = _require_exact_opened_component(directory_fd, name, descriptor)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or opened.st_uid != os.geteuid()
+            or stat.S_IMODE(opened.st_mode) != 0o700
+            or opened.st_nlink < 1
+        ):
+            raise RuntimeError("provenance generation directory is invalid")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _write_generation_at(directory_fd: int, name: str, content: bytes) -> None:
+    descriptor = os.open(
+        name,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o400,
+        dir_fd=directory_fd,
+    )
+    try:
+        remaining = memoryview(content)
+        while remaining:
+            count = os.write(descriptor, remaining)
+            if count <= 0:
+                raise OSError("provenance generation write failed")
+            remaining = remaining[count:]
+        os.fsync(descriptor)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.geteuid()
+            or stat.S_IMODE(opened.st_mode) != 0o400
+            or opened.st_nlink != 1
+            or opened.st_size != len(content)
+        ):
+            raise RuntimeError("provenance generation is invalid")
+    finally:
+        os.close(descriptor)
+
+
+def _read_committed_pair_at(
+    directory_fd: int, jsonl_name: str, projection_name: str
+) -> CommittedPairSnapshot:
+    directory_epoch = os.fstat(directory_fd)
+    pointer_name = _pair_pointer_name(jsonl_name)
+    pointer_snapshot = _read_pair_pointer_snapshot_at(directory_fd, pointer_name)
+    if pointer_snapshot is None:
+        legacy = _read_provenance_pair_at(directory_fd, jsonl_name, projection_name)
+        return CommittedPairSnapshot(
+            None,
+            None,
+            None,
+            None if legacy.jsonl is None else legacy.jsonl.content,
+            None if legacy.projection is None else legacy.projection.content,
+        )
+    pointer_content = pointer_snapshot.content
+    pointer_version = pointer_snapshot.version
+    pointer = _parse_pair_pointer(pointer_content)
+    generation_fd = _open_generation_directory(directory_fd, jsonl_name, create=False)
+    try:
+        generation_directory_identity = _provenance_file_identity(
+            os.fstat(generation_fd)
+        )
+        generation_pair = _read_provenance_pair_at(
+            generation_fd,
+            f"{pointer.generation}.jsonl",
+            f"{pointer.generation}.txt",
+        )
+    finally:
+        os.close(generation_fd)
+    if generation_pair.jsonl is None or generation_pair.projection is None:
+        raise RuntimeError("provenance committed pair is invalid")
+    for artifact in (generation_pair.jsonl, generation_pair.projection):
+        mode = artifact.identity[2]
+        uid = artifact.identity[6]
+        links = artifact.identity[7]
+        if (
+            not stat.S_ISREG(mode)
+            or stat.S_IMODE(mode) != 0o400
+            or uid != os.geteuid()
+            or links != 1
+        ):
+            raise RuntimeError("provenance committed pair is invalid")
+    jsonl = generation_pair.jsonl.content
+    projection = generation_pair.projection.content
+    entries = parse_provenance(jsonl)
+    if (
+        hashlib.sha256(jsonl).hexdigest() != pointer.jsonl_sha256
+        or hashlib.sha256(projection).hexdigest() != pointer.projection_sha256
+        or projection != render_commands_projection(entries)
+        or len(entries) != pointer.entry_count
+        or _spec_digest_summary(entries) != pointer.spec_digest_sha256
+    ):
+        raise RuntimeError("provenance committed pair is invalid")
+    _provenance_pair_hook(
+        "before_pointer_recheck", directory_fd, jsonl_name, projection_name
+    )
+    rebound = _read_pair_pointer_snapshot_at(directory_fd, pointer_name)
+    if rebound != pointer_snapshot:
+        raise RuntimeError("provenance pair pointer changed")
+    public = _read_provenance_pair_at(directory_fd, jsonl_name, projection_name)
+    if (
+        public.jsonl is None
+        or public.projection is None
+        or public.jsonl.content != jsonl
+        or public.projection.content != projection
+    ):
+        raise RuntimeError("provenance public pair is inconsistent")
+    generation_fd = _open_generation_directory(directory_fd, jsonl_name, create=False)
+    try:
+        if (
+            _provenance_file_identity(os.fstat(generation_fd))
+            != generation_directory_identity
+        ):
+            raise RuntimeError("provenance committed pair changed")
+        final_generation_pair = _read_provenance_pair_at(
+            generation_fd,
+            f"{pointer.generation}.jsonl",
+            f"{pointer.generation}.txt",
+        )
+    finally:
+        os.close(generation_fd)
+    if final_generation_pair != generation_pair:
+        raise RuntimeError("provenance committed pair changed")
+    if _read_provenance_pair_at(
+        directory_fd, jsonl_name, projection_name
+    ) != public:
+        raise RuntimeError("provenance public pair changed")
+    final_pointer = _read_pair_pointer_snapshot_at(directory_fd, pointer_name)
+    if final_pointer != pointer_snapshot:
+        raise RuntimeError("provenance pair pointer changed")
+    final_epoch = os.fstat(directory_fd)
+    if (
+        final_epoch.st_dev,
+        final_epoch.st_ino,
+        final_epoch.st_ctime_ns,
+    ) != (
+        directory_epoch.st_dev,
+        directory_epoch.st_ino,
+        directory_epoch.st_ctime_ns,
+    ):
+        raise RuntimeError("provenance pair changed")
+    return CommittedPairSnapshot(
+        pointer, pointer_content, pointer_version, jsonl, projection
+    )
 
 
 def _atomic_replace_at(
@@ -1222,6 +1541,51 @@ def _atomic_replace_at(
                 os.unlink(name, dir_fd=directory_fd)
             except FileNotFoundError:
                 pass
+
+
+def _create_generation_pair_at(
+    directory_fd: int,
+    jsonl_name: str,
+    jsonl: bytes,
+    projection: bytes,
+    entries: list[dict[str, Any]],
+) -> tuple[PairPointer, bytes]:
+    generation = secrets.token_hex(16)
+    generation_fd = _open_generation_directory(directory_fd, jsonl_name)
+    try:
+        _write_generation_at(generation_fd, f"{generation}.jsonl", jsonl)
+        _provenance_transaction_hook("after_generation_jsonl")
+        _write_generation_at(generation_fd, f"{generation}.txt", projection)
+        _provenance_transaction_hook("after_generation_projection")
+        os.fsync(generation_fd)
+    finally:
+        os.close(generation_fd)
+    pointer = PairPointer(
+        generation,
+        hashlib.sha256(jsonl).hexdigest(),
+        hashlib.sha256(projection).hexdigest(),
+        len(entries),
+        _spec_digest_summary(entries),
+    )
+    return pointer, _render_pair_pointer(pointer)
+
+
+def _cleanup_generations_at(
+    directory_fd: int, jsonl_name: str, keep_generations: set[str]
+) -> None:
+    generation_fd = _open_generation_directory(directory_fd, jsonl_name)
+    changed = False
+    try:
+        for name in os.listdir(generation_fd):
+            match = GENERATION_FILE.fullmatch(name)
+            if match is None or match.group(1) in keep_generations:
+                continue
+            os.unlink(name, dir_fd=generation_fd)
+            changed = True
+        if changed:
+            os.fsync(generation_fd)
+    finally:
+        os.close(generation_fd)
 
 
 def _unlink_if_exists_at(directory_fd: int, name: str) -> None:
@@ -1366,12 +1730,13 @@ def _commit_entry(provenance: Path, entry: dict[str, Any]) -> None:
         _require_transaction_binding(parent, lock_path.name, lock_fd)
         _provenance_transaction_hook("before_read")
         _require_transaction_binding(parent, lock_path.name, lock_fd)
-        old_pair = _read_provenance_pair_at(
+        old_committed = _read_committed_pair_at(
             parent.descriptor, provenance.name, projection.name
         )
-        old_jsonl = None if old_pair.jsonl is None else old_pair.jsonl.content
-        old_projection = (
-            None if old_pair.projection is None else old_pair.projection.content
+        old_jsonl = old_committed.jsonl
+        old_projection = old_committed.projection
+        old_public = _read_provenance_pair_at(
+            parent.descriptor, provenance.name, projection.name
         )
         _require_transaction_binding(parent, lock_path.name, lock_fd)
         entries = parse_provenance(old_jsonl or b"")
@@ -1385,19 +1750,35 @@ def _commit_entry(provenance: Path, entry: dict[str, Any]) -> None:
         next_entries = [*entries, entry]
         next_jsonl = render_provenance(next_entries)
         next_projection = render_commands_projection(next_entries)
+        _cleanup_generations_at(
+            parent.descriptor,
+            provenance.name,
+            set()
+            if old_committed.pointer is None
+            else {old_committed.pointer.generation},
+        )
+        next_pointer, next_pointer_content = _create_generation_pair_at(
+            parent.descriptor,
+            provenance.name,
+            next_jsonl,
+            next_projection,
+            next_entries,
+        )
+        pointer_name = _pair_pointer_name(provenance.name)
         originals = {
             provenance.name: old_jsonl,
             projection.name: old_projection,
         }
         expected_current = {
             provenance.name: (
-                None if old_pair.jsonl is None else old_pair.jsonl.version
+                None if old_public.jsonl is None else old_public.jsonl.version
             ),
             projection.name: (
-                None if old_pair.projection is None else old_pair.projection.version
+                None if old_public.projection is None else old_public.projection.version
             ),
         }
         published_names: set[str] = set()
+        published_pointer = None
         try:
             _require_transaction_binding(parent, lock_path.name, lock_fd)
             try:
@@ -1411,6 +1792,7 @@ def _commit_entry(provenance: Path, entry: dict[str, Any]) -> None:
                     published_names.add(provenance.name)
                 raise
             published_names.add(provenance.name)
+            _provenance_transaction_hook("after_public_jsonl")
             _provenance_transaction_hook("after_jsonl_replace")
             _require_transaction_binding(parent, lock_path.name, lock_fd)
             try:
@@ -1424,18 +1806,28 @@ def _commit_entry(provenance: Path, entry: dict[str, Any]) -> None:
                     published_names.add(projection.name)
                 raise
             published_names.add(projection.name)
+            _provenance_transaction_hook("after_public_projection")
             _provenance_transaction_hook("after_projection_replace")
+            _require_transaction_binding(parent, lock_path.name, lock_fd)
+            _provenance_transaction_hook("before_pointer")
+            try:
+                published_pointer = _atomic_replace_at(
+                    parent.descriptor, pointer_name, next_pointer_content
+                )
+            except BaseException as exc:
+                published_pointer = getattr(exc, "_provenance_published", None)
+                raise
+            _provenance_transaction_hook("after_pointer")
             _require_transaction_binding(parent, lock_path.name, lock_fd)
             _provenance_transaction_hook("before_verify")
             _require_transaction_binding(parent, lock_path.name, lock_fd)
-            published_pair = _read_provenance_pair_at(
+            published_pair = _read_committed_pair_at(
                 parent.descriptor, provenance.name, projection.name
             )
             if (
-                published_pair.jsonl is None
-                or published_pair.projection is None
-                or published_pair.jsonl.content != next_jsonl
-                or published_pair.projection.content != next_projection
+                published_pair.pointer != next_pointer
+                or published_pair.jsonl != next_jsonl
+                or published_pair.projection != next_projection
             ):
                 raise RuntimeError("provenance projection is inconsistent")
             _provenance_transaction_hook("post_publish")
@@ -1448,6 +1840,27 @@ def _commit_entry(provenance: Path, entry: dict[str, Any]) -> None:
                 _require_transaction_binding(parent, lock_path.name, lock_fd)
             except (OSError, RuntimeError):
                 pass
+            pointer_rollback_error = None
+            if published_pointer is not None:
+                current_pointer = _read_existing_version_at(
+                    parent.descriptor, pointer_name
+                )
+                if current_pointer is None or current_pointer[1] != published_pointer:
+                    raise RuntimeError("provenance rollback conflict")
+                try:
+                    if old_committed.pointer_content is None:
+                        _unlink_if_exists_at(parent.descriptor, pointer_name)
+                    else:
+                        _atomic_replace_at(
+                            parent.descriptor,
+                            pointer_name,
+                            old_committed.pointer_content,
+                        )
+                except BaseException as exc:
+                    observed = _read_existing_at(parent.descriptor, pointer_name)
+                    if observed != old_committed.pointer_content:
+                        raise
+                    pointer_rollback_error = exc
             _rollback_published_at(
                 parent.descriptor,
                 provenance.name,
@@ -1456,6 +1869,8 @@ def _commit_entry(provenance: Path, entry: dict[str, Any]) -> None:
                 expected_current,
                 published_names,
             )
+            if pointer_rollback_error is not None:
+                raise pointer_rollback_error
             raise
     finally:
         unlock_error = None
@@ -1491,13 +1906,16 @@ def _preflight_provenance(provenance: Path, command_id: str) -> None:
         _require_transaction_binding(parent, lock_path.name, lock_fd)
         _provenance_transaction_hook("preflight_before_read")
         _require_transaction_binding(parent, lock_path.name, lock_fd)
-        old_pair = _read_provenance_pair_at(
-            parent.descriptor, provenance.name, projection.name
-        )
-        old_jsonl = None if old_pair.jsonl is None else old_pair.jsonl.content
-        old_projection = (
-            None if old_pair.projection is None else old_pair.projection.content
-        )
+        try:
+            old_pair = _read_committed_pair_at(
+                parent.descriptor, provenance.name, projection.name
+            )
+        except RuntimeError as exc:
+            if str(exc) != "provenance public pair is inconsistent":
+                raise
+            raise ValueError("provenance projection is inconsistent") from exc
+        old_jsonl = old_pair.jsonl
+        old_projection = old_pair.projection
         entries = parse_provenance(old_jsonl or b"")
         if (old_jsonl is None) != (old_projection is None) or (
             old_projection is not None and old_projection != render_commands_projection(entries)
@@ -1538,12 +1956,23 @@ def execute_and_record(
     if not isinstance(provenance, Path) or not provenance.is_absolute():
         raise ValueError("provenance path must be absolute")
     root = provenance.parent
+    pointer_path = provenance.with_name(_pair_pointer_name(provenance.name))
+    generation_path = provenance.with_name(
+        _generation_directory_name(provenance.name)
+    )
     control_paths = {
         provenance,
         provenance.with_suffix(".txt"),
         provenance.with_name(f".{provenance.name}.lock"),
+        pointer_path,
+        generation_path,
     }
-    if any(path in control_paths or any(_same_file(path, item) for item in control_paths) for path in (*spec.inputs, *spec.outputs)):
+    if any(
+        path in control_paths
+        or generation_path in path.parents
+        or any(_same_file(path, item) for item in control_paths)
+        for path in (*spec.inputs, *spec.outputs)
+    ):
         raise ValueError("command artifacts alias provenance control files")
     if (stdin_bytes is None) != (spec.stdin_source is None):
         raise ValueError("protected stdin bytes and source must be supplied together")
