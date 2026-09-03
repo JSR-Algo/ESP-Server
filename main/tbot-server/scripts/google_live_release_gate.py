@@ -50,6 +50,7 @@ from scripts.physical_smoke_audit import validate_physical_candidate_report
 
 RELEASE_SCHEMA_VERSION = "google-live-release-verdict.v1"
 PYTHON_EXECUTABLE_SCHEMA = "google-live-python-executables.v1"
+COMMAND_EXECUTION_POLICY = "candidate-git-python-source.v1"
 PYTHON_EXECUTABLE_MANIFEST_GIT_PATH = (
     "main/tbot-server/tests/fixtures/google_live_python_executable_manifest.json"
 )
@@ -362,6 +363,7 @@ def _recorded_command_spec_digest(entry: Mapping[str, Any]) -> str:
         "stdinSource": entry["stdinSource"],
         "timeoutSec": entry["terminalPolicy"]["timeoutSec"],
         "cleanupGraceSec": entry["terminalPolicy"]["cleanupGraceSec"],
+        "executionPolicy": COMMAND_EXECUTION_POLICY,
     }
     canonical = json.dumps(stable, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(canonical.encode()).hexdigest()

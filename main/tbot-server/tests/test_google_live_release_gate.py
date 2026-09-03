@@ -615,6 +615,36 @@ def test_release_rejects_untrusted_command_spec_with_fresh_digest(tmp_path: Path
     assert any(item["code"] == "COMMAND_PROVENANCE_INVALID" for item in verdict["failures"])
 
 
+def test_release_rejects_legacy_pre_source_binding_spec_digest(tmp_path: Path) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    entries = [json.loads(line) for line in paths["command_provenance"].read_text().splitlines()]
+    entry = next(item for item in entries if item["commandId"] == "real_api.round_trip")
+    legacy = {
+        "argv": entry["argv"],
+        "commandId": entry["commandId"],
+        "cwd": entry["cwd"],
+        "environmentSources": entry["environmentSources"],
+        "expectedExitCodes": entry["terminalPolicy"]["expectedExitCodes"],
+        "inputs": [item["label"] for item in entry["inputs"]],
+        "outputs": [item["label"] for item in entry["outputs"]],
+        "secretSources": entry["secretSources"],
+        "stdinSource": entry["stdinSource"],
+        "timeoutSec": entry["terminalPolicy"]["timeoutSec"],
+        "cleanupGraceSec": entry["terminalPolicy"]["cleanupGraceSec"],
+    }
+    entry["specSha256"] = hashlib.sha256(
+        json.dumps(legacy, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    content = render_provenance(entries)
+    paths["command_provenance"].write_bytes(content)
+    checksums["command_provenance"] = hashlib.sha256(content).hexdigest()
+
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+
+    assert verdict["status"] == "FAIL"
+    assert any(item["code"] == "COMMAND_PROVENANCE_INVALID" for item in verdict["failures"])
+
+
 @pytest.mark.parametrize(
     ("command_id", "old", "new"),
     [

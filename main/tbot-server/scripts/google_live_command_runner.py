@@ -7,7 +7,9 @@ import ctypes
 import errno
 import hashlib
 import hmac
+import io
 import json
+import math
 import os
 import platform
 import re
@@ -16,6 +18,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -37,6 +40,7 @@ from scripts.google_live_trusted_git import trusted_git_session
 
 
 COMMAND_PROVENANCE_SCHEMA = "google-live-command-provenance.v1"
+COMMAND_EXECUTION_POLICY = "candidate-git-python-source.v1"
 COMMAND_ID = re.compile(r"(?:diagnostic\.)?[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+")
 ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -96,6 +100,120 @@ except BaseException:
             pass
     os._exit(126)
 """
+_GIT_SOURCE_EXEC = """import importlib.machinery, importlib.util, os, subprocess, sys
+bootstrap_path = os.path.abspath(sys.argv[0])
+source_root, original_root, script_relative, original_file = sys.argv[1:5]
+script_arguments = sys.argv[5:]
+class BlockedProjectPath:
+    @staticmethod
+    def find_spec(fullname, target=None):
+        del fullname, target
+        return None
+class CandidateSourceLoader:
+    def __init__(self, snapshot_file, original_file, package_directory=None):
+        self.snapshot_file = snapshot_file
+        self.original_file = original_file
+        self.package_directory = package_directory
+    def create_module(self, spec):
+        del spec
+        return None
+    def exec_module(self, module):
+        module.__file__ = self.original_file
+        if self.package_directory is not None:
+            module.__path__ = [self.package_directory]
+        with open(self.snapshot_file, "rb") as source_file:
+            source = source_file.read()
+        exec(compile(source, self.original_file, "exec"), module.__dict__, module.__dict__)
+class CandidateSourceFinder:
+    @staticmethod
+    def find_spec(fullname, path=None, target=None):
+        del path, target
+        relative = fullname.replace(".", "/")
+        package_directory = os.path.join(source_root, relative)
+        package_file = os.path.join(package_directory, "__init__.py")
+        module_file = os.path.join(source_root, relative + ".py")
+        if os.path.isfile(package_file):
+            loader = CandidateSourceLoader(
+                package_file,
+                os.path.join(original_root, relative, "__init__.py"),
+                package_directory,
+            )
+            return importlib.util.spec_from_loader(fullname, loader, is_package=True)
+        if os.path.isfile(module_file):
+            loader = CandidateSourceLoader(
+                module_file, os.path.join(original_root, relative + ".py")
+            )
+            return importlib.util.spec_from_loader(fullname, loader, is_package=False)
+        if os.path.isdir(package_directory):
+            spec = importlib.machinery.ModuleSpec(fullname, loader=None, is_package=True)
+            spec.submodule_search_locations = [package_directory]
+            return spec
+        return None
+sys.meta_path.insert(0, CandidateSourceFinder())
+sys.path_importer_cache[original_root] = BlockedProjectPath()
+sys.path[:] = [original_root, *[
+    item for item in sys.path if item not in {"", source_root, original_root}
+]]
+original_popen = subprocess.Popen
+def python_script_index(arguments):
+    no_value = {"-b", "-B", "-d", "-E", "-i", "-I", "-O", "-OO", "-P", "-q", "-R", "-s", "-S", "-u", "-v", "-V", "-x"}
+    with_value = {"-W", "-X", "--check-hash-based-pycs"}
+    index = 1
+    while index < len(arguments):
+        value = os.fspath(arguments[index])
+        if value == "--":
+            return index + 1 if index + 1 < len(arguments) else None
+        if value in {"-c", "-m"}:
+            return None
+        if not value.startswith("-"):
+            return index
+        if value in no_value or value.startswith(("-W", "-X")) and len(value) > 2:
+            index += 1
+            continue
+        if value in with_value and index + 1 < len(arguments):
+            index += 2
+            continue
+        return None
+    return None
+def candidate_popen(arguments, *args, **kwargs):
+    script_index = python_script_index(arguments) if isinstance(arguments, (list, tuple)) else None
+    if (
+        not kwargs.get("shell", False)
+        and isinstance(arguments, (list, tuple))
+        and script_index is not None
+        and os.path.abspath(os.fspath(arguments[0])) == os.path.abspath(sys.executable)
+        and isinstance(arguments[script_index], (str, os.PathLike))
+        and os.fspath(arguments[script_index]).endswith(".py")
+    ):
+        child_file = os.path.abspath(os.fspath(arguments[script_index]))
+        try:
+            inside_project = os.path.commonpath([original_root, child_file]) == original_root
+        except ValueError:
+            inside_project = False
+        if inside_project:
+            child_relative = os.path.relpath(child_file, original_root).replace(os.sep, "/")
+            arguments = [
+                arguments[0], *arguments[1:script_index], bootstrap_path,
+                source_root, original_root, child_relative, child_file,
+                *arguments[script_index + 1:]
+            ]
+    return original_popen(arguments, *args, **kwargs)
+subprocess.Popen = candidate_popen
+sys.argv = [original_file, *script_arguments]
+source_path = os.path.join(source_root, *script_relative.split("/"))
+with open(source_path, "rb") as source_file:
+    source = source_file.read()
+namespace = {
+    "__name__": "__main__",
+    "__file__": original_file,
+    "__package__": None,
+    "__cached__": None,
+}
+exec(compile(source, original_file, "exec"), namespace, namespace)
+"""
+_MAX_PYTHON_SOURCE_ARCHIVE_BYTES = 64 * 1024 * 1024
+_MAX_PYTHON_SOURCE_FILE_BYTES = 16 * 1024 * 1024
+_MAX_PYTHON_SOURCE_MEMBERS = 5000
 
 
 def _immutable_identity(value: Mapping[str, str] | None) -> Mapping[str, str]:
@@ -169,9 +287,17 @@ class CommandSpec:
             type(code) is not int or code < 0 or code > 255 for code in self.expected_exit_codes
         ):
             raise ValueError("expected exit policy is invalid")
-        if type(self.timeout_sec) not in {int, float} or self.timeout_sec <= 0:
+        if (
+            type(self.timeout_sec) not in {int, float}
+            or not math.isfinite(self.timeout_sec)
+            or self.timeout_sec <= 0
+        ):
             raise ValueError("timeout must be positive")
-        if type(self.cleanup_grace_sec) not in {int, float} or self.cleanup_grace_sec < 0:
+        if (
+            type(self.cleanup_grace_sec) not in {int, float}
+            or not math.isfinite(self.cleanup_grace_sec)
+            or self.cleanup_grace_sec < 0
+        ):
             raise ValueError("cleanup grace must be non-negative")
         if self.stdin_source not in {
             None,
@@ -262,8 +388,13 @@ class BoundArgumentArtifacts:
 
 
 def _unsafe_recorded_value(value: str) -> bool:
-    if value.startswith("<env:") or value.startswith("<stdin:"):
+    if re.fullmatch(r"<env:[A-Z][A-Z0-9_]*>", value) or value in {
+        "<stdin:protected_transcript_plan>",
+        "<stdin:protected_candidate_plan>",
+    }:
         return False
+    if "<env:" in value or "<stdin:" in value:
+        return True
     return _junit_value_is_sensitive(value)
 
 
@@ -505,7 +636,7 @@ def _require_working_directory_unchanged(
 
 
 def _prepare_paths(
-    spec: CommandSpec, root: Path
+    spec: CommandSpec, root: Path, *, materialize_outputs: bool = True
 ) -> tuple[
     dict[Path, tuple[Any, tuple[tuple[int, int], ...]]],
     dict[Path, tuple[tuple[int, int, int, int, int, int], ...]],
@@ -524,7 +655,7 @@ def _prepare_paths(
             raise RuntimeError("evidence input alias detected")
         inputs[path] = (bound, _directory_chain(path.parent))
     parents = {}
-    for output in spec.outputs:
+    for output in spec.outputs if materialize_outputs else ():
         parent = _secure_materialize_directory(root, output.parent)
         try:
             try:
@@ -637,6 +768,7 @@ def _canonical_spec(spec: CommandSpec, root: Path) -> dict[str, Any]:
         ),
         "timeoutSec": float(spec.timeout_sec),
         "cleanupGraceSec": float(spec.cleanup_grace_sec),
+        "executionPolicy": COMMAND_EXECUTION_POLICY,
     }
 
 
@@ -690,6 +822,143 @@ def _load_trusted_python_executable_manifest(expected_git_sha: str) -> bytes:
         ):
             raise ValueError("candidate repository changed during executable validation")
     return content
+
+
+def _load_candidate_python_archive(expected_git_sha: str) -> bytes:
+    code_root = Path(__file__).resolve().parents[1]
+    with trusted_git_session():
+        observed_head = _trusted_git_output(code_root, "rev-parse", "HEAD").decode().strip()
+        if observed_head != expected_git_sha:
+            raise ValueError("candidate git SHA does not match repository HEAD")
+        content = _trusted_git_output(
+            code_root,
+            "archive",
+            "--format=tar",
+            expected_git_sha,
+            "--",
+            ":(glob)**/*.py",
+            ":(glob)*.py",
+        )
+        if (
+            len(content) > _MAX_PYTHON_SOURCE_ARCHIVE_BYTES
+            or _trusted_git_output(code_root, "rev-parse", "HEAD").decode().strip()
+            != expected_git_sha
+        ):
+            raise ValueError("candidate repository changed during source validation")
+    return content
+
+
+def _materialize_candidate_python_sources(content: bytes, destination: Path) -> None:
+    if not content or len(content) > _MAX_PYTHON_SOURCE_ARCHIVE_BYTES:
+        raise ValueError("candidate Python source archive is invalid")
+    destination.mkdir(mode=0o700)
+    count = 0
+    try:
+        with tarfile.open(fileobj=io.BytesIO(content), mode="r:") as archive:
+            for member in archive:
+                count += 1
+                path = Path(member.name)
+                if (
+                    count > _MAX_PYTHON_SOURCE_MEMBERS
+                    or path.is_absolute()
+                    or any(part in {"", ".", ".."} for part in path.parts)
+                    or any(ord(character) < 32 or ord(character) > 126 for character in member.name)
+                ):
+                    raise ValueError("candidate Python source archive is invalid")
+                target = destination.joinpath(*path.parts)
+                if member.isdir():
+                    target.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    continue
+                if (
+                    not member.isfile()
+                    or path.suffix != ".py"
+                    or member.size < 0
+                    or member.size > _MAX_PYTHON_SOURCE_FILE_BYTES
+                ):
+                    raise ValueError("candidate Python source archive is invalid")
+                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                source = archive.extractfile(member)
+                if source is None:
+                    raise ValueError("candidate Python source archive is invalid")
+                data = source.read(_MAX_PYTHON_SOURCE_FILE_BYTES + 1)
+                if len(data) != member.size:
+                    raise ValueError("candidate Python source archive is invalid")
+                descriptor = os.open(
+                    target,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o400,
+                )
+                try:
+                    offset = 0
+                    while offset < len(data):
+                        offset += os.write(descriptor, data[offset:])
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+    except (OSError, tarfile.TarError) as exc:
+        raise ValueError("candidate Python source archive is invalid") from exc
+    for directory, subdirectories, _files in os.walk(destination, topdown=False):
+        for name in subdirectories:
+            os.chmod(Path(directory) / name, 0o500)
+    os.chmod(destination, 0o500)
+
+
+def _relative_python_script(argv: tuple[str, ...]) -> tuple[str, int] | None:
+    no_value = {
+        "-b", "-B", "-d", "-E", "-i", "-I", "-O", "-OO", "-P", "-q",
+        "-R", "-s", "-S", "-u", "-v", "-V", "-x",
+    }
+    with_value = {"-W", "-X", "--check-hash-based-pycs"}
+    index = 1
+    while index < len(argv):
+        value = argv[index]
+        if value == "--":
+            index += 1
+            break
+        if value in {"-c", "-m"}:
+            return None
+        if not value.startswith("-"):
+            break
+        if value in no_value or value.startswith(("-W", "-X")) and len(value) > 2:
+            index += 1
+            continue
+        if value in with_value and index + 1 < len(argv):
+            index += 2
+            continue
+        raise ValueError("Python command options are invalid")
+    if index >= len(argv) or not argv[index].endswith(".py"):
+        return None
+    script = Path(argv[index])
+    if script.is_absolute() or any(part in {"", ".", ".."} for part in script.parts):
+        raise ValueError("relative Python script path is invalid")
+    return script.as_posix(), index
+
+
+def _git_bound_python_argv(
+    spec: CommandSpec,
+    runtime_argv: tuple[str, ...],
+    source_root: Path,
+    bootstrap_path: Path,
+    script_relative: str,
+    script_index: int,
+) -> tuple[str, ...]:
+    source_root = source_root.resolve(strict=True)
+    bootstrap_path = bootstrap_path.resolve(strict=True)
+    script_path = source_root.joinpath(*script_relative.split("/"))
+    if not script_path.is_file():
+        raise ValueError("relative Python script is absent from candidate Git source")
+    original_root = spec.cwd.resolve(strict=True)
+    original_file = original_root.joinpath(*script_relative.split("/"))
+    return (
+        runtime_argv[0],
+        *runtime_argv[1:script_index],
+        str(bootstrap_path),
+        str(source_root),
+        str(original_root),
+        script_relative,
+        str(original_file),
+        *runtime_argv[script_index + 1 :],
+    )
 
 
 def _parse_python_executable_manifest(content: bytes) -> Mapping[str, Any]:
@@ -785,13 +1054,13 @@ def _trusted_executable_content(
             before.st_ino,
             before.st_size,
             before.st_mtime_ns,
-            before.st_ctime_ns,
+            before.st_mode,
         ) != (
             after.st_dev,
             after.st_ino,
             after.st_size,
             after.st_mtime_ns,
-            after.st_ctime_ns,
+            after.st_mode,
         ):
             raise RuntimeError("spawn_failed")
         version = f"{sys.version_info.major}.{sys.version_info.minor}"
@@ -842,6 +1111,21 @@ def _write_executable_snapshot(directory: Path, name: str, content: bytes) -> Pa
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    return path
+
+
+def _write_python_executable_snapshot(
+    directory: Path, name: str, source: str, content: bytes
+) -> Path:
+    if platform.system() != "Darwin":
+        return _write_executable_snapshot(directory, name, content)
+    path = directory / name
+    try:
+        os.link(Path(source).resolve(strict=True), path, follow_symlinks=False)
+    except OSError as exc:
+        raise RuntimeError("spawn_failed") from exc
+    if path.read_bytes() != content:
+        raise RuntimeError("spawn_failed")
     return path
 
 
@@ -897,7 +1181,9 @@ def _run_process(
     argument_artifacts: BoundArgumentArtifacts,
     executable_path: Path,
     launcher_path: Path,
+    runtime_argv: tuple[str, ...] | None = None,
 ) -> tuple[int | None, str, bool]:
+    command_argv = argument_artifacts.argv if runtime_argv is None else runtime_argv
     try:
         process = subprocess.Popen(
             [
@@ -907,7 +1193,7 @@ def _run_process(
                 str(cwd_descriptor),
                 str(executable_path),
                 ",".join(str(value) for value in argument_artifacts.descriptors),
-                *argument_artifacts.argv,
+                *command_argv,
             ],
             executable=str(launcher_path),
             shell=False,
@@ -1064,6 +1350,32 @@ def _parse_time(value: Any) -> None:
     datetime.fromisoformat(value[:-1] + "+00:00")
 
 
+def _provenance_has_unsafe_placeholder(value: Any, path: tuple[Any, ...] = ()) -> bool:
+    if isinstance(value, dict):
+        return any(
+            _provenance_has_unsafe_placeholder(item, (*path, key))
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(
+            _provenance_has_unsafe_placeholder(item, (*path, index))
+            for index, item in enumerate(value)
+        )
+    if type(value) is not str or ("<env:" not in value and "<stdin:" not in value):
+        return False
+    root = path[0] if path else None
+    if root in {"argv", "environmentSources", "secretSources"} and re.fullmatch(
+        r"<env:[A-Z][A-Z0-9_]*>", value
+    ):
+        return False
+    if root in {"argv", "stdinSource"} and value in {
+        "<stdin:protected_transcript_plan>",
+        "<stdin:protected_candidate_plan>",
+    }:
+        return False
+    return True
+
+
 def validate_provenance_entries(entries: Any) -> list[dict[str, Any]]:
     if not isinstance(entries, list):
         raise ValueError("provenance is invalid")
@@ -1072,6 +1384,8 @@ def validate_provenance_entries(entries: Any) -> list[dict[str, Any]]:
     for entry in entries:
         if not isinstance(entry, dict) or set(entry) != _EXACT_ENTRY_FIELDS:
             raise ValueError("provenance schema is invalid")
+        if _provenance_has_unsafe_placeholder(entry):
+            raise ValueError("provenance privacy contract is invalid")
         if entry.get("schemaVersion") != COMMAND_PROVENANCE_SCHEMA:
             raise ValueError("provenance schema is invalid")
         command_id = entry.get("commandId")
@@ -1101,8 +1415,10 @@ def validate_provenance_entries(entries: Any) -> list[dict[str, Any]]:
             or len(expected_codes) != len(set(expected_codes))
             or any(type(code) is not int or code < 0 or code > 255 for code in expected_codes)
             or type(terminal.get("timeoutSec")) not in {int, float}
+            or not math.isfinite(terminal["timeoutSec"])
             or terminal["timeoutSec"] <= 0
             or type(terminal.get("cleanupGraceSec")) not in {int, float}
+            or not math.isfinite(terminal["cleanupGraceSec"])
             or terminal["cleanupGraceSec"] < 0
             or classification not in {
                 "expected_exit",
@@ -1125,8 +1441,12 @@ def validate_provenance_entries(entries: Any) -> list[dict[str, Any]]:
         if classification in {"timeout", "cancelled", "keyboard_interrupt"} and terminal["satisfied"] is not False:
             raise ValueError("provenance terminal policy is invalid")
         argv = entry.get("argv")
-        if not isinstance(argv, list) or not argv or any(type(item) is not str or not item for item in argv):
+        if not isinstance(argv, list) or not argv or any(
+            type(item) is not str or not item for item in argv
+        ):
             raise ValueError("provenance argv is invalid")
+        if any(_unsafe_recorded_value(item) for item in argv):
+            raise ValueError("provenance privacy contract is invalid")
         if type(entry.get("cwd")) is not str or not entry["cwd"]:
             raise ValueError("provenance cwd is invalid")
         for field, pattern in (
@@ -1171,7 +1491,11 @@ def validate_provenance_entries(entries: Any) -> list[dict[str, Any]]:
         if forbidden_report_fields(entry):
             raise ValueError("provenance privacy contract is invalid")
         rendered = json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        scrubbed = re.sub(r"<env:[A-Z][A-Z0-9_]*>|<stdin:protected_transcript_plan>", "<source>", rendered)
+        scrubbed = re.sub(
+            r"<env:[A-Z][A-Z0-9_]*>|<stdin:protected_(?:transcript|candidate)_plan>",
+            "<source>",
+            rendered,
+        )
         if _junit_value_is_sensitive(scrubbed):
             raise ValueError("provenance privacy contract is invalid")
     return entries
@@ -2837,70 +3161,110 @@ def execute_and_record(
     if stdin_bytes is not None and type(stdin_bytes) is not bytes:
         raise TypeError("protected stdin must be bytes")
     _preflight_provenance(provenance, spec.command_id)
-    inputs, output_parents = _prepare_paths(spec, root)
+    pre_cancelled = cancel_event is not None and cancel_event.is_set()
+    inputs, output_parents = _prepare_paths(
+        spec, root, materialize_outputs=not pre_cancelled
+    )
     try:
         bound_cwd = _open_bound_working_directory(root, spec.cwd)
     except OSError as exc:
         raise RuntimeError("cwd is invalid") from exc
     try:
         try:
-            argument_artifacts = _bind_argument_artifacts(spec, root, inputs)
+            argument_artifacts = (
+                BoundArgumentArtifacts(spec.argv, (), MappingProxyType({}))
+                if pre_cancelled
+                else _bind_argument_artifacts(spec, root, inputs)
+            )
             canonical_spec = _canonical_spec(spec, root)
             spec_digest = _digest(canonical_spec)
             child_env = _child_environment(spec, env)
-            expected_git_sha = str(spec.candidate_identity.get("gitSha", ""))
-            executable_manifest = _parse_python_executable_manifest(
-                _load_trusted_python_executable_manifest(expected_git_sha)
-            )
-            executable_content = _trusted_executable_content(
-                spec.argv[0], executable_manifest
-            )
             started = _utc_now()
             interrupted = False
-            if _before_spawn is not None:
-                _before_spawn()
-            _require_working_directory_unchanged(bound_cwd, require_ctime=True)
-            with tempfile.TemporaryDirectory(prefix="google-live-exec-") as snapshot_dir:
-                snapshot_root = Path(snapshot_dir)
-                executable_path = _write_executable_snapshot(
-                    snapshot_root, "command-python", executable_content
+            if pre_cancelled:
+                exit_code, classification, satisfied = None, "cancelled", False
+            else:
+                expected_git_sha = str(spec.candidate_identity.get("gitSha", ""))
+                executable_manifest = _parse_python_executable_manifest(
+                    _load_trusted_python_executable_manifest(expected_git_sha)
                 )
-                executable_snapshot = executable_path.stat()
-                try:
-                    exit_code, classification, satisfied = _run_process(
-                        spec,
-                        child_env,
-                        stdin_bytes,
-                        cancel_event,
-                        bound_cwd.descriptor,
-                        argument_artifacts,
-                        executable_path,
-                        executable_path,
+                executable_content = _trusted_executable_content(
+                    spec.argv[0], executable_manifest
+                )
+                trusted_executable_path = Path(spec.argv[0]).resolve(strict=True)
+                if _before_spawn is not None:
+                    _before_spawn()
+                _require_working_directory_unchanged(bound_cwd, require_ctime=True)
+                with tempfile.TemporaryDirectory(prefix="google-live-exec-") as snapshot_dir:
+                    snapshot_root = Path(snapshot_dir)
+                    executable_path = _write_python_executable_snapshot(
+                        snapshot_root,
+                        "command-python",
+                        str(trusted_executable_path),
+                        executable_content,
                     )
-                except KeyboardInterrupt:
-                    exit_code, classification, satisfied = None, "keyboard_interrupt", False
-                    interrupted = True
-                current_snapshot = executable_path.stat()
-                if (
-                    (
-                        current_snapshot.st_dev,
-                        current_snapshot.st_ino,
-                        current_snapshot.st_size,
-                        current_snapshot.st_mtime_ns,
-                        current_snapshot.st_ctime_ns,
-                        current_snapshot.st_mode,
-                    )
-                    != (
-                        executable_snapshot.st_dev,
-                        executable_snapshot.st_ino,
-                        executable_snapshot.st_size,
-                        executable_snapshot.st_mtime_ns,
-                        executable_snapshot.st_ctime_ns,
-                        executable_snapshot.st_mode,
-                    )
-                    or executable_path.read_bytes() != executable_content
-                ):
-                    raise RuntimeError("spawn executable changed")
+                    runtime_argv = argument_artifacts.argv
+                    relative_script = _relative_python_script(spec.argv)
+                    if relative_script is not None:
+                        script_relative, script_index = relative_script
+                        source_root = snapshot_root / "candidate-source"
+                        source_archive = _load_candidate_python_archive(expected_git_sha)
+                        _materialize_candidate_python_sources(source_archive, source_root)
+                        bootstrap_path = _write_executable_snapshot(
+                            snapshot_root,
+                            "candidate-bootstrap.py",
+                            _GIT_SOURCE_EXEC.encode(),
+                        )
+                        runtime_argv = _git_bound_python_argv(
+                            spec,
+                            runtime_argv,
+                            source_root,
+                            bootstrap_path,
+                            script_relative,
+                            script_index,
+                        )
+                    executable_snapshot = executable_path.stat()
+                    if cancel_event is not None and cancel_event.is_set():
+                        exit_code, classification, satisfied = None, "cancelled", False
+                    else:
+                        try:
+                            exit_code, classification, satisfied = _run_process(
+                                spec,
+                                child_env,
+                                stdin_bytes,
+                                cancel_event,
+                                bound_cwd.descriptor,
+                                argument_artifacts,
+                                executable_path,
+                                executable_path,
+                                runtime_argv,
+                            )
+                        except KeyboardInterrupt:
+                            exit_code, classification, satisfied = (
+                                None,
+                                "keyboard_interrupt",
+                                False,
+                            )
+                            interrupted = True
+                    current_snapshot = executable_path.stat()
+                    if (
+                        (
+                            current_snapshot.st_dev,
+                            current_snapshot.st_ino,
+                            current_snapshot.st_size,
+                            current_snapshot.st_mtime_ns,
+                            current_snapshot.st_mode,
+                        )
+                        != (
+                            executable_snapshot.st_dev,
+                            executable_snapshot.st_ino,
+                            executable_snapshot.st_size,
+                            executable_snapshot.st_mtime_ns,
+                            executable_snapshot.st_mode,
+                        )
+                        or executable_path.read_bytes() != executable_content
+                    ):
+                        raise RuntimeError("spawn executable changed")
             ended = _utc_now()
             _require_working_directory_unchanged(bound_cwd, require_ctime=False)
             _require_argument_artifacts_unchanged(argument_artifacts)
@@ -2930,7 +3294,7 @@ def execute_and_record(
                 raise RuntimeError("evidence output parent changed")
         finally:
             os.close(current_parent.descriptor)
-    if not satisfied:
+    if not satisfied and output_parents:
         _cleanup_declared_outputs(root, spec.outputs, output_parents)
     if satisfied:
         output_rows, output_bindings = _artifact_rows(root, spec.outputs)

@@ -1,10 +1,12 @@
 import hashlib
+import io
 import json
 import os
 import signal
 import stat
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 from pathlib import Path
@@ -80,6 +82,45 @@ def _write_report_code(payload: str = "ok") -> str:
     )
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin snapshots use hardlinks")
+def test_executable_read_allows_concurrent_snapshot_hardlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    source = Path(sys.executable).resolve(strict=True)
+    snapshot = tmp_path / "command-python"
+    real_read = runner.os.read
+    linked = False
+
+    def link_during_read(descriptor: int, size: int) -> bytes:
+        nonlocal linked
+        if not linked:
+            linked = True
+            os.link(source, snapshot)
+        return real_read(descriptor, size)
+
+    monkeypatch.setattr(runner.os, "read", link_during_read)
+    content = runner._trusted_executable_content(
+        str(source), runner._parse_python_executable_manifest(PYTHON_EXECUTABLE_MANIFEST)
+    )
+
+    assert linked
+    assert content == source.read_bytes()
+
+
+def _python_source_archive(files: dict[str, str]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        for name, source in sorted(files.items()):
+            content = source.encode()
+            info = tarfile.TarInfo(name)
+            info.mode = 0o644
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
+    return buffer.getvalue()
+
+
 def test_executes_argv_and_records_only_secret_source(tmp_path: Path) -> None:
     secret = "must-never-persist"
     spec = _spec(
@@ -152,6 +193,209 @@ def test_execution_rejects_untrusted_interpreter_before_spawn(tmp_path: Path) ->
     assert not (root / "commands.jsonl").exists()
 
 
+def test_relative_python_script_executes_candidate_git_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    script = tmp_path / "entry.py"
+    marker = tmp_path.parent / f"{tmp_path.name}-mutable-script-marker"
+    script.write_text("raise SystemExit('mutable source executed')\n")
+    archive = _python_source_archive(
+        {
+            "entry.py": (
+                "from pathlib import Path\n"
+                "Path('real-api').mkdir(exist_ok=True)\n"
+                "Path('real-api/report.json').write_text('candidate')\n"
+            )
+        }
+    )
+    monkeypatch.setattr(
+        runner, "_load_candidate_python_archive", lambda _sha: archive, raising=False
+    )
+
+    def swap_script() -> None:
+        script.write_text(
+            f"from pathlib import Path\nPath({str(marker)!r}).write_text('spawned')\n"
+        )
+
+    execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py")),
+        provenance=tmp_path / "commands.jsonl",
+        _before_spawn=swap_script,
+    )
+
+    assert (tmp_path / "real-api" / "report.json").read_text() == "candidate"
+    assert not marker.exists()
+
+
+def test_relative_python_script_imports_candidate_git_module_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path.parent / f"{tmp_path.name}-mutable-module-marker"
+    (tmp_path / "entry.py").write_text(
+        "from dependency import VALUE\n"
+        "from pathlib import Path\n"
+        "Path('real-api').mkdir(exist_ok=True)\n"
+        "Path('real-api/report.json').write_text(VALUE)\n"
+    )
+    dependency = tmp_path / "dependency.py"
+    dependency.write_text("VALUE = 'mutable'\n")
+    archive = _python_source_archive(
+        {
+            "entry.py": (
+                "from dependency import VALUE\n"
+                "from pathlib import Path\n"
+                "Path('real-api').mkdir(exist_ok=True)\n"
+                "Path('real-api/report.json').write_text(VALUE)\n"
+            ),
+            "dependency.py": "VALUE = 'candidate'\n",
+        }
+    )
+    monkeypatch.setattr(
+        runner, "_load_candidate_python_archive", lambda _sha: archive, raising=False
+    )
+
+    def swap_module() -> None:
+        dependency.write_text(
+            f"from pathlib import Path\nPath({str(marker)!r}).write_text('spawned')\n"
+            "VALUE = 'malicious'\n"
+        )
+
+    execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py")),
+        provenance=tmp_path / "commands.jsonl",
+        _before_spawn=swap_module,
+    )
+
+    assert (tmp_path / "real-api" / "report.json").read_text() == "candidate"
+    assert not marker.exists()
+
+
+def test_relative_python_script_cannot_import_untracked_worktree_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path.parent / f"{tmp_path.name}-untracked-module-marker"
+    (tmp_path / "entry.py").write_text("raise SystemExit('mutable source executed')\n")
+    (tmp_path / "untracked_dependency.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('spawned')\n"
+    )
+    archive = _python_source_archive({"entry.py": "import untracked_dependency\n"})
+    monkeypatch.setattr(
+        runner, "_load_candidate_python_archive", lambda _sha: archive, raising=False
+    )
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_relative_python_script_preserves_candidate_runtime_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    (tmp_path / "entry.py").write_text("raise SystemExit('mutable source executed')\n")
+    archive = _python_source_archive(
+        {
+            "entry.py": (
+                "import pytest\n"
+                "from pathlib import Path\n"
+                "Path('real-api').mkdir(exist_ok=True)\n"
+                "Path('real-api/report.json').write_text(pytest.__version__)\n"
+            )
+        }
+    )
+    monkeypatch.setattr(
+        runner, "_load_candidate_python_archive", lambda _sha: archive, raising=False
+    )
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py")),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "expected_exit"
+    assert (tmp_path / "real-api" / "report.json").read_text() == pytest.__version__
+
+
+def test_nested_python_script_executes_candidate_git_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path.parent / f"{tmp_path.name}-nested-script-marker"
+    (tmp_path / "entry.py").write_text("raise SystemExit('mutable source executed')\n")
+    (tmp_path / "child.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('spawned')\n"
+    )
+    archive = _python_source_archive(
+        {
+            "entry.py": (
+                "import subprocess, sys\n"
+                "from pathlib import Path\n"
+                "subprocess.run([sys.executable, '-u', str(Path(__file__).with_name('child.py'))], check=True)\n"
+            ),
+            "child.py": (
+                "from pathlib import Path\n"
+                "Path('real-api').mkdir(exist_ok=True)\n"
+                "Path('real-api/report.json').write_text('candidate child')\n"
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        runner, "_load_candidate_python_archive", lambda _sha: archive, raising=False
+    )
+
+    execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py")),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert (tmp_path / "real-api" / "report.json").read_text() == "candidate child"
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("python_flag", ["-u", "-B"])
+def test_flagged_relative_python_script_executes_candidate_git_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, python_flag: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path.parent / f"{tmp_path.name}-flagged-script-marker"
+    (tmp_path / "entry.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('spawned')\n"
+    )
+    archive = _python_source_archive(
+        {
+            "entry.py": (
+                "from pathlib import Path\n"
+                "Path('real-api').mkdir(exist_ok=True)\n"
+                "Path('real-api/report.json').write_text('candidate')\n"
+            )
+        }
+    )
+    monkeypatch.setattr(
+        runner, "_load_candidate_python_archive", lambda _sha: archive, raising=False
+    )
+
+    execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, python_flag, "entry.py")),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert (tmp_path / "real-api" / "report.json").read_text() == "candidate"
+    assert not marker.exists()
+
+
 def test_rejects_shell_strings_lists_and_argument_secrets(tmp_path: Path) -> None:
     with pytest.raises((TypeError, ValueError)):
         _spec(tmp_path, "pass", argv="echo injected")
@@ -159,6 +403,31 @@ def test_rejects_shell_strings_lists_and_argument_secrets(tmp_path: Path) -> Non
         _spec(tmp_path, "pass", argv=[sys.executable, "-c", "pass"])
     with pytest.raises(ValueError):
         _spec(tmp_path, "pass", argv=(sys.executable, "-c", "pass", "GOOGLE_API_KEY=secret"))
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("field", ["timeout_sec", "cleanup_grace_sec"])
+def test_rejects_non_finite_terminal_timing(
+    tmp_path: Path, field: str, value: float
+) -> None:
+    with pytest.raises(ValueError):
+        _spec(tmp_path, "pass", **{field: value})
+
+
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "<env:GOOGLE_API_KEY>suffix",
+        "prefix<env:GOOGLE_API_KEY>",
+        "<stdin:protected_transcript_plan>suffix",
+        "prefix<stdin:protected_candidate_plan>",
+    ],
+)
+def test_rejects_placeholder_tokens_embedded_in_argv(
+    tmp_path: Path, argument: str
+) -> None:
+    with pytest.raises(ValueError, match="privacy contract"):
+        _spec(tmp_path, "pass", argv=(sys.executable, "-c", "pass", argument))
 
 
 def test_passes_only_allowlisted_environment_and_rejects_overlap(tmp_path: Path) -> None:
@@ -195,6 +464,24 @@ def test_protected_stdin_is_passed_but_never_recorded(tmp_path: Path) -> None:
     execute_and_record(spec, provenance=provenance, stdin_bytes=secret)
     rendered = provenance.read_bytes()
     assert b"<stdin:protected_transcript_plan>" in rendered
+    assert secret not in rendered
+
+
+def test_protected_candidate_stdin_token_is_safe_in_persisted_provenance(
+    tmp_path: Path,
+) -> None:
+    secret = b"private candidate plan"
+    spec = _spec(
+        tmp_path,
+        "import sys; assert sys.stdin.buffer.read(); " + _write_report_code(),
+        stdin_source="protected_candidate_plan",
+    )
+    provenance = tmp_path / "commands.jsonl"
+
+    execute_and_record(spec, provenance=provenance, stdin_bytes=secret)
+
+    rendered = provenance.read_bytes()
+    assert b"<stdin:protected_candidate_plan>" in rendered
     assert secret not in rendered
 
 
@@ -2251,6 +2538,89 @@ def test_cancellation_terminates_owned_process_and_records_classification(tmp_pa
         timer.cancel()
     assert result.classification == "cancelled"
     assert result.policy_satisfied is False
+
+
+def test_pre_cancelled_command_is_recorded_without_spawning_child(tmp_path: Path) -> None:
+    marker = tmp_path / "spawned"
+    cancel = threading.Event()
+    cancel.set()
+    code = f"from pathlib import Path; Path({str(marker)!r}).write_text('spawned')"
+
+    result = execute_and_record(
+        _spec(tmp_path, code),
+        provenance=tmp_path / "commands.jsonl",
+        cancel_event=cancel,
+    )
+
+    assert result.exit_code is None
+    assert result.classification == "cancelled"
+    assert result.policy_satisfied is False
+    assert not marker.exists()
+    assert not (tmp_path / "real-api").exists()
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("field", ["timeoutSec", "cleanupGraceSec"])
+def test_provenance_rejects_non_finite_terminal_timing(
+    tmp_path: Path, field: str, value: float
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(
+        _spec(tmp_path, _write_report_code()),
+        provenance=provenance,
+    )
+    entry = json.loads(provenance.read_text())
+    entry["terminalPolicy"][field] = value
+
+    with pytest.raises(ValueError, match="terminal policy"):
+        runner.validate_provenance_entries([entry])
+
+
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "<env:GOOGLE_API_KEY>suffix",
+        "prefix<env:GOOGLE_API_KEY>",
+        "<stdin:protected_transcript_plan>suffix",
+        "prefix<stdin:protected_candidate_plan>",
+    ],
+)
+def test_provenance_rejects_placeholder_tokens_embedded_in_argv(
+    tmp_path: Path, argument: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(
+        _spec(tmp_path, _write_report_code()),
+        provenance=provenance,
+    )
+    entry = json.loads(provenance.read_text())
+    entry["argv"].append(argument)
+
+    with pytest.raises(ValueError, match="privacy contract"):
+        runner.validate_provenance_entries([entry])
+
+
+def test_provenance_rejects_embedded_placeholder_in_nested_identity(
+    tmp_path: Path,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(
+        _spec(tmp_path, _write_report_code()),
+        provenance=provenance,
+    )
+    entry = json.loads(provenance.read_text())
+    entry["candidateIdentity"]["firmwareIdentity"] = (
+        "prefix<stdin:protected_candidate_plan>suffix"
+    )
+
+    with pytest.raises(ValueError, match="privacy contract"):
+        runner.validate_provenance_entries([entry])
 
 
 def test_keyboard_interrupt_cleans_group_and_records_terminal_state(monkeypatch, tmp_path: Path) -> None:
