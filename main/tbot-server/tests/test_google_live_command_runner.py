@@ -2559,6 +2559,28 @@ def test_pre_cancelled_command_is_recorded_without_spawning_child(tmp_path: Path
     assert not (tmp_path / "real-api").exists()
 
 
+def test_cancelled_before_spawn_removes_only_new_output_parents(tmp_path: Path) -> None:
+    cancel = threading.Event()
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    output = tmp_path / "new-parent" / "nested" / "report.json"
+
+    def cancel_before_spawn() -> None:
+        cancel.set()
+
+    result = execute_and_record(
+        _spec(tmp_path, _write_report_code(), outputs=(output,)),
+        provenance=tmp_path / "commands.jsonl",
+        cancel_event=cancel,
+        _before_spawn=cancel_before_spawn,
+    )
+
+    assert result.classification == "cancelled"
+    assert not output.exists()
+    assert not (tmp_path / "new-parent").exists()
+    assert existing.is_dir()
+
+
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
 @pytest.mark.parametrize("field", ["timeoutSec", "cleanupGraceSec"])
 def test_provenance_rejects_non_finite_terminal_timing(

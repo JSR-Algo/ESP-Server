@@ -670,6 +670,22 @@ def _prepare_paths(
     return inputs, parents
 
 
+def _remove_new_output_parents(root: Path, outputs: tuple[Path, ...], existing: set[Path]) -> None:
+    candidates = set()
+    for output in outputs:
+        current = output.parent
+        while current != root and _inside(root, current):
+            if current in existing:
+                break
+            candidates.add(current)
+            current = current.parent
+    for directory in sorted(candidates, key=lambda path: len(path.parts), reverse=True):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+
+
 def _bind_argument_artifacts(
     spec: CommandSpec,
     root: Path,
@@ -3162,6 +3178,12 @@ def execute_and_record(
         raise TypeError("protected stdin must be bytes")
     _preflight_provenance(provenance, spec.command_id)
     pre_cancelled = cancel_event is not None and cancel_event.is_set()
+    existing_output_parents = {
+        parent
+        for output in spec.outputs
+        for parent in output.parents
+        if parent != root and _inside(root, parent) and parent.exists()
+    }
     inputs, output_parents = _prepare_paths(
         spec, root, materialize_outputs=not pre_cancelled
     )
@@ -3296,6 +3318,7 @@ def execute_and_record(
             os.close(current_parent.descriptor)
     if not satisfied and output_parents:
         _cleanup_declared_outputs(root, spec.outputs, output_parents)
+        _remove_new_output_parents(root, spec.outputs, existing_output_parents)
     if satisfied:
         output_rows, output_bindings = _artifact_rows(root, spec.outputs)
     else:
