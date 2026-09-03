@@ -9,8 +9,10 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import shutil
 import signal
+import shlex
 import socket
 import stat
 import subprocess
@@ -43,7 +45,21 @@ def _fixture_python_wrapper(interpreter: Path, source: str) -> str:
         "import base64,sys;__file__=sys.argv[1];sys.argv=sys.argv[1:];"
         f"exec(compile(base64.b64decode({encoded!r}),__file__,'exec'))"
     )
-    return f"#!/bin/sh\nexec {interpreter!s} -I -c {bootstrap!r} \"$0\" \"$@\"\n"
+    return (
+        "#!/bin/sh\n"
+        f"# fixture-python-source:{encoded}\n"
+        f"exec {shlex.quote(str(interpreter))} -I -c {shlex.quote(bootstrap)} \"$0\" \"$@\"\n"
+    )
+
+
+def _rewrite_fixture_python_wrapper(path: Path, interpreter: Path, prefix: str) -> None:
+    wrapper = path.read_text(encoding="utf-8")
+    match = re.search(r"^# fixture-python-source:([A-Za-z0-9+/=]+)$", wrapper, re.MULTILINE)
+    if match is None:
+        raise ValueError("fixture wrapper payload missing")
+    source = base64.b64decode(match.group(1)).decode("utf-8")
+    path.write_text(_fixture_python_wrapper(interpreter, prefix + source), encoding="utf-8")
+    path.chmod(0o755)
 
 
 def test_fixture_host_python_is_stable_and_not_standalone_runtime(
@@ -56,6 +72,21 @@ def test_fixture_host_python_is_stable_and_not_standalone_runtime(
     assert interpreter.is_file() and os.access(interpreter, os.X_OK)
     assert interpreter != Path(standalone)
     assert interpreter == Path("/Library/Frameworks/Python.framework/Versions/3.14/bin/python3")
+
+
+def test_fixture_python_wrapper_rebuilds_embedded_payload(tmp_path: Path) -> None:
+    executable = tmp_path / "fixture-tool"
+    interpreter = _fixture_host_python()
+    executable.write_text(
+        _fixture_python_wrapper(interpreter, "print('original')\n"), encoding="utf-8",
+    )
+
+    _rewrite_fixture_python_wrapper(executable, interpreter, "print('injected')\n")
+
+    result = subprocess.run(
+        ["/bin/sh", str(executable)], check=True, capture_output=True, text=True, timeout=5,
+    )
+    assert result.stdout.splitlines() == ["injected", "original"]
 
 
 _PLAYWRIGHT_SOURCE_PATHS = [
@@ -2290,16 +2321,14 @@ def test_assignment_runner_accepts_gate_owned_capsule(
     for tool_name in ("docker", "dockerCompose"):
         descriptor = candidate["tools"][tool_name]
         executable = Path(descriptor["path"])
-        lines = executable.read_text(encoding="utf-8").splitlines(keepends=True)
-        lines.insert(
-            1,
+        _rewrite_fixture_python_wrapper(
+            executable,
+            _fixture_host_python(),
             "import os,pathlib,sys\n"
             "if os.environ.get('TASK4_ASSIGNMENT_RUNTIME_CAPSULE_ROOT'):\n"
             f" pathlib.Path({str(forbidden_docker_marker)!r}).write_text({tool_name!r})\n"
             " sys.exit(97)\n",
         )
-        executable.write_text("".join(lines), encoding="utf-8")
-        executable.chmod(0o755)
         descriptor["sha256"] = hashlib.sha256(executable.read_bytes()).hexdigest()
     node_descriptor = candidate["tools"]["node"]["adminManagerWeb"]
     candidate_node = Path(node_descriptor["executable"])
