@@ -6837,6 +6837,42 @@ def test_firmware_handler_cjson_gitlink_rejects_absent_pinned_commit(
     _assert_gitlink_stage_rejected(candidate, lane, stage_roots)
 
 
+@pytest.mark.parametrize("object_kind", ["blob", "tree", "annotated-tag"])
+def test_firmware_handler_cjson_gitlink_rejects_existing_non_commit_object(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    object_kind: str,
+) -> None:
+    candidate, esp_idf, submodule_root, _, checkout_commit = _install_cjson_gitlink(
+        candidate_file, tmp_path,
+    )
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    blob_id = _git(submodule_root, "hash-object", "-w", "cJSON.c")
+    if object_kind == "blob":
+        object_id = blob_id
+    elif object_kind == "tree":
+        object_id = _git(submodule_root, "rev-parse", f"{checkout_commit}^{{tree}}")
+    else:
+        _git(
+            submodule_root, "tag", "-a", "non-commit-object", blob_id,
+            "-m", "annotated tag targeting a blob",
+        )
+        object_id = _git(submodule_root, "rev-parse", "refs/tags/non-commit-object")
+    assert _git(submodule_root, "cat-file", "-t", object_id) == object_kind.removeprefix(
+        "annotated-"
+    )
+    _git(
+        esp_idf, "update-index", "--add", "--cacheinfo", "160000", object_id,
+        "components/json/cJSON",
+    )
+    _git(esp_idf, "commit", "-m", f"point cjson gitlink at {object_kind}")
+    candidate["tools"]["espIdf"]["commit"] = _git(esp_idf, "rev-parse", "HEAD")
+    entry = _git(esp_idf, "ls-tree", "HEAD", "components/json/cJSON")
+    assert entry.split()[:3] == ["160000", "commit", object_id]
+    stage_roots = _record_stage_roots(monkeypatch)
+
+    _assert_gitlink_stage_rejected(candidate, lane, stage_roots)
+
+
 @pytest.mark.parametrize("root_kind", ["symlink", "noncanonical"])
 def test_firmware_handler_cjson_gitlink_rejects_untrusted_submodule_root(
     candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
