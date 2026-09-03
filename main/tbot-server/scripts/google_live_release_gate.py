@@ -494,6 +494,7 @@ def _require_release_input_unchanged(
     *,
     protected_root: Path | None = None,
     allowed_changed_directory: Path | None = None,
+    allowed_directory_identity: BoundDirectory | None = None,
 ) -> None:
     current = _read_bound_release_input(bound.path)
     allowed_index = None
@@ -515,29 +516,21 @@ def _require_release_input_unchanged(
     ):
         if index == allowed_index:
             matches = (
-                observed.device,
-                observed.inode,
-                observed.mode,
-                observed.uid,
-            ) == (
-                expected.device,
-                expected.inode,
-                expected.mode,
-                expected.uid,
+                observed == expected
+                if allowed_directory_identity is None
+                else observed == allowed_directory_identity
             )
-        elif index < protected_index - 1:
+        elif index < protected_index:
             matches = (
                 observed.device,
                 observed.inode,
                 observed.mode,
                 observed.uid,
-                observed.links,
             ) == (
                 expected.device,
                 expected.inode,
                 expected.mode,
                 expected.uid,
-                expected.links,
             )
         else:
             matches = observed == expected
@@ -552,6 +545,7 @@ def _require_all_release_inputs_unchanged(
     bindings: Mapping[str, BoundReleaseInput],
     *,
     allowed_changed_directory: Path | None = None,
+    allowed_directory_identity: BoundDirectory | None = None,
 ) -> None:
     protected_root = Path(
         os.path.commonpath([str(bound.path.parent) for bound in bindings.values()])
@@ -563,6 +557,7 @@ def _require_all_release_inputs_unchanged(
                     bound,
                     protected_root=protected_root,
                     allowed_changed_directory=allowed_changed_directory,
+                    allowed_directory_identity=allowed_directory_identity,
                 )
             except (OSError, ValueError, RuntimeError) as exc:
                 raise ReleaseEvidenceChanged(
@@ -1018,6 +1013,19 @@ def _atomic_write(
     )
 
 
+def _snapshot_release_directory(path: Path) -> BoundDirectory:
+    descriptor = os.open(
+        _absolute_input_path(path),
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        return _directory_identity(os.fstat(descriptor))
+    finally:
+        os.close(descriptor)
+
+
 def _produce_release_verdict(
     expected_identity: Mapping[str, Any],
     layer_paths: Mapping[str, Path | str],
@@ -1087,19 +1095,23 @@ def _produce_release_verdict(
     output_parent_identity = snapshot_output_parent(output_path)
 
     def validate_pre_publish(_temporary_path: Path) -> None:
+        output_parent_identity = _snapshot_release_directory(output_path.parent)
         if pre_publish is not None:
             pre_publish()
         _require_all_release_inputs_unchanged(
             bindings,
             allowed_changed_directory=output_path.parent,
+            allowed_directory_identity=output_parent_identity,
         )
 
     def validate_post_publish() -> None:
+        output_parent_identity = _snapshot_release_directory(output_path.parent)
         if post_publish is not None:
             post_publish()
         _require_all_release_inputs_unchanged(
             bindings,
             allowed_changed_directory=output_path.parent,
+            allowed_directory_identity=output_parent_identity,
         )
 
     _atomic_write(

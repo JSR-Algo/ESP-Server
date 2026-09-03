@@ -1527,6 +1527,24 @@ def test_bound_release_input_detects_allowed_evidence_root_aba(
         )
 
 
+def test_bound_release_input_allows_unrelated_parent_sibling_churn(
+    tmp_path: Path,
+) -> None:
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    evidence = evidence_root / "report.json"
+    evidence.write_bytes(b"evidence")
+    bound = release_gate._read_bound_release_input(evidence)
+
+    (tmp_path / "unrelated-sibling").write_bytes(b"unrelated")
+
+    release_gate._require_release_input_unchanged(
+        bound,
+        protected_root=evidence_root,
+        allowed_changed_directory=evidence_root,
+    )
+
+
 def test_bound_release_verdict_leaves_no_output_when_publisher_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
