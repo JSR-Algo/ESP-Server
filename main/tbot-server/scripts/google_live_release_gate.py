@@ -534,6 +534,7 @@ def _command_matches_trusted_spec(
     *,
     executable_trust: Mapping[str, Any] | None = None,
     executable_approved: bool | None = None,
+    runtime_closure_sha256: str | None = None,
 ) -> bool:
     terminal = entry["terminalPolicy"]
     return (
@@ -557,7 +558,7 @@ def _command_matches_trusted_spec(
         and [item["label"] for item in entry["inputs"]] == list(spec.input_labels)
         and [item["label"] for item in entry["outputs"]] == list(spec.output_labels)
         and entry["secretSources"] == list(spec.secret_sources)
-        and hmac.compare_digest(entry["specSha256"], _recorded_command_spec_digest(entry))
+        and hmac.compare_digest(entry["specSha256"], _recorded_command_spec_digest(entry, runtime_closure_sha256))
         and entry["stdinSource"] == spec.stdin_source
         and terminal["timeoutSec"] == spec.timeout_sec
         and terminal["cleanupGraceSec"] == spec.cleanup_grace_sec
@@ -1240,6 +1241,9 @@ def aggregate_release_evidence(
         )
         if trusted_runtime_closure["runtime"]["pythonMajorMinor"] != trusted_runtime["pythonMajorMinor"]:
             raise ValueError("runtime closure does not match deterministic runtime")
+        runtime_closure_sha256 = hashlib.sha256(
+            (json.dumps(trusted_runtime_closure, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        ).hexdigest() if trusted_runtime_closure.get("schemaVersion") else None
     except (OSError, RuntimeError, UnicodeError, ValueError):
         trusted_manifest_path = None
         trusted_manifest_content = None
@@ -1248,6 +1252,7 @@ def aggregate_release_evidence(
         trusted_executable_content = None
         trusted_executable = None
         trusted_runtime_closure = None
+        runtime_closure_sha256 = None
         failures.append(_failure("DETERMINISTIC_TRUSTED_MANIFEST_INVALID", "deterministic"))
     support_contents: dict[str, bytes] = {}
     supplied_support_paths = [
@@ -1390,6 +1395,7 @@ def aggregate_release_evidence(
                 trusted_specs[command_id],
                 trusted_runtime,
                 executable_approved=executable_approved,
+                runtime_closure_sha256=runtime_closure_sha256,
             )
             for command_id in REQUIRED_COMMAND_IDS
         ):

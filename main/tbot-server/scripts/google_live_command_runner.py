@@ -1318,7 +1318,7 @@ def _bind_argument_artifacts(
         raise
 
 
-def _canonical_spec(spec: CommandSpec, root: Path) -> dict[str, Any]:
+def _canonical_spec(spec: CommandSpec, root: Path, closure_digest: str | None = None) -> dict[str, Any]:
     recorded_argv = []
     for index, argument in enumerate(spec.argv):
         candidate = Path(argument)
@@ -1331,7 +1331,7 @@ def _canonical_spec(spec: CommandSpec, root: Path) -> dict[str, Any]:
             recorded_argv.append(f"<evidence:{_label(root, candidate)}>")
         else:
             recorded_argv.append(argument)
-    return {
+    value = {
         "argv": recorded_argv,
         "commandId": spec.command_id,
         "cwd": "." if spec.cwd == root else _label(root, spec.cwd),
@@ -1347,6 +1347,9 @@ def _canonical_spec(spec: CommandSpec, root: Path) -> dict[str, Any]:
         "cleanupGraceSec": float(spec.cleanup_grace_sec),
         "executionPolicy": COMMAND_EXECUTION_POLICY,
     }
+    if closure_digest:
+        value["runtimeClosureSha256"] = closure_digest
+    return value
 
 
 def _digest(value: Mapping[str, Any]) -> str:
@@ -3826,7 +3829,17 @@ def execute_and_record(
                 if pre_cancelled
                 else _bind_argument_artifacts(spec, root, inputs)
             )
-            canonical_spec = _canonical_spec(spec, root)
+            relative_script = _relative_python_script(spec.argv)
+            closure_manifest = None
+            closure_digest = None
+            if not pre_cancelled and relative_script is not None:
+                closure_manifest = _load_runtime_closure_manifest(
+                    str(spec.candidate_identity.get("gitSha", ""))
+                )
+                closure_digest = hashlib.sha256(
+                    (json.dumps(closure_manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                ).hexdigest()
+            canonical_spec = _canonical_spec(spec, root, closure_digest)
             spec_digest = _digest(canonical_spec)
             child_env = _child_environment(spec, env)
             started = _utc_now()
@@ -3853,10 +3866,9 @@ def execute_and_record(
                         executable_content,
                     )
                     runtime_argv = argument_artifacts.argv
-                    relative_script = _relative_python_script(spec.argv)
                     if relative_script is not None:
                         script_relative, script_index = relative_script
-                        closure_manifest = _load_runtime_closure_manifest(expected_git_sha)
+                        assert closure_manifest is not None
                         snapshot_tree = snapshot_root / "candidate-source"
                         source_archive = _load_candidate_resource_archive(
                             expected_git_sha, closure_manifest
