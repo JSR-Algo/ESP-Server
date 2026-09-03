@@ -460,12 +460,18 @@ PLAYWRIGHT_FIXED_CONTRACT = {
         "serviceWorkers": "block",
     },
 }
-SAFE_PHYSICAL_CONTRACT_TESTS = {
-    "test_course_mode_physical_tft_compose.py",
-    "test_course_mode_physical_tft_ledger_validate.py",
-    "test_course_mode_physical_tft_preflight.py",
-    "test_course_mode_physical_tft_receipt_verify.py",
-}
+ESP_COURSE_MODE_FULL_TESTS = (
+    "tests/test_course_mode_contract.py",
+    "tests/test_course_mode_curriculum.py",
+    "tests/test_course_mode_curriculum_e2e.py",
+    "tests/test_course_mode_e2e_journeys.py",
+    "tests/test_course_mode_forwarder.py",
+    "tests/test_course_mode_resource_soak.py",
+    "tests/test_course_mode_runtime_compatibility.py",
+    "tests/test_course_mode_runtime_integration.py",
+    "tests/test_course_mode_task00_contract.py",
+    "tests/test_google_live_course_mode.py",
+)
 
 
 @dataclass(frozen=True)
@@ -2223,45 +2229,16 @@ def _required_environment(lane: Lane) -> tuple[str, ...]:
     return lane.required_environment
 
 
-def discover_esp_course_mode_tests(admin_root: Path, sha: str) -> tuple[str, ...]:
+def select_esp_software_tests(admin_root: Path, sha: str) -> tuple[str, ...]:
     try:
-        tracked = _candidate_git(
+        tracked = set(_candidate_git(
             admin_root, "ls-tree", "-r", "--name-only", "-z", sha, "--",
             "main/tbot-server/tests",
-        ).split("\0")
+        ).split("\0"))
     except RuntimeError:
         return ()
-    discovered = []
-    for relative in sorted(path for path in tracked if path):
-        name = Path(relative).name
-        if not (
-            (name.startswith("test_course_mode") and name.endswith(".py"))
-            or name == "test_google_live_course_mode.py"
-        ):
-            continue
-        if name == "test_course_mode_release_gate.py":
-            continue
-        discovered.append(f"tests/{name}")
-    return tuple(discovered)
-
-
-def classify_esp_course_mode_test(relative: str) -> str:
-    name = Path(relative).name
-    if name in SAFE_PHYSICAL_CONTRACT_TESTS:
-        return "physical-contract"
-    if "_physical_" in name:
-        return "physical-runtime"
-    if "postgres" in name or "live_db" in name:
-        return "live-db"
-    return "software"
-
-
-def select_esp_software_tests(discovered: Sequence[str]) -> tuple[str, ...]:
-    return tuple(
-        relative for relative in discovered
-        if classify_esp_course_mode_test(relative) in {"software", "physical-contract"}
-    )
-
+    required = {f"main/tbot-server/{relative}" for relative in ESP_COURSE_MODE_FULL_TESTS}
+    return ESP_COURSE_MODE_FULL_TESTS if required <= tracked else ()
 
 def _playwright_spec_paths(admin_root: Path, sha: str) -> tuple[str, ...]:
     try:
@@ -2333,8 +2310,7 @@ def lane_candidate_paths(lane: Lane, candidate: dict) -> tuple[str, ...]:
         paths.update(_playwright_spec_paths(root, repository["sha"]))
     if lane.name == "esp-course-mode-full":
         paths.add("main/tbot-server/pyproject.toml")
-        discovered = discover_esp_course_mode_tests(root, repository["sha"])
-        paths.update(f"main/tbot-server/{relative}" for relative in select_esp_software_tests(discovered))
+        paths.update(f"main/tbot-server/{relative}" for relative in ESP_COURSE_MODE_FULL_TESTS)
     elif lane.repository == "adminEsp" and lane.relative_cwd == "main/tbot-server":
         paths.update(
             f"main/tbot-server/{token}" for token in lane.command
@@ -3695,9 +3671,7 @@ def _paths_alias(left: Path, right: Path) -> bool:
 def _command_for_lane(lane: Lane, candidate: dict) -> tuple[str, ...] | None:
     if lane.command == (COURSE_MODE_SOFTWARE_TESTS,):
         repository = candidate["repositories"]["adminEsp"]
-        tests = select_esp_software_tests(
-            discover_esp_course_mode_tests(Path(repository["path"]), repository["sha"])
-        )
+        tests = select_esp_software_tests(Path(repository["path"]), repository["sha"])
         return ("python3", "-m", "pytest", "-q", *tests) if tests else None
     if lane.name == "physical-tft-preflight":
         return physical_preflight_command(candidate)

@@ -6075,71 +6075,68 @@ def test_full_backend_test_lane_disables_vitest_cache() -> None:
     assert backend_tests.command == ("npm", "test", "--", "--no-cache")
 
 
-def test_full_esp_lane_discovers_every_committed_software_course_mode_suite() -> None:
-    root = Path(__file__).resolve().parents[3]
-    discovered = gate.discover_esp_course_mode_tests(root, _git(root, "rev-parse", "HEAD"))
-    expected = (
-        "tests/test_course_mode_candidate_manifest.py",
+def test_full_esp_lane_uses_exact_hermetic_runtime_contract_suite() -> None:
+    assert gate.ESP_COURSE_MODE_FULL_TESTS == (
         "tests/test_course_mode_contract.py",
-        "tests/test_course_mode_cross_process_e2e.py",
         "tests/test_course_mode_curriculum.py",
         "tests/test_course_mode_curriculum_e2e.py",
         "tests/test_course_mode_e2e_journeys.py",
-        "tests/test_course_mode_evidence_audit.py",
         "tests/test_course_mode_forwarder.py",
-        "tests/test_course_mode_operator_attestation.py",
-        "tests/test_course_mode_physical_tft_compose.py",
-        "tests/test_course_mode_physical_tft_ledger_validate.py",
-        "tests/test_course_mode_physical_tft_preflight.py",
-        "tests/test_course_mode_physical_tft_receipt_verify.py",
-        "tests/test_course_mode_renderer_v4_persistence.py",
         "tests/test_course_mode_resource_soak.py",
         "tests/test_course_mode_runtime_compatibility.py",
         "tests/test_course_mode_runtime_integration.py",
         "tests/test_course_mode_task00_contract.py",
-        "tests/test_course_mode_task06_validation_script.py",
-        "tests/test_course_mode_task07_evidence_validate.py",
         "tests/test_google_live_course_mode.py",
     )
 
-    assert discovered == expected
-    assert "tests/test_course_mode_candidate_manifest.py" in discovered
-    assert "tests/test_course_mode_task07_evidence_validate.py" in discovered
-    assert gate.classify_esp_course_mode_test("tests/test_course_mode_cross_process_e2e.py") == "software"
-    assert gate.classify_esp_course_mode_test("tests/test_course_mode_evidence_audit.py") == "software"
-    assert "tests/test_google_live_course_mode.py" in discovered
-    assert "tests/test_course_mode_physical_tft_preflight.py" in discovered
-    assert gate.classify_esp_course_mode_test("tests/test_course_mode_physical_tft_preflight.py") == "physical-contract"
-    assert gate.classify_esp_course_mode_test("tests/test_course_mode_runtime_integration.py") == "software"
 
-
-def test_esp_discovery_ignores_untracked_and_non_source_files(tmp_path: Path) -> None:
-    root = tmp_path / "admin"
-    tests = root / "main/tbot-server/tests"
-    tests.mkdir(parents=True)
-    _git(root, "init", "-b", "candidate")
-    _git(root, "config", "user.email", "candidate@example.invalid")
-    _git(root, "config", "user.name", "Candidate Test")
-    (tests / "test_course_mode_committed.py").write_text("def test_ok(): pass\n")
-    (tests / "test_course_mode_physical_lab.py").write_text("def test_ok(): pass\n")
-    (tests / "test_google_live_course_mode.py").write_text("def test_ok(): pass\n")
-    _git(root, "add", ".")
-    _git(root, "commit", "-m", "fixture")
-    sha = _git(root, "rev-parse", "HEAD")
-    (tests / "test_course_mode_untracked.py").write_text("def test_no(): pass\n")
-    cache = root / "main/tbot-server/.pytest_cache/test_course_mode_cached.py"
-    cache.parent.mkdir()
-    cache.write_text("cached")
-
-    assert gate.discover_esp_course_mode_tests(root, sha) == (
-        "tests/test_course_mode_committed.py",
-        "tests/test_course_mode_physical_lab.py",
-        "tests/test_google_live_course_mode.py",
+def test_full_esp_lane_does_not_auto_select_prefix_matching_meta_test(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    monkeypatch.setattr(
+        gate, "_candidate_git",
+        lambda *_args: "\0".join(
+            f"main/tbot-server/{relative}" for relative in gate.ESP_COURSE_MODE_FULL_TESTS
+        ) + "\0main/tbot-server/tests/test_course_mode_candidate_manifest.py\0",
     )
-    assert gate.select_esp_software_tests(gate.discover_esp_course_mode_tests(root, sha)) == (
-        "tests/test_course_mode_committed.py",
-        "tests/test_google_live_course_mode.py",
+    command = gate._command_for_lane(
+        next(lane for lane in gate.FULL_LANES if lane.name == "esp-course-mode-full"),
+        candidate,
     )
+
+    assert command == ("python3", "-m", "pytest", "-q", *gate.ESP_COURSE_MODE_FULL_TESTS)
+    assert "tests/test_course_mode_candidate_manifest.py" not in command
+    assert "tests/test_course_mode_physical_tft_preflight.py" not in command
+    assert "tests/test_course_mode_cross_process_e2e.py" not in command
+
+
+def test_full_esp_lane_blocks_when_an_allowlisted_test_is_missing_from_candidate_commit(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(lane for lane in gate.FULL_LANES if lane.name == "esp-course-mode-full")
+    monkeypatch.setattr(
+        gate, "_candidate_git",
+        lambda *_args: "\0".join(
+            f"main/tbot-server/{relative}"
+            for relative in gate.ESP_COURSE_MODE_FULL_TESTS[:-1]
+        ) + "\0",
+    )
+
+    assert gate._command_for_lane(lane, candidate) is None
+
+
+def test_full_esp_lane_candidate_paths_include_every_allowlisted_test(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(lane for lane in gate.FULL_LANES if lane.name == "esp-course-mode-full")
+
+    assert set(gate.lane_candidate_paths(lane, candidate)) == {
+        "main/tbot-server/pyproject.toml",
+        *(f"main/tbot-server/{relative}" for relative in gate.ESP_COURSE_MODE_FULL_TESTS),
+    }
 
 
 def test_selected_esp_test_drift_blocks_before_execution(candidate_file: Path, tmp_path: Path) -> None:
