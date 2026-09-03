@@ -92,6 +92,7 @@ class BoundDirectory:
     modified_ns: int
     changed_ns: int
     mode: int
+    uid: int
     links: int
 
 
@@ -398,6 +399,7 @@ def _directory_identity(opened: os.stat_result) -> BoundDirectory:
         opened.st_mtime_ns,
         opened.st_ctime_ns,
         opened.st_mode,
+        opened.st_uid,
         opened.st_nlink,
     )
 
@@ -512,17 +514,29 @@ def _require_release_input_unchanged(
         zip(current.parent_chain, bound.parent_chain, strict=True)
     ):
         if index == allowed_index:
-            matches = True
-        elif index < protected_index:
             matches = (
                 observed.device,
                 observed.inode,
                 observed.mode,
+                observed.uid,
+            ) == (
+                expected.device,
+                expected.inode,
+                expected.mode,
+                expected.uid,
+            )
+        elif index < protected_index - 1:
+            matches = (
+                observed.device,
+                observed.inode,
+                observed.mode,
+                observed.uid,
                 observed.links,
             ) == (
                 expected.device,
                 expected.inode,
                 expected.mode,
+                expected.uid,
                 expected.links,
             )
         else:

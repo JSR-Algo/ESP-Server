@@ -1506,6 +1506,27 @@ def test_bound_release_input_detects_parent_directory_aba(tmp_path: Path) -> Non
         release_gate._require_release_input_unchanged(bound)
 
 
+def test_bound_release_input_detects_allowed_evidence_root_aba(
+    tmp_path: Path,
+) -> None:
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    evidence = evidence_root / "report.json"
+    evidence.write_bytes(b"evidence")
+    bound = release_gate._read_bound_release_input(evidence)
+    moved = tmp_path / "moved-evidence"
+
+    evidence_root.rename(moved)
+    moved.rename(evidence_root)
+
+    with pytest.raises(RuntimeError, match="release evidence changed"):
+        release_gate._require_release_input_unchanged(
+            bound,
+            protected_root=evidence_root,
+            allowed_changed_directory=evidence_root,
+        )
+
+
 def test_bound_release_verdict_leaves_no_output_when_publisher_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
