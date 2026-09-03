@@ -2357,7 +2357,8 @@ def test_assignment_runner_accepts_gate_owned_capsule(
         "process.env.PATH = `${resolve(process.cwd(), 'scripts/media-tools')}:${process.env.PATH}`;\n"
         "process.argv = [process.argv[0], "
         "resolve(process.cwd(), 'scripts/run-task4-assignment-phase.cjs'), 'new'];\n"
-        "require(resolve(process.cwd(), 'scripts/run-task4-assignment-phase.cjs'));\n",
+        "try { require(resolve(process.cwd(), 'scripts/run-task4-assignment-phase.cjs')); process.exit(0); } "
+        "catch (error) { console.error(error); process.exit(1); }\n",
         encoding="utf-8",
     )
     node_descriptor["npm"]["sha256"] = hashlib.sha256(npm_entrypoint.read_bytes()).hexdigest()
