@@ -1657,7 +1657,7 @@ def test_lane_failure_is_preserved_when_lane_cleanup_also_fails(
             lanes=(_lane("primary-failure", "raise SystemExit(7)"),),
         )
 
-        assert result["verdict"] == "FAIL"
+        assert result["verdict"] == "BLOCKED"
         assert result["failedLane"] == "primary-failure"
         assert result["cleanupFailed"] is True
         assert result["retainedOwner"] == "current-process"
@@ -1666,6 +1666,28 @@ def test_lane_failure_is_preserved_when_lane_cleanup_also_fails(
         monkeypatch.setattr(gate, "_remove_owned_tree", original_remove)
         for execution in executions:
             original_remove(execution.root, execution.identity)
+
+
+def test_nonzero_lane_result_precedes_missing_pytest_report(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lane = gate.Lane(
+        name="nonzero-with-missing-junit", repository="adminEsp", relative_cwd=".",
+        command=(sys.executable, "-c", "raise SystemExit(7)"), timeout_sec=5.0,
+        reject_pytest_skips=True,
+    )
+    monkeypatch.setattr(gate, "validate_candidate", lambda _candidate: False)
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *_args, **_kwargs: gate._manifest.BoundedCommandResult(7, "", None),
+    )
+
+    result = gate.run_gate(candidate_file, "quick", lanes=(lane,))
+
+    assert result["verdict"] == "FAIL"
+    assert result["failedLane"] == lane.name
+    assert result["lanes"][0]["exitCode"] == 7
 
 
 def test_assignment_runtime_capsule_is_private_and_identity_bound() -> None:
@@ -2425,6 +2447,7 @@ def test_assignment_capsule_cleanup_failure_overrides_lane_failure(
 
     monkeypatch.setattr(gate.AssignmentRuntimeCapsule, "create", record_create)
     monkeypatch.setattr(gate, "_remove_owned_tree", fail_capsule_cleanup)
+    monkeypatch.setattr(gate, "validate_candidate", lambda _candidate: False)
     lane = _stateful_assignment_lane(
         "admin-course-mode-assignment-new", "raise SystemExit(7)",
     )
@@ -2435,7 +2458,8 @@ def test_assignment_capsule_cleanup_failure_overrides_lane_failure(
     )
 
     assert result["verdict"] == "BLOCKED"
-    assert result["failedLane"] == "cleanup"
+    assert result["failedLane"] == lane.name
+    assert result["cleanupFailed"] is True
     assert result["retainedOwner"] == "current-process"
     assert result["retainedPaths"] == [str(capsules[0].root)]
     monkeypatch.setattr(gate, "_remove_owned_tree", original_remove)

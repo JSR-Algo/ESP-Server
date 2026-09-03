@@ -1071,8 +1071,8 @@ def _cleanup_gate_owned(
         owned, report.get("retainedPaths", ()),
     )
     if retained:
+        report["verdict"] = "BLOCKED"
         if report.get("failedLane") in (None, "cleanup"):
-            report["verdict"] = "BLOCKED"
             report["failedLane"] = "cleanup"
         else:
             report["cleanupFailed"] = True
@@ -4244,7 +4244,7 @@ def _run_gate_impl(
                         else "FAIL"
                     )
                     report["failedLane"] = lane.name
-                if skip_state is not False:
+                elif skip_state is not False:
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
                 if not _cleanup_gate_owned(report, lane_execution, execution_stage):
