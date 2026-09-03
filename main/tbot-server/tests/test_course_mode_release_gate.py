@@ -207,6 +207,77 @@ def _git(root: Path, *arguments: str) -> str:
     ).stdout.strip()
 
 
+def _install_cjson_gitlink(
+    candidate_file: Path, tmp_path: Path,
+) -> tuple[dict, Path, Path, str, str]:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    repository = tmp_path / "cjson-repository"
+    repository.mkdir()
+    _git(repository, "init", "-b", "candidate")
+    _git(repository, "config", "user.email", "candidate@example.invalid")
+    _git(repository, "config", "user.name", "Candidate Test")
+    source = repository / "cJSON.c"
+    source.write_text("pinned gitlink bytes\n", encoding="utf-8")
+    _git(repository, "add", "cJSON.c")
+    _git(repository, "commit", "-m", "pinned cjson")
+    pinned_commit = _git(repository, "rev-parse", "HEAD")
+    source.write_text("different checked-out bytes\n", encoding="utf-8")
+    _git(repository, "commit", "-am", "later cjson")
+    checkout_commit = _git(repository, "rev-parse", "HEAD")
+
+    esp_idf = Path(candidate["tools"]["espIdf"]["root"])
+    submodule_root = esp_idf / "components/json/cJSON"
+    _git(esp_idf, "rm", "-r", "components/json/cJSON")
+    _git(
+        esp_idf, "-c", "protocol.file.allow=always", "submodule", "add",
+        str(repository), "components/json/cJSON",
+    )
+    _git(submodule_root, "checkout", pinned_commit)
+    _git(esp_idf, "add", ".gitmodules", "components/json/cJSON")
+    _git(esp_idf, "commit", "-m", "use cjson gitlink")
+    candidate["tools"]["espIdf"]["commit"] = _git(esp_idf, "rev-parse", "HEAD")
+    entry = _git(esp_idf, "ls-tree", "HEAD", "components/json/cJSON")
+    assert entry.split()[:2] == ["160000", "commit"]
+    assert entry.split()[2] == pinned_commit
+    git_file_record = (submodule_root / ".git").read_text(encoding="utf-8")
+    assert git_file_record.startswith("gitdir: ") and git_file_record.endswith("\n")
+    declared_git_dir = Path(git_file_record.removeprefix("gitdir: ").strip())
+    assert not declared_git_dir.is_absolute()
+    assert (submodule_root / declared_git_dir).resolve(strict=True) == (
+        esp_idf / ".git/modules/components/json/cJSON"
+    )
+    _git(submodule_root, "checkout", checkout_commit)
+    return candidate, esp_idf, submodule_root, pinned_commit, checkout_commit
+
+
+def _record_stage_roots(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    roots: list[Path] = []
+    original = gate.tempfile.mkdtemp
+
+    def record(*args, **kwargs) -> str:
+        path = Path(original(*args, **kwargs))
+        if kwargs.get("prefix") == "course-mode-stage-":
+            roots.append(path)
+        return str(path)
+
+    monkeypatch.setattr(gate.tempfile, "mkdtemp", record)
+    return roots
+
+
+def _assert_gitlink_stage_rejected(
+    candidate: dict, lane: gate.Lane, stage_roots: list[Path],
+) -> None:
+    with pytest.raises(ValueError, match="candidate archive failed"):
+        gate.stage_execution_candidate(candidate, (lane,))
+    assert stage_roots and all(not path.exists() for path in stage_roots)
+
+
+def _stat_result_with_uid(metadata: os.stat_result, uid: int) -> os.stat_result:
+    fields = list(metadata)
+    fields[4] = uid
+    return os.stat_result(fields)
+
+
 def _repository(root: Path) -> dict:
     return {
         "path": str(root),
@@ -6712,6 +6783,303 @@ def test_firmware_handler_command_receives_usable_candidate_cjson_with_nonexiste
     assert result.stdout.splitlines() == [
         "/nonexistent", str(expected_cjson), "/* candidate ESP-IDF cJSON fixture */",
     ]
+
+
+def test_firmware_handler_stages_exact_cjson_gitlink_commit(
+    candidate_file: Path, tmp_path: Path,
+) -> None:
+    candidate, _, submodule_root, _, _ = _install_cjson_gitlink(candidate_file, tmp_path)
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    assert (submodule_root / "cJSON.c").read_text(encoding="utf-8") == (
+        "different checked-out bytes\n"
+    )
+
+    stage = gate.stage_execution_candidate(candidate, (lane,))
+    staged_cjson = (
+        Path(stage.candidate["tools"]["espIdf"]["root"])
+        / "components/json/cJSON/cJSON.c"
+    )
+    try:
+        assert staged_cjson.is_relative_to(stage.root / "tools")
+        assert staged_cjson.read_text(encoding="utf-8") == "pinned gitlink bytes\n"
+    finally:
+        assert stage.cleanup() is True
+    assert not stage.root.exists()
+
+
+def test_firmware_handler_cjson_gitlink_rejects_missing_initialized_submodule(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate, _, submodule_root, _, _ = _install_cjson_gitlink(candidate_file, tmp_path)
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    shutil.rmtree(submodule_root)
+    stage_roots = _record_stage_roots(monkeypatch)
+
+    _assert_gitlink_stage_rejected(candidate, lane, stage_roots)
+
+
+def test_firmware_handler_cjson_gitlink_rejects_absent_pinned_commit(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate, esp_idf, _, pinned_commit, _ = _install_cjson_gitlink(
+        candidate_file, tmp_path,
+    )
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    git_dir = esp_idf / ".git/modules/components/json/cJSON"
+    shutil.rmtree(git_dir)
+    _git(git_dir.parent, "init", "--bare", str(git_dir))
+    assert subprocess.run(
+        ["git", f"--git-dir={git_dir}", "cat-file", "-e", pinned_commit],
+        check=False, capture_output=True,
+    ).returncode != 0
+    stage_roots = _record_stage_roots(monkeypatch)
+
+    _assert_gitlink_stage_rejected(candidate, lane, stage_roots)
+
+
+@pytest.mark.parametrize("root_kind", ["symlink", "noncanonical"])
+def test_firmware_handler_cjson_gitlink_rejects_untrusted_submodule_root(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    root_kind: str,
+) -> None:
+    candidate, _, submodule_root, _, _ = _install_cjson_gitlink(candidate_file, tmp_path)
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    if root_kind == "symlink":
+        real_root = submodule_root.with_name("cJSON-real")
+        submodule_root.rename(real_root)
+        submodule_root.symlink_to(real_root, target_is_directory=True)
+    else:
+        json_root = submodule_root.parent
+        real_json_root = json_root.with_name("json-real")
+        json_root.rename(real_json_root)
+        json_root.symlink_to(real_json_root, target_is_directory=True)
+    stage_roots = _record_stage_roots(monkeypatch)
+
+    _assert_gitlink_stage_rejected(candidate, lane, stage_roots)
+
+
+@pytest.mark.parametrize("git_file_kind", ["symlink", "directory"])
+def test_firmware_handler_cjson_gitlink_rejects_non_regular_git_file(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    git_file_kind: str,
+) -> None:
+    candidate, _, submodule_root, _, _ = _install_cjson_gitlink(candidate_file, tmp_path)
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    git_file = submodule_root / ".git"
+    original = git_file.with_name(".git-original")
+    git_file.rename(original)
+    if git_file_kind == "symlink":
+        git_file.symlink_to(original)
+    else:
+        git_file.mkdir()
+    stage_roots = _record_stage_roots(monkeypatch)
+
+    _assert_gitlink_stage_rejected(candidate, lane, stage_roots)
+
+
+@pytest.mark.parametrize(
+    "git_file_content",
+    [
+        "{redirect}",
+        "{absolute}",
+        "{relative}unexpected second line\n",
+        "{relative}\0",
+        "",
+        "gitdir: " + "x" * 4097 + "\n",
+        "worktree: ../../../../.git/modules/components/json/cJSON\n",
+    ],
+    ids=("redirected", "absolute", "extra-line", "nul", "empty", "oversized", "malformed"),
+)
+def test_firmware_handler_cjson_gitlink_rejects_invalid_git_file_record(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    git_file_content: str,
+) -> None:
+    candidate, esp_idf, submodule_root, _, _ = _install_cjson_gitlink(
+        candidate_file, tmp_path,
+    )
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    git_file = submodule_root / ".git"
+    relative = git_file.read_text(encoding="utf-8")
+    canonical = esp_idf / ".git/modules/components/json/cJSON"
+    redirect = tmp_path / "redirected-cjson.git"
+    _git(tmp_path, "init", "--bare", str(redirect))
+    content = git_file_content.format(
+        absolute=f"gitdir: {canonical}\n", relative=relative,
+        redirect=f"gitdir: {os.path.relpath(redirect, submodule_root)}\n",
+    )
+    git_file.write_bytes(content.encode("utf-8"))
+    stage_roots = _record_stage_roots(monkeypatch)
+
+    _assert_gitlink_stage_rejected(candidate, lane, stage_roots)
+
+
+@pytest.mark.parametrize("git_dir_kind", ["symlink", "file"])
+def test_firmware_handler_cjson_gitlink_rejects_untrusted_canonical_git_dir(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    git_dir_kind: str,
+) -> None:
+    candidate, esp_idf, _, _, _ = _install_cjson_gitlink(candidate_file, tmp_path)
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    git_dir = esp_idf / ".git/modules/components/json/cJSON"
+    original = git_dir.with_name("cJSON-original")
+    git_dir.rename(original)
+    if git_dir_kind == "symlink":
+        git_dir.symlink_to(original, target_is_directory=True)
+    else:
+        git_dir.write_text("not a git directory\n", encoding="utf-8")
+    stage_roots = _record_stage_roots(monkeypatch)
+
+    _assert_gitlink_stage_rejected(candidate, lane, stage_roots)
+
+
+@pytest.mark.parametrize("target_name", ["root", "git-file", "git-dir"])
+@pytest.mark.parametrize("writable_bit", [stat.S_IWGRP, stat.S_IWOTH])
+def test_firmware_handler_cjson_gitlink_rejects_shared_writable_metadata(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    target_name: str, writable_bit: int,
+) -> None:
+    candidate, esp_idf, submodule_root, _, _ = _install_cjson_gitlink(
+        candidate_file, tmp_path,
+    )
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    targets = {
+        "root": submodule_root,
+        "git-file": submodule_root / ".git",
+        "git-dir": esp_idf / ".git/modules/components/json/cJSON",
+    }
+    target = targets[target_name]
+    target.chmod(stat.S_IMODE(target.lstat().st_mode) | writable_bit)
+    stage_roots = _record_stage_roots(monkeypatch)
+
+    _assert_gitlink_stage_rejected(candidate, lane, stage_roots)
+
+
+@pytest.mark.parametrize("target_name", ["root", "git-file", "git-dir"])
+def test_firmware_handler_cjson_gitlink_rejects_wrong_owner(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    target_name: str,
+) -> None:
+    candidate, esp_idf, submodule_root, _, _ = _install_cjson_gitlink(
+        candidate_file, tmp_path,
+    )
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    targets = {
+        "root": submodule_root,
+        "git-file": submodule_root / ".git",
+        "git-dir": esp_idf / ".git/modules/components/json/cJSON",
+    }
+    target = targets[target_name]
+    original_lstat = Path.lstat
+
+    def wrong_owner(path: Path) -> os.stat_result:
+        metadata = original_lstat(path)
+        if path == target:
+            return _stat_result_with_uid(metadata, os.geteuid() + 1)
+        return metadata
+
+    monkeypatch.setattr(Path, "lstat", wrong_owner)
+    stage_roots = _record_stage_roots(monkeypatch)
+
+    _assert_gitlink_stage_rejected(candidate, lane, stage_roots)
+
+
+@pytest.mark.parametrize(
+    "mode,object_type",
+    [
+        ("040000", "commit"),
+        ("160000", "tree"),
+        ("100644", "blob"),
+        ("120000", "blob"),
+    ],
+)
+def test_firmware_handler_cjson_gitlink_rejects_unsupported_entry_pair(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    mode: str, object_type: str,
+) -> None:
+    candidate, _, _, pinned_commit, _ = _install_cjson_gitlink(candidate_file, tmp_path)
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    original = gate._manifest.run_bounded_command
+
+    def invalid_entry(command, **kwargs):
+        if "ls-tree" in command and command[-1] == "components/json/cJSON" and "-r" not in command:
+            return gate._manifest.BoundedCommandResult(
+                0,
+                f"{mode} {object_type} {pinned_commit}\tcomponents/json/cJSON\0",
+                None,
+            )
+        return original(command, **kwargs)
+
+    monkeypatch.setattr(gate._manifest, "run_bounded_command", invalid_entry)
+    stage_roots = _record_stage_roots(monkeypatch)
+
+    _assert_gitlink_stage_rejected(candidate, lane, stage_roots)
+
+
+@pytest.mark.parametrize(
+    "listing",
+    [
+        "{valid}{valid}",
+        "{record}",
+        "160000 commit {oid}\tcomponents/json/not-cJSON\0",
+        "160000 commit {upper}\tcomponents/json/cJSON\0",
+    ],
+    ids=("duplicate", "unterminated", "wrong-path", "uppercase-oid"),
+)
+def test_firmware_handler_cjson_gitlink_rejects_malformed_ls_tree_record(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    listing: str,
+) -> None:
+    candidate, _, _, pinned_commit, _ = _install_cjson_gitlink(candidate_file, tmp_path)
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    valid = f"160000 commit {pinned_commit}\tcomponents/json/cJSON\0"
+    rendered = listing.format(
+        valid=valid, record=valid.removesuffix("\0"), oid=pinned_commit,
+        upper=pinned_commit.upper(),
+    )
+    original = gate._manifest.run_bounded_command
+
+    def malformed_entry(command, **kwargs):
+        if "ls-tree" in command and command[-1] == "components/json/cJSON" and "-r" not in command:
+            return gate._manifest.BoundedCommandResult(0, rendered, None)
+        return original(command, **kwargs)
+
+    monkeypatch.setattr(gate._manifest, "run_bounded_command", malformed_entry)
+    stage_roots = _record_stage_roots(monkeypatch)
+
+    _assert_gitlink_stage_rejected(candidate, lane, stage_roots)
+
+
+def test_firmware_handler_cjson_gitlink_disables_lazy_fetch_and_ext_transport(
+    candidate_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate, esp_idf, _, pinned_commit, _ = _install_cjson_gitlink(
+        candidate_file, tmp_path,
+    )
+    lane = next(item for item in gate.FULL_LANES if item.name == "firmware-handler")
+    git_dir = esp_idf / ".git/modules/components/json/cJSON"
+    shutil.rmtree(git_dir)
+    _git(git_dir.parent, "init", "--bare", str(git_dir))
+    marker = tmp_path / "lazy-fetch-marker"
+    helper = tmp_path / "hostile-transport"
+    helper.write_text(f"#!/bin/sh\ntouch {str(marker)!r}\nexit 1\n", encoding="utf-8")
+    helper.chmod(0o755)
+    _git(git_dir, "config", "extensions.partialClone", "origin")
+    _git(git_dir, "config", "remote.origin.promisor", "true")
+    _git(git_dir, "config", "remote.origin.partialCloneFilter", "blob:none")
+    _git(git_dir, "config", "remote.origin.url", f"ext::{helper}")
+    probe = subprocess.run(
+        [
+            "git", "-c", "protocol.ext.allow=always", f"--git-dir={git_dir}",
+            "cat-file", "-e", f"{pinned_commit}^{{commit}}",
+        ],
+        check=False, capture_output=True,
+    )
+    assert probe.returncode != 0 and marker.exists()
+    marker.unlink()
+    stage_roots = _record_stage_roots(monkeypatch)
+
+    _assert_gitlink_stage_rejected(candidate, lane, stage_roots)
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize("external_change", ["mutate", "unlink", "symlink"])
