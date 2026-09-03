@@ -372,8 +372,10 @@ def test_absolute_nested_project_script_is_candidate_bound_regression(
     project_root = tmp_path.parent / f"{tmp_path.name}-candidate-repo"
     scripts = project_root / "scripts"
     scripts.mkdir(parents=True)
+    mutable_entry = scripts / "google_live_robot_soak.py"
     mutable = scripts / "analyze_google_live_log.py"
     marker = tmp_path / "mutable-analyzer-executed"
+    mutable_entry.write_text("raise SystemExit('mutable robot soak executed')\n", encoding="utf-8")
     mutable.write_text(
         f"from pathlib import Path; Path({str(marker)!r}).write_text('mutable'); "
         "Path('real-api').mkdir(exist_ok=True); Path('real-api/report.json').write_text('mutable')\n",
@@ -384,7 +386,10 @@ def test_absolute_nested_project_script_is_candidate_bound_regression(
         {
             "scripts/google_live_robot_soak.py": (
                 "import subprocess, sys\n"
-                f"subprocess.run([sys.executable, {str(mutable)!r}, {str(tmp_path / 'journey.json')!r}], check=True)\n"
+                "from pathlib import Path\n"
+                "SERVER_ROOT = Path(__file__).resolve().parents[1]\n"
+                f"assert SERVER_ROOT == Path({str(project_root)!r})\n"
+                f"subprocess.run([sys.executable, str(SERVER_ROOT / 'scripts' / 'analyze_google_live_log.py'), {str(tmp_path / 'journey.json')!r}], check=True)\n"
             ),
             "scripts/analyze_google_live_log.py": (
                 "import sys\n"

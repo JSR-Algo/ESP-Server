@@ -974,14 +974,18 @@ def _git_bound_python_argv(
     if not script_path.is_file():
         raise ValueError("relative Python script is absent from candidate Git source")
     original_root = spec.cwd.resolve(strict=True)
-    original_file = original_root.joinpath(*script_relative.split("/"))
+    project_root = Path(__file__).resolve().parents[1]
+    project_file = project_root.joinpath(*script_relative.split("/"))
+    original_file = (
+        project_file if project_file.is_file() else original_root.joinpath(*script_relative.split("/"))
+    )
     return (
         runtime_argv[0],
         *runtime_argv[1:script_index],
         str(bootstrap_path),
         str(source_root),
         str(original_root),
-        str(Path(__file__).resolve().parents[1]),
+        str(project_root),
         script_relative,
         str(original_file),
         *runtime_argv[script_index + 1 :],
