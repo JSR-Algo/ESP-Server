@@ -102,8 +102,8 @@ except BaseException:
 """
 _GIT_SOURCE_EXEC = """import importlib.machinery, importlib.util, os, subprocess, sys
 bootstrap_path = os.path.abspath(sys.argv[0])
-source_root, original_root, script_relative, original_file = sys.argv[1:5]
-script_arguments = sys.argv[5:]
+source_root, original_root, project_root, script_relative, original_file = sys.argv[1:6]
+script_arguments = sys.argv[6:]
 class BlockedProjectPath:
     @staticmethod
     def find_spec(fullname, target=None):
@@ -187,16 +187,26 @@ def candidate_popen(arguments, *args, **kwargs):
     ):
         child_file = os.path.abspath(os.fspath(arguments[script_index]))
         try:
-            inside_project = os.path.commonpath([original_root, child_file]) == original_root
+            inside_project = os.path.commonpath([project_root, child_file]) == project_root
+            inside_original = os.path.commonpath([original_root, child_file]) == original_root
         except ValueError:
-            inside_project = False
+            inside_project = inside_original = False
         if inside_project:
+            child_original_root = project_root
+            child_relative = os.path.relpath(child_file, project_root).replace(os.sep, "/")
+        elif inside_original:
+            child_original_root = original_root
             child_relative = os.path.relpath(child_file, original_root).replace(os.sep, "/")
+        else:
+            child_original_root = None
+        if child_original_root is not None:
             arguments = [
                 arguments[0], *arguments[1:script_index], bootstrap_path,
-                source_root, original_root, child_relative, child_file,
+                source_root, child_original_root, project_root, child_relative, child_file,
                 *arguments[script_index + 1:]
             ]
+        else:
+            raise PermissionError("Python child script is outside candidate project")
     return original_popen(arguments, *args, **kwargs)
 subprocess.Popen = candidate_popen
 sys.argv = [original_file, *script_arguments]
@@ -971,6 +981,7 @@ def _git_bound_python_argv(
         str(bootstrap_path),
         str(source_root),
         str(original_root),
+        str(Path(__file__).resolve().parents[1]),
         script_relative,
         str(original_file),
         *runtime_argv[script_index + 1 :],

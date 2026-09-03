@@ -384,9 +384,11 @@ def test_absolute_nested_project_script_is_candidate_bound_regression(
         {
             "scripts/google_live_robot_soak.py": (
                 "import subprocess, sys\n"
-                f"subprocess.run([sys.executable, {str(mutable)!r}], check=True)\n"
+                f"subprocess.run([sys.executable, {str(mutable)!r}, {str(tmp_path / 'journey.json')!r}], check=True)\n"
             ),
             "scripts/analyze_google_live_log.py": (
+                "import sys\n"
+                f"assert sys.argv[1:] == [{str(tmp_path / 'journey.json')!r}]\n"
                 "from pathlib import Path; Path('real-api').mkdir(exist_ok=True); "
                 "Path('real-api/report.json').write_text('candidate')\n"
             ),
@@ -398,6 +400,36 @@ def test_absolute_nested_project_script_is_candidate_bound_regression(
         provenance=tmp_path / "commands.jsonl",
     )
     assert (tmp_path / "real-api" / "report.json").read_text() == "candidate"
+    assert not marker.exists()
+
+
+def test_nested_python_script_outside_approved_roots_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.py"
+    marker = tmp_path / "outside-executed"
+    outside.write_text(
+        f"from pathlib import Path; Path({str(marker)!r}).write_text('executed')\n",
+        encoding="utf-8",
+    )
+    archive = _python_source_archive(
+        {
+            "entry.py": (
+                "import subprocess, sys\n"
+                f"subprocess.run([sys.executable, {str(outside)!r}], check=True)\n"
+            )
+        }
+    )
+    monkeypatch.setattr(runner, "_load_candidate_python_archive", lambda _sha: archive)
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
     assert not marker.exists()
 
 
