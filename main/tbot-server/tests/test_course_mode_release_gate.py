@@ -6090,6 +6090,14 @@ def test_full_esp_lane_uses_exact_hermetic_runtime_contract_suite() -> None:
     )
 
 
+def test_full_esp_lane_owns_only_tests_without_pytest_skip_sources() -> None:
+    server_root = Path(__file__).parent.parent
+
+    for relative in gate.ESP_COURSE_MODE_FULL_TESTS:
+        source = (server_root / relative).read_text(encoding="utf-8")
+        assert "pytest.skip(" not in source, relative
+
+
 def test_full_esp_lane_does_not_auto_select_prefix_matching_meta_test(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
