@@ -555,6 +555,7 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     synthetic_tools: dict[str, str] = {}
     synthetic_tool_hashes: dict[str, set[str]] = {}
     original_run_bounded_command = gate._manifest.run_bounded_command
+    original_assignment_command = gate.run_assignment_bounded_command
 
     def register_synthetic_tool(path: Path) -> None:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -594,7 +595,24 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                 command = [*command[:tool_index], "/bin/sh", *command[tool_index:]]
         return original_run_bounded_command(command, **kwargs)
 
+    def run_fixture_assignment_command(command, **kwargs):
+        if command:
+            tool = Path(command[0])
+            if (
+                tool.is_absolute()
+                and tool.is_file()
+                and tool.name == "node"
+                and "candidate" in tool.parts
+                and "tools" in tool.parts
+                and any(parent.name.startswith("course-mode-lane-") for parent in tool.parents)
+            ):
+                command = ["/bin/sh", *command]
+        return original_assignment_command(command, **kwargs)
+
     monkeypatch.setattr(gate._manifest, "run_bounded_command", run_fixture_command)
+    monkeypatch.setattr(
+        gate, "run_assignment_bounded_command", run_fixture_assignment_command,
+    )
     docker = tmp_path / "docker"
     backend_ref = f"local/tbot-backend:course-mode-physical-tft-{repositories['backend']['sha']}"
     web_ref = f"local/tbot-server-web:course-mode-physical-tft-{repositories['adminEsp']['sha']}"
@@ -2216,17 +2234,31 @@ def test_assignment_runner_accepts_gate_owned_capsule(
     (scripts / "task4-assignment-runtime.cjs").write_text(
         instrumented_helper, encoding="utf-8",
     )
-    (scripts / "run-task4-assignment-phase.cjs").write_text(
-        (canonical_root / "main/manager-web/scripts/run-task4-assignment-phase.cjs").read_text(
-            encoding="utf-8",
-        ),
-        encoding="utf-8",
+    phase_source = (
+        canonical_root / "main/manager-web/scripts/run-task4-assignment-phase.cjs"
+    ).read_text(encoding="utf-8")
+    phase_source = phase_source.replace(
+        "execFileSync('openssl', [",
+        "execFileSync('/bin/sh', [resolve(__dirname, 'media-tools/openssl'),",
+    ).replace(
+        "run('openssl', [",
+        "run('/bin/sh', [resolve(__dirname, 'media-tools/openssl'),",
     )
+    assert phase_source.count("resolve(__dirname, 'media-tools/openssl')") == 3
+    (scripts / "run-task4-assignment-phase.cjs").write_text(
+        phase_source, encoding="utf-8",
+    )
+    media_source = (
+        canonical_root / "main/manager-web/scripts/prepare-task4-media-templates.cjs"
+    ).read_text(encoding="utf-8")
+    for tool in ("ffmpeg", "ffprobe"):
+        media_source = media_source.replace(
+            f"execFileSync('{tool}', [",
+            f"execFileSync('/bin/sh', [resolve(__dirname, 'media-tools/{tool}'),",
+        )
+    assert media_source.count("resolve(__dirname, 'media-tools/") == 2
     (scripts / "prepare-task4-media-templates.cjs").write_text(
-        (canonical_root / "main/manager-web/scripts/prepare-task4-media-templates.cjs").read_text(
-            encoding="utf-8",
-        ),
-        encoding="utf-8",
+        media_source, encoding="utf-8",
     )
     (scripts / "task4-image-identity.cjs").write_text(
         "const { statSync, writeFileSync } = require('node:fs');\n"
