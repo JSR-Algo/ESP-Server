@@ -6,14 +6,17 @@ import fcntl
 import ctypes
 import errno
 import hashlib
+import hmac
 import json
 import os
+import platform
 import re
 import secrets
 import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
@@ -29,12 +32,18 @@ from scripts.google_live_deterministic_evidence import (
     require_file_unchanged,
 )
 from scripts.google_live_reliability import forbidden_report_fields
+from scripts.google_live_trusted_git import git_output as _trusted_git_output
+from scripts.google_live_trusted_git import trusted_git_session
 
 
 COMMAND_PROVENANCE_SCHEMA = "google-live-command-provenance.v1"
 COMMAND_ID = re.compile(r"(?:diagnostic\.)?[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+")
 ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+PYTHON_EXECUTABLE_SCHEMA = "google-live-python-executables.v1"
+PYTHON_EXECUTABLE_MANIFEST_GIT_PATH = (
+    "main/tbot-server/tests/fixtures/google_live_python_executable_manifest.json"
+)
 _MAX_PROVENANCE_ARTIFACT_BYTES = 16 * 1024 * 1024
 _MAX_GENERATION_FILES = 1024
 PAIR_SCHEMA = "google-live-command-provenance-pair.v1"
@@ -71,13 +80,14 @@ _EXACT_TERMINAL_FIELDS = {
 }
 _FCHDIR_EXEC = """import os, sys
 cwd = int(sys.argv[1])
-keep = [int(value) for value in sys.argv[2].split(",") if value]
-argv = sys.argv[3:]
+executable = sys.argv[2]
+keep = [int(value) for value in sys.argv[3].split(",") if value]
+argv = sys.argv[4:]
 try:
     os.fchdir(cwd)
     os.close(cwd)
     cwd = -1
-    os.execve(argv[0], argv, os.environ)
+    os.execve(executable, argv, os.environ)
 except BaseException:
     for descriptor in [cwd, *keep]:
         try:
@@ -198,6 +208,11 @@ class BoundWorkingDirectory:
 class PublishedArtifact:
     device: int
     inode: int
+    digest: str
+
+
+@dataclass(frozen=True)
+class PlannedArtifact:
     digest: str
 
 
@@ -644,13 +659,190 @@ def _child_environment(spec: CommandSpec, source: Mapping[str, str] | None) -> d
     return result
 
 
-def _validate_executable(path: str) -> None:
+def _load_trusted_python_executable_manifest(expected_git_sha: str) -> bytes:
+    code_root = Path(__file__).resolve().parents[1]
+    with trusted_git_session():
+        repo_root = Path(
+            _trusted_git_output(code_root, "rev-parse", "--show-toplevel")
+            .decode()
+            .strip()
+        ).resolve(strict=True)
+        if (
+            _trusted_git_output(repo_root, "rev-parse", "HEAD").decode().strip()
+            != expected_git_sha
+        ):
+            raise ValueError("candidate git SHA does not match repository HEAD")
+        if _trusted_git_output(
+            repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=no"
+        ):
+            raise ValueError("candidate worktree contains tracked or staged modifications")
+        content = _trusted_git_output(
+            repo_root,
+            "show",
+            f"{expected_git_sha}:{PYTHON_EXECUTABLE_MANIFEST_GIT_PATH}",
+        )
+        if (
+            _trusted_git_output(repo_root, "rev-parse", "HEAD").decode().strip()
+            != expected_git_sha
+            or _trusted_git_output(
+                repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=no"
+            )
+        ):
+            raise ValueError("candidate repository changed during executable validation")
+    return content
+
+
+def _parse_python_executable_manifest(content: bytes) -> Mapping[str, Any]:
     try:
-        opened = os.stat(path)
-    except OSError as exc:
+        value = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("trusted Python executable manifest is invalid") from exc
+    canonical = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    if (
+        canonical != content
+        or not isinstance(value, dict)
+        or set(value) != {"profiles", "schemaVersion"}
+        or value.get("schemaVersion") != PYTHON_EXECUTABLE_SCHEMA
+        or not isinstance(value.get("profiles"), list)
+        or not value["profiles"]
+    ):
+        raise ValueError("trusted Python executable manifest is invalid")
+    keys = []
+    for profile in value["profiles"]:
+        if (
+            not isinstance(profile, dict)
+            or set(profile)
+            != {
+                "machine",
+                "pythonImplementation",
+                "pythonMajorMinor",
+                "sha256",
+                "size",
+                "system",
+            }
+            or any(
+                type(profile.get(field)) is not str or not profile[field]
+                for field in (
+                    "machine",
+                    "pythonImplementation",
+                    "pythonMajorMinor",
+                    "sha256",
+                    "system",
+                )
+            )
+            or SHA256.fullmatch(profile["sha256"]) is None
+            or re.fullmatch(r"[0-9]+\.[0-9]+", profile["pythonMajorMinor"]) is None
+            or type(profile.get("size")) is not int
+            or profile["size"] <= 0
+            or profile["size"] > 128 * 1024 * 1024
+        ):
+            raise ValueError("trusted Python executable manifest is invalid")
+        keys.append(
+            (
+                profile["system"],
+                profile["machine"],
+                profile["pythonImplementation"],
+                profile["pythonMajorMinor"],
+            )
+        )
+    if keys != sorted(keys) or len(keys) != len(set(keys)):
+        raise ValueError("trusted Python executable manifest is invalid")
+    return value
+
+
+def _trusted_executable_content(
+    path: str, manifest: Mapping[str, Any]
+) -> bytes:
+    descriptor = None
+    try:
+        resolved = Path(path).resolve(strict=True)
+        descriptor = os.open(
+            resolved,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > 128 * 1024 * 1024
+            or before.st_mode & 0o111 == 0
+        ):
+            raise RuntimeError("spawn_failed")
+        content = bytearray()
+        remaining = before.st_size
+        magic = b""
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise RuntimeError("spawn_failed")
+            if not magic:
+                magic = chunk[:4]
+            content.extend(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
+            raise RuntimeError("spawn_failed")
+        version = f"{sys.version_info.major}.{sys.version_info.minor}"
+        allowed_names = {"python", "python3", f"python{version}"}
+        matches = [
+            profile
+            for profile in manifest.get("profiles", [])
+            if isinstance(profile, Mapping)
+            and profile.get("system") == platform.system().lower()
+            and profile.get("machine") == platform.machine().lower()
+            and profile.get("pythonImplementation") == sys.implementation.name
+            and profile.get("pythonMajorMinor") == version
+            and Path(path).name in allowed_names
+            and profile.get("size") == before.st_size
+            and type(profile.get("sha256")) is str
+            and hmac.compare_digest(
+                profile["sha256"], hashlib.sha256(content).hexdigest()
+            )
+        ]
+        if len(matches) != 1 or magic not in {
+            b"\x7fELF",
+            b"\xca\xfe\xba\xbe",
+            b"\xbe\xba\xfe\xca",
+            b"\xce\xfa\xed\xfe",
+            b"\xcf\xfa\xed\xfe",
+            b"\xfe\xed\xfa\xce",
+            b"\xfe\xed\xfa\xcf",
+        } and not magic.startswith(b"MZ"):
+            raise RuntimeError("spawn_failed")
+        return bytes(content)
+    except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
         raise RuntimeError("spawn_failed") from exc
-    if not stat.S_ISREG(opened.st_mode) or not os.access(path, os.X_OK):
-        raise RuntimeError("spawn_failed")
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _write_executable_snapshot(directory: Path, name: str, content: bytes) -> Path:
+    path = directory / name
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o500)
+    try:
+        offset = 0
+        while offset < len(content):
+            written = os.write(descriptor, content[offset:])
+            if written <= 0:
+                raise RuntimeError("spawn_failed")
+            offset += written
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return path
 
 
 def _terminate_group(process: subprocess.Popen[bytes], pgid: int, grace: float) -> None:
@@ -703,6 +895,8 @@ def _run_process(
     cancel_event: threading.Event | None,
     cwd_descriptor: int,
     argument_artifacts: BoundArgumentArtifacts,
+    executable_path: Path,
+    launcher_path: Path,
 ) -> tuple[int | None, str, bool]:
     try:
         process = subprocess.Popen(
@@ -711,9 +905,11 @@ def _run_process(
                 "-c",
                 _FCHDIR_EXEC,
                 str(cwd_descriptor),
+                str(executable_path),
                 ",".join(str(value) for value in argument_artifacts.descriptors),
                 *argument_artifacts.argv,
             ],
+            executable=str(launcher_path),
             shell=False,
             cwd=None,
             env=dict(child_env),
@@ -1405,7 +1601,7 @@ def _pending_generation_name(jsonl_name: str) -> str:
 
 def _render_pending_generation(
     generation: str,
-    artifacts: Mapping[str, PublishedArtifact | None] | None = None,
+    artifacts: Mapping[str, PublishedArtifact | PlannedArtifact | None] | None = None,
 ) -> bytes:
     if type(generation) is not str or GENERATION_ID.fullmatch(generation) is None:
         raise ValueError("provenance pending generation is invalid")
@@ -1416,6 +1612,12 @@ def _render_pending_generation(
     for suffix, artifact in owned.items():
         if artifact is None:
             rendered[suffix] = None
+        elif isinstance(artifact, PlannedArtifact):
+            rendered[suffix] = {
+                "device": None,
+                "inode": None,
+                "sha256": artifact.digest,
+            }
         elif isinstance(artifact, PublishedArtifact):
             rendered[suffix] = {
                 "device": artifact.device,
@@ -1440,7 +1642,7 @@ def _render_pending_generation(
 
 def _parse_pending_generation(
     content: bytes,
-) -> tuple[str, dict[str, PublishedArtifact | None]]:
+) -> tuple[str, dict[str, PublishedArtifact | PlannedArtifact | None]]:
     try:
         value = json.loads(content)
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
@@ -1453,21 +1655,24 @@ def _parse_pending_generation(
         or set(value["artifacts"]) != {"jsonl", "txt"}
     ):
         raise ValueError("provenance pending generation is invalid")
-    artifacts = {}
+    artifacts: dict[str, PublishedArtifact | PlannedArtifact | None] = {}
     for suffix, artifact in value["artifacts"].items():
         if artifact is None:
             artifacts[suffix] = None
         elif (
             isinstance(artifact, dict)
             and set(artifact) == {"device", "inode", "sha256"}
-            and type(artifact.get("device")) is int
-            and type(artifact.get("inode")) is int
             and type(artifact.get("sha256")) is str
             and SHA256.fullmatch(artifact["sha256"]) is not None
         ):
-            artifacts[suffix] = PublishedArtifact(
-                artifact["device"], artifact["inode"], artifact["sha256"]
-            )
+            if artifact.get("device") is None and artifact.get("inode") is None:
+                artifacts[suffix] = PlannedArtifact(artifact["sha256"])
+            elif type(artifact.get("device")) is int and type(artifact.get("inode")) is int:
+                artifacts[suffix] = PublishedArtifact(
+                    artifact["device"], artifact["inode"], artifact["sha256"]
+                )
+            else:
+                raise ValueError("provenance pending generation is invalid")
         else:
             raise ValueError("provenance pending generation is invalid")
     generation = value.get("generation")
@@ -1508,7 +1713,11 @@ def _open_generation_directory(
         raise
 
 
-def _write_generation_at(directory_fd: int, name: str, content: bytes) -> None:
+def _write_generation_at(
+    directory_fd: int,
+    name: str,
+    content: bytes,
+) -> None:
     descriptor = os.open(
         name,
         os.O_WRONLY
@@ -1712,13 +1921,24 @@ def _create_generation_pair_at(
 ) -> tuple[PairPointer, bytes]:
     generation = secrets.token_hex(16)
     generation_fd = _open_generation_directory(directory_fd, jsonl_name)
-    artifacts: dict[str, PublishedArtifact | None] = {"jsonl": None, "txt": None}
+    artifacts: dict[str, PublishedArtifact | PlannedArtifact | None] = {
+        "jsonl": None,
+        "txt": None,
+    }
     try:
         _atomic_replace_at(
             directory_fd,
             _pending_generation_name(jsonl_name),
             _render_pending_generation(generation),
         )
+        _provenance_transaction_hook("after_generation_pending_journal")
+        artifacts["jsonl"] = PlannedArtifact(hashlib.sha256(jsonl).hexdigest())
+        _atomic_replace_at(
+            directory_fd,
+            _pending_generation_name(jsonl_name),
+            _render_pending_generation(generation, artifacts),
+        )
+        _provenance_transaction_hook("after_generation_jsonl_planned_journal")
         _write_generation_at(generation_fd, f"{generation}.jsonl", jsonl)
         _provenance_transaction_hook("after_generation_jsonl_before_journal")
         jsonl_snapshot = _read_existing_snapshot_at(
@@ -1733,6 +1953,13 @@ def _create_generation_pair_at(
             _render_pending_generation(generation, artifacts),
         )
         _provenance_transaction_hook("after_generation_jsonl")
+        artifacts["txt"] = PlannedArtifact(hashlib.sha256(projection).hexdigest())
+        _atomic_replace_at(
+            directory_fd,
+            _pending_generation_name(jsonl_name),
+            _render_pending_generation(generation, artifacts),
+        )
+        _provenance_transaction_hook("after_generation_projection_planned_journal")
         _write_generation_at(generation_fd, f"{generation}.txt", projection)
         _provenance_transaction_hook("after_generation_projection_before_journal")
         projection_snapshot = _read_existing_snapshot_at(
@@ -1910,6 +2137,26 @@ def _compact_generation_quarantine_at(
         raise RuntimeError("provenance generation changed after compaction")
 
 
+def _remove_generation_tombstone_at(
+    directory_fd: int,
+    name: str,
+    artifact: PublishedArtifact,
+    *,
+    original: str,
+) -> None:
+    if not _generation_tombstone_matches(
+        _read_existing_snapshot_at(directory_fd, name), artifact
+    ):
+        raise RuntimeError("provenance tombstone changed before cleanup")
+    _generation_cleanup_hook("tombstone_before_unlink", original)
+    if not _generation_tombstone_matches(
+        _read_existing_snapshot_at(directory_fd, name), artifact
+    ):
+        raise RuntimeError("provenance tombstone changed during cleanup")
+    os.unlink(name, dir_fd=directory_fd)
+    os.fsync(directory_fd)
+
+
 def _remove_generation_snapshot_at(
     directory_fd: int,
     name: str,
@@ -1951,6 +2198,12 @@ def _remove_generation_snapshot_at(
     ):
         raise RuntimeError("provenance generation changed after cleanup")
     _compact_generation_quarantine_at(directory_fd, quarantine, expected)
+    _remove_generation_tombstone_at(
+        directory_fd,
+        quarantine,
+        expected.version,
+        original=name,
+    )
 
 
 def _recover_generation_quarantines_at(
@@ -1979,6 +2232,12 @@ def _recover_generation_quarantines_at(
         elif not _generation_tombstone_matches(snapshot, artifact):
             raise RuntimeError("provenance generation changed during recovery")
         _generation_cleanup_hook("pending_quarantine_after_validation", original)
+        _remove_generation_tombstone_at(
+            generation_fd,
+            name,
+            artifact,
+            original=original,
+        )
 
 
 def _require_pending_generation_uncommitted_at(
@@ -2022,13 +2281,21 @@ def _recover_pending_generation_at(directory_fd: int, jsonl_name: str) -> None:
             name = f"{generation}.{suffix}"
             snapshot = _read_existing_snapshot_at(generation_fd, name)
             owned = owned_artifacts[suffix]
-            if snapshot is not None and (
-                owned is None
-                or snapshot.version != owned
-                or stat.S_IMODE(snapshot.identity[2]) != 0o400
-                or snapshot.identity[6] != os.geteuid()
-            ):
-                raise RuntimeError("provenance pending generation is invalid")
+            if snapshot is not None:
+                ownership_matches = (
+                    isinstance(owned, PublishedArtifact)
+                    and snapshot.version == owned
+                ) or (
+                    isinstance(owned, PlannedArtifact)
+                    and hmac.compare_digest(snapshot.version.digest, owned.digest)
+                )
+                if (
+                    not ownership_matches
+                    or stat.S_IMODE(snapshot.identity[2]) != 0o400
+                    or snapshot.identity[6] != os.geteuid()
+                    or snapshot.identity[7] != 1
+                ):
+                    raise RuntimeError("provenance pending generation is invalid")
             snapshots[name] = snapshot
         for name, snapshot in snapshots.items():
             if snapshot is not None:
@@ -2581,24 +2848,59 @@ def execute_and_record(
             canonical_spec = _canonical_spec(spec, root)
             spec_digest = _digest(canonical_spec)
             child_env = _child_environment(spec, env)
-            _validate_executable(spec.argv[0])
+            expected_git_sha = str(spec.candidate_identity.get("gitSha", ""))
+            executable_manifest = _parse_python_executable_manifest(
+                _load_trusted_python_executable_manifest(expected_git_sha)
+            )
+            executable_content = _trusted_executable_content(
+                spec.argv[0], executable_manifest
+            )
             started = _utc_now()
             interrupted = False
             if _before_spawn is not None:
                 _before_spawn()
             _require_working_directory_unchanged(bound_cwd, require_ctime=True)
-            try:
-                exit_code, classification, satisfied = _run_process(
-                    spec,
-                    child_env,
-                    stdin_bytes,
-                    cancel_event,
-                    bound_cwd.descriptor,
-                    argument_artifacts,
+            with tempfile.TemporaryDirectory(prefix="google-live-exec-") as snapshot_dir:
+                snapshot_root = Path(snapshot_dir)
+                executable_path = _write_executable_snapshot(
+                    snapshot_root, "command-python", executable_content
                 )
-            except KeyboardInterrupt:
-                exit_code, classification, satisfied = None, "keyboard_interrupt", False
-                interrupted = True
+                executable_snapshot = executable_path.stat()
+                try:
+                    exit_code, classification, satisfied = _run_process(
+                        spec,
+                        child_env,
+                        stdin_bytes,
+                        cancel_event,
+                        bound_cwd.descriptor,
+                        argument_artifacts,
+                        executable_path,
+                        executable_path,
+                    )
+                except KeyboardInterrupt:
+                    exit_code, classification, satisfied = None, "keyboard_interrupt", False
+                    interrupted = True
+                current_snapshot = executable_path.stat()
+                if (
+                    (
+                        current_snapshot.st_dev,
+                        current_snapshot.st_ino,
+                        current_snapshot.st_size,
+                        current_snapshot.st_mtime_ns,
+                        current_snapshot.st_ctime_ns,
+                        current_snapshot.st_mode,
+                    )
+                    != (
+                        executable_snapshot.st_dev,
+                        executable_snapshot.st_ino,
+                        executable_snapshot.st_size,
+                        executable_snapshot.st_mtime_ns,
+                        executable_snapshot.st_ctime_ns,
+                        executable_snapshot.st_mode,
+                    )
+                    or executable_path.read_bytes() != executable_content
+                ):
+                    raise RuntimeError("spawn executable changed")
             ended = _utc_now()
             _require_working_directory_unchanged(bound_cwd, require_ctime=False)
             _require_argument_artifacts_unchanged(argument_artifacts)

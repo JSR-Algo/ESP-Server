@@ -2,6 +2,7 @@ import copy
 import hashlib
 import json
 import os
+import platform
 import subprocess
 import sys
 from pathlib import Path
@@ -51,7 +52,33 @@ PYTEST_RUNTIME_MANIFEST = (
     Path(__file__).parent / "fixtures" / "google_live_pytest_runtime_manifest.json"
 ).read_bytes()
 PYTEST_RUNTIME = parse_pytest_runtime_manifest(PYTEST_RUNTIME_MANIFEST)
+PYTHON_EXECUTABLE_MANIFEST = (
+    json.dumps(
+        {
+            "profiles": [
+                {
+                    "machine": platform.machine().lower(),
+                    "pythonImplementation": PYTEST_RUNTIME["pythonImplementation"],
+                    "pythonMajorMinor": PYTEST_RUNTIME["pythonMajorMinor"],
+                    "sha256": hashlib.sha256(Path(sys.executable).resolve().read_bytes()).hexdigest(),
+                    "size": Path(sys.executable).resolve().stat().st_size,
+                    "system": platform.system().lower(),
+                }
+            ],
+            "schemaVersion": "google-live-python-executables.v1",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    + "\n"
+).encode()
+PYTHON_EXECUTABLE_TRUST = release_gate.parse_trusted_python_executable_manifest(
+    PYTHON_EXECUTABLE_MANIFEST
+)
 REAL_LOAD_TRUSTED_MANIFEST = release_gate._load_trusted_deterministic_manifest
+REAL_LOAD_TRUSTED_PYTHON_EXECUTABLE_MANIFEST = (
+    release_gate._load_trusted_python_executable_manifest
+)
 
 
 def _planned_command_argv(
@@ -97,6 +124,12 @@ def _pin_release_manifest_loader(monkeypatch: pytest.MonkeyPatch) -> None:
         release_gate,
         "_load_trusted_pytest_runtime_manifest",
         lambda _expected_git_sha: PYTEST_RUNTIME_MANIFEST,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        release_gate,
+        "_load_trusted_python_executable_manifest",
+        lambda _expected_git_sha: PYTHON_EXECUTABLE_MANIFEST,
         raising=False,
     )
 
@@ -518,7 +551,12 @@ def test_release_accepts_planned_immutable_command_specs(
         },
     }
 
-    assert release_gate._command_matches_trusted_spec(emitted, trusted, PYTEST_RUNTIME)
+    assert release_gate._command_matches_trusted_spec(
+        emitted,
+        trusted,
+        PYTEST_RUNTIME,
+        executable_trust=PYTHON_EXECUTABLE_TRUST,
+    )
 
 
 @pytest.mark.parametrize("command_id", ["candidate_soak.produce", "candidate_soak.replay"])
@@ -619,8 +657,9 @@ def test_release_accepts_approved_interpreter_symlink(tmp_path: Path) -> None:
     assert aggregate_release_evidence(IDENTITY, paths, checksums)["status"] == "PASS"
 
 
-def test_release_rejects_foreign_venv_interpreter_with_same_runtime_binary(
+def test_release_accepts_different_approved_runtime_from_verifier_interpreter(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     foreign_venv = tmp_path / "foreign-venv"
     foreign_venv.mkdir()
@@ -630,8 +669,11 @@ def test_release_rejects_foreign_venv_interpreter_with_same_runtime_binary(
     interpreter = bin_dir / f"python{PYTEST_RUNTIME['pythonMajorMinor']}"
     interpreter.symlink_to(sys.executable)
 
-    assert not release_gate._approved_python_executable(
-        str(interpreter), PYTEST_RUNTIME
+    recorded_interpreter = str(interpreter)
+    monkeypatch.setattr(release_gate.sys, "executable", "/different/verifier/python")
+
+    assert release_gate._approved_python_executable(
+        recorded_interpreter, PYTEST_RUNTIME, PYTHON_EXECUTABLE_TRUST
     )
 
 
@@ -640,7 +682,7 @@ def test_release_rejects_interpreter_when_runtime_version_does_not_match() -> No
     mismatched_runtime["pythonMajorMinor"] = "0.0"
 
     assert not release_gate._approved_python_executable(
-        sys.executable, mismatched_runtime
+        sys.executable, mismatched_runtime, PYTHON_EXECUTABLE_TRUST
     )
 
 
@@ -654,6 +696,114 @@ def test_release_rejects_unapproved_interpreter_substitution(tmp_path: Path) -> 
     checksums["command_provenance"] = hashlib.sha256(content).hexdigest()
 
     assert aggregate_release_evidence(IDENTITY, paths, checksums)["status"] == "FAIL"
+
+
+def test_release_rejects_executable_that_spoofs_runtime_probe(tmp_path: Path) -> None:
+    interpreter = tmp_path / f"python{PYTEST_RUNTIME['pythonMajorMinor']}"
+    expected = json.dumps(
+        {
+            "implementation": PYTEST_RUNTIME["pythonImplementation"],
+            "majorMinor": PYTEST_RUNTIME["pythonMajorMinor"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    interpreter.write_text(f"#!/bin/sh\nprintf '%s\\n' '{expected}'\n", encoding="utf-8")
+    interpreter.chmod(0o700)
+
+    assert not release_gate._approved_python_executable(
+        str(interpreter), PYTEST_RUNTIME, PYTHON_EXECUTABLE_TRUST
+    )
+
+
+def test_release_binds_digest_check_to_opened_interpreter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    interpreter = tmp_path / f"python{PYTEST_RUNTIME['pythonMajorMinor']}"
+    interpreter.symlink_to(sys.executable)
+    spoof = tmp_path / "spoof"
+    spoof.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    spoof.chmod(0o700)
+    real_read = release_gate.os.read
+    swapped = False
+
+    def swap_then_read(*args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            interpreter.unlink()
+            interpreter.symlink_to(spoof)
+            swapped = True
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(release_gate.os, "read", swap_then_read)
+
+    assert release_gate._approved_python_executable(
+        str(interpreter), PYTEST_RUNTIME, PYTHON_EXECUTABLE_TRUST
+    )
+
+
+def test_release_checks_executable_mode_on_opened_interpreter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    interpreter = tmp_path / f"python{PYTEST_RUNTIME['pythonMajorMinor']}"
+    interpreter.write_bytes(Path(sys.executable).resolve().read_bytes())
+    interpreter.chmod(0o600)
+    monkeypatch.setattr(release_gate.os, "access", lambda *_args: True)
+
+    assert not release_gate._approved_python_executable(
+        str(interpreter), PYTEST_RUNTIME, PYTHON_EXECUTABLE_TRUST
+    )
+
+
+def test_release_rejects_wrong_platform_interpreter_profile() -> None:
+    trust = copy.deepcopy(PYTHON_EXECUTABLE_TRUST)
+    trust["profiles"][0]["system"] = "unsupported-system"
+
+    assert not release_gate._approved_python_executable(
+        sys.executable, PYTEST_RUNTIME, trust
+    )
+
+
+@pytest.mark.parametrize("mutation", ["missing", "tampered", "candidate_mismatch"])
+def test_trusted_python_executable_manifest_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    expected_sha = IDENTITY["gitSha"]
+    content = PYTHON_EXECUTABLE_MANIFEST
+    fixture_path = (
+        tmp_path
+        / "main/tbot-server/tests/fixtures/google_live_deterministic_nodes.txt"
+    )
+    fixture_path.parent.mkdir(parents=True)
+
+    def git_output(_root: Path, *arguments: str) -> bytes:
+        if arguments[:2] == ("rev-parse", "--show-toplevel"):
+            return f"{tmp_path}\n".encode()
+        if arguments[:2] == ("rev-parse", "HEAD"):
+            return ("f" * 40 if mutation == "candidate_mismatch" else expected_sha).encode() + b"\n"
+        if arguments[0] == "status":
+            return b""
+        if arguments[0] == "show":
+            if mutation == "missing":
+                raise RuntimeError("missing")
+            if mutation == "tampered":
+                return content.replace(b'"schemaVersion"', b'"badSchema"')
+            return content
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(release_gate, "_git_output", git_output)
+    monkeypatch.setattr(
+        release_gate,
+        "_trusted_manifest_path",
+        lambda: fixture_path,
+    )
+
+    with pytest.raises((RuntimeError, ValueError)):
+        REAL_LOAD_TRUSTED_PYTHON_EXECUTABLE_MANIFEST(expected_sha)
 
 
 def test_release_rejects_fresh_digest_for_trusted_command_spec(tmp_path: Path) -> None:

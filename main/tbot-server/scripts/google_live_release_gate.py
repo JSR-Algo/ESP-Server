@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import os
+import platform
 import re
 import stat
 import sys
@@ -48,6 +49,10 @@ from scripts.google_live_trusted_git import (
 from scripts.physical_smoke_audit import validate_physical_candidate_report
 
 RELEASE_SCHEMA_VERSION = "google-live-release-verdict.v1"
+PYTHON_EXECUTABLE_SCHEMA = "google-live-python-executables.v1"
+PYTHON_EXECUTABLE_MANIFEST_GIT_PATH = (
+    "main/tbot-server/tests/fixtures/google_live_python_executable_manifest.json"
+)
 REQUIRED_LAYERS = (
     "deterministic",
     "server_regression",
@@ -362,45 +367,171 @@ def _recorded_command_spec_digest(entry: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def _approved_python_executable(value: Any, runtime: Mapping[str, Any]) -> bool:
+def parse_trusted_python_executable_manifest(content: bytes) -> dict[str, Any]:
+    try:
+        value = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("trusted Python executable manifest is invalid") from exc
+    canonical = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    if (
+        canonical != content
+        or not isinstance(value, dict)
+        or set(value) != {"profiles", "schemaVersion"}
+        or value.get("schemaVersion") != PYTHON_EXECUTABLE_SCHEMA
+        or not isinstance(value.get("profiles"), list)
+        or not value["profiles"]
+    ):
+        raise ValueError("trusted Python executable manifest is invalid")
+    keys = []
+    for profile in value["profiles"]:
+        if (
+            not isinstance(profile, dict)
+            or set(profile)
+            != {
+                "machine",
+                "pythonImplementation",
+                "pythonMajorMinor",
+                "sha256",
+                "size",
+                "system",
+            }
+            or any(
+                type(profile.get(field)) is not str or not profile[field]
+                for field in (
+                    "machine",
+                    "pythonImplementation",
+                    "pythonMajorMinor",
+                    "sha256",
+                    "system",
+                )
+            )
+            or SHA256.fullmatch(profile["sha256"]) is None
+            or re.fullmatch(r"[0-9]+\.[0-9]+", profile["pythonMajorMinor"]) is None
+            or type(profile.get("size")) is not int
+            or profile["size"] <= 0
+            or profile["size"] > 128 * 1024 * 1024
+        ):
+            raise ValueError("trusted Python executable manifest is invalid")
+        keys.append(
+            (
+                profile["system"],
+                profile["machine"],
+                profile["pythonImplementation"],
+                profile["pythonMajorMinor"],
+            )
+        )
+    if keys != sorted(keys) or len(keys) != len(set(keys)):
+        raise ValueError("trusted Python executable manifest is invalid")
+    return value
+
+
+def _approved_python_executable(
+    value: Any,
+    runtime: Mapping[str, Any],
+    executable_trust: Mapping[str, Any],
+) -> bool:
     if (
         type(value) is not str
         or not Path(value).is_absolute()
         or not isinstance(runtime, Mapping)
+        or not isinstance(executable_trust, Mapping)
     ):
         return False
     expected_version = runtime.get("pythonMajorMinor")
-    if (
-        type(expected_version) is not str
-        or expected_version != f"{sys.version_info.major}.{sys.version_info.minor}"
-        or runtime.get("pythonImplementation") != sys.implementation.name
-    ):
+    expected_implementation = runtime.get("pythonImplementation")
+    if type(expected_version) is not str or type(expected_implementation) is not str:
         return False
-    allowed_names = {"python", "python3", f"python{expected_version}"}
-    if Path(value).name not in allowed_names:
+    if Path(value).name not in {"python", "python3", f"python{expected_version}"}:
         return False
-    environment_root = Path(value).parent.parent
-    if (environment_root / "pyvenv.cfg").exists():
-        try:
-            if environment_root.resolve(strict=True) != Path(sys.prefix).resolve(strict=True):
-                return False
-        except OSError:
-            return False
+    descriptor = None
     try:
-        return Path(value).resolve(strict=True) == Path(sys.executable).resolve(strict=True)
+        resolved = Path(value).resolve(strict=True)
+        descriptor = os.open(
+            resolved,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > 128 * 1024 * 1024
+            or before.st_mode & 0o111 == 0
+        ):
+            return False
+        content = bytearray()
+        while len(content) < before.st_size:
+            chunk = os.read(descriptor, min(1024 * 1024, before.st_size - len(content)))
+            if not chunk:
+                return False
+            content.extend(chunk)
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
+            return False
+        immutable_content = bytes(content)
+        magic = immutable_content[:4]
+        if magic not in {
+            b"\x7fELF",
+            b"\xca\xfe\xba\xbe",
+            b"\xbe\xba\xfe\xca",
+            b"\xce\xfa\xed\xfe",
+            b"\xcf\xfa\xed\xfe",
+            b"\xfe\xed\xfa\xce",
+            b"\xfe\xed\xfa\xcf",
+        } and not magic.startswith(b"MZ"):
+            return False
+        matching = [
+            profile
+            for profile in executable_trust.get("profiles", [])
+            if isinstance(profile, Mapping)
+            and profile.get("system") == platform.system().lower()
+            and profile.get("machine") == platform.machine().lower()
+            and profile.get("pythonImplementation") == expected_implementation
+            and profile.get("pythonMajorMinor") == expected_version
+        ]
+        return len(matching) == 1 and (
+            matching[0].get("size") == len(immutable_content)
+            and hmac.compare_digest(
+                str(matching[0].get("sha256")),
+                hashlib.sha256(immutable_content).hexdigest(),
+            )
+        )
     except OSError:
         return False
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _command_matches_trusted_spec(
     entry: Mapping[str, Any],
     spec: TrustedCommandSpec,
     runtime: Mapping[str, Any],
+    *,
+    executable_trust: Mapping[str, Any] | None = None,
+    executable_approved: bool | None = None,
 ) -> bool:
     terminal = entry["terminalPolicy"]
     return (
         len(entry["argv"]) == len(spec.argv_pattern)
-        and _approved_python_executable(entry["argv"][0], runtime)
+        and (
+            _approved_python_executable(
+                entry["argv"][0], runtime, executable_trust
+            )
+            if executable_approved is None
+            else executable_approved
+        )
         and all(
             index == 0 or expected is None or actual == expected
             for index, (actual, expected) in enumerate(
@@ -692,6 +823,29 @@ def _load_trusted_pytest_runtime_manifest(expected_git_sha: str) -> bytes:
         or _git_output(repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=no")
     ):
         raise ValueError("candidate repository changed during runtime validation")
+    return content
+
+
+def _load_trusted_python_executable_manifest(expected_git_sha: str) -> bytes:
+    fixture_path = _trusted_manifest_path()
+    repo_root = Path(
+        _git_output(fixture_path.parent, "rev-parse", "--show-toplevel").decode().strip()
+    ).resolve(strict=True)
+    if _git_output(repo_root, "rev-parse", "HEAD").decode().strip() != expected_git_sha:
+        raise ValueError("candidate git SHA does not match repository HEAD")
+    if _git_output(repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=no"):
+        raise ValueError("candidate worktree contains tracked or staged modifications")
+    content = _git_output(
+        repo_root,
+        "show",
+        f"{expected_git_sha}:{PYTHON_EXECUTABLE_MANIFEST_GIT_PATH}",
+    )
+    parse_trusted_python_executable_manifest(content)
+    if (
+        _git_output(repo_root, "rev-parse", "HEAD").decode().strip() != expected_git_sha
+        or _git_output(repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=no")
+    ):
+        raise ValueError("candidate repository changed during executable validation")
     return content
 
 
@@ -1062,11 +1216,19 @@ def aggregate_release_evidence(
             str(expected_identity.get("gitSha", ""))
         )
         trusted_runtime = parse_pytest_runtime_manifest(trusted_runtime_content)
+        trusted_executable_content = _load_trusted_python_executable_manifest(
+            str(expected_identity.get("gitSha", ""))
+        )
+        trusted_executable = parse_trusted_python_executable_manifest(
+            trusted_executable_content
+        )
     except (OSError, RuntimeError, UnicodeError, ValueError):
         trusted_manifest_path = None
         trusted_manifest_content = None
         trusted_runtime_content = None
         trusted_runtime = None
+        trusted_executable_content = None
+        trusted_executable = None
         failures.append(_failure("DETERMINISTIC_TRUSTED_MANIFEST_INVALID", "deterministic"))
     support_contents: dict[str, bytes] = {}
     supplied_support_paths = [
@@ -1197,9 +1359,18 @@ def aggregate_release_evidence(
         }
         by_id = {entry["commandId"]: entry for entry in required}
         trusted_specs = _trusted_command_specs(expected_identity)
+        recorded_executables = {entry["argv"][0] for entry in required}
+        if len(recorded_executables) != 1:
+            raise ValueError
+        executable_approved = _approved_python_executable(
+            next(iter(recorded_executables)), trusted_runtime, trusted_executable
+        )
         if any(
             not _command_matches_trusted_spec(
-                by_id[command_id], trusted_specs[command_id], trusted_runtime
+                by_id[command_id],
+                trusted_specs[command_id],
+                trusted_runtime,
+                executable_approved=executable_approved,
             )
             for command_id in REQUIRED_COMMAND_IDS
         ):

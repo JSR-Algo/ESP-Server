@@ -21,6 +21,40 @@ IDENTITY = {
     "configFingerprint": "sha256:" + "c" * 64,
     "fixtureSha256": "d" * 64,
 }
+PYTHON_EXECUTABLE_MANIFEST = (
+    json.dumps(
+        {
+            "profiles": [
+                {
+                    "machine": __import__("platform").machine().lower(),
+                    "pythonImplementation": sys.implementation.name,
+                    "pythonMajorMinor": f"{sys.version_info.major}.{sys.version_info.minor}",
+                    "sha256": hashlib.sha256(
+                        Path(sys.executable).resolve().read_bytes()
+                    ).hexdigest(),
+                    "size": Path(sys.executable).resolve().stat().st_size,
+                    "system": __import__("platform").system().lower(),
+                }
+            ],
+            "schemaVersion": "google-live-python-executables.v1",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    + "\n"
+).encode()
+
+
+@pytest.fixture(autouse=True)
+def _pin_python_executable_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.google_live_command_runner as runner
+
+    monkeypatch.setattr(
+        runner,
+        "_load_trusted_python_executable_manifest",
+        lambda _expected_git_sha: PYTHON_EXECUTABLE_MANIFEST,
+        raising=False,
+    )
 
 
 def _spec(root: Path, code: str, **changes) -> CommandSpec:
@@ -64,6 +98,58 @@ def test_executes_argv_and_records_only_secret_source(tmp_path: Path) -> None:
     assert entry["outputs"][0]["sha256"]
     assert secret not in provenance.read_text()
     assert secret not in (tmp_path / "commands.txt").read_text()
+
+
+def test_execution_is_bound_to_interpreter_opened_before_spawn(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    root.mkdir()
+    interpreter = tmp_path / f"python{sys.version_info.major}.{sys.version_info.minor}"
+    interpreter.symlink_to(sys.executable)
+    malicious = tmp_path / "malicious"
+    malicious.write_text(
+        "#!/bin/sh\nmkdir -p real-api\nprintf malicious > real-api/report.json\n",
+        encoding="utf-8",
+    )
+    malicious.chmod(0o700)
+
+    def swap_interpreter() -> None:
+        interpreter.unlink()
+        interpreter.symlink_to(malicious)
+
+    code = (
+        "import subprocess, sys; from pathlib import Path; "
+        "value=subprocess.check_output([sys.executable, '-c', \"print('ok')\"], "
+        "text=True).strip(); p=Path('real-api/report.json'); "
+        "p.parent.mkdir(parents=True, exist_ok=True); p.write_text(value)"
+    )
+    execute_and_record(
+        _spec(root, code, argv=(str(interpreter), "-c", code)),
+        provenance=root / "commands.jsonl",
+        _before_spawn=swap_interpreter,
+    )
+
+    assert (root / "real-api" / "report.json").read_text() == "ok"
+
+
+def test_execution_rejects_untrusted_interpreter_before_spawn(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    root.mkdir()
+    interpreter = tmp_path / f"python{sys.version_info.major}.{sys.version_info.minor}"
+    interpreter.write_text(
+        "#!/bin/sh\nmkdir -p real-api\nprintf malicious > real-api/report.json\n",
+        encoding="utf-8",
+    )
+    interpreter.chmod(0o700)
+
+    with pytest.raises(RuntimeError, match="spawn_failed"):
+        execute_and_record(
+            _spec(root, "pass", argv=(str(interpreter), "-c", "pass")),
+            provenance=root / "commands.jsonl",
+        )
+
+    assert not (root / "commands.jsonl").exists()
 
 
 def test_rejects_shell_strings_lists_and_argument_secrets(tmp_path: Path) -> None:
@@ -721,11 +807,16 @@ def test_failed_generation_write_is_recovered_before_retry(
 @pytest.mark.parametrize(
     "stage",
     [
+        "after_generation_pending_journal",
+        "after_generation_jsonl_planned_journal",
         "after_generation_jsonl_before_journal",
+        "after_generation_jsonl",
+        "after_generation_projection_planned_journal",
         "after_generation_projection_before_journal",
+        "after_generation_projection",
     ],
 )
-def test_unjournaled_generation_component_is_preserved_fail_closed(
+def test_generation_creation_checkpoint_recovers_without_ambiguous_component(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     stage: str,
@@ -739,11 +830,16 @@ def test_unjournaled_generation_component_is_preserved_fail_closed(
             raise KeyboardInterrupt
 
     monkeypatch.setattr(runner, "_provenance_transaction_hook", crash)
-    with pytest.raises(RuntimeError, match="pending generation"):
+    with pytest.raises(KeyboardInterrupt):
         execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", lambda _stage: None)
 
     generation_dir = tmp_path / ".commands.jsonl.generations"
-    assert any(path.name.endswith((".jsonl", ".txt")) for path in generation_dir.iterdir())
+    assert not any(path.name.endswith((".jsonl", ".txt")) for path in generation_dir.iterdir())
+    execute_and_record(
+        _spec(tmp_path, "pass", command_id="diagnostic.retry", outputs=()),
+        provenance=provenance,
+    )
 
 
 def test_pending_recovery_never_deletes_racing_replacement(
@@ -935,7 +1031,7 @@ def test_interrupted_quarantine_compaction_resumes_from_owned_inode(
     finally:
         os.close(generation_fd)
 
-    assert runner._generation_tombstone_matches(recovered, snapshot.version)
+    assert recovered is None
 
 
 def test_generation_quarantine_never_overwrites_racing_destination(
@@ -980,7 +1076,7 @@ def test_generation_quarantine_never_overwrites_racing_destination(
     assert any(path.read_bytes() == replacement for path in generation_dir.iterdir())
 
 
-def test_compact_quarantines_do_not_exhaust_generation_inventory(
+def test_cleaned_quarantines_do_not_exhaust_generation_inventory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1001,19 +1097,82 @@ def test_compact_quarantines_do_not_exhaust_generation_inventory(
         _spec(tmp_path, "pass", command_id="diagnostic.second", outputs=()),
         provenance=provenance,
     )
-    tombstones = [
-        path
+    assert not any(
+        runner.GENERATION_QUARANTINE.fullmatch(path.name)
         for path in generation_dir.iterdir()
-        if runner.GENERATION_QUARANTINE.fullmatch(path.name)
-    ]
-    assert tombstones
-    assert all(path.stat().st_size < 256 for path in tombstones)
+    )
 
     monkeypatch.setattr(runner, "_MAX_GENERATION_FILES", 4)
     execute_and_record(
         _spec(tmp_path, "pass", command_id="diagnostic.third", outputs=()),
         provenance=provenance,
     )
+
+
+def test_long_run_generation_storage_remains_bounded(tmp_path: Path) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    for index in range(24):
+        execute_and_record(
+            _spec(
+                tmp_path,
+                "pass",
+                command_id=f"diagnostic.run_{index}",
+                outputs=(),
+            ),
+            provenance=provenance,
+        )
+
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    hidden_files = list(generation_dir.iterdir())
+    assert len(hidden_files) <= 4
+    assert all(runner.GENERATION_FILE.fullmatch(path.name) for path in hidden_files)
+    assert sum(path.stat().st_size for path in hidden_files) <= 2 * (
+        provenance.stat().st_size + provenance.with_suffix(".txt").stat().st_size
+    )
+
+
+def test_tombstone_cleanup_preserves_instrumented_racing_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    stale = "e" * 32
+    (generation_dir / f"{stale}.jsonl").write_bytes(provenance.read_bytes())
+    (generation_dir / f"{stale}.txt").write_bytes(
+        provenance.with_suffix(".txt").read_bytes()
+    )
+    (generation_dir / f"{stale}.jsonl").chmod(0o400)
+    (generation_dir / f"{stale}.txt").chmod(0o400)
+    replacement = b"preserve tombstone replacement\n"
+
+    def replace(stage: str, name: str) -> None:
+        if stage != "tombstone_before_unlink" or not name.endswith(".jsonl"):
+            return
+        tombstone = next(
+            path
+            for path in generation_dir.iterdir()
+            if runner.GENERATION_QUARANTINE.fullmatch(path.name)
+            and ".jsonl." in path.name
+        )
+        tombstone.unlink()
+        tombstone.write_bytes(replacement)
+        tombstone.chmod(0o400)
+
+    monkeypatch.setattr(runner, "_generation_cleanup_hook", replace)
+
+    with pytest.raises(RuntimeError, match="tombstone"):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+        )
+
+    assert any(path.read_bytes() == replacement for path in generation_dir.iterdir())
 
 
 def test_pending_journal_cannot_delete_committed_generation(tmp_path: Path) -> None:
@@ -2069,7 +2228,7 @@ def test_timeout_terminates_owned_process_group_and_records_safe_classification(
         "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); "
         f"open({str(child)!r},'w').write(str(p.pid)); time.sleep(30)",
         outputs=(),
-        timeout_sec=0.2,
+        timeout_sec=1.0,
     )
     result = execute_and_record(spec, provenance=tmp_path / "commands.jsonl")
     assert result.classification == "timeout"
