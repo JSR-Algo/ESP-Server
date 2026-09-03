@@ -1071,8 +1071,11 @@ def _cleanup_gate_owned(
         owned, report.get("retainedPaths", ()),
     )
     if retained:
-        report["verdict"] = "BLOCKED"
-        report["failedLane"] = "cleanup"
+        if report.get("failedLane") in (None, "cleanup"):
+            report["verdict"] = "BLOCKED"
+            report["failedLane"] = "cleanup"
+        else:
+            report["cleanupFailed"] = True
         report["retainedOwner"] = "current-process"
         report["retainedPaths"] = list(retained)
         return False
@@ -4233,6 +4236,17 @@ def _run_gate_impl(
                 report["lanes"].append({
                     "name": lane.name, "exitCode": exit_code, "durationMs": duration_ms,
                 })
+                lane_failed = result.error or result.returncode != 0
+                if lane_failed:
+                    report["verdict"] = (
+                        "BLOCKED"
+                        if result.error in {"authority", "containment"}
+                        else "FAIL"
+                    )
+                    report["failedLane"] = lane.name
+                if skip_state is not False:
+                    report["verdict"] = "BLOCKED"
+                    report["failedLane"] = lane.name
                 if not _cleanup_gate_owned(report, lane_execution, execution_stage):
                     break
                 if lane.name == last_assignment_name:
@@ -4252,17 +4266,9 @@ def _run_gate_impl(
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
                     break
-                if result.error or result.returncode != 0:
-                    report["verdict"] = (
-                        "BLOCKED"
-                        if result.error in {"authority", "containment"}
-                        else "FAIL"
-                    )
-                    report["failedLane"] = lane.name
+                if lane_failed:
                     break
                 if skip_state is not False:
-                    report["verdict"] = "BLOCKED"
-                    report["failedLane"] = lane.name
                     break
             if assignment_runtime is not None:
                 _cleanup_gate_owned(report, assignment_runtime)

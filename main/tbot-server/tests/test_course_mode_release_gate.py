@@ -1629,6 +1629,45 @@ def test_snapshot_cleanup_runs_after_lane_failure(candidate_file: Path, monkeypa
     assert observed and not observed[0].exists()
 
 
+def test_lane_failure_is_preserved_when_lane_cleanup_also_fails(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executions: list[gate.LaneExecution] = []
+    original_create = gate.ExecutionStage.create_lane_execution
+    original_remove = gate._remove_owned_tree
+
+    def record_execution(self):
+        execution = original_create(self)
+        executions.append(execution)
+        return execution
+
+    def refuse_lane_cleanup(path: Path, identity=None) -> bool:
+        if path.name.startswith("course-mode-lane-"):
+            return False
+        return original_remove(path, identity)
+
+    monkeypatch.setattr(gate.ExecutionStage, "create_lane_execution", record_execution)
+    monkeypatch.setattr(gate, "_remove_owned_tree", refuse_lane_cleanup)
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(gate, "validate_candidate", lambda _candidate: False)
+
+    try:
+        result = gate.run_gate(
+            candidate_file, "quick",
+            lanes=(_lane("primary-failure", "raise SystemExit(7)"),),
+        )
+
+        assert result["verdict"] == "FAIL"
+        assert result["failedLane"] == "primary-failure"
+        assert result["cleanupFailed"] is True
+        assert result["retainedOwner"] == "current-process"
+        assert result["retainedPaths"] == [str(executions[0].root)]
+    finally:
+        monkeypatch.setattr(gate, "_remove_owned_tree", original_remove)
+        for execution in executions:
+            original_remove(execution.root, execution.identity)
+
+
 def test_assignment_runtime_capsule_is_private_and_identity_bound() -> None:
     capsule = gate.AssignmentRuntimeCapsule.create(())
     root = capsule.root
