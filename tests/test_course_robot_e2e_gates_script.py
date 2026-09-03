@@ -97,9 +97,13 @@ def test_canonical_gate_forwards_exact_assignment_environment(tmp_path: Path) ->
     allowed = {
         "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME": "assignment-project",
         "LESSON_STUDIO_E2E_RESOURCE_PREFIX": "assignment-resource",
-        "TASK4_ASSIGNMENT_RUNTIME_ROOT": "/tmp/assignment-runtime",
-        "JWT_PUBLIC_KEY": "assignment-public-key",
-        "TBOT_DEVICE_MINT_SECRET": "assignment-mint-secret",
+        "TASK4_ASSIGNMENT_RUNTIME_ROOT": "/tmp/assignment runtime",
+        "JWT_PUBLIC_KEY": (
+            "-----BEGIN PUBLIC KEY-----\n"
+            "YXNzaWdubWVudC1wdWJsaWMta2V5\n"
+            "-----END PUBLIC KEY-----\n"
+        ),
+        "TBOT_DEVICE_MINT_SECRET": "assignment secret *?[x];$()&|<>\\ end",
         "LESSON_ASSET_ORIGIN_BASE": "http://127.0.0.1:18126/tvideo-demo",
         "ROBOT_ESP_BASE_URL": "http://127.0.0.1:9",
         "LESSON_STUDIO_E2E_BACKEND_HOST_PORT": "13126",
