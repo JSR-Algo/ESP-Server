@@ -169,7 +169,8 @@ sys.path_importer_cache[original_root] = BlockedProjectPath()
 if dependency_roots:
     sys.path[:] = [source_root, *dependency_roots,
         __import__('sysconfig').get_paths()['stdlib'],
-        __import__('sysconfig').get_paths()['platstdlib']]
+        __import__('sysconfig').get_paths()['platstdlib'],
+        __import__('sysconfig').get_config_var('DESTSHARED')]
 else:
     site_paths = [__import__('sysconfig').get_paths()['purelib']]
     try:

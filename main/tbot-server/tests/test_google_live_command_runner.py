@@ -238,6 +238,32 @@ def test_checked_runtime_closure_manifest_parses() -> None:
     }
 
 
+def test_checked_dependency_closure_imports_extension_backed_packages(
+    tmp_path: Path,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    manifest_path = Path(__file__).parent / "fixtures" / "google_live_runtime_closure_manifest.json"
+    manifest = runner._parse_runtime_closure_manifest(
+        manifest_path.read_bytes(), platform_name="darwin-arm64-cp314"
+    )
+    dependency_roots = runner._materialize_distribution_closure(
+        manifest, tmp_path / "dependencies"
+    )
+    code = (
+        "import json,sys,sysconfig; roots=json.loads(sys.argv[1]); "
+        "sys.path[:]=roots+[sysconfig.get_paths()['stdlib'],sysconfig.get_paths()['platstdlib'],sysconfig.get_config_var('DESTSHARED')]; "
+        "import yaml,websockets,opuslib_next,numpy,google.genai"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-S", "-B", "-c", code, json.dumps(dependency_roots)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 @pytest.mark.parametrize(
     "mutate, message",
     [
