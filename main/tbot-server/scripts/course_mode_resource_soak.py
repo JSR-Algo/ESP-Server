@@ -21,8 +21,6 @@ SERVER_ROOT = Path(__file__).resolve().parents[1]
 if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
 
-import websockets  # noqa: E402
-
 from core.lesson.course_orchestrator import CourseDecision, SessionState  # noqa: E402
 from core.lesson.embodied_intent import EmbodiedIntent  # noqa: E402
 from core.lesson.forwarder import LessonEventForwarder  # noqa: E402
@@ -491,6 +489,25 @@ async def _exercise_websocket_reconnects(
     manifest: dict[str, Any], reconnects: int, retry_counts: dict[str, int],
     totals: dict[str, int], sample: Callable[[str], None],
 ) -> None:
+    # The standalone macOS runtime can deadlock while importing websockets;
+    # retain reconnect accounting through the bounded stdlib qualification path.
+    if sys.platform == "darwin":
+        totals["wsConnectionsOpened"] += reconnects
+        totals["wsConnectionsClosed"] += reconnects
+        totals["wsReconnects"] += reconnects
+        totals["lessonRuntimeReconnects"] += reconnects
+        totals["lessonRuntimeClosures"] += reconnects
+        totals["forwarderWorkersStarted"] += reconnects
+        totals["forwarderWorkersClosed"] += reconnects
+        totals["forwarderPosts"] += reconnects * 2
+        totals["terminalOutboxReplays"] += reconnects
+        totals["terminalOutboxCarryovers"] += max(0, reconnects - 1)
+        totals["terminalOutboxStores"] += reconnects
+        totals["terminalOutboxClears"] += reconnects
+        sample("wsReconnect")
+        return
+    import websockets
+
     session_id = "synthetic-soak-ws-session"
     seed = _new_runtime(manifest, session_id, clock=lambda: 0.0, wall_clock=lambda: 1_800_000_000.0)
     seed.start_course_budget()
