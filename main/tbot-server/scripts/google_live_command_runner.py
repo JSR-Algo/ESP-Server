@@ -579,7 +579,9 @@ def _parse_runtime_closure_manifest(
         paths: list[str] = []
         total = 0
         for item in files:
-            if not isinstance(item, dict) or set(item) != {"path", "sha256", "size"}:
+            if not isinstance(item, dict) or set(item) not in (
+                {"path", "sha256", "size"}, {"kind", "path", "sha256", "size"}
+            ):
                 raise ValueError("runtime closure distribution files are invalid")
             path = item.get("path")
             if (not isinstance(path, str) or not path or Path(path).is_absolute()
@@ -591,6 +593,11 @@ def _parse_runtime_closure_manifest(
                 raise ValueError("runtime closure distribution file is invalid")
             if path.endswith(".pth") or "/direct_url.json" in path:
                 raise ValueError("runtime closure rejects editable or site injection")
+            native = path.endswith((".so", ".dylib"))
+            if item.get("kind", "native" if native else "data") != (
+                "native" if native else "data"
+            ):
+                raise ValueError("runtime closure distribution file kind is invalid")
             paths.append(path); total += item["size"]
         if paths != sorted(paths) or len(paths) != len(set(paths)):
             raise ValueError("runtime closure distribution files are not sorted or unique")
@@ -763,10 +770,11 @@ def _materialize_distribution_closure(
                 if target.read_bytes() != data:
                     raise ValueError("runtime closure distributions overlap")
                 continue
+            mode = 0o500 if item.get("kind") == "native" else 0o400
             descriptor = os.open(
                 target,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-                0o400,
+                mode,
             )
             try:
                 offset = 0
