@@ -788,7 +788,6 @@ def test_production_gate_blocks_without_operator_attestation(candidate_file: Pat
         candidate_file, "quick", runtime_root=_runtime_root(candidate_file),
     )
 
-    print(result)
     assert result["verdict"] == "BLOCKED"
     assert result["failedLane"] == "operator-precondition"
 
