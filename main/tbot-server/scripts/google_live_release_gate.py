@@ -111,6 +111,101 @@ class BoundReleaseInput:
     parent_chain: tuple[BoundDirectory, ...]
 
 
+@dataclass(frozen=True)
+class TrustedCommandSpec:
+    argv: tuple[str, ...]
+    cwd: str
+    environment_sources: tuple[str, ...]
+    expected_exit_codes: tuple[int, ...]
+    input_labels: tuple[str, ...]
+    output_labels: tuple[str, ...]
+    secret_sources: tuple[str, ...]
+    stdin_source: str | None
+    timeout_sec: float
+    cleanup_grace_sec: float
+
+
+def _trusted_command_specs() -> dict[str, TrustedCommandSpec]:
+    outputs = {
+        "deterministic.produce": (
+            "deterministic/report.json",
+            "deterministic/node-manifest.txt",
+            "deterministic/pytest.xml",
+        ),
+        "real_api.round_trip": ("real-api/report.json",),
+        "websocket.transport": (),
+        "websocket.log_analysis": ("server-regression/report.json",),
+        "websocket.correlation": ("websocket-e2e/report.json",),
+        "candidate_soak.produce": ("candidate-soak/journey-evidence.json",),
+        "candidate_soak.replay": ("candidate-soak/report.json",),
+        "physical.capture_and_audit": (
+            "server-regression/report.json",
+            "physical/report.json",
+        ),
+    }
+    mint_commands = {
+        "websocket.transport",
+        "candidate_soak.produce",
+        "physical.capture_and_audit",
+    }
+    return {
+        command_id: TrustedCommandSpec(
+            argv=(sys.executable, "-m", command_id),
+            cwd=".",
+            environment_sources=(),
+            expected_exit_codes=(0,),
+            input_labels=("candidate-soak/journey-evidence.json",)
+            if command_id == "candidate_soak.replay"
+            else (),
+            output_labels=outputs[command_id],
+            secret_sources=("<env:TBOT_DEVICE_MINT_SECRET>",)
+            if command_id in mint_commands
+            else (),
+            stdin_source="<stdin:protected_transcript_plan>"
+            if command_id == "physical.capture_and_audit"
+            else None,
+            timeout_sec=300.0,
+            cleanup_grace_sec=2.0,
+        )
+        for command_id in REQUIRED_COMMAND_IDS
+    }
+
+
+def _recorded_command_spec_digest(entry: Mapping[str, Any]) -> str:
+    stable = {
+        "argv": entry["argv"],
+        "commandId": entry["commandId"],
+        "cwd": entry["cwd"],
+        "environmentSources": entry["environmentSources"],
+        "expectedExitCodes": entry["terminalPolicy"]["expectedExitCodes"],
+        "inputs": [item["label"] for item in entry["inputs"]],
+        "outputs": [item["label"] for item in entry["outputs"]],
+        "secretSources": entry["secretSources"],
+        "stdinSource": entry["stdinSource"],
+        "timeoutSec": entry["terminalPolicy"]["timeoutSec"],
+        "cleanupGraceSec": entry["terminalPolicy"]["cleanupGraceSec"],
+    }
+    canonical = json.dumps(stable, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _command_matches_trusted_spec(entry: Mapping[str, Any], spec: TrustedCommandSpec) -> bool:
+    terminal = entry["terminalPolicy"]
+    return (
+        entry["argv"] == list(spec.argv)
+        and entry["cwd"] == spec.cwd
+        and entry["environmentSources"] == list(spec.environment_sources)
+        and terminal["expectedExitCodes"] == list(spec.expected_exit_codes)
+        and [item["label"] for item in entry["inputs"]] == list(spec.input_labels)
+        and [item["label"] for item in entry["outputs"]] == list(spec.output_labels)
+        and entry["secretSources"] == list(spec.secret_sources)
+        and hmac.compare_digest(entry["specSha256"], _recorded_command_spec_digest(entry))
+        and entry["stdinSource"] == spec.stdin_source
+        and terminal["timeoutSec"] == spec.timeout_sec
+        and terminal["cleanupGraceSec"] == spec.cleanup_grace_sec
+    )
+
+
 class ReleaseEvidenceChanged(RuntimeError):
     pass
 
@@ -887,6 +982,12 @@ def aggregate_release_evidence(
             if name in (*REQUIRED_LAYERS, *DETERMINISTIC_SUPPORTS)
         }
         by_id = {entry["commandId"]: entry for entry in required}
+        trusted_specs = _trusted_command_specs()
+        if any(
+            not _command_matches_trusted_spec(by_id[command_id], trusted_specs[command_id])
+            for command_id in REQUIRED_COMMAND_IDS
+        ):
+            raise ValueError
         expected_output_bindings = {
             "deterministic.produce": {
                 "deterministic",

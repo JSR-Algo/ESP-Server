@@ -617,6 +617,111 @@ def test_generation_cleanup_rejects_unsafe_inventory_without_deleting(
     assert unsafe.exists() or unsafe.is_symlink()
 
 
+def test_interrupted_stale_generation_cleanup_recovers_on_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    stale = "e" * 32
+    stale_jsonl = generation_dir / f"{stale}.jsonl"
+    stale_projection = generation_dir / f"{stale}.txt"
+    stale_jsonl.write_bytes(provenance.read_bytes())
+    stale_projection.write_bytes(provenance.with_suffix(".txt").read_bytes())
+    stale_jsonl.chmod(0o400)
+    stale_projection.chmod(0o400)
+    real_unlink = runner.os.unlink
+    interrupted = False
+
+    def interrupt_between_pair_unlinks(path, *args, **kwargs):
+        nonlocal interrupted
+        real_unlink(path, *args, **kwargs)
+        if path == stale_jsonl.name and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner.os, "unlink", interrupt_between_pair_unlinks)
+    with pytest.raises(KeyboardInterrupt):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+        )
+    monkeypatch.setattr(runner.os, "unlink", real_unlink)
+
+    execute_and_record(
+        _spec(tmp_path, "pass", command_id="diagnostic.retry", outputs=()),
+        provenance=provenance,
+    )
+    assert not stale_jsonl.exists()
+    assert not stale_projection.exists()
+
+
+def test_failed_generation_write_is_recovered_before_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+
+    def fail(stage: str) -> None:
+        if stage == "after_generation_jsonl":
+            raise RuntimeError("injected generation failure")
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", fail)
+    with pytest.raises(RuntimeError, match="generation failure"):
+        execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", lambda stage: None)
+
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    assert len(runner.parse_provenance(provenance.read_bytes())) == 1
+
+
+def test_pending_journal_cannot_delete_committed_generation(tmp_path: Path) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    pointer = runner._parse_pair_pointer((tmp_path / ".commands.jsonl.pair").read_bytes())
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    committed = {
+        generation_dir / f"{pointer.generation}.jsonl",
+        generation_dir / f"{pointer.generation}.txt",
+    }
+    pending = tmp_path / ".commands.jsonl.pending"
+    pending.write_bytes(
+        runner._render_pending_generation(pointer.generation)
+    )
+    pending.chmod(0o600)
+
+    with pytest.raises(RuntimeError, match="provenance"):
+        execute_and_record(
+            _spec(tmp_path, "pass", command_id="diagnostic.retry", outputs=()),
+            provenance=provenance,
+        )
+
+    assert all(path.exists() for path in committed)
+    assert provenance.exists()
+    assert provenance.with_suffix(".txt").exists()
+
+
+def test_invalid_generation_inventory_fails_before_child_execution(
+    tmp_path: Path,
+) -> None:
+    provenance = tmp_path / "commands.jsonl"
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    generation_dir.mkdir(mode=0o700)
+    (generation_dir / "operator-file").write_bytes(b"unknown")
+    marker = tmp_path / "child-executed"
+    code = f"from pathlib import Path; Path({str(marker)!r}).write_text('bad')"
+
+    with pytest.raises(RuntimeError, match="generation inventory"):
+        execute_and_record(_spec(tmp_path, code, outputs=()), provenance=provenance)
+
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize("kind", ["pointer_input", "generation_output"])
 def test_rejects_pointer_and_generation_control_artifacts(
     tmp_path: Path, kind: str
@@ -1674,10 +1779,119 @@ def test_keyboard_interrupt_cleans_group_and_records_terminal_state(monkeypatch,
     assert entry["terminalPolicy"]["classification"] == "keyboard_interrupt"
 
 
+def test_repeated_keyboard_interrupt_still_kills_drains_and_records(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    real = runner.subprocess.Popen.communicate
+    calls = 0
+
+    def interrupt_twice(process, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise KeyboardInterrupt
+        return real(process, *args, **kwargs)
+
+    monkeypatch.setattr(runner.subprocess.Popen, "communicate", interrupt_twice)
+    with pytest.raises(KeyboardInterrupt):
+        execute_and_record(
+            _spec(tmp_path, "import time; time.sleep(30)", outputs=()),
+            provenance=tmp_path / "commands.jsonl",
+        )
+    entry = json.loads((tmp_path / "commands.jsonl").read_text())
+    assert entry["terminalPolicy"]["classification"] == "keyboard_interrupt"
+    assert calls >= 3
+
+
+def test_process_output_is_discarded_without_pipe_buffering(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    real = runner.subprocess.Popen
+    observed = {}
+
+    def capture(*args, **kwargs):
+        observed.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(runner.subprocess, "Popen", capture)
+    execute_and_record(
+        _spec(
+            tmp_path,
+            "import sys; sys.stdout.write('x' * 1000000); sys.stderr.write('y' * 1000000)",
+            outputs=(),
+        ),
+        provenance=tmp_path / "commands.jsonl",
+    )
+    assert observed["stdout"] is subprocess.DEVNULL
+    assert observed["stderr"] is subprocess.DEVNULL
+
+
 def test_missing_or_mutated_output_fails_without_provenance(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="output"):
         execute_and_record(_spec(tmp_path, "pass"), provenance=tmp_path / "commands.jsonl")
     assert not (tmp_path / "commands.jsonl").exists()
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_commit_failure_cleans_only_unchanged_execution_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: bool,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    output = tmp_path / "real-api" / "report.json"
+
+    def fail_commit(path: Path, entry: dict) -> None:
+        del path, entry
+        if replacement:
+            output.unlink()
+            output.write_text("attacker")
+        raise RuntimeError("injected commit failure")
+
+    monkeypatch.setattr(runner, "_commit_entry", fail_commit)
+    with pytest.raises(RuntimeError, match="commit failure"):
+        execute_and_record(
+            _spec(tmp_path, _write_report_code()),
+            provenance=provenance,
+        )
+
+    if replacement:
+        assert output.read_text() == "attacker"
+    else:
+        assert not output.exists()
+    assert not provenance.exists()
+
+
+def test_commit_failure_cleanup_does_not_unlink_racing_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    output = tmp_path / "real-api" / "report.json"
+    real_rename = runner.os.rename
+    swapped = False
+
+    def swap_before_quarantine(source, destination, *args, **kwargs):
+        nonlocal swapped
+        if source == output.name and not swapped:
+            swapped = True
+            output.unlink()
+            output.write_text("replacement")
+        return real_rename(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(runner, "_commit_entry", lambda path, entry: (_ for _ in ()).throw(RuntimeError("commit")))
+    monkeypatch.setattr(runner.os, "rename", swap_before_quarantine)
+    with pytest.raises(RuntimeError, match="commit"):
+        execute_and_record(_spec(tmp_path, _write_report_code()), provenance=provenance)
+
+    assert output.read_text() == "replacement"
 
 
 def test_duplicate_ids_fail_closed_and_corrupt_public_log_is_repaired(

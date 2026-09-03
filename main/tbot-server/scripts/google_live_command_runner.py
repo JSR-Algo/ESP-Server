@@ -36,6 +36,7 @@ SHA256 = re.compile(r"[0-9a-f]{64}")
 _MAX_PROVENANCE_ARTIFACT_BYTES = 16 * 1024 * 1024
 _MAX_GENERATION_FILES = 1024
 PAIR_SCHEMA = "google-live-command-provenance-pair.v1"
+PENDING_SCHEMA = "google-live-command-provenance-pending.v1"
 GENERATION_ID = re.compile(r"[0-9a-f]{32}")
 GENERATION_FILE = re.compile(r"([0-9a-f]{32})\.(?:jsonl|txt)")
 _EXACT_ENTRY_FIELDS = {
@@ -619,24 +620,6 @@ def _digest(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def _spec_digest(spec: CommandSpec) -> str:
-    return _digest(
-        {
-            "argv": list(spec.argv),
-            "commandId": spec.command_id,
-            "cwd": str(spec.cwd),
-            "environmentNames": list(spec.env_allowlist),
-            "expectedExitCodes": list(spec.expected_exit_codes),
-            "inputs": [str(path) for path in spec.inputs],
-            "outputs": [str(path) for path in spec.outputs],
-            "secretEnvironmentNames": list(spec.secret_env),
-            "stdinSource": spec.stdin_source,
-            "timeoutSec": float(spec.timeout_sec),
-            "cleanupGraceSec": float(spec.cleanup_grace_sec),
-        }
-    )
-
-
 def _child_environment(spec: CommandSpec, source: Mapping[str, str] | None) -> dict[str, str]:
     supplied = os.environ if source is None else source
     declared = set(spec.env_allowlist) | set(spec.secret_env)
@@ -661,24 +644,46 @@ def _validate_executable(path: str) -> None:
 
 
 def _terminate_group(process: subprocess.Popen[bytes], pgid: int, grace: float) -> None:
-    try:
-        os.killpg(pgid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
+    while True:
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+            break
+        except ProcessLookupError:
+            break
+        except KeyboardInterrupt:
+            continue
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline:
         try:
             os.killpg(pgid, 0)
         except (ProcessLookupError, PermissionError):
             break
-        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
-    try:
-        os.killpg(pgid, 0)
-    except (ProcessLookupError, PermissionError):
-        process.communicate()
-        return
-    os.killpg(pgid, signal.SIGKILL)
-    process.communicate()
+        except KeyboardInterrupt:
+            continue
+        try:
+            time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+        except KeyboardInterrupt:
+            continue
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except (ProcessLookupError, PermissionError):
+            break
+        except KeyboardInterrupt:
+            continue
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+            break
+        except ProcessLookupError:
+            break
+        except KeyboardInterrupt:
+            continue
+    while True:
+        try:
+            process.communicate()
+            break
+        except KeyboardInterrupt:
+            continue
 
 
 def _run_process(
@@ -703,8 +708,8 @@ def _run_process(
             cwd=None,
             env=dict(child_env),
             stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             start_new_session=True,
             pass_fds=(cwd_descriptor, *argument_artifacts.descriptors),
         )
@@ -743,8 +748,11 @@ def _run_process(
         raise RuntimeError("communicate_failed") from exc
 
 
-def _artifact_rows(root: Path, paths: tuple[Path, ...]) -> list[dict[str, str]]:
+def _artifact_rows(
+    root: Path, paths: tuple[Path, ...]
+) -> tuple[list[dict[str, str]], dict[Path, Any]]:
     result = []
+    bindings = {}
     for path in paths:
         try:
             first = read_bound_file(path)
@@ -754,7 +762,8 @@ def _artifact_rows(root: Path, paths: tuple[Path, ...]) -> list[dict[str, str]]:
             raise RuntimeError("evidence output alias detected")
         require_file_unchanged(path, first)
         result.append({"label": _label(root, path), "sha256": hashlib.sha256(first.content).hexdigest()})
-    return result
+        bindings[path] = first
+    return result, bindings
 
 
 def _cleanup_declared_outputs(
@@ -775,6 +784,60 @@ def _cleanup_declared_outputs(
             opened = os.stat(path, follow_symlinks=False)
             if stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1:
                 path.unlink()
+        except (FileNotFoundError, OSError, RuntimeError):
+            continue
+
+
+def _cleanup_bound_outputs(
+    root: Path,
+    bindings: Mapping[Path, Any],
+    parents: Mapping[Path, tuple[tuple[int, int, int, int, int, int], ...]],
+) -> None:
+    for path, expected in bindings.items():
+        try:
+            parent = _open_bound_working_directory(root, path.parent)
+            try:
+                if tuple((item[0], item[1], item[2], item[4]) for item in parent.chain) != tuple(
+                    (item[0], item[1], item[2], item[4]) for item in parents[path]
+                ):
+                    continue
+                current = read_bound_file(path)
+                if current != expected:
+                    continue
+                quarantine = f".{path.name}.{secrets.token_hex(12)}.cleanup"
+                os.rename(
+                    path.name,
+                    quarantine,
+                    src_dir_fd=parent.descriptor,
+                    dst_dir_fd=parent.descriptor,
+                )
+                quarantined = read_bound_file(path.with_name(quarantine))
+                unchanged = (
+                    quarantined.content == expected.content
+                    and quarantined.device == expected.device
+                    and quarantined.inode == expected.inode
+                    and quarantined.size == expected.size
+                    and quarantined.modified_ns == expected.modified_ns
+                    and quarantined.mode == expected.mode
+                    and quarantined.links == expected.links
+                )
+                if unchanged:
+                    os.unlink(quarantine, dir_fd=parent.descriptor)
+                else:
+                    try:
+                        os.link(
+                            quarantine,
+                            path.name,
+                            src_dir_fd=parent.descriptor,
+                            dst_dir_fd=parent.descriptor,
+                            follow_symlinks=False,
+                        )
+                    except FileExistsError:
+                        continue
+                    os.unlink(quarantine, dir_fd=parent.descriptor)
+                os.fsync(parent.descriptor)
+            finally:
+                os.close(parent.descriptor)
         except (FileNotFoundError, OSError, RuntimeError):
             continue
 
@@ -1321,6 +1384,39 @@ def _generation_directory_name(jsonl_name: str) -> str:
     return f".{jsonl_name}.generations"
 
 
+def _pending_generation_name(jsonl_name: str) -> str:
+    _component_key(jsonl_name)
+    return f".{jsonl_name}.pending"
+
+
+def _render_pending_generation(generation: str) -> bytes:
+    if type(generation) is not str or GENERATION_ID.fullmatch(generation) is None:
+        raise ValueError("provenance pending generation is invalid")
+    return (
+        json.dumps(
+            {"generation": generation, "schemaVersion": PENDING_SCHEMA},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
+
+
+def _parse_pending_generation(content: bytes) -> str:
+    try:
+        value = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise ValueError("provenance pending generation is invalid") from exc
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"generation", "schemaVersion"}
+        or value.get("schemaVersion") != PENDING_SCHEMA
+        or _render_pending_generation(value.get("generation")) != content
+    ):
+        raise ValueError("provenance pending generation is invalid")
+    return value["generation"]
+
+
 def _open_generation_directory(
     directory_fd: int, jsonl_name: str, *, create: bool = True
 ) -> int:
@@ -1558,11 +1654,20 @@ def _create_generation_pair_at(
     generation = secrets.token_hex(16)
     generation_fd = _open_generation_directory(directory_fd, jsonl_name)
     try:
+        _atomic_replace_at(
+            directory_fd,
+            _pending_generation_name(jsonl_name),
+            _render_pending_generation(generation),
+        )
         _write_generation_at(generation_fd, f"{generation}.jsonl", jsonl)
         _provenance_transaction_hook("after_generation_jsonl")
         _write_generation_at(generation_fd, f"{generation}.txt", projection)
         _provenance_transaction_hook("after_generation_projection")
         os.fsync(generation_fd)
+        _unlink_if_exists_at(directory_fd, _pending_generation_name(jsonl_name))
+    except BaseException:
+        _recover_pending_generation_at(directory_fd, jsonl_name)
+        raise
     finally:
         os.close(generation_fd)
     pointer = PairPointer(
@@ -1573,6 +1678,46 @@ def _create_generation_pair_at(
         _spec_digest_summary(entries),
     )
     return pointer, _render_pair_pointer(pointer)
+
+
+def _recover_pending_generation_at(directory_fd: int, jsonl_name: str) -> None:
+    pending_name = _pending_generation_name(jsonl_name)
+    pending = _read_pair_pointer_snapshot_at(directory_fd, pending_name)
+    if pending is None:
+        return
+    generation = _parse_pending_generation(pending.content)
+    pointer_snapshot = _read_pair_pointer_snapshot_at(
+        directory_fd, _pair_pointer_name(jsonl_name)
+    )
+    if (
+        pointer_snapshot is not None
+        and _parse_pair_pointer(pointer_snapshot.content).generation == generation
+    ):
+        raise RuntimeError("provenance pending generation is committed")
+    generation_fd = _open_generation_directory(directory_fd, jsonl_name, create=False)
+    removed = False
+    try:
+        snapshots = {}
+        for suffix in ("jsonl", "txt"):
+            name = f"{generation}.{suffix}"
+            snapshot = _read_existing_snapshot_at(generation_fd, name)
+            if snapshot is not None and (
+                stat.S_IMODE(snapshot.identity[2]) != 0o400
+                or snapshot.identity[6] != os.geteuid()
+            ):
+                raise RuntimeError("provenance pending generation is invalid")
+            snapshots[name] = snapshot
+        for name, snapshot in snapshots.items():
+            if snapshot is not None:
+                os.unlink(name, dir_fd=generation_fd)
+                removed = True
+        if removed:
+            os.fsync(generation_fd)
+    finally:
+        os.close(generation_fd)
+    if _read_pair_pointer_snapshot_at(directory_fd, pending_name) != pending:
+        raise RuntimeError("provenance pending generation changed")
+    _unlink_if_exists_at(directory_fd, pending_name)
 
 
 def _cleanup_generations_at(
@@ -1616,10 +1761,15 @@ def _cleanup_generations_at(
             if generation not in keep_generations:
                 removable.append(generation)
         for generation in removable:
+            _atomic_replace_at(
+                directory_fd,
+                _pending_generation_name(jsonl_name),
+                _render_pending_generation(generation),
+            )
             os.unlink(f"{generation}.jsonl", dir_fd=generation_fd)
             os.unlink(f"{generation}.txt", dir_fd=generation_fd)
-        if removable:
             os.fsync(generation_fd)
+            _unlink_if_exists_at(directory_fd, _pending_generation_name(jsonl_name))
     finally:
         os.close(generation_fd)
 
@@ -1942,6 +2092,7 @@ def _preflight_provenance(provenance: Path, command_id: str) -> None:
         _require_transaction_binding(parent, lock_path.name, lock_fd)
         _provenance_transaction_hook("preflight_before_read")
         _require_transaction_binding(parent, lock_path.name, lock_fd)
+        _recover_pending_generation_at(parent.descriptor, provenance.name)
         old_pair = _read_committed_pair_at(
             parent.descriptor,
             provenance.name,
@@ -1974,6 +2125,11 @@ def _preflight_provenance(provenance: Path, command_id: str) -> None:
                 old_pair = _read_committed_pair_at(
                     parent.descriptor, provenance.name, projection.name
                 )
+        _cleanup_generations_at(
+            parent.descriptor,
+            provenance.name,
+            set() if old_pair.pointer is None else {old_pair.pointer.generation},
+        )
         old_jsonl = old_pair.jsonl
         old_projection = old_pair.projection
         entries = parse_provenance(old_jsonl or b"")
@@ -2020,12 +2176,14 @@ def execute_and_record(
     generation_path = provenance.with_name(
         _generation_directory_name(provenance.name)
     )
+    pending_path = provenance.with_name(_pending_generation_name(provenance.name))
     control_paths = {
         provenance,
         provenance.with_suffix(".txt"),
         provenance.with_name(f".{provenance.name}.lock"),
         pointer_path,
         generation_path,
+        pending_path,
     }
     if any(
         path in control_paths
@@ -2048,7 +2206,7 @@ def execute_and_record(
         try:
             argument_artifacts = _bind_argument_artifacts(spec, root, inputs)
             canonical_spec = _canonical_spec(spec, root)
-            spec_digest = _spec_digest(spec)
+            spec_digest = _digest(canonical_spec)
             child_env = _child_environment(spec, env)
             _validate_executable(spec.argv[0])
             started = _utc_now()
@@ -2099,7 +2257,10 @@ def execute_and_record(
             os.close(current_parent.descriptor)
     if not satisfied:
         _cleanup_declared_outputs(root, spec.outputs, output_parents)
-    output_rows = _artifact_rows(root, spec.outputs) if satisfied else []
+    if satisfied:
+        output_rows, output_bindings = _artifact_rows(root, spec.outputs)
+    else:
+        output_rows, output_bindings = [], {}
     input_rows = [
         {"label": _label(root, path), "sha256": hashlib.sha256(bound.content).hexdigest()}
         for path, (bound, _parent_chain) in inputs.items()
@@ -2127,7 +2288,11 @@ def execute_and_record(
             "timeoutSec": float(spec.timeout_sec),
         },
     }
-    _commit_entry(provenance, entry)
+    try:
+        _commit_entry(provenance, entry)
+    except BaseException:
+        _cleanup_bound_outputs(root, output_bindings, output_parents)
+        raise
     result = CommandResult(
         spec.command_id,
         exit_code,

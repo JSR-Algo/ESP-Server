@@ -21,9 +21,11 @@ from scripts.google_live_release_gate import (
 )
 from scripts.google_live_command_runner import (
     COMMAND_PROVENANCE_SCHEMA,
+    CommandSpec,
     PairPointer,
     _render_pair_pointer,
     _spec_digest_summary,
+    execute_and_record,
     parse_provenance,
     render_commands_projection,
     render_provenance,
@@ -286,9 +288,8 @@ def _write_evidence(
             if command_id in {"websocket.transport", "candidate_soak.produce", "physical.capture_and_audit"}
             else []
         )
-        commands.append(
-            {
-                "argv": ["python3", "-m", command_id],
+        command = {
+                "argv": [sys.executable, "-m", command_id],
                 "candidateIdentity": copy.deepcopy(IDENTITY),
                 "commandId": command_id,
                 "cwd": ".",
@@ -307,7 +308,7 @@ def _write_evidence(
                 + ([copy.deepcopy(journey_evidence_artifact)] if command_id == "candidate_soak.produce" else []),
                 "schemaVersion": COMMAND_PROVENANCE_SCHEMA,
                 "secretSources": secret_sources,
-                "specSha256": hashlib.sha256(command_id.encode()).hexdigest(),
+                "specSha256": "0" * 64,
                 "startedAtUtc": f"2026-09-03T00:00:{index:02d}.000000Z",
                 "stdinSource": (
                     "<stdin:protected_transcript_plan>"
@@ -322,7 +323,8 @@ def _write_evidence(
                     "timeoutSec": 300.0,
                 },
             }
-        )
+        command["specSha256"] = release_gate._recorded_command_spec_digest(command)
+        commands.append(command)
     provenance = root / "commands.jsonl"
     provenance.write_bytes(render_provenance(commands))
     digest = hashlib.sha256(provenance.read_bytes()).hexdigest()
@@ -367,6 +369,52 @@ def test_release_passes_only_real_exact_candidate_contracts(tmp_path: Path) -> N
     assert verdict["failures"] == []
 
 
+def test_release_accepts_runner_emitted_stable_spec_digest(tmp_path: Path) -> None:
+    root = tmp_path
+    report = root / "real-api" / "report.json"
+    code = (
+        "from pathlib import Path; "
+        "path = Path('real-api/report.json')\n"
+        "path.write_text('{}')\n",
+    )
+    code = "".join(code).replace("\n", "; ")
+    runner_provenance = root / "runner.jsonl"
+    execute_and_record(
+        CommandSpec(
+            command_id="real_api.round_trip",
+            argv=(sys.executable, "-c", code),
+            cwd=root,
+            candidate_identity={
+                "gitSha": "a" * 40,
+                "imageDigest": "sha256:" + "b" * 64,
+                "firmwareIdentity": "firmware-v1",
+                "configFingerprint": "sha256:" + "c" * 64,
+                "fixtureSha256": "d" * 64,
+            },
+            outputs=(report,),
+            expected_exit_codes=(0,),
+            timeout_sec=300.0,
+            cleanup_grace_sec=2.0,
+        ),
+        provenance=runner_provenance,
+    )
+    emitted = json.loads(runner_provenance.read_text())
+    trusted = release_gate.TrustedCommandSpec(
+        argv=(sys.executable, "-c", code),
+        cwd=".",
+        environment_sources=(),
+        expected_exit_codes=(0,),
+        input_labels=(),
+        output_labels=("real-api/report.json",),
+        secret_sources=(),
+        stdin_source=None,
+        timeout_sec=300.0,
+        cleanup_grace_sec=2.0,
+    )
+
+    assert release_gate._command_matches_trusted_spec(emitted, trusted)
+
+
 @pytest.mark.parametrize("mutation", ["missing", "reordered", "diagnostic_substitution"])
 def test_release_requires_exact_ordered_command_provenance(tmp_path: Path, mutation: str) -> None:
     paths, checksums, _ = _write_evidence(tmp_path)
@@ -381,6 +429,37 @@ def test_release_requires_exact_ordered_command_provenance(tmp_path: Path, mutat
     paths["command_provenance"].write_bytes(render_provenance(entries))
     checksums["command_provenance"] = hashlib.sha256(paths["command_provenance"].read_bytes()).hexdigest()
     verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+    assert verdict["status"] == "FAIL"
+    assert any(item["code"] == "COMMAND_PROVENANCE_INVALID" for item in verdict["failures"])
+
+
+def test_release_rejects_untrusted_command_spec_with_fresh_digest(tmp_path: Path) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    entries = [json.loads(line) for line in paths["command_provenance"].read_text().splitlines()]
+    entry = next(item for item in entries if item["commandId"] == "real_api.round_trip")
+    entry["argv"] = ["/usr/bin/false", "--arbitrary-command"]
+    entry["specSha256"] = hashlib.sha256(b"attacker-controlled-command-spec").hexdigest()
+    content = render_provenance(entries)
+    paths["command_provenance"].write_bytes(content)
+    checksums["command_provenance"] = hashlib.sha256(content).hexdigest()
+
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+
+    assert verdict["status"] == "FAIL"
+    assert any(item["code"] == "COMMAND_PROVENANCE_INVALID" for item in verdict["failures"])
+
+
+def test_release_rejects_fresh_digest_for_trusted_command_spec(tmp_path: Path) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    entries = [json.loads(line) for line in paths["command_provenance"].read_text().splitlines()]
+    entry = next(item for item in entries if item["commandId"] == "real_api.round_trip")
+    entry["specSha256"] = hashlib.sha256(b"different-command-spec").hexdigest()
+    content = render_provenance(entries)
+    paths["command_provenance"].write_bytes(content)
+    checksums["command_provenance"] = hashlib.sha256(content).hexdigest()
+
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+
     assert verdict["status"] == "FAIL"
     assert any(item["code"] == "COMMAND_PROVENANCE_INVALID" for item in verdict["failures"])
 
