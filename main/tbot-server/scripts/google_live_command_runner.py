@@ -230,7 +230,7 @@ def candidate_popen(arguments, *args, **kwargs):
             child_original_root = None
         if child_original_root is not None:
             arguments = [
-                arguments[0], *arguments[1:script_index], bootstrap_path,
+                arguments[0], "-I", "-S", "-B", *arguments[1:script_index], bootstrap_path,
                 source_root, child_original_root, project_root, child_relative, child_file,
                 dependency_roots_json,
                 *arguments[script_index + 1:]
