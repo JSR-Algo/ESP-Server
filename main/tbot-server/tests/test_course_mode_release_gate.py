@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import base64
 import contextlib
 import errno
 import gc
@@ -34,6 +35,15 @@ def _fixture_host_python() -> Path:
         if candidate.is_absolute() and candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate
     raise RuntimeError("no executable Python interpreter is available for fixture scripts")
+
+
+def _fixture_python_wrapper(interpreter: Path, source: str) -> str:
+    encoded = base64.b64encode(source.encode("utf-8")).decode("ascii")
+    bootstrap = (
+        "import base64,sys;__file__=sys.argv[1];sys.argv=sys.argv[1:];"
+        f"exec(compile(base64.b64decode({encoded!r}),__file__,'exec'))"
+    )
+    return f"#!/bin/sh\nexec {interpreter!s} -I -c {bootstrap!r} \"$0\" \"$@\"\n"
 
 
 def test_fixture_host_python_is_stable_and_not_standalone_runtime(
@@ -505,11 +515,55 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             "treeDigest": bundle_tree,
         }
     fixture_python = _fixture_host_python()
+    synthetic_tools: dict[str, str] = {}
+    synthetic_tool_hashes: dict[str, set[str]] = {}
+    original_run_bounded_command = gate._manifest.run_bounded_command
+
+    def register_synthetic_tool(path: Path) -> None:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        synthetic_tools[str(path)] = digest
+        synthetic_tool_hashes.setdefault(path.name, set()).add(digest)
+
+    def run_fixture_command(command, **kwargs):
+        tool_index = 0
+        if (
+            command
+            and command[0] == str(gate._manifest.TRUSTED_SANDBOX_EXECUTABLE)
+        ):
+            tool_index = 1
+            while tool_index < len(command):
+                option = command[tool_index]
+                if option == "--":
+                    tool_index += 1
+                    break
+                if option in ("-p", "-f", "-D"):
+                    tool_index += 2
+                    continue
+                if option.startswith("-"):
+                    tool_index += 1
+                    continue
+                break
+        if len(command) > tool_index:
+            tool = Path(command[tool_index])
+            digest = synthetic_tools.get(str(tool))
+            if (
+                digest is None
+                and tool.is_absolute()
+                and tool.is_file()
+                and tool.name in synthetic_tool_hashes
+            ):
+                digest = hashlib.sha256(tool.read_bytes()).hexdigest()
+            if digest in synthetic_tool_hashes.get(tool.name, set()):
+                command = [*command[:tool_index], "/bin/sh", *command[tool_index:]]
+        return original_run_bounded_command(command, **kwargs)
+
+    monkeypatch.setattr(gate._manifest, "run_bounded_command", run_fixture_command)
     docker = tmp_path / "docker"
     backend_ref = f"local/tbot-backend:course-mode-physical-tft-{repositories['backend']['sha']}"
     web_ref = f"local/tbot-server-web:course-mode-physical-tft-{repositories['adminEsp']['sha']}"
-    docker.write_text(
-        f"#!{fixture_python}\nimport json,sys\n"
+    docker_script = docker.with_name("docker.py")
+    docker_script.write_text(
+        "import json,sys\n"
         f"backend_source={repositories['backend']['remoteUrl']!r}\n"
         f"web_source={repositories['adminEsp']['remoteUrl']!r}\n"
         "if sys.argv[1:] == ['--version']: print('Docker version fixture'); sys.exit(0)\n"
@@ -520,15 +574,22 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "print(json.dumps(value)) if value is not None else sys.exit(1)\n",
         encoding="utf-8",
     )
+    docker.write_text(_fixture_python_wrapper(fixture_python, docker_script.read_text(encoding="utf-8")), encoding="utf-8")
+    docker_script.unlink()
     docker.chmod(0o755)
+    register_synthetic_tool(docker)
     monkeypatch.setattr(gate._manifest, "TRUSTED_DOCKER_EXECUTABLE", docker)
     compose = tmp_path / "docker-compose"
-    compose.write_text(
-        f"#!{fixture_python}\nimport sys\n"
+    compose_script = compose.with_name("docker-compose.py")
+    compose_script.write_text(
+        "import sys\n"
         "print('Docker Compose version fixture') if sys.argv[1:] == ['version'] else sys.exit(0)\n",
         encoding="utf-8",
     )
+    compose.write_text(_fixture_python_wrapper(fixture_python, compose_script.read_text(encoding="utf-8")), encoding="utf-8")
+    compose_script.unlink()
     compose.chmod(0o755)
+    register_synthetic_tool(compose)
     monkeypatch.setattr(gate._manifest, "_container_tool_path_authorized", lambda *_args: True)
     firmware_dir = tmp_path / "firmware-artifact"
     firmware_dir.mkdir()
@@ -563,8 +624,12 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         prefix = tmp_path / f"node-{key}"
         executable = prefix / "bin/node"
         executable.parent.mkdir(parents=True)
-        executable.write_text(f"#!/bin/sh\nif [ \"$1\" = --version ]; then echo {version}; else exec python3 \"$@\"; fi\n", encoding="utf-8")
+        executable.write_text(
+            f"#!/bin/sh\nif [ \"$1\" = --version ]; then echo {version}; else exec {fixture_python!s} \"$@\"; fi\n",
+            encoding="utf-8",
+        )
         executable.chmod(0o755)
+        register_synthetic_tool(executable)
         package_tools = {}
         for tool in ("npm", "npx"):
             entrypoint = prefix / f"lib/node_modules/npm/bin/{tool}-cli.js"
@@ -584,8 +649,9 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     python_root = tmp_path / "python-test-runtime"
     python_executable = python_root / "bin/python3.11"
     python_executable.parent.mkdir(parents=True)
-    python_executable.write_text(
-        f"#!{fixture_python}\nimport json,os,pathlib,runpy,subprocess,sys\n"
+    python_script = python_executable.with_name("python3.11.py")
+    python_script.write_text(
+        "import json,os,pathlib,runpy,subprocess,sys\n"
         "def attack():\n"
         " target=pathlib.Path(__file__).resolve().parents[1]; parent=target.parent\n"
         " target_mode=target.stat().st_mode & 0o7777; parent_mode=parent.stat().st_mode & 0o7777\n"
@@ -637,9 +703,12 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         " sys.argv=sys.argv[1:]; runpy.run_module('pytest', run_name='__main__')\n",
         encoding="utf-8",
     )
+    python_executable.write_text(_fixture_python_wrapper(fixture_python, python_script.read_text(encoding="utf-8")), encoding="utf-8")
+    python_script.unlink()
     python_executable.chmod(0o555)
     python_executable.parent.chmod(0o555)
     python_root.chmod(0o555)
+    register_synthetic_tool(python_executable)
     monkeypatch.setattr(
         gate._manifest, "_python_runtime_library_authority", lambda _root, _executable: True,
     )
