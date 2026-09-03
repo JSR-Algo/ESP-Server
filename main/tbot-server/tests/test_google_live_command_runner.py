@@ -381,6 +381,7 @@ def test_materialize_candidate_resources_uses_archived_bytes_and_verifies_digest
     destination = tmp_path / "snapshot"
     runner._materialize_candidate_resources(archive, destination, manifest)
     assert (destination / "config.json").read_bytes() == content
+    runner._cleanup_candidate_snapshot(destination)
 
 
 def test_materialize_candidate_resources_sets_exact_modes_despite_umask(
@@ -400,6 +401,7 @@ def test_materialize_candidate_resources_sets_exact_modes_despite_umask(
         os.umask(previous)
     assert stat.S_IMODE((destination / "nested" / "config.json").stat().st_mode) == 0o400
     assert stat.S_IMODE((destination / "nested").stat().st_mode) == 0o500
+    runner._cleanup_candidate_snapshot(destination)
 
 
 def test_materialized_resource_snapshot_can_be_cleaned_after_read_only_finalize(
