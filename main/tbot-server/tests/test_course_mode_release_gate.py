@@ -62,6 +62,12 @@ def _rewrite_fixture_python_wrapper(path: Path, interpreter: Path, prefix: str) 
     path.chmod(0o755)
 
 
+def _fixture_node_wrapper(node: Path, source: str) -> str:
+    encoded = base64.b64encode(source.encode("utf-8")).decode("ascii")
+    script = f"const vm=require('node:vm');vm.runInThisContext(Buffer.from({encoded!r},'base64').toString(),{{filename:process.argv[1]}});"
+    return f"#!/bin/sh\nexec {shlex.quote(str(node))} -e {shlex.quote(script)} \"$0\" \"$@\"\n"
+
+
 def test_fixture_host_python_is_stable_and_not_standalone_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2249,27 +2255,30 @@ def test_assignment_runner_accepts_gate_owned_capsule(
     media_tools = scripts / "media-tools"
     media_tools.mkdir()
     (media_tools / "ffmpeg").write_text(
-        f"#!{node}\n"
+        _fixture_node_wrapper(node,
         "require('node:fs').writeFileSync(process.argv.at(-1), 'stub media');\n",
+        ),
         encoding="utf-8",
     )
     (media_tools / "ffprobe").write_text(
-        f"#!{node}\n"
+        _fixture_node_wrapper(node,
         "const { basename } = require('node:path');\n"
         "const durationMs = Number(basename(process.argv.at(-1), '.mp4'));\n"
         "process.stdout.write(JSON.stringify({ streams: [{ codec_name: 'h264', width: 480, "
         "height: 320, r_frame_rate: '10/1', nb_frames: durationMs / 100 }], "
         "format: { duration: durationMs / 1000 } }));\n",
+        ),
         encoding="utf-8",
     )
     (media_tools / "openssl").write_text(
-        f"#!{node}\n"
+        _fixture_node_wrapper(node,
         "const { writeFileSync } = require('node:fs');\n"
         "const key = process.argv.indexOf('-keyout');\n"
         "const cert = process.argv.indexOf('-out');\n"
         "if (key < 0 || cert < 0) process.exit(96);\n"
         "writeFileSync(process.argv[key + 1], 'stub key');\n"
         "writeFileSync(process.argv[cert + 1], 'stub cert');\n",
+        ),
         encoding="utf-8",
     )
     for tool in (media_tools / "ffmpeg", media_tools / "ffprobe", media_tools / "openssl"):
