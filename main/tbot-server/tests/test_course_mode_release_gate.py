@@ -554,6 +554,10 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     fixture_python = _fixture_host_python()
     synthetic_tools: dict[str, str] = {}
     synthetic_tool_hashes: dict[str, set[str]] = {}
+    assignment_node_hashes: set[str] = set()
+    monkeypatch.setattr(
+        gate, "_fixture_assignment_node_hashes", assignment_node_hashes, raising=False,
+    )
     original_run_bounded_command = gate._manifest.run_bounded_command
     original_assignment_command = gate.run_assignment_bounded_command
 
@@ -598,15 +602,10 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     def run_fixture_assignment_command(command, **kwargs):
         if command:
             tool = Path(command[0])
-            if (
-                tool.is_absolute()
-                and tool.is_file()
-                and tool.name == "node"
-                and "candidate" in tool.parts
-                and "tools" in tool.parts
-                and any(parent.name.startswith("course-mode-lane-") for parent in tool.parents)
-            ):
-                command = ["/bin/sh", *command]
+            if tool.is_absolute() and tool.is_file() and tool.name == "node":
+                digest = hashlib.sha256(tool.read_bytes()).hexdigest()
+                if digest in assignment_node_hashes:
+                    command = ["/bin/sh", *command]
         return original_assignment_command(command, **kwargs)
 
     monkeypatch.setattr(gate._manifest, "run_bounded_command", run_fixture_command)
@@ -2405,6 +2404,7 @@ def test_assignment_runner_accepts_gate_owned_capsule(
         "packageRootMode": package_tree["rootMode"],
         "packageTreeSha256": package_tree["sha256"],
     })
+    gate._fixture_assignment_node_hashes.add(node_descriptor["sha256"])
     candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
 
     lane = next(
