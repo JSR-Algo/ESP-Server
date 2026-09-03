@@ -91,6 +91,48 @@ def test_canonical_gate_forwards_complete_live_db_snapshot_without_other_secrets
     }
 
 
+def test_canonical_gate_forwards_exact_assignment_environment(tmp_path: Path) -> None:
+    fixture = _shell_fixture(tmp_path)
+    probe = fixture / "main/tbot-server/scripts/course_mode_release_gate.py"
+    allowed = {
+        "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME": "assignment-project",
+        "LESSON_STUDIO_E2E_RESOURCE_PREFIX": "assignment-resource",
+        "TASK4_ASSIGNMENT_RUNTIME_ROOT": "/tmp/assignment-runtime",
+        "JWT_PUBLIC_KEY": "assignment-public-key",
+        "TBOT_DEVICE_MINT_SECRET": "assignment-mint-secret",
+        "LESSON_ASSET_ORIGIN_BASE": "http://127.0.0.1:18126/tvideo-demo",
+        "ROBOT_ESP_BASE_URL": "http://127.0.0.1:9",
+        "LESSON_STUDIO_E2E_BACKEND_HOST_PORT": "13126",
+        "LESSON_STUDIO_E2E_WEB_HOST_PORT": "18126",
+        "TASK4_ASSIGNMENT_MEDIA_HOST_PORT": "18426",
+    }
+    rejected = {
+        "LESSON_STUDIO_E2E_UNRELATED_SECRET": "must-not-forward",
+        "TASK4_ASSIGNMENT_DEBUG_TOKEN": "must-not-forward",
+        "TBOT_DEVICE_MINT_SECRET_BACKUP": "must-not-forward",
+    }
+    keys = tuple((*allowed, *rejected))
+    probe.write_text(
+        "import json, os\n"
+        f"keys = {keys!r}\n"
+        "print(json.dumps({key: os.environ[key] for key in keys if key in os.environ}))\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=fixture, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "assignment environment probe"], cwd=fixture,
+        check=True, capture_output=True,
+    )
+
+    result = subprocess.run(
+        [str(fixture / "scripts/course_robot_e2e_gates.sh"), "--candidate", "unused.json"],
+        cwd=fixture, env={**os.environ, **allowed, **rejected}, capture_output=True, text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == allowed
+
+
 def test_canonical_gate_does_not_materialize_absent_optional_production_url(tmp_path: Path) -> None:
     fixture = _shell_fixture(tmp_path)
     probe = fixture / "main/tbot-server/scripts/course_mode_release_gate.py"
