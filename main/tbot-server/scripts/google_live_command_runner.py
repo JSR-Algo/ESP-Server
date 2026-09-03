@@ -166,7 +166,8 @@ if dependency_roots:
         __import__('sysconfig').get_paths()['platstdlib']]
 else:
     sys.path[:] = [source_root, *[item for item in sys.path if item and item != original_root]]
-os.environ['PYTHONNOUSERSITE'] = '1'
+if dependency_roots:
+    os.environ['PYTHONNOUSERSITE'] = '1'
 original_popen = subprocess.Popen
 def python_script_index(arguments):
     no_value = {"-b", "-B", "-d", "-E", "-i", "-I", "-O", "-OO", "-P", "-q", "-R", "-s", "-S", "-u", "-v", "-V", "-x"}
@@ -727,6 +728,8 @@ def _load_runtime_closure_manifest(
 def _materialize_distribution_closure(
     manifest: Mapping[str, Any], destination: Path
 ) -> list[str]:
+    if not manifest.get("distributions"):
+        return []
     destination.mkdir(mode=0o700)
     for distribution in manifest.get("distributions", []):
         root = Path(distribution["root"]).resolve(strict=True)
