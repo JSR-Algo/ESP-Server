@@ -158,6 +158,7 @@ def _commit_runtime_manifest_repo(
     content: bytes = b"abc",
     include_resource: bool = True,
     resource_overrides: dict[str, object] | None = None,
+    runtime_overrides: dict[str, object] | None = None,
 ) -> tuple[Path, str]:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -170,13 +171,24 @@ def _commit_runtime_manifest_repo(
     resource = {"gitBlob": blob, "kind": "python", "path": resource_path, "sha256": sha256, "size": len(content)}
     resource.update(resource_overrides or {})
     resources = [resource]
-    manifest = _canonical_json(_runtime_closure_manifest(resources))
+    manifest_value = _runtime_closure_manifest(resources)
+    manifest_value["runtime"]["interpreterSha256"] = hashlib.sha256(
+        Path(sys.executable).resolve().read_bytes()
+    ).hexdigest()
+    manifest_value["runtime"].update(runtime_overrides or {})
+    manifest = _canonical_json(manifest_value)
     manifest_blob = subprocess.check_output(["git", "hash-object", "-w", "--stdin"], cwd=repo, input=manifest).decode().strip()
+    executable_manifest_blob = subprocess.check_output(
+        ["git", "hash-object", "-w", "--stdin"],
+        cwd=repo,
+        input=PYTHON_EXECUTABLE_MANIFEST,
+    ).decode().strip()
     index = tmp_path / "index"
     env = {**os.environ, "GIT_INDEX_FILE": str(index)}
     if include_resource:
         subprocess.run(["git", "update-index", "--add", "--cacheinfo", mode, blob, resource_path], cwd=repo, env=env, check=True)
     subprocess.run(["git", "update-index", "--add", "--cacheinfo", "100644", manifest_blob, "main/tbot-server/tests/fixtures/google_live_runtime_closure_manifest.json"], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "update-index", "--add", "--cacheinfo", "100644", executable_manifest_blob, "main/tbot-server/tests/fixtures/google_live_python_executable_manifest.json"], cwd=repo, env=env, check=True)
     tree = subprocess.check_output(["git", "write-tree"], cwd=repo, env=env).decode().strip()
     commit = subprocess.check_output(["git", "commit-tree", tree, "-m", "fixture"], cwd=repo, env=env).decode().strip()
     subprocess.run(["git", "update-ref", "refs/heads/main", commit], cwd=repo, check=True)
@@ -206,6 +218,21 @@ def test_runtime_closure_manifest_loader_verifies_git_members(
     _ignore_temp_repo_worktree_status(monkeypatch, runner)
     result = runner._load_runtime_closure_manifest(commit, code_root=repo, platform_name="darwin-arm64-cp314")
     assert result["resources"][0]["gitBlob"]
+
+
+def test_runtime_closure_manifest_loader_rejects_interpreter_digest_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    repo, commit = _commit_runtime_manifest_repo(
+        tmp_path, runtime_overrides={"interpreterSha256": "f" * 64}
+    )
+    _ignore_temp_repo_worktree_status(monkeypatch, runner)
+    with pytest.raises(ValueError, match="interpreter digest"):
+        runner._load_runtime_closure_manifest(
+            commit, code_root=repo, platform_name="darwin-arm64-cp314"
+        )
 
 
 @pytest.mark.parametrize(

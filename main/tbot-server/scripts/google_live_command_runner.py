@@ -384,6 +384,20 @@ def _load_runtime_closure_manifest(
         except Exception as exc:
             raise ValueError("runtime closure manifest is missing from Git") from exc
         manifest = _parse_runtime_closure_manifest(content, platform_name=platform_name)
+        executable_manifest = _parse_python_executable_manifest(
+            _load_trusted_python_executable_manifest(expected_git_sha)
+        )
+        try:
+            executable_content = _trusted_executable_content(
+                sys.executable, executable_manifest
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError("runtime closure interpreter is not trusted") from exc
+        if not hmac.compare_digest(
+            hashlib.sha256(executable_content).hexdigest(),
+            manifest["runtime"]["interpreterSha256"],
+        ):
+            raise ValueError("runtime closure interpreter digest mismatch")
         for resource in manifest["resources"]:
             spec = f"{expected_git_sha}:{resource['path']}"
             try:
