@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 import unicodedata
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,7 @@ from scripts.google_live_deterministic_evidence import (
 )
 from scripts.google_live_reliability import forbidden_report_fields
 from scripts.google_live_trusted_git import git_output as _trusted_git_output
+from scripts.google_live_trusted_git import _git_command as _trusted_git_command
 from scripts.google_live_trusted_git import trusted_git_session
 
 
@@ -122,12 +124,12 @@ class CandidateSourceLoader:
         del spec
         return None
     def exec_module(self, module):
-        module.__file__ = self.original_file
+        module.__file__ = self.snapshot_file
         if self.package_directory is not None:
             module.__path__ = [self.package_directory]
         with open(self.snapshot_file, "rb") as source_file:
             source = source_file.read()
-        exec(compile(source, self.original_file, "exec"), module.__dict__, module.__dict__)
+        exec(compile(source, self.snapshot_file, "exec"), module.__dict__, module.__dict__)
 class CandidateSourceFinder:
     @staticmethod
     def find_spec(fullname, path=None, target=None):
@@ -193,9 +195,13 @@ def candidate_popen(arguments, *args, **kwargs):
         try:
             inside_project = os.path.commonpath([project_root, child_file]) == project_root
             inside_original = os.path.commonpath([original_root, child_file]) == original_root
+            inside_snapshot = os.path.commonpath([source_root, child_file]) == source_root
         except ValueError:
-            inside_project = inside_original = False
-        if inside_project:
+            inside_project = inside_original = inside_snapshot = False
+        if inside_snapshot:
+            child_original_root = original_root
+            child_relative = os.path.relpath(child_file, source_root).replace(os.sep, "/")
+        elif inside_project:
             child_original_root = project_root
             child_relative = os.path.relpath(child_file, project_root).replace(os.sep, "/")
         elif inside_original:
@@ -219,15 +225,169 @@ with open(source_path, "rb") as source_file:
     source = source_file.read()
 namespace = {
     "__name__": "__main__",
-    "__file__": original_file,
+    "__file__": source_path,
     "__package__": None,
     "__cached__": None,
 }
-exec(compile(source, original_file, "exec"), namespace, namespace)
+exec(compile(source, source_path, "exec"), namespace, namespace)
 """
 _MAX_PYTHON_SOURCE_ARCHIVE_BYTES = 64 * 1024 * 1024
 _MAX_PYTHON_SOURCE_FILE_BYTES = 16 * 1024 * 1024
 _MAX_PYTHON_SOURCE_MEMBERS = 5000
+
+
+def _candidate_resource_archive_bound(manifest: Mapping[str, Any]) -> int:
+    limits = manifest["limits"]
+    metadata = int(limits["maxResourceCount"]) * (
+        int(limits["maxPathDepth"]) + 3
+    ) * 512
+    return int(limits["maxResourceBytes"]) + metadata + 10 * 1024
+
+
+def _load_candidate_resource_archive(
+    expected_git_sha: str, manifest: Mapping[str, Any], *, code_root: Path | None = None
+) -> bytes:
+    """Stream a manifest-scoped Git archive while enforcing its hard byte cap."""
+    code_root = (Path(__file__).resolve().parents[1] if code_root is None else code_root).resolve(strict=True)
+    limits = manifest["limits"]
+    cap = _candidate_resource_archive_bound(manifest)
+    paths = [resource["path"] for resource in manifest["resources"]]
+    with trusted_git_session() as identity:
+        if _trusted_git_output(code_root, "rev-parse", "HEAD").decode().strip() != expected_git_sha:
+            raise ValueError("candidate git SHA does not match repository HEAD")
+        process = subprocess.Popen(
+            _trusted_git_command(
+                identity.path,
+                code_root,
+                "archive",
+                "--format=tar",
+                expected_git_sha,
+                "--",
+                *paths,
+            ),
+            cwd=code_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env={"GIT_ATTR_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                 "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_SYSTEM": os.devnull,
+                 "GIT_NO_REPLACE_OBJECTS": "1", "GIT_TERMINAL_PROMPT": "0",
+                 "LANG": "C", "LC_ALL": "C", "PATH": os.defpath},
+        )
+        output = bytearray()
+        try:
+            assert process.stdout is not None
+            while True:
+                chunk = process.stdout.read(1024 * 1024)
+                if not chunk:
+                    break
+                output.extend(chunk)
+                if len(output) > cap:
+                    process.kill()
+                    process.wait()
+                    raise ValueError("candidate resource archive exceeds bound")
+            if process.wait(timeout=30) != 0:
+                raise ValueError("candidate resource archive is unavailable")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            process.kill()
+            process.wait()
+            raise ValueError("candidate resource archive is unavailable") from exc
+        if _trusted_git_output(code_root, "rev-parse", "HEAD").decode().strip() != expected_git_sha:
+            raise ValueError("candidate repository changed during resource validation")
+    return bytes(output)
+
+
+def _materialize_candidate_resources(
+    content: bytes, destination: Path, manifest: Mapping[str, Any]
+) -> None:
+    """Extract only verified regular members from a bounded candidate archive."""
+    limits = manifest["limits"]
+    if not content or len(content) > _candidate_resource_archive_bound(manifest):
+        raise ValueError("candidate resource archive is invalid")
+    expected = {item["path"]: item for item in manifest["resources"]}
+    if len(expected) != len(manifest["resources"]):
+        raise ValueError("candidate resource archive has duplicate paths")
+    destination.mkdir(mode=0o700)
+    seen: set[str] = set()
+    seen_members: set[str] = set()
+    allowed_directories = {
+        "/".join(Path(path).parts[:index])
+        for path in expected
+        for index in range(1, len(Path(path).parts))
+    }
+    total = 0
+    try:
+        with tarfile.open(fileobj=io.BytesIO(content), mode="r:") as archive:
+            for member in archive:
+                path = Path(member.name)
+                canonical_name = member.name.rstrip("/") if member.isdir() else member.name
+                if (
+                    path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts)
+                    or "\\" in member.name or len(path.parts) > int(limits["maxPathDepth"])
+                    or any(ord(character) < 32 or ord(character) > 126 for character in member.name)
+                    or path.as_posix() != canonical_name
+                    or canonical_name in seen_members
+                ):
+                    raise ValueError("candidate resource archive is invalid")
+                seen_members.add(canonical_name)
+                if member.isdir():
+                    if canonical_name not in allowed_directories:
+                        raise ValueError("candidate resource archive is invalid")
+                    target = destination.joinpath(*path.parts)
+                    target.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    continue
+                if len(seen) >= int(limits["maxResourceCount"]):
+                    raise ValueError("candidate resource archive exceeds bound")
+                if (
+                    not member.isfile()
+                    or member.sparse is not None
+                    or member.name not in expected
+                    or member.name in seen
+                ):
+                    raise ValueError("candidate resource archive is invalid")
+                item = expected[member.name]
+                if member.size != item["size"] or member.size > int(limits["maxResourceFileBytes"]):
+                    raise ValueError("candidate resource archive exceeds bound")
+                source = archive.extractfile(member)
+                if source is None:
+                    raise ValueError("candidate resource archive is invalid")
+                data = source.read(member.size + 1)
+                if len(data) != member.size or hashlib.sha256(data).hexdigest() != item["sha256"]:
+                    raise ValueError("candidate resource archive digest mismatch")
+                target = destination.joinpath(*path.parts)
+                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o400)
+                try:
+                    offset = 0
+                    while offset < len(data):
+                        written = os.write(descriptor, data[offset:])
+                        if written <= 0:
+                            raise OSError(errno.EIO, "short write")
+                        offset += written
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                seen.add(member.name)
+                total += len(data)
+                if total > int(limits["maxResourceBytes"]):
+                    raise ValueError("candidate resource archive exceeds bound")
+    except (OSError, tarfile.TarError) as exc:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise ValueError("candidate resource archive is invalid") from exc
+    except ValueError:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+    if seen != set(expected):
+        shutil.rmtree(destination, ignore_errors=True)
+        raise ValueError("candidate resource archive is missing a member")
+    for directory, subdirectories, _files in os.walk(destination, topdown=False):
+        for name in subdirectories:
+            os.chmod(Path(directory) / name, 0o500)
+        descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    os.chmod(destination, 0o500)
 
 
 def _runtime_platform_tuple() -> str:
@@ -1202,6 +1362,60 @@ def _git_bound_python_argv(
         str(original_file),
         *runtime_argv[script_index + 1 :],
     )
+
+
+def _candidate_snapshot_project_root(
+    destination: Path, manifest: Mapping[str, Any], script_relative: str
+) -> Path:
+    suffix = "/" + script_relative
+    matches = []
+    for resource in manifest["resources"]:
+        path = resource["path"]
+        if path == script_relative:
+            matches.append(destination)
+        elif path.endswith(suffix):
+            prefix = path[: -len(suffix)]
+            matches.append(destination.joinpath(*prefix.split("/")))
+    if len(matches) != 1:
+        raise ValueError("relative Python script is absent or ambiguous in candidate snapshot")
+    return matches[0]
+
+
+def _resolve_candidate_resource_arguments(
+    spec: CommandSpec,
+    argv: tuple[str, ...],
+    *,
+    script_index: int,
+    snapshot_tree: Path,
+    source_root: Path,
+    manifest: Mapping[str, Any],
+) -> tuple[str, ...]:
+    protected = {str(path) for path in (*spec.inputs, *spec.outputs)}
+    project_root = Path(__file__).resolve().parents[1]
+    relative_resources: dict[str, str] = {}
+    for resource in manifest["resources"]:
+        target = snapshot_tree.joinpath(*resource["path"].split("/"))
+        try:
+            relative = target.relative_to(source_root).as_posix()
+        except ValueError:
+            continue
+        relative_resources[relative] = str(target)
+    resolved = list(argv)
+    for index in range(script_index + 1, len(resolved)):
+        value = resolved[index]
+        if value in protected:
+            continue
+        replacement = relative_resources.get(value)
+        if replacement is None and os.path.isabs(value):
+            try:
+                relative = Path(value).relative_to(project_root).as_posix()
+            except ValueError:
+                pass
+            else:
+                replacement = relative_resources.get(relative)
+        if replacement is not None:
+            resolved[index] = replacement
+    return tuple(resolved)
 
 
 def _parse_python_executable_manifest(content: bytes) -> Mapping[str, Any]:
@@ -3456,9 +3670,25 @@ def execute_and_record(
                     relative_script = _relative_python_script(spec.argv)
                     if relative_script is not None:
                         script_relative, script_index = relative_script
-                        source_root = snapshot_root / "candidate-source"
-                        source_archive = _load_candidate_python_archive(expected_git_sha)
-                        _materialize_candidate_python_sources(source_archive, source_root)
+                        closure_manifest = _load_runtime_closure_manifest(expected_git_sha)
+                        snapshot_tree = snapshot_root / "candidate-source"
+                        source_archive = _load_candidate_resource_archive(
+                            expected_git_sha, closure_manifest
+                        )
+                        _materialize_candidate_resources(
+                            source_archive, snapshot_tree, closure_manifest
+                        )
+                        source_root = _candidate_snapshot_project_root(
+                            snapshot_tree, closure_manifest, script_relative
+                        )
+                        runtime_argv = _resolve_candidate_resource_arguments(
+                            spec,
+                            runtime_argv,
+                            script_index=script_index,
+                            snapshot_tree=snapshot_tree,
+                            source_root=source_root,
+                            manifest=closure_manifest,
+                        )
                         bootstrap_path = _write_executable_snapshot(
                             snapshot_root,
                             "candidate-bootstrap.py",

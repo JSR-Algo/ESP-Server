@@ -313,6 +313,231 @@ def _python_source_archive(files: dict[str, str]) -> bytes:
     return buffer.getvalue()
 
 
+def test_materialize_candidate_resources_uses_archived_bytes_and_verifies_digest(
+    tmp_path: Path,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    content = b"candidate-config"
+    archive = _python_source_archive({"config.json": content.decode()})
+    manifest = {
+        "limits": {
+            "maxPathDepth": 4,
+            "maxResourceBytes": 1024,
+            "maxResourceCount": 2,
+            "maxResourceFileBytes": 1024,
+        },
+        "resources": [
+            {
+                "path": "config.json",
+                "kind": "json",
+                "gitBlob": "a" * 40,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size": len(content),
+            }
+        ],
+    }
+    destination = tmp_path / "snapshot"
+    runner._materialize_candidate_resources(archive, destination, manifest)
+    assert (destination / "config.json").read_bytes() == content
+
+
+def test_materialize_candidate_resources_rejects_symlink_member(tmp_path: Path) -> None:
+    import scripts.google_live_command_runner as runner
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        info = tarfile.TarInfo("config.json")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "elsewhere"
+        archive.addfile(info)
+    manifest = {
+        "limits": {
+            "maxPathDepth": 4,
+            "maxResourceBytes": 1024,
+            "maxResourceCount": 2,
+            "maxResourceFileBytes": 1024,
+        },
+        "resources": [],
+    }
+    with pytest.raises(ValueError, match="archive"):
+        runner._materialize_candidate_resources(buffer.getvalue(), tmp_path / "snapshot", manifest)
+
+
+def _resource_manifest(files: dict[str, bytes], **limit_changes: int) -> dict[str, object]:
+    limits = {
+        "maxPathDepth": 8,
+        "maxResourceBytes": 4096,
+        "maxResourceCount": 8,
+        "maxResourceFileBytes": 2048,
+    }
+    limits.update(limit_changes)
+    return {
+        "limits": limits,
+        "resources": [
+            {
+                "path": path,
+                "kind": "python" if path.endswith(".py") else "config",
+                "gitBlob": f"{index + 1:040x}",
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size": len(content),
+            }
+            for index, (path, content) in enumerate(sorted(files.items()))
+        ],
+    }
+
+
+def _resource_archive(entries: list[tuple[str, bytes, bytes | None]]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        for name, content, member_type in entries:
+            info = tarfile.TarInfo(name)
+            info.type = member_type or tarfile.REGTYPE
+            info.size = len(content) if info.isreg() else 0
+            archive.addfile(info, io.BytesIO(content) if info.isreg() else None)
+    return buffer.getvalue()
+
+
+def _patch_candidate_resource_archive(
+    monkeypatch: pytest.MonkeyPatch, runner: object, archive: bytes
+) -> None:
+    files = {}
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as opened:
+        for member in opened:
+            if member.isfile():
+                source = opened.extractfile(member)
+                assert source is not None
+                files[member.name] = source.read()
+    manifest = _resource_manifest(files, maxResourceBytes=64 * 1024 * 1024)
+    monkeypatch.setattr(runner, "_load_runtime_closure_manifest", lambda _sha: manifest)
+    monkeypatch.setattr(
+        runner, "_load_candidate_resource_archive", lambda _sha, _manifest: archive
+    )
+
+
+@pytest.mark.parametrize(
+    "entries, files, limits, message",
+    [
+        ([], {"config.json": b"ok"}, {}, "missing"),
+        ([('config.json', b"no", None)], {"config.json": b"ok"}, {}, "digest"),
+        ([('config.json', b"12345", None)], {"config.json": b"12345"}, {"maxResourceFileBytes": 4}, "bound"),
+        ([('a', b"1", None), ('b', b"2", None)], {"a": b"1", "b": b"2"}, {"maxResourceCount": 1}, "bound"),
+        ([('a/b/c', b"1", None)], {"a/b/c": b"1"}, {"maxPathDepth": 2}, "archive"),
+        ([('config.json', b"ok", None), ('config.json', b"ok", None)], {"config.json": b"ok"}, {}, "archive"),
+        ([('../escape', b"ok", None)], {"../escape": b"ok"}, {}, "archive"),
+        ([('config.json', b"", tarfile.LNKTYPE)], {}, {}, "archive"),
+        ([('config.json', b"", tarfile.CHRTYPE)], {}, {}, "archive"),
+        ([('config.json', b"", tarfile.FIFOTYPE)], {}, {}, "archive"),
+    ],
+)
+def test_resource_snapshot_rejects_invalid_archive_members_and_limits(
+    tmp_path: Path,
+    entries: list[tuple[str, bytes, bytes | None]],
+    files: dict[str, bytes],
+    limits: dict[str, int],
+    message: str,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    destination = tmp_path / "snapshot"
+    with pytest.raises(ValueError, match=message):
+        runner._materialize_candidate_resources(
+            _resource_archive(entries), destination, _resource_manifest(files, **limits)
+        )
+    assert not destination.exists()
+
+
+def test_resource_snapshot_rejects_total_bytes(tmp_path: Path) -> None:
+    import scripts.google_live_command_runner as runner
+
+    files = {"a": b"12", "b": b"34"}
+    with pytest.raises(ValueError, match="bound"):
+        runner._materialize_candidate_resources(
+            _resource_archive([(name, data, None) for name, data in files.items()]),
+            tmp_path / "snapshot",
+            _resource_manifest(files, maxResourceBytes=3),
+        )
+    assert not (tmp_path / "snapshot").exists()
+
+
+@pytest.mark.parametrize("resource_name", ["fixture.wav", "settings.conf", "data.json", "lesson.yaml"])
+def test_resource_swap_after_archive_capture_reads_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resource_name: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    entry = f"from pathlib import Path\nPath('real-api').mkdir(exist_ok=True)\nPath('real-api/report.json').write_bytes(Path(__file__).with_name({resource_name!r}).read_bytes())\n".encode()
+    config = tmp_path / resource_name
+    config.write_bytes(b"mutable")
+    (tmp_path / "entry.py").write_bytes(b"raise SystemExit('mutable')\n")
+    files = {"entry.py": entry, resource_name: b"candidate"}
+    manifest = _resource_manifest(files)
+    archive = _resource_archive([(name, data, None) for name, data in sorted(files.items())])
+    monkeypatch.setattr(runner, "_load_runtime_closure_manifest", lambda _sha: manifest)
+
+    def capture_then_swap(_sha: str, _manifest: object) -> bytes:
+        config.write_bytes(b"swapped")
+        return archive
+
+    monkeypatch.setattr(runner, "_load_candidate_resource_archive", capture_then_swap)
+    execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py")),
+        provenance=tmp_path / "commands.jsonl",
+    )
+    assert (tmp_path / "real-api" / "report.json").read_bytes() == b"candidate"
+
+
+def test_candidate_relative_resource_argument_resolves_to_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    entry = b"import sys\nfrom pathlib import Path\nPath('real-api').mkdir(exist_ok=True)\nPath('real-api/report.json').write_bytes(Path(sys.argv[1]).read_bytes())\n"
+    (tmp_path / "entry.py").write_bytes(b"mutable")
+    (tmp_path / "config.json").write_bytes(b"mutable")
+    files = {"entry.py": entry, "config.json": b"candidate"}
+    archive = _resource_archive([(name, data, None) for name, data in sorted(files.items())])
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
+    execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py", "config.json")),
+        provenance=tmp_path / "commands.jsonl",
+    )
+    assert (tmp_path / "real-api" / "report.json").read_bytes() == b"candidate"
+
+
+def test_resource_archive_stdout_is_hard_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import contextlib
+    from types import SimpleNamespace
+    import scripts.google_live_command_runner as runner
+
+    expected_sha = "a" * 40
+    identity = SimpleNamespace(path=Path("/usr/bin/git"))
+    monkeypatch.setattr(runner, "trusted_git_session", lambda: contextlib.nullcontext(identity))
+    monkeypatch.setattr(runner, "_trusted_git_output", lambda *_args: (expected_sha + "\n").encode())
+    monkeypatch.setattr(runner, "_trusted_git_command", lambda *_args: ["git"])
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = io.BytesIO(b"x" * (1024 * 1024 + 2))
+            self.killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def wait(self, timeout: int | None = None) -> int:
+            del timeout
+            return 0
+
+    process = FakeProcess()
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    manifest = _resource_manifest({"x": b"x"}, maxResourceBytes=1)
+    with pytest.raises(ValueError, match="exceeds bound"):
+        runner._load_candidate_resource_archive(expected_sha, manifest, code_root=tmp_path)
+    assert process.killed
+
+
 def test_executes_argv_and_records_only_secret_source(tmp_path: Path) -> None:
     secret = "must-never-persist"
     spec = _spec(
@@ -402,9 +627,7 @@ def test_relative_python_script_executes_candidate_git_source(
             )
         }
     )
-    monkeypatch.setattr(
-        runner, "_load_candidate_python_archive", lambda _sha: archive, raising=False
-    )
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
 
     def swap_script() -> None:
         script.write_text(
@@ -446,9 +669,7 @@ def test_relative_python_script_imports_candidate_git_module_tree(
             "dependency.py": "VALUE = 'candidate'\n",
         }
     )
-    monkeypatch.setattr(
-        runner, "_load_candidate_python_archive", lambda _sha: archive, raising=False
-    )
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
 
     def swap_module() -> None:
         dependency.write_text(
@@ -477,9 +698,7 @@ def test_relative_python_script_cannot_import_untracked_worktree_module(
         f"from pathlib import Path\nPath({str(marker)!r}).write_text('spawned')\n"
     )
     archive = _python_source_archive({"entry.py": "import untracked_dependency\n"})
-    monkeypatch.setattr(
-        runner, "_load_candidate_python_archive", lambda _sha: archive, raising=False
-    )
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
 
     result = execute_and_record(
         _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
@@ -506,9 +725,7 @@ def test_relative_python_script_preserves_candidate_runtime_dependencies(
             )
         }
     )
-    monkeypatch.setattr(
-        runner, "_load_candidate_python_archive", lambda _sha: archive, raising=False
-    )
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
 
     result = execute_and_record(
         _spec(tmp_path, "", argv=(sys.executable, "entry.py")),
@@ -543,9 +760,7 @@ def test_nested_python_script_executes_candidate_git_source(
             ),
         }
     )
-    monkeypatch.setattr(
-        runner, "_load_candidate_python_archive", lambda _sha: archive, raising=False
-    )
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
 
     execute_and_record(
         _spec(tmp_path, "", argv=(sys.executable, "entry.py")),
@@ -580,7 +795,8 @@ def test_absolute_nested_project_script_is_candidate_bound_regression(
                 "import subprocess, sys\n"
                 "from pathlib import Path\n"
                 "SERVER_ROOT = Path(__file__).resolve().parents[1]\n"
-                f"assert SERVER_ROOT == Path({str(project_root)!r})\n"
+                f"assert SERVER_ROOT != Path({str(project_root)!r})\n"
+                "assert SERVER_ROOT.name == 'candidate-source'\n"
                 f"subprocess.run([sys.executable, str(SERVER_ROOT / 'scripts' / 'analyze_google_live_log.py'), {str(tmp_path / 'journey.json')!r}], check=True)\n"
             ),
             "scripts/analyze_google_live_log.py": (
@@ -591,7 +807,7 @@ def test_absolute_nested_project_script_is_candidate_bound_regression(
             ),
         }
     )
-    monkeypatch.setattr(runner, "_load_candidate_python_archive", lambda _sha: archive)
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
     execute_and_record(
         _spec(tmp_path, "", argv=(sys.executable, "scripts/google_live_robot_soak.py")),
         provenance=tmp_path / "commands.jsonl",
@@ -619,7 +835,7 @@ def test_nested_python_script_outside_approved_roots_fails_closed(
             )
         }
     )
-    monkeypatch.setattr(runner, "_load_candidate_python_archive", lambda _sha: archive)
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
 
     result = execute_and_record(
         _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
@@ -649,9 +865,7 @@ def test_flagged_relative_python_script_executes_candidate_git_source(
             )
         }
     )
-    monkeypatch.setattr(
-        runner, "_load_candidate_python_archive", lambda _sha: archive, raising=False
-    )
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
 
     execute_and_record(
         _spec(tmp_path, "", argv=(sys.executable, python_flag, "entry.py")),
