@@ -3091,6 +3091,23 @@ def test_owned_cleanup_rejects_child_swap_immediately_before_rmdir(
     gate._remove_owned_tree(root)
 
 
+@pytest.mark.parametrize("link_count", [2, 3])
+def test_owned_cleanup_removes_regular_file_links_wholly_inside_tree(
+    tmp_path: Path, link_count: int,
+) -> None:
+    root = tmp_path / "owned-root"
+    root.mkdir()
+    first = root / "linked-0.txt"
+    first.write_text("owned", encoding="utf-8")
+    for index in range(1, link_count):
+        os.link(first, root / f"linked-{index}.txt")
+    identity = gate._owned_tree_identity(root)
+
+    assert gate._remove_owned_tree(root, identity) is True
+    assert not root.exists()
+    assert not list(root.parent.glob(".course-mode-cleanup-*"))
+
+
 @pytest.mark.parametrize("leaf_type", ["file", "symlink"])
 def test_owned_cleanup_rejects_leaf_swap_at_unlink(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, leaf_type: str,

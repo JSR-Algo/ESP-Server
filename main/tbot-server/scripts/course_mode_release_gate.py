@@ -916,11 +916,21 @@ def _remove_owned_tree(root: Path, expected_identity: tuple[int, int] | None = N
                 or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
             ):
                 raise _StagingIdentityChanged("staging leaf changed before removal")
+            pre_unlink_link_count = None
+            if stat.S_ISREG(opened.st_mode):
+                pre_unlink_link_count = os.fstat(leaf_fd).st_nlink
+                if pre_unlink_link_count <= 0:
+                    raise _StagingIdentityChanged("staging leaf link count changed")
             os.unlink(quarantine, dir_fd=directory_fd)
             try:
                 os.stat(quarantine, dir_fd=directory_fd, follow_symlinks=False)
             except FileNotFoundError:
-                if os.fstat(leaf_fd).st_nlink != 0:
+                post_unlink_link_count = os.fstat(leaf_fd).st_nlink
+                if (
+                    post_unlink_link_count != pre_unlink_link_count - 1
+                    if pre_unlink_link_count is not None
+                    else post_unlink_link_count != 0
+                ):
                     raise _StagingIdentityChanged("staging leaf moved during removal")
             else:
                 raise _StagingIdentityChanged("staging leaf path recreated")
