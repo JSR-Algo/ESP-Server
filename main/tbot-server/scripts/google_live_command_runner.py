@@ -110,8 +110,9 @@ except BaseException:
 """
 _GIT_SOURCE_EXEC = """import importlib.machinery, importlib.util, os, subprocess, sys
 bootstrap_path = os.path.abspath(sys.argv[0])
-source_root, original_root, project_root, script_relative, original_file = sys.argv[1:6]
-script_arguments = sys.argv[6:]
+source_root, original_root, project_root, script_relative, original_file, dependency_roots_json = sys.argv[1:7]
+dependency_roots = __import__('json').loads(dependency_roots_json)
+script_arguments = sys.argv[7:]
 class BlockedProjectPath:
     @staticmethod
     def find_spec(fullname, target=None):
@@ -159,9 +160,13 @@ class CandidateSourceFinder:
         return None
 sys.meta_path.insert(0, CandidateSourceFinder())
 sys.path_importer_cache[original_root] = BlockedProjectPath()
-sys.path[:] = [original_root, *[
-    item for item in sys.path if item not in {"", source_root, original_root}
-]]
+if dependency_roots:
+    sys.path[:] = [source_root, *dependency_roots,
+        __import__('sysconfig').get_paths()['stdlib'],
+        __import__('sysconfig').get_paths()['platstdlib']]
+else:
+    sys.path[:] = [source_root, *[item for item in sys.path if item and item != original_root]]
+os.environ['PYTHONNOUSERSITE'] = '1'
 original_popen = subprocess.Popen
 def python_script_index(arguments):
     no_value = {"-b", "-B", "-d", "-E", "-i", "-I", "-O", "-OO", "-P", "-q", "-R", "-s", "-S", "-u", "-v", "-V", "-x"}
@@ -215,6 +220,7 @@ def candidate_popen(arguments, *args, **kwargs):
             arguments = [
                 arguments[0], *arguments[1:script_index], bootstrap_path,
                 source_root, child_original_root, project_root, child_relative, child_file,
+                dependency_roots_json,
                 *arguments[script_index + 1:]
             ]
         else:
@@ -488,6 +494,7 @@ def _parse_runtime_closure_manifest(
         not isinstance(value, dict)
         or set(value)
         != {
+            "distributions",
             "limits",
             "platform",
             "resourceInventorySha256",
@@ -535,6 +542,48 @@ def _parse_runtime_closure_manifest(
         or limits["maxPathDepth"] > 64
     ):
         raise ValueError("runtime closure limits are invalid")
+    distributions = value.get("distributions")
+    if not isinstance(distributions, list) or len(distributions) > 128:
+        raise ValueError("runtime closure distributions are invalid")
+    distribution_names: list[str] = []
+    for distribution in distributions:
+        if not isinstance(distribution, dict) or set(distribution) != {
+            "fileCount", "files", "importRoots", "name", "root", "totalBytes", "version"
+        }:
+            raise ValueError("runtime closure distributions are invalid")
+        name, version, root = distribution.get("name"), distribution.get("version"), distribution.get("root")
+        if (not isinstance(name, str) or not name or not isinstance(version, str) or not version
+                or not isinstance(root, str) or not Path(root).is_absolute()):
+            raise ValueError("runtime closure distribution root is invalid")
+        roots = distribution.get("importRoots")
+        if (not isinstance(roots, list) or not roots or any(
+            not isinstance(item, str) or not item or "." in item or "/" in item for item in roots
+        ) or roots != sorted(set(roots))):
+            raise ValueError("runtime closure import roots are invalid")
+        files = distribution.get("files")
+        if not isinstance(files, list) or not files or len(files) > 10000:
+            raise ValueError("runtime closure distribution files are invalid")
+        paths: list[str] = []
+        total = 0
+        for item in files:
+            if not isinstance(item, dict) or set(item) != {"path", "sha256", "size"}:
+                raise ValueError("runtime closure distribution files are invalid")
+            path = item.get("path")
+            if (not isinstance(path, str) or not path or Path(path).is_absolute()
+                    or any(part in {"", ".", ".."} for part in Path(path).parts)
+                    or "\\" in path or SHA256.fullmatch(item.get("sha256", "")) is None
+                    or type(item.get("size")) is not int or item["size"] < 0):
+                raise ValueError("runtime closure distribution file is invalid")
+            if path.endswith(".pth") or "/direct_url.json" in path:
+                raise ValueError("runtime closure rejects editable or site injection")
+            paths.append(path); total += item["size"]
+        if paths != sorted(paths) or len(paths) != len(set(paths)):
+            raise ValueError("runtime closure distribution files are not sorted or unique")
+        if distribution["fileCount"] != len(files) or distribution["totalBytes"] != total:
+            raise ValueError("runtime closure distribution totals are invalid")
+        distribution_names.append(name.lower().replace("-", "_"))
+    if distribution_names != sorted(distribution_names) or len(distribution_names) != len(set(distribution_names)):
+        raise ValueError("runtime closure distributions are not sorted or unique")
     resources = value.get("resources")
     if (
         not isinstance(resources, list)
@@ -673,6 +722,40 @@ def _load_runtime_closure_manifest(
         ):
             raise ValueError("candidate repository changed during closure validation")
     return manifest
+
+
+def _materialize_distribution_closure(
+    manifest: Mapping[str, Any], destination: Path
+) -> list[str]:
+    destination.mkdir(mode=0o700)
+    for distribution in manifest.get("distributions", []):
+        root = Path(distribution["root"]).resolve(strict=True)
+        for item in distribution["files"]:
+            path = root.joinpath(*item["path"].split("/"))
+            if not path.is_file() or path.is_symlink() or path.stat().st_size != item["size"]:
+                raise ValueError("runtime closure distribution file changed")
+            data = path.read_bytes()
+            if hashlib.sha256(data).hexdigest() != item["sha256"]:
+                raise ValueError("runtime closure distribution file digest mismatch")
+            target = destination.joinpath(*item["path"].split("/"))
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if target.exists():
+                if target.read_bytes() != data:
+                    raise ValueError("runtime closure distributions overlap")
+                continue
+            descriptor = os.open(
+                target,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o400,
+            )
+            try:
+                offset = 0
+                while offset < len(data):
+                    offset += os.write(descriptor, data[offset:])
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+    return [str(destination.resolve(strict=True))]
 
 
 def _immutable_identity(value: Mapping[str, str] | None) -> Mapping[str, str]:
@@ -1416,6 +1499,7 @@ def _git_bound_python_argv(
     bootstrap_path: Path,
     script_relative: str,
     script_index: int,
+    dependency_roots: list[str] | None = None,
 ) -> tuple[str, ...]:
     source_root = source_root.resolve(strict=True)
     bootstrap_path = bootstrap_path.resolve(strict=True)
@@ -1437,6 +1521,7 @@ def _git_bound_python_argv(
         str(project_root),
         script_relative,
         str(original_file),
+        json.dumps(dependency_roots or [], separators=(",", ":")),
         *runtime_argv[script_index + 1 :],
     )
 
@@ -3770,6 +3855,9 @@ def execute_and_record(
                             "candidate-bootstrap.py",
                             _GIT_SOURCE_EXEC.encode(),
                         )
+                        dependency_roots = _materialize_distribution_closure(
+                            closure_manifest, snapshot_root / "dependencies"
+                        )
                         runtime_argv = _git_bound_python_argv(
                             spec,
                             runtime_argv,
@@ -3777,6 +3865,7 @@ def execute_and_record(
                             bootstrap_path,
                             script_relative,
                             script_index,
+                            dependency_roots,
                         )
                     executable_snapshot = executable_path.stat()
                     if cancel_event is not None and cancel_event.is_set():

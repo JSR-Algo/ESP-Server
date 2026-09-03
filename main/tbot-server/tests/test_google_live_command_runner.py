@@ -85,6 +85,7 @@ def _write_report_code(payload: str = "ok") -> str:
 def _runtime_closure_manifest(resources: list[dict[str, object]]) -> dict[str, object]:
     inventory = json.dumps(resources, sort_keys=True, separators=(",", ":")).encode()
     return {
+        "distributions": [],
         "limits": {
             "maxPathDepth": 8,
             "maxResourceBytes": 4096,
@@ -117,6 +118,56 @@ def test_runtime_closure_manifest_parser_accepts_canonical_inventory() -> None:
     payload = _canonical_json(_runtime_closure_manifest(resources))
     parsed = runner._parse_runtime_closure_manifest(payload, platform_name="darwin-arm64-cp314")
     assert parsed["resources"][0]["path"] == "config/server.yaml"
+
+
+def test_runtime_closure_manifest_binds_dependency_distribution_files() -> None:
+    import scripts.google_live_command_runner as runner
+
+    resources = [
+        {"gitBlob": "1" * 40, "kind": "config", "path": "config/server.yaml", "sha256": "a" * 64, "size": 2},
+    ]
+    manifest = _runtime_closure_manifest(resources)
+    manifest["distributions"] = [{
+        "name": "websockets",
+        "version": "14.2",
+        "importRoots": ["websockets"],
+        "root": "/immutable/site-packages",
+        "fileCount": 1,
+        "totalBytes": 2,
+        "files": [{"path": "websockets/__init__.py", "sha256": "b" * 64, "size": 2}],
+    }]
+    payload = _canonical_json(manifest)
+    parsed = runner._parse_runtime_closure_manifest(payload, platform_name="darwin-arm64-cp314")
+    assert parsed["distributions"][0]["name"] == "websockets"
+
+
+def test_runtime_closure_manifest_rejects_unapproved_import_root() -> None:
+    import scripts.google_live_command_runner as runner
+
+    resources = [{"gitBlob": "1" * 40, "kind": "python", "path": "scripts/example.py", "sha256": "b" * 64, "size": 3}]
+    manifest = _runtime_closure_manifest(resources)
+    manifest["distributions"] = [{
+        "name": "websockets", "version": "14.2", "importRoots": ["websockets"],
+        "root": "relative/site-packages", "fileCount": 1, "totalBytes": 2,
+        "files": [{"path": "websockets/__init__.py", "sha256": "b" * 64, "size": 2}],
+    }]
+    with pytest.raises(ValueError, match="distribution root"):
+        runner._parse_runtime_closure_manifest(_canonical_json(manifest), platform_name="darwin-arm64-cp314")
+
+
+@pytest.mark.parametrize("path", ["ambient.pth", "websockets-14.2.dist-info/direct_url.json"])
+def test_runtime_closure_manifest_rejects_pth_and_editable_install(path: str) -> None:
+    import scripts.google_live_command_runner as runner
+
+    resources = [{"gitBlob": "1" * 40, "kind": "python", "path": "scripts/example.py", "sha256": "b" * 64, "size": 3}]
+    manifest = _runtime_closure_manifest(resources)
+    manifest["distributions"] = [{
+        "name": "websockets", "version": "14.2", "importRoots": ["websockets"],
+        "root": "/immutable/site-packages", "fileCount": 1, "totalBytes": 2,
+        "files": [{"path": path, "sha256": "b" * 64, "size": 2}],
+    }]
+    with pytest.raises(ValueError, match="injection|editable"):
+        runner._parse_runtime_closure_manifest(_canonical_json(manifest), platform_name="darwin-arm64-cp314")
 
 
 def test_checked_runtime_closure_inventory_covers_existing_approved_commands() -> None:

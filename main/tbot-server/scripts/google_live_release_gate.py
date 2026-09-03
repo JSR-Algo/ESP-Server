@@ -34,7 +34,11 @@ from scripts.google_live_deterministic_evidence import (
     parse_pytest_runtime_manifest,
     snapshot_output_parent,
 )
-from scripts.google_live_command_runner import _read_committed_pair_at, parse_provenance
+from scripts.google_live_command_runner import (
+    _load_runtime_closure_manifest,
+    _read_committed_pair_at,
+    parse_provenance,
+)
 from scripts.google_live_reliability import (
     SCHEMA_VERSION,
     forbidden_report_fields,
@@ -1224,6 +1228,11 @@ def aggregate_release_evidence(
         trusted_executable = parse_trusted_python_executable_manifest(
             trusted_executable_content
         )
+        trusted_runtime_closure = _load_runtime_closure_manifest(
+            str(expected_identity.get("gitSha", ""))
+        )
+        if trusted_runtime_closure["runtime"]["pythonMajorMinor"] != trusted_runtime["pythonMajorMinor"]:
+            raise ValueError("runtime closure does not match deterministic runtime")
     except (OSError, RuntimeError, UnicodeError, ValueError):
         trusted_manifest_path = None
         trusted_manifest_content = None
@@ -1231,6 +1240,7 @@ def aggregate_release_evidence(
         trusted_runtime = None
         trusted_executable_content = None
         trusted_executable = None
+        trusted_runtime_closure = None
         failures.append(_failure("DETERMINISTIC_TRUSTED_MANIFEST_INVALID", "deterministic"))
     support_contents: dict[str, bytes] = {}
     supplied_support_paths = [

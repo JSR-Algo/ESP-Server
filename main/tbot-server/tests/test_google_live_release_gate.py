@@ -132,6 +132,12 @@ def _pin_release_manifest_loader(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda _expected_git_sha: PYTHON_EXECUTABLE_MANIFEST,
         raising=False,
     )
+    monkeypatch.setattr(
+        release_gate,
+        "_load_runtime_closure_manifest",
+        lambda _expected_git_sha: {"runtime": {"pythonMajorMinor": PYTEST_RUNTIME["pythonMajorMinor"]}},
+        raising=False,
+    )
 
 
 def _websocket_report() -> dict:
@@ -177,6 +183,20 @@ def _websocket_report() -> dict:
     }
 
 
+def test_release_rejects_invalid_dependency_closure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _, checksum_manifest = _write_evidence(tmp_path)
+    monkeypatch.setattr(
+        release_gate,
+        "_load_runtime_closure_manifest",
+        lambda _sha: (_ for _ in ()).throw(ValueError("dependency drift")),
+    )
+    verdict = release_gate.produce_release_verdict(
+        IDENTITY, paths, checksum_manifest, tmp_path / "release.json"
+    )
+    assert verdict["status"] == "FAIL"
+    assert any(item["code"] == "DETERMINISTIC_TRUSTED_MANIFEST_INVALID" for item in verdict["failures"])
 def _reports(test_count: int = len(CANONICAL_NODES)) -> dict[str, dict]:
     physical_audit = _PHYSICAL_CASE._candidate_audit(
         _PHYSICAL_CASE._candidate_physical_log()
