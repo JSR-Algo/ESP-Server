@@ -12,7 +12,6 @@ import argparse
 import base64
 import os
 import tempfile
-import contextlib
 from pathlib import Path
 from typing import Any, Callable
 

@@ -219,3 +219,19 @@ def test_composition_invokes_existing_audit_and_writes_bound_report(tmp_path: Pa
     assert "websocket" not in bounded.read_text()
     assert json.loads(server_output.read_text()) == report["logEvidence"]
     assert json.loads(output.read_text())["candidateSoakEvidence"] == soak
+
+
+def test_default_bounded_window_is_ephemeral(tmp_path: Path):
+    log = tmp_path / "server.log"
+    log.write_text("private transcript must not persist\n")
+    output = tmp_path / "physical" / "report.json"
+    compose_physical_report(
+        raw_server_log=log, journey_id="physical.run",
+        candidate_soak_report={"status": "PASS"}, candidate_identity=IDENTITY,
+        device_id="device-1", client_id="client-1", output=output,
+        selector_fn=lambda lines, journey: lines,
+        analyzer_fn=lambda path: {"status": "PASS", "evidenceScope": {"journeyId": "physical.run"}, "logWindow": {"windowId": "physical.run", "start": "2026-01-01T00:00:00Z", "end": "2026-01-01T00:01:00Z"}},
+        audit_fn=lambda text, **kwargs: {"passed": True},
+    )
+    assert not (output.parent / "server-window.log").exists()
+    assert "private transcript" not in "".join(path.read_text(errors="ignore") for path in output.parent.iterdir())
