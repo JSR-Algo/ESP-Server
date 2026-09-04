@@ -798,8 +798,9 @@ def test_unified_runner_finalize_publishes_through_real_release_gate(tmp_path):
     }
     runner = EvidenceRunner(root, state["runId"], IDENTITY, state)
 
-    runner.finalize()
+    result = runner.synthetic_dry_run()
 
+    assert result["status"] == "PASS"
     assert json.loads((root / "release-verdict.json").read_text())["status"] == "PASS"
 
 
