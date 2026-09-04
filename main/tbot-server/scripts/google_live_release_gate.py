@@ -40,6 +40,7 @@ from scripts.google_live_command_runner import (
     _load_runtime_closure_manifest,
     _read_committed_pair_at,
     parse_provenance,
+    render_commands_projection,
 )
 from scripts.google_live_reliability import (
     SCHEMA_VERSION,
@@ -70,6 +71,8 @@ REQUIRED_LAYERS = (
 )
 DETERMINISTIC_SUPPORTS = ("deterministic_manifest", "deterministic_junit")
 COMMAND_PROVENANCE_SUPPORT = "command_provenance"
+COMMAND_PROJECTION_SUPPORT = "command_projection"
+TIMELINE_INDEX_SUPPORT = "timeline_index"
 RUNTIME_CLOSURE_SUPPORT = "runtime_closure_manifest"
 REQUIRED_SUPPORTS = (*DETERMINISTIC_SUPPORTS, RUNTIME_CLOSURE_SUPPORT, COMMAND_PROVENANCE_SUPPORT)
 REQUIRED_COMMAND_IDS = (
@@ -1259,7 +1262,11 @@ def aggregate_release_evidence(
         validate_expected_identity(expected_identity)
     except ValueError:
         failures.append(_failure("EXPECTED_CANDIDATE_IDENTITY_INVALID"))
-    for name in sorted(set(layer_paths) - set(REQUIRED_LAYERS) - set(REQUIRED_SUPPORTS)):
+    allowed_supports = set(REQUIRED_SUPPORTS) | {
+        COMMAND_PROJECTION_SUPPORT,
+        TIMELINE_INDEX_SUPPORT,
+    }
+    for name in sorted(set(layer_paths) - set(REQUIRED_LAYERS) - allowed_supports):
         failures.append(_failure("UNEXPECTED_LAYER", name))
 
     for layer in REQUIRED_LAYERS:
@@ -1630,6 +1637,79 @@ def aggregate_release_evidence(
             raise ValueError
     except (KeyError, OSError, RuntimeError, TypeError, UnicodeError, ValueError):
         failures.append(_failure("COMMAND_PROVENANCE_INVALID"))
+    orchestration_supports_absent = (
+        layer_paths.get(COMMAND_PROJECTION_SUPPORT) is None
+        and layer_paths.get(TIMELINE_INDEX_SUPPORT) is None
+    )
+    try:
+        if orchestration_supports_absent:
+            raise KeyError("optional orchestration supports absent")
+        if layer_paths.get(COMMAND_PROJECTION_SUPPORT) is None or layer_paths.get(TIMELINE_INDEX_SUPPORT) is None:
+            raise ValueError
+        projection_path = Path(layer_paths[COMMAND_PROJECTION_SUPPORT])
+        timeline_path = Path(layer_paths[TIMELINE_INDEX_SUPPORT])
+        support_paths = [
+            Path(layer_paths[name])
+            for name in REQUIRED_SUPPORTS
+            if layer_paths.get(name) is not None
+        ]
+        if any(
+            _same_file(left, right)
+            for index, left in enumerate(support_paths)
+            for right in support_paths[index + 1 :]
+        ):
+            raise ValueError
+        projection = (
+            input_contents[COMMAND_PROJECTION_SUPPORT]
+            if input_contents is not None
+            else projection_path.read_bytes()
+        )
+        timeline = (
+            input_contents[TIMELINE_INDEX_SUPPORT]
+            if input_contents is not None
+            else timeline_path.read_bytes()
+        )
+        for name, content in (
+            (COMMAND_PROJECTION_SUPPORT, projection),
+            (TIMELINE_INDEX_SUPPORT, timeline),
+        ):
+            checksum = expected_checksums.get(name)
+            path = Path(layer_paths[name])
+            opened = path.lstat()
+            if (
+                type(checksum) is not str
+                or SHA256.fullmatch(checksum) is None
+                or path.is_symlink()
+                or not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or not hmac.compare_digest(hashlib.sha256(content).hexdigest(), checksum)
+            ):
+                raise ValueError
+        if projection != render_commands_projection(entries):
+            raise ValueError
+        if _junit_value_is_sensitive(projection.decode("ascii", errors="strict")):
+            raise ValueError
+        timeline_rows = []
+        for raw_line in timeline.decode("ascii", errors="strict").splitlines():
+            row = json.loads(raw_line)
+            if (
+                not isinstance(row, dict)
+                or not {"layer", "artifact"} <= set(row)
+                or not set(row) <= {
+                    "layer", "artifact", "journeyId", "windowId", "startedAtUtc", "endedAtUtc"
+                }
+                or row["layer"] not in REQUIRED_LAYERS
+                or row["artifact"]
+                != Path(layer_paths[row["layer"]]).relative_to(timeline_path.parent).as_posix()
+                or forbidden_report_fields(row)
+            ):
+                raise ValueError
+            timeline_rows.append(row)
+        if [row["layer"] for row in timeline_rows] != list(REQUIRED_LAYERS):
+            raise ValueError
+    except (KeyError, OSError, TypeError, UnicodeError, ValueError, json.JSONDecodeError):
+        if not orchestration_supports_absent:
+            failures.append(_failure("ORCHESTRATION_SUPPORT_INVALID"))
     return {
         "schemaVersion": RELEASE_SCHEMA_VERSION,
         "status": "PASS" if not failures else "FAIL",

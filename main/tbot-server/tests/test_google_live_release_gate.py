@@ -734,6 +734,49 @@ def _write_evidence(
     return paths, checksums, manifest
 
 
+def _add_orchestration_supports(paths, checksums):
+    root = paths["command_provenance"].parent
+    projection = root / "commands.txt"
+    projection.write_bytes(
+        render_commands_projection(
+            [
+                json.loads(line)
+                for line in paths["command_provenance"].read_text().splitlines()
+            ]
+        )
+    )
+    timeline = root / "timeline.log"
+    timeline.write_text(
+        "".join(
+            json.dumps(
+                {"layer": layer, "artifact": paths[layer].relative_to(root).as_posix()},
+                sort_keys=True,
+                separators=(",", ":"),
+            ) + "\n"
+            for layer in release_gate.REQUIRED_LAYERS
+        ),
+        encoding="utf-8",
+    )
+    for name, path in (("command_projection", projection), ("timeline_index", timeline)):
+        paths[name] = path
+        checksums[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_release_accepts_bound_orchestration_supports(tmp_path):
+    paths, checksums, _ = _write_evidence(tmp_path)
+    _add_orchestration_supports(paths, checksums)
+    assert aggregate_release_evidence(IDENTITY, paths, checksums)["status"] == "PASS"
+
+
+@pytest.mark.parametrize("support", ["command_projection", "timeline_index"])
+def test_release_rejects_mutated_orchestration_supports(tmp_path, support):
+    paths, checksums, _ = _write_evidence(tmp_path)
+    _add_orchestration_supports(paths, checksums)
+    paths[support].write_text("private transcript secret\n", encoding="utf-8")
+    checksums[support] = hashlib.sha256(paths[support].read_bytes()).hexdigest()
+    assert aggregate_release_evidence(IDENTITY, paths, checksums)["status"] == "FAIL"
+
+
 def _rewrite(path: Path, mutate) -> None:
     report = json.loads(path.read_text(encoding="utf-8"))
     mutate(report)
