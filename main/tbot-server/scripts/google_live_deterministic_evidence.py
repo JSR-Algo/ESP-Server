@@ -1826,6 +1826,17 @@ def _snapshot_pytest_arguments(candidate_root: Path, arguments: Sequence[str]) -
     return resolved
 
 
+def _bind_candidate_tests_into_scratch(candidate_root: Path, scratch_root: Path) -> None:
+    candidate_tests = (candidate_root / "tests").resolve(strict=True)
+    scratch = scratch_root.resolve(strict=True)
+    if not candidate_tests.is_dir() or not scratch.is_dir():
+        raise RuntimeError("pytest scratch binding is invalid")
+    test_link = scratch / "tests"
+    test_link.symlink_to(candidate_tests, target_is_directory=True)
+    if not test_link.is_symlink() or test_link.resolve(strict=True) != candidate_tests:
+        raise RuntimeError("pytest scratch binding is invalid")
+
+
 def _git_output(repo_root: Path, *arguments: str) -> bytes:
     return _trusted_git_output(repo_root, *arguments)
 
@@ -2030,6 +2041,8 @@ def _produce(
             else nullcontext(str(candidate_root))
         )
         with working_directory as pytest_cwd:
+            if outer_execution_context is not None:
+                _bind_candidate_tests_into_scratch(candidate_root, Path(pytest_cwd))
             with _private_pytest_runtime(
                 repo_root,
                 identity["gitSha"],
@@ -2081,6 +2094,8 @@ def _produce(
                 else nullcontext(str(candidate_root))
             )
             with working_directory as pytest_cwd:
+                if outer_execution_context is not None:
+                    _bind_candidate_tests_into_scratch(candidate_root, Path(pytest_cwd))
                 with _private_pytest_runtime(
                     repo_root,
                     identity["gitSha"],

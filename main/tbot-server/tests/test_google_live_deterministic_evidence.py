@@ -131,6 +131,21 @@ def test_exact_collection_rejects_node_drift(mutation: str) -> None:
         deterministic.require_exact_nodes(observed, expected, label="collection")
 
 
+def test_pytest_scratch_resolves_relative_test_paths_from_candidate_snapshot(
+    tmp_path: Path,
+) -> None:
+    candidate_root = tmp_path / "candidate"
+    candidate_tests = candidate_root / "tests"
+    candidate_tests.mkdir(parents=True)
+    scratch_root = tmp_path / "scratch"
+    scratch_root.mkdir()
+
+    deterministic._bind_candidate_tests_into_scratch(candidate_root, scratch_root)
+
+    assert (scratch_root / "tests").is_symlink()
+    assert (scratch_root / "tests").resolve(strict=True) == candidate_tests.resolve()
+
+
 def test_plugin_adds_exactly_one_nodeid_property() -> None:
     class Item:
         nodeid = "tests/test_a.py::test_one"

@@ -266,6 +266,7 @@ def test_checked_runtime_closure_manifest_parses() -> None:
     }
     resources = {item["path"]: item for item in parsed["resources"]}
     assert resources["main/tbot-server/pyproject.toml"]["kind"] == "config"
+    assert resources["main/tbot-server/docs/lesson-master-prompts.md"]["kind"] == "config"
 
 
 @pytest.mark.parametrize("module", ["yaml", "websockets", "opuslib_next", "numpy", "google.genai"])
