@@ -41,7 +41,6 @@ def _runner(tmp_path: Path, run_id: str = "20260904T010203Z") -> EvidenceRunner:
         "client_id": "client-1",
         "journey_id": "journey-1",
         "server_log": str(runner.root / "server.log"),
-        "config_json": "{}",
         "expected_candidate_json": str(candidate_identity),
         "evidence_control_url": "http://127.0.0.1/internal",
         "baseline_report": str(runner.root / "baseline/report.json"),
@@ -195,6 +194,30 @@ def test_command_specs_preserve_exact_order_and_secret_assignment(tmp_path: Path
     ]
     assert specs[5].stdin_source == "protected_candidate_plan"
     assert specs[7].stdin_source == "protected_transcript_plan"
+
+
+def test_command_specs_use_only_the_bound_config_fingerprint(tmp_path: Path):
+    runner = _runner(tmp_path)
+
+    specs = {spec.command_id: spec for spec in runner.command_specs()}
+    for command_id in (
+        "websocket.transport",
+        "candidate_soak.produce",
+        "candidate_soak.replay",
+    ):
+        argv = specs[command_id].argv
+        assert "--config-json" not in argv
+        index = argv.index("--config-fingerprint")
+        assert argv[index + 1] == IDENTITY["configFingerprint"]
+
+
+def test_long_running_operator_commands_have_bounded_operational_timeouts(
+    tmp_path: Path,
+):
+    specs = {spec.command_id: spec for spec in _runner(tmp_path).command_specs()}
+
+    assert specs["candidate_soak.produce"].timeout_sec >= 1800 + 300
+    assert specs["physical.capture_and_audit"].timeout_sec > 300
 
 
 def test_live_server_log_is_runtime_source_not_immutable_command_input(tmp_path: Path):

@@ -156,6 +156,17 @@ class VoiceModeWebsocketAudioBargeinTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "journey_id"):
             audio_bargein._evidence_context(self._args(journey_id="hành-trình"))
 
+    def test_evidence_context_accepts_prevalidated_config_fingerprint(self):
+        audio_bargein = importlib.import_module("scripts.voice_mode_websocket_audio_bargein")
+        fingerprint = "sha256:" + "c" * 64
+
+        journey_id, identity = audio_bargein._evidence_context(
+            self._args(config_json=None, config_fingerprint=fingerprint)
+        )
+
+        self.assertEqual(journey_id, "bargein-journey-1")
+        self.assertEqual(identity["configFingerprint"], fingerprint)
+
     def test_finalized_transition_chain_accepts_exact_ordered_reconnects(self):
         audio_bargein = importlib.import_module(
             "scripts.voice_mode_websocket_audio_bargein"

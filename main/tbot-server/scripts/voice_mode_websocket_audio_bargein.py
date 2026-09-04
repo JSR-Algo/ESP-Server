@@ -316,6 +316,17 @@ def _evidence_context(args):
     journey_id = str(getattr(args, "journey_id", "") or "").strip()
     if SAFE_JOURNEY_RE.fullmatch(journey_id) is None:
         raise ValueError("journey_id must be 1-64 safe identifier characters")
+    config_fingerprint = getattr(args, "config_fingerprint", None)
+    if config_fingerprint is not None:
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", config_fingerprint) is None:
+            raise ValueError("config_fingerprint must be a SHA-256 identity")
+        return journey_id, {
+            "gitSha": str(getattr(args, "candidate_git_sha", "")),
+            "imageDigest": str(getattr(args, "candidate_image_digest", "")),
+            "firmwareIdentity": str(getattr(args, "firmware_identity", "")),
+            "configFingerprint": config_fingerprint,
+            "fixtureSha256": str(getattr(args, "fixture_sha256", "")),
+        }
     try:
         config = json.loads(getattr(args, "config_json", ""))
     except json.JSONDecodeError as exc:
@@ -587,7 +598,9 @@ def main():
     parser.add_argument("--candidate-git-sha", required=True)
     parser.add_argument("--candidate-image-digest", required=True)
     parser.add_argument("--firmware-identity", required=True)
-    parser.add_argument("--config-json", required=True)
+    config_identity = parser.add_mutually_exclusive_group(required=True)
+    config_identity.add_argument("--config-json")
+    config_identity.add_argument("--config-fingerprint")
     parser.add_argument("--fixture-sha256", required=True)
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()

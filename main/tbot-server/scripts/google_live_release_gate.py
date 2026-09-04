@@ -171,8 +171,8 @@ def _trusted_command_argv_patterns(
         "<evidence:websocket-e2e/server-report.json>",
         "--lesson-manifest",
         "<evidence:lesson-manifest.json>",
-        "--config-json",
-        None,
+        "--config-fingerprint",
+        str(identity["configFingerprint"]),
     )
     return {
         "deterministic.produce": (
@@ -214,8 +214,8 @@ def _trusted_command_argv_patterns(
             "--journey-id",
             None,
             *candidate[:6],
-            "--config-json",
-            None,
+            "--config-fingerprint",
+            str(identity["configFingerprint"]),
             *candidate[6:],
             "--report",
             "<evidence:websocket-e2e/transport.json>",
@@ -370,7 +370,11 @@ def _trusted_command_specs(identity: Mapping[str, Any]) -> dict[str, TrustedComm
                     else None
                 )
             ),
-            timeout_sec=300.0,
+            timeout_sec=(
+                2400.0
+                if command_id == "candidate_soak.produce"
+                else (360.0 if command_id == "physical.capture_and_audit" else 300.0)
+            ),
             cleanup_grace_sec=2.0,
         )
         for command_id in REQUIRED_COMMAND_IDS

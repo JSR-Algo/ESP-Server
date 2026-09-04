@@ -2042,6 +2042,17 @@ def _read_json_evidence(value, field):
 
 
 def _candidate_identity(args):
+    config_fingerprint = getattr(args, "config_fingerprint", None)
+    if config_fingerprint is not None:
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", config_fingerprint) is None:
+            raise ValueError("config_fingerprint must be a SHA-256 identity")
+        return {
+            "gitSha": str(args.candidate_git_sha),
+            "imageDigest": str(args.candidate_image_digest),
+            "firmwareIdentity": str(args.firmware_identity),
+            "configFingerprint": config_fingerprint,
+            "fixtureSha256": str(args.fixture_sha256),
+        }
     try:
         config = json.loads(args.config_json)
     except (AttributeError, json.JSONDecodeError) as exc:
@@ -5265,6 +5276,7 @@ def _build_argument_parser():
     parser.add_argument("--firmware-identity", default=None)
     parser.add_argument("--fixture-sha256", default=None)
     parser.add_argument("--config-json", default="{}")
+    parser.add_argument("--config-fingerprint", default=None)
     parser.add_argument("--baseline-report", type=Path, default=None)
     parser.add_argument("--real-api-report", type=Path, default=None)
     parser.add_argument("--transport-report", type=Path, default=None)

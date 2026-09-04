@@ -104,6 +104,14 @@ REAL_LOAD_TRUSTED_PYTHON_EXECUTABLE_MANIFEST = (
 )
 
 
+def _command_timeout(command_id: str) -> float:
+    if command_id == "candidate_soak.produce":
+        return 2400.0
+    if command_id == "physical.capture_and_audit":
+        return 360.0
+    return 300.0
+
+
 def _planned_command_argv(
     command_id: str, identity: dict = IDENTITY
 ) -> tuple[str | None, ...]:
@@ -120,12 +128,12 @@ def _planned_command_argv(
         "--correlated-transport-report", "<evidence:websocket-e2e/report.json>",
         "--log-reliability-report", "<evidence:websocket-e2e/server-report.json>",
         "--lesson-manifest", "<evidence:lesson-manifest.json>",
-        "--config-json", None,
+        "--config-fingerprint", identity["configFingerprint"],
     )
     common = {
         "deterministic.produce": (sys.executable, "scripts/google_live_deterministic_evidence.py", "--manifest", "<evidence:deterministic/node-manifest.txt>", "--junit-out", "<evidence:deterministic/pytest.xml>", "--report", "<evidence:deterministic/report.json>", *candidate[:6], "--config-fingerprint", identity["configFingerprint"], *candidate[6:]),
         "real_api.round_trip": (sys.executable, "scripts/google_live_smoke.py", "--round-trip", "--audio-file", "<evidence:fixture.wav>", "--report", "<evidence:real-api/report.json>", *candidate[:6], "--config-fingerprint", identity["configFingerprint"], *candidate[6:]),
-        "websocket.transport": (sys.executable, "scripts/voice_mode_websocket_audio_bargein.py", "--websocket-url", None, "--device-id", None, "--client-id", None, "--journey-id", None, *candidate[:6], "--config-json", None, *candidate[6:], "--report", "<evidence:websocket-e2e/transport.json>"),
+        "websocket.transport": (sys.executable, "scripts/voice_mode_websocket_audio_bargein.py", "--websocket-url", None, "--device-id", None, "--client-id", None, "--journey-id", None, *candidate[:6], "--config-fingerprint", identity["configFingerprint"], *candidate[6:], "--report", "<evidence:websocket-e2e/transport.json>"),
         "websocket.log_analysis": (sys.executable, "scripts/analyze_google_live_log.py", "--log", None, "--reliability-window", "--journey-id", None, "--out-json", "<evidence:websocket-e2e/server-report.json>"),
         "websocket.correlation": (sys.executable, "scripts/analyze_google_live_log.py", "--log", None, "--correlate-transport", "<evidence:websocket-e2e/transport.json>", "--expected-candidate-json", None, "--out-json", "<evidence:websocket-e2e/report.json>"),
         "candidate_soak.produce": (sys.executable, "scripts/google_live_robot_soak.py", "--mode", "candidate", "--produce-candidate-evidence", "<evidence:candidate-soak/journey-evidence.json>", "--evidence-control-url", None, "--server-log", None, "--run-id", None, *soak_support, *candidate),
@@ -752,7 +760,7 @@ def _write_evidence(
                     "cleanupGraceSec": 2.0,
                     "expectedExitCodes": [0, 1] if command_id == "websocket.transport" else [0],
                     "satisfied": True,
-                    "timeoutSec": 300.0,
+                    "timeoutSec": _command_timeout(command_id),
                 },
             }
         command["specSha256"] = release_gate._recorded_command_spec_digest(
@@ -982,7 +990,7 @@ def test_release_accepts_planned_immutable_command_specs(
                 else None
             )
         ),
-        timeout_sec=300.0,
+        timeout_sec=_command_timeout(command_id),
         cleanup_grace_sec=2.0,
     )
     canonical = _canonical_spec(spec, tmp_path)
@@ -999,7 +1007,7 @@ def test_release_accepts_planned_immutable_command_specs(
         "terminalPolicy": {
             "cleanupGraceSec": 2.0,
             "expectedExitCodes": [0, 1] if command_id == "websocket.transport" else [0],
-            "timeoutSec": 300.0,
+            "timeoutSec": _command_timeout(command_id),
         },
     }
 

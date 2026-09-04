@@ -361,6 +361,16 @@ def _args(**overrides):
     return SimpleNamespace(**values)
 
 
+def test_candidate_identity_accepts_prevalidated_config_fingerprint():
+    fingerprint = "sha256:" + "c" * 64
+
+    identity = robot_soak._candidate_identity(
+        _args(config_json=None, config_fingerprint=fingerprint)
+    )
+
+    assert identity == {**IDENTITY, "configFingerprint": fingerprint}
+
+
 def _journeys(*, mutation=None):
     sequence = 0
     last_window = None
