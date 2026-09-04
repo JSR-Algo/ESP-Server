@@ -340,6 +340,7 @@ namespace = {
     "__package__": None,
     "__cached__": None,
     "__google_live_execution_context__": {
+        "dependencyRoots": tuple(dependency_roots),
         "evidenceRoot": original_root,
         "gitSha": candidate_git_sha,
         "projectRoot": project_root,

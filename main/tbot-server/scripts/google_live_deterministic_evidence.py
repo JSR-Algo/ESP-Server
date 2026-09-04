@@ -1200,8 +1200,17 @@ def _distribution_owned_runtime_files(package_distribution: Any, root: Path) -> 
     return sorted(files)
 
 
-def _copy_trusted_pytest_packages(destination: Path, manifest: Mapping[str, Any]) -> None:
-    approved_roots = _approved_package_roots()
+def _copy_trusted_pytest_packages(
+    destination: Path,
+    manifest: Mapping[str, Any],
+    *,
+    approved_package_roots: Sequence[str] = (),
+) -> None:
+    approved_roots = (
+        [Path(path).resolve(strict=True) for path in approved_package_roots]
+        if approved_package_roots
+        else _approved_package_roots()
+    )
     destination.mkdir(mode=0o700, parents=True, exist_ok=True)
     copied_packages = set()
     for expected_distribution in manifest["distributions"]:
@@ -1687,6 +1696,7 @@ def _private_pytest_runtime(
     *,
     candidate_root: Path | None = None,
     snapshot_control_root: Path | None = None,
+    approved_package_roots: Sequence[str] = (),
 ):
     temporary = Path(tempfile.mkdtemp(prefix="google-live-pytest-runtime-"))
     try:
@@ -1721,7 +1731,11 @@ def _private_pytest_runtime(
             raise RuntimeError("trusted pytest runtime Python constraint does not match")
         variant = _runtime_platform_variant(manifest)
         packages = temporary / "packages"
-        _copy_trusted_pytest_packages(packages, manifest)
+        _copy_trusted_pytest_packages(
+            packages,
+            manifest,
+            approved_package_roots=approved_package_roots,
+        )
         native_source, native_bound = _load_native_library(variant)
         private_native = temporary / "native" / variant["nativeLibraries"][0]["basename"]
         _write_private_snapshot_file(private_native, native_bound.content)
@@ -1758,7 +1772,11 @@ def _private_pytest_runtime(
             "repo": str(candidate),
             "liveRepo": str(repo_root),
             "candidateImportNames": sorted(candidate_import_names),
-            "dependencies": [str(path) for path in _approved_package_roots()],
+            "dependencies": (
+                list(approved_package_roots)
+                if approved_package_roots
+                else [str(path) for path in _approved_package_roots()]
+            ),
             "plugin": str(plugin),
             "opusLibrary": str(private_native),
             "pycache": str(temporary / "blocked-pycache"),
@@ -1856,14 +1874,25 @@ def _produce(
     git_head: Callable[[], str] | None = None,
     approved_test_files: Sequence[str] = APPROVED_TEST_FILES,
     canonical_manifest_path: Path | None = None,
-    outer_execution_context: Mapping[str, str] | None = None,
+    outer_execution_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     repo_root = repo_root.resolve(strict=True)
     if outer_execution_context is not None:
         if (
             set(outer_execution_context)
-            != {"evidenceRoot", "gitSha", "projectRoot", "sourceRoot"}
+            != {
+                "dependencyRoots",
+                "evidenceRoot",
+                "gitSha",
+                "projectRoot",
+                "sourceRoot",
+            }
             or outer_execution_context["gitSha"] != identity.get("gitSha")
+            or not isinstance(outer_execution_context["dependencyRoots"], tuple)
+            or any(
+                type(path) is not str or not Path(path).is_absolute()
+                for path in outer_execution_context["dependencyRoots"]
+            )
             or Path(outer_execution_context["sourceRoot"]).resolve(strict=True)
             != repo_root
         ):
@@ -1873,6 +1902,11 @@ def _produce(
         ).resolve(strict=True)
     else:
         outer_evidence_root = None
+    outer_dependency_roots = (
+        outer_execution_context["dependencyRoots"]
+        if outer_execution_context is not None
+        else ()
+    )
     paths = [manifest_path, junit_out, report_path]
     bound_targets = _runner_bound_output_targets(paths)
     logical_manifest, logical_junit, logical_report = (
@@ -1974,6 +2008,7 @@ def _produce(
             identity["gitSha"],
             candidate_root=candidate_root,
             snapshot_control_root=(repo_root if outer_execution_context is not None else None),
+            approved_package_roots=outer_dependency_roots,
         ) as pytest_runtime:
             runtime_manifest_content = pytest_runtime.manifest_content
             collect = run(
@@ -2013,6 +2048,7 @@ def _produce(
                 snapshot_control_root=(
                     repo_root if outer_execution_context is not None else None
                 ),
+                approved_package_roots=outer_dependency_roots,
             ) as pytest_runtime:
                 if not secrets.compare_digest(
                     runtime_manifest_content,
@@ -2100,7 +2136,7 @@ def produce(
     git_head: Callable[[], str] | None = None,
     approved_test_files: Sequence[str] = APPROVED_TEST_FILES,
     canonical_manifest_path: Path | None = None,
-    outer_execution_context: Mapping[str, str] | None = None,
+    outer_execution_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if outer_execution_context is not None:
         return _produce(
