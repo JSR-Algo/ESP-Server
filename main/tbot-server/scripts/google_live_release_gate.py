@@ -1750,8 +1750,8 @@ def _produce_release_verdict(
         runtime_closure_distribution_snapshot = _validate_runtime_closure_distributions(
             runtime_closure
         )
-    except (OSError, RuntimeError, ValueError):
-        pass
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RuntimeError("release evidence changed") from exc
     bindings = {"checksums": _read_bound_release_input(checksum_path)}
     bindings.update(
         {name: _read_bound_release_input(path) for name, path in layer_paths.items()}

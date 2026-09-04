@@ -214,11 +214,12 @@ def test_release_rejects_invalid_dependency_closure(
         "_load_runtime_closure_manifest",
         lambda _sha: (_ for _ in ()).throw(ValueError("dependency drift")),
     )
-    verdict = release_gate.produce_release_verdict(
-        IDENTITY, paths, checksum_manifest, tmp_path / "release.json"
-    )
-    assert verdict["status"] == "FAIL"
-    assert any(item["code"] == "DETERMINISTIC_TRUSTED_MANIFEST_INVALID" for item in verdict["failures"])
+    out = tmp_path / "release.json"
+    with pytest.raises(RuntimeError, match="release evidence changed"):
+        release_gate.produce_release_verdict(
+            IDENTITY, paths, checksum_manifest, out
+        )
+    assert not out.exists()
 
 
 def test_command_spec_digest_binds_runtime_closure_identity() -> None:
@@ -429,6 +430,30 @@ def test_release_rejects_same_byte_distribution_identity_replacement_at_boundari
         assert verdict["status"] == "FAIL"
         assert "private_dependency" not in json.dumps(verdict)
     assert not out.exists() or json.loads(out.read_text())["status"] == "FAIL"
+
+
+def test_release_fails_closed_when_initial_distribution_snapshot_transiently_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _, checksum_manifest = _write_evidence(tmp_path / "evidence")
+    calls = 0
+
+    def transient_loader(_sha: str) -> dict:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("private initial closure failure")
+        return copy.deepcopy(RUNTIME_CLOSURE)
+
+    monkeypatch.setattr(release_gate, "_load_runtime_closure_manifest", transient_loader)
+    out = tmp_path / "release.json"
+    with pytest.raises(RuntimeError, match="release evidence changed"):
+        release_gate.produce_release_verdict(
+            IDENTITY, paths, checksum_manifest, out
+        )
+
+    assert calls == 1
+    assert not out.exists()
 def _reports(test_count: int = len(CANONICAL_NODES)) -> dict[str, dict]:
     physical_audit = _PHYSICAL_CASE._candidate_audit(
         _PHYSICAL_CASE._candidate_physical_log()
@@ -1917,9 +1942,9 @@ def test_cli_reads_checksum_manifest_and_writes_deterministic_failure(tmp_path: 
     )
     completed = subprocess.run(command, text=True, capture_output=True, check=False)
     assert completed.returncode == 1
-    assert completed.stdout, completed.stderr
-    assert json.loads(completed.stdout) == json.loads(out.read_text(encoding="utf-8"))
-    assert json.loads(completed.stdout)["status"] == "FAIL"
+    assert completed.stdout == ""
+    assert completed.stderr == "release evidence validation failed\n"
+    assert not out.exists()
 
 
 @pytest.mark.parametrize("alias_kind", ["direct", "symlink", "hardlink"])
