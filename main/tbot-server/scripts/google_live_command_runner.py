@@ -191,12 +191,15 @@ def candidate_audit(event, args):
         raise PermissionError("candidate native FFI is not approved")
     if event in {"os.system", "os.fork", "os.forkpty", "os.exec", "os.posix_spawn", "subprocess.Popen"} and not getattr(spawn_state, "approved", False):
         raise PermissionError("candidate process escape API is not approved")
-sys.addaudithook(candidate_audit)
 def blocked_cffi_dlopen(*args, **kwargs):
     del args, kwargs
     raise PermissionError("candidate native FFI is not approved")
 try:
     import opuslib_next
+except Exception:
+    pass
+try:
+    import numpy
 except Exception:
     pass
 try:
@@ -207,6 +210,7 @@ else:
     cffi.api.FFI.dlopen = blocked_cffi_dlopen
     cffi.api._make_ffi_library = blocked_cffi_dlopen
     _cffi_backend.FFI = blocked_cffi_dlopen
+sys.addaudithook(candidate_audit)
 def guarded_fork_exec(*args, **kwargs):
     if not getattr(spawn_state, "approved", False):
         raise PermissionError("candidate process escape API is not approved")
