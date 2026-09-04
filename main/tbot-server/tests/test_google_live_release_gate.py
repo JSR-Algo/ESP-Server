@@ -312,7 +312,10 @@ def test_release_rejects_unsupported_runtime_closure_platform(
     assert any(item["code"] == "DETERMINISTIC_TRUSTED_MANIFEST_INVALID" for item in verdict["failures"])
 
 
-def test_runtime_closure_distribution_digest_is_revalidated(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mutation", ["size", "content", "identity", "symlink", "hardlink"])
+def test_runtime_closure_distribution_file_is_revalidated(
+    tmp_path: Path, mutation: str
+) -> None:
     package_root = tmp_path / "site-packages"
     package_root.mkdir()
     package_file = package_root / "example.py"
@@ -323,10 +326,23 @@ def test_runtime_closure_distribution_digest_is_revalidated(tmp_path: Path) -> N
             "importRoots": ["example"], "name": "example", "root": str(package_root), "totalBytes": 7, "version": "1",
         }],
     }
-    release_gate._validate_runtime_closure_distributions(manifest)
-    package_file.write_bytes(b"tampered")
+    snapshot = release_gate._validate_runtime_closure_distributions(manifest)
+    if mutation == "size":
+        package_file.write_bytes(b"too-long")
+    elif mutation == "content":
+        package_file.write_bytes(b"changed")
+    elif mutation == "identity":
+        replacement = package_root / "replacement.py"
+        replacement.write_bytes(b"trusted")
+        os.replace(replacement, package_file)
+    elif mutation == "symlink":
+        moved = package_root / "moved.py"
+        package_file.rename(moved)
+        package_file.symlink_to(moved)
+    else:
+        os.link(package_file, package_root / "alias.py")
     with pytest.raises(ValueError, match="distribution"):
-        release_gate._validate_runtime_closure_distributions(manifest)
+        release_gate._validate_runtime_closure_distributions(manifest, snapshot)
 def _reports(test_count: int = len(CANONICAL_NODES)) -> dict[str, dict]:
     physical_audit = _PHYSICAL_CASE._candidate_audit(
         _PHYSICAL_CASE._candidate_physical_log()

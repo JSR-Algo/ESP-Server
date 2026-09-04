@@ -386,22 +386,94 @@ def _canonical_runtime_closure(manifest: Mapping[str, Any]) -> bytes:
     return (json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
 
 
-def _validate_runtime_closure_distributions(manifest: Mapping[str, Any]) -> None:
+def _read_runtime_distribution_file(root: Path, relative: str) -> tuple[bytes, os.stat_result]:
+    parts = relative.split("/")
+    descriptors: list[int] = []
+    try:
+        descriptor = os.open(
+            root,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        descriptors.append(descriptor)
+        for part in parts[:-1]:
+            descriptor = os.open(
+                part,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=descriptor,
+            )
+            descriptors.append(descriptor)
+        file_descriptor = os.open(
+            parts[-1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=descriptor
+        )
+        descriptors.append(file_descriptor)
+        before = os.fstat(file_descriptor)
+        chunks: list[bytes] = []
+        remaining = before.st_size + 1
+        while remaining:
+            chunk = os.read(file_descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(file_descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
+            raise ValueError("runtime closure distribution changed while reading")
+        return b"".join(chunks), after
+    except OSError as exc:
+        raise ValueError("runtime closure distribution is unavailable") from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _validate_runtime_closure_distributions(
+    manifest: Mapping[str, Any], expected: tuple[tuple[int, ...], ...] | None = None
+) -> tuple[tuple[int, ...], ...]:
     """Recheck mutable dependency files named by the Git-bound closure."""
+    identities: list[tuple[int, ...]] = []
     for distribution in manifest.get("distributions", []):
         root = Path(distribution["root"])
         for item in distribution["files"]:
-            path = root.joinpath(*item["path"].split("/"))
-            try:
-                info = path.lstat()
-            except OSError as exc:
-                raise ValueError("runtime closure distribution is unavailable") from exc
-            if path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            data, info = _read_runtime_distribution_file(root, item["path"])
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise ValueError("runtime closure distribution is not a regular file")
             if info.st_size != item["size"]:
                 raise ValueError("runtime closure distribution size changed")
-            if hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
+            if hashlib.sha256(data).hexdigest() != item["sha256"]:
                 raise ValueError("runtime closure distribution digest changed")
+            identities.append(
+                (
+                    info.st_dev,
+                    info.st_ino,
+                    info.st_mode,
+                    info.st_nlink,
+                    info.st_size,
+                    info.st_mtime_ns,
+                    info.st_ctime_ns,
+                )
+            )
+    snapshot = tuple(identities)
+    if expected is not None and snapshot != expected:
+        raise ValueError("runtime closure distribution identity changed")
+    return snapshot
 
 
 def parse_trusted_python_executable_manifest(content: bytes) -> dict[str, Any]:
