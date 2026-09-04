@@ -23,7 +23,9 @@ IDENTITY = {
 
 
 def _runner(tmp_path: Path, run_id: str = "20260904T010203Z") -> EvidenceRunner:
-    runner = EvidenceRunner.initialize(tmp_path, run_id=run_id, identity=IDENTITY)
+    runner = EvidenceRunner.initialize(
+        tmp_path, run_id=run_id, identity=IDENTITY, verify_repository=False
+    )
     for relative in ("fixture.wav", "server.log", "baseline/report.json", "lesson-manifest.json"):
         path = runner.root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -84,7 +86,7 @@ def test_new_run_id_is_required_for_retry_and_resume_is_refused(tmp_path: Path):
     runner.finish_layer("deterministic", "FAIL", failure={"code": "CANCELLED"})
 
     with pytest.raises(FileExistsError):
-        EvidenceRunner.initialize(tmp_path, run_id=runner.run_id, identity=IDENTITY)
+        EvidenceRunner.initialize(tmp_path, run_id=runner.run_id, identity=IDENTITY, verify_repository=False)
     with pytest.raises(EvidenceStateError):
         EvidenceRunner.open(runner.root, resume=True)
     assert _runner(tmp_path, "20260904T010204Z").run_id == "20260904T010204Z"
@@ -96,7 +98,7 @@ def test_invalid_run_id_and_evidence_root_alias_fail_closed(tmp_path: Path):
     alias = tmp_path / "alias"
     alias.symlink_to(tmp_path, target_is_directory=True)
     with pytest.raises(ValueError):
-        EvidenceRunner.initialize(alias, run_id="20260904T010205Z", identity=IDENTITY)
+        EvidenceRunner.initialize(alias, run_id="20260904T010205Z", identity=IDENTITY, verify_repository=False)
 
 
 def test_state_write_is_atomic_when_replace_fails(tmp_path: Path, monkeypatch):

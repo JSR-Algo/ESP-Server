@@ -69,15 +69,32 @@ class EvidenceRunner:
         self.operator_config = dict(operator_config or {})
 
     @classmethod
-    def initialize(cls, evidence_root: Path, *, run_id: str, identity: dict[str, str], operator_config: dict[str, str] | None = None) -> "EvidenceRunner":
+    def initialize(cls, evidence_root: Path, *, run_id: str, identity: dict[str, str], operator_config: dict[str, str] | None = None, verify_repository: bool = True, repository_root: Path | None = None) -> "EvidenceRunner":
         evidence_root = Path(evidence_root)
         if evidence_root.is_symlink() or not evidence_root.is_absolute():
             raise ValueError("evidence root must be an absolute non-alias path")
         if RUN_ID_RE.fullmatch(run_id) is None:
             raise ValueError("run ID is invalid")
         required = {"gitSha", "imageDigest", "firmwareIdentity", "configFingerprint", "fixtureSha256"}
-        if set(identity) != required or any(not isinstance(v, str) or not v for v in identity.values()):
+        if (
+            set(identity) != required
+            or re.fullmatch(r"[0-9a-f]{40}", identity.get("gitSha", "")) is None
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", identity.get("imageDigest", "")) is None
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", identity.get("configFingerprint", "")) is None
+            or re.fullmatch(r"[0-9a-f]{64}", identity.get("fixtureSha256", "")) is None
+            or re.fullmatch(r"[A-Za-z0-9._:+/-]{1,128}", identity.get("firmwareIdentity", "")) is None
+        ):
             raise ValueError("candidate identity is invalid")
+        if verify_repository:
+            from scripts.google_live_trusted_git import git_output, trusted_git_session
+            repository_root = Path(__file__).resolve().parents[3] if repository_root is None else repository_root
+            with trusted_git_session():
+                head = git_output(repository_root, "rev-parse", "HEAD").decode().strip()
+                status = git_output(repository_root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+            if head != identity["gitSha"]:
+                raise ValueError("candidate git SHA does not match repository HEAD")
+            if status:
+                raise ValueError("candidate worktree must be clean before evidence init")
         root = evidence_root / run_id
         if root.exists() or root.is_symlink():
             raise FileExistsError(root)
