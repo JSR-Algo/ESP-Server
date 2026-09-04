@@ -153,6 +153,7 @@ def test_composition_invokes_existing_audit_and_writes_bound_report(tmp_path: Pa
         client_id="client-1",
         output=output,
         audit_fn=audit,
+        selector_fn=lambda lines, journey: lines,
     )
     assert seen["require_receive_loop_balance"] is True
     assert seen["min_interrupts"] == 10
