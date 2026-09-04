@@ -15,7 +15,6 @@ import pytest
 
 from scripts.google_live_command_runner import CommandSpec, execute_and_record
 
-
 IDENTITY = {
     "gitSha": "a" * 40,
     "imageDigest": "sha256:" + "b" * 64,
@@ -723,6 +722,7 @@ def test_resource_archive_stdout_is_hard_bounded(
 ) -> None:
     import contextlib
     from types import SimpleNamespace
+
     import scripts.google_live_command_runner as runner
 
     expected_sha = "a" * 40
@@ -764,6 +764,7 @@ def test_resource_archive_partial_stdout_timeout_is_bounded(
 ) -> None:
     import contextlib
     from types import SimpleNamespace
+
     import scripts.google_live_command_runner as runner
 
     expected_sha = "a" * 40
@@ -1298,6 +1299,29 @@ def test_nested_shell_command_fails_closed(
         f"subprocess.run('touch {str(marker)}', shell=True, check=True)"
     )
     _patch_candidate_resource_archive(monkeypatch, runner, _python_source_archive({"entry.py": payload}))
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_nested_native_executable_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / "native-executable-ran"
+    payload = (
+        "import subprocess; "
+        f"subprocess.run(['/usr/bin/touch', {str(marker)!r}], check=True)"
+    )
+    _patch_candidate_resource_archive(
+        monkeypatch, runner, _python_source_archive({"entry.py": payload})
+    )
 
     result = execute_and_record(
         _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
