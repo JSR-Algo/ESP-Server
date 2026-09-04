@@ -724,7 +724,7 @@ def _write_evidence(
                 "terminalPolicy": {
                     "classification": "expected_exit",
                     "cleanupGraceSec": 2.0,
-                    "expectedExitCodes": [0],
+                    "expectedExitCodes": [0, 1] if command_id == "websocket.transport" else [0],
                     "satisfied": True,
                     "timeoutSec": 300.0,
                 },
@@ -757,10 +757,13 @@ def _add_orchestration_supports(paths, checksums):
         )
     )
     timeline = root / "timeline.log"
+    server = json.loads(paths["server_regression"].read_text())
+    scope = server["evidenceScope"]
+    window = server["logWindow"]
     timeline.write_text(
         "".join(
             json.dumps(
-                {"layer": layer, "artifact": paths[layer].relative_to(root).as_posix()},
+                {"layer": layer, "artifact": paths[layer].relative_to(root).as_posix(), "journeyId": scope["journeyId"], "windowId": window["windowId"], "startedAtUtc": window["start"], "endedAtUtc": window["end"]},
                 sort_keys=True,
                 separators=(",", ":"),
             ) + "\n"

@@ -233,10 +233,14 @@ class EvidenceRunner:
         entries = parse_provenance(provenance.read_bytes())
         _atomic(projection, render_commands_projection(entries))
         rows = []
+        server_payload = json.loads((self.root / "server-regression/report.json").read_text(encoding="utf-8"))
+        server_scope = server_payload["evidenceScope"]
+        server_window = server_payload["logWindow"]
         for layer in LAYERS:
             report = next(self.root.glob(f"{layer.replace('_', '-')}/report.json"), None)
             if report is not None:
-                rows.append(json.dumps({"layer": layer, "artifact": report.relative_to(self.root).as_posix()}, sort_keys=True))
+                payload = json.loads(report.read_text(encoding="utf-8"))
+                rows.append(json.dumps({"layer": layer, "artifact": report.relative_to(self.root).as_posix(), "journeyId": server_scope["journeyId"], "windowId": server_window["windowId"], "startedAtUtc": server_window["start"], "endedAtUtc": server_window["end"]}, sort_keys=True))
         timeline = self.root / "timeline.log"
         _atomic(timeline, ("\n".join(rows) + "\n").encode())
         artifacts = [self.root / name for name in ("deterministic/report.json", "deterministic/node-manifest.txt", "deterministic/pytest.xml", "server-regression/report.json", "real-api/report.json", "websocket-e2e/report.json", "physical/report.json", "candidate-soak/report.json", "commands.jsonl", "commands.txt", "timeline.log", "runtime-closure.json")]
@@ -269,7 +273,10 @@ class EvidenceRunner:
             for output in next(item for item in self.command_specs() if item.command_id == command_id).outputs:
                 output.parent.mkdir(parents=True, exist_ok=True)
                 if not output.exists():
-                    output.write_bytes(b"{}\n")
+                    if output == self.root / "server-regression/report.json":
+                        output.write_text(json.dumps({"evidenceScope": {"journeyId": "synthetic-journey"}, "logWindow": {"windowId": "synthetic-window", "start": "2026-01-01T00:00:00Z", "end": "2026-01-01T00:01:00Z"}}) + "\n")
+                    else:
+                        output.write_bytes(b"{}\n")
             spec = next(item for item in self.command_specs() if item.command_id == command_id)
             self.execute_layer(command_id, executor=executor or (lambda *args, **kwargs: Result()))
             entries.append({"argv": list(spec.argv), "candidateIdentity": dict(self.identity), "commandId": command_id, "cwd": ".", "endedAtUtc": f"2026-01-01T00:00:{index:02d}.500000Z", "environmentSources": [], "exitCode": 0, "inputs": [], "outputs": [], "schemaVersion": "google-live-command-provenance.v1", "secretSources": [f"<env:{name}>" for name in spec.secret_env], "specSha256": hashlib.sha256(command_id.encode()).hexdigest(), "startedAtUtc": f"2026-01-01T00:00:{index:02d}.000000Z", "stdinSource": None if spec.stdin_source is None else f"<stdin:{spec.stdin_source}>", "terminalPolicy": {"classification": "expected_exit", "cleanupGraceSec": 2.0, "expectedExitCodes": [0], "satisfied": True, "timeoutSec": 300.0}})

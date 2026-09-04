@@ -206,7 +206,10 @@ def test_finalize_refuses_nonpassing_layer_and_hashes_closed_artifacts(tmp_path:
             runner.finish_layer(layer, "PASS")
     for layer in LAYERS:
         path = runner.root / layer.replace("_", "-") / "report.json"
-        path.write_text(json.dumps({"status": "PASS"}) + "\n")
+        report = {"status": "PASS"}
+        if layer == "server_regression":
+            report.update(evidenceScope={"journeyId": "journey-1"}, logWindow={"windowId": "window-1", "start": "2026-01-01T00:00:00Z", "end": "2026-01-01T00:01:00Z"})
+        path.write_text(json.dumps(report) + "\n")
     (runner.root / "commands.jsonl").write_text("")
     (runner.root / "commands.txt").write_text("")
     checksum = runner.finalize(

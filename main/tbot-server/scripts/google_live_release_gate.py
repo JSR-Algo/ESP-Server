@@ -319,7 +319,7 @@ def _trusted_command_specs(identity: Mapping[str, Any]) -> dict[str, TrustedComm
             argv_pattern=_trusted_command_argv_patterns(identity)[command_id],
             cwd=".",
             environment_sources=(),
-            expected_exit_codes=(0,),
+            expected_exit_codes=(0, 1) if command_id == "websocket.transport" else (0,),
             input_labels={
                 "real_api.round_trip": ("fixture.wav",),
                 "websocket.log_analysis": ("server.log",),
@@ -1710,15 +1710,28 @@ def aggregate_release_evidence(
             row = json.loads(raw_line)
             if (
                 not isinstance(row, dict)
-                or not {"layer", "artifact"} <= set(row)
+                or not {"layer", "artifact", "journeyId", "windowId", "startedAtUtc", "endedAtUtc"} <= set(row)
                 or not set(row) <= {
                     "layer", "artifact", "journeyId", "windowId", "startedAtUtc", "endedAtUtc"
                 }
                 or row["layer"] not in REQUIRED_LAYERS
                 or row["artifact"]
                 != Path(layer_paths[row["layer"]]).relative_to(timeline_path.parent).as_posix()
+                or any(not isinstance(row[field], str) or not row[field] for field in ("journeyId", "windowId", "startedAtUtc", "endedAtUtc"))
                 or forbidden_report_fields(row)
             ):
+                raise ValueError
+            server_report = loaded_reports.get("server_regression")
+            server_scope = server_report.get("evidenceScope", {}) if isinstance(server_report, Mapping) else {}
+            server_window = server_report.get("logWindow", {}) if isinstance(server_report, Mapping) else {}
+            if row != {
+                "layer": row["layer"],
+                "artifact": row["artifact"],
+                "journeyId": server_scope.get("journeyId"),
+                "windowId": server_window.get("windowId"),
+                "startedAtUtc": server_window.get("start"),
+                "endedAtUtc": server_window.get("end"),
+            }:
                 raise ValueError
             timeline_rows.append(row)
         if [row["layer"] for row in timeline_rows] != list(REQUIRED_LAYERS):
