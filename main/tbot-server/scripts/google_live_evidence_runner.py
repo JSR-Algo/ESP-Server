@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import sys
 import subprocess
+from xml.sax.saxutils import escape
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -202,6 +203,125 @@ class EvidenceRunner:
     def all_passed(self) -> bool:
         return all(self.state(layer) == "PASS" for layer in LAYERS)
 
+    def configure_synthetic_inputs(self) -> None:
+        """Create local-only inputs for the guarded synthetic evidence journey."""
+        fixture = b"synthetic fixture\n"
+        if hashlib.sha256(fixture).hexdigest() != self.identity["fixtureSha256"]:
+            raise EvidenceStateError("synthetic fixture identity is invalid")
+        inputs = {
+            "fixture.wav": fixture,
+            "server.log": b"bounded synthetic evidence log\n",
+            "baseline/report.json": b"{}\n",
+            "lesson-manifest.json": b"{}\n",
+        }
+        for relative, content in inputs.items():
+            _atomic(self.root / relative, content)
+        self.operator_config = {
+            "fixture": str(self.root / "fixture.wav"),
+            "websocket_url": "ws://127.0.0.1/disabled",
+            "device_id": "synthetic-device",
+            "client_id": "synthetic-client",
+            "journey_id": "synthetic-journey",
+            "server_log": str(self.root / "server.log"),
+            "config_json": "{}",
+            "expected_candidate_json": json.dumps(self.identity, sort_keys=True),
+            "evidence_control_url": "http://127.0.0.1/disabled",
+            "baseline_report": str(self.root / "baseline/report.json"),
+            "lesson_manifest": str(self.root / "lesson-manifest.json"),
+            "base_url": "http://127.0.0.1/disabled",
+        }
+
+    def _synthetic_report(self, layer: str) -> dict[str, Any]:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "tests/fixtures/google_live_synthetic"
+            / f"{layer}.json"
+        )
+        value = json.loads(source.read_text(encoding="utf-8"))
+
+        def bind_identity(item: Any) -> Any:
+            if isinstance(item, dict):
+                return {
+                    key: dict(self.identity) if key == "candidateIdentity" else bind_identity(child)
+                    for key, child in item.items()
+                }
+            if isinstance(item, list):
+                return [bind_identity(child) for child in item]
+            return item
+
+        return bind_identity(value)
+
+    def _write_synthetic_outputs(self, command_id: str) -> None:
+        if command_id == "deterministic.produce":
+            manifest_source = (
+                Path(__file__).resolve().parents[1]
+                / "tests/fixtures/google_live_deterministic_nodes.txt"
+            )
+            runtime = json.loads(
+                (
+                    Path(__file__).resolve().parents[1]
+                    / "tests/fixtures/google_live_pytest_runtime_manifest.json"
+                ).read_text(encoding="utf-8")
+            )
+            manifest = manifest_source.read_bytes()
+            nodes = manifest.decode("utf-8").splitlines()
+            cases = []
+            for node in nodes:
+                parts = node.split("::")
+                classname = parts[0][:-3].replace("/", ".")
+                if len(parts) > 2:
+                    classname += "." + ".".join(parts[1:-1])
+                cases.append(
+                    f'<testcase classname="{escape(classname)}" name="{escape(parts[-1])}" time="0.000">'
+                    f'<properties><property name="google_live_nodeid" value="{escape(node)}" />'
+                    "</properties></testcase>"
+                )
+            junit = (
+                f'<testsuites name="pytest tests"><testsuite name="pytest" tests="{len(nodes)}" '
+                f'failures="0" errors="0" skipped="0">{"".join(cases)}</testsuite></testsuites>'
+            ).encode()
+            report = self._synthetic_report("deterministic")
+            report["testVerdict"]["total"] = len(nodes)
+            report["coverageProof"] = {
+                "manifestSchema": "google-live-deterministic-manifest.v1",
+                "manifestSha256": hashlib.sha256(manifest).hexdigest(),
+                "manifestNodeCount": len(nodes),
+                "executedNodeCount": len(nodes),
+                "junitSha256": hashlib.sha256(junit).hexdigest(),
+                "nodeidPluginSha256": runtime["plugin"]["sha256"],
+                "pytestRuntimeManifestSha256": hashlib.sha256(
+                    (json.dumps(runtime, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                ).hexdigest(),
+                "pytestRuntimeSchema": runtime["schemaVersion"],
+            }
+            _atomic(self.root / "deterministic/node-manifest.txt", manifest)
+            _atomic(self.root / "deterministic/pytest.xml", junit)
+            _atomic(self.root / "deterministic/report.json", (json.dumps(report, sort_keys=True) + "\n").encode())
+            return
+        if command_id == "real_api.round_trip":
+            outputs = {"real-api/report.json": self._synthetic_report("real_api")}
+        elif command_id == "websocket.transport":
+            outputs = {"websocket-e2e/transport.json": self._synthetic_report("websocket_e2e")["transportEvidence"]}
+        elif command_id == "websocket.log_analysis":
+            outputs = {"websocket-e2e/server-report.json": self._synthetic_report("websocket_e2e")["logEvidence"]}
+        elif command_id == "websocket.correlation":
+            outputs = {"websocket-e2e/report.json": self._synthetic_report("websocket_e2e")}
+        elif command_id == "candidate_soak.produce":
+            outputs = {"candidate-soak/journey-evidence.json": {"closed": True}}
+        elif command_id == "candidate_soak.replay":
+            outputs = {"candidate-soak/report.json": self._synthetic_report("candidate_soak")}
+        elif command_id == "physical.capture_and_audit":
+            physical = self._synthetic_report("physical")
+            outputs = {
+                "server-regression/report.json": self._synthetic_report("server_regression"),
+                "physical/terminal-snapshot.json": physical["terminalSnapshot"],
+                "physical/report.json": physical,
+            }
+        else:
+            raise EvidenceStateError("unknown synthetic command")
+        for relative, value in outputs.items():
+            _atomic(self.root / relative, (json.dumps(value, sort_keys=True) + "\n").encode())
+
     def command_specs(self) -> tuple[Any, ...]:
         """Return the immutable command declarations used by this run."""
         from scripts.google_live_command_runner import CommandSpec
@@ -316,6 +436,7 @@ class EvidenceRunner:
 
     def synthetic_dry_run(self, *, executor: Any | None = None) -> dict[str, Any]:
         """Exercise the production orchestration path with deterministic fakes."""
+        external_executor = executor is not None
         provenance = self.root / "commands.jsonl"
         required_reports = [
             self.root / layer.replace("_", "-") / "report.json" for layer in LAYERS
@@ -329,23 +450,26 @@ class EvidenceRunner:
             self.finalize()
             return {"status": "PASS", "runId": self.run_id}
 
-        class Result:
-            policy_satisfied = True
-        entries = []
-        for index, command_id in enumerate(COMMAND_ORDER):
-            layer = {"deterministic.produce": "deterministic", "real_api.round_trip": "real_api", "websocket.transport": "websocket_e2e", "websocket.log_analysis": "server_regression", "websocket.correlation": "websocket_e2e", "candidate_soak.produce": "candidate_soak", "candidate_soak.replay": "candidate_soak", "physical.capture_and_audit": "physical"}[command_id]
-            for output in next(item for item in self.command_specs() if item.command_id == command_id).outputs:
-                output.parent.mkdir(parents=True, exist_ok=True)
-                if not output.exists():
-                    if output == self.root / "server-regression/report.json":
-                        output.write_text(json.dumps({"evidenceScope": {"journeyId": "synthetic-journey"}, "logWindow": {"windowId": "synthetic-window", "start": "2026-01-01T00:00:00Z", "end": "2026-01-01T00:01:00Z"}}) + "\n")
-                    else:
-                        output.write_bytes(b"{}\n")
+        if executor is None:
+            from scripts.google_live_command_runner import execute_and_record
+
+            def fake_process(spec: Any, *_args: Any, **_kwargs: Any) -> tuple[int, str, bool]:
+                self._write_synthetic_outputs(spec.command_id)
+                return 0, "expected_exit", True
+
+            def executor(spec: Any, **kwargs: Any) -> Any:
+                return execute_and_record(spec, _process_runner=fake_process, **kwargs)
+
+        synthetic_env = {
+            "GOOGLE_API_KEY": "synthetic-not-a-credential",
+            "TBOT_DEVICE_MINT_SECRET": "synthetic-not-a-credential",
+        }
+        for command_id in COMMAND_ORDER:
             spec = next(item for item in self.command_specs() if item.command_id == command_id)
-            self.execute_layer(command_id, executor=executor or (lambda *args, **kwargs: Result()))
-            entries.append({"argv": list(spec.argv), "candidateIdentity": dict(self.identity), "commandId": command_id, "cwd": ".", "endedAtUtc": f"2026-01-01T00:00:{index:02d}.500000Z", "environmentSources": [], "exitCode": 0, "inputs": [], "outputs": [], "schemaVersion": "google-live-command-provenance.v1", "secretSources": [f"<env:{name}>" for name in spec.secret_env], "specSha256": hashlib.sha256(command_id.encode()).hexdigest(), "startedAtUtc": f"2026-01-01T00:00:{index:02d}.000000Z", "stdinSource": None if spec.stdin_source is None else f"<stdin:{spec.stdin_source}>", "terminalPolicy": {"classification": "expected_exit", "cleanupGraceSec": 2.0, "expectedExitCodes": [0], "satisfied": True, "timeoutSec": 300.0}})
-        from scripts.google_live_command_runner import render_provenance
-        _atomic(self.root / "commands.jsonl", render_provenance(entries))
+            if external_executor:
+                self._write_synthetic_outputs(command_id)
+            stdin = b"{}" if spec.stdin_source is not None else None
+            self.execute_layer(command_id, executor=executor, env=synthetic_env, stdin_bytes=stdin)
         self.finalize()
         return {"status": "PASS", "runId": self.run_id}
 

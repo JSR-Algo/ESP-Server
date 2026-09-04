@@ -3826,6 +3826,7 @@ def execute_and_record(
     stdin_bytes: bytes | None = None,
     cancel_event: threading.Event | None = None,
     _before_spawn: Any | None = None,
+    _process_runner: Any | None = None,
 ) -> CommandResult:
     if type(spec) is not CommandSpec:
         raise TypeError("spec must be an immutable CommandSpec")
@@ -3958,7 +3959,8 @@ def execute_and_record(
                         exit_code, classification, satisfied = None, "cancelled", False
                     else:
                         try:
-                            exit_code, classification, satisfied = _run_process(
+                            process_runner = _run_process if _process_runner is None else _process_runner
+                            exit_code, classification, satisfied = process_runner(
                                 spec,
                                 child_env,
                                 stdin_bytes,

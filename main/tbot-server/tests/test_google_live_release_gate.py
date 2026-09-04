@@ -815,6 +815,60 @@ def test_unified_runner_finalize_publishes_through_real_release_gate(tmp_path):
     assert json.loads((root / "release-verdict.json").read_text())["status"] == "PASS"
 
 
+def test_synthetic_dry_run_builds_fresh_evidence_and_passes_real_release_gate(
+    tmp_path, monkeypatch
+):
+    from scripts import google_live_command_runner as command_runner
+
+    repository_root = Path(__file__).resolve().parents[3]
+    git_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    identity = {
+        "gitSha": git_sha,
+        "imageDigest": "sha256:" + "0" * 64,
+        "firmwareIdentity": "synthetic",
+        "configFingerprint": "sha256:" + "0" * 64,
+        "fixtureSha256": hashlib.sha256(b"synthetic fixture\n").hexdigest(),
+    }
+    runner = EvidenceRunner.initialize(
+        tmp_path.resolve(),
+        run_id="20260904T010204Z",
+        identity=identity,
+        verify_repository=False,
+    )
+    runner.configure_synthetic_inputs()
+    closure = command_runner._parse_runtime_closure_manifest(
+        (runner.root / "runtime-closure.json").read_bytes()
+    )
+    monkeypatch.setattr(
+        release_gate, "_load_runtime_closure_manifest", lambda _sha: closure
+    )
+    monkeypatch.setattr(
+        release_gate,
+        "_load_trusted_deterministic_manifest",
+        lambda _sha: CANONICAL_MANIFEST,
+    )
+    monkeypatch.setattr(
+        release_gate,
+        "_load_trusted_pytest_runtime_manifest",
+        lambda _sha: PYTEST_RUNTIME_MANIFEST,
+    )
+
+    result = runner.synthetic_dry_run()
+
+    assert result == {"status": "PASS", "runId": runner.run_id}
+    assert json.loads((runner.root / "release-verdict.json").read_text())["status"] == "PASS"
+    assert [
+        item["commandId"]
+        for item in parse_provenance((runner.root / "commands.jsonl").read_bytes())
+    ] == list(release_gate.REQUIRED_COMMAND_IDS)
+
+
 def test_release_rejects_temporally_false_per_layer_timeline(tmp_path):
     paths, checksums, _ = _write_evidence(tmp_path)
     _add_orchestration_supports(paths, checksums)
