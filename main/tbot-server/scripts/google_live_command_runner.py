@@ -55,7 +55,7 @@ RUNTIME_CLOSURE_SCHEMA = "google-live-runtime-closure.v1"
 RUNTIME_CLOSURE_MANIFEST_GIT_PATH = (
     "main/tbot-server/tests/fixtures/google_live_runtime_closure_manifest.json"
 )
-_MAX_CLOSURE_DISTRIBUTIONS = 32
+_MAX_CLOSURE_DISTRIBUTIONS = 64
 _MAX_CLOSURE_FILES_PER_DISTRIBUTION = 2048
 _MAX_CLOSURE_FILE_BYTES = 32 * 1024 * 1024
 _MAX_CLOSURE_TOTAL_FILES = 4096
