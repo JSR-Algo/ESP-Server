@@ -671,11 +671,18 @@ def _write_evidence(
         )
         inputs = {
             "real_api.round_trip": [copy.deepcopy(fixture_artifact)],
+            "websocket.log_analysis": [
+                {"label": "server.log", "sha256": hashlib.sha256(server_log.read_bytes()).hexdigest()}
+            ],
             "websocket.correlation": [
+                {"label": "server.log", "sha256": hashlib.sha256(server_log.read_bytes()).hexdigest()},
                 copy.deepcopy(transport_artifact),
                 {"label": "server-regression/report.json", "sha256": checksums["server_regression"]},
             ],
-            "candidate_soak.produce": copy.deepcopy(soak_inputs),
+            "candidate_soak.produce": [
+                {"label": "server.log", "sha256": hashlib.sha256(server_log.read_bytes()).hexdigest()},
+                *copy.deepcopy(soak_inputs),
+            ],
             "candidate_soak.replay": [copy.deepcopy(journey_evidence_artifact), *copy.deepcopy(soak_inputs)],
             "physical.capture_and_audit": [
                 {"label": "candidate-soak/report.json", "sha256": checksums["candidate_soak"]},

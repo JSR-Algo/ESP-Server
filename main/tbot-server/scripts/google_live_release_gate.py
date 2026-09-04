@@ -75,6 +75,7 @@ COMMAND_PROJECTION_SUPPORT = "command_projection"
 TIMELINE_INDEX_SUPPORT = "timeline_index"
 RUNTIME_CLOSURE_SUPPORT = "runtime_closure_manifest"
 REQUIRED_SUPPORTS = (*DETERMINISTIC_SUPPORTS, RUNTIME_CLOSURE_SUPPORT, COMMAND_PROVENANCE_SUPPORT)
+UNIFIED_SUPPORTS = (*REQUIRED_SUPPORTS, COMMAND_PROJECTION_SUPPORT, TIMELINE_INDEX_SUPPORT)
 REQUIRED_COMMAND_IDS = (
     "deterministic.produce",
     "real_api.round_trip",
@@ -321,11 +322,14 @@ def _trusted_command_specs(identity: Mapping[str, Any]) -> dict[str, TrustedComm
             expected_exit_codes=(0,),
             input_labels={
                 "real_api.round_trip": ("fixture.wav",),
+                "websocket.log_analysis": ("server.log",),
                 "websocket.correlation": (
+                    "server.log",
                     "websocket-e2e/transport.json",
                     "server-regression/report.json",
                 ),
                 "candidate_soak.produce": (
+                    "server.log",
                     "baseline/report.json",
                     "real-api/report.json",
                     "websocket-e2e/transport.json",
@@ -1824,9 +1828,13 @@ def _produce_release_verdict(
     after_inputs_parsed: Callable[[], None] | None = None,
     pre_publish: Callable[[], None] | None = None,
     post_publish: Callable[[], None] | None = None,
+    unified: bool = False,
 ) -> dict[str, Any]:
     """Publish a verdict only while every validated input retains its identity."""
-    if set(layer_paths) != set(REQUIRED_LAYERS) | set(REQUIRED_SUPPORTS):
+    expected_paths = set(REQUIRED_LAYERS) | set(
+        UNIFIED_SUPPORTS if unified else REQUIRED_SUPPORTS
+    )
+    if set(layer_paths) != expected_paths:
         raise ValueError("release evidence paths are incomplete")
     evidence_paths = [Path(path) for path in layer_paths.values()]
     if _evidence_paths_alias([*evidence_paths, Path(checksum_path)]):
@@ -1957,6 +1965,7 @@ def produce_release_verdict(
     after_inputs_parsed: Callable[[], None] | None = None,
     pre_publish: Callable[[], None] | None = None,
     post_publish: Callable[[], None] | None = None,
+    unified: bool = False,
 ) -> dict[str, Any]:
     with trusted_git_session():
         return _produce_release_verdict(
@@ -1968,6 +1977,7 @@ def produce_release_verdict(
             after_inputs_parsed=after_inputs_parsed,
             pre_publish=pre_publish,
             post_publish=post_publish,
+            unified=unified,
         )
 
 
