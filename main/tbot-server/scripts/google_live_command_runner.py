@@ -183,10 +183,16 @@ original_popen = subprocess.Popen
 def blocked_process_escape(*args, **kwargs):
     del args, kwargs
     raise PermissionError("candidate process escape API is not approved")
+def candidate_audit(event, args):
+    del args
+    if event in {"ctypes.dlopen", "ctypes.dlsym"}:
+        raise PermissionError("candidate native FFI is not approved")
+sys.addaudithook(candidate_audit)
 os.system = blocked_process_escape
 for _name in (
     "execv", "execve", "execvp", "execvpe", "execl", "execle", "execlp",
-    "posix_spawn", "posix_spawnp",
+    "fork", "forkpty", "posix_spawn", "posix_spawnp", "setpgid", "setpgrp",
+    "setsid",
 ):
     if hasattr(os, _name):
         setattr(os, _name, blocked_process_escape)

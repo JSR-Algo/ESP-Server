@@ -1332,6 +1332,53 @@ def test_nested_native_executable_fails_closed(
     assert not marker.exists()
 
 
+def test_nested_ctypes_process_escape_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / "ctypes-process-ran"
+    payload = (
+        "import ctypes; "
+        f"ctypes.CDLL(None).system({('/usr/bin/touch ' + str(marker))!r}.encode())"
+    )
+    _patch_candidate_resource_archive(
+        monkeypatch, runner, _python_source_archive({"entry.py": payload})
+    )
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    "escape_name", ["fork", "forkpty", "setsid", "setpgid", "setpgrp"]
+)
+def test_nested_process_group_escape_apis_are_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, escape_name: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    payload = (
+        "import os; "
+        f"assert getattr(os, {escape_name!r}).__name__ == 'blocked_process_escape'"
+    )
+    _patch_candidate_resource_archive(
+        monkeypatch, runner, _python_source_archive({"entry.py": payload})
+    )
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "expected_exit"
+
+
 @pytest.mark.parametrize(
     "override",
     [
