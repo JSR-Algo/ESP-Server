@@ -62,23 +62,31 @@ class PhysicalEvidenceClient:
         with urllib.request.urlopen(req, timeout=10) as response:
             return json.loads(response.read())
 
-    def capture(self, *, journey_id: str, enrollment: dict[str, Any], timeout_sec: float = 300.0, poll_interval_sec: float = 1.0) -> dict[str, Any]:
+    def capture(self, *, journey_id: str, enrollment: dict[str, Any], candidate_identity: dict[str, Any] | None = None, timeout_sec: float = 300.0, poll_interval_sec: float = 1.0) -> dict[str, Any]:
         path = f"/internal/devices/{self.device_id}/google-live-evidence/{journey_id}"
+        completed = False
         try:
             self._request("POST", f"/internal/devices/{self.device_id}/google-live-evidence", enrollment)
+            if candidate_identity is not None:
+                self._request("PUT", path + "/candidate-identity", {"candidateIdentity": candidate_identity})
             deadline = time.monotonic() + timeout_sec
             while time.monotonic() < deadline:
                 snapshot = self._request("GET", path)
                 if snapshot.get("readyToFinalize"):
                     validate_ready_snapshot(snapshot, journey_id=journey_id)
-                    return self._request("POST", path + "/finalize")
+                    result = self._request("POST", path + "/finalize")
+                    if result.get("status") != "PASS":
+                        raise PhysicalEvidenceError("physical evidence finalization failed")
+                    completed = True
+                    return result
                 time.sleep(poll_interval_sec)
             raise PhysicalEvidenceError("physical evidence timed out")
         finally:
-            try:
-                self._request("DELETE", path)
-            except Exception:
-                pass
+            if not completed:
+                try:
+                    self._request("DELETE", path)
+                except Exception:
+                    pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -102,7 +110,8 @@ def main(argv: list[str] | None = None) -> int:
         plan = json.load(__import__("sys").stdin)
         key = bytearray(__import__("secrets").token_bytes(32))
         enrollment = build_enrollment(device_id=args.device_id, client_id=str(plan["clientId"]), journey_id=str(plan["journeyId"]), transcript_plan=list(plan["transcriptPlan"]), hmac_key=key, ttl_sec=int(plan.get("ttlSec", 300)))
-        result = PhysicalEvidenceClient(args.base_url, args.device_id, __import__("os").environ.get("TBOT_DEVICE_MINT_SECRET", "")).capture(journey_id=str(plan["journeyId"]), enrollment=enrollment)
+        identity = {"gitSha": args.candidate_git_sha, "imageDigest": args.candidate_image_digest, "firmwareIdentity": args.firmware_identity, "configFingerprint": args.config_fingerprint, "fixtureSha256": args.fixture_sha256}
+        result = PhysicalEvidenceClient(args.base_url, args.device_id, __import__("os").environ.get("TBOT_DEVICE_MINT_SECRET", "")).capture(journey_id=str(plan["journeyId"]), enrollment=enrollment, candidate_identity=identity)
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(result, sort_keys=True) + "\n", encoding="utf-8")
         print("READY journey_id=" + str(plan["journeyId"]))

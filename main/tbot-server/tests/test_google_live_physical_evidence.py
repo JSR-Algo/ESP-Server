@@ -120,8 +120,11 @@ def test_client_finalizes_without_any_hardware_control_request():
     result = client.capture(
         journey_id="physical.run",
         enrollment={"clientId": "client-1"},
+        candidate_identity=IDENTITY,
         timeout_sec=1,
         poll_interval_sec=0,
     )
     assert result["status"] == "PASS"
+    assert [method for method, path, _ in calls if path.endswith("candidate-identity")] == ["PUT"]
+    assert calls[-1][1].endswith("/finalize")
     assert all(not any(word in path for word in ("deploy", "flash", "reset")) for _, path, _ in calls)
