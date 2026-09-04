@@ -1,23 +1,31 @@
 import asyncio
+import hashlib
+import hmac
 import json
 import time
 import unittest
 from collections import deque
 from contextvars import ContextVar
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import core.voice.session_provider.google_live as google_live_module
 from core.activity_lease import (
     ActivityLeaseCoordinator,
     ActivityOperation,
     ExclusiveDisposition,
 )
-from plugins_func.register import Action
-from plugins_func.functions import start_lesson as start_lesson_module
+from core.voice.google_live.evidence_enrollment import (
+    CandidateIntentExpectation,
+    EvidenceEnrollmentRegistry,
+    normalize_transcript,
+)
+from core.voice.google_live.client import GoogleLiveClient
 from core.voice.live_admission import AdmissionDecision, AdmissionReason
 from core.voice.session_orchestrator import SessionMode
-import core.voice.session_provider.google_live as google_live_module
 from core.voice.session_provider.google_live import GoogleLiveProvider
+from plugins_func.functions import start_lesson as start_lesson_module
+from plugins_func.register import Action
 
 
 class _Logger:
@@ -29,6 +37,9 @@ class _Logger:
 
     def info(self, *args, **kwargs):
         self.messages.append(("info", args, kwargs))
+
+    def debug(self, *args, **kwargs):
+        self.messages.append(("debug", args, kwargs))
 
     def warning(self, *args, **kwargs):
         self.messages.append(("warning", args, kwargs))
@@ -352,6 +363,1305 @@ class _EmptyAuthFailingASR:
         return "", None
 
 class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _bind_candidate_quiet(conn, journey_id="candidate.quiet-1"):
+        registry = EvidenceEnrollmentRegistry()
+        registry.register(
+            device_id=conn.device_id,
+            client_id="client-1",
+            journey_id=journey_id,
+            journey_type="quiet",
+            proof_profile="candidate-lifecycle",
+            ttl_sec=120,
+            transcript_plan=(),
+            hmac_key=b"",
+            semantic_kind="quiet",
+            quiet_mode="robot_speaking",
+        )
+        registry.claim(
+            device_id=conn.device_id,
+            client_id="client-1",
+            journey_id=journey_id,
+        )
+        conn.evidence_registry = registry
+        conn.google_live_evidence_journey_id = journey_id
+        conn.google_live_evidence_journey_type = "quiet"
+        conn.google_live_evidence_proof_profile = "candidate-lifecycle"
+        return registry
+
+    @staticmethod
+    def _bind_candidate_bargein(conn):
+        key = b"s" * 32
+
+        def expected(value):
+            return hmac.new(
+                key,
+                normalize_transcript(value).encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+
+        registry = EvidenceEnrollmentRegistry()
+        registry.register(
+            device_id=conn.device_id,
+            client_id="client-1",
+            journey_id="candidate.bargein-1",
+            journey_type="bargein",
+            proof_profile="candidate-lifecycle",
+            ttl_sec=120,
+            transcript_plan=(),
+            hmac_key=b"",
+            semantic_kind="bargein-intent",
+            intent_plan=(
+                CandidateIntentExpectation(1, "initial", expected("first intent")),
+                CandidateIntentExpectation(2, "newest", expected("newest intent")),
+            ),
+            semantic_hmac_key=key,
+        )
+        registry.claim(
+            device_id=conn.device_id,
+            client_id="client-1",
+            journey_id="candidate.bargein-1",
+        )
+        conn.client_id = "client-1"
+        conn.google_live_evidence_journey_id = "candidate.bargein-1"
+        conn.google_live_evidence_journey_type = "bargein"
+        conn.google_live_evidence_proof_profile = "candidate-lifecycle"
+        conn.evidence_registry = registry
+        return registry
+
+    async def test_candidate_semantic_newest_owns_exact_interrupt_replacement_chain(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._bridge = _Bridge()
+        provider._client = _Client()
+        provider._response_generation = 1
+
+        conn.google_live_transcript_event_token = object()
+        self.assertFalse(await provider._on_user_transcript("first intent"))
+        await provider._handle_live_event(
+            {"type": "audio_start", "response_generation": 1}
+        )
+        conn.google_live_audio_out_started_at = time.monotonic()
+
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript_barge_in("newest intent")
+        self.assertEqual(provider._response_generation, 2)
+        await provider._handle_live_event(
+            {"type": "audio_end", "response_generation": 1}
+        )
+        await provider._handle_live_event(
+            {"type": "audio_start", "response_generation": 2}
+        )
+        await provider._handle_live_event(
+            {"type": "audio_end", "response_generation": 2}
+        )
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertTrue(snapshot["semanticOwnershipReady"])
+        self.assertTrue(snapshot["latestIntentMatched"])
+        self.assertEqual(snapshot["semanticOldResponseGeneration"], 1)
+        self.assertEqual(snapshot["semanticReplacementGeneration"], 2)
+        self.assertEqual(snapshot["semanticStaleOldAudioCount"], 0)
+        markers = [str(args[0]) for _, args, _ in conn.logger.messages if args]
+        self.assertTrue(any("evidence_candidate_intent_match" in item for item in markers))
+        self.assertTrue(any("evidence_candidate_intent_replacement" in item for item in markers))
+        self.assertFalse(any("first intent" in str(item) for item in conn.logger.messages))
+        self.assertFalse(any("newest intent" in str(item) for item in conn.logger.messages))
+
+    async def test_interrupt_rebinds_real_client_receive_iterator_to_replacement_generation(self):
+        audio_message = SimpleNamespace(
+            server_content=SimpleNamespace(
+                interrupted=False,
+                turn_complete=True,
+                model_turn=SimpleNamespace(
+                    parts=[
+                        SimpleNamespace(
+                            inline_data=SimpleNamespace(
+                                data=b"pcm-audio",
+                                mime_type="audio/pcm;rate=24000",
+                            )
+                        )
+                    ]
+                ),
+            )
+        )
+
+        class RebindSession:
+            def __init__(self):
+                self.receive_calls = 0
+                self.first_waiting = asyncio.Event()
+
+            def receive(self):
+                self.receive_calls += 1
+                call = self.receive_calls
+
+                async def messages():
+                    if call == 1:
+                        self.first_waiting.set()
+                        await asyncio.Event().wait()
+                    yield audio_message
+
+                return messages()
+
+            async def send_client_content(self, **_kwargs):
+                return None
+
+            async def send_realtime_input(self, **_kwargs):
+                return None
+
+        conn = _Conn()
+        client = GoogleLiveClient({}, conn.logger)
+        session = RebindSession()
+        client.connected = True
+        client._session = session
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        provider._client = client
+        provider._bridge = _Bridge()
+        provider._response_generation = 1
+        client.set_response_generation_getter(provider.current_response_id)
+        original_bind = client.bind_response_generation
+        client.bind_response_generation = MagicMock(side_effect=original_bind)
+        events = client.receive_events().__aiter__()
+        first_event = asyncio.create_task(events.__anext__())
+        await session.first_waiting.wait()
+
+        await provider._begin_user_interrupt("explicit_interrupt")
+
+        event = await asyncio.wait_for(first_event, timeout=0.2)
+        self.assertEqual(provider._response_generation, 2)
+        self.assertEqual(event["type"], "audio_start")
+        self.assertEqual(event["response_generation"], 2)
+        self.assertEqual(session.receive_calls, 2)
+        client.bind_response_generation.assert_called_once_with(2)
+        await events.aclose()
+        await client.close()
+
+    async def test_real_client_rebind_preserves_open_old_audio_generation_until_terminal(self):
+        def server_message(*, audio=None, turn_complete=False):
+            parts = []
+            if audio is not None:
+                parts.append(
+                    SimpleNamespace(
+                        inline_data=SimpleNamespace(
+                            data=audio,
+                            mime_type="audio/pcm;rate=24000",
+                        )
+                    )
+                )
+            return SimpleNamespace(
+                server_content=SimpleNamespace(
+                    interrupted=False,
+                    turn_complete=turn_complete,
+                    model_turn=SimpleNamespace(parts=parts),
+                )
+            )
+
+        class RebindSequenceSession:
+            def __init__(self):
+                self.receive_calls = 0
+                self.first_waiting = asyncio.Event()
+
+            def receive(self):
+                self.receive_calls += 1
+                call = self.receive_calls
+
+                async def messages():
+                    if call == 1:
+                        yield server_message(audio=b"old", turn_complete=False)
+                        self.first_waiting.set()
+                        await asyncio.Event().wait()
+                    else:
+                        yield server_message(turn_complete=True)
+                        yield server_message(audio=b"new", turn_complete=True)
+
+                return messages()
+
+            async def send_client_content(self, **_kwargs):
+                return None
+
+            async def send_realtime_input(self, **_kwargs):
+                return None
+
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        client = GoogleLiveClient({}, conn.logger)
+        session = RebindSequenceSession()
+        client.connected = True
+        client._session = session
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        provider._client = client
+        provider._bridge = _Bridge()
+        provider._response_generation = 1
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        client.set_response_generation_getter(provider.current_response_id)
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript("first intent")
+        events = client.receive_events().__aiter__()
+
+        old_start = await events.__anext__()
+        old_chunk = await events.__anext__()
+        await provider._handle_live_event(old_start)
+        await provider._handle_live_event(old_chunk)
+        pending_terminal = asyncio.create_task(events.__anext__())
+        await session.first_waiting.wait()
+        conn.google_live_transcript_event_token = object()
+
+        await provider._on_user_transcript_barge_in("newest intent")
+
+        old_end = await asyncio.wait_for(pending_terminal, timeout=0.2)
+        self.assertEqual(old_end["type"], "audio_end")
+        self.assertEqual(old_end["response_generation"], 1)
+        await provider._handle_live_event(old_end)
+        replacement = [await events.__anext__() for _ in range(3)]
+        self.assertEqual(
+            [(item["type"], item["response_generation"]) for item in replacement],
+            [("audio_start", 2), ("audio_chunk", 2), ("audio_end", 2)],
+        )
+        for event in replacement:
+            await provider._handle_live_event(event)
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertTrue(snapshot["semanticOwnershipReady"])
+        self.assertEqual(snapshot["semanticStaleOldAudioCount"], 0)
+        await events.aclose()
+        await client.close()
+
+    async def test_real_client_rebind_synthesizes_old_end_before_direct_replacement_audio(self):
+        def audio_message(payload, *, turn_complete):
+            return SimpleNamespace(
+                server_content=SimpleNamespace(
+                    interrupted=False,
+                    turn_complete=turn_complete,
+                    model_turn=SimpleNamespace(
+                        parts=[
+                            SimpleNamespace(
+                                inline_data=SimpleNamespace(
+                                    data=payload,
+                                    mime_type="audio/pcm;rate=24000",
+                                )
+                            )
+                        ]
+                    ),
+                )
+            )
+
+        class DirectReplacementSession:
+            def __init__(self):
+                self.receive_calls = 0
+                self.first_waiting = asyncio.Event()
+
+            def receive(self):
+                self.receive_calls += 1
+                call = self.receive_calls
+
+                async def messages():
+                    if call == 1:
+                        yield audio_message(b"old", turn_complete=False)
+                        self.first_waiting.set()
+                        await asyncio.Event().wait()
+                    else:
+                        yield audio_message(b"new", turn_complete=True)
+
+                return messages()
+
+            async def send_client_content(self, **_kwargs):
+                return None
+
+            async def send_realtime_input(self, **_kwargs):
+                return None
+
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        client = GoogleLiveClient({}, conn.logger)
+        session = DirectReplacementSession()
+        client.connected = True
+        client._session = session
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        provider._client = client
+        provider._bridge = _Bridge()
+        provider._response_generation = 1
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        client.set_response_generation_getter(provider.current_response_id)
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript("first intent")
+        events = client.receive_events().__aiter__()
+        old_events = [await events.__anext__(), await events.__anext__()]
+        for event in old_events:
+            await provider._handle_live_event(event)
+        pending_end = asyncio.create_task(events.__anext__())
+        await session.first_waiting.wait()
+        conn.google_live_transcript_event_token = object()
+
+        await provider._on_user_transcript_barge_in("newest intent")
+
+        synthesized_end = await asyncio.wait_for(pending_end, timeout=0.2)
+        self.assertEqual(
+            (synthesized_end["type"], synthesized_end["response_generation"]),
+            ("audio_end", 1),
+        )
+        await provider._handle_live_event(synthesized_end)
+        replacement = [await events.__anext__() for _ in range(3)]
+        self.assertEqual(
+            [(item["type"], item["response_generation"]) for item in replacement],
+            [("audio_start", 2), ("audio_chunk", 2), ("audio_end", 2)],
+        )
+        for event in replacement:
+            await provider._handle_live_event(event)
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertTrue(snapshot["semanticOwnershipReady"])
+        self.assertEqual(snapshot["semanticStaleOldAudioCount"], 0)
+        await events.aclose()
+        await client.close()
+
+    async def test_candidate_semantic_rejects_newest_without_active_old_output(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._begin_user_interrupt = AsyncMock()
+
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript("first intent")
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript_barge_in("newest intent")
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertFalse(snapshot["semanticEligible"])
+        self.assertFalse(snapshot["semanticOwnershipReady"])
+
+    async def test_candidate_semantic_rejects_newest_after_old_output_ends(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._begin_user_interrupt = AsyncMock()
+        provider._response_generation = 1
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript("first intent")
+        await provider._handle_live_event({"type": "audio_start", "response_generation": 1})
+        await provider._handle_live_event({"type": "audio_end", "response_generation": 1})
+        conn.google_live_audio_out_started_at = None
+        conn.google_live_transcript_event_token = object()
+
+        await provider._on_user_transcript_barge_in("newest intent")
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertFalse(snapshot["semanticEligible"])
+        self.assertFalse(snapshot["semanticOwnershipReady"])
+
+    async def test_candidate_semantic_stale_old_audio_after_replacement_is_sticky_failure(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._bridge = _Bridge()
+        provider._client = _Client()
+        provider._response_generation = 1
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript("first intent")
+        await provider._handle_live_event({"type": "audio_start", "response_generation": 1})
+        conn.google_live_audio_out_started_at = time.monotonic()
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript_barge_in("newest intent")
+        await provider._handle_live_event({"type": "audio_start", "response_generation": 2})
+
+        await provider._handle_live_event({"type": "audio", "response_generation": 1})
+        await provider._handle_live_event({"type": "audio_end", "response_generation": 2})
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertFalse(snapshot["semanticEligible"])
+        self.assertFalse(snapshot["semanticOwnershipReady"])
+        self.assertEqual(snapshot["semanticStaleOldAudioCount"], 1)
+
+    async def test_candidate_semantic_wrong_replacement_generation_fails_closed(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._bridge = _Bridge()
+        provider._client = _Client()
+        provider._response_generation = 1
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript("first intent")
+        await provider._handle_live_event({"type": "audio_start", "response_generation": 1})
+        conn.google_live_audio_out_started_at = time.monotonic()
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript_barge_in("newest intent")
+
+        await provider._handle_live_event({"type": "audio_start", "response_generation": 3})
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertFalse(snapshot["semanticEligible"])
+        self.assertFalse(snapshot["semanticOwnershipReady"])
+
+    async def test_candidate_semantic_stop_failure_cannot_claim_replacement_ownership(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._bridge = _FailingBridge()
+        provider._client = _Client()
+        provider._response_generation = 1
+        conn.google_live_transcript_event_token = object()
+        await provider._on_user_transcript("first intent")
+        await provider._handle_live_event({"type": "audio_start", "response_generation": 1})
+        conn.google_live_audio_out_started_at = time.monotonic()
+        conn.google_live_transcript_event_token = object()
+
+        await provider._on_user_transcript_barge_in("newest intent")
+        await provider._handle_live_event({"type": "audio_start", "response_generation": 2})
+        await provider._handle_live_event({"type": "audio_end", "response_generation": 2})
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertFalse(snapshot["semanticOwnershipReady"])
+        self.assertIsNone(snapshot["semanticOldResponseGeneration"])
+
+    async def test_candidate_semantic_duplicate_provider_lifecycle_event_fails_sticky(self):
+        for duplicate_type in ("audio_start", "audio_end"):
+            with self.subTest(duplicate_type=duplicate_type):
+                conn = _Conn()
+                registry = self._bind_candidate_bargein(conn)
+                provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+                provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+                provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+                provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+                provider._bridge = _Bridge()
+                provider._client = _Client()
+                provider._response_generation = 1
+                conn.google_live_transcript_event_token = object()
+                await provider._on_user_transcript("first intent")
+                await provider._handle_live_event(
+                    {"type": "audio_start", "response_generation": 1}
+                )
+                conn.google_live_transcript_event_token = object()
+                await provider._on_user_transcript_barge_in("newest intent")
+                await provider._handle_live_event(
+                    {"type": "audio_start", "response_generation": 2}
+                )
+                if duplicate_type == "audio_end":
+                    await provider._handle_live_event(
+                        {"type": "audio_end", "response_generation": 2}
+                    )
+                await provider._handle_live_event(
+                    {"type": duplicate_type, "response_generation": 2}
+                )
+
+                snapshot = registry.safe_snapshot("candidate.bargein-1")
+                self.assertFalse(snapshot["semanticEligible"])
+                self.assertFalse(snapshot["semanticOwnershipReady"])
+
+    async def test_candidate_semantic_duplicate_callback_is_observed_once(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._begin_user_interrupt = AsyncMock()
+        token = object()
+        conn.google_live_transcript_event_token = token
+
+        await provider._on_user_transcript("first intent")
+        await provider._on_user_transcript_barge_in("first intent")
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertEqual(snapshot["semanticObservedCount"], 1)
+        self.assertEqual(snapshot["semanticMatchCount"], 1)
+
+    async def test_candidate_semantic_initial_response_generation_is_sticky(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._response_generation = 1
+        conn.google_live_transcript_event_token = object()
+
+        await provider._on_user_transcript("first intent")
+        await provider._handle_live_event(
+            {"type": "audio_start", "response_generation": 2}
+        )
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertFalse(snapshot["semanticEligible"])
+        self.assertEqual(snapshot["semanticInitialObservedGeneration"], 1)
+        self.assertIsNone(snapshot["semanticInitialResponseGeneration"])
+
+    async def test_candidate_semantic_duplicate_initial_response_start_fails_sticky(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._response_generation = 1
+        conn.google_live_transcript_event_token = object()
+
+        await provider._on_user_transcript("first intent")
+        await provider._handle_live_event(
+            {"type": "audio_start", "response_generation": 1}
+        )
+        await provider._handle_live_event(
+            {"type": "audio_start", "response_generation": 1}
+        )
+
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertFalse(snapshot["semanticEligible"])
+
+    async def test_candidate_quiet_marker_uses_measured_robot_speaking_counters(self):
+        conn = _Conn()
+        registry = self._bind_candidate_quiet(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._interaction.start_live_connection("live-quiet")
+        provider._reset_candidate_scope_measurements()
+        provider._close_live_resources = AsyncMock(return_value=None)
+        conn.google_live_live_connection_id = "live-quiet"
+        provider._bridge = google_live_module.GoogleLiveAudioBridge(
+            conn,
+            _Client(),
+            conn.logger,
+            response_id_getter=provider.current_response_id,
+            response_cancelled_checker=provider.is_response_cancelled,
+            model_output_forwarded_handler=provider._record_quiet_forwarded_output,
+            model_output_delivery_failed_handler=(
+                provider._record_model_output_delivery_failure
+            ),
+        )
+        async def deliver(_audio, **kwargs):
+            complete, _fail = provider._bridge._new_output_delivery(
+                kwargs.get("response_generation")
+            )
+            complete(1)
+            return 1
+
+        provider._bridge._send_binary_audio_message = deliver
+        provider._bridge._send_tts_message = AsyncMock()
+
+        provider._mark_clean_user_turn_opened("audio_input")
+        response_clock = [10.0]
+        provider._evidence_candidate_scope_started_at = 9.0
+        with patch.object(
+            google_live_module.time, "monotonic", side_effect=lambda: response_clock[0]
+        ):
+            start = {"type": "audio_start", "response_generation": 1}
+            await provider._handle_live_event(start)
+            await provider._bridge.handle_event(start)
+            chunk = {
+                "type": "audio",
+                "response_generation": 1,
+                "audio": b"pcm",
+            }
+            await provider._handle_live_event(chunk)
+            await provider._bridge.handle_event(chunk)
+            response_clock[0] = 12.4
+            end = {"type": "audio_end", "response_generation": 1}
+            await provider._handle_live_event(end)
+            await provider._bridge.handle_event(end)
+            result = await provider.finalize_evidence()
+        causal = registry.safe_snapshot("candidate.quiet-1")
+        self.assertTrue(causal["quietSetupTurnConsumed"], causal)
+        self.assertTrue(causal["quietSemanticEligible"], causal)
+        self.assertEqual(causal["quietSetupResponseGeneration"], 1)
+        self.assertEqual(causal["quietResponseStartedGeneration"], 1)
+        self.assertEqual(causal["quietResponseCompletedGeneration"], 1)
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(
+            result["quietSemanticEvidence"]["status"],
+            "PASS",
+            result["quietSemanticEvidence"],
+        )
+        provider._evidence_candidate_observation_ended_at = (
+            provider._evidence_candidate_scope_started_at
+        )
+        self.assertEqual(
+            provider._candidate_quiet_semantic_evidence(
+                dict(provider._evidence_candidate_counters)
+            )["status"],
+            "FAIL",
+        )
+        rendered = [
+            (args[0].format(*args[1:]) if len(args) > 1 else str(args[0]))
+            for _, args, _ in conn.logger.messages
+            if args
+        ]
+        quiet = next(item for item in rendered if "evidence_candidate_quiet" in item)
+        self.assertIn("mode=robot_speaking", quiet)
+        self.assertIn("user_turns=0", quiet)
+        self.assertIn("response_starts=1 response_ends=1", quiet)
+        self.assertIn("response_generation=1 response_duration_ms=2400", quiet)
+        self.assertIn("interrupts=0 replacements=0 reconnects=0 fallbacks=0", quiet)
+        self.assertTrue(any("evidence_candidate_fallback" in item and "fallbacks=0" in item for item in rendered))
+
+        provider._response_generation = 2
+        provider._mark_clean_user_turn_opened("audio_input")
+        self.assertEqual(provider._evidence_candidate_counters["user_turns"], 1)
+
+    async def test_candidate_quiet_forwarded_chunks_fail_closed_outside_exact_lifecycle(self):
+        scenarios = {
+            "pre_start": [
+                {"type": "audio", "audio": b"early", "response_generation": 1},
+                {"type": "audio_start", "response_generation": 1},
+                {"type": "audio", "audio": b"valid", "response_generation": 1},
+                {"type": "audio_end", "response_generation": 1},
+            ],
+            "post_end": [
+                {"type": "audio_start", "response_generation": 1},
+                {"type": "audio", "audio": b"valid", "response_generation": 1},
+                {"type": "audio_end", "response_generation": 1},
+                {"type": "audio", "audio": b"late", "response_generation": 1},
+            ],
+            "wrong_generation": [
+                {"type": "audio_start", "response_generation": 1},
+                {"type": "audio", "audio": b"wrong", "response_generation": 2},
+                {"type": "audio", "audio": b"valid", "response_generation": 1},
+                {"type": "audio_end", "response_generation": 1},
+            ],
+            "stale_generation": [
+                {"type": "audio_start", "response_generation": 1},
+                {"type": "audio", "audio": b"stale", "response_generation": 0},
+                {"type": "audio", "audio": b"valid", "response_generation": 1},
+                {"type": "audio_end", "response_generation": 1},
+            ],
+            "missing_generation": [
+                {"type": "audio_start", "response_generation": 1},
+                {"type": "audio", "audio": b"missing"},
+                {"type": "audio", "audio": b"valid", "response_generation": 1},
+                {"type": "audio_end", "response_generation": 1},
+            ],
+            "non_int_generation": [
+                {"type": "audio_start", "response_generation": 1},
+                {"type": "audio", "audio": b"invalid", "response_generation": "1"},
+                {"type": "audio", "audio": b"valid", "response_generation": 1},
+                {"type": "audio_end", "response_generation": 1},
+            ],
+            "bool_generation": [
+                {"type": "audio_start", "response_generation": 1},
+                {"type": "audio", "audio": b"invalid", "response_generation": True},
+                {"type": "audio", "audio": b"valid", "response_generation": 1},
+                {"type": "audio_end", "response_generation": 1},
+            ],
+            "negative_generation": [
+                {"type": "audio_start", "response_generation": 1},
+                {"type": "audio", "audio": b"invalid", "response_generation": -1},
+                {"type": "audio", "audio": b"valid", "response_generation": 1},
+                {"type": "audio_end", "response_generation": 1},
+            ],
+        }
+        for suffix, events in scenarios.items():
+            with self.subTest(scenario=suffix):
+                conn = _Conn()
+                journey_id = f"candidate.quiet-{suffix}"
+                registry = self._bind_candidate_quiet(conn, journey_id)
+                provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+                provider._interaction.start_live_connection("live-quiet")
+                provider._reset_candidate_scope_measurements()
+                provider._close_live_resources = AsyncMock(return_value=None)
+                provider._bridge = google_live_module.GoogleLiveAudioBridge(
+                    conn,
+                    _Client(),
+                    conn.logger,
+                    response_id_getter=provider.current_response_id,
+                    response_cancelled_checker=provider.is_response_cancelled,
+                    model_output_forwarded_handler=provider._record_quiet_forwarded_output,
+                    model_output_delivery_failed_handler=(
+                        provider._record_model_output_delivery_failure
+                    ),
+                )
+                async def deliver(_audio, **kwargs):
+                    complete, _fail = provider._bridge._new_output_delivery(
+                        kwargs.get("response_generation")
+                    )
+                    complete(1)
+                    return 1
+
+                provider._bridge._send_binary_audio_message = deliver
+                provider._bridge._send_tts_message = AsyncMock()
+                provider._mark_clean_user_turn_opened("audio_input")
+                provider._evidence_candidate_scope_started_at = 9.0
+
+                for event in events:
+                    await provider._handle_live_event(event)
+                    try:
+                        await provider._bridge.handle_event(event)
+                    except RuntimeError as exc:
+                        self.assertIn("delivery failed", str(exc))
+                provider._evidence_candidate_observation_ended_at = 12.0
+                result = await provider.finalize_evidence()
+
+                snapshot = registry.safe_snapshot(journey_id)
+                self.assertFalse(snapshot["quietSemanticEligible"], snapshot)
+                self.assertEqual(result["quietSemanticEvidence"]["status"], "FAIL")
+
+    async def test_candidate_quiet_failed_binary_send_does_not_create_output_proof(self):
+        conn = _Conn()
+        registry = self._bind_candidate_quiet(conn, "candidate.quiet-send-failed")
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._interaction.start_live_connection("live-quiet")
+        provider._reset_candidate_scope_measurements()
+        provider._close_live_resources = AsyncMock(return_value=None)
+        provider._bridge = google_live_module.GoogleLiveAudioBridge(
+            conn,
+            _Client(),
+            conn.logger,
+            response_id_getter=provider.current_response_id,
+            response_cancelled_checker=provider.is_response_cancelled,
+            model_output_forwarded_handler=provider._record_quiet_forwarded_output,
+        )
+        provider._bridge._send_binary_audio_message = AsyncMock(
+            side_effect=RuntimeError("send failed")
+        )
+        provider._bridge._send_tts_message = AsyncMock()
+        provider._mark_clean_user_turn_opened("audio_input")
+        provider._evidence_candidate_scope_started_at = 9.0
+        start = {"type": "audio_start", "response_generation": 1}
+        await provider._handle_live_event(start)
+        await provider._bridge.handle_event(start)
+        chunk = {"type": "audio", "audio": b"pcm", "response_generation": 1}
+        await provider._handle_live_event(chunk)
+        with self.assertRaisesRegex(RuntimeError, "send failed"):
+            await provider._bridge.handle_event(chunk)
+        end = {"type": "audio_end", "response_generation": 1}
+        await provider._handle_live_event(end)
+        await provider._bridge.handle_event(end)
+        provider._evidence_candidate_observation_ended_at = 12.0
+
+        result = await provider.finalize_evidence()
+
+        snapshot = registry.safe_snapshot("candidate.quiet-send-failed")
+        self.assertEqual(snapshot["quietForwardedOutputChunks"], 0)
+        self.assertEqual(result["quietSemanticEvidence"]["status"], "FAIL")
+
+    async def test_candidate_quiet_distinct_text_during_setup_audio_fails_closed(self):
+        conn = _Conn()
+        registry = self._bind_candidate_quiet(conn, "candidate.quiet-mixed-input")
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-quiet")
+        provider._reset_candidate_scope_measurements()
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_lesson_start_intent = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._should_interrupt_for_input = lambda _audio: False
+        provider._should_drop_input_during_output = lambda: False
+        provider._should_drop_conversation_start_noise = lambda _audio: False
+
+        self.assertTrue(await provider.handle_audio_bytes(b"setup-one"))
+        self.assertTrue(await provider.handle_audio_bytes(b"setup-two"))
+        before_text = registry.safe_snapshot("candidate.quiet-mixed-input")
+        self.assertTrue(before_text["quietSemanticEligible"], before_text)
+        self.assertEqual(provider._evidence_candidate_counters["user_turns"], 0)
+        self.assertTrue(
+            await provider.handle_text_message(
+                '{"type":"listen","state":"detect","text":" "}'
+            )
+        )
+        self.assertTrue(
+            registry.safe_snapshot("candidate.quiet-mixed-input")[
+                "quietSemanticEligible"
+            ]
+        )
+
+        distinct_text = '{"type":"text","text":"distinct accepted input"}'
+        self.assertTrue(await provider.handle_text_message(distinct_text))
+
+        after_text = registry.safe_snapshot("candidate.quiet-mixed-input")
+        self.assertFalse(after_text["quietSemanticEligible"], after_text)
+        self.assertEqual(provider._evidence_candidate_counters["user_turns"], 1)
+        self.assertEqual(provider._response_generation, 2)
+        self.assertTrue(await provider.handle_text_message(distinct_text))
+        self.assertEqual(provider._evidence_candidate_counters["user_turns"], 2)
+
+    async def test_candidate_quiet_second_audio_stream_is_not_frame_deduped(self):
+        conn = _Conn()
+        registry = self._bind_candidate_quiet(conn, "candidate.quiet-second-audio")
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-quiet")
+        provider._reset_candidate_scope_measurements()
+        provider._should_interrupt_for_input = lambda _audio: False
+        provider._should_drop_input_during_output = lambda: False
+        provider._should_drop_conversation_start_noise = lambda _audio: False
+        provider._waiting_model_retry_audio_can_resume = lambda _audio: True
+
+        self.assertTrue(await provider.handle_audio_bytes(b"setup"))
+        self.assertTrue(
+            await provider.handle_text_message('{"type":"listen","state":"stop"}')
+        )
+        self.assertTrue(await provider.handle_audio_bytes(b"second-turn"))
+
+        snapshot = registry.safe_snapshot("candidate.quiet-second-audio")
+        self.assertFalse(snapshot["quietSemanticEligible"], snapshot)
+        self.assertEqual(provider._evidence_candidate_counters["user_turns"], 1)
+
+    async def test_candidate_quiet_silence_duration_excludes_successful_teardown(self):
+        conn = _Conn()
+        registry = EvidenceEnrollmentRegistry()
+        registry.register(
+            device_id=conn.device_id,
+            client_id="client-1",
+            journey_id="candidate.quiet-frozen-1",
+            journey_type="quiet",
+            proof_profile="candidate-lifecycle",
+            ttl_sec=120,
+            transcript_plan=(),
+            hmac_key=b"",
+            semantic_kind="quiet",
+            quiet_mode="silence",
+        )
+        registry.claim(device_id=conn.device_id, client_id="client-1", journey_id="candidate.quiet-frozen-1")
+        conn.evidence_registry = registry
+        conn.google_live_evidence_journey_id = "candidate.quiet-frozen-1"
+        conn.google_live_evidence_journey_type = "quiet"
+        conn.google_live_evidence_proof_profile = "candidate-lifecycle"
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._interaction.start_live_connection("live-quiet")
+        provider._evidence_candidate_scope_started_at = 10.0
+
+        async def slow_close(**_kwargs):
+            clock[0] = 15.5
+
+        clock = [12.0]
+        provider._close_live_resources = AsyncMock(side_effect=slow_close)
+        with patch.object(google_live_module.time, "monotonic", side_effect=lambda: clock[0]):
+            result = await provider.finalize_evidence()
+
+        self.assertEqual(result["status"], "PASS")
+        rendered = [args[0].format(*args[1:]) for _, args, _ in conn.logger.messages if args]
+        quiet = next(item for item in rendered if "evidence_candidate_quiet" in item)
+        self.assertIn("duration_ms=2000", quiet)
+
+    async def test_candidate_quiet_silence_marker_reports_explicit_zero_counters(self):
+        conn = _Conn()
+        registry = EvidenceEnrollmentRegistry()
+        registry.register(
+            device_id=conn.device_id,
+            client_id="client-1",
+            journey_id="candidate.quiet-silence-1",
+            journey_type="quiet",
+            proof_profile="candidate-lifecycle",
+            ttl_sec=120,
+            transcript_plan=(),
+            hmac_key=b"",
+            semantic_kind="quiet",
+            quiet_mode="silence",
+        )
+        registry.claim(
+            device_id=conn.device_id,
+            client_id="client-1",
+            journey_id="candidate.quiet-silence-1",
+        )
+        conn.evidence_registry = registry
+        conn.google_live_evidence_journey_id = "candidate.quiet-silence-1"
+        conn.google_live_evidence_journey_type = "quiet"
+        conn.google_live_evidence_proof_profile = "candidate-lifecycle"
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._interaction.start_live_connection("live-quiet")
+        provider._reset_candidate_scope_measurements()
+        provider._close_live_resources = AsyncMock(return_value=None)
+
+        await provider.finalize_evidence()
+
+        rendered = [
+            (args[0].format(*args[1:]) if len(args) > 1 else str(args[0]))
+            for _, args, _ in conn.logger.messages
+            if args
+        ]
+        quiet = next(item for item in rendered if "evidence_candidate_quiet" in item)
+        self.assertIn("mode=silence", quiet)
+        self.assertIn("user_turns=0 response_starts=0 response_ends=0", quiet)
+        self.assertIn(
+            "interrupts=0 replacements=0 reconnects=0 fallbacks=0 "
+            "stale_audio=0 delivery_failures=0",
+            quiet,
+        )
+
+    async def test_candidate_quiet_marker_waits_for_quiescence_and_retry_uses_fresh_counters(self):
+        conn = _Conn()
+        registry = EvidenceEnrollmentRegistry()
+        registry.register(
+            device_id=conn.device_id,
+            client_id="client-1",
+            journey_id="candidate.quiet-retry-1",
+            journey_type="quiet",
+            proof_profile="candidate-lifecycle",
+            ttl_sec=120,
+            transcript_plan=(),
+            hmac_key=b"",
+            semantic_kind="quiet",
+            quiet_mode="silence",
+        )
+        registry.claim(
+            device_id=conn.device_id,
+            client_id="client-1",
+            journey_id="candidate.quiet-retry-1",
+        )
+        conn.evidence_registry = registry
+        conn.google_live_evidence_journey_id = "candidate.quiet-retry-1"
+        conn.google_live_evidence_journey_type = "quiet"
+        conn.google_live_evidence_proof_profile = "candidate-lifecycle"
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._interaction.start_live_connection("live-quiet")
+        provider._reset_candidate_scope_measurements()
+        close_calls = 0
+
+        async def close_with_late_response(**_kwargs):
+            nonlocal close_calls
+            close_calls += 1
+            if close_calls == 1:
+                provider._increment_candidate_counter("response_starts")
+
+        provider._close_live_resources = AsyncMock(side_effect=close_with_late_response)
+        provider._pending_evidence_task_count = MagicMock(side_effect=(1, 0))
+
+        first = await provider.finalize_evidence()
+        first_markers = [
+            args
+            for _, args, _ in conn.logger.messages
+            if args and "evidence_candidate_quiet" in str(args[0])
+        ]
+        self.assertEqual(first["status"], "FAIL")
+        self.assertEqual(first_markers, [])
+
+        self.assertTrue(provider.prepare_evidence_finalize_retry())
+        second = await provider.finalize_evidence()
+
+        rendered = [
+            (args[0].format(*args[1:]) if len(args) > 1 else str(args[0]))
+            for _, args, _ in conn.logger.messages
+            if args and "evidence_candidate_quiet" in str(args[0])
+        ]
+        self.assertEqual(second["status"], "PASS")
+        self.assertEqual(len(rendered), 1)
+        self.assertIn("mode=silence", rendered[0])
+        self.assertIn("response_starts=1", rendered[0])
+
+    async def test_evidence_transcript_is_observed_before_normal_dispatch_without_changing_result(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.next_transcript_phase.return_value = "interrupt"
+        conn.evidence_registry.observe_transcript.return_value = {
+            "slot": 1,
+            "phase": "interrupt",
+            "chars": 5,
+            "matched": True,
+            "observedAt": 10.0,
+        }
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._has_active_output = MagicMock(return_value=True)
+        order = []
+
+        def observe(*args, **kwargs):
+            order.append("observe")
+            return {
+                "slot": 1, "phase": "interrupt", "chars": 5,
+                "matched": True, "observedAt": 10.0,
+            }
+
+        async def dispatch(_text):
+            order.append("dispatch")
+            return True
+
+        conn.evidence_registry.observe_transcript.side_effect = observe
+        provider._dispatch_lesson_child_response = dispatch
+
+        handled = await provider._on_user_transcript("hello")
+
+        self.assertTrue(handled)
+        self.assertEqual(order, ["observe", "dispatch"])
+        conn.evidence_registry.observe_transcript.assert_called_once_with(
+            "physical.run-1",
+            "hello",
+            phase="interrupt",
+            response_generation=0,
+        )
+        self.assertTrue(
+            any(
+                "evidence_transcript_match" in str(args[0])
+                and "hello" not in str(args)
+                for _, args, _ in conn.logger.messages
+            )
+        )
+
+    async def test_evidence_barge_in_observes_interactive_lesson_before_dispatch(self):
+        conn = _Conn()
+        conn.session_mode = SessionMode.LESSON
+        conn.lesson_runtime = SimpleNamespace(
+            state="RUNNING", _step_passive=False, _step_completed=False
+        )
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.next_transcript_phase.return_value = "lesson"
+        conn.evidence_registry.observe_transcript.return_value = {
+            "slot": 2, "phase": "lesson", "chars": 6,
+            "matched": True, "observedAt": 11.0,
+        }
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        order = []
+        conn.evidence_registry.observe_transcript.side_effect = lambda *args, **kwargs: (
+            order.append("observe")
+            or {"slot": 2, "phase": "lesson", "chars": 6, "matched": True, "observedAt": 11.0}
+        )
+        provider._dispatch_lesson_child_response = AsyncMock(
+            side_effect=lambda _text: order.append("dispatch") or True
+        )
+
+        await provider._on_user_transcript_barge_in("answer")
+
+        self.assertEqual(order, ["observe", "dispatch"])
+        self.assertEqual(
+            conn.evidence_registry.observe_transcript.call_args.kwargs["phase"],
+            "lesson",
+        )
+
+    async def test_evidence_output_idle_marks_only_current_final_response_generation(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.mark_output_idle.return_value = True
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._response_generation = 4
+        provider._evidence_final_response_reservation = {
+            "token": 12,
+            "providerGeneration": 4,
+            "outputStarted": True,
+        }
+
+        await provider._handle_live_event(
+            {"type": "audio_end", "response_generation": 4}
+        )
+
+        conn.evidence_registry.mark_output_idle.assert_called_once_with(
+            "physical.run-1", response_generation=12
+        )
+
+    async def test_evidence_post_lesson_phase_requires_durable_lesson_release(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.next_transcript_phase.return_value = "post_lesson"
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+
+        self.assertIsNone(provider._evidence_transcript_phase())
+        conn.google_live_evidence_lesson_released = True
+        self.assertEqual(provider._evidence_transcript_phase(), "post_lesson")
+
+    async def test_wrong_phase_is_observed_and_fails_closed_before_lesson_dispatch(self):
+        conn = _Conn()
+        conn.session_mode = SessionMode.LESSON
+        conn.lesson_runtime = SimpleNamespace(
+            state="RUNNING", _step_passive=False, _step_completed=False
+        )
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.next_transcript_phase.return_value = "interrupt"
+        conn.evidence_registry.observe_transcript.return_value = {
+            "slot": 1, "phase": "lesson", "chars": 5,
+            "matched": False, "observedAt": 10.0,
+        }
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=True)
+
+        self.assertTrue(await provider._on_user_transcript("wrong"))
+
+        conn.evidence_registry.observe_transcript.assert_called_once()
+        self.assertEqual(
+            conn.evidence_registry.observe_transcript.call_args.kwargs["phase"],
+            "lesson",
+        )
+
+    async def test_final_post_lesson_normal_callback_reserves_causal_output_token(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.google_live_evidence_lesson_released = True
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.next_transcript_phase.return_value = None
+        conn.evidence_registry.observe_transcript.return_value = {
+            "slot": 11, "phase": "post_lesson", "chars": 5,
+            "matched": True, "observedAt": 10.0,
+        }
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._response_generation = 4
+
+        self.assertFalse(await provider._on_user_transcript("final"))
+        token = conn.evidence_registry.observe_transcript.call_args.kwargs[
+            "response_generation"
+        ]
+        self.assertNotEqual(token, 4)
+        await provider._handle_live_event({"type": "audio_end", "response_generation": 4})
+        conn.evidence_registry.mark_output_idle.assert_not_called()
+        await provider._handle_live_event({"type": "audio_start", "response_generation": 4})
+        await provider._handle_live_event({"type": "audio_end", "response_generation": 4})
+        conn.evidence_registry.mark_output_idle.assert_called_once_with(
+            "physical.run-1", response_generation=token
+        )
+
+    async def test_final_post_lesson_binds_after_outstanding_prior_normal_response(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.google_live_evidence_lesson_released = True
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.next_transcript_phase.return_value = None
+        conn.evidence_registry.observe_transcript.return_value = {
+            "slot": 11, "phase": "post_lesson", "chars": 5,
+            "matched": True, "observedAt": 10.0,
+        }
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._response_generation = 4
+        provider._interaction.response_id = 4
+        provider._client = SimpleNamespace(bind_response_generation=MagicMock())
+        provider._interaction.transition(google_live_module.InteractionState.WAITING_MODEL)
+
+        provider._mark_clean_user_turn_opened("audio_input")
+        self.assertEqual(provider._response_generation, 5)
+        provider._client.bind_response_generation.assert_called_once_with(5)
+        self.assertFalse(await provider._on_user_transcript("final"))
+        token = conn.evidence_registry.observe_transcript.call_args.kwargs[
+            "response_generation"
+        ]
+        self.assertEqual(
+            provider._evidence_final_response_reservation["providerGeneration"],
+            5,
+        )
+
+        await provider._handle_live_event(
+            {"type": "audio_start", "response_generation": 4}
+        )
+        await provider._handle_live_event(
+            {"type": "audio_end", "response_generation": 4}
+        )
+        conn.evidence_registry.mark_output_idle.assert_not_called()
+
+        await provider._handle_live_event(
+            {"type": "audio_start", "response_generation": 5}
+        )
+        await provider._handle_live_event(
+            {"type": "audio_end", "response_generation": 5}
+        )
+        conn.evidence_registry.mark_output_idle.assert_called_once_with(
+            "physical.run-1", response_generation=token
+        )
+
+    async def test_final_post_lesson_direct_barge_callback_reserves_same_causal_contract(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.google_live_evidence_lesson_released = True
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.next_transcript_phase.return_value = None
+        conn.evidence_registry.observe_transcript.return_value = {
+            "slot": 11, "phase": "post_lesson", "chars": 5,
+            "matched": True, "observedAt": 10.0,
+        }
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._dispatch_lesson_child_response = AsyncMock(return_value=False)
+        provider._dispatch_music_control_intent = AsyncMock(return_value=False)
+        provider._bridge = SimpleNamespace(stop_output=AsyncMock())
+        provider._client = _Client()
+
+        await provider._on_user_transcript_barge_in("final")
+
+        token = conn.evidence_registry.observe_transcript.call_args.kwargs[
+            "response_generation"
+        ]
+        self.assertIsNotNone(provider._evidence_final_response_reservation)
+        self.assertEqual(
+            provider._evidence_final_response_reservation["token"], token
+        )
+        self.assertEqual(
+            provider._evidence_final_response_reservation["providerGeneration"],
+            provider._response_generation,
+        )
+        await provider._handle_live_event(
+            {"type": "audio_start", "response_generation": provider._response_generation}
+        )
+        await provider._handle_live_event(
+            {"type": "audio_end", "response_generation": provider._response_generation}
+        )
+        conn.evidence_registry.mark_output_idle.assert_called_once_with(
+            "physical.run-1", response_generation=token
+        )
+
+    async def test_normal_then_barge_callbacks_observe_same_utterance_exactly_once(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.observe_transcript.return_value = {
+            "slot": 1, "phase": "interrupt", "chars": 5,
+            "matched": True, "observedAt": 10.0,
+        }
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._has_active_output = MagicMock(return_value=True)
+        provider._begin_user_interrupt = AsyncMock()
+        utterance = "hello"
+        conn.google_live_transcript_event_token = object()
+
+        self.assertFalse(await provider._on_user_transcript(utterance))
+        await provider._on_user_transcript_barge_in(utterance)
+
+        conn.evidence_registry.observe_transcript.assert_called_once()
+        provider._begin_user_interrupt.assert_awaited_once_with("transcript_barge_in")
+
+    async def test_evidence_does_not_match_transcript_suppressed_as_model_echo(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "physical.run-1"
+        conn.evidence_registry = MagicMock()
+        conn.evidence_registry.next_transcript_phase.return_value = "interrupt"
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._has_active_output = MagicMock(return_value=True)
+        provider._bridge = SimpleNamespace(looks_like_model_echo=lambda _text: True)
+
+        handled = await provider._on_user_transcript("model echo")
+
+        self.assertTrue(handled)
+        conn.evidence_registry.observe_transcript.assert_not_called()
+
+    async def test_candidate_semantic_observes_once_before_model_echo_suppression(self):
+        conn = _Conn()
+        registry = self._bind_candidate_bargein(conn)
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
+        provider._bridge = SimpleNamespace(looks_like_model_echo=lambda _text: True)
+        token = object()
+        conn.google_live_transcript_event_token = token
+
+        handled = await provider._on_user_transcript("first intent")
+        after_normal = registry.safe_snapshot("candidate.bargein-1")
+        await provider._on_user_transcript_barge_in("first intent")
+
+        self.assertTrue(handled)
+        self.assertEqual(after_normal["semanticObservedCount"], 1)
+        snapshot = registry.safe_snapshot("candidate.bargein-1")
+        self.assertEqual(snapshot["semanticObservedCount"], 1)
+        self.assertEqual(snapshot["semanticMatchCount"], 1)
+        self.assertTrue(
+            any(
+                "user_transcript_suppressed_as_model_echo" in str(args[0])
+                for _, args, _ in conn.logger.messages
+                if args
+            )
+        )
+
     async def test_activity_lease_covers_live_open_connect_task(self):
         conn = _Conn()
         connect_entered = asyncio.Event()
@@ -555,6 +1865,13 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(conn.activity_leases.has_voice_leases())
         release.set()
         self.assertTrue(await silent)
+        self.assertTrue(
+            any(
+                "Google Live reopen_ready reason=waiting_model_timeout" in str(args[0])
+                for level, args, _kwargs in conn.logger.messages
+                if level == "info" and args
+            )
+        )
         self.assertFalse(conn.activity_leases.has_voice_leases())
 
     async def test_activity_lease_eviction_first_hard_reconnect_discards_replay_buffer(self):
@@ -2626,6 +3943,131 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(provider._waiting_model_timeout_task)
         self.assertEqual(provider._client.text, [])
 
+    async def test_receive_timeout_policy_failure_emits_scoped_failed_outcome(self):
+        async def fail_timeout_policy():
+            raise RuntimeError("policy failed")
+
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        conn.session_mode = SessionMode.LESSON
+        conn.lesson_runtime = SimpleNamespace(
+            state="RUNNING",
+            on_google_live_receive_timeout=fail_timeout_policy,
+        )
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-1")
+        provider._client = _Client(events=[{"type": "receive_timeout"}])
+        provider._bridge = _Bridge()
+        provider._session_generation = 7
+        provider._handle_runtime_failure = AsyncMock()
+
+        await provider._receive_events_loop(7)
+
+        scoped = [
+            args
+            for level, args, _kwargs in conn.logger.messages
+            if level == "info"
+            and args
+            and "evidence_receive_timeout_outcome" in str(args[0])
+        ]
+        self.assertEqual(
+            scoped,
+            [
+                (
+                    "Google Live evidence_receive_timeout_outcome journey_id={} "
+                    "connection_id={} live_connection_id={} generation={} outcome={}",
+                    "journey-1",
+                    "session-1",
+                    "live-1",
+                    7,
+                    "failed",
+                )
+            ],
+        )
+
+    async def test_receive_timeout_outcome_keeps_originating_scope_across_reconnect(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-1")
+        provider._client = _Client(events=[{"type": "receive_timeout"}])
+        provider._bridge = _Bridge()
+        provider._session_generation = 7
+        provider._handle_runtime_failure = AsyncMock()
+
+        async def reconnect_while_handling():
+            provider._session_generation = 8
+            provider._interaction.start_live_connection("live-2")
+            return True
+
+        provider._handle_receive_timeout_event = reconnect_while_handling
+
+        await provider._receive_events_loop(7)
+
+        scoped = [
+            args
+            for level, args, _kwargs in conn.logger.messages
+            if level == "info"
+            and args
+            and "evidence_receive_timeout_outcome" in str(args[0])
+        ]
+        self.assertEqual(scoped[0][1:5], ("journey-1", "session-1", "live-1", 7))
+
+    async def test_opened_client_keeps_its_original_evidence_scope(self):
+        class _ScopedClient(_Client):
+            def set_response_generation_getter(self, getter):
+                self.response_generation_getter = getter
+
+            def set_evidence_scope_getter(self, getter):
+                self.evidence_scope_getter = getter
+
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        client = _ScopedClient()
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_args: client)
+        self.provider = provider
+        provider._ensure_required_aec_ready = lambda: None
+
+        with patch.object(
+            google_live_module, "GoogleLiveAudioBridge", lambda *_a, **_k: _Bridge()
+        ):
+            await provider._open_live_session_locked()
+
+        original_scope = client.evidence_scope_getter()
+        provider._session_generation = 9
+        provider._interaction.start_live_connection("live-9")
+
+        self.assertEqual(original_scope, ("journey-1", "session-1", "1", 1))
+        self.assertEqual(client.evidence_scope_getter(), original_scope)
+
+    async def test_prepare_evidence_scope_binds_prehello_prewarmed_client(self):
+        class _ScopedClient(_Client):
+            def set_response_generation_getter(self, getter):
+                self.response_generation_getter = getter
+
+            def set_evidence_scope_getter(self, getter):
+                self.evidence_scope_getter = getter
+
+        conn = _Conn()
+        client = _ScopedClient()
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_args: client)
+        self.provider = provider
+        provider._ensure_required_aec_ready = lambda: None
+
+        with patch.object(
+            google_live_module, "GoogleLiveAudioBridge", lambda *_a, **_k: _Bridge()
+        ):
+            await provider._open_live_session_locked()
+
+        self.assertIsNone(client.evidence_scope_getter())
+        conn.google_live_evidence_journey_id = "journey-1"
+
+        self.assertEqual(await provider.prepare_evidence_scope(), "1")
+        self.assertEqual(
+            client.evidence_scope_getter(),
+            ("journey-1", "session-1", "1", 1),
+        )
+
     async def test_interrupt_does_not_forward_current_audio_when_client_disconnected(self):
         conn = _Conn()
         provider = self.make_provider(conn)
@@ -3714,9 +5156,14 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
                 self.closed += 1
                 raise RuntimeError("anext(): asynchronous generator is already running")
 
-        provider._client = _ConcurrentCloseClient()
-        await provider._close_live_resources()
-        self.assertIsNone(provider._client)
+        concurrent_client = _ConcurrentCloseClient()
+        provider._client = concurrent_client
+        cleanup_result = await provider._close_live_resources(
+            evidence_finalize=True
+        )
+        self.assertEqual(cleanup_result, "EVIDENCE_CLIENT_CLOSE_INCOMPLETE")
+        self.assertIs(provider._client, concurrent_client)
+        provider._client = None
 
         conn.live_admission_gate = _Gate(SimpleNamespace(decision=AdmissionDecision.ALLOW_LIVE, reason=AdmissionReason.OK))
         conn.google_live_session_started_at = time.monotonic() - 1
@@ -3794,6 +5241,74 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         provider._interrupt_capture_last_speech_at = time.monotonic() - 2
         self.assertTrue(provider._interrupt_input_can_finalize())
         self.assertGreater(provider._interrupt_capture_elapsed_ms(), 0)
+
+    async def test_buffered_replay_marker_uses_pending_transition_before_commit(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        attempt = provider._begin_evidence_reconnect("network")
+        transition = provider._accept_evidence_reconnect_ready("live-2")
+        provider._response_generation = 3
+        provider._pending_reconnect_audio.append((3, b"audio"))
+
+        await provider._forward_pending_reconnect_audio()
+
+        self.assertEqual(provider._evidence_pending_reconnect, transition)
+        self.assertEqual(provider._evidence_live_connection_transitions, [])
+        self.assertEqual(attempt["attempt"], 1)
+        self.assertIsNone(provider._evidence_transition_for_attempt(2))
+        self.assertTrue(
+            any(
+                args
+                and "evidence_replayed_buffered_audio" in str(args[0])
+                and args[3:] == (1, "live-1", "live-2", "network", 1, 5)
+                for level, args, _kwargs in conn.logger.messages
+                if level == "info"
+            )
+        )
+        with self.assertRaisesRegex(RuntimeError, "already emitted"):
+            await provider._forward_pending_reconnect_audio()
+        provider._commit_evidence_reconnect(transition)
+        self.assertIsNone(provider._evidence_transition_for_attempt(1))
+        conn.logger.messages.clear()
+        provider._pending_reconnect_audio.append((3, b"late"))
+
+        await provider._forward_pending_reconnect_audio()
+
+        self.assertFalse(
+            any(
+                args and "evidence_replayed_buffered_audio" in str(args[0])
+                for level, args, _kwargs in conn.logger.messages
+                if level == "info"
+            )
+        )
+
+    async def test_buffered_replay_marker_emits_zero_batch_for_pending_transition(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._begin_evidence_reconnect("network")
+        provider._accept_evidence_reconnect_ready("live-2")
+
+        await provider._forward_pending_reconnect_audio()
+
+        self.assertTrue(
+            any(
+                args
+                and "evidence_replayed_buffered_audio" in str(args[0])
+                and args[3:] == (1, "live-1", "live-2", "network", 0, 0)
+                for level, args, _kwargs in conn.logger.messages
+                if level == "info"
+            )
+        )
 
     async def test_intent_ack_tool_and_error_edges(self):
         conn = _Conn()
@@ -3958,7 +5473,8 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             hard_reconnects.append(reason)
 
         provider._last_interrupt_at = 0
-        provider._receive_task = object()
+        receive_hold = asyncio.Event()
+        provider._receive_task = asyncio.create_task(receive_hold.wait())
         provider._should_hard_reconnect_on_interrupt = lambda: True
         provider._hard_reconnect_after_interrupt = _hard_reconnect
         await provider._begin_user_interrupt("audio_input")
@@ -4586,6 +6102,996 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
             google_live_module.time.time = original_time
 
         self.assertEqual(conn.last_activity_time, 123456.0)
+
+    async def test_provider_stale_guard_emits_optional_scoped_marker(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "bargein-journey-1"
+        conn.google_live_live_connection_id = "live-7"
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-7")
+        provider._response_generation = 8
+
+        await provider._handle_live_event(
+            {"type": "audio", "audio": b"late", "response_generation": 7}
+        )
+
+        scoped = [
+            args
+            for level, args, _kwargs in conn.logger.messages
+            if level == "info"
+            and args
+            and args[0] == (
+                "Google Live evidence_stale_model_drop journey_id={} "
+                "connection_id={} live_connection_id={} response_id={} "
+                "current_response_id={}"
+            )
+        ]
+        self.assertEqual(
+            scoped,
+            [("Google Live evidence_stale_model_drop journey_id={} connection_id={} live_connection_id={} response_id={} current_response_id={}", "bargein-journey-1", "session-1", "live-7", 7, 8)],
+        )
+
+        normal = _Conn()
+        normal_provider = self.make_provider(normal)
+        normal_provider._response_generation = 8
+        await normal_provider._handle_live_event(
+            {"type": "audio", "audio": b"late", "response_generation": 7}
+        )
+        self.assertFalse(
+            any(
+                args and "evidence_stale_model_drop" in str(args[0])
+                for _level, args, _kwargs in normal.logger.messages
+            )
+        )
+
+    async def test_evidence_finalize_is_idempotent_and_logs_cleanup_once(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "bargein-journey-1"
+        conn.google_live_evidence_scope = {
+            "peerIdentityHash": "sha256:" + "a" * 64,
+        }
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-7")
+        provider._close_live_resources = AsyncMock()
+
+        first = await provider.finalize_evidence()
+        second = await provider.finalize_evidence()
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["status"], "PASS")
+        self.assertEqual(first["initialLiveConnectionId"], "live-7")
+        self.assertEqual(first["finalLiveConnectionId"], "live-7")
+        self.assertEqual(first["liveConnectionTransitions"], [])
+        self.assertEqual(first["pendingTasks"], 0)
+        provider._close_live_resources.assert_awaited_once()
+        markers = [
+            args
+            for level, args, _kwargs in conn.logger.messages
+            if level == "info"
+            and args
+            and "evidence_connection_close" in str(args[0])
+        ]
+        self.assertEqual(len(markers), 1)
+
+    async def test_incomplete_evidence_finalize_can_be_prepared_for_retry(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "bargein-journey-1"
+        conn.google_live_evidence_scope = {
+            "peerIdentityHash": "sha256:" + "a" * 64,
+        }
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-7")
+        provider._close_live_resources = AsyncMock()
+        provider._pending_evidence_task_count = MagicMock(side_effect=(1, 0))
+
+        first = await provider.finalize_evidence()
+        prepared = provider.prepare_evidence_finalize_retry()
+        second = await provider.finalize_evidence()
+        third = await provider.finalize_evidence()
+
+        self.assertEqual(first["status"], "FAIL")
+        self.assertEqual(first["pendingTasks"], 1)
+        self.assertTrue(prepared)
+        self.assertEqual(second["status"], "PASS")
+        self.assertEqual(second["pendingTasks"], 0)
+        self.assertEqual(second, third)
+        self.assertEqual(provider._close_live_resources.await_count, 2)
+
+    async def test_next_evidence_scope_rejects_unrelated_provider_pass(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        provider._evidence_finalize_result = {
+            "status": "PASS",
+            "journeyId": "journey-previous",
+            "connectionId": "session-1",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "initialLiveConnectionId": "live-1",
+        }
+
+        prepared = await provider.prepare_next_evidence_scope(
+            {
+                "journeyId": "journey-other",
+                "connectionId": "session-1",
+                "peerIdentityHash": "sha256:" + "a" * 64,
+                "initialLiveConnectionId": "live-1",
+            }
+        )
+
+        self.assertFalse(prepared)
+        self.assertIsNotNone(provider._evidence_finalize_result)
+
+    async def test_next_evidence_scope_resets_prior_scope_identity_state(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+        peer_identity_hash = "sha256:" + "a" * 64
+        previous_scope = {
+            "journeyId": "journey-previous",
+            "connectionId": "session-1",
+            "peerIdentityHash": peer_identity_hash,
+            "initialLiveConnectionId": "live-1",
+        }
+        provider._evidence_finalize_result = {
+            "status": "PASS",
+            **previous_scope,
+        }
+        provider._evidence_initial_live_connection_id = "live-1"
+        provider._evidence_current_live_connection_id = "live-2"
+        provider._evidence_live_connection_transitions = [
+            {
+                "attempt": 1,
+                "fromLiveConnectionId": "live-1",
+                "toLiveConnectionId": "live-2",
+            }
+        ]
+        provider._evidence_pending_reconnect = {
+            "attempt": 2,
+            "fromLiveConnectionId": "live-2",
+        }
+        provider._evidence_reconnect_attempt_serial = 2
+        provider._evidence_replay_logged_attempts = {1}
+        provider._evidence_response_token_serial = 4
+        provider._evidence_final_response_reservation = {"token": 4}
+        provider._evidence_last_transcript_event_token = 4
+        conn.google_live_evidence_reconnect_attempt = 2
+
+        prepared = await provider.prepare_next_evidence_scope(previous_scope)
+
+        self.assertTrue(prepared)
+        self.assertIsNone(provider._evidence_finalize_result)
+        self.assertIsNone(provider._evidence_initial_live_connection_id)
+        self.assertIsNone(provider._evidence_current_live_connection_id)
+        self.assertEqual(provider._evidence_live_connection_transitions, [])
+        self.assertIsNone(provider._evidence_pending_reconnect)
+        self.assertEqual(provider._evidence_reconnect_attempt_serial, 0)
+        self.assertEqual(provider._evidence_replay_logged_attempts, set())
+        self.assertEqual(provider._evidence_response_token_serial, 0)
+        self.assertIsNone(provider._evidence_final_response_reservation)
+        self.assertIsNone(provider._evidence_last_transcript_event_token)
+        self.assertIsNone(conn.google_live_evidence_reconnect_attempt)
+
+    async def test_evidence_finalize_fails_safely_when_bridge_close_fails(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "bargein-journey-1"
+        conn.google_live_evidence_scope = {
+            "peerIdentityHash": "sha256:" + "a" * 64,
+        }
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-7")
+        provider._bridge = _FailingBridge()
+        provider._client = _Client()
+
+        await provider._close_live_resources()
+
+        first = await provider.finalize_evidence()
+        second = await provider.finalize_evidence()
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["status"], "FAIL")
+        self.assertEqual(first["failureCode"], "EVIDENCE_BRIDGE_CLOSE_FAILED")
+        self.assertEqual(first["pendingTasks"], 0)
+        self.assertNotIn("bridge close failed", json.dumps(first))
+        self.assertEqual(provider._client, None)
+
+    async def test_evidence_finalize_retries_bridge_close_after_transient_failure(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "bargein-journey-1"
+        conn.google_live_evidence_scope = {
+            "peerIdentityHash": "sha256:" + "a" * 64,
+        }
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-7")
+
+        class FailOnceBridge(_Bridge):
+            async def close(self):
+                self.closed += 1
+                if self.closed == 1:
+                    raise RuntimeError("transient bridge close failure")
+
+        bridge = FailOnceBridge()
+        provider._bridge = bridge
+        provider._client = _Client()
+
+        first = await provider.finalize_evidence()
+        prepared = provider.prepare_evidence_finalize_retry()
+        second = await provider.finalize_evidence()
+
+        self.assertEqual(first["status"], "FAIL")
+        self.assertEqual(first["failureCode"], "EVIDENCE_BRIDGE_CLOSE_FAILED")
+        self.assertTrue(prepared)
+        self.assertEqual(second["status"], "PASS")
+        self.assertEqual(second["pendingTasks"], 0)
+        self.assertEqual(bridge.closed, 2)
+        self.assertIsNone(provider._bridge)
+        self.assertIsNone(provider._evidence_cleanup_failure_code)
+
+    async def test_evidence_finalize_retries_concurrent_client_close_before_marker(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "bargein-journey-1"
+        conn.google_live_evidence_scope = {
+            "peerIdentityHash": "sha256:" + "a" * 64,
+        }
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-7")
+        provider._bridge = _Bridge()
+
+        class ConcurrentOnceClient(_Client):
+            async def close(self):
+                self.closed += 1
+                if self.closed == 1:
+                    raise RuntimeError(
+                        "anext(): asynchronous generator is already running"
+                    )
+
+        client = ConcurrentOnceClient()
+        provider._client = client
+
+        first = await provider.finalize_evidence()
+
+        self.assertEqual(first["status"], "FAIL")
+        self.assertEqual(
+            first["failureCode"], "EVIDENCE_CLIENT_CLOSE_INCOMPLETE"
+        )
+        self.assertIs(provider._client, client)
+        self.assertFalse(
+            any(
+                args and "evidence_connection_close" in str(args[0])
+                for _level, args, _kwargs in conn.logger.messages
+            )
+        )
+
+        self.assertTrue(provider.prepare_evidence_finalize_retry())
+        second = await provider.finalize_evidence()
+
+        self.assertEqual(second["status"], "PASS")
+        self.assertIsNone(provider._client)
+        self.assertEqual(client.closed, 2)
+        self.assertEqual(
+            sum(
+                1
+                for _level, args, _kwargs in conn.logger.messages
+                if args and "evidence_connection_close" in str(args[0])
+            ),
+            1,
+        )
+
+    async def test_non_evidence_close_never_leaves_detached_client_close_task(self):
+        conn = _Conn()
+        provider = self.make_provider(conn)
+
+        class ConcurrentOnceClient(_Client):
+            async def close(self):
+                self.closed += 1
+                if self.closed == 1:
+                    raise RuntimeError(
+                        "anext(): asynchronous generator is already running"
+                    )
+
+        client = ConcurrentOnceClient()
+        provider._client = client
+
+        with self.assertRaisesRegex(RuntimeError, "already running"):
+            await provider._close_live_resources()
+
+        self.assertIs(provider._client, client)
+        self.assertIsNone(provider._evidence_client_close_task)
+        await provider._close_live_resources()
+        self.assertIsNone(provider._client)
+        self.assertEqual(client.closed, 2)
+
+    async def test_evidence_live_identity_tracks_ordered_reconnect_transitions(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+
+        first = provider._begin_evidence_reconnect()
+        first_transition = provider._accept_evidence_reconnect_ready("live-2")
+        provider._commit_evidence_reconnect(first_transition)
+        second = provider._begin_evidence_reconnect()
+        second_transition = provider._accept_evidence_reconnect_ready("live-3")
+        provider._commit_evidence_reconnect(second_transition)
+
+        self.assertEqual(first, {"attempt": 1, "fromLiveConnectionId": "live-1"})
+        self.assertEqual(
+            first_transition,
+            {
+                "attempt": 1,
+                "fromLiveConnectionId": "live-1",
+                "toLiveConnectionId": "live-2",
+            },
+        )
+        self.assertEqual(second, {"attempt": 2, "fromLiveConnectionId": "live-2"})
+        self.assertEqual(
+            second_transition,
+            {
+                "attempt": 2,
+                "fromLiveConnectionId": "live-2",
+                "toLiveConnectionId": "live-3",
+            },
+        )
+        self.assertEqual(provider._evidence_scope()[2], "live-3")
+
+    async def test_failed_evidence_reconnect_before_ready_retains_current_live_id(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+
+        attempt = provider._begin_evidence_reconnect()
+        failed = provider._fail_evidence_reconnect()
+
+        self.assertEqual(failed, attempt)
+        self.assertEqual(provider._evidence_scope()[2], "live-1")
+        self.assertEqual(provider._evidence_live_connection_transitions, [])
+
+    async def test_failed_evidence_reconnect_after_ready_rolls_back_live_owner(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+
+        provider._begin_evidence_reconnect()
+        ready = provider._accept_evidence_reconnect_ready("live-2")
+        failed = provider._fail_evidence_reconnect()
+
+        self.assertEqual(failed, ready)
+        self.assertEqual(provider._evidence_scope()[2], "live-1")
+        self.assertEqual(provider._evidence_live_connection_transitions, [])
+
+    async def test_normal_reconnect_commits_only_after_pending_audio_forward(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        conn.config["google_live"]["reconnect"] = {
+            "enabled": True,
+            "max_retries": 1,
+            "backoff_ms": 0,
+            "backoff_multiplier": 1,
+        }
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._close_live_resources = AsyncMock()
+        provider._record_reconnect_attempt = AsyncMock()
+
+        async def open_owner():
+            provider._interaction.start_live_connection("live-2")
+
+        provider._open_live_session = AsyncMock(side_effect=open_owner)
+        provider._forward_pending_reconnect_audio = AsyncMock(
+            side_effect=RuntimeError("forward failed")
+        )
+
+        self.assertFalse(await provider._try_reconnect_with_lease(RuntimeError("network")))
+        self.assertEqual(provider._evidence_scope()[2], "live-1")
+        self.assertEqual(provider._evidence_live_connection_transitions, [])
+
+        provider._reconnect_attempts = 0
+        provider._forward_pending_reconnect_audio = AsyncMock()
+
+        async def open_retry_owner():
+            provider._interaction.start_live_connection("live-3")
+
+        provider._open_live_session = AsyncMock(side_effect=open_retry_owner)
+        self.assertTrue(await provider._try_reconnect_with_lease(RuntimeError("network")))
+        self.assertEqual(provider._evidence_scope()[2], "live-3")
+        self.assertEqual(
+            provider._evidence_live_connection_transitions,
+            [
+                {
+                    "attempt": 2,
+                    "fromLiveConnectionId": "live-1",
+                    "toLiveConnectionId": "live-3",
+                }
+            ],
+        )
+
+    async def test_silent_reconnect_commits_only_after_pending_audio_forward(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._consecutive_waiting_model_timeouts = (
+            provider._SILENT_LIVE_REOPEN_TIMEOUTS
+        )
+        provider._record_reconnect_attempt = AsyncMock()
+        provider._close_live_resources = AsyncMock()
+
+        async def open_owner(*_args, **_kwargs):
+            provider._interaction.start_live_connection("live-2")
+
+        provider._open_live_session_locked = AsyncMock(side_effect=open_owner)
+        provider._forward_pending_reconnect_audio = AsyncMock(
+            side_effect=RuntimeError("forward failed")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "forward failed"):
+            await provider._reopen_silent_live_session_after_timeouts_with_lease(1.0)
+
+        self.assertEqual(provider._evidence_scope()[2], "live-1")
+        self.assertEqual(provider._evidence_live_connection_transitions, [])
+
+    async def test_lesson_and_hard_reconnect_commit_after_success_hooks(self):
+        for path, trigger in (
+            ("lesson", "lesson_live_reconnect diagnostic=SUCCEEDED"),
+            ("hard", "hard_reconnected_after_interrupt"),
+        ):
+            with self.subTest(path=path):
+                conn = _Conn()
+                conn.google_live_evidence_journey_id = "journey-1"
+                provider = self.make_provider(conn)
+                provider._client = _Client()
+                provider._bridge = _Bridge()
+                provider._interaction.start_live_connection("live-1")
+                provider._ensure_evidence_live_identity()
+                provider._close_live_resources = AsyncMock()
+                provider._record_reconnect_attempt = AsyncMock()
+
+                async def open_owner(*_args, **_kwargs):
+                    provider._interaction.start_live_connection("live-2")
+
+                provider._open_live_session = AsyncMock(side_effect=open_owner)
+                original_info = conn.logger.info
+                raised = False
+
+                def fail_success_hook(*args, **kwargs):
+                    nonlocal raised
+                    if not raised and args and trigger in str(args[0]):
+                        raised = True
+                        raise RuntimeError("success hook failed")
+                    original_info(*args, **kwargs)
+
+                conn.logger.info = fail_success_hook
+                provider._handle_runtime_failure = AsyncMock()
+
+                if path == "lesson":
+                    self.assertFalse(await provider._attempt_lesson_reconnect_once("retry"))
+                else:
+                    self.assertFalse(
+                        await provider._hard_reconnect_after_interrupt_with_lease(
+                            "interrupt"
+                        )
+                    )
+
+                self.assertEqual(provider._evidence_scope()[2], "live-1")
+                self.assertEqual(provider._evidence_live_connection_transitions, [])
+
+    async def test_normal_reconnect_rolls_back_before_failed_cleanup(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        conn.config["google_live"]["reconnect"] = {
+            "enabled": True,
+            "max_retries": 1,
+            "backoff_ms": 0,
+            "backoff_multiplier": 1,
+        }
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._record_reconnect_attempt = AsyncMock()
+
+        async def open_owner():
+            provider._interaction.start_live_connection("live-2")
+
+        provider._open_live_session = AsyncMock(side_effect=open_owner)
+        provider._forward_pending_reconnect_audio = AsyncMock(
+            side_effect=RuntimeError("forward failed")
+        )
+        cleanup_calls = 0
+
+        async def fail_second_cleanup(**_kwargs):
+            nonlocal cleanup_calls
+            cleanup_calls += 1
+            if cleanup_calls == 2:
+                raise RuntimeError("cleanup failed")
+
+        provider._close_live_resources = AsyncMock(side_effect=fail_second_cleanup)
+
+        self.assertFalse(await provider._try_reconnect_with_lease(RuntimeError("network")))
+        self.assertEqual(provider._evidence_scope()[2], "live-1")
+        self.assertEqual(provider._evidence_live_connection_transitions, [])
+
+    async def test_commit_binding_failure_rolls_back_without_publishing_transition(self):
+        class FailingEvidenceClient(_Client):
+            def set_evidence_scope_getter(self, _getter):
+                raise RuntimeError("bind failed")
+
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        provider = self.make_provider(conn)
+        provider._client = FailingEvidenceClient()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._close_live_resources = AsyncMock()
+        provider._record_reconnect_attempt = AsyncMock()
+
+        async def open_owner():
+            provider._interaction.start_live_connection("live-2")
+
+        provider._open_live_session = AsyncMock(side_effect=open_owner)
+        self.assertFalse(
+            await provider._hard_reconnect_after_interrupt_with_lease("interrupt")
+        )
+        self.assertEqual(provider._evidence_scope()[2], "live-1")
+        self.assertEqual(provider._evidence_live_connection_transitions, [])
+
+    async def test_terminal_evidence_marker_failure_does_not_fail_committed_reconnect(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._close_live_resources = AsyncMock()
+        provider._record_reconnect_attempt = AsyncMock()
+
+        async def open_owner():
+            provider._interaction.start_live_connection("live-2")
+
+        provider._open_live_session = AsyncMock(side_effect=open_owner)
+        original_info = conn.logger.info
+
+        def fail_terminal_marker(*args, **kwargs):
+            if args and "evidence_reconnect_succeeded" in str(args[0]):
+                raise RuntimeError("terminal marker failed")
+            original_info(*args, **kwargs)
+
+        conn.logger.info = fail_terminal_marker
+
+        self.assertTrue(
+            await provider._hard_reconnect_after_interrupt_with_lease("interrupt")
+        )
+        self.assertEqual(provider._evidence_scope()[2], "live-2")
+        self.assertEqual(
+            provider._evidence_live_connection_transitions,
+            [
+                {
+                    "attempt": 1,
+                    "fromLiveConnectionId": "live-1",
+                    "toLiveConnectionId": "live-2",
+                }
+            ],
+        )
+
+    async def test_failed_silent_evidence_reopen_emits_terminal_old_id_marker(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._consecutive_waiting_model_timeouts = (
+            provider._SILENT_LIVE_REOPEN_TIMEOUTS
+        )
+        provider._record_reconnect_attempt = AsyncMock()
+        provider._close_live_resources = AsyncMock()
+        provider._open_live_session_locked = AsyncMock(
+            side_effect=RuntimeError("network")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "network"):
+            await provider._reopen_silent_live_session_after_timeouts_with_lease(1.0)
+
+        self.assertEqual(provider._evidence_scope()[2], "live-1")
+        self.assertEqual(provider._evidence_live_connection_transitions, [])
+        self.assertTrue(
+            any(
+                args
+                and args[0]
+                == (
+                    "Google Live evidence_reconnect_failed journey_id={} "
+                    "connection_id={} attempt={} from_live_connection_id={} "
+                    "live_connection_id={} error_class={}"
+                )
+                and args[1:] == (
+                    "journey-1",
+                    "session-1",
+                    1,
+                    "live-1",
+                    "live-1",
+                    "network",
+                )
+                for level, args, _kwargs in conn.logger.messages
+                if level == "info"
+            )
+        )
+
+    async def test_lesson_and_hard_reopens_record_live_owner_transitions(self):
+        for path in ("lesson", "hard"):
+            with self.subTest(path=path):
+                conn = _Conn()
+                conn.google_live_evidence_journey_id = "journey-1"
+                provider = self.make_provider(conn)
+                provider._client = _Client()
+                provider._bridge = _Bridge()
+                provider._interaction.start_live_connection("live-1")
+                provider._close_live_resources = AsyncMock()
+                provider._record_reconnect_attempt = AsyncMock()
+
+                async def open_new_owner(*_args, **_kwargs):
+                    provider._interaction.start_live_connection("live-2")
+                    provider._pending_reconnect_audio.append(
+                        (provider._response_generation, b"audio")
+                    )
+
+                provider._open_live_session = AsyncMock(side_effect=open_new_owner)
+
+                if path == "lesson":
+                    reopened = await provider._attempt_lesson_reconnect_once("retry")
+                else:
+                    reopened = await provider._hard_reconnect_after_interrupt_with_lease(
+                        "interrupt"
+                    )
+
+                self.assertTrue(reopened)
+                self.assertEqual(provider._evidence_scope()[2], "live-2")
+                self.assertEqual(
+                    provider._evidence_live_connection_transitions,
+                    [
+                        {
+                            "attempt": 1,
+                            "fromLiveConnectionId": "live-1",
+                            "toLiveConnectionId": "live-2",
+                        }
+                    ],
+                )
+                replay_index = next(
+                    index
+                    for index, (level, args, _kwargs) in enumerate(conn.logger.messages)
+                    if level == "info"
+                    and args
+                    and "evidence_replayed_buffered_audio" in str(args[0])
+                )
+                success_index = next(
+                    index
+                    for index, (level, args, _kwargs) in enumerate(conn.logger.messages)
+                    if level == "info"
+                    and args
+                    and "evidence_reconnect_succeeded" in str(args[0])
+                )
+                self.assertLess(replay_index, success_index)
+                self.assertEqual(conn.logger.messages[replay_index][1][7:], (1, 5))
+                self.assertEqual(provider._bridge.forwarded, [b"pcm:audio"])
+                self.assertEqual(list(provider._pending_reconnect_audio), [])
+
+    async def test_reconnect_closing_during_backoff_terminates_evidence_attempt(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._get_reconnect_config = lambda: {
+            "enabled": True,
+            "max_retries": 1,
+            "backoff_ms": 1,
+            "backoff_multiplier": 1,
+        }
+        provider._get_reconnect_delay_ms = lambda _attempt: 1
+        provider._close_live_resources = AsyncMock()
+
+        async def close_during_backoff(_seconds):
+            provider._closing = True
+
+        with patch.object(google_live_module.asyncio, "sleep", close_during_backoff):
+            reconnected = await provider._try_reconnect_with_lease(
+                RuntimeError("network")
+            )
+
+        self.assertFalse(reconnected)
+        self.assertIsNone(provider._evidence_pending_reconnect)
+        self.assertEqual(provider._evidence_scope()[2], "live-1")
+        self.assertTrue(
+            any(
+                args
+                and "evidence_reconnect_failed" in str(args[0])
+                and args[-1] == "closing"
+                for level, args, _kwargs in conn.logger.messages
+                if level == "info"
+            )
+        )
+
+    async def test_finalize_serializes_with_hard_reconnect_and_keeps_final_owner_stable(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        conn.google_live_evidence_scope = {
+            "peerIdentityHash": "sha256:" + "a" * 64,
+        }
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        close_started = asyncio.Event()
+        release_close = asyncio.Event()
+        close_calls = 0
+
+        async def controlled_close(**_kwargs):
+            nonlocal close_calls
+            close_calls += 1
+            if close_calls == 1:
+                close_started.set()
+                await release_close.wait()
+
+        async def open_new_owner():
+            provider._interaction.start_live_connection("live-2")
+
+        provider._close_live_resources = AsyncMock(side_effect=controlled_close)
+        provider._open_live_session = AsyncMock(side_effect=open_new_owner)
+
+        reconnect_task = asyncio.create_task(
+            provider._hard_reconnect_after_interrupt_with_lease("interrupt")
+        )
+        await close_started.wait()
+        finalize_task = asyncio.create_task(provider.finalize_evidence())
+        await asyncio.sleep(0)
+        release_close.set()
+
+        self.assertFalse(await reconnect_task)
+        finalized = await finalize_task
+
+        self.assertEqual(finalized["status"], "PASS")
+        self.assertEqual(finalized["finalLiveConnectionId"], "live-1")
+        self.assertEqual(finalized["liveConnectionTransitions"], [])
+        self.assertEqual(provider._evidence_scope()[2], "live-1")
+        provider._open_live_session.assert_not_awaited()
+
+    async def test_finalize_racing_normal_reconnect_aborts_new_live_owner(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        conn.google_live_evidence_scope = {
+            "peerIdentityHash": "sha256:" + "a" * 64,
+        }
+        conn.config["google_live"]["reconnect"] = {
+            "enabled": True,
+            "max_retries": 1,
+            "backoff_ms": 0,
+            "backoff_multiplier": 1,
+        }
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._record_reconnect_attempt = AsyncMock()
+        open_started = asyncio.Event()
+        release_open = asyncio.Event()
+
+        async def controlled_close(**_kwargs):
+            provider._client = None
+            provider._bridge = None
+
+        async def controlled_open():
+            provider._client = _Client()
+            provider._bridge = _Bridge()
+            provider._interaction.start_live_connection("live-2")
+            open_started.set()
+            await release_open.wait()
+
+        provider._close_live_resources = AsyncMock(side_effect=controlled_close)
+        provider._open_live_session = AsyncMock(side_effect=controlled_open)
+
+        reconnect_task = asyncio.create_task(
+            provider._try_reconnect_with_lease(RuntimeError("network"))
+        )
+        await open_started.wait()
+        finalize_started_at = time.monotonic()
+        finalize_task = asyncio.create_task(provider.finalize_evidence())
+        await asyncio.sleep(0)
+        release_open.set()
+
+        self.assertFalse(await reconnect_task)
+        finalized = await finalize_task
+        finalized_again = await provider.finalize_evidence()
+
+        self.assertEqual(finalized["status"], "PASS")
+        self.assertLess(time.monotonic() - finalize_started_at, 5.0)
+        self.assertEqual(finalized, finalized_again)
+        self.assertEqual(finalized["finalLiveConnectionId"], "live-1")
+        self.assertEqual(finalized["liveConnectionTransitions"], [])
+        self.assertIsNone(provider._client)
+        self.assertIsNone(provider._bridge)
+        self.assertIsNone(provider._evidence_pending_reconnect)
+
+    async def test_normal_reconnect_can_commit_before_finalize(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        conn.google_live_evidence_scope = {
+            "peerIdentityHash": "sha256:" + "a" * 64,
+        }
+        conn.config["google_live"]["reconnect"] = {
+            "enabled": True,
+            "max_retries": 1,
+            "backoff_ms": 0,
+            "backoff_multiplier": 1,
+        }
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._record_reconnect_attempt = AsyncMock()
+        provider._close_live_resources = AsyncMock()
+
+        async def open_new_owner():
+            provider._interaction.start_live_connection("live-2")
+
+        provider._open_live_session = AsyncMock(side_effect=open_new_owner)
+
+        self.assertTrue(
+            await provider._try_reconnect_with_lease(RuntimeError("network"))
+        )
+        finalized = await provider.finalize_evidence()
+
+        self.assertEqual(finalized["status"], "PASS")
+        self.assertEqual(finalized["finalLiveConnectionId"], "live-2")
+        self.assertEqual(
+            finalized["liveConnectionTransitions"],
+            [
+                {
+                    "attempt": 1,
+                    "fromLiveConnectionId": "live-1",
+                    "toLiveConnectionId": "live-2",
+                }
+            ],
+        )
+
+    async def test_finalize_survives_reconnect_cancellation_cleanup_failure(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        conn.google_live_evidence_scope = {
+            "peerIdentityHash": "sha256:" + "a" * 64,
+        }
+        conn.config["google_live"]["reconnect"] = {
+            "enabled": True,
+            "max_retries": 1,
+            "backoff_ms": 0,
+            "backoff_multiplier": 1,
+        }
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._record_reconnect_attempt = AsyncMock()
+        open_started = asyncio.Event()
+        close_calls = 0
+
+        async def controlled_close(**_kwargs):
+            nonlocal close_calls
+            close_calls += 1
+            if close_calls == 2:
+                raise RuntimeError("cancel cleanup failed")
+            provider._client = None
+            provider._bridge = None
+
+        async def blocked_open():
+            provider._client = _Client()
+            provider._bridge = _Bridge()
+            provider._interaction.start_live_connection("live-2")
+            open_started.set()
+            await asyncio.Event().wait()
+
+        provider._close_live_resources = AsyncMock(side_effect=controlled_close)
+        provider._open_live_session = AsyncMock(side_effect=blocked_open)
+
+        reconnect_task = asyncio.create_task(
+            provider._try_reconnect_with_lease(RuntimeError("network"))
+        )
+        await open_started.wait()
+        finalized = await provider.finalize_evidence()
+
+        self.assertFalse(await reconnect_task)
+        self.assertEqual(finalized["status"], "PASS")
+        self.assertEqual(finalized["finalLiveConnectionId"], "live-1")
+        self.assertEqual(finalized["liveConnectionTransitions"], [])
+        self.assertIsNone(provider._client)
+        self.assertIsNone(provider._bridge)
+        self.assertIsNone(provider._evidence_pending_reconnect)
+
+    async def test_hard_interrupt_recomputes_replacement_evidence_owner(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "journey-1"
+        conn.config["google_live"]["hard_reconnect_on_interrupt"] = True
+        provider = self.make_provider(conn)
+        provider._client = _Client()
+        provider._bridge = _Bridge()
+        receive_hold = asyncio.Event()
+        provider._receive_task = asyncio.create_task(receive_hold.wait())
+        provider._interaction.start_live_connection("live-1")
+        provider._ensure_evidence_live_identity()
+        provider._close_live_resources = AsyncMock()
+        provider._record_reconnect_attempt = AsyncMock()
+        provider._schedule_forced_interrupt_input_flush = lambda _reason: None
+
+        async def open_new_owner():
+            provider._interaction.start_live_connection("live-2")
+
+        provider._open_live_session = AsyncMock(side_effect=open_new_owner)
+
+        await provider._begin_user_interrupt("audio_input")
+
+        evidence_messages = [
+            args
+            for level, args, _kwargs in conn.logger.messages
+            if level == "info" and args and "journey_id" in str(args[0])
+        ]
+        self.assertTrue(
+            any(
+                "user_interrupt_started" in args[0]
+                and args[4:6] == ("live-1", "live-1")
+                for args in evidence_messages
+            )
+        )
+        self.assertTrue(
+            any(
+                "evidence_user_interrupted" in args[0]
+                and args[4:6] == ("live-1", "live-2")
+                for args in evidence_messages
+            )
+        )
+        self.assertEqual(provider._evidence_scope()[2], "live-2")
+        provider._receive_task.cancel()
+        await asyncio.gather(provider._receive_task, return_exceptions=True)
+        provider._receive_task = None
+
+    async def test_evidence_finalize_survives_caller_timeout_and_close_reuses_cleanup(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "bargein-journey-1"
+        provider = self.make_provider(conn)
+        provider._interaction.start_live_connection("live-7")
+        cleanup_started = asyncio.Event()
+        release_cleanup = asyncio.Event()
+
+        async def delayed_cleanup(**_kwargs):
+            cleanup_started.set()
+            await release_cleanup.wait()
+
+        provider._close_live_resources = AsyncMock(side_effect=delayed_cleanup)
+        finalize_task = asyncio.create_task(provider.finalize_evidence())
+        await cleanup_started.wait()
+
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(finalize_task), timeout=0.01)
+
+        self.assertFalse(finalize_task.cancelled())
+        release_cleanup.set()
+        await provider.close()
+        result = await finalize_task
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["pendingTasks"], 0)
+        provider._close_live_resources.assert_awaited_once()
 
     async def test_interrupt_flush_and_finalize_guard_edges(self):
         conn = _Conn()

@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -19,6 +20,9 @@ warnings.filterwarnings(
 import websockets  # noqa: E402
 
 from config.logger import setup_logging  # noqa: E402
+from core.voice.google_live.evidence_enrollment import (  # noqa: E402
+    EvidenceEnrollmentRegistry,
+)
 
 
 class SuppressInvalidHandshakeFilter(logging.Filter):
@@ -75,6 +79,7 @@ class WebSocketServer:
         *,
         lesson_sd_online_index=None,
         global_generation_sessions=None,
+        evidence_registry=None,
     ):
         from core.connection_registry import ConnectionRegistry
 
@@ -134,6 +139,11 @@ class WebSocketServer:
         self.lesson_connections = ConnectionRegistry()
         self.lesson_sd_online_index = lesson_sd_online_index
         self.global_generation_sessions = global_generation_sessions
+        self.evidence_registry = (
+            evidence_registry
+            if evidence_registry is not None
+            else EvidenceEnrollmentRegistry()
+        )
         self.accept_cap = self._resolve_accept_cap()
         self._active_device_connections = 0
         self.is_draining = False
@@ -225,7 +235,7 @@ class WebSocketServer:
             # CreateConnectionHandlerPass current whenserverInstance
             from core.connection import ConnectionHandler
 
-            handler = ConnectionHandler(
+            handler_args = (
                 self.config,
                 self._vad,
                 self._asr,
@@ -233,6 +243,20 @@ class WebSocketServer:
                 self._memory,
                 self._intent,
                 self,  # Pass inserverInstance
+            )
+            parameters = inspect.signature(ConnectionHandler).parameters.values()
+            accepts_evidence_registry = any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                or parameter.name == "evidence_registry"
+                for parameter in parameters
+            )
+            handler = ConnectionHandler(
+                *handler_args,
+                **(
+                    {"evidence_registry": self.evidence_registry}
+                    if accepts_evidence_registry
+                    else {}
+                ),
             )
             if device_id:
                 handler.device_id = device_id
@@ -344,6 +368,7 @@ class WebSocketServer:
         provider teardown and forwarder drain follow) and is scheduled behind
         that guard rather than in front of it.
         """
+        from core.handle.helloHandle import _evidence_peer_identity_hash
         from core.lesson.liveness_lease import Disposition, emit_disposition
         from core.lesson.runtime_counters import CONNECTION_SUPERSEDED, increment
 
@@ -357,6 +382,11 @@ class WebSocketServer:
 
         try:
             superseded.superseded_by = getattr(winner, "session_id", None) or True
+            winner.google_live_previous_server_connection = {
+                "connectionId": str(getattr(superseded, "session_id", "") or ""),
+                "peerIdentityHash": _evidence_peer_identity_hash(superseded),
+                "evidenceScope": getattr(superseded, "google_live_evidence_scope", None),
+            }
         except Exception:  # pragma: no cover - exotic handler object
             pass
 

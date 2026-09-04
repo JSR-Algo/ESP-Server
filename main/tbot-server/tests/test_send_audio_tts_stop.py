@@ -391,6 +391,40 @@ class SendTtsStopTest(unittest.IsolatedAsyncioTestCase):
         await sendAudioHandle.sendAudio(aborted, [b"skip"])
         self.assertEqual(aborted.websocket.sent, [])
 
+    async def test_send_audio_completes_source_receipt_after_direct_prebuffer_send(self):
+        conn = _Conn()
+        completed = Mock()
+        failed = Mock()
+
+        await sendAudioHandle.sendAudio(
+            conn,
+            [b"one", b"two"],
+            on_delivery_complete=completed,
+            on_delivery_failed=failed,
+        )
+
+        self.assertEqual(conn.websocket.sent, [b"one", b"two"])
+        completed.assert_called_once_with(2)
+        failed.assert_not_called()
+
+    async def test_send_audio_fails_source_receipt_once_on_direct_send_error(self):
+        conn = _Conn()
+        conn.websocket.send = AsyncMock(side_effect=RuntimeError("send failed"))
+        completed = Mock()
+        failed = Mock()
+
+        with self.assertRaisesRegex(RuntimeError, "send failed"):
+            await sendAudioHandle.sendAudio(
+                conn,
+                [b"one", b"two"],
+                on_delivery_complete=completed,
+                on_delivery_failed=failed,
+            )
+
+        completed.assert_not_called()
+        failed.assert_called_once()
+        self.assertIn("send failed", str(failed.call_args.args[0]))
+
     def test_rate_controller_reuses_resets_or_recreates_by_task_and_sentence_state(self):
         reuse = _Conn()
         reuse.audio_rate_controller = _RateController(done=False)

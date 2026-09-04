@@ -41,6 +41,7 @@ import core.websocket_server as ws_mod
 from core.connection_registry import ConnectionRegistry
 from core.lesson.forwarder import LessonEventForwarder
 
+
 def _sibling(module_name, alias):
     spec = importlib.util.spec_from_file_location(
         alias, Path(__file__).with_name(module_name)
@@ -244,6 +245,38 @@ async def test_supersede_tolerates_a_handler_without_a_socket(monkeypatch):
     await asyncio.sleep(0)
     assert displaced.superseded_by == "new"
     assert not [record for record in server.logger.records if record[0] == "error"]
+
+
+@pytest.mark.asyncio
+async def test_supersede_copies_the_authenticated_server_scope_to_the_winner(monkeypatch):
+    server = _build_server(monkeypatch)
+    old_scope = {
+        "journeyId": "lesson-journey-30",
+        "connectionId": "server-connection-1",
+        "liveConnectionId": "live-30",
+        "initialLiveConnectionId": "live-30",
+        "peerIdentityHash": "ignored-candidate-copy",
+        "serverStartUtc": "2026-08-31T02:59:00+00:00",
+    }
+    displaced = types.SimpleNamespace(
+        websocket=None,
+        superseded_by=None,
+        session_id="server-connection-1",
+        device_id=DEVICE_ID,
+        client_id="authenticated-client",
+        google_live_evidence_scope=old_scope,
+    )
+    winner = types.SimpleNamespace(session_id="server-connection-2", liveness_lease=None)
+
+    server._scrap_superseded_connection(displaced, winner, DEVICE_ID)
+    await asyncio.sleep(0)
+
+    handoff = winner.google_live_previous_server_connection
+    assert handoff["connectionId"] == "server-connection-1"
+    assert handoff["evidenceScope"] is old_scope
+    assert handoff["peerIdentityHash"].startswith("sha256:")
+    assert DEVICE_ID not in json.dumps(handoff)
+    assert "authenticated-client" not in json.dumps(handoff)
 
 
 @pytest.mark.asyncio

@@ -9,22 +9,24 @@ from aiohttp import web
 from config.logger import setup_logging
 from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler
 from core.api.generation_retry_handler import GenerationRetryHandler
+from core.api.google_live_evidence_handler import GoogleLiveEvidenceHandler
 from core.api.lesson_asset_handler import LessonAssetHandler
 from core.api.lesson_assignment_console_handler import LessonAssignmentConsoleHandler
 from core.api.lesson_nudge_handler import LessonNudgeHandler
 from core.api.lesson_sd_evict_handler import LessonSdEvictHandler
 from core.api.lesson_sd_fanout_handler import LessonSdFanoutHandler
 from core.api.lesson_sd_materialize_handler import LessonSdMaterializeHandler
-from core.lesson import runtime_counters as lesson_runtime_counters
 from core.api.ota_handler import OTAHandler, is_placeholder_websocket_url
 from core.api.remote_unpair_handler import RemoteUnpairHandler
 from core.api.vision_handler import VisionHandler
+from core.lesson import runtime_counters as lesson_runtime_counters
 from core.lesson.esp_build_identity import (
     approved_identities_from_config,
     esp_build_identity_metrics_fields,
 )
 from core.lesson.sd_pack_fanout import get_pending_store
 from core.lesson.sd_pack_retry_worker import LessonSdOnlineIndex, LessonSdRetryWorker
+from core.voice.google_live.evidence_enrollment import EvidenceEnrollmentRegistry
 
 TAG = __name__
 
@@ -68,17 +70,27 @@ class SimpleHttpServer:
         generation_status: _GenerationStatus | None = None,
         generation_redis=None,
         owns_generation_redis=False,
+        evidence_registry=None,
     ):
         self.config = config
         self.logger = setup_logging()
-        self.ota_handler = OTAHandler(config)
+        self.evidence_registry = (
+            evidence_registry
+            if evidence_registry is not None
+            else EvidenceEnrollmentRegistry()
+        )
+        self.lesson_connections = lesson_connections if lesson_connections is not None else {}
+        self.ota_handler = OTAHandler(config, evidence_registry=self.evidence_registry)
+        self.google_live_evidence_handler = GoogleLiveEvidenceHandler(
+            self.evidence_registry,
+            self.lesson_connections,
+        )
         self.vision_handler = VisionHandler(config)
         self.lesson_asset_handler = LessonAssetHandler(config)
         self.lesson_assignment_console_handler = LessonAssignmentConsoleHandler(
             config,
             lesson_connections if lesson_connections is not None else {},
         )
-        self.lesson_connections = lesson_connections if lesson_connections is not None else {}
         self.lesson_sd_pending_store = get_pending_store()
         lesson_cfg = config.get("lesson", {}) if isinstance(config, dict) else {}
         server_cfg = config.get("server", {}) if isinstance(config, dict) else {}
@@ -202,6 +214,26 @@ class SimpleHttpServer:
                         web.post(
                             "/internal/devices/{deviceId}/lesson-nudge",
                             self.lesson_nudge_handler.handle_post,
+                        ),
+                        web.post(
+                            "/internal/devices/{deviceId}/google-live-evidence",
+                            self.google_live_evidence_handler.handle_post,
+                        ),
+                        web.get(
+                            "/internal/devices/{deviceId}/google-live-evidence/{journeyId}",
+                            self.google_live_evidence_handler.handle_get,
+                        ),
+                        web.delete(
+                            "/internal/devices/{deviceId}/google-live-evidence/{journeyId}",
+                            self.google_live_evidence_handler.handle_delete,
+                        ),
+                        web.put(
+                            "/internal/devices/{deviceId}/google-live-evidence/{journeyId}/candidate-identity",
+                            self.google_live_evidence_handler.handle_candidate_identity_put,
+                        ),
+                        web.post(
+                            "/internal/devices/{deviceId}/google-live-evidence/{journeyId}/finalize",
+                            self.google_live_evidence_handler.handle_finalize,
                         ),
                         web.post(
                             "/internal/devices/{deviceId}/remote-unpair",

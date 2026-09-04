@@ -1,11 +1,38 @@
+import asyncio
 import importlib
 import json
-from types import SimpleNamespace
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
 class VoiceModeWebsocketSoakTest(unittest.TestCase):
+    def test_recv_until_counts_binary_output_before_terminal_event(self):
+        soak = importlib.import_module("scripts.voice_mode_websocket_soak")
+
+        class _WebSocket:
+            def __init__(self):
+                self.messages = [
+                    b"audio-1",
+                    b"audio-2",
+                    json.dumps({"type": "tts", "state": "stop"}),
+                ]
+
+            async def recv(self):
+                return self.messages.pop(0)
+
+        terminal, binary_count, messages = asyncio.run(
+            soak._recv_until(
+                _WebSocket(),
+                lambda payload: soak._is_tts_state(payload, "stop"),
+                1,
+            )
+        )
+
+        self.assertEqual(terminal, {"type": "tts", "state": "stop"})
+        self.assertEqual(binary_count, 2)
+        self.assertEqual(messages, [terminal])
+
     def test_hello_message_uses_firmware_audio_params(self):
         soak = importlib.import_module("scripts.voice_mode_websocket_soak")
 

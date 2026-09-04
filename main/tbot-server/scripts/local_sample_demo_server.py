@@ -95,7 +95,11 @@ async def serve(*, lan_ip: str, ws_port: int, http_port: int, device_id: str) ->
         device_id=device_id,
     )
     ws = WebSocketServer(config)
-    http = SimpleHttpServer(config, ws.lesson_connections)
+    http = SimpleHttpServer(
+        config,
+        ws.lesson_connections,
+        evidence_registry=ws.evidence_registry,
+    )
     tasks = [asyncio.create_task(ws.start()), asyncio.create_task(http.start())]
     try:
         for line in status_lines(lan_ip=lan_ip, ws_port=ws_port, http_port=http_port):

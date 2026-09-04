@@ -84,6 +84,12 @@ def test_handshake_filter_and_accept_cap_fallbacks(monkeypatch):
         websocket_server.WebSocketServer(_config())
 
 
+def test_websocket_server_always_owns_an_evidence_registry(monkeypatch):
+    server = _build_server(monkeypatch)
+
+    assert server.evidence_registry is not None
+
+
 @pytest.mark.asyncio
 async def test_start_uses_websocket_serve_and_http_response(monkeypatch):
     server = _build_server(monkeypatch, _config(ip="127.0.0.1", port="9001"))

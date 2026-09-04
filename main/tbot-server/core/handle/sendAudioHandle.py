@@ -139,7 +139,11 @@ async def _send_to_mqtt_gateway(
 
 
 async def sendAudio(
-    conn: "ConnectionHandler", audios, frame_duration=AUDIO_FRAME_DURATION
+    conn: "ConnectionHandler",
+    audios,
+    frame_duration=AUDIO_FRAME_DURATION,
+    on_delivery_complete=None,
+    on_delivery_failed=None,
 ):
     """
     Send audio packets, using AudioRateController for precise flow control
@@ -162,10 +166,35 @@ async def sendAudio(
 
     # Convert uniformly to list processing
     audio_list = [audios] if is_single_packet else audios
+    delivery = {"remaining": len(audio_list), "finished": False}
+
+    def packet_sent():
+        if delivery["finished"]:
+            return
+        delivery["remaining"] -= 1
+        if delivery["remaining"] == 0:
+            delivery["finished"] = True
+            if callable(on_delivery_complete):
+                on_delivery_complete(len(audio_list))
+
+    def packet_failed(error):
+        if delivery["finished"]:
+            return
+        delivery["finished"] = True
+        if callable(on_delivery_failed):
+            on_delivery_failed(error)
+
+    track_delivery = callable(on_delivery_complete) or callable(on_delivery_failed)
 
     # Send audio packet
     await _send_audio_with_rate_control(
-        conn, audio_list, rate_controller, flow_control, send_delay
+        conn,
+        audio_list,
+        rate_controller,
+        flow_control,
+        send_delay,
+        packet_sent=packet_sent if track_delivery else None,
+        packet_failed=packet_failed if track_delivery else None,
     )
 
 
@@ -250,7 +279,14 @@ def _start_background_sender(conn: "ConnectionHandler", rate_controller, flow_co
 
 
 async def _send_audio_with_rate_control(
-    conn: "ConnectionHandler", audio_list, rate_controller, flow_control, send_delay
+    conn,
+    audio_list,
+    rate_controller,
+    flow_control,
+    send_delay,
+    *,
+    packet_sent=None,
+    packet_failed=None,
 ):
     """
     Send audio packets using rate_controller
@@ -264,20 +300,39 @@ async def _send_audio_with_rate_control(
     """
     for packet in audio_list:
         if conn.client_abort:
+            if callable(packet_failed):
+                packet_failed(RuntimeError("audio delivery aborted"))
             return
 
         conn.last_activity_time = time.time() * 1000
 
         # Pre-buffer: beforeNpackets send directly
         if flow_control["packet_count"] < PRE_BUFFER_COUNT:
-            await _do_send_audio(conn, packet, flow_control)
+            try:
+                await _do_send_audio(conn, packet, flow_control)
+            except BaseException as exc:
+                if callable(packet_failed):
+                    packet_failed(exc)
+                raise
+            if callable(packet_sent):
+                packet_sent()
         elif send_delay > 0:
             # Fixed delay mode
             await asyncio.sleep(send_delay)
-            await _do_send_audio(conn, packet, flow_control)
+            try:
+                await _do_send_audio(conn, packet, flow_control)
+            except BaseException as exc:
+                if callable(packet_failed):
+                    packet_failed(exc)
+                raise
+            if callable(packet_sent):
+                packet_sent()
         else:
             # Dynamic flow control mode: only add to queue, background loop handles sending
-            rate_controller.add_audio(packet)
+            if packet_sent is None and packet_failed is None:
+                rate_controller.add_audio(packet)
+            else:
+                rate_controller.add_audio(packet, packet_sent, packet_failed)
 
 
 async def _do_send_audio(conn: "ConnectionHandler", opus_packet, flow_control):

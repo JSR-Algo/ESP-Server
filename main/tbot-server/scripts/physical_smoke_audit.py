@@ -2,12 +2,26 @@
 import argparse
 import hashlib
 import json
+import math
 import re
 import sys
 import unicodedata
 from collections import Counter
+from datetime import datetime, timedelta
 from pathlib import Path
 
+_SERVER_ROOT = Path(__file__).resolve().parents[1]
+if str(_SERVER_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SERVER_ROOT))
+
+from scripts.google_live_reliability import (  # noqa: E402
+    GOOGLE_LIVE_LIMITS,
+    SCHEMA_VERSION,
+    forbidden_report_fields,
+    percentile,
+    validate_candidate_soak_report,
+    validate_log_reliability_contract,
+)
 
 FATAL_PATTERNS = (
     "Traceback",
@@ -87,6 +101,25 @@ IMMEDIATE_PRONUNCIATION_SCORING_PATTERNS = (
 FIRST_AUDIO_OUT_MARKER_PATTERN = (
     r"(?:Google Live first_audio_out_latency_ms=[\d.]+|"
     r"Google Live turn_latency_ms=[\d.]+ phase=first_audio_out)"
+)
+
+_CANDIDATE_STAGE_COUNTS = (
+    ("conversation", 17),
+    ("bargein", 10),
+    ("quiet", 2),
+    ("reopen", 1),
+    ("reconnect", 1),
+    ("lesson", 1),
+    ("conversation_after_lesson", 1),
+)
+_PHYSICAL_AUDIT_SAMPLE_COUNTS = {
+    "firstAudio": 10,
+    "interruptStop": 10,
+    "physicalBargein": 10,
+    "serverOutputGap": 10,
+}
+_INTENTIONAL_OUTPUT_GAP_BOUNDARIES = frozenset(
+    {"interrupt", "turn_completion", "backpressure", "transport_recovery"}
 )
 
 
@@ -241,6 +274,43 @@ def _expected_user_transcript_match_count(transcript_texts, expected_transcripts
         ):
             matches += 1
     return matches
+
+
+_TRANSCRIPT_PROOF_MARKER_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} - "
+    r"[A-Za-z0-9._:-]{1,128} - core\.voice\.session_provider\.google_live - "
+    r"INFO - GoogleLive - Google Live evidence_transcript_match "
+    r"journey_id=([A-Za-z0-9._:-]{1,64}) slot=(\d+) "
+    r"phase=(interrupt|lesson|post_lesson) chars=(\d+) matched=(true|false)$"
+)
+
+
+def _transcript_proof_markers(lines, *, journey_id):
+    markers = []
+    malformed = 0
+    mismatches = 0
+    for line in lines:
+        if "Google Live evidence_transcript_match" not in line:
+            continue
+        match = _TRANSCRIPT_PROOF_MARKER_RE.fullmatch(line)
+        if match is None:
+            malformed += 1
+            continue
+        if match.group(1) != journey_id:
+            malformed += 1
+            continue
+        if match.group(5) != "true":
+            mismatches += 1
+            continue
+        markers.append(
+            {
+                "slot": int(match.group(2)),
+                "phase": match.group(3),
+                "chars": int(match.group(4)),
+                "matched": True,
+            }
+        )
+    return markers, malformed, mismatches
 
 
 def _post_lesson_response_chain_count(lines, expected_transcripts):
@@ -400,7 +470,15 @@ def _format_budget(value):
 
 
 def _number_stats(values):
-    values = [float(value) for value in values]
+    converted = []
+    for value in values:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            converted.append(number)
+    values = converted
     if not values:
         return {"count": 0}
     ordered = sorted(values)
@@ -408,6 +486,8 @@ def _number_stats(values):
         "count": len(ordered),
         "min": ordered[0],
         "max": ordered[-1],
+        "p50": percentile(ordered, 50),
+        "p95": percentile(ordered, 95),
     }
 
 
@@ -419,6 +499,539 @@ def _first_audio_out_ms_stats(log_text):
     if not values:
         values = re.findall(r"first_audio_out_latency_ms=([\d.]+)", log_text)
     return _number_stats(values)
+
+
+def _forbidden_report_fields(value, path=""):
+    return forbidden_report_fields(value, path)
+
+
+def validate_physical_candidate_report(
+    report,
+    *,
+    expected_candidate_identity,
+    reliability_report,
+    candidate_soak_report,
+    production_profile,
+):
+    """Validate released Task 7 physical budgets and its exact upstream bindings."""
+    failures = []
+
+    def mismatch(field):
+        failures.append({"code": "PHYSICAL_CONTRACT_MISMATCH", "field": field})
+
+    if not isinstance(report, dict):
+        mismatch("report")
+        return failures
+    exact = {
+        "passed": True,
+        "candidateIdentity": dict(expected_candidate_identity),
+        "missing": [],
+        "fatal_hits": [],
+        "malformedLatencyMarkers": 0,
+        "live_identity_mismatches": 0,
+        "model_echo_user_transcripts": 0,
+        "receiveLoopBalance": 0,
+        "maxReceiveLoopsActive": 1,
+        "physical_ws_connected": True,
+        "live_identity": True,
+        "listen_start_interrupts": 0,
+        "expected_user_transcripts": 10,
+        "user_transcript_expected_matches": 10,
+        "post_interrupt_user_transcript_expected_matches": 10,
+    }
+    for field, expected in exact.items():
+        if report.get(field) != expected or type(report.get(field)) is not type(expected):
+            mismatch(field)
+    for field, minimum in (("input_audio_diag", 1), ("user_transcripts", 10)):
+        if type(report.get(field)) is not int or report.get(field) < minimum:
+            mismatch(field)
+    exact_count_fields = {
+        "audio_interrupts": 10,
+        "aec_live_vad_forward": 10,
+        "aec_interruption_chains": 10,
+        "live_server_interruption": 10,
+        "interrupt_tts_stops": 10,
+        "interrupt_stop_chains": 10,
+        "interrupt_user_chains": 10,
+        "interrupt_relisten_chains": 10,
+        "post_interrupt_user_transcripts": 10,
+        "realtime_tts_stops": 10,
+    }
+    for field, expected in exact_count_fields.items():
+        if type(report.get(field)) is not int or report.get(field) != expected:
+            mismatch(field)
+    minimum_fields = {
+        "live_identity_first_audio_chains": 1,
+        "output_relisten_chains": 1,
+        "expected_post_lesson_transcripts": 1,
+        "post_lesson_response_chains": 1,
+        "lesson_prepare": 1,
+        "lesson_start": 1,
+        "lesson_steps": 1,
+        "lesson_step_layers_complete": 1,
+        "lesson_prompt_tts": 1,
+        "lesson_prompt_after_render": 1,
+        "lesson_firmware_rendered": 1,
+        "lesson_step_layers_drawn_by_step": 1,
+        "lesson_stop": 1,
+        "lesson_completed": 1,
+    }
+    for field, minimum in minimum_fields.items():
+        if type(report.get(field)) is not int or report.get(field) < minimum:
+            mismatch(field)
+
+    expected_profile = {
+        "strictMarkersValidated": True,
+        "lessonValidated": True,
+        "postLessonValidated": True,
+        "receiveLoopBalanceRequired": True,
+        "sampleCounts": dict(_PHYSICAL_AUDIT_SAMPLE_COUNTS),
+        "budgetsMs": {
+            "firstAudioP50": 1200.0,
+            "firstAudioP95": 1800.0,
+            "interruptStopMax": 250.0,
+            "physicalBargeinP95": 500.0,
+            "serverOutputGapMax": 250.0,
+        },
+    }
+    if production_profile != expected_profile:
+        mismatch("productionProfile")
+
+    metric_specs = (
+        ("firstAudioLatencyMs", "p50", 1200.0),
+        ("firstAudioLatencyMs", "p95", 1800.0),
+        ("interruptStopLatencyMs", "max", 250.0),
+        ("physicalBargeinLatencyMs", "p95", 500.0),
+        ("serverOutputGapMs", "max", 250.0),
+    )
+    for field, statistic, limit in metric_specs:
+        value = report.get(field)
+        if (
+            not isinstance(value, dict)
+            or type(value.get("count")) is not int
+            or value.get("count") != _PHYSICAL_AUDIT_SAMPLE_COUNTS[
+                {
+                    "firstAudioLatencyMs": "firstAudio",
+                    "interruptStopLatencyMs": "interruptStop",
+                    "physicalBargeinLatencyMs": "physicalBargein",
+                    "serverOutputGapMs": "serverOutputGap",
+                }[field]
+            ]
+            or any(
+                isinstance(value.get(name), bool)
+                or not isinstance(value.get(name), (int, float))
+                or not math.isfinite(value.get(name))
+                or value.get(name) < 0
+                for name in ("min", "max", "p50", "p95")
+            )
+            or not value["min"] <= value["p50"] <= value["p95"] <= value["max"]
+            or value.get(statistic) > limit
+        ):
+            mismatch(field)
+    mirrored_metrics = {
+        "first_audio_out_ms": "firstAudioLatencyMs",
+        "interrupt_stop_latency_ms": "interruptStopLatencyMs",
+    }
+    for legacy, canonical in mirrored_metrics.items():
+        if report.get(legacy) != report.get(canonical):
+            mismatch(legacy)
+
+    gaps = report.get("serverOutputGapMs")
+    if not isinstance(gaps, dict):
+        mismatch("serverOutputGapEvidence")
+    else:
+        allowed_boundaries = _INTENTIONAL_OUTPUT_GAP_BOUNDARIES
+        boundaries = gaps.get("excludedByBoundary")
+        durations = gaps.get("excludedDurationMsByBoundary")
+        if (
+            type(gaps.get("observed")) is not int
+            or gaps.get("observed") < _PHYSICAL_AUDIT_SAMPLE_COUNTS["serverOutputGap"]
+            or type(gaps.get("invalid")) is not int
+            or gaps.get("invalid") != 0
+            or type(gaps.get("excludedIntentional")) is not int
+            or gaps.get("excludedIntentional") < 0
+            or not isinstance(boundaries, dict)
+            or not set(boundaries) <= allowed_boundaries
+            or any(type(value) is not int or value < 0 for value in boundaries.values())
+            or not isinstance(durations, dict)
+            or set(durations) != set(boundaries)
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+                for value in durations.values()
+            )
+            or sum(boundaries.values()) != gaps.get("excludedIntentional")
+            or isinstance(gaps.get("excludedDurationMs"), bool)
+            or not isinstance(gaps.get("excludedDurationMs"), (int, float))
+            or not math.isfinite(gaps.get("excludedDurationMs"))
+            or gaps.get("excludedDurationMs") < 0
+            or abs(sum(durations.values()) - gaps.get("excludedDurationMs")) > 0.001
+            or gaps.get("observed")
+            != gaps.get("count") + gaps.get("excludedIntentional")
+        ):
+            mismatch("serverOutputGapEvidence")
+        for nested in ("rawGapDurationMs", "unexplainedResidualMs"):
+            value = gaps.get(nested)
+            if (
+                not isinstance(value, dict)
+                or type(value.get("count")) is not int
+                or any(
+                    isinstance(value.get(name), bool)
+                    or not isinstance(value.get(name), (int, float))
+                    or not math.isfinite(value.get(name))
+                    or value.get(name) < 0
+                    for name in ("min", "max", "p50", "p95")
+                )
+                or not value["min"] <= value["p50"] <= value["p95"] <= value["max"]
+                or (
+                    nested == "rawGapDurationMs"
+                    and value.get("count") != gaps.get("observed")
+                )
+                or (
+                    nested == "unexplainedResidualMs"
+                    and value.get("count") != gaps.get("count")
+                )
+                or (nested == "unexplainedResidualMs" and value.get("max") > 250.0)
+            ):
+                mismatch(nested)
+
+    if not isinstance(reliability_report, dict) or validate_log_reliability_contract(
+        reliability_report,
+        expected_candidate_identity=expected_candidate_identity,
+        expected_log_window=reliability_report.get("logWindow", {}),
+        expected_evidence_scope=reliability_report.get("evidenceScope", {}),
+    ):
+        mismatch("logEvidence")
+    if validate_candidate_soak_report(
+        candidate_soak_report,
+        expected_candidate_identity=expected_candidate_identity,
+    ):
+        mismatch("candidateSoakEvidence")
+    if _forbidden_report_fields(report):
+        mismatch("privacy")
+    return failures
+
+
+def _candidate_identity_valid(identity):
+    required = {
+        "gitSha",
+        "imageDigest",
+        "firmwareIdentity",
+        "fixtureSha256",
+        "configFingerprint",
+    }
+    return (
+        isinstance(identity, dict)
+        and set(identity) == required
+        and all(isinstance(identity[key], str) and identity[key].strip() for key in required)
+        and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", identity["imageDigest"])
+        is not None
+        and re.fullmatch(r"[0-9a-fA-F]{64}", identity["fixtureSha256"])
+        is not None
+        and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", identity["configFingerprint"])
+        is not None
+    )
+
+
+def _finite_number(value, *, minimum=0.0):
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+        and value >= minimum
+    )
+
+
+def _candidate_window_evidence(log_text):
+    starts = []
+    for match in re.finditer(
+        r"Google Live reliability_window_start window_id=(?P<window_id>[A-Za-z0-9._:-]+) "
+        r"(?P<fields>.*?)candidate_identity=(?P<identity>\{.*\})$",
+        log_text,
+        re.MULTILINE,
+    ):
+        try:
+            identity = json.loads(match.group("identity"))
+        except json.JSONDecodeError:
+            identity = None
+        fields = dict(
+            re.findall(
+                r"\b(journey_id|connection_id|live_connection_id|"
+                r"initial_live_connection_id|peer_identity_hash|server_start_utc)="
+                r"([^\s]+)",
+                match.group("fields"),
+            )
+        )
+        starts.append(
+            {
+                "windowId": match.group("window_id"),
+                "candidateIdentity": identity,
+                "journeyId": fields.get("journey_id"),
+                "connectionId": fields.get("connection_id"),
+                "liveConnectionId": fields.get("live_connection_id"),
+                "initialLiveConnectionId": fields.get(
+                    "initial_live_connection_id"
+                ),
+                "peerIdentityHash": fields.get("peer_identity_hash"),
+                "serverStartUtc": fields.get("server_start_utc"),
+            }
+        )
+    ends = [
+        {"windowId": match.group("window_id"), "serverEndUtc": match.group("end")}
+        for match in re.finditer(
+            r"Google Live reliability_window_end window_id=(?P<window_id>[A-Za-z0-9._:-]+)"
+            r"(?: server_end_utc=(?P<end>\S+))?$",
+            log_text,
+            re.MULTILINE,
+        )
+    ]
+    return starts, ends
+
+
+def _output_gap_stats(log_text):
+    gaps = {}
+    boundaries = []
+    invalid = 0
+    gap_pattern = re.compile(
+        r"Google Live server_output_gap gap_id=(?P<gap_id>[A-Za-z0-9._:-]+) "
+        r"start_utc=(?P<start>\S+) end_utc=(?P<end>\S+) "
+        r"duration_ms=(?P<duration>[\d.]+)$"
+    )
+    boundary_pattern = re.compile(
+        r"Google Live server_output_gap_boundary "
+        r"gap_id=(?P<gap_id>[A-Za-z0-9._:-]+) "
+        r"type=(?P<boundary>[A-Za-z_]+) start_utc=(?P<start>\S+) "
+        r"end_utc=(?P<end>\S+) duration_ms=(?P<duration>[\d.]+)$"
+    )
+
+    def parse_interval(match):
+        try:
+            start = datetime.fromisoformat(match.group("start"))
+            end = datetime.fromisoformat(match.group("end"))
+            duration = float(match.group("duration"))
+        except (TypeError, ValueError):
+            return None
+        if (
+            start.tzinfo is None
+            or end.tzinfo is None
+            or start.utcoffset() != timedelta(0)
+            or end.utcoffset() != timedelta(0)
+            or end < start
+            or not math.isfinite(duration)
+            or duration < 0
+            or abs((end - start).total_seconds() * 1000 - duration) > 0.001
+        ):
+            return None
+        return start, end, duration
+
+    for line in log_text.splitlines():
+        if "Google Live server_output_gap " in line:
+            match = gap_pattern.search(line)
+            interval = parse_interval(match) if match is not None else None
+            if match is None or interval is None or match.group("gap_id") in gaps:
+                invalid += 1
+                continue
+            gaps[match.group("gap_id")] = interval
+        elif "Google Live server_output_gap_boundary " in line:
+            match = boundary_pattern.search(line)
+            interval = parse_interval(match) if match is not None else None
+            if match is None or interval is None:
+                invalid += 1
+                continue
+            boundaries.append(
+                (match.group("gap_id"), match.group("boundary"), *interval)
+            )
+
+    by_gap = {}
+    for gap_id, boundary_type, start, end, duration in boundaries:
+        gap = gaps.get(gap_id)
+        if gap is None or boundary_type not in _INTENTIONAL_OUTPUT_GAP_BOUNDARIES:
+            invalid += 1
+            continue
+        gap_start, gap_end, gap_duration = gap
+        if (
+            duration <= 0
+            or start < gap_start
+            or end > gap_end
+            or duration > gap_duration
+        ):
+            invalid += 1
+            continue
+        by_gap.setdefault(gap_id, []).append(
+            (start, end, duration, boundary_type)
+        )
+
+    residuals = []
+    excluded = Counter()
+    excluded_durations = Counter()
+    for gap_id, (_, _, gap_duration) in gaps.items():
+        intervals = sorted(by_gap.get(gap_id, []), key=lambda item: item[0])
+        previous_end = None
+        explained = 0.0
+        valid_intervals = []
+        for start, end, duration, boundary_type in intervals:
+            if previous_end is not None and start < previous_end:
+                invalid += 1
+                continue
+            previous_end = end
+            explained += duration
+            valid_intervals.append((duration, boundary_type))
+        if explained > gap_duration + 0.001:
+            invalid += 1
+            explained = 0.0
+            valid_intervals = []
+        for duration, boundary_type in valid_intervals:
+            excluded[boundary_type] += 1
+            excluded_durations[boundary_type] += duration
+        residuals.append(max(0.0, round(gap_duration - explained, 3)))
+
+    stats = _number_stats(residuals)
+    stats["observed"] = len(gaps)
+    stats["excludedIntentional"] = sum(excluded.values())
+    stats["excludedByBoundary"] = dict(sorted(excluded.items()))
+    stats["excludedDurationMs"] = round(sum(excluded_durations.values()), 3)
+    stats["excludedDurationMsByBoundary"] = {
+        key: round(value, 3) for key, value in sorted(excluded_durations.items())
+    }
+    stats["invalid"] = invalid
+    stats["rawGapDurationMs"] = _number_stats(
+        [duration for _, _, duration in gaps.values()]
+    )
+    stats["unexplainedResidualMs"] = {
+        key: value for key, value in stats.items() if key in {"count", "min", "max", "p50", "p95"}
+    }
+    return stats
+
+
+def _malformed_latency_marker_count(log_text):
+    marker_patterns = (
+        (
+            lambda line: "phase=first_audio_out" in line
+            and "Google Live turn_latency_ms=" in line,
+            re.compile(r"Google Live turn_latency_ms=\d+(?:\.\d+)? phase=first_audio_out$"),
+        ),
+        (
+            lambda line: "Google Live first_audio_out_latency_ms=" in line,
+            re.compile(r"Google Live first_audio_out_latency_ms=\d+(?:\.\d+)?$"),
+        ),
+        (
+            lambda line: "Google Live interruption_stop_latency_ms=" in line,
+            re.compile(r"Google Live interruption_stop_latency_ms=\d+(?:\.\d+)?$"),
+        ),
+        (
+            lambda line: "Google Live physical_bargein_latency_ms=" in line,
+            re.compile(r"Google Live physical_bargein_latency_ms=\d+(?:\.\d+)?$"),
+        ),
+    )
+    invalid = 0
+    for line in log_text.splitlines():
+        for is_marker, valid_pattern in marker_patterns:
+            if is_marker(line) and valid_pattern.search(line) is None:
+                invalid += 1
+    return invalid
+
+
+def _upstream_candidate_evidence(
+    *,
+    candidate_identity,
+    reliability_report,
+    candidate_soak_report,
+    starts,
+    ends,
+):
+    failures = []
+    if not _candidate_identity_valid(candidate_identity):
+        failures.append("candidate_identity_valid")
+
+    if not isinstance(reliability_report, dict):
+        failures.append("log_reliability_report_pass")
+        reliability_report = {}
+    elif (
+        reliability_report.get("schemaVersion") != SCHEMA_VERSION
+        or reliability_report.get("name") != "google_live_log_reliability"
+        or reliability_report.get("status") != "PASS"
+        or reliability_report.get("failures") != []
+        or reliability_report.get("fatalHits") != []
+        or type(reliability_report.get("receiveLoopBalance")) is not int
+        or reliability_report.get("receiveLoopBalance") != 0
+        or type(reliability_report.get("maxReceiveLoopsActive")) is not int
+        or reliability_report.get("maxReceiveLoopsActive") != 1
+        or type(reliability_report.get("staleAudioAfterReplacement")) is not int
+        or reliability_report.get("staleAudioAfterReplacement") != 0
+        or reliability_report.get("duplicateResponseIds") != []
+        or reliability_report.get("unrecoveredTimeouts") != []
+        or reliability_report.get("unreleasedLessonHandoffs") != []
+        or not isinstance(reliability_report.get("replayCountsByReopen"), dict)
+        or any(
+            type(value) is not int or value not in {0, 1}
+            for value in (reliability_report.get("replayCountsByReopen") or {}).values()
+        )
+        or not isinstance(reliability_report.get("correlations"), list)
+        or not reliability_report.get("correlations")
+        or any(
+            not isinstance(item, dict) or item.get("status") != "PASS"
+            for item in reliability_report.get("correlations") or []
+        )
+    ):
+        failures.append("log_reliability_report_pass")
+    if _forbidden_report_fields(reliability_report):
+        failures.append("log_reliability_report_privacy_safe")
+
+    if validate_candidate_soak_report(
+        candidate_soak_report, expected_candidate_identity=candidate_identity
+    ):
+        failures.append("candidate_soak_report_pass")
+    if not isinstance(candidate_soak_report, dict):
+        candidate_soak_report = {}
+    if _forbidden_report_fields(candidate_soak_report):
+        failures.append("candidate_soak_report_privacy_safe")
+
+    upstream_identities = (
+        reliability_report.get("candidateIdentity"),
+        candidate_soak_report.get("candidateIdentity"),
+    )
+    if any(identity != candidate_identity for identity in upstream_identities):
+        failures.append("candidate_identity_match")
+
+    expected_scope = starts[0] if len(starts) == 1 else {}
+    scope = {
+        key: expected_scope.get(key)
+        for key in (
+            "journeyId",
+            "connectionId",
+            "liveConnectionId",
+            "initialLiveConnectionId",
+            "peerIdentityHash",
+            "serverStartUtc",
+        )
+    }
+    expected_end = ends[0] if len(ends) == 1 else {}
+    log_window = {
+        "windowId": expected_scope.get("windowId"),
+        "start": expected_scope.get("serverStartUtc"),
+        "end": expected_end.get("serverEndUtc"),
+    }
+    shared_failures = validate_log_reliability_contract(
+        reliability_report,
+        expected_candidate_identity=candidate_identity,
+        expected_log_window=log_window,
+        expected_evidence_scope=scope,
+    )
+    if shared_failures:
+        failures.append("log_reliability_report_pass")
+    valid_scope = (
+        len(starts) == 1
+        and len(ends) == 1
+        and ends[0]["windowId"] == starts[0]["windowId"]
+        and starts[0]["candidateIdentity"] == candidate_identity
+        and all(scope.values())
+        and all(log_window.values())
+    )
+    if not valid_scope:
+        failures.append("candidate_evidence_scope_match")
+    return failures
 
 def _ordered_marker_pair_count(lines, first_pattern, second_pattern):
     first = re.compile(first_pattern)
@@ -1072,7 +1685,19 @@ def audit_log(
     max_aec_live_vad_forward=None,
     max_listen_start_interrupts=None,
     max_first_audio_ms=None,
+    max_first_audio_p50_ms=None,
+    max_first_audio_p95_ms=None,
     max_interrupt_stop_latency_ms=None,
+    max_physical_bargein_p95_ms=None,
+    max_server_output_gap_ms=None,
+    min_first_audio_samples=None,
+    min_interrupt_stop_samples=None,
+    min_physical_bargein_samples=None,
+    min_server_output_gap_samples=None,
+    candidate_identity=None,
+    reliability_report=None,
+    candidate_soak_report=None,
+    require_receive_loop_balance=False,
     require_post_lesson_response=False,
     require_lesson_live_text=False,
     min_lesson_live_text_chars=None,
@@ -1156,6 +1781,17 @@ def audit_log(
             evidence_log_text,
         )
     )
+    physical_bargein_latency_ms = _number_stats(
+        re.findall(
+            r"Google Live physical_bargein_latency_ms=([\d.]+)",
+            evidence_log_text,
+        )
+    )
+    server_output_gap_ms = _output_gap_stats(evidence_log_text)
+    malformed_latency_markers = _malformed_latency_marker_count(evidence_log_text)
+    candidate_window_starts, candidate_window_ends = _candidate_window_evidence(
+        evidence_log_text
+    )
     realtime_tts_stops = len(
         re.findall(
             r"(?:Google Live )?tts_stop_sent "
@@ -1229,6 +1865,25 @@ def audit_log(
     user_transcripts = len(
         re.findall(r"Google Live transcript source=user chars=\d+", evidence_log_text)
     )
+    transcript_proof_markers = []
+    malformed_transcript_proof_markers = 0
+    transcript_proof_mismatches = 0
+    if candidate_identity is not None:
+        evidence_scope = (
+            reliability_report.get("evidenceScope", {})
+            if isinstance(reliability_report, dict)
+            else {}
+        )
+        (
+            transcript_proof_markers,
+            malformed_transcript_proof_markers,
+            transcript_proof_mismatches,
+        ) = (
+            _transcript_proof_markers(
+                lines,
+                journey_id=str(evidence_scope.get("journeyId") or ""),
+            )
+        )
     allowed_fatal_patterns = set(allowed_fatal_patterns or [])
     fatal_hits = [
         pattern
@@ -1248,6 +1903,31 @@ def audit_log(
         fatal_hits.append("model_echo_user_transcript")
 
     missing = []
+    if candidate_identity is not None or reliability_report is not None or candidate_soak_report is not None:
+        missing.extend(
+            _upstream_candidate_evidence(
+                candidate_identity=candidate_identity,
+                reliability_report=reliability_report,
+                candidate_soak_report=candidate_soak_report,
+                starts=candidate_window_starts,
+                ends=candidate_window_ends,
+            )
+        )
+    if candidate_identity is not None:
+        required_transcript_proofs = [
+            *({"slot": slot, "phase": "interrupt"} for slot in range(1, 11)),
+            {"slot": 11, "phase": "post_lesson"},
+        ]
+        observed_transcript_proofs = [
+            {"slot": marker["slot"], "phase": marker["phase"]}
+            for marker in transcript_proof_markers
+        ]
+        if (
+            observed_transcript_proofs != required_transcript_proofs
+            or malformed_transcript_proof_markers
+            or transcript_proof_mismatches
+        ):
+            missing.append("transcript_proof_exact_slots")
     if not physical_ws_connected:
         missing.append("physical_ws_connected")
     if input_audio_diag < 1:
@@ -1276,15 +1956,91 @@ def audit_log(
             missing.append("first_audio_out_ms")
         elif first_audio_out_ms["max"] > float(max_first_audio_ms):
             missing.append(f"first_audio_out_ms<={_format_budget(max_first_audio_ms)}")
+    if min_first_audio_samples is not None and first_audio_out_ms["count"] != int(
+        min_first_audio_samples
+    ):
+        missing.append(f"first_audio_samples={int(min_first_audio_samples)}")
+    if max_first_audio_p50_ms is not None and (
+        first_audio_out_ms.get("p50") is None
+        or first_audio_out_ms["p50"] > float(max_first_audio_p50_ms)
+    ):
+        missing.append(
+            f"first_audio_p50_ms<={_format_budget(max_first_audio_p50_ms)}"
+        )
+    if max_first_audio_p95_ms is not None and (
+        first_audio_out_ms.get("p95") is None
+        or first_audio_out_ms["p95"] > float(max_first_audio_p95_ms)
+    ):
+        missing.append(
+            f"first_audio_p95_ms<={_format_budget(max_first_audio_p95_ms)}"
+        )
     if max_interrupt_stop_latency_ms is not None:
-        expected_count = int(min_interrupt_tts_stops or min_interrupts)
-        if interrupt_stop_latency_ms["count"] < expected_count:
-            missing.append(f"interrupt_stop_latency_ms>={expected_count}")
+        expected_count = int(
+            min_interrupt_stop_samples
+            if min_interrupt_stop_samples is not None
+            else min_interrupt_tts_stops or min_interrupts
+        )
+        exact_interrupt_samples = min_interrupt_stop_samples is not None
+        count_mismatch = (
+            interrupt_stop_latency_ms["count"] != expected_count
+            if exact_interrupt_samples
+            else interrupt_stop_latency_ms["count"] < expected_count
+        )
+        if count_mismatch:
+            operator = "=" if exact_interrupt_samples else ">="
+            missing.append(f"interrupt_stop_latency_ms{operator}{expected_count}")
         elif interrupt_stop_latency_ms["max"] > float(max_interrupt_stop_latency_ms):
             missing.append(
                 "interrupt_stop_latency_ms"
                 f"<={_format_budget(max_interrupt_stop_latency_ms)}"
             )
+    if min_physical_bargein_samples is not None and physical_bargein_latency_ms[
+        "count"
+    ] != int(min_physical_bargein_samples):
+        missing.append(
+            f"physical_bargein_samples={int(min_physical_bargein_samples)}"
+        )
+    if max_physical_bargein_p95_ms is not None and (
+        physical_bargein_latency_ms.get("p95") is None
+        or physical_bargein_latency_ms["p95"] > float(max_physical_bargein_p95_ms)
+    ):
+        missing.append(
+            "physical_bargein_p95_ms"
+            f"<={_format_budget(max_physical_bargein_p95_ms)}"
+        )
+    if min_server_output_gap_samples is not None and (
+        server_output_gap_ms["observed"] != int(min_server_output_gap_samples)
+        or server_output_gap_ms["count"] < 1
+    ):
+        missing.append(
+            f"server_output_gap_samples={int(min_server_output_gap_samples)}"
+        )
+    if server_output_gap_ms["invalid"]:
+        missing.append("server_output_gap_boundaries_valid")
+    if malformed_latency_markers:
+        missing.append("latency_evidence_valid")
+    if max_server_output_gap_ms is not None and (
+        server_output_gap_ms.get("max") is None
+        or server_output_gap_ms["max"] > float(max_server_output_gap_ms)
+    ):
+        missing.append(
+            f"server_output_gap_ms<={_format_budget(max_server_output_gap_ms)}"
+        )
+    receive_loop_balance = (
+        reliability_report.get("receiveLoopBalance")
+        if isinstance(reliability_report, dict)
+        else None
+    )
+    max_receive_loops_active = (
+        reliability_report.get("maxReceiveLoopsActive")
+        if isinstance(reliability_report, dict)
+        else None
+    )
+    if require_receive_loop_balance:
+        if type(receive_loop_balance) is not int or receive_loop_balance != 0:
+            missing.append("receive_loop_balance=0")
+        if type(max_receive_loops_active) is not int or max_receive_loops_active != 1:
+            missing.append("max_receive_loops_active=1")
     if require_aec_live_vad_forward and aec_live_vad_forward < 1:
         missing.append("aec_live_vad_forward")
     if min_aec_live_vad_forward is not None:
@@ -1391,12 +2147,20 @@ def audit_log(
         "physical_ws_connected": physical_ws_connected,
         "input_audio_diag": input_audio_diag,
         "first_audio_out_ms": first_audio_out_ms,
+        "firstAudioLatencyMs": first_audio_out_ms,
         "aec_live_vad_forward": aec_live_vad_forward,
         "listen_start_interrupts": listen_start_interrupts,
         "aec_interruption_chains": aec_interruption_chains,
         "live_server_interruption": live_server_interruption,
         "interrupt_tts_stops": interrupt_tts_stops,
         "interrupt_stop_latency_ms": interrupt_stop_latency_ms,
+        "interruptStopLatencyMs": interrupt_stop_latency_ms,
+        "physicalBargeinLatencyMs": physical_bargein_latency_ms,
+        "serverOutputGapMs": server_output_gap_ms,
+        "malformedLatencyMarkers": malformed_latency_markers,
+        "receiveLoopBalance": receive_loop_balance,
+        "maxReceiveLoopsActive": max_receive_loops_active,
+        "candidateIdentity": candidate_identity,
         "interrupt_stop_chains": interrupt_stop_chains,
         "interrupt_user_chains": interrupt_user_chains,
         "interrupt_relisten_chains": interrupt_relisten_chains,
@@ -1417,6 +2181,15 @@ def audit_log(
             post_interrupt_user_transcript_expected_matches
         ),
         "model_echo_user_transcripts": model_echo_user_transcripts,
+        "transcript_proof_matches": len(transcript_proof_markers),
+        "transcript_proof_phases": [
+            marker["phase"] for marker in transcript_proof_markers
+        ],
+        "transcript_proof_slots": [
+            marker["slot"] for marker in transcript_proof_markers
+        ],
+        "malformed_transcript_proof_markers": malformed_transcript_proof_markers,
+        "transcript_proof_mismatches": transcript_proof_mismatches,
         "audio_interrupts": audio_interrupts,
         "fatal_hits": fatal_hits,
         "missing": missing,
@@ -1560,6 +2333,39 @@ def main():
     parser.add_argument("--require-aec-live-vad-forward", action="store_true")
     parser.add_argument("--require-live-server-interruption", action="store_true")
     parser.add_argument("--max-first-audio-ms", type=float)
+    parser.add_argument("--production-google-live-candidate", action="store_true")
+    parser.add_argument("--candidate-git-sha")
+    parser.add_argument("--candidate-image-digest")
+    parser.add_argument("--firmware-identity")
+    parser.add_argument("--config-fingerprint")
+    parser.add_argument("--fixture-sha256")
+    parser.add_argument("--google-live-reliability-report", type=Path)
+    parser.add_argument("--candidate-soak-report", type=Path)
+    parser.add_argument(
+        "--max-first-audio-p50-ms",
+        type=float,
+        default=GOOGLE_LIVE_LIMITS["firstAudioP50Ms"],
+    )
+    parser.add_argument(
+        "--max-first-audio-p95-ms",
+        type=float,
+        default=GOOGLE_LIVE_LIMITS["firstAudioP95Ms"],
+    )
+    parser.add_argument(
+        "--max-server-stop-ms",
+        type=float,
+        default=GOOGLE_LIVE_LIMITS["serverStopMaxMs"],
+    )
+    parser.add_argument(
+        "--max-physical-bargein-p95-ms",
+        type=float,
+        default=GOOGLE_LIVE_LIMITS["physicalBargeinP95Ms"],
+    )
+    parser.add_argument(
+        "--max-server-output-gap-ms",
+        type=float,
+        default=GOOGLE_LIVE_LIMITS["serverOutputGapMaxMs"],
+    )
     parser.add_argument(
         "--production-voice-strict",
         action="store_true",
@@ -1624,13 +2430,72 @@ def main():
     args = parser.parse_args()
 
     log_text = args.log_file.read_text(encoding="utf-8", errors="replace")
+    candidate_identity = None
+    reliability_report = None
+    candidate_soak_report = None
+    if args.production_google_live_candidate:
+        required_candidate_args = (
+            "candidate_git_sha",
+            "candidate_image_digest",
+            "firmware_identity",
+            "config_fingerprint",
+            "fixture_sha256",
+            "google_live_reliability_report",
+            "candidate_soak_report",
+        )
+        missing_candidate_args = [
+            "--" + name.replace("_", "-")
+            for name in required_candidate_args
+            if getattr(args, name) is None
+        ]
+        if missing_candidate_args:
+            parser.error(
+                "--production-google-live-candidate requires "
+                + ", ".join(missing_candidate_args)
+            )
+        candidate_identity = {
+            "gitSha": str(args.candidate_git_sha).strip(),
+            "imageDigest": str(args.candidate_image_digest).strip(),
+            "firmwareIdentity": str(args.firmware_identity).strip(),
+            "fixtureSha256": str(args.fixture_sha256).strip(),
+            "configFingerprint": str(args.config_fingerprint).strip(),
+        }
+        if not _candidate_identity_valid(candidate_identity):
+            parser.error("production candidate identity is malformed")
+        try:
+            reliability_report = json.loads(
+                args.google_live_reliability_report.read_text(encoding="utf-8")
+            )
+            candidate_soak_report = json.loads(
+                args.candidate_soak_report.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            parser.error(f"candidate evidence report is unreadable: {exc}")
+        for budget_name in (
+            "max_first_audio_p50_ms",
+            "max_first_audio_p95_ms",
+            "max_server_stop_ms",
+            "max_physical_bargein_p95_ms",
+            "max_server_output_gap_ms",
+        ):
+            value = getattr(args, budget_name)
+            if not math.isfinite(value) or value <= 0:
+                parser.error(f"--{budget_name.replace('_', '-')} must be positive")
     lesson_manifest = None
     if args.lesson_manifest is not None:
         lesson_manifest = json.loads(
             args.lesson_manifest.read_text(encoding="utf-8", errors="replace")
         )
-    production_voice_strict = args.production_voice_strict or args.production_strict
-    production_course_strict = args.production_course_strict or args.production_strict
+    production_voice_strict = (
+        args.production_voice_strict
+        or args.production_strict
+        or args.production_google_live_candidate
+    )
+    production_course_strict = (
+        args.production_course_strict
+        or args.production_strict
+        or args.production_google_live_candidate
+    )
     if args.child_live_moderation_proof is not None:
         if not args.production_child_safety_strict:
             parser.error(
@@ -1655,7 +2520,11 @@ def main():
                     _proof_text(getattr(args, flag))
             except ValueError as exc:
                 parser.error(f"--{flag.replace('_', '-')} {exc}")
-    if production_voice_strict and not args.expected_user_transcript:
+    if (
+        production_voice_strict
+        and not args.production_google_live_candidate
+        and not args.expected_user_transcript
+    ):
         strict_flag = "--production-strict" if args.production_strict else "--production-voice-strict"
         parser.error(f"{strict_flag} requires --expected-user-transcript")
     if production_course_strict and lesson_manifest is None:
@@ -1698,6 +2567,9 @@ def main():
         max_interrupt_stop_latency_ms = 250.0
         if max_first_audio_ms is None:
             max_first_audio_ms = 1800.0
+    if args.production_google_live_candidate:
+        max_first_audio_ms = None
+        max_interrupt_stop_latency_ms = args.max_server_stop_ms
     if args.production_output_safe_strict:
         min_audio_interrupts = 0
         min_realtime_tts_stops = 1
@@ -1749,13 +2621,65 @@ def main():
         max_aec_live_vad_forward=max_aec_live_vad_forward,
         max_listen_start_interrupts=max_listen_start_interrupts,
         max_first_audio_ms=max_first_audio_ms,
+        max_first_audio_p50_ms=(
+            args.max_first_audio_p50_ms
+            if args.production_google_live_candidate
+            else None
+        ),
+        max_first_audio_p95_ms=(
+            args.max_first_audio_p95_ms
+            if args.production_google_live_candidate
+            else None
+        ),
         max_interrupt_stop_latency_ms=max_interrupt_stop_latency_ms,
+        max_physical_bargein_p95_ms=(
+            args.max_physical_bargein_p95_ms
+            if args.production_google_live_candidate
+            else None
+        ),
+        max_server_output_gap_ms=(
+            args.max_server_output_gap_ms
+            if args.production_google_live_candidate
+            else None
+        ),
+        min_first_audio_samples=(
+            _PHYSICAL_AUDIT_SAMPLE_COUNTS["firstAudio"]
+            if args.production_google_live_candidate
+            else None
+        ),
+        min_interrupt_stop_samples=(
+            _PHYSICAL_AUDIT_SAMPLE_COUNTS["interruptStop"]
+            if args.production_google_live_candidate
+            else None
+        ),
+        min_physical_bargein_samples=(
+            _PHYSICAL_AUDIT_SAMPLE_COUNTS["physicalBargein"]
+            if args.production_google_live_candidate
+            else None
+        ),
+        min_server_output_gap_samples=(
+            _PHYSICAL_AUDIT_SAMPLE_COUNTS["serverOutputGap"]
+            if args.production_google_live_candidate
+            else None
+        ),
+        candidate_identity=candidate_identity,
+        reliability_report=reliability_report,
+        candidate_soak_report=candidate_soak_report,
+        require_receive_loop_balance=args.production_google_live_candidate,
         require_post_lesson_response=require_post_lesson_response,
         require_lesson_live_text=require_lesson_live_text,
         min_lesson_live_text_chars=args.min_lesson_live_text_chars,
         lesson_manifest=lesson_manifest,
-        expected_user_transcripts=args.expected_user_transcript,
-        expected_post_lesson_transcripts=args.expected_post_lesson_transcript,
+        expected_user_transcripts=(
+            None
+            if args.production_google_live_candidate
+            else args.expected_user_transcript
+        ),
+        expected_post_lesson_transcripts=(
+            None
+            if args.production_google_live_candidate
+            else args.expected_post_lesson_transcript
+        ),
         allowed_fatal_patterns=allowed_fatal_patterns,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))

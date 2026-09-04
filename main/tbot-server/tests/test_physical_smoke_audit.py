@@ -1,11 +1,13 @@
-import importlib
 import hashlib
+import importlib
 import json
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
 import unittest
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 
 class PhysicalSmokeAuditTest(unittest.TestCase):
@@ -3837,6 +3839,960 @@ class PhysicalSmokeAuditTest(unittest.TestCase):
         self.assertIn("lesson_steps>=9", result["missing"])
         self.assertIn("lesson_step_layers_complete", result["missing"])
         self.assertIn("lesson_firmware_rendered>=9", result["missing"])
+
+    def _candidate_identity(self):
+        return {
+            "gitSha": "candidate-sha",
+            "imageDigest": f"sha256:{'a' * 64}",
+            "firmwareIdentity": "esp32-production-2.2.7",
+            "fixtureSha256": "b" * 64,
+            "configFingerprint": f"sha256:{'c' * 64}",
+        }
+
+    def _candidate_physical_log(
+        self,
+        *,
+        first_audio=None,
+        interrupt_stop=None,
+        physical_bargein=None,
+        output_gaps=None,
+        extra_lines=None,
+        include_transcript_proofs=True,
+    ):
+        identity = json.dumps(self._candidate_identity(), separators=(",", ":"))
+        first_audio = [600.0] * 10 if first_audio is None else first_audio
+        interrupt_stop = [25.0] * 10 if interrupt_stop is None else interrupt_stop
+        physical_bargein = (
+            [300.0] * 10 if physical_bargein is None else physical_bargein
+        )
+        output_gaps = [100.0] * 10 if output_gaps is None else output_gaps
+        lines = [
+            "260518 20:10:00[core.connection]-INFO-192.168.0.50 conn - Headers: {'device-id': '3c:0f:02:de:c2:e0', 'client-id': 'd16afa54-eb44-4fcb-8cac-cdefdf05f6fc', 'user-agent': 'TBOT/2.2.7'}",
+            "2026-08-31 13:10:00+00:00[GoogleLive]-INFO-Google Live reliability_window_start window_id=physical-1 journey_id=physical-1 connection_id=connection-1 live_connection_id=live-1 initial_live_connection_id=live-1 peer_identity_hash=sha256:"
+            + "d" * 64
+            + " server_start_utc=2026-08-31T13:10:00+00:00 candidate_identity="
+            + identity,
+            "260518 20:10:00[GoogleLive]-INFO-Google Live evidence_receive_loop_started journey_id=physical-1 connection_id=connection-1 live_connection_id=live-1 generation=1",
+            "260518 20:10:01[GoogleLive]-INFO-Google Live input_audio_diag encoded_bytes=80 decoded_bytes=640 rms=921 source_rate=16000 target_rate=16000 sample_width=2",
+            "260518 20:10:02[GoogleLive]-INFO-Google Live transcript source=user chars=8 text='xin chào'",
+        ]
+        lines.extend(
+            f"260518 20:11:{index:02d}[GoogleLive]-INFO-Google Live turn_latency_ms={value} phase=first_audio_out"
+            for index, value in enumerate(first_audio)
+        )
+        lines.extend(
+            f"260518 20:12:{index:02d}[GoogleLive]-INFO-Google Live interruption_stop_latency_ms={value}"
+            for index, value in enumerate(interrupt_stop)
+        )
+        lines.extend(
+            f"260518 20:13:{index:02d}[GoogleLive]-INFO-Google Live physical_bargein_latency_ms={value}"
+            for index, value in enumerate(physical_bargein)
+        )
+        gap_epoch = datetime(2026, 8, 31, 13, 14, tzinfo=timezone.utc)
+        for index, item in enumerate(output_gaps):
+            if isinstance(item, tuple):
+                value, boundary_type, boundary_duration = item
+            else:
+                value, boundary_type, boundary_duration = item, None, None
+            start = gap_epoch + timedelta(seconds=index * 2)
+            end = start + timedelta(milliseconds=value)
+            gap_id = f"gap-{index}"
+            lines.append(
+                "260518 20:14:{:02d}[GoogleLive]-INFO-Google Live server_output_gap "
+                "gap_id={} start_utc={} end_utc={} duration_ms={}".format(
+                    index,
+                    gap_id,
+                    start.isoformat(),
+                    end.isoformat(),
+                    value,
+                )
+            )
+            if boundary_type is not None:
+                boundary_end = start + timedelta(milliseconds=boundary_duration)
+                lines.append(
+                    "260518 20:14:{:02d}[GoogleLive]-INFO-Google Live "
+                    "server_output_gap_boundary gap_id={} type={} start_utc={} "
+                    "end_utc={} duration_ms={}".format(
+                        index,
+                        gap_id,
+                        boundary_type,
+                        start.isoformat(),
+                        boundary_end.isoformat(),
+                        boundary_duration,
+                    )
+                )
+        lines.extend(extra_lines or [])
+        if include_transcript_proofs:
+            lines.extend(
+                f"2026-08-31 20:14:{index:02d} - 0.9.3_00000000000000 - "
+                "core.voice.session_provider.google_live - INFO - GoogleLive - Google Live "
+                f"evidence_transcript_match journey_id=physical-1 slot={index + 1} "
+                "phase=interrupt chars=8 matched=true"
+                for index in range(10)
+            )
+            lines.append(
+                "2026-08-31 20:14:20 - 0.9.3_00000000000000 - "
+                "core.voice.session_provider.google_live - INFO - GoogleLive - Google Live "
+                "evidence_transcript_match journey_id=physical-1 slot=11 "
+                "phase=post_lesson chars=12 matched=true"
+            )
+        lines.extend(
+            [
+                "260518 20:15:00[GoogleLive]-INFO-Google Live evidence_receive_loop_stopped journey_id=physical-1 connection_id=connection-1 live_connection_id=live-1 generation=1",
+                "2026-08-31 13:15:01+00:00[GoogleLive]-INFO-Google Live reliability_window_end window_id=physical-1 server_end_utc=2026-08-31T13:15:01+00:00",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _candidate_audit_options(self):
+        identity = self._candidate_identity()
+        stage_names = [
+            name
+            for name, count in (
+                ("conversation", 17),
+                ("bargein", 10),
+                ("quiet", 2),
+                ("reopen", 1),
+                ("reconnect", 1),
+                ("lesson", 1),
+                ("conversation_after_lesson", 1),
+            )
+            for _ in range(count)
+        ]
+        cursor = datetime(2026, 8, 31, 11, 0, tzinfo=timezone.utc)
+        evidence_executions = []
+        for sequence, stage in enumerate(stage_names, start=1):
+            end = cursor + timedelta(seconds=40)
+            connection_id = "connection-2" if sequence >= 31 else "connection-1"
+            journey_id = f"journey-{sequence}"
+            window_id = f"window-{sequence}"
+            evidence_scope = {
+                "journeyId": journey_id,
+                "connectionId": connection_id,
+                "liveConnectionId": "live-1",
+                "initialLiveConnectionId": "live-1",
+                "peerIdentityHash": f"sha256:{'d' * 64}",
+                "serverStartUtc": cursor.isoformat(),
+                "journeyType": stage,
+                "proofProfile": "candidate-lifecycle",
+            }
+            server_transitions = []
+            if stage == "reconnect":
+                server_transitions = [
+                    {
+                        "status": "PASS",
+                        "source": "server_log",
+                        "serverIssued": True,
+                        "sequence": 1,
+                        "reason": "same_device_reconnect",
+                        "fromJourneyId": f"journey-{sequence - 1}",
+                        "fromConnectionId": "connection-1",
+                        "toJourneyId": journey_id,
+                        "toConnectionId": connection_id,
+                        "peerIdentityHash": evidence_scope["peerIdentityHash"],
+                    }
+                ]
+            evidence_executions.append(
+                {
+                    "sequence": sequence,
+                    "stage": stage,
+                    "journeyId": journey_id,
+                    "connectionId": connection_id,
+                    "windowId": window_id,
+                    "evidenceScope": evidence_scope,
+                    "initialLiveConnectionId": "live-1",
+                    "finalLiveConnectionId": "live-1",
+                    "liveConnectionTransitions": [],
+                    "serverConnectionTransitions": server_transitions,
+                    "status": "PASS",
+                    "logWindow": {
+                        "windowId": window_id,
+                        "start": cursor.isoformat(),
+                        "end": end.isoformat(),
+                    },
+                }
+            )
+            cursor = end
+        padding_start = cursor + timedelta(seconds=10)
+        padding_end = padding_start + timedelta(seconds=480)
+        quiet_padding = [
+            {
+                "journeyId": "quiet-padding-1",
+                "candidateIdentity": identity,
+                "connectionId": "connection-2",
+                "windowId": "quiet-padding-window-1",
+                "logWindow": {
+                    "windowId": "quiet-padding-window-1",
+                    "start": padding_start.isoformat(),
+                    "end": padding_end.isoformat(),
+                },
+                "durationSec": 480.0,
+                "status": "PASS",
+                "serverIssued": True,
+                "peerIdentityHash": f"sha256:{'d' * 64}",
+                "liveConnectionId": "padding-live-1",
+                "initialLiveConnectionId": "padding-live-1",
+                "finalLiveConnectionId": "padding-live-1",
+                "liveConnectionTransitions": [],
+                "evidenceScope": {
+                    "journeyId": "quiet-padding-1",
+                    "connectionId": "connection-2",
+                    "liveConnectionId": "padding-live-1",
+                    "initialLiveConnectionId": "padding-live-1",
+                    "peerIdentityHash": f"sha256:{'d' * 64}",
+                    "serverStartUtc": padding_start.isoformat(),
+                    "journeyType": "quiet_padding",
+                    "proofProfile": "candidate-lifecycle",
+                },
+                "falseInterrupts": 0,
+                "unexpectedFallbacks": 0,
+                "resourceVerdict": {"status": "PASS"},
+                "logStatus": "PASS",
+            }
+        ]
+        reliability_report = {
+            "schemaVersion": "google-live-reliability.v1",
+            "name": "google_live_log_reliability",
+            "status": "PASS",
+            "candidateIdentity": identity,
+            "logWindow": {
+                "windowId": "physical-1",
+                "start": "2026-08-31T13:10:00+00:00",
+                "end": "2026-08-31T13:15:01+00:00",
+            },
+            "evidenceScope": {
+                "journeyId": "physical-1",
+                "connectionId": "connection-1",
+                "liveConnectionId": "live-1",
+                "initialLiveConnectionId": "live-1",
+                "peerIdentityHash": f"sha256:{'d' * 64}",
+                "serverStartUtc": "2026-08-31T13:10:00+00:00",
+            },
+            "initialLiveConnectionId": "live-1",
+            "finalLiveConnectionId": "live-1",
+            "liveConnectionTransitions": [],
+            "serverConnectionTransitions": [],
+            "receiveLoopBalance": 0,
+            "maxReceiveLoopsActive": 1,
+            "staleAudioAfterReplacement": 0,
+            "duplicateResponseIds": [],
+            "unrecoveredTimeouts": [],
+            "unreleasedLessonHandoffs": [],
+            "replayCountsByReopen": {},
+            "correlations": [
+                {
+                    "status": "PASS",
+                    "journeyId": "physical-1",
+                    "connectionId": "connection-1",
+                    "liveConnectionId": "live-1",
+                    "cancelledResponseId": 1,
+                    "replacementResponseId": 2,
+                }
+            ],
+            "correlation": {
+                "status": "PASS",
+                "cancelledResponseId": 1,
+                "replacementResponseId": 2,
+            },
+            "failures": [],
+            "fatalHits": [],
+        }
+        candidate_soak_report = {
+            "schemaVersion": "google-live-reliability.v1",
+            "name": "candidate_soak",
+            "status": "PASS",
+            "candidateIdentity": identity,
+            "stages": [
+                {"name": name, "executions": count, "status": "PASS"}
+                for name, count in (
+                    ("conversation", 17),
+                    ("bargein", 10),
+                    ("quiet", 2),
+                    ("reopen", 1),
+                    ("reconnect", 1),
+                    ("lesson", 1),
+                    ("conversation_after_lesson", 1),
+                )
+            ],
+            "cleanupVerdict": {
+                "status": "PASS",
+                "websocketClosed": True,
+                "pendingOwnedTasks": 0,
+                "actualPendingCleanupTasks": 0,
+                "activeSessions": 0,
+                "activeReceiveLoops": 0,
+                "providerFinalizeStatus": "PASS",
+                "providerCloseStatus": "PASS",
+                "logStatus": "PASS",
+                "resourceEndSampleAccounted": True,
+            },
+            "durationSec": 1800.0,
+            "runtimeElapsedSec": 1800.0,
+            "recordedRuntimeElapsedSec": None,
+            "replayCandidateEvidence": False,
+            "evidenceGapBudgetSec": 10.0,
+            "evidenceAnchors": {
+                "serverStartUtc": "2026-08-31T11:00:00+00:00",
+                "serverEndUtc": "2026-08-31T11:30:10+00:00",
+            },
+            "evidenceExecutions": evidence_executions,
+            "quietPadding": quiet_padding,
+            "totals": {
+                "successfulTurns": 30,
+                "bargeins": 10,
+                "latestIntentSuccesses": 10,
+                "falseInterrupts": 0,
+                "unexpectedFallbacks": 0,
+                "latestIntentSuccessRate": 1.0,
+            },
+            "latencyMetrics": {
+                "firstAudioP50Ms": 600.0,
+                "firstAudioP95Ms": 900.0,
+                "bargeinP95Ms": 300.0,
+                "reconnectRecoveryP95Ms": 900.0,
+            },
+            "serverOutputGapP95Ms": 100.0,
+            "latencyComparison": {
+                "checks": {
+                    "firstAudioP50Regression": True,
+                    "firstAudioP95Regression": True,
+                    "bargeinP95Regression": True,
+                    "reconnectRecoveryP95Regression": True,
+                },
+                "regressionPct": {
+                    "firstAudioP50Ms": 0.0,
+                    "firstAudioP95Ms": 0.0,
+                    "bargeinP95Ms": 0.0,
+                    "reconnectRecoveryP95Ms": 0.0,
+                },
+                "pass": True,
+            },
+            "resourceVerdict": {
+                "status": "PASS",
+                "checks": {
+                    "rssDeltaBounded": True,
+                    "fdDeltaBounded": True,
+                    "taskDeltaBounded": True,
+                    "threadDeltaBounded": True,
+                    "rssSlopeBounded": True,
+                    "fdSlopeBounded": True,
+                    "taskSlopeBounded": True,
+                    "threadSlopeBounded": True,
+                },
+                "failures": [],
+                "deltas": {
+                    "rssBytes": 0,
+                    "fdCount": 0,
+                    "asyncioTaskCount": 0,
+                    "threadCount": 0,
+                },
+                "slopes": {
+                    "rssBytesPerSample": 0.0,
+                    "fdCountPerSample": 0.0,
+                    "asyncioTaskCountPerSample": 0.0,
+                    "threadCountPerSample": 0.0,
+                },
+                "limits": {
+                    "rssDeltaBytes": 33554432,
+                    "fdDelta": 8,
+                    "asyncioTaskDelta": 4,
+                    "threadDelta": 4,
+                    "rssSlopeBytesPerSample": 1048576,
+                    "fdSlopePerSample": 0.25,
+                    "asyncioTaskSlopePerSample": 0.25,
+                    "threadSlopePerSample": 0.25,
+                },
+            },
+            "upstreamLayers": [
+                {"name": name, "status": status, "candidateIdentity": identity}
+                for name, status in (
+                    ("real_api", "PASS"),
+                    ("websocket_audio_bargein_transport", "SKIPPED"),
+                    ("websocket_audio_bargein_correlated", "PASS"),
+                    ("google_live_log_reliability", "PASS"),
+                )
+            ],
+            "failures": [],
+            "rawAudioPersisted": False,
+            "transcriptPersisted": False,
+            "exit_code": 0,
+        }
+        return {
+            "device_id": "3c:0f:02:de:c2:e0",
+            "client_id": "d16afa54-eb44-4fcb-8cac-cdefdf05f6fc",
+            "min_interrupts": 0,
+            "candidate_identity": self._candidate_identity(),
+            "reliability_report": reliability_report,
+            "candidate_soak_report": candidate_soak_report,
+            "max_first_audio_p50_ms": 1200.0,
+            "max_first_audio_p95_ms": 1800.0,
+            "max_interrupt_stop_latency_ms": 250.0,
+            "max_physical_bargein_p95_ms": 500.0,
+            "max_server_output_gap_ms": 250.0,
+            "min_first_audio_samples": 10,
+            "min_interrupt_stop_samples": 10,
+            "min_physical_bargein_samples": 10,
+            "min_server_output_gap_samples": 10,
+            "require_receive_loop_balance": True,
+        }
+
+    def _candidate_audit(self, log_text, **overrides):
+        audit = importlib.import_module("scripts.physical_smoke_audit")
+        options = self._candidate_audit_options()
+        options.update(overrides)
+        return audit.audit_log(log_text, **options)
+
+    def test_candidate_physical_audit_reports_all_production_budgets(self):
+        result = self._candidate_audit(self._candidate_physical_log())
+
+        self.assertTrue(result["passed"], result["missing"])
+        self.assertLessEqual(result["firstAudioLatencyMs"]["p50"], 1200.0)
+
+    def test_candidate_physical_audit_requires_exact_safe_transcript_proof_slots(self):
+        missing = self._candidate_audit(
+            self._candidate_physical_log(include_transcript_proofs=False)
+        )
+        duplicate = self._candidate_audit(
+            self._candidate_physical_log(
+                extra_lines=[
+                    "2026-08-31 20:14:21 - 0.9.3_00000000000000 - "
+                    "core.voice.session_provider.google_live - INFO - GoogleLive - Google Live "
+                    "evidence_transcript_match journey_id=physical-1 slot=1 "
+                    "phase=interrupt chars=8 matched=true"
+                ]
+            )
+        )
+
+        self.assertFalse(missing["passed"])
+        self.assertIn("transcript_proof_exact_slots", missing["missing"])
+        self.assertFalse(duplicate["passed"])
+        self.assertIn("transcript_proof_exact_slots", duplicate["missing"])
+
+    def test_transcript_proof_parser_accepts_only_exact_canonical_info_record(self):
+        audit = importlib.import_module("scripts.physical_smoke_audit")
+        canonical = (
+            "2026-08-31 20:14:01 - 0.9.3_00000000000000 - "
+            "core.voice.session_provider.google_live - INFO - GoogleLive - Google Live "
+            "evidence_transcript_match journey_id=physical-1 slot=1 "
+            "phase=interrupt chars=8 matched=true"
+        )
+        spoofed = (
+            "2026-08-31 20:14:01 - 0.9.3_x - provider - WARNING - GoogleLive - "
+            "provider text: " + canonical,
+            canonical + " trailing text",
+            canonical + " extra=value",
+            canonical + " slot=2",
+            canonical.replace(" - INFO - ", " - WARNING - "),
+            canonical.replace(" - GoogleLive - ", " - provider - "),
+        )
+
+        markers, malformed, mismatches = audit._transcript_proof_markers(
+            [canonical, *spoofed], journey_id="physical-1"
+        )
+
+        self.assertEqual(
+            markers,
+            [{"slot": 1, "phase": "interrupt", "chars": 8, "matched": True}],
+        )
+        self.assertEqual(malformed, len(spoofed))
+        self.assertEqual(mismatches, 0)
+
+    def test_candidate_physical_audit_legacy_raw_text_cannot_replace_safe_proof(self):
+        result = self._candidate_audit(
+            self._candidate_physical_log(
+                include_transcript_proofs=False,
+                extra_lines=[
+                    "260518 20:14:21[GoogleLive]-INFO-Google Live transcript "
+                    "source=user chars=17 text='private expected phrase'"
+                ],
+            ),
+            expected_user_transcripts=["private expected phrase"],
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertIn("transcript_proof_exact_slots", result["missing"])
+
+    def test_candidate_physical_audit_rejects_scoped_mismatch_before_valid_sequence(self):
+        result = self._candidate_audit(
+            self._candidate_physical_log(
+                extra_lines=[
+                    "2026-08-31 20:10:30 - 0.9.3_00000000000000 - "
+                    "core.voice.session_provider.google_live - INFO - GoogleLive - Google Live "
+                    "evidence_transcript_match journey_id=physical-1 slot=1 "
+                    "phase=lesson chars=5 matched=false"
+                ]
+            )
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertIn("transcript_proof_exact_slots", result["missing"])
+        self.assertEqual(result["transcript_proof_mismatches"], 1)
+
+    def test_candidate_physical_audit_rejects_reordered_matched_proofs(self):
+        log_text = self._candidate_physical_log()
+        first = "slot=1 phase=interrupt"
+        second = "slot=2 phase=interrupt"
+        log_text = log_text.replace(first, "slot=99 phase=interrupt", 1)
+        log_text = log_text.replace(second, first, 1)
+        log_text = log_text.replace("slot=99 phase=interrupt", second, 1)
+
+        result = self._candidate_audit(log_text)
+
+        self.assertFalse(result["passed"])
+        self.assertIn("transcript_proof_exact_slots", result["missing"])
+        self.assertLessEqual(result["firstAudioLatencyMs"]["p95"], 1800.0)
+        self.assertLessEqual(result["interruptStopLatencyMs"]["max"], 250.0)
+        self.assertLessEqual(result["physicalBargeinLatencyMs"]["p95"], 500.0)
+        self.assertLessEqual(result["serverOutputGapMs"]["max"], 250.0)
+        self.assertEqual(result["receiveLoopBalance"], 0)
+        self.assertEqual(result["maxReceiveLoopsActive"], 1)
+        self.assertEqual(result["candidateIdentity"], self._candidate_identity())
+
+    def test_candidate_physical_audit_fails_each_latency_bound(self):
+        cases = (
+            ({"first_audio": [1300.0] * 10}, "first_audio_p50_ms<=1200"),
+            ({"first_audio": [600.0] * 9 + [1900.0]}, "first_audio_p95_ms<=1800"),
+            ({"interrupt_stop": [25.0] * 9 + [251.0]}, "interrupt_stop_latency_ms<=250"),
+            ({"physical_bargein": [300.0] * 9 + [501.0]}, "physical_bargein_p95_ms<=500"),
+            ({"output_gaps": [100.0] * 9 + [251.0]}, "server_output_gap_ms<=250"),
+        )
+        for changes, expected_missing in cases:
+            with self.subTest(expected_missing=expected_missing):
+                result = self._candidate_audit(self._candidate_physical_log(**changes))
+                self.assertFalse(result["passed"])
+                self.assertIn(expected_missing, result["missing"])
+
+    def test_candidate_physical_audit_excludes_intentional_interrupt_output_gap(self):
+        result = self._candidate_audit(
+            self._candidate_physical_log(
+                output_gaps=[100.0] * 9 + [(900.0, "interrupt", 700.0)]
+            )
+        )
+
+        self.assertTrue(result["passed"], result["missing"])
+        self.assertEqual(result["serverOutputGapMs"]["excludedIntentional"], 1)
+        self.assertEqual(result["serverOutputGapMs"]["excludedDurationMs"], 700.0)
+        self.assertEqual(
+            result["serverOutputGapMs"]["unexplainedResidualMs"]["max"], 200.0
+        )
+        self.assertEqual(result["serverOutputGapMs"]["max"], 200.0)
+
+    def test_candidate_physical_audit_fails_closed_on_identity_scope_and_multiplicity(self):
+        mismatched = self._candidate_identity()
+        mismatched["gitSha"] = "other-sha"
+        result = self._candidate_audit(
+            self._candidate_physical_log(first_audio=[600.0] * 9),
+            candidate_identity=mismatched,
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertIn("candidate_identity_match", result["missing"])
+        self.assertIn("first_audio_samples=10", result["missing"])
+
+    def test_candidate_physical_audit_rejects_missing_latency_evidence(self):
+        cases = (
+            ({"first_audio": []}, "first_audio_samples=10"),
+            ({"interrupt_stop": []}, "interrupt_stop_latency_ms=10"),
+            ({"physical_bargein": []}, "physical_bargein_samples=10"),
+            ({"output_gaps": []}, "server_output_gap_samples=10"),
+        )
+        for changes, expected_missing in cases:
+            with self.subTest(expected_missing=expected_missing):
+                result = self._candidate_audit(self._candidate_physical_log(**changes))
+                self.assertFalse(result["passed"])
+                self.assertIn(expected_missing, result["missing"])
+
+    def test_candidate_physical_audit_requires_exact_metric_multiplicities(self):
+        cases = (
+            ("first_audio", 600.0, "first_audio_samples=10"),
+            ("interrupt_stop", 25.0, "interrupt_stop_latency_ms=10"),
+            ("physical_bargein", 300.0, "physical_bargein_samples=10"),
+            ("output_gaps", 100.0, "server_output_gap_samples=10"),
+        )
+        for field, sample, expected_missing in cases:
+            for count in (9, 11):
+                with self.subTest(field=field, count=count):
+                    result = self._candidate_audit(
+                        self._candidate_physical_log(**{field: [sample] * count})
+                    )
+                    self.assertFalse(result["passed"])
+                    self.assertIn(expected_missing, result["missing"])
+
+    def test_candidate_physical_audit_uses_full_normalized_log_contract(self):
+        mutations = (
+            (
+                "peer",
+                lambda report: report["evidenceScope"].update(
+                    peerIdentityHash=f"sha256:{'e' * 64}"
+                ),
+            ),
+            (
+                "connection",
+                lambda report: report["evidenceScope"].update(
+                    connectionId="fabricated"
+                ),
+            ),
+            (
+                "window_time",
+                lambda report: report["logWindow"].update(
+                    end="2026-08-31T13:16:01+00:00"
+                ),
+            ),
+            (
+                "initial_live",
+                lambda report: report.update(
+                    initialLiveConnectionId="fabricated-live"
+                ),
+            ),
+            (
+                "final_live",
+                lambda report: report.update(finalLiveConnectionId="fabricated-live"),
+            ),
+            (
+                "transition_ledger",
+                lambda report: report.update(
+                    liveConnectionTransitions=[
+                        {
+                            "attempt": 2,
+                            "fromLiveConnectionId": "live-1",
+                            "toLiveConnectionId": "fabricated-live",
+                            "status": "committed",
+                        }
+                    ]
+                ),
+            ),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                report = deepcopy(
+                    self._candidate_audit_options()["reliability_report"]
+                )
+                mutate(report)
+                result = self._candidate_audit(
+                    self._candidate_physical_log(), reliability_report=report
+                )
+                self.assertFalse(result["passed"])
+                self.assertIn("log_reliability_report_pass", result["missing"])
+
+    def test_candidate_physical_audit_rejects_malformed_latency_evidence(self):
+        log_text = self._candidate_physical_log() + "\n" + "\n".join(
+            (
+                "260518 20:16:00[GoogleLive]-INFO-Google Live turn_latency_ms=nan phase=first_audio_out",
+                "260518 20:16:01[GoogleLive]-INFO-Google Live interruption_stop_latency_ms=-1",
+                "260518 20:16:02[GoogleLive]-INFO-Google Live physical_bargein_latency_ms=inf",
+                "260518 20:16:03[GoogleLive]-INFO-Google Live server_output_gap_ms=oops boundary=continuous",
+                "260518 20:16:04[GoogleLive]-INFO-Google Live turn_latency_ms=1.2.3 phase=first_audio_out",
+            )
+        )
+
+        result = self._candidate_audit(log_text)
+
+        self.assertFalse(result["passed"])
+        self.assertIn("latency_evidence_valid", result["missing"])
+
+    def test_candidate_physical_audit_rejects_untyped_gap_exclusion(self):
+        result = self._candidate_audit(
+            self._candidate_physical_log(
+                output_gaps=[100.0] * 9
+                + [(900.0, "interrupt_like", 700.0)]
+            )
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertIn("server_output_gap_boundaries_valid", result["missing"])
+
+    def test_candidate_physical_audit_boundary_is_subtractive_not_whole_gap_mask(self):
+        result = self._candidate_audit(
+            self._candidate_physical_log(
+                output_gaps=[100.0] * 9 + [(900.0, "interrupt", 1.0)]
+            )
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["serverOutputGapMs"]["max"], 899.0)
+        self.assertIn("server_output_gap_ms<=250", result["missing"])
+
+    def test_candidate_physical_audit_rejects_duplicate_or_oversized_boundary(self):
+        log_text = self._candidate_physical_log(
+            output_gaps=[100.0] * 9 + [(900.0, "interrupt", 700.0)]
+        )
+        boundary_line = next(
+            line
+            for line in log_text.splitlines()
+            if "server_output_gap_boundary gap_id=gap-9" in line
+        )
+        duplicate = self._candidate_audit(log_text + "\n" + boundary_line)
+        oversized = self._candidate_audit(
+            self._candidate_physical_log(
+                output_gaps=[100.0] * 9 + [(900.0, "interrupt", 901.0)]
+            )
+        )
+        negative = self._candidate_audit(
+            self._candidate_physical_log(
+                output_gaps=[100.0] * 9 + [(900.0, "interrupt", -1.0)]
+            )
+        )
+
+        self.assertIn("server_output_gap_boundaries_valid", duplicate["missing"])
+        self.assertIn("server_output_gap_boundaries_valid", oversized["missing"])
+        self.assertIn("server_output_gap_boundaries_valid", negative["missing"])
+
+    def test_candidate_physical_audit_rejects_partially_overlapping_boundaries(self):
+        log_text = self._candidate_physical_log(
+            output_gaps=[100.0] * 9 + [(900.0, "interrupt", 700.0)]
+        )
+        overlap = (
+            "260518 20:14:09[GoogleLive]-INFO-Google Live "
+            "server_output_gap_boundary gap_id=gap-9 type=backpressure "
+            "start_utc=2026-08-31T13:14:18.600000+00:00 "
+            "end_utc=2026-08-31T13:14:18.800000+00:00 duration_ms=200.0"
+        )
+
+        result = self._candidate_audit(log_text + "\n" + overlap)
+
+        self.assertFalse(result["passed"])
+        self.assertIn("server_output_gap_boundaries_valid", result["missing"])
+
+    def test_candidate_physical_audit_rejects_unbalanced_or_overlapping_receive_loops(self):
+        identity = self._candidate_identity()
+        bad_report = {
+            "schemaVersion": "google-live-reliability.v1",
+            "name": "google_live_log_reliability",
+            "status": "PASS",
+            "candidateIdentity": identity,
+            "logWindow": {
+                "windowId": "physical-1",
+                "start": "2026-08-31T13:10:00+00:00",
+                "end": "2026-08-31T13:15:01+00:00",
+            },
+            "evidenceScope": {
+                "journeyId": "physical-1",
+                "connectionId": "connection-1",
+                "liveConnectionId": "live-1",
+                "initialLiveConnectionId": "live-1",
+                "peerIdentityHash": f"sha256:{'d' * 64}",
+                "serverStartUtc": "2026-08-31T13:10:00+00:00",
+            },
+            "initialLiveConnectionId": "live-1",
+            "finalLiveConnectionId": "live-1",
+            "liveConnectionTransitions": [],
+            "serverConnectionTransitions": [],
+            "receiveLoopBalance": 1,
+            "maxReceiveLoopsActive": 2,
+            "staleAudioAfterReplacement": 0,
+            "duplicateResponseIds": [],
+            "unrecoveredTimeouts": [],
+            "unreleasedLessonHandoffs": [],
+            "replayCountsByReopen": {},
+            "correlations": [
+                {
+                    "status": "PASS",
+                    "journeyId": "physical-1",
+                    "connectionId": "connection-1",
+                    "liveConnectionId": "live-1",
+                    "cancelledResponseId": 1,
+                    "replacementResponseId": 2,
+                }
+            ],
+            "correlation": {
+                "status": "PASS",
+                "cancelledResponseId": 1,
+                "replacementResponseId": 2,
+            },
+            "failures": [],
+            "fatalHits": [],
+        }
+        result = self._candidate_audit(
+            self._candidate_physical_log(), reliability_report=bad_report
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertIn("receive_loop_balance=0", result["missing"])
+        self.assertIn("max_receive_loops_active=1", result["missing"])
+
+    def test_candidate_physical_audit_rejects_skipped_or_sensitive_upstream_report(self):
+        identity = self._candidate_identity()
+        skipped = {
+            "schemaVersion": "google-live-reliability.v1",
+            "name": "candidate_soak",
+            "status": "SKIPPED",
+            "candidateIdentity": identity,
+            "rawAudio": "forbidden",
+        }
+
+        result = self._candidate_audit(
+            self._candidate_physical_log(), candidate_soak_report=skipped
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertIn("candidate_soak_report_pass", result["missing"])
+        self.assertIn("candidate_soak_report_privacy_safe", result["missing"])
+
+    def test_candidate_physical_audit_uses_full_candidate_soak_contract(self):
+        mutations = (
+            ("websocket_open", lambda report: report["cleanupVerdict"].update(websocketClosed=False)),
+            ("pending_bool", lambda report: report["cleanupVerdict"].update(pendingOwnedTasks=False)),
+            ("pending_float", lambda report: report["cleanupVerdict"].update(pendingOwnedTasks=0.0)),
+            ("pending_nonzero", lambda report: report["cleanupVerdict"].update(pendingOwnedTasks=1)),
+            ("active_session", lambda report: report["cleanupVerdict"].update(activeSessions=1)),
+            ("active_receive", lambda report: report["cleanupVerdict"].update(activeReceiveLoops=1)),
+            ("provider_finalize", lambda report: report["cleanupVerdict"].update(providerFinalizeStatus="FAIL")),
+            ("provider_close", lambda report: report["cleanupVerdict"].update(providerCloseStatus="FAIL")),
+            ("stage_bool", lambda report: report["stages"][3].update(executions=True)),
+            ("totals_float", lambda report: report["totals"].update(successfulTurns=30.0)),
+            ("false_interrupt_bool", lambda report: report["totals"].update(falseInterrupts=False)),
+            ("false_interrupt", lambda report: report["totals"].update(falseInterrupts=1)),
+            ("unexpected_fallback", lambda report: report["totals"].update(unexpectedFallbacks=1)),
+            ("resource_status", lambda report: report["resourceVerdict"].update(status="FAIL")),
+            (
+                "resource_checks_list",
+                lambda report: report["resourceVerdict"].update(
+                    checks=list(report["resourceVerdict"]["checks"])
+                ),
+            ),
+            ("resource_check_int", lambda report: report["resourceVerdict"]["checks"].update(rssDeltaBounded=1)),
+            ("resource_leak", lambda report: report["resourceVerdict"]["deltas"].update(rssBytes=33554433)),
+            ("latency_comparison", lambda report: report["latencyComparison"].update(pass_=False)),
+            ("latency_check_int", lambda report: report["latencyComparison"]["checks"].update(firstAudioP50Regression=1)),
+            ("latency_failures", lambda report: report["latencyComparison"].update(failures=[{"code": "FAIL"}])),
+            (
+                "latency_checks_list",
+                lambda report: report["latencyComparison"].update(
+                    checks=list(report["latencyComparison"]["checks"])
+                ),
+            ),
+            (
+                "latency_metrics_list",
+                lambda report: report.update(
+                    latencyMetrics=list(report["latencyMetrics"])
+                ),
+            ),
+            ("latency_zero", lambda report: report["latencyMetrics"].update(reconnectRecoveryP95Ms=0.0)),
+            ("latency_metric", lambda report: report["latencyMetrics"].update(firstAudioP95Ms=1801.0)),
+            ("duration", lambda report: report.update(durationSec=1799.0)),
+            ("live_runtime", lambda report: report.update(runtimeElapsedSec=0.0)),
+            ("recorded_runtime", lambda report: report.update(recordedRuntimeElapsedSec=1799.0)),
+            ("gap_budget", lambda report: report.update(evidenceGapBudgetSec=1000.0)),
+            ("anchor", lambda report: report["evidenceAnchors"].update(serverEndUtc="2026-08-31T10:59:00+00:00")),
+            ("anchors_list", lambda report: report.update(evidenceAnchors=[])),
+            ("execution_fail", lambda report: report["evidenceExecutions"][0].update(status="FAIL")),
+            (
+                "execution_journey_duplicate",
+                lambda report: report["evidenceExecutions"][1].update(
+                    journeyId=report["evidenceExecutions"][0]["journeyId"],
+                    evidenceScope={
+                        **report["evidenceExecutions"][1]["evidenceScope"],
+                        "journeyId": report["evidenceExecutions"][0]["journeyId"],
+                    },
+                ),
+            ),
+            ("execution_scope_missing", lambda report: report["evidenceExecutions"][0].pop("evidenceScope")),
+            ("execution_connection_fabricated", lambda report: report["evidenceExecutions"][0].update(connectionId="fabricated")),
+            ("execution_peer_fabricated", lambda report: report["evidenceExecutions"][0]["evidenceScope"].update(peerIdentityHash=f"sha256:{'e' * 64}")),
+            ("execution_live_owner_stripped", lambda report: report["evidenceExecutions"][0].pop("liveConnectionTransitions")),
+            (
+                "execution_live_final_fabricated",
+                lambda report: report["evidenceExecutions"][0].update(
+                    finalLiveConnectionId="fabricated-live"
+                ),
+            ),
+            ("execution_server_transition_stripped", lambda report: report["evidenceExecutions"][30].update(serverConnectionTransitions=[])),
+            ("padding_candidate_identity", lambda report: report["quietPadding"][0].update(candidateIdentity={**self._candidate_identity(), "gitSha": "other"})),
+            ("padding_journey_duplicate", lambda report: report["quietPadding"][0].update(journeyId=report["evidenceExecutions"][0]["journeyId"], evidenceScope={**report["quietPadding"][0]["evidenceScope"], "journeyId": report["evidenceExecutions"][0]["journeyId"]})),
+            ("padding_connection", lambda report: report["quietPadding"][0].update(connectionId="unrelated", evidenceScope={**report["quietPadding"][0]["evidenceScope"], "connectionId": "unrelated"})),
+            ("padding_scope_missing", lambda report: report["quietPadding"][0].pop("evidenceScope")),
+            ("padding_peer", lambda report: report["quietPadding"][0].update(peerIdentityHash=f"sha256:{'e' * 64}", evidenceScope={**report["quietPadding"][0]["evidenceScope"], "peerIdentityHash": f"sha256:{'e' * 64}"})),
+            ("padding_live_final", lambda report: report["quietPadding"][0].update(finalLiveConnectionId="fabricated-live")),
+            ("padding_live_transitions", lambda report: report["quietPadding"][0].update(liveConnectionTransitions=[{"attempt": 1, "fromLiveConnectionId": "wrong", "toLiveConnectionId": "fabricated-live"}])),
+            ("padding_log_status", lambda report: report["quietPadding"][0].update(logStatus="FAIL")),
+            ("padding_log_status_missing", lambda report: report["quietPadding"][0].pop("logStatus")),
+            ("padding_extra_field", lambda report: report["quietPadding"][0].update(extra=True)),
+            ("padding_window_duplicate", lambda report: report["quietPadding"][0].update(windowId=report["evidenceExecutions"][0]["windowId"], logWindow={**report["quietPadding"][0]["logWindow"], "windowId": report["evidenceExecutions"][0]["windowId"]})),
+            ("fake_padding", lambda report: report["quietPadding"].append({"status": "PASS"})),
+            ("raw_audio_flag_int", lambda report: report.update(rawAudioPersisted=0)),
+            (
+                "upstream_identity",
+                lambda report: report["upstreamLayers"][0].update(
+                    candidateIdentity={**self._candidate_identity(), "gitSha": "other"}
+                ),
+            ),
+            ("upstream_missing", lambda report: report.pop("upstreamLayers")),
+            ("upstream_malformed", lambda report: report.update(upstreamLayers={})),
+            ("upstream_reordered", lambda report: report["upstreamLayers"].reverse()),
+            (
+                "upstream_extra",
+                lambda report: report["upstreamLayers"].append(
+                    deepcopy(report["upstreamLayers"][0])
+                ),
+            ),
+            (
+                "upstream_duplicate",
+                lambda report: report["upstreamLayers"].__setitem__(
+                    1, deepcopy(report["upstreamLayers"][0])
+                ),
+            ),
+            (
+                "upstream_wrong_status",
+                lambda report: report["upstreamLayers"][0].update(status="SKIPPED"),
+            ),
+            (
+                "upstream_extra_field",
+                lambda report: report["upstreamLayers"][0].update(extra=True),
+            ),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                report = deepcopy(
+                    self._candidate_audit_options()["candidate_soak_report"]
+                )
+                mutate(report)
+                if "pass_" in report.get("latencyComparison", {}):
+                    report["latencyComparison"]["pass"] = report[
+                        "latencyComparison"
+                    ].pop("pass_")
+                result = self._candidate_audit(
+                    self._candidate_physical_log(), candidate_soak_report=report
+                )
+                self.assertFalse(result["passed"])
+                self.assertIn("candidate_soak_report_pass", result["missing"])
+
+    def test_candidate_physical_audit_accepts_minimum_latest_intent_rate(self):
+        report = deepcopy(self._candidate_audit_options()["candidate_soak_report"])
+        report["totals"].update(
+            latestIntentSuccesses=8,
+            latestIntentSuccessRate=0.8,
+        )
+
+        result = self._candidate_audit(
+            self._candidate_physical_log(), candidate_soak_report=report
+        )
+
+        self.assertTrue(result["passed"])
+
+    def test_candidate_cli_requires_complete_valid_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "server.log"
+            log_path.write_text(self._candidate_physical_log(), encoding="utf-8")
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/physical_smoke_audit.py",
+                    str(log_path),
+                    "--device-id",
+                    "3c:0f:02:de:c2:e0",
+                    "--client-id",
+                    "d16afa54-eb44-4fcb-8cac-cdefdf05f6fc",
+                    "--production-google-live-candidate",
+                    "--candidate-git-sha",
+                    "candidate-sha",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                capture_output=True,
+            )
+
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("requires --candidate-image-digest", proc.stderr)
 
 if __name__ == "__main__":
     unittest.main()

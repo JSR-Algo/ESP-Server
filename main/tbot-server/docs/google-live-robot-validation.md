@@ -1,135 +1,187 @@
-# Google Live robot validation (PR5)
+# Google Live robot validation and release gate
 
-Step-by-step playbook for validating PR2 + PR4 stability and barge-in
-changes on a real TBOT robot. Output is a JSON report that maps onto the
-acceptance criteria defined in [.omc/plans/google-live-stability-bargein-v2.md](../../../.omc/plans/google-live-stability-bargein-v2.md).
+Use this runbook with `docs/google-live-smoke.md`. It covers only the
+operator-controlled candidate soak and physical Vietnamese journey. No command
+here deploys the server, installs an image, flashes firmware, resets hardware,
+or autonomously controls a robot.
 
----
+The reviewed firmware evidence source is Git SHA
+`351fd7f8737afd83dc572895b7cfe1d8248d0766`. Build and install it through the
+normal separately reviewed operator process. Before collecting evidence, read
+the identity from the firmware actually running on the robot and export that
+exact value as `FIRMWARE_IDENTITY`. An intended version, branch, tag, local
+build directory, or source SHA alone is not proof of installed firmware.
 
-## 1. Pre-flight checklist (must all be PASS before soak)
+## 1. Operator preflight
 
-| Check | Command | Pass criteria |
-|---|---|---|
-| Server reachable | `curl -sI http://<server-ip>:8000` | HTTP 1xx/2xx |
-| Robot ARP present | `arp -a \| grep <robot-mac>` | One match |
-| Network preflight | `python scripts/voice_mode_preflight.py --device-ip <robot-ip> --max-loss-pct 0` | 0 packet loss |
-| Google Live key reachable | `GOOGLE_API_KEY=... python scripts/google_live_smoke.py` | `SMOKE_CONNECT_OK` + `SMOKE_CLOSE_OK` |
-| Firmware audio mode | `cat TBOT-Firmware/sdkconfig.defaults.local \| grep AEC` | confirm what AEC mode is compiled |
-| Voice mode config | manager-web > role config > Voice Mode | `google_live` selected |
-| `tmp/server.log` writable & rotating | `ls -lah tmp/server.log` | non-zero size, last-mod within minutes |
-
-If any pre-flight fails, fix before running soak — failures here are
-network/config bias, not server defect.
-
----
-
-## 2. Run the soak harness
+Complete these checks before starting the unified runner:
 
 ```bash
-cd esp32-server/main/tbot-server
-./.venv311/bin/python scripts/google_live_robot_soak.py \
-    --websocket-url ws://<server-ip>:8000/tbot/v1/ \
-    --device-id <robot-mac> \
-    --client-id <robot-client-uuid> \
-    --bargein-cycles 5 \
-    --idle-cycles 1 \
-    --idle-duration-sec 120 \
-    --log-path tmp/server.log \
-    --report .omc/research/soak-$(date +%Y%m%d-%H%M%S).json
+set -euo pipefail
+test -n "${RUN_ROOT:?run the smoke runbook setup first}"
+test -n "${DEVICE_ID:?set the robot device ID}"
+test -n "${CLIENT_ID:?set the client ID}"
+test -n "${FIRMWARE_IDENTITY:?set the installed firmware identity}"
+test -n "${TBOT_DEVICE_MINT_SECRET:?load the mint secret into the environment}"
+curl -fsSI "$BASE_URL"
+python3 scripts/voice_mode_preflight.py \
+  --device-ip "$ROBOT_IP" \
+  --max-loss-pct 0 \
+  --max-avg-ms 1000 \
+  --max-max-ms 1500 \
+  --max-jitter-ms 500 \
+  --max-duplicates 0
+test -r "$SERVER_LOG_SOURCE"
 ```
 
-The script reuses helpers from [`voice_mode_websocket_soak.py`](../scripts/voice_mode_websocket_soak.py)
-(hello, detect, recv predicates) and tails [`server.log`](../tmp/server.log)
-for deterministic AC3/AC4 signals.
+Confirm the robot uses the production-equivalent microphone, speaker, AEC
+posture, LAN, and installed firmware identity. Confirm the server image digest,
+Git SHA, generated effective config, fixture checksum, baseline report, lesson
+manifest, device/client IDs, and endpoints match the initialized run.
 
-### Per-cycle output
+Do not continue if another session owns the robot, the server log is shared
+with an unbounded capture, the network is unstable, or the candidate identity
+cannot be read back.
 
-For each barge-in cycle you should see one line:
+## 2. Candidate soak protected input
+
+The producer performs the fixed 33-execution lifecycle: 17 conversation, 10
+barge-in, two quiet modes, reopen, reconnect, lesson, and post-lesson
+conversation. It also records quiet padding until the 30-minute minimum,
+resource samples, scoped server evidence, and exactly-once cleanup.
+
+Prepare three distinct, regular, non-symlink consenting-adult WAV files at the
+configured sample rate. When the smoke runbook invokes
+`candidate-soak-produce`, paste this JSON directly into protected stdin and
+send EOF:
+
+```json
+{"bargein":{"initialAudioPath":"/protected/adult-initial.wav","initialExpected":"<initial intent>","newestAudioPath":"/protected/adult-newest.wav","newestExpected":"<newest intent>"},"robotSpeaking":{"triggerAudioPath":"/protected/adult-trigger.wav"}}
 ```
-BARGEIN_CYCLE outcome=PASS first_audio_ms=632.4 bargein_latency_ms=312.0 \
-    transcript=True new_id=17 cancelled_id=16
+
+The two expected intents must be distinct. Their normalized bytes exist only
+in process memory and are zeroed after use. Do not redirect the object from a
+file inside the evidence run, add it to `commands.txt`, or include the text in
+reports. The producer publishes `candidate-soak/journey-evidence.json` only
+after every execution and cleanup contract closes; the replay command then
+creates `candidate-soak/report.json`.
+
+## 3. Physical Vietnamese journey
+
+The physical command first enrolls an authenticated evidence journey and
+prints `READY journey_id=...`. Only then perform the following sequence near
+the robot, speaking Vietnamese naturally through the real microphone:
+
+1. Complete ten ordinary conversation turns and confirm each answer addresses
+   the latest intent with prompt first audio.
+2. Complete ten barge-in turns. Interrupt while robot audio is actively
+   playing; confirm old audio stops, never resumes, and the newest request owns
+   the response.
+3. Hold one silence interval and one robot-speaking interval; confirm no false
+   interruption or echo-driven request.
+4. Reopen the same listening flow, then disconnect/reconnect once and complete
+   the required follow-up turns.
+5. Say the approved Vietnamese lesson-start intent, finish one interactive
+   Google Live lesson step, exit or complete the bounded lesson, then make one
+   final ordinary request.
+
+The protected stdin plan must contain exactly 11 ordered slots: ten
+`interrupt` phrases followed by one `post_lesson` phrase. Paste the following
+shape directly into the terminal used by the `physical` command, replace only
+the placeholder text and IDs, then send EOF:
+
+```json
+{"clientId":"<same client ID>","journeyId":"physical-<RUN_ID>","ttlSec":300,"transcriptPlan":[{"slot":1,"phase":"interrupt","text":"<phrase 01>"},{"slot":2,"phase":"interrupt","text":"<phrase 02>"},{"slot":3,"phase":"interrupt","text":"<phrase 03>"},{"slot":4,"phase":"interrupt","text":"<phrase 04>"},{"slot":5,"phase":"interrupt","text":"<phrase 05>"},{"slot":6,"phase":"interrupt","text":"<phrase 06>"},{"slot":7,"phase":"interrupt","text":"<phrase 07>"},{"slot":8,"phase":"interrupt","text":"<phrase 08>"},{"slot":9,"phase":"interrupt","text":"<phrase 09>"},{"slot":10,"phase":"interrupt","text":"<phrase 10>"},{"slot":11,"phase":"post_lesson","text":"<post-lesson phrase>"}]}
 ```
 
-For the idle cycle:
+The command hashes normalized phrases with an ephemeral HMAC key before
+enrollment. Reports retain only ordered match/count proof. Raw transcript text,
+the HMAC key, and its input plan must not be persisted. The key is zeroed on
+every exit path.
+
+The operator must watch the full journey and abort on wrong firmware, wrong
+device/client, stale audio, missing interruption, unexpected session ownership,
+or unsafe robot behavior. Explicit `--operator-confirmed` acknowledges this
+human responsibility; it is not an automation bypass.
+
+## 4. Physical evidence outputs
+
+The physical producer polls the authenticated evidence-control endpoint until
+the 11 slots match in order and the server marks the journey ready. It then
+finalizes and re-reads the authoritative terminal snapshot, selects only that
+journey from the raw server log, and runs the existing production audit.
+
+Success atomically produces:
+
+```text
+server-regression/report.json
+physical/terminal-snapshot.json
+physical/report.json
 ```
-IDLE_CYCLE outcome=PASS false_positives=0
+
+The bounded selected log is temporary. `server-regression/report.json` is
+produced directly by the physical command and is bound to the same candidate,
+journey, UTC window, terminal snapshot, and candidate-soak report. Foreign,
+missing, duplicate, malformed, or out-of-window markers fail closed.
+
+The physical audit enforces at least 11 first-audio samples, 10 interrupt-stop
+samples, 10 physical-barge-in samples, 10 server-output-gap samples, balanced
+receive-loop ownership, lesson/post-lesson completion, and the production
+latency budgets already encoded by `physical_smoke_audit.py`.
+
+## 5. Privacy and artifact handling
+
+Allowed retained evidence is limited to candidate identity, safe aggregate
+metrics, opaque journey/window/session identifiers, UTC bounds, result counts,
+safe failure codes, checksums, and redacted command provenance.
+
+Never retain raw/base64 audio, raw transcript or prompt text, credentials,
+tokens, cookies, authorization headers, session-resumption handles, raw
+exception text, or copied server-log lines in reports, `commands.jsonl`,
+`commands.txt`, `timeline.log`, or the verdict. Do not put real protected paths
+or endpoint query secrets in command notes.
+
+The raw `server.log` is an ephemeral operator input. Restrict access while the
+run is active, stop capture before finalization, and remove it after the final
+gate according to the organization's secure retention policy. Never transform
+or hand-edit it to make an analyzer pass.
+
+## 6. Final release decision
+
+Run `finalize` only after the exact eight commands complete in order. Release
+requires all six layers to be present and `PASS` for one identical candidate:
+
+```text
+deterministic
+server_regression
+real_api
+websocket_e2e
+physical
+candidate_soak
 ```
 
-Then the script prints the AC summary and writes the JSON report.
+The gate revalidates the clean candidate Git object, approved interpreter and
+dependency closure, every report schema and candidate identity, command input
+and output bindings, the deterministic command projection, privacy-safe
+timeline index, artifact aliases/hardlinks/symlinks, and external checksum
+manifest. `release-verdict.json` must contain `"status":"PASS"`; any missing,
+`PENDING`, `SKIPPED`, or failed layer blocks release.
 
----
+This evidence result authorizes neither deployment nor hardware changes. The
+actual release remains a separate operator-controlled process.
 
-## 3. AC interpretation guide
+## 7. Triage, cancellation, and retry
 
-| AC | Definition | Where measured | Pass rule |
-|---|---|---|---|
-| AC1 | Stability over the soak window | `LOG_GOAWAY_RE`, `LOG_RECONNECT_RE`, `LOG_FALLBACK_RE` | `goaway_seen <= --ac1-goaway-budget` AND `fallback_triggered == 0` |
-| AC2 | Barge-in latency (p95) | wall clock from interrupt-send to `tts.state=stop` | `p95 <= --bargein-latency-budget-ms` (default 500) |
-| AC3 | Post-interrupt: model serves the NEW request | Log: `transcript source=user` + `user_interrupted` with `next_response_id > cancelled_response_id` | `>= 80%` bargein cycles match |
-| AC4 | No false-positive interrupts during long monologue | Log: `user_interrupted` count between `tts.state=start` and `tts.state=stop` of the idle cycle | `false_positive_interrupts == 0` for every idle cycle |
-| AC5 | No regression: no fallback during soak | Log: `fallback_triggered` count | `== 0` |
+On failure or cancellation, stop the bounded capture, preserve the failed run,
+and classify only from safe codes and aggregate artifacts. Do not paste raw
+logs, transcripts, keys, tokens, or exception bodies into tickets or reports.
 
-AC6 and AC7 are separate workstreams:
-- **AC6 (test coverage)** is gated by `python -m unittest discover -s tests`
-  in CI — not part of the soak.
-- **AC7 (AEC-forward evidence)** is gated in physical robot logs by
-  `scripts/physical_smoke_audit.py --require-aec-live-vad-forward`, which
-  requires `Google Live aec_live_vad_forward reason=robot_speaking`. Quantitative
-  AEC effectiveness remains covered by `scripts/aec_loopback_eval.py`.
-- **First-audio response speed** is gated by
-  `scripts/physical_smoke_audit.py --max-first-audio-ms 1800`, using
-  `Google Live first_audio_out_latency_ms=...` log markers.
-- **Expected user speech recognition** is gated by
-  `scripts/physical_smoke_audit.py --expected-user-transcript "bắt đầu bài học"`,
-  which requires the expected phrase to appear in a user transcript after
-  case/punctuation/whitespace normalization. The flag is repeatable.
-- **Lesson Live voice path** is gated by
-  `scripts/physical_smoke_audit.py --require-lesson --require-lesson-live-text`,
-  which requires each expected lesson prompt to be queued through Live text.
-  Add `--lesson-manifest <lesson-manifest.json>` so the audit derives expected
-  step count, interactive step count, prompt char lower bound, and per-prompt
-  SHA-256 hashes from the selected lesson to catch truncated or changed
-  payloads without logging content.
+Common classifications are `AUTH`, `CONFIG`, `QUOTA`, `PROTOCOL`, `TIMEOUT`,
+`NETWORK`, `PROVIDER`, `CLEANUP`, `RESOURCE`, `IDENTITY`, `PRIVACY`,
+`EVIDENCE_INTEGRITY`, and `CANCELLED`.
 
----
-
-## 4. Common failure modes
-
-| Symptom in report | Likely root cause | Action |
-|---|---|---|
-| `first_tts_start_timeout` on every cycle | Server not running or wrong voice_mode | check Docker `docker ps`, agent config |
-| `bargein_latency_ms > 500` but `transcript=True` | network jitter or model still on cold start | rerun, retain only steady-state cycles |
-| `transcript=False` but `bargein_latency_ms` good | Live interruption reached the server, but the captured user turn was too short or got suppressed before turn close | check `activity_handling=START_OF_ACTIVITY_INTERRUPTS`, `input_live_chunk_ms=20`, `input_flush_delay_sec=1.0`, and `model_output_unblock_timeout_sec` |
-| `goaway_seen > 0` and PR2 deployed | confirm `recv_timeout_sec=60`, `reconnect_buffer_ms=2000` are active in container, restart server | |
-| Repeated `IDLE_CYCLE false_positives > 0` | echo (no AEC) is exceeding `barge_in_rms_threshold`. Pause and run controlled measurement: silent room vs talking-robot, compare RMS in `tmp/server.log` `input_audio_diag` lines | |
-| `fallback_triggered > 0` | non-retriable error class — open `server.log`, find `reason=...`. Most often `auth` (bad key) or `quota` (429) |
-
----
-
-## 5. Evidence file
-
-After every run, capture:
-1. Soak JSON report → `.omc/research/soak-<timestamp>.json`
-2. Tail of `tmp/server.log` covering the soak window
-3. Verification-matrix row in
-   [`docs/qa/ad-hoc/2026-05-19-google-live-robot-validation.md`](qa/ad-hoc/2026-05-19-google-live-robot-validation.md)
-
-Two passes (before-deploy / after-deploy) lets reviewers compare deltas.
-
----
-
-## 6. Known limitations of this harness
-
-- **Audio injection is NOT yet wired here** — barge-in is triggered via
-  the existing text-message path (`type=listen state=detect`). For true
-  voice barge-in injection see
-  [`scripts/voice_mode_websocket_audio_bargein.py`](../scripts/voice_mode_websocket_audio_bargein.py).
-  Extending this script with Opus injection is a follow-up; the current
-  text path exercises the same server-side `_begin_user_interrupt`
-  pipeline so AC1/AC3/AC5 are still meaningful.
-- The AC3 transcript signal is `transcript source=user`, which the Live
-  API emits when its input transcription detects user speech. With
-  text-message bargein this comes from `handle_text_message` instead;
-  the log pattern still fires.
-- Soak does NOT spoof firmware AEC capability — pre-flight should
-  confirm the firmware's AEC mode separately.
+Never resume or repair a terminal run. Resolve the cause, confirm the exact
+server and firmware candidates again, create a new UTC `RUN_ID`, and rerun all
+eight commands. Preserve the first failed run for comparison. Do not weaken a
+budget, remove a test, fabricate a marker, copy a report, or reuse evidence
+from another candidate.

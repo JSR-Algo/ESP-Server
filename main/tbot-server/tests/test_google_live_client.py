@@ -1082,6 +1082,108 @@ class GoogleLiveClientAsyncTest(unittest.IsolatedAsyncioTestCase):
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+
+    async def test_receive_events_rebinds_pending_iterator_for_ordinary_turn(self):
+        logger = _DummyLogger()
+        audio_message = SimpleNamespace(
+            server_content=SimpleNamespace(
+                interrupted=False,
+                turn_complete=True,
+                model_turn=SimpleNamespace(
+                    parts=[
+                        SimpleNamespace(
+                            inline_data=SimpleNamespace(
+                                data=b"pcm-audio",
+                                mime_type="audio/pcm;rate=24000",
+                            )
+                        )
+                    ]
+                ),
+            )
+        )
+
+        class RebindSession:
+            def __init__(self):
+                self.receive_calls = 0
+                self.first_waiting = asyncio.Event()
+
+            def receive(self):
+                self.receive_calls += 1
+                call = self.receive_calls
+
+                async def messages():
+                    if call == 1:
+                        self.first_waiting.set()
+                        await asyncio.Event().wait()
+                    yield audio_message
+
+                return messages()
+
+        generation = 4
+        session = RebindSession()
+        client = _TestableGoogleLiveClient(
+            {"api_key": "k", "model": "m"},
+            logger,
+            _FakeGenaiModule(_FakeSdkClient(_FakeLiveContext(session=session))),
+        )
+        client.set_response_generation_getter(lambda: generation)
+        await client.connect()
+        events = client.receive_events().__aiter__()
+        first_event = asyncio.create_task(_anext(events))
+        await session.first_waiting.wait()
+
+        generation = 5
+        self.assertTrue(client.bind_response_generation(5))
+
+        event = await asyncio.wait_for(first_event, timeout=0.2)
+        self.assertEqual(event["type"], "audio_start")
+        self.assertEqual(event["response_generation"], 5)
+        self.assertEqual(session.receive_calls, 2)
+        await events.aclose()
+        await client.close()
+
+    async def test_receive_rebind_does_not_swallow_outer_cancellation(self):
+        logger = _DummyLogger()
+
+        class BlockingSession:
+            def __init__(self):
+                self.waiting = asyncio.Event()
+                self.receive_calls = 0
+
+            def receive(self):
+                self.receive_calls += 1
+
+                async def messages():
+                    self.waiting.set()
+                    await asyncio.Event().wait()
+                    yield None
+
+                return messages()
+
+        generation = 4
+        session = BlockingSession()
+        client = _TestableGoogleLiveClient(
+            {"api_key": "k", "model": "m"},
+            logger,
+            _FakeGenaiModule(_FakeSdkClient(_FakeLiveContext(session=session))),
+        )
+        client.set_response_generation_getter(lambda: generation)
+        await client.connect()
+
+        async def drain():
+            async for _event in client.receive_events():
+                pass
+
+        receive_task = asyncio.create_task(drain())
+        await session.waiting.wait()
+        generation = 5
+        self.assertTrue(client.bind_response_generation(5))
+        receive_task.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(receive_task, timeout=0.2)
+        self.assertEqual(session.receive_calls, 1)
+        await client.close()
     async def test_connect_honors_configured_timeout(self):
         logger = _DummyLogger()
         context = _FakeLiveContext(enter_delay=0.05)
@@ -1141,6 +1243,101 @@ class GoogleLiveClientAsyncTest(unittest.IsolatedAsyncioTestCase):
                 for level, args, _kwargs in logger.messages
             )
         )
+
+    async def test_receive_events_emits_exact_scoped_lifecycle_markers(self):
+        logger = _DummyLogger()
+        session = _TimeoutThenMessageSession(
+            timeout_count=1,
+            message=SimpleNamespace(text="hello"),
+        )
+        client = _TestableGoogleLiveClient(
+            {
+                "api_key": "test-key",
+                "model": "gemini-live-test",
+                "recv_timeout_sec": 0.01,
+            },
+            logger,
+            _FakeGenaiModule(_FakeSdkClient(_FakeLiveContext(session=session))),
+        )
+        client.set_evidence_scope_getter(
+            lambda: ("journey-1", "conn-1", "live-1", 7)
+        )
+        await client.connect()
+
+        events = client.receive_events()
+        async for event in events:
+            if event == {"type": "transcript", "text": "hello", "source": "model"}:
+                break
+        await events.aclose()
+        await client.close()
+
+        scoped = [
+            args
+            for level, args, _kwargs in logger.messages
+            if level == "info"
+            and args
+            and "Google Live evidence_receive_" in str(args[0])
+        ]
+        expected_prefix = (
+            "Google Live evidence_receive_{} journey_id={} connection_id={} "
+            "live_connection_id={} generation={}",
+        )
+        self.assertEqual(
+            scoped[0],
+            (*expected_prefix, "loop_started", "journey-1", "conn-1", "live-1", 7),
+        )
+        self.assertEqual(
+            scoped[-1],
+            (*expected_prefix, "loop_stopped", "journey-1", "conn-1", "live-1", 7),
+        )
+        self.assertGreaterEqual(len(scoped[1:-1]), 1)
+        self.assertTrue(
+            all(
+                marker
+                == (*expected_prefix, "timeout", "journey-1", "conn-1", "live-1", 7)
+                for marker in scoped[1:-1]
+            ),
+        )
+
+    async def test_active_prehello_receive_loop_adopts_late_evidence_scope(self):
+        logger = _DummyLogger()
+        client = _TestableGoogleLiveClient(
+            {
+                "api_key": "test-key",
+                "model": "gemini-live-test",
+                "recv_timeout_sec": 0.01,
+            },
+            logger,
+            _FakeGenaiModule(
+                _FakeSdkClient(
+                    _FakeLiveContext(
+                        session=_TimeoutThenMessageSession(
+                            timeout_count=2,
+                            message=SimpleNamespace(text="hello"),
+                        )
+                    )
+                )
+            ),
+        )
+        await client.connect()
+        events = client.receive_events()
+
+        self.assertEqual(await _anext(events), {"type": "receive_timeout"})
+        client.set_evidence_scope_getter(
+            lambda: ("journey-1", "conn-1", "live-1", 7)
+        )
+        await events.aclose()
+        await client.close()
+
+        lifecycle = [
+            args[1]
+            for level, args, _kwargs in logger.messages
+            if level == "info"
+            and args
+            and args[0].startswith("Google Live evidence_receive_{}")
+            and args[1] in {"loop_started", "loop_stopped"}
+        ]
+        self.assertEqual(lifecycle, ["loop_started", "loop_stopped"])
 
     async def test_receive_events_flushes_audio_when_stream_ends_without_turn_complete(self):
         logger = _DummyLogger()

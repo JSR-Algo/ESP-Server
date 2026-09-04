@@ -1,21 +1,28 @@
 import asyncio
+import base64
 import json
 import re
 import types
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from aiohttp.test_utils import make_mocked_request
 
 from core import http_server as http_module
 from core.api import lesson_sd_fanout_handler as lesson_sd_fanout_handler_module
+from core.api.google_live_evidence_handler import GoogleLiveEvidenceHandler
 from core.api.lesson_sd_fanout_handler import LessonSdFanoutHandler
+from core.connection_registry import ConnectionRegistry
 from core.http_server import SimpleHttpServer
 from core.lesson.global_generation_status import (
     GlobalGenerationStatus,
     GlobalGenerationStatusError,
 )
-
+from core.voice.google_live.evidence_enrollment import (
+    EvidenceEnrollmentRegistry,
+    TranscriptExpectation,
+)
 
 # T6.4 — /internal/lesson-runtime/* now share the X-Mint-Secret gate that every
 # other /internal/ route already used, so these tests must authenticate.
@@ -60,6 +67,59 @@ class _Request:
 
     async def json(self):
         return self.body
+
+
+class _EvidenceRequest(_Request):
+    def __init__(self, body, device_id="device-1"):
+        super().__init__(
+            headers={"X-Mint-Secret": INTERNAL_MINT_SECRET}, body=body
+        )
+        self.match_info = {"deviceId": device_id}
+
+
+def _physical_evidence_body(**overrides):
+    body = {
+        "clientId": "client-1",
+        "journeyId": "physical.run-1",
+        "ttlSec": 120,
+        "normalizationVersion": "google-live-transcript-nfkc-casefold.v1",
+        "hmacKeyBase64": base64.b64encode(b"k" * 32).decode("ascii"),
+        "transcriptPlan": [
+            {"slot": 1, "phase": "post_lesson", "expectedMac": "a" * 64}
+        ],
+    }
+    body.update(overrides)
+    return body
+
+
+def _candidate_evidence_body(**overrides):
+    body = {
+        "clientId": "client-1",
+        "journeyId": "candidate-soak.20260901T010203Z.1",
+        "ttlSec": 120,
+        "journeyType": "conversation",
+        "proofProfile": "candidate-lifecycle",
+    }
+    body.update(overrides)
+    return body
+
+
+def _candidate_bargein_body(**overrides):
+    key = b"s" * 32
+    body = _candidate_evidence_body(
+        journeyId="candidate-soak.20260902T010203Z.18",
+        journeyType="bargein",
+        semanticProof={
+            "version": "google-live-candidate-intent-nfkc-casefold.v1",
+            "hmacKeyBase64": base64.b64encode(key).decode("ascii"),
+            "intentPlan": [
+                {"slot": 1, "role": "initial", "expectedMac": "a" * 64},
+                {"slot": 2, "role": "newest", "expectedMac": "b" * 64},
+            ],
+        },
+    )
+    body.update(overrides)
+    return body
 
 
 def _config(**server_overrides):
@@ -309,12 +369,428 @@ async def test_http_server_start_registers_routes_and_starts_site(monkeypatch):
     assert "/internal/devices/{deviceId}/lesson-nudge" in route_paths
     assert "/internal/devices/{deviceId}/lesson-child-response" in route_paths
     assert "/internal/devices/{deviceId}/mcp-call" in route_paths
+    assert "/internal/devices/{deviceId}/google-live-evidence" in route_paths
+    assert "/internal/devices/{deviceId}/google-live-evidence/{journeyId}" in route_paths
+    assert any(
+        route.method == "POST"
+        and route.resource.canonical
+        == "/internal/devices/{deviceId}/google-live-evidence/{journeyId}/finalize"
+        for route in runner_apps[0].router.routes()
+    )
+    assert any(
+        route.method == "PUT"
+        and route.resource.canonical
+        == "/internal/devices/{deviceId}/google-live-evidence/{journeyId}/candidate-identity"
+        for route in runner_apps[0].router.routes()
+    )
     assert "/internal/lesson-assets/generation/retry" in route_paths
     assert "/internal/lesson-runtime/preload-voice-alarm" in route_paths
     assert "/internal/lesson-runtime/preload-voice-alarm/reset" in route_paths
     assert "/internal/lesson-runtime/metrics" in route_paths
     assert "/tbot/lesson-assets/{cacheToken}/{assetKey}" in route_paths
     assert "/tbot/assign/" in route_paths
+
+
+@pytest.mark.asyncio
+async def test_google_live_evidence_http_finalize_reserves_exact_current_connection():
+    connections = ConnectionRegistry()
+    server = SimpleHttpServer(_config(), lesson_connections=connections)
+    registry = server.evidence_registry
+    registry.register(
+        device_id="device-1",
+        client_id="client-1",
+        journey_id="physical.run-1",
+        transcript_plan=(TranscriptExpectation(1, "post_lesson", "a" * 64),),
+        hmac_key=b"k" * 32,
+        ttl_sec=120,
+    )
+    registry.claim_once(
+        device_id="device-1", client_id="client-1", journey_id="physical.run-1"
+    )
+    scope = {"journeyId": "physical.run-1", "connectionId": "session-1"}
+
+    connection = None
+
+    async def finalize(expected_scope):
+        registry.finalize("physical.run-1", status="PASS")
+        result = {
+            "type": "evidence_finalized",
+            "status": "PASS",
+            "evidenceScope": expected_scope,
+        }
+        connection.google_live_evidence_finalize_result = result
+        return result
+
+    finalize_mock = AsyncMock(side_effect=finalize)
+    connection = types.SimpleNamespace(
+        session_id="session-1",
+        client_id="client-1",
+        google_live_evidence_scope=scope,
+        finalize_google_live_evidence=finalize_mock,
+    )
+    connections["device-1"] = connection
+    request = make_mocked_request(
+        "POST",
+        "/internal/devices/device-1/google-live-evidence/physical.run-1/finalize",
+        headers={"X-Mint-Secret": INTERNAL_MINT_SECRET},
+        match_info={"deviceId": "device-1", "journeyId": "physical.run-1"},
+    )
+
+    response = await server.google_live_evidence_handler.handle_finalize(request)
+
+    assert response.status == 200
+    connection.finalize_google_live_evidence.assert_awaited_once_with(scope)
+    assert registry.safe_snapshot("physical.run-1")["status"] == "PASS"
+
+    retry = await server.google_live_evidence_handler.handle_finalize(request)
+    assert retry.status == 200
+    assert retry.text == response.text
+    assert connection.finalize_google_live_evidence.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_google_live_evidence_http_finalize_rejects_expired_tombstone():
+    class Clock:
+        now = 1000.0
+
+        def __call__(self):
+            return self.now
+
+    clock = Clock()
+    registry = EvidenceEnrollmentRegistry(clock=clock)
+    connections = ConnectionRegistry()
+    server = SimpleHttpServer(
+        _config(), lesson_connections=connections, evidence_registry=registry
+    )
+    registry.register(
+        device_id="device-1",
+        client_id="client-1",
+        journey_id="physical.run-1",
+        transcript_plan=(TranscriptExpectation(1, "post_lesson", "a" * 64),),
+        hmac_key=b"k" * 32,
+        ttl_sec=30,
+    )
+    registry.claim(
+        device_id="device-1", client_id="client-1", journey_id="physical.run-1"
+    )
+    clock.now += 31
+    finalize = AsyncMock()
+    connections["device-1"] = types.SimpleNamespace(
+        session_id="session-1",
+        client_id="client-1",
+        google_live_evidence_scope={
+            "journeyId": "physical.run-1", "connectionId": "session-1"
+        },
+        finalize_google_live_evidence=finalize,
+    )
+    request = make_mocked_request(
+        "POST",
+        "/internal/devices/device-1/google-live-evidence/physical.run-1/finalize",
+        headers={"X-Mint-Secret": INTERNAL_MINT_SECRET},
+        match_info={"deviceId": "device-1", "journeyId": "physical.run-1"},
+    )
+
+    response = await server.google_live_evidence_handler.handle_finalize(request)
+
+    assert response.status == 409
+    finalize.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_google_live_evidence_post_accepts_candidate_and_legacy_physical_shapes():
+    handler = GoogleLiveEvidenceHandler(EvidenceEnrollmentRegistry())
+
+    candidate = await handler.handle_post(_EvidenceRequest(_candidate_evidence_body()))
+    physical = await handler.handle_post(
+        _EvidenceRequest(_physical_evidence_body(), device_id="device-2")
+    )
+
+    assert candidate.status == 201
+    assert json.loads(candidate.text) == {
+        "data": {
+            "registered": True,
+            "journeyId": "candidate-soak.20260901T010203Z.1",
+        }
+    }
+    assert physical.status == 201
+    assert json.loads(physical.text) == {
+        "data": {"registered": True, "journeyId": "physical.run-1"}
+    }
+
+
+@pytest.mark.asyncio
+async def test_google_live_evidence_post_accepts_explicit_physical_claims():
+    handler = GoogleLiveEvidenceHandler(EvidenceEnrollmentRegistry())
+    body = _physical_evidence_body(
+        journeyType="physical", proofProfile="physical-transcript"
+    )
+
+    response = await handler.handle_post(_EvidenceRequest(body))
+
+    assert response.status == 201
+    snapshot = handler.registry.safe_snapshot("physical.run-1")
+    assert snapshot["journeyType"] == "physical"
+    assert snapshot["proofProfile"] == "physical-transcript"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "kind", "mode"),
+    [
+        (_candidate_bargein_body(), "bargein-intent", None),
+        (
+            _candidate_evidence_body(
+                journeyType="quiet",
+                semanticProof={
+                    "version": "google-live-candidate-quiet.v1",
+                    "mode": "silence",
+                },
+            ),
+            "quiet",
+            "silence",
+        ),
+        (
+            _candidate_evidence_body(
+                journeyType="quiet",
+                semanticProof={
+                    "version": "google-live-candidate-quiet.v1",
+                    "mode": "robot_speaking",
+                },
+            ),
+            "quiet",
+            "robot_speaking",
+        ),
+    ],
+)
+async def test_google_live_evidence_post_accepts_exact_candidate_semantic_shapes(
+    body, kind, mode
+):
+    handler = GoogleLiveEvidenceHandler(EvidenceEnrollmentRegistry())
+
+    response = await handler.handle_post(_EvidenceRequest(body))
+
+    assert response.status == 201
+    snapshot = handler.registry.safe_snapshot(body["journeyId"])
+    assert snapshot["semanticProofKind"] == kind
+    if mode is not None:
+        assert snapshot["quietMode"] == mode
+    encoded = response.text.casefold() + json.dumps(snapshot).casefold()
+    assert "expectedmac" not in encoded
+    assert "hmackeybase64" not in encoded
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("journey_type", ["bargein", "quiet"])
+async def test_google_live_evidence_post_preserves_nonsemantic_candidate_stages(
+    journey_type,
+):
+    body = _candidate_evidence_body(journeyType=journey_type)
+    handler = GoogleLiveEvidenceHandler(EvidenceEnrollmentRegistry())
+
+    response = await handler.handle_post(_EvidenceRequest(body))
+
+    assert response.status == 201
+    snapshot = handler.registry.safe_snapshot(body["journeyId"])
+    assert "semanticProofKind" not in snapshot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "journey_type",
+    [
+        "conversation",
+        "bargein",
+        "quiet",
+        "quiet_padding",
+        "reopen",
+        "reconnect",
+        "lesson",
+        "conversation_after_lesson",
+        "websocket",
+    ],
+)
+async def test_google_live_evidence_post_rejects_explicit_null_semantic_proof(
+    journey_type,
+):
+    response = await GoogleLiveEvidenceHandler(
+        EvidenceEnrollmentRegistry()
+    ).handle_post(
+        _EvidenceRequest(
+            _candidate_evidence_body(
+                journeyType=journey_type,
+                semanticProof=None,
+            )
+        )
+    )
+
+    assert response.status == 400
+    assert json.loads(response.text)["error"] == "INVALID_REQUEST"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        _candidate_evidence_body(semanticProof={}),
+        _candidate_evidence_body(
+            semanticProof={
+                "version": "google-live-candidate-quiet.v1",
+                "mode": "silence",
+            }
+        ),
+        _candidate_evidence_body(
+            journeyType="bargein",
+            semanticProof={
+                "version": "wrong",
+                "hmacKeyBase64": base64.b64encode(b"s" * 32).decode("ascii"),
+                "intentPlan": [
+                    {"slot": 1, "role": "initial", "expectedMac": "a" * 64},
+                    {"slot": 2, "role": "newest", "expectedMac": "b" * 64},
+                ],
+            },
+        ),
+        _candidate_bargein_body(
+            semanticProof={
+                **_candidate_bargein_body()["semanticProof"],
+                "extra": True,
+            }
+        ),
+        _candidate_bargein_body(
+            semanticProof={
+                **_candidate_bargein_body()["semanticProof"],
+                "intentPlan": [
+                    {"slot": 2, "role": "newest", "expectedMac": "b" * 64},
+                    {"slot": 1, "role": "initial", "expectedMac": "a" * 64},
+                ],
+            }
+        ),
+        _candidate_bargein_body(
+            semanticProof={
+                **_candidate_bargein_body()["semanticProof"],
+                "intentPlan": [
+                    {"slot": 1, "role": "initial", "expectedMac": "a" * 64},
+                    {"slot": 2, "role": "initial", "expectedMac": "b" * 64},
+                ],
+            }
+        ),
+        _candidate_bargein_body(
+            semanticProof={
+                **_candidate_bargein_body()["semanticProof"],
+                "hmacKeyBase64": base64.b64encode(b"short").decode("ascii"),
+            }
+        ),
+        _candidate_bargein_body(
+            semanticProof={
+                **_candidate_bargein_body()["semanticProof"],
+                "intentPlan": [
+                    {"slot": 1, "role": "initial", "expectedMac": "A" * 64},
+                    {"slot": 2, "role": "newest", "expectedMac": "b" * 64},
+                ],
+            }
+        ),
+        _candidate_evidence_body(
+            journeyType="quiet",
+            semanticProof={
+                "version": "google-live-candidate-quiet.v1",
+                "mode": "silence",
+                "intentPlan": [],
+            },
+        ),
+        _candidate_evidence_body(
+            journeyType="quiet",
+            semanticProof={
+                "version": "google-live-candidate-quiet.v1",
+                "mode": "wrong",
+            },
+        ),
+        _physical_evidence_body(
+            semanticProof={
+                "version": "google-live-candidate-quiet.v1",
+                "mode": "silence",
+            }
+        ),
+    ],
+)
+async def test_google_live_evidence_post_rejects_invalid_semantic_shapes_without_echo(body):
+    handler = GoogleLiveEvidenceHandler(EvidenceEnrollmentRegistry())
+
+    response = await handler.handle_post(_EvidenceRequest(body))
+
+    assert response.status == 400
+    assert json.loads(response.text)["error"] == "INVALID_REQUEST"
+    assert "expectedMac" not in response.text
+    assert "hmacKeyBase64" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_google_live_evidence_post_rejects_physical_plan_without_final_post_lesson():
+    handler = GoogleLiveEvidenceHandler(EvidenceEnrollmentRegistry())
+    body = _physical_evidence_body(
+        transcriptPlan=[
+            {"slot": 1, "phase": "interrupt", "expectedMac": "a" * 64}
+        ]
+    )
+
+    response = await handler.handle_post(_EvidenceRequest(body))
+
+    assert response.status == 400
+    assert json.loads(response.text) == {
+        "error": "INVALID_REQUEST",
+        "message": "Invalid Google Live evidence enrollment request",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {
+            key: value
+            for key, value in _candidate_evidence_body().items()
+            if key != "proofProfile"
+        },
+        {
+            key: value
+            for key, value in _candidate_evidence_body().items()
+            if key != "journeyType"
+        },
+        _candidate_evidence_body(unknown=True),
+        _candidate_evidence_body(journeyType="unknown"),
+        _candidate_evidence_body(proofProfile="unknown"),
+        _candidate_evidence_body(journeyType=[]),
+        _candidate_evidence_body(proofProfile={}),
+        _candidate_evidence_body(
+            journeyType="physical", proofProfile="candidate-lifecycle"
+        ),
+        _physical_evidence_body(
+            journeyType=[], proofProfile="physical-transcript"
+        ),
+        _physical_evidence_body(journeyType="physical", proofProfile={}),
+        _candidate_evidence_body(
+            normalizationVersion="google-live-transcript-nfkc-casefold.v1"
+        ),
+        _candidate_evidence_body(hmacKeyBase64="private-key"),
+        _candidate_evidence_body(transcriptPlan=[]),
+        {
+            key: value
+            for key, value in _physical_evidence_body().items()
+            if key != "transcriptPlan"
+        },
+    ],
+)
+async def test_google_live_evidence_post_rejects_invalid_claim_shapes_without_echo(body):
+    handler = GoogleLiveEvidenceHandler(EvidenceEnrollmentRegistry())
+
+    response = await handler.handle_post(_EvidenceRequest(body))
+
+    assert response.status == 400
+    assert json.loads(response.text) == {
+        "error": "INVALID_REQUEST",
+        "message": "Invalid Google Live evidence enrollment request",
+    }
+    assert "private-key" not in response.text
+    assert "expectedMac" not in response.text
+    assert "hmacKeyBase64" not in response.text
 
 
 @pytest.mark.asyncio
@@ -921,14 +1397,23 @@ def test_build_servers_disabled_preserves_legacy_constructor_shape(monkeypatch):
     captures = {}
 
     class WS:
-        def __init__(self, config, *, lesson_sd_online_index=None):
+        def __init__(self, config, *, lesson_sd_online_index=None, evidence_registry=None):
             self.lesson_connections = {}
             captures["ws_index"] = lesson_sd_online_index
+            captures["ws_evidence_registry"] = evidence_registry
 
     class HTTP:
-        def __init__(self, config, connections, *, lesson_sd_online_index=None):
+        def __init__(
+            self,
+            config,
+            connections,
+            *,
+            lesson_sd_online_index=None,
+            evidence_registry=None,
+        ):
             captures["http_index"] = lesson_sd_online_index
             captures["connections"] = connections
+            captures["http_evidence_registry"] = evidence_registry
             self.remote_unpair_handler = object()
 
     ws, http = app._build_servers(
@@ -941,6 +1426,23 @@ def test_build_servers_disabled_preserves_legacy_constructor_shape(monkeypatch):
     assert captures["ws_index"] is captures["http_index"]
     assert captures["connections"] is ws.lesson_connections
     assert ws.remote_unpair_handler is http.remote_unpair_handler
+    assert captures["ws_evidence_registry"] is captures["http_evidence_registry"]
+
+def test_build_servers_rejects_factory_that_cannot_receive_evidence_registry(monkeypatch):
+    import app
+
+    monkeypatch.delenv("LESSON_GENERATION_CMS_URL", raising=False)
+
+    class WS:
+        def __init__(self, config, *, lesson_sd_online_index=None):
+            self.lesson_connections = {}
+
+    with pytest.raises(RuntimeError, match="evidence_registry"):
+        app._build_servers(
+            {"server": {"api_url": "http://backend.test"}},
+            websocket_server_factory=WS,
+            http_server_factory=lambda *_args, **_kwargs: object(),
+        )
 
 
 @pytest.mark.asyncio
@@ -994,9 +1496,17 @@ async def test_build_servers_enabled_shares_global_stack_and_adapts_positional_f
             captures["status"] = self
 
     class WS:
-        def __init__(self, config, *, lesson_sd_online_index=None, global_generation_sessions=None):
+        def __init__(
+            self,
+            config,
+            *,
+            lesson_sd_online_index=None,
+            global_generation_sessions=None,
+            evidence_registry=None,
+        ):
             assert global_generation_sessions is captures["sessions"]
             self.lesson_connections = {}
+            captures["ws_evidence_registry"] = evidence_registry
 
     class HTTP:
         def __init__(self, config, connections, **kwargs):
@@ -1004,6 +1514,7 @@ async def test_build_servers_enabled_shares_global_stack_and_adapts_positional_f
             assert kwargs["generation_status"] is captures["status"]
             assert kwargs["generation_redis"] is redis
             assert kwargs["owns_generation_redis"] is True
+            captures["http_evidence_registry"] = kwargs["evidence_registry"]
 
     config = {
         "server": {"api_url": "http://backend.test"},
@@ -1034,6 +1545,30 @@ async def test_build_servers_enabled_shares_global_stack_and_adapts_positional_f
         "a" * 64,
         [{"cacheKey": "lesson/v1-checksum"}],
     )
+    assert captures["ws_evidence_registry"] is captures["http_evidence_registry"]
+
+    class WSWithoutEvidenceRegistry:
+        def __init__(
+            self,
+            config,
+            *,
+            lesson_sd_online_index=None,
+            global_generation_sessions=None,
+        ):
+            self.lesson_connections = {}
+
+    with pytest.raises(RuntimeError, match="evidence_registry"):
+        await app._build_servers_async(
+            config,
+            websocket_server_factory=WSWithoutEvidenceRegistry,
+            http_server_factory=HTTP,
+            redis_factory=lambda _url, **_kwargs: redis,
+            store_factory=Store,
+            sessions_factory=Sessions,
+            sync_factory=Sync,
+            poller_factory=Poller,
+            status_factory=Status,
+        )
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ from core.api.ota_handler import (
     _safe_basename,
     is_placeholder_websocket_url,
 )
+from core.voice.google_live.evidence_enrollment import EvidenceEnrollmentRegistry, TranscriptExpectation
 
 
 class _Logger:
@@ -73,6 +74,32 @@ def _handler(tmp_path, **server_overrides):
     handler.bin_dir = str(tmp_path)
     handler._bin_cache["ttl"] = 0
     return handler
+
+
+@pytest.mark.asyncio
+async def test_ota_emits_only_exact_active_evidence_journey(tmp_path, monkeypatch):
+    registry = EvidenceEnrollmentRegistry()
+    registry.register(
+        device_id="aa:bb",
+        client_id="client-1",
+        journey_id="physical.run-1",
+        transcript_plan=(TranscriptExpectation(1, "post_lesson", "a" * 64),),
+        hmac_key=bytearray(b"k" * 32),
+        ttl_sec=120,
+    )
+    handler = OTAHandler(_config(), evidence_registry=registry)
+    handler.logger = _Logger()
+    handler.bin_dir = str(tmp_path)
+    monkeypatch.setattr(ota_module, "get_local_ip", lambda: "127.0.0.1")
+
+    exact = _payload(await handler.handle_post(_Request(headers=_headers())))
+    unrelated = _payload(await handler.handle_post(_Request(headers=_headers(**{"client-id": "other"}))))
+    registry.finalize("physical.run-1", status="PASS")
+    finalized = _payload(await handler.handle_post(_Request(headers=_headers())))
+
+    assert exact["websocket"]["evidence_journey_id"] == "physical.run-1"
+    assert "evidence_journey_id" not in unrelated["websocket"]
+    assert "evidence_journey_id" not in finalized["websocket"]
 
 
 def _headers(**overrides):

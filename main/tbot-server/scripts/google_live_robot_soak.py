@@ -39,12 +39,28 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import hashlib
+import hmac
+import inspect
 import json
+import math
+import os
 import re
+import secrets
+import stat
+import subprocess
 import sys
+import tempfile
 import time
+import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
+import wave
 from collections import Counter
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import websockets
@@ -57,10 +73,33 @@ from core.voice.google_live_credentials import (  # noqa: E402
     GOOGLE_LIVE_CREDENTIAL_ENV_NAMES,
     resolve_google_live_env_api_key,
 )
+from scripts.analyze_google_live_log import (  # noqa: E402
+    _parse_utc_iso,
+    _validate_log_reliability_contract,
+    _validated_live_connection_transition_chain,
+    correlate_websocket_bargein_evidence,
+)
+from scripts.google_live_reliability import (  # noqa: E402
+    GOOGLE_LIVE_LIMITS,
+    SCHEMA_VERSION,
+    build_candidate_identity,
+    compare_latency_baseline,
+    percentile,
+    redact_mapping,
+    resource_verdict,
+    sample_process_resources,
+    validate_candidate_soak_report,
+)
 from scripts.voice_mode_websocket_audio_bargein import (  # noqa: E402
+    _collect_replacement_response,
+    _drain_preflight_terminal,
+    _observe_interrupt_stop,
+    _opus_packets,
     _opus_packets_from_audio_file,
+    _opus_packets_from_pcm,
 )
 from scripts.voice_mode_websocket_soak import (  # noqa: E402
+    _build_headers,
     _detect_message,
     _hello_message,
     _is_tts_state,
@@ -68,6 +107,494 @@ from scripts.voice_mode_websocket_soak import (  # noqa: E402
 )
 
 __all__ = ["GOOGLE_LIVE_CREDENTIAL_ENV_NAMES"]
+
+_CANDIDATE_STAGE_COUNTS = (
+    ("conversation", 17),
+    ("bargein", 10),
+    ("quiet", 2),
+    ("reopen", 1),
+    ("reconnect", 1),
+    ("lesson", 1),
+    ("conversation_after_lesson", 1),
+)
+_CANDIDATE_LATENCY_METRICS = (
+    "firstAudioP50Ms",
+    "firstAudioP95Ms",
+    "bargeinP95Ms",
+    "reconnectRecoveryP95Ms",
+)
+_OWNED_CLEANUP_TASKS = set()
+_UNRESOLVED_CANDIDATE_CLEANUPS = set()
+
+
+class _EvidenceControlNotFound(RuntimeError):
+    pass
+
+
+class _CleanupDeadlineExceeded(RuntimeError):
+    pass
+_FORBIDDEN_EVIDENCE_KEYS = frozenset(
+    {
+        "audio",
+        "audiochunk",
+        "audiobytes",
+        "rawaudio",
+        "rawaudiobase64",
+        "audiobase64",
+        "transcript",
+        "rawtranscript",
+        "prompt",
+        "modeltext",
+        "rawlog",
+        "loglines",
+        "authorization",
+        "apikey",
+        "xgoogapikey",
+        "xgoogleapikey",
+        "xapikey",
+        "token",
+        "bearertoken",
+        "cookie",
+        "setcookie",
+        "credential",
+        "credentials",
+        "secret",
+        "exception",
+        "sessionresumptionhandle",
+    }
+)
+_SENSITIVE_EVIDENCE_VALUE_RE = re.compile(
+    r"(?i)(?:\bbearer\s+\S+|\bauthorization\s*[:=]|\b(?:set-)?cookie\s*[:=]|"
+    r"\b(?:api[_ -]?key|secret|token|session(?:resumption)?handle|transcript|"
+    r"prompt|raw[_ -]?exception|raw[_ -]?audio)\s*[:=]|"
+    r"\bAIza[0-9A-Za-z_-]{35}\b|"
+    r"\beyJ[0-9A-Za-z_-]{5,}\.[0-9A-Za-z_-]{5,}\.[0-9A-Za-z_-]+\b|"
+    r"\bsk-(?:proj-)?[0-9A-Za-z_-]{20,}\b|"
+    r"\bAQEA[0-9A-Za-z_-]{32,}\b)"
+)
+_CANDIDATE_INTENT_VERSION = "google-live-candidate-intent-nfkc-casefold.v1"
+_MAX_PROTECTED_INPUT_BYTES = 1024 * 1024
+_MAX_PROTECTED_PCM_BYTES = 16 * 1024 * 1024
+_MAX_QUIET_OBSERVATION_SEC = 600.0
+_QUIET_DURATION_TOLERANCE_MS = 1000
+_QUIET_WINDOW_TOLERANCE_SEC = 5.0
+
+
+@dataclass(slots=True)
+class _ProtectedAudioFixture:
+    label: str
+    pcm: bytearray = field(repr=False)
+
+
+@dataclass(slots=True)
+class _SealedBargeinPlan:
+    key: bytearray = field(repr=False)
+    initial_mac: bytearray = field(repr=False)
+    newest_mac: bytearray = field(repr=False)
+
+    def zeroize(self):
+        for private in (self.key, self.initial_mac, self.newest_mac):
+            for offset in range(len(private)):
+                private[offset] = 0
+
+
+def _new_candidate_semantic_key():
+    return bytearray(secrets.token_bytes(32))
+
+
+def _candidate_hmac_render_checkpoint(_index, _rendered):
+    return None
+
+
+def _candidate_hmac_hex(key, value):
+    digest = bytearray(hmac.new(key, value, hashlib.sha256).digest())
+    rendered = bytearray(len(digest) * 2)
+    alphabet = b"0123456789abcdef"
+    completed = False
+    try:
+        for index, item in enumerate(digest):
+            rendered[index * 2] = alphabet[item >> 4]
+            rendered[index * 2 + 1] = alphabet[item & 0x0F]
+            _candidate_hmac_render_checkpoint(index, rendered)
+        completed = True
+        return rendered
+    finally:
+        for index in range(len(digest)):
+            digest[index] = 0
+        if not completed:
+            for index in range(len(rendered)):
+                rendered[index] = 0
+
+
+@dataclass(slots=True)
+class _CandidateProtectedInput:
+    bargein_initial: _ProtectedAudioFixture
+    bargein_newest: _ProtectedAudioFixture
+    robot_speaking: _ProtectedAudioFixture
+    initial_expected: bytearray | None = field(repr=False)
+    newest_expected: bytearray | None = field(repr=False)
+    bargein_plans: list[_SealedBargeinPlan] = field(default_factory=list, repr=False)
+
+    def seal_bargein_plans(self, count):
+        if self.bargein_plans:
+            return
+        if self.initial_expected is None or self.newest_expected is None:
+            raise ValueError("protected candidate input expectations are unavailable")
+        try:
+            for _index in range(count):
+                key = _new_candidate_semantic_key()
+                initial_mac = None
+                newest_mac = None
+                transferred = False
+                try:
+                    initial_mac = _candidate_hmac_hex(key, self.initial_expected)
+                    newest_mac = _candidate_hmac_hex(key, self.newest_expected)
+                    plan = _SealedBargeinPlan(
+                        key=key,
+                        initial_mac=initial_mac,
+                        newest_mac=newest_mac,
+                    )
+                    self.bargein_plans.append(plan)
+                    transferred = True
+                finally:
+                    if not transferred:
+                        for private in (key, initial_mac, newest_mac):
+                            if private is not None:
+                                for offset in range(len(private)):
+                                    private[offset] = 0
+        except BaseException:
+            self.zeroize()
+            raise
+        finally:
+            for private in (self.initial_expected, self.newest_expected):
+                if private is not None:
+                    for offset in range(len(private)):
+                        private[offset] = 0
+            self.initial_expected = None
+            self.newest_expected = None
+
+    def consume_bargein_plan(self):
+        if not self.bargein_plans:
+            raise ValueError("protected candidate input semantic plans are exhausted")
+        return self.bargein_plans.pop(0)
+
+    def zeroize(self):
+        for private in (
+            self.bargein_initial.pcm,
+            self.bargein_newest.pcm,
+            self.robot_speaking.pcm,
+            self.initial_expected,
+            self.newest_expected,
+        ):
+            if private is not None:
+                for offset in range(len(private)):
+                    private[offset] = 0
+        for plan in self.bargein_plans:
+            plan.zeroize()
+        self.bargein_plans.clear()
+        self.initial_expected = None
+        self.newest_expected = None
+
+
+def _open_regular_nofollow(path: Path) -> int:
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    parts = absolute.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts[1:]):
+        raise ValueError("protected candidate input fixture is invalid")
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    directory_fd = os.open(parts[0], directory_flags)
+    try:
+        for component in parts[1:-1]:
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        descriptor = os.open(
+            parts[-1],
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+    except BaseException:
+        os.close(directory_fd)
+        raise
+    os.close(directory_fd)
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise ValueError("protected candidate input fixture is not regular")
+    return descriptor
+
+
+def _read_protected_wav_descriptor(descriptor, *, path, sample_rate, label):
+    try:
+        identity = (os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino)
+        with os.fdopen(os.dup(descriptor), "rb") as raw:
+            with wave.open(raw, "rb") as source:
+                if (
+                    source.getnchannels() != 1
+                    or source.getsampwidth() != 2
+                    or source.getframerate() != sample_rate
+                    or source.getcomptype() != "NONE"
+                    or source.getnframes() <= 0
+                ):
+                    raise ValueError("protected candidate input WAV shape is unsupported")
+                frame_count = source.getnframes()
+                bytes_per_frame = source.getnchannels() * source.getsampwidth()
+                if (
+                    frame_count <= 0
+                    or bytes_per_frame <= 0
+                    or frame_count > _MAX_PROTECTED_PCM_BYTES // bytes_per_frame
+                ):
+                    raise ValueError("protected candidate input WAV shape is unsupported")
+                expected_bytes = frame_count * bytes_per_frame
+                pcm = source.readframes(frame_count)
+        if not pcm or len(pcm) != expected_bytes:
+            raise ValueError("protected candidate input fixture is empty")
+        return _ProtectedAudioFixture(label=label, pcm=bytearray(pcm)), identity
+    except (OSError, EOFError, wave.Error) as exc:
+        raise ValueError("protected candidate input fixture is invalid") from exc
+
+
+def _read_protected_wav(path: Path, *, sample_rate: int, label: str):
+    descriptor = _open_regular_nofollow(path)
+    try:
+        return _read_protected_wav_descriptor(
+            descriptor, path=path, sample_rate=sample_rate, label=label
+        )
+    finally:
+        os.close(descriptor)
+
+
+def _candidate_generated_output_paths(args, output):
+    output = Path(output)
+    root = output.parent
+    run_id = str(getattr(args, "run_id", "") or "")
+    paths = {
+        output,
+        *(Path(value) for value in (
+            getattr(args, "report", None),
+            getattr(args, "server_log", None),
+            getattr(args, "lesson_manifest", None),
+        ) if isinstance(value, (str, os.PathLike))),
+    }
+    sequence = 0
+    for stage, count in _CANDIDATE_STAGE_COUNTS:
+        for _index in range(count):
+            sequence += 1
+            paths.add(root / "executions" / f"{sequence:02d}-{stage}.json")
+    maximum_padding = int(getattr(args, "maximum_padding_windows", 60))
+    for padding_index in range(0, maximum_padding + 1):
+        padding_sequence = sequence + padding_index
+        if padding_index:
+            paths.add(
+                root / "executions" / f"{padding_sequence:02d}-quiet_padding.json"
+            )
+        paths.add(
+            root
+            / "cleanup"
+            / f"candidate-soak.{run_id}.{padding_sequence}.json"
+        )
+    return tuple(sorted(paths, key=lambda path: str(path)))
+
+
+def _read_candidate_protected_input(stream, *, output_paths, sample_rate):
+    fixtures = []
+    descriptors = []
+    try:
+        raw = stream.read(_MAX_PROTECTED_INPUT_BYTES + 1)
+        if not raw:
+            raise ValueError("protected candidate input is missing")
+        if len(raw) > _MAX_PROTECTED_INPUT_BYTES:
+            raise ValueError("protected candidate input is too large")
+        document = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+        if not isinstance(document, dict) or set(document) != {"bargein", "robotSpeaking"}:
+            raise ValueError("protected candidate input schema is invalid")
+        bargein = document["bargein"]
+        speaking = document["robotSpeaking"]
+        if (
+            not isinstance(bargein, dict)
+            or set(bargein)
+            != {"initialAudioPath", "initialExpected", "newestAudioPath", "newestExpected"}
+            or not isinstance(speaking, dict)
+            or set(speaking) != {"triggerAudioPath"}
+        ):
+            raise ValueError("protected candidate input schema is invalid")
+        values = (*bargein.values(), speaking["triggerAudioPath"])
+        if any(not isinstance(value, str) or not value for value in values):
+            raise ValueError("protected candidate input schema is invalid")
+        identities = []
+        source_specs = (
+            ("bargein/initial", bargein["initialAudioPath"]),
+            ("bargein/newest", bargein["newestAudioPath"]),
+            ("robot_speaking/trigger", speaking["triggerAudioPath"]),
+        )
+        output_paths = tuple(Path(path) for path in output_paths)
+        normalized_outputs = {
+            os.path.abspath(os.fspath(path)) for path in output_paths
+        }
+        if any(
+            os.path.abspath(os.fspath(Path(value))) in normalized_outputs
+            for _label, value in source_specs
+        ):
+            raise ValueError("protected candidate input output alias detected")
+        for _label, value in source_specs:
+            descriptor = _open_regular_nofollow(Path(value))
+            descriptors.append(descriptor)
+            opened = os.fstat(descriptor)
+            identity = (opened.st_dev, opened.st_ino)
+            identities.append(identity)
+        if len(set(identities)) != len(identities):
+            raise ValueError("protected candidate input fixture alias detected")
+        for output_path in output_paths:
+            if Path(output_path).is_symlink():
+                raise ValueError("protected candidate input output alias detected")
+            try:
+                output_stat = os.stat(output_path, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if (output_stat.st_dev, output_stat.st_ino) in identities:
+                raise ValueError("protected candidate input output alias detected")
+        for (label, value), descriptor in zip(
+            source_specs, descriptors, strict=True
+        ):
+            fixture, _identity = _read_protected_wav_descriptor(
+                descriptor,
+                path=Path(value),
+                sample_rate=sample_rate,
+                label=label,
+            )
+            fixtures.append(fixture)
+        initial_expected = _normalize_candidate_intent(bargein["initialExpected"])
+        newest_expected = _normalize_candidate_intent(bargein["newestExpected"])
+        if not initial_expected or not newest_expected:
+            raise ValueError("protected candidate input expectation is invalid")
+        if hmac.compare_digest(
+            initial_expected.encode("utf-8"), newest_expected.encode("utf-8")
+        ):
+            raise ValueError("protected candidate input expectations must be distinct")
+        return _CandidateProtectedInput(
+            fixtures[0], fixtures[1], fixtures[2],
+            bytearray(initial_expected.encode("utf-8")),
+            bytearray(newest_expected.encode("utf-8")),
+        )
+    except BaseException as exc:
+        for fixture in fixtures:
+            for offset in range(len(fixture.pcm)):
+                fixture.pcm[offset] = 0
+        if isinstance(exc, ValueError) and str(exc).startswith(
+            "protected candidate input"
+        ):
+            raise
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise ValueError("protected candidate input is invalid") from exc
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
+def _normalize_candidate_intent(value):
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return " ".join(
+        "".join(character if character.isalnum() else " " for character in normalized).split()
+    )
+
+
+def _candidate_semantic_counters(
+    stage,
+    log_evidence,
+    *,
+    quiet_mode=None,
+    requested_duration_sec=None,
+    window_duration_sec=None,
+):
+    semantic = (
+        log_evidence.get("candidateSemanticEvidence")
+        if isinstance(log_evidence, Mapping)
+        else None
+    )
+    valid = isinstance(semantic, Mapping) and log_evidence.get("status") == "PASS"
+    if stage == "bargein":
+        valid = valid and semantic == {
+            "status": "PASS",
+            "kind": "bargein-intent",
+            "initialSlotMatched": True,
+            "initialIntentOwnedOldGeneration": True,
+            "newestSlotMatched": True,
+            "orderingValid": True,
+            "latestIntentMatched": True,
+            "replacementOwnedByNewestGeneration": True,
+        }
+        if not valid:
+            raise RuntimeError("candidate semantic evidence is invalid")
+        return {"latestIntentSuccesses": 1, "falseInterrupts": 0}
+    if stage == "quiet":
+        expected_responses = 0 if quiet_mode == "silence" else 1
+        observed_duration_ms = semantic.get("durationMs") if valid else None
+        duration_valid = False
+        if quiet_mode == "silence":
+            expected_duration_ms = requested_duration_sec * 1000
+            duration_valid = bool(
+                type(observed_duration_ms) is int
+                and expected_duration_ms <= observed_duration_ms
+                <= expected_duration_ms + _QUIET_DURATION_TOLERANCE_MS
+                and isinstance(window_duration_sec, (int, float))
+                and not isinstance(window_duration_sec, bool)
+                and math.isfinite(window_duration_sec)
+                and requested_duration_sec <= window_duration_sec
+                <= requested_duration_sec + _QUIET_WINDOW_TOLERANCE_SEC
+            )
+        elif quiet_mode == "robot_speaking":
+            duration_valid = bool(
+                type(observed_duration_ms) is int
+                and 0 < observed_duration_ms <= _MAX_QUIET_OBSERVATION_SEC * 1000
+                and isinstance(window_duration_sec, (int, float))
+                and not isinstance(window_duration_sec, bool)
+                and math.isfinite(window_duration_sec)
+                and 0 < window_duration_sec
+                <= _MAX_QUIET_OBSERVATION_SEC + _QUIET_WINDOW_TOLERANCE_SEC
+                and observed_duration_ms
+                <= window_duration_sec * 1000 + _QUIET_DURATION_TOLERANCE_MS
+            )
+        valid = (
+            valid
+            and set(semantic)
+            == {
+                "status", "kind", "mode", "durationMs", "falseInterrupts",
+                "responseGeneration", "responseDurationMs", "outputChunks",
+                "setupTurnConsumed",
+                "responseStarts", "responseEnds", "replacements", "fallbacks",
+            }
+            and semantic.get("status") == "PASS"
+            and semantic.get("kind") == "quiet"
+            and semantic.get("mode") == quiet_mode
+            and duration_valid
+            and semantic.get("falseInterrupts") == 0
+            and semantic.get("responseStarts") == expected_responses
+            and semantic.get("responseEnds") == expected_responses
+            and (
+                semantic.get("responseGeneration") is None
+                and semantic.get("setupTurnConsumed") is False
+                and semantic.get("responseDurationMs") == 0
+                and semantic.get("outputChunks") == 0
+                if quiet_mode == "silence"
+                else (
+                    type(semantic.get("responseGeneration")) is int
+                    and semantic.get("setupTurnConsumed") is True
+                    and semantic.get("responseGeneration") >= 0
+                    and type(semantic.get("responseDurationMs")) is int
+                    and 0 < semantic.get("responseDurationMs") <= observed_duration_ms
+                    and type(semantic.get("outputChunks")) is int
+                    and semantic.get("outputChunks") > 0
+                )
+            )
+            and semantic.get("replacements") == 0
+            and semantic.get("fallbacks") == 0
+        )
+        if not valid:
+            raise RuntimeError("candidate semantic evidence is invalid")
+        return {"latestIntentSuccesses": 0, "falseInterrupts": 0}
+    return {"latestIntentSuccesses": 0, "falseInterrupts": 0}
 
 # ---------------------------------------------------------------------------
 # Latency-chain patterns for PR5 modes (also used by analyze_google_live_log)
@@ -1502,12 +2029,3052 @@ def _dry_run_report(args):
     }
 
 
+def _read_json_evidence(value, field):
+    if isinstance(value, Mapping):
+        return dict(value)
+    try:
+        result = json.loads(Path(value).read_text(encoding="utf-8"))
+    except (OSError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{field} must be a readable JSON object") from exc
+    if not isinstance(result, dict):
+        raise ValueError(f"{field} must contain a JSON object")
+    return result
+
+
+def _candidate_identity(args):
+    config_fingerprint = getattr(args, "config_fingerprint", None)
+    if config_fingerprint is not None:
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", config_fingerprint) is None:
+            raise ValueError("config_fingerprint must be a SHA-256 identity")
+        return {
+            "gitSha": str(args.candidate_git_sha),
+            "imageDigest": str(args.candidate_image_digest),
+            "firmwareIdentity": str(args.firmware_identity),
+            "configFingerprint": config_fingerprint,
+            "fixtureSha256": str(args.fixture_sha256),
+        }
+    try:
+        config = json.loads(args.config_json)
+    except (AttributeError, json.JSONDecodeError) as exc:
+        raise ValueError("config_json must contain a JSON object") from exc
+    if not isinstance(config, dict):
+        raise ValueError("config_json must contain a JSON object")
+    return build_candidate_identity(
+        args.candidate_git_sha,
+        args.candidate_image_digest,
+        args.firmware_identity,
+        config,
+        args.fixture_sha256,
+    )
+
+
+def _atomic_write_json(path: Path, value: Mapping) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _open_pinned_parent(path: Path):
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    parts = absolute.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts[1:]):
+        raise ValueError("candidate evidence output path is invalid")
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    directory_fd = os.open(parts[0], directory_flags)
+    ancestry = [
+        (os.fstat(directory_fd).st_dev, os.fstat(directory_fd).st_ino)
+    ]
+    try:
+        for component in parts[1:-1]:
+            try:
+                next_fd = os.open(
+                    component, directory_flags, dir_fd=directory_fd
+                )
+            except FileNotFoundError:
+                os.mkdir(component, 0o755, dir_fd=directory_fd)
+                next_fd = os.open(
+                    component, directory_flags, dir_fd=directory_fd
+                )
+            os.close(directory_fd)
+            directory_fd = next_fd
+            opened = os.fstat(directory_fd)
+            ancestry.append((opened.st_dev, opened.st_ino))
+        return absolute, directory_fd, tuple(ancestry)
+    except BaseException:
+        os.close(directory_fd)
+        raise
+
+
+def _pinned_parent_path_matches(path: Path, ancestry) -> bool:
+    parts = path.parts
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    directory_fd = os.open(parts[0], directory_flags)
+    try:
+        opened = os.fstat(directory_fd)
+        observed = [(opened.st_dev, opened.st_ino)]
+        for component in parts[1:]:
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+            opened = os.fstat(directory_fd)
+            observed.append((opened.st_dev, opened.st_ino))
+        return tuple(observed) == tuple(ancestry)
+    except OSError:
+        return False
+    finally:
+        os.close(directory_fd)
+
+
+def _atomic_write_json_exclusive(path: Path, value: Mapping):
+    path, directory_fd, ancestry = _open_pinned_parent(Path(path))
+    temporary_name = f".{path.name}.{secrets.token_hex(12)}.tmp"
+    descriptor = None
+    written_stat = None
+    published = False
+    target_linked = False
+    try:
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=False) as handle:
+            json.dump(value, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        written_stat = os.fstat(descriptor)
+        os.link(
+            temporary_name,
+            path.name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        target_linked = True
+        target_fd = os.open(
+            path.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+        try:
+            target_stat = os.fstat(target_fd)
+            if (
+                (written_stat.st_dev, written_stat.st_ino)
+                != (target_stat.st_dev, target_stat.st_ino)
+                or target_stat.st_nlink != 2
+            ):
+                raise RuntimeError("candidate evidence output identity changed")
+            with os.fdopen(target_fd, "r", encoding="utf-8", closefd=False) as target:
+                reopened = json.load(target)
+        finally:
+            os.close(target_fd)
+        os.unlink(temporary_name, dir_fd=directory_fd)
+        temporary_name = None
+        final_stat = os.stat(
+            path.name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        if (
+            (final_stat.st_dev, final_stat.st_ino)
+            != (written_stat.st_dev, written_stat.st_ino)
+            or final_stat.st_nlink != 1
+        ):
+            raise RuntimeError("candidate evidence output alias detected")
+        if not _pinned_parent_path_matches(path.parent, ancestry):
+            raise RuntimeError("candidate evidence parent changed")
+        os.fsync(directory_fd)
+        published = True
+        return reopened
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary_name is not None:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        if target_linked and not published:
+            try:
+                current_target_stat = os.stat(
+                    path.name,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                if written_stat is not None and (
+                    current_target_stat.st_dev,
+                    current_target_stat.st_ino,
+                ) == (written_stat.st_dev, written_stat.st_ino):
+                    os.unlink(path.name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        os.close(directory_fd)
+
+
+def _publish_candidate_report(path: Path, report: Mapping) -> bool:
+    path = Path(path)
+    if report.get("status") != "PASS" or path.exists() or path.is_symlink():
+        return False
+    try:
+        _atomic_write_json_exclusive(path, report)
+    except FileExistsError:
+        return False
+    return True
+
+
+_RESOURCE_SAMPLE_FIELDS = frozenset(
+    {"sampleId", "rssBytes", "fdCount", "asyncioTaskCount", "threadCount"}
+)
+_RESOURCE_METRIC_FIELDS = _RESOURCE_SAMPLE_FIELDS - {"sampleId"}
+
+
+def _valid_resource_metrics(sample) -> bool:
+    return (
+        isinstance(sample, Mapping)
+        and set(sample) == _RESOURCE_METRIC_FIELDS
+        and all(
+            type(sample.get(field)) is int and sample[field] >= 0
+            for field in _RESOURCE_METRIC_FIELDS
+        )
+    )
+
+
+def _valid_resource_samples(samples) -> bool:
+    return isinstance(samples, list) and all(
+        isinstance(sample, Mapping)
+        and set(sample) == _RESOURCE_SAMPLE_FIELDS
+        and sample.get("sampleId") == f"candidate-resource-{index}"
+        and all(
+            type(sample.get(field)) is int and sample[field] >= 0
+            for field in _RESOURCE_METRIC_FIELDS
+        )
+        for index, sample in enumerate(samples, 1)
+    )
+
+
+def _validate_candidate_manifest_structure(manifest, *, identity) -> None:
+    if not isinstance(manifest, Mapping) or _forbidden_evidence_fields(manifest):
+        raise ValueError("candidate evidence manifest is invalid")
+    executions = manifest.get("executions")
+    padding = manifest.get("quietPadding")
+    cleanup = manifest.get("cleanup")
+    samples = manifest.get("resourceSamples")
+    expected_names = [
+        name
+        for name, count in _CANDIDATE_STAGE_COUNTS
+        for _index in range(count)
+    ]
+    expected_fields = {
+        "schemaVersion",
+        "name",
+        "candidateIdentity",
+        "durationSec",
+        "runtimeElapsedSec",
+        "executions",
+        "quietPadding",
+        "cleanup",
+        "resourceSamples",
+    }
+    if (
+        set(manifest) != expected_fields
+        or manifest.get("schemaVersion") != SCHEMA_VERSION
+        or manifest.get("name") != "candidate_soak_evidence_manifest"
+        or manifest.get("candidateIdentity") != identity
+        or not isinstance(executions, list)
+        or [item.get("name") if isinstance(item, Mapping) else None for item in executions]
+        != expected_names
+        or not isinstance(padding, list)
+        or not isinstance(cleanup, Mapping)
+        or cleanup.get("status") != "PASS"
+        or cleanup.get("candidateIdentity") != identity
+        or not isinstance(samples, list)
+        or len(samples) != 1 + len(executions) + len(padding) + 1
+        or not _finite_nonnegative(manifest.get("durationSec"))
+        or not _finite_nonnegative(manifest.get("runtimeElapsedSec"))
+    ):
+        raise ValueError("candidate evidence manifest is incomplete")
+    if not _valid_resource_samples(samples):
+        raise ValueError("candidate evidence resource accounting is invalid")
+    execution_fields = {
+        "schemaVersion", "name", "status", "candidateIdentity", "evidenceSequence",
+        "journeyId", "connectionId", "liveConnectionId", "initialLiveConnectionId",
+        "finalLiveConnectionId", "liveConnectionTransitions", "peerIdentityHash",
+        "serverIssued", "windowId", "logWindow", "evidenceScope", "successfulTurns",
+        "bargeins", "latestIntentSuccesses", "falseInterrupts", "unexpectedFallbacks",
+        "latencies", "task5LogEvidence",
+    }
+    padding_fields = {
+        "schemaVersion", "name", "status", "candidateIdentity", "journeyId",
+        "connectionId", "serverIssued", "windowId", "logWindow", "evidenceScope",
+        "liveConnectionId", "initialLiveConnectionId", "finalLiveConnectionId",
+        "liveConnectionTransitions", "peerIdentityHash", "durationSec", "falseInterrupts",
+        "unexpectedFallbacks", "resourceVerdict", "task5LogEvidence",
+    }
+    cleanup_fields = {
+        "schemaVersion", "name", "status", "candidateIdentity", "finalScope",
+        "serverAnchor", "websocketClosed", "providerFinalizeStatus",
+        "providerCloseStatus", "pendingOwnedTasks", "activeSessions",
+        "activeReceiveLoops", "logStatus", "resourceEndSampleRequired",
+    }
+    if any(
+        not isinstance(item, Mapping)
+        or set(item)
+        != execution_fields
+        | (
+            {"task4TransportEvidence", "task5CorrelatedEvidence"}
+            if item.get("name") == "bargein"
+            else {"quietMode", "observationDurationSec"}
+            if item.get("name") == "quiet"
+            else {"lessonManifestSha256"}
+            if item.get("name") == "lesson"
+            else set()
+        )
+        for item in executions
+    ) or any(
+        not isinstance(item, Mapping) or set(item) != padding_fields
+        for item in padding
+    ) or set(cleanup) != cleanup_fields:
+        raise ValueError("candidate evidence manifest schema is invalid")
+
+
+async def _invoke_candidate_driver(args, **context):
+    driver = getattr(args, "candidate_journey_driver", None)
+    if not callable(driver):
+        driver = _run_candidate_websocket_journey
+    value = driver(args, **context)
+    return await value if inspect.isawaitable(value) else value
+
+
+def _candidate_audio_packets(args, fixture=None):
+    if isinstance(fixture, _ProtectedAudioFixture):
+        return _opus_packets_from_pcm(
+            fixture.pcm,
+            int(getattr(args, "sample_rate", 24000)),
+            int(getattr(args, "frame_duration_ms", 60)),
+        )
+    audio_file = str(getattr(args, "inject_audio", "") or "")
+    sample_rate = int(getattr(args, "sample_rate", 24000))
+    frame_duration_ms = int(getattr(args, "frame_duration_ms", 60))
+    if audio_file:
+        return _opus_packets_from_audio_file(
+            audio_file,
+            sample_rate,
+            frame_duration_ms,
+        )
+    return _opus_packets(
+        sample_rate,
+        frame_duration_ms,
+        float(getattr(args, "audio_duration_sec", 0.6)),
+        int(getattr(args, "audio_rms", 9000)),
+    )
+
+
+async def _run_candidate_audio_bargein(
+    args, websocket, *, fixture=None, clock=time.monotonic
+):
+    packets = (
+        _candidate_audio_packets(args)
+        if fixture is None
+        else _candidate_audio_packets(args, fixture)
+    )
+    if not packets:
+        raise RuntimeError("candidate audio barge-in has no opus packets")
+    frame_duration_ms = int(getattr(args, "frame_duration_ms", 60))
+    preflight_failure = await _drain_preflight_terminal(
+        websocket,
+        timeout_sec=args.interrupt_timeout_sec,
+    )
+    if preflight_failure is not None:
+        raise RuntimeError("candidate audio barge-in preflight failed")
+    await websocket.send(
+        json.dumps({"type": "listen", "state": "start", "mode": "realtime"})
+    )
+    first_packet_sent = asyncio.Event()
+    stop_task = asyncio.create_task(
+        _observe_interrupt_stop(
+            websocket,
+            timeout_sec=args.interrupt_timeout_sec,
+            clock=clock,
+            first_packet_sent=first_packet_sent,
+        )
+    )
+    try:
+        first_packet_sent_at = None
+        for packet in packets:
+            await websocket.send(packet)
+            if first_packet_sent_at is None:
+                first_packet_sent_at = clock()
+                first_packet_sent.set()
+            await asyncio.sleep(frame_duration_ms / 1000)
+        stop_result = await stop_task
+    finally:
+        if not stop_task.done():
+            stop_task.cancel()
+            await asyncio.gather(stop_task, return_exceptions=True)
+    if stop_result.get("failureCode") or stop_result.get("stop") is None:
+        raise RuntimeError("candidate audio interruption stop failed")
+    replacement = await _collect_replacement_response(
+        websocket,
+        timeout_sec=args.event_timeout_sec,
+        clock=clock,
+    )
+    if (
+        not replacement["replacementResponseStarted"]
+        or replacement["replacementBinaryChunks"] < 1
+        or not replacement["replacementResponseStopped"]
+    ):
+        raise RuntimeError("candidate audio replacement response is incomplete")
+    return {
+        **replacement,
+        "interruptStopMarkerObserved": True,
+        "bargeinStopMs": round(
+            (stop_result["observedAt"] - first_packet_sent_at) * 1000,
+            1,
+        ),
+        "binaryChunks": stop_result["binaryCount"]
+        + replacement["replacementBinaryChunks"],
+    }
+
+
+async def _run_candidate_websocket_journey(args, **context):
+    """Default synthetic-client transport; it never deploys or controls hardware."""
+    operation = context["operation"]
+    if operation == "cleanup":
+        final_scope = context["final_scope"]
+        state = getattr(args, "_candidate_websocket_state", {})
+        websocket = state.get("websocket") if isinstance(state, dict) else None
+        if websocket is not None:
+            await websocket.close()
+            state["websocket"] = None
+        journey_id = final_scope.get("journeyId")
+        collection_url = _evidence_collection_url(args)
+        journey_url = f"{collection_url}/{urllib.parse.quote(str(journey_id), safe='')}"
+        output_root = Path(getattr(args, "produce_candidate_evidence")).parent
+        cleanup_output = output_root / "cleanup" / f"{journey_id}.json"
+        cleanup_output.parent.mkdir(parents=True, exist_ok=True)
+        log_evidence = await _analyze_candidate_journey(
+            args,
+            journey_id,
+            cleanup_output,
+        )
+        terminal = await _candidate_control_json(args, "GET", journey_url)
+        raw_cleanup_proof = (
+            log_evidence.get("cleanupEvidence")
+            if isinstance(log_evidence, Mapping)
+            else None
+        )
+        expected_scope = final_scope.get("evidenceScope")
+        expected_log_window = final_scope.get("logWindow")
+        analyzer_bound = (
+            isinstance(log_evidence, Mapping)
+            and isinstance(expected_scope, Mapping)
+            and isinstance(expected_log_window, Mapping)
+            and not _validate_log_reliability_contract(
+                log_evidence,
+                expected_candidate_identity=_candidate_identity(args),
+                expected_log_window=dict(expected_log_window),
+                expected_evidence_scope=dict(expected_scope),
+            )
+            and log_evidence.get("serverIssued") is True
+            and log_evidence.get("journeyType") == final_scope.get("journeyType")
+            and final_scope.get("journeyType")
+            in {"quiet_padding", "conversation_after_lesson"}
+            and log_evidence.get("serverConnectionTransitions") == []
+            and expected_scope.get("journeyId") == journey_id
+            and final_scope.get("connectionId")
+            == expected_scope.get("connectionId")
+            and final_scope.get("windowId") == expected_log_window.get("windowId")
+            and final_scope.get("serverEndUtc") == expected_log_window.get("end")
+            and expected_scope.get("journeyType") == final_scope.get("journeyType")
+            and expected_scope.get("proofProfile")
+            == final_scope.get("proofProfile")
+            and final_scope.get("peerIdentityHash")
+            == expected_scope.get("peerIdentityHash")
+            and final_scope.get("initialLiveConnectionId")
+            == expected_scope.get("initialLiveConnectionId")
+            and final_scope.get("serverIssued") is True
+            and all(
+                log_evidence.get(field) == final_scope.get(field)
+                for field in (
+                    "initialLiveConnectionId",
+                    "finalLiveConnectionId",
+                    "liveConnectionTransitions",
+                )
+            )
+            and isinstance(terminal, Mapping)
+            and terminal.get("journeyId") == journey_id
+            and terminal.get("journeyType") == final_scope.get("journeyType")
+            and terminal.get("proofProfile") == final_scope.get("proofProfile")
+            and terminal.get("status") == "PASS"
+        )
+        cleanup_proof = raw_cleanup_proof if analyzer_bound else None
+        proof_pass = (
+            analyzer_bound
+            and isinstance(cleanup_proof, Mapping)
+            and cleanup_proof.get("status") == "PASS"
+            and cleanup_proof.get("pendingOwnedTasks") == 0
+            and cleanup_proof.get("activeSessions") == 0
+            and cleanup_proof.get("activeReceiveLoops") == 0
+            and log_evidence.get("status") == "PASS"
+        )
+        return {
+            "schemaVersion": SCHEMA_VERSION,
+            "name": "candidate_cleanup",
+            "status": "PASS" if proof_pass else "FAIL",
+            "candidateIdentity": _candidate_identity(args),
+            "finalScope": final_scope,
+            "serverAnchor": {
+                "connectionId": final_scope.get("connectionId"),
+                "peerIdentityHash": getattr(args, "candidate_peer_identity_hash", None),
+            },
+            "websocketClosed": True,
+            "providerFinalizeStatus": (
+                "PASS" if analyzer_bound else "FAIL"
+            ),
+            "providerCloseStatus": (
+                "PASS" if isinstance(cleanup_proof, Mapping) and cleanup_proof.get("status") == "PASS" else "FAIL"
+            ),
+            "pendingOwnedTasks": cleanup_proof.get("pendingOwnedTasks")
+            if isinstance(cleanup_proof, Mapping)
+            else None,
+            "activeSessions": cleanup_proof.get("activeSessions")
+            if isinstance(cleanup_proof, Mapping)
+            else None,
+            "activeReceiveLoops": cleanup_proof.get("activeReceiveLoops")
+            if isinstance(cleanup_proof, Mapping)
+            else None,
+            "logStatus": "PASS" if analyzer_bound else "FAIL",
+            "resourceEndSampleRequired": True,
+        }
+    name = context["name"]
+    index = context.get("index", context["sequence"])
+    journey_id = context["journey_id"]
+    headers = _build_headers(args)
+    started = time.monotonic()
+    binary_chunks = 0
+    response_binary_frames = 0
+    bargein_stop_ms = None
+    state = getattr(args, "_candidate_websocket_state", None)
+    if not isinstance(state, dict):
+        state = {"websocket": None}
+        setattr(args, "_candidate_websocket_state", state)
+    websocket = state.get("websocket")
+    if name == "reconnect" and websocket is not None:
+        await websocket.close()
+        websocket = None
+    if websocket is None:
+        websocket = await websockets.connect(
+            args.websocket_url,
+            additional_headers=headers,
+            open_timeout=args.open_timeout_sec,
+            max_size=None,
+        )
+        state["websocket"] = websocket
+    try:
+        hello = _hello_message()
+        hello["evidence_journey_id"] = journey_id
+        await websocket.send(json.dumps(hello))
+        ack, observed, _messages = await _recv_until(
+            websocket,
+            lambda payload: payload.get("type") == "hello",
+            args.event_timeout_sec,
+        )
+        binary_chunks += observed
+        scope = ack.get("evidenceScope") if isinstance(ack, Mapping) else None
+        if not isinstance(scope, Mapping) or scope.get("journeyId") != journey_id:
+            raise RuntimeError("candidate hello scope is invalid")
+        setattr(args, "candidate_peer_identity_hash", scope.get("peerIdentityHash"))
+
+        first_audio_ms = None
+        audio_bargein = None
+        monitor_resources = None
+        if operation == "monitor":
+            duration_sec = float(context["duration_sec"])
+            if not math.isfinite(duration_sec) or duration_sec <= 0:
+                raise RuntimeError("candidate quiet padding duration is invalid")
+            resource_start = sample_process_resources()
+            try:
+                unexpected = await asyncio.wait_for(
+                    websocket.recv(),
+                    timeout=duration_sec,
+                )
+            except asyncio.TimeoutError:
+                unexpected = None
+            if unexpected is not None:
+                raise RuntimeError("candidate quiet padding observed unexpected output")
+            monitor_resources = resource_verdict(
+                [resource_start, sample_process_resources()]
+            )
+            if monitor_resources.get("status") != "PASS":
+                raise RuntimeError("candidate quiet padding resource budget failed")
+        else:
+            protected = context.get("protected_input")
+            quiet_mode = context.get("quiet_mode")
+            initial_fixture = (
+                protected.bargein_initial
+                if name == "bargein" and isinstance(protected, _CandidateProtectedInput)
+                else protected.robot_speaking
+                if name == "quiet"
+                and quiet_mode == "robot_speaking"
+                and isinstance(protected, _CandidateProtectedInput)
+                else None
+            )
+            if name == "quiet" and quiet_mode == "silence":
+                duration_sec = float(getattr(args, "idle_duration_sec", 120.0))
+                try:
+                    unexpected = await asyncio.wait_for(
+                        websocket.recv(), timeout=duration_sec
+                    )
+                except asyncio.TimeoutError:
+                    unexpected = None
+                if unexpected is not None:
+                    raise RuntimeError("candidate quiet silence observed unexpected output")
+                first_start = None
+            elif initial_fixture is not None:
+                await websocket.send(
+                    json.dumps({"type": "listen", "state": "start", "mode": "realtime"})
+                )
+                for packet in _candidate_audio_packets(args, initial_fixture):
+                    await websocket.send(packet)
+                    await asyncio.sleep(int(getattr(args, "frame_duration_ms", 60)) / 1000)
+                first_start, observed, _messages = await _recv_until(
+                    websocket,
+                    lambda payload: _is_tts_state(payload, "start"),
+                    args.event_timeout_sec,
+                )
+                binary_chunks += observed
+            else:
+                prompt = args.idle_prompt if name == "quiet" else f"{args.first_prompt} Lần {index}."
+                await websocket.send(json.dumps(_detect_message(prompt)))
+                first_start, observed, _messages = await _recv_until(
+                    websocket,
+                    lambda payload: _is_tts_state(payload, "start"),
+                    args.event_timeout_sec,
+                )
+                binary_chunks += observed
+            if name == "quiet" and quiet_mode == "silence":
+                first_audio_ms = None
+            else:
+                if first_start is None:
+                    raise RuntimeError("candidate tts start timeout")
+                first_audio_ms = (time.monotonic() - started) * 1000
+            if name == "bargein":
+                await asyncio.sleep(args.speak_for_sec)
+                audio_bargein = await _run_candidate_audio_bargein(
+                    args,
+                    websocket,
+                    fixture=(protected.bargein_newest if isinstance(protected, _CandidateProtectedInput) else None),
+                )
+                bargein_stop_ms = audio_bargein["bargeinStopMs"]
+                binary_chunks += audio_bargein["binaryChunks"]
+            elif not (name == "quiet" and quiet_mode == "silence"):
+                stopped, observed, _messages = await _recv_until(
+                    websocket,
+                    lambda payload: _is_tts_state(payload, "stop"),
+                    args.settle_timeout_sec,
+                )
+                binary_chunks += observed
+                response_binary_frames = observed
+                if stopped is None:
+                    raise RuntimeError("candidate tts stop timeout")
+        await websocket.send(
+            json.dumps({"type": "evidence_finalize", "evidenceScope": scope})
+        )
+        finalized, observed, _messages = await _recv_until(
+            websocket,
+            lambda payload: payload.get("type") == "evidence_finalized",
+            args.event_timeout_sec,
+        )
+        binary_chunks += observed
+        if not isinstance(finalized, Mapping) or finalized.get("status") != "PASS":
+            raise RuntimeError("candidate evidence finalization failed")
+    except BaseException:
+        await websocket.close()
+        state["websocket"] = None
+        raise
+
+    final_live_id = finalized.get("finalLiveConnectionId")
+    result = {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": name,
+        "status": "PASS",
+        "candidateIdentity": _candidate_identity(args),
+        "evidenceSequence": context["sequence"],
+        "journeyId": journey_id,
+        "connectionId": scope.get("connectionId"),
+        "liveConnectionId": scope.get("liveConnectionId"),
+        "initialLiveConnectionId": scope.get("initialLiveConnectionId"),
+        "finalLiveConnectionId": final_live_id,
+        "liveConnectionTransitions": finalized.get("liveConnectionTransitions", []),
+        "peerIdentityHash": scope.get("peerIdentityHash"),
+        "serverIssued": True,
+        "windowId": journey_id,
+        "logWindow": {
+            "windowId": journey_id,
+            "start": scope.get("serverStartUtc"),
+            "end": finalized.get("serverEndUtc"),
+        },
+        "evidenceScope": dict(scope),
+        "successfulTurns": 0 if name in {"quiet", "quiet_padding", "lesson"} else 1,
+        "bargeins": 1 if name == "bargein" else 0,
+        "latestIntentSuccesses": 1 if name == "bargein" else 0,
+        "falseInterrupts": 0,
+        "unexpectedFallbacks": 0,
+        "latencies": {} if operation == "monitor" else {"firstAudioMs": [first_audio_ms]},
+        "_scopeFinalized": True,
+        "_finalizeResult": dict(finalized),
+        "_observedBinaryFrames": response_binary_frames,
+    }
+    if name == "quiet" and context.get("quiet_mode") in {"silence", "robot_speaking"}:
+        result["quietMode"] = context["quiet_mode"]
+        result["observationDurationSec"] = float(
+            getattr(args, "idle_duration_sec", 120.0)
+        )
+        result["latencies"] = {}
+    if operation == "monitor":
+        start_utc = _parse_utc_iso(result["logWindow"]["start"])
+        end_utc = _parse_utc_iso(result["logWindow"]["end"])
+        result.update(
+            {
+                "durationSec": (end_utc - start_utc).total_seconds(),
+                "resourceVerdict": monitor_resources,
+            }
+        )
+    if name == "bargein":
+        result["latencies"] = {
+            "bargeinStopMs": [bargein_stop_ms],
+            "serverOutputGapMs": [0.0],
+        }
+        result["task4TransportEvidence"] = {
+            "schemaVersion": SCHEMA_VERSION,
+            "name": "websocket_audio_bargein_transport",
+            "status": "SKIPPED",
+            "candidateIdentity": _candidate_identity(args),
+            "pendingCode": "PENDING_BOUNDED_SERVER_LOG_VERIFICATION",
+            "correlationSource": "server_log",
+            "correlationStatus": "PENDING_BOUNDED_SERVER_LOG_VERIFICATION",
+            "aggregateReleaseEligible": False,
+            "interruptStopMarkerObserved": True,
+            "replacementResponseStarted": audio_bargein["replacementResponseStarted"],
+            "replacementResponseStopped": audio_bargein["replacementResponseStopped"],
+            "replacementBinaryChunks": audio_bargein["replacementBinaryChunks"],
+            "bargeinStopMs": bargein_stop_ms,
+            "maxServerOutputGapMs": audio_bargein["maxServerOutputGapMs"],
+            "journeyId": journey_id,
+            "evidenceScope": dict(scope),
+            "serverConnectionId": scope.get("connectionId"),
+            "liveConnectionId": scope.get("liveConnectionId"),
+            "peerIdentityHash": scope.get("peerIdentityHash"),
+            "initialLiveConnectionId": scope.get("initialLiveConnectionId"),
+            "finalLiveConnectionId": final_live_id,
+            "liveConnectionTransitions": finalized.get("liveConnectionTransitions", []),
+            "logWindow": result["logWindow"],
+        }
+    elif name in {"reopen", "reconnect"}:
+        result["latencies"] = {"reconnectRecoveryMs": [first_audio_ms]}
+    elif name == "lesson":
+        result["latencies"] = {}
+        result["lessonManifestSha256"] = _lesson_manifest_digest(
+            args.lesson_manifest
+        )
+    return result
+
+
+def _evidence_collection_url(args) -> str:
+    base = str(getattr(args, "evidence_control_url", "") or "").rstrip("/")
+    device_id = str(
+        getattr(args, "device_mac", None)
+        or getattr(args, "device_id", None)
+        or ""
+    )
+    if not base or not device_id:
+        raise ValueError("evidence control URL and device identity are required")
+    encoded_device = urllib.parse.quote(device_id, safe="")
+    if base.endswith("/google-live-evidence"):
+        return base
+    if base.endswith("/internal/devices"):
+        return f"{base}/{encoded_device}/google-live-evidence"
+    return f"{base}/internal/devices/{encoded_device}/google-live-evidence"
+
+
+async def _candidate_control_json(
+    args, method, url, payload=None, *, request_timeout_sec=None
+):
+    override = getattr(args, "candidate_control_json", None)
+    if callable(override):
+        value = override(method, url, payload)
+        return await value if inspect.isawaitable(value) else value
+    return await asyncio.to_thread(
+        _candidate_control_request,
+        args,
+        method,
+        url,
+        payload,
+        request_timeout_sec,
+    )
+
+
+def _candidate_control_request(
+    args, method, url, payload=None, request_timeout_sec=None
+):
+    secret_name = str(
+        getattr(args, "evidence_mint_secret_env", "TBOT_DEVICE_MINT_SECRET")
+    )
+    secret = os.environ.get(secret_name, "")
+    if not secret:
+        raise RuntimeError("evidence mint secret is unavailable")
+
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {"X-Mint-Secret": secret, "Accept": "application/json"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    timeout = (
+        float(request_timeout_sec)
+        if request_timeout_sec is not None
+        else float(getattr(args, "event_timeout_sec", 30.0))
+    )
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(url, data=body, headers=headers, method=method),
+            timeout=timeout,
+        ) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise _EvidenceControlNotFound(
+                "evidence control journey not found"
+            ) from exc
+        raise RuntimeError("evidence control request failed") from exc
+    except (urllib.error.URLError, json.JSONDecodeError) as exc:
+        raise RuntimeError("evidence control request failed") from exc
+
+
+async def _candidate_control_json_uncancelled(
+    args, method, url, payload=None, *, request_timeout_sec=None
+):
+    loop = asyncio.get_running_loop()
+    worker = loop.run_in_executor(
+        None,
+        _candidate_control_request,
+        args,
+        method,
+        url,
+        payload,
+        request_timeout_sec,
+    )
+    while True:
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None:
+                while current.cancelling():
+                    current.uncancel()
+
+
+async def _analyze_candidate_journey(args, journey_id, output_path):
+    override = getattr(args, "candidate_log_analyzer", None)
+    if callable(override):
+        value = override(journey_id=journey_id, output_path=output_path)
+        return await value if inspect.isawaitable(value) else value
+    command = (
+        sys.executable,
+        str(SERVER_ROOT / "scripts" / "analyze_google_live_log.py"),
+        "--log",
+        str(args.server_log),
+        "--reliability-window",
+        "--journey-id",
+        journey_id,
+        "--out-json",
+        str(output_path),
+    )
+
+    def analyze():
+        completed = subprocess.run(
+            command,
+            cwd=SERVER_ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError("candidate log analysis failed")
+        return _read_json_evidence(output_path, "candidate_log_evidence")
+
+    return await asyncio.to_thread(analyze)
+
+
+def _validate_candidate_finalization(finalized, *, result, journey_id, stage):
+    if not isinstance(finalized, Mapping) or not isinstance(result, Mapping):
+        raise RuntimeError("candidate evidence finalization is malformed")
+    scope = finalized.get("evidenceScope")
+    result_scope = result.get("evidenceScope")
+    transitions = finalized.get("liveConnectionTransitions")
+    server_start = (
+        _parse_utc_iso(scope.get("serverStartUtc"))
+        if isinstance(scope, Mapping)
+        else None
+    )
+    server_end = _parse_utc_iso(finalized.get("serverEndUtc"))
+    initial_live_id = (
+        scope.get("initialLiveConnectionId")
+        if isinstance(scope, Mapping)
+        else None
+    )
+    final_live_id = finalized.get("finalLiveConnectionId")
+    scope_fields = {
+        "journeyId",
+        "connectionId",
+        "liveConnectionId",
+        "initialLiveConnectionId",
+        "peerIdentityHash",
+        "serverStartUtc",
+        "journeyType",
+        "proofProfile",
+    }
+    safe_scope_id = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+    if (
+        set(finalized)
+        != {
+            "type",
+            "status",
+            "evidenceScope",
+            "serverEndUtc",
+            "finalLiveConnectionId",
+            "liveConnectionTransitions",
+        }
+        or finalized.get("type") != "evidence_finalized"
+        or finalized.get("status") != "PASS"
+        or not isinstance(scope, Mapping)
+        or set(scope) != scope_fields
+        or dict(scope) != result_scope
+        or re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", str(scope.get("journeyId", "")))
+        is None
+        or any(
+            safe_scope_id.fullmatch(str(scope.get(field, ""))) is None
+            for field in (
+                "connectionId",
+                "liveConnectionId",
+                "initialLiveConnectionId",
+            )
+        )
+        or scope.get("journeyId") != journey_id
+        or scope.get("journeyType") != stage
+        or scope.get("proofProfile") != "candidate-lifecycle"
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(scope.get("peerIdentityHash", "")))
+        is None
+        or scope.get("initialLiveConnectionId") != scope.get("liveConnectionId")
+        or safe_scope_id.fullmatch(str(final_live_id or "")) is None
+        or server_start is None
+        or server_end is None
+        or server_end <= server_start
+        or _validated_live_connection_transition_chain(
+            initial_live_id,
+            final_live_id,
+            transitions,
+        )
+        != final_live_id
+    ):
+        raise RuntimeError("candidate evidence finalization is invalid")
+    return dict(finalized)
+
+
+def build_candidate_journeys(args, *, protected_input=None):
+    """Build the exact stateful journey surface consumed by candidate soak."""
+    run_id = str(getattr(args, "run_id", "") or "").strip()
+    if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z", run_id) is None:
+        raise ValueError("run_id must be a UTC basic timestamp")
+    if isinstance(protected_input, _CandidateProtectedInput):
+        protected_input.seal_bargein_plans(10)
+    sequence = 0
+    cleanup_called = False
+
+    def own_task(coroutine, name, *, unresolved_key=None):
+        task = asyncio.create_task(coroutine, name=name)
+        _OWNED_CLEANUP_TASKS.add(task)
+
+        def release(owned):
+            _publish_owned_cleanup_task(owned, unresolved_key=unresolved_key)
+
+        task.add_done_callback(release)
+        return task
+
+    def cleanup_timeout():
+        try:
+            timeout = float(getattr(args, "cleanup_timeout_sec", 2.0))
+        except (TypeError, ValueError):
+            timeout = 2.0
+        if not math.isfinite(timeout) or timeout <= 0:
+            timeout = 2.0
+        return timeout
+
+    async def wait_bounded(task):
+        timeout = cleanup_timeout()
+        done, _pending = await asyncio.wait({task}, timeout=timeout)
+        if task in done:
+            task.result()
+            return True
+        return False
+
+    async def cleanup_ambiguous_enrollment(
+        post_task,
+        journey_url,
+        *,
+        journey_id,
+        journey_type,
+        finalize_task=None,
+        driver_result=None,
+    ):
+        def defer_current_cancellation():
+            current = asyncio.current_task()
+            if current is None:
+                return
+            while current.cancelling():
+                current.uncancel()
+
+        if post_task is not None:
+            while not post_task.done():
+                try:
+                    await asyncio.shield(post_task)
+                except asyncio.CancelledError:
+                    defer_current_cancellation()
+                    continue
+                except BaseException:
+                    break
+            if post_task.done():
+                try:
+                    post_task.result()
+                except BaseException:
+                    pass
+        if finalize_task is not None:
+            while not finalize_task.done():
+                try:
+                    await asyncio.shield(finalize_task)
+                except asyncio.CancelledError:
+                    defer_current_cancellation()
+                    continue
+                except BaseException:
+                    break
+            try:
+                finalized = finalize_task.result()
+                _validate_candidate_finalization(
+                    finalized,
+                    result=driver_result,
+                    journey_id=journey_id,
+                    stage=journey_type,
+                )
+            except BaseException:
+                pass
+            else:
+                return
+
+        loop = asyncio.get_running_loop()
+        clock = getattr(args, "candidate_cleanup_clock", None)
+        if not callable(clock):
+            clock = loop.time
+        deadline = clock() + cleanup_timeout()
+
+        def remaining_budget():
+            return deadline - clock()
+
+        async def cancellation_resistant_step(coroutine_factory):
+            while True:
+                remaining = remaining_budget()
+                if remaining <= 0:
+                    raise _CleanupDeadlineExceeded
+                operation = asyncio.create_task(coroutine_factory(remaining))
+                timed_out = False
+
+                def cancel_at_deadline():
+                    nonlocal timed_out
+                    timed_out = True
+                    operation.cancel()
+
+                deadline_cancel = loop.call_later(remaining, cancel_at_deadline)
+                try:
+                    while True:
+                        try:
+                            return await asyncio.shield(operation)
+                        except asyncio.CancelledError:
+                            defer_current_cancellation()
+                            if operation.done():
+                                break
+                            loop.call_soon(operation.cancel)
+                    if timed_out or remaining_budget() <= 0:
+                        raise _CleanupDeadlineExceeded
+                finally:
+                    deadline_cancel.cancel()
+
+        async def control_before_deadline(method):
+            remaining = remaining_budget()
+            if remaining <= 0:
+                raise _CleanupDeadlineExceeded
+            if not callable(getattr(args, "candidate_control_json", None)):
+                result = await _candidate_control_json_uncancelled(
+                    args,
+                    method,
+                    journey_url,
+                    request_timeout_sec=remaining,
+                )
+                if remaining_budget() <= 0:
+                    raise _CleanupDeadlineExceeded
+                return result
+
+            async def control(remaining):
+                return await _candidate_control_json(args, method, journey_url)
+
+            return await cancellation_resistant_step(control)
+
+        expected = {
+            "journeyId": journey_id,
+            "journeyType": journey_type,
+            "proofProfile": "candidate-lifecycle",
+            "status": "FAIL",
+            "failureCode": "OPERATOR_CANCELLED",
+        }
+        active_expected = {
+            "journeyId": journey_id,
+            "journeyType": journey_type,
+            "proofProfile": "candidate-lifecycle",
+            "status": "ACTIVE",
+        }
+        for attempt in range(3):
+            if remaining_budget() <= 0:
+                raise RuntimeError("candidate enrollment cleanup failed")
+            delete_ambiguous = False
+            try:
+                deleted = await control_before_deadline("DELETE")
+            except _CleanupDeadlineExceeded:
+                raise RuntimeError("candidate enrollment cleanup failed") from None
+            except Exception:
+                delete_ambiguous = True
+            if not delete_ambiguous and (
+                not isinstance(deleted, Mapping)
+                or any(
+                    deleted.get(key) != value
+                    for key, value in expected.items()
+                )
+            ):
+                raise RuntimeError("candidate enrollment cleanup failed")
+            try:
+                terminal = await control_before_deadline("GET")
+            except _CleanupDeadlineExceeded:
+                raise RuntimeError("candidate enrollment cleanup failed") from None
+            except _EvidenceControlNotFound:
+                return
+            except Exception:
+                raise RuntimeError("candidate enrollment cleanup failed") from None
+            if isinstance(terminal, Mapping) and all(
+                terminal.get(key) == value for key, value in expected.items()
+            ):
+                return
+            active_matches = isinstance(terminal, Mapping) and all(
+                terminal.get(key) == value
+                for key, value in active_expected.items()
+            )
+            if not active_matches:
+                raise RuntimeError("candidate enrollment cleanup failed")
+            remaining = remaining_budget()
+            if attempt == 2 or remaining <= 0:
+                raise RuntimeError("candidate enrollment cleanup failed")
+            try:
+                await asyncio.sleep(min(0.01 * (attempt + 1), remaining))
+            except asyncio.CancelledError:
+                defer_current_cancellation()
+
+    async def run_lifecycle(
+        _args,
+        *,
+        name,
+        index,
+        label=None,
+        duration_sec=None,
+    ):
+        nonlocal sequence
+        if _UNRESOLVED_CANDIDATE_CLEANUPS or _OWNED_CLEANUP_TASKS:
+            raise RuntimeError("candidate cleanup obligations are unresolved")
+        quiet_duration_sec = None
+        if name == "quiet":
+            try:
+                quiet_duration_sec = float(getattr(args, "idle_duration_sec", 120.0))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("candidate quiet duration is invalid") from exc
+            if (
+                not math.isfinite(quiet_duration_sec)
+                or quiet_duration_sec <= 0
+                or quiet_duration_sec > _MAX_QUIET_OBSERVATION_SEC
+            ):
+                raise ValueError("candidate quiet duration is invalid")
+        sequence += 1
+        journey_id = f"candidate-soak.{run_id}.{sequence}"
+        collection_url = _evidence_collection_url(args)
+        journey_url = f"{collection_url}/{urllib.parse.quote(journey_id, safe='')}"
+        output_root = Path(getattr(args, "produce_candidate_evidence")).parent
+        output_path = output_root / "executions" / f"{sequence:02d}-{name}.json"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        enrollment_attempted = False
+        enrollment_post_task = None
+        finalize_post_task = None
+        terminal_finalized = False
+        driver_result = None
+        try:
+            semantic_proof = None
+            semantic_key = None
+            quiet_mode = None
+            if name == "bargein" and isinstance(protected_input, _CandidateProtectedInput):
+                sealed_plan = protected_input.consume_bargein_plan()
+                semantic_key = sealed_plan.key
+                semantic_proof = {
+                    "version": _CANDIDATE_INTENT_VERSION,
+                    "hmacKeyBase64": base64.b64encode(semantic_key).decode("ascii"),
+                    "intentPlan": [
+                        {
+                            "slot": 1,
+                            "role": "initial",
+                            "expectedMac": sealed_plan.initial_mac.decode("ascii"),
+                        },
+                        {
+                            "slot": 2,
+                            "role": "newest",
+                            "expectedMac": sealed_plan.newest_mac.decode("ascii"),
+                        },
+                    ],
+                }
+            elif name == "quiet" and isinstance(protected_input, _CandidateProtectedInput):
+                quiet_mode = "silence" if index == 1 else "robot_speaking"
+                semantic_proof = {
+                    "version": "google-live-candidate-quiet.v1",
+                    "mode": quiet_mode,
+                }
+            enrollment_payload = {
+                "clientId": args.client_id,
+                "journeyId": journey_id,
+                "ttlSec": 3600,
+                "journeyType": name,
+                "proofProfile": "candidate-lifecycle",
+            }
+            if semantic_proof is not None:
+                enrollment_payload["semanticProof"] = semantic_proof
+
+            async def post_enrollment():
+                try:
+                    if callable(getattr(args, "candidate_control_json", None)):
+                        return await _candidate_control_json(
+                            args,
+                            "POST",
+                            collection_url,
+                            enrollment_payload,
+                        )
+                    return await _candidate_control_json_uncancelled(
+                        args,
+                        "POST",
+                        collection_url,
+                        enrollment_payload,
+                    )
+                finally:
+                    proof = enrollment_payload.get("semanticProof")
+                    if isinstance(proof, dict) and "hmacKeyBase64" in proof:
+                        proof["hmacKeyBase64"] = ""
+                        for item in proof.get("intentPlan", ()):
+                            if isinstance(item, dict):
+                                item["expectedMac"] = ""
+
+            try:
+                enrollment_attempted = True
+                enrollment_post_task = own_task(
+                    post_enrollment(),
+                    "google-live-candidate-enrollment-post",
+                )
+                await asyncio.shield(enrollment_post_task)
+            finally:
+                if semantic_key is not None:
+                    sealed_plan.zeroize()
+                    semantic_key = None
+            semantic_proof = None
+            await _candidate_control_json(
+                args,
+                "PUT",
+                f"{journey_url}/candidate-identity",
+                {"candidateIdentity": _candidate_identity(args)},
+            )
+            result = await _invoke_candidate_driver(
+                args,
+                operation="monitor" if name == "quiet_padding" else "execute",
+                name=name,
+                index=index,
+                label=label,
+                sequence=sequence,
+                journey_id=journey_id,
+                duration_sec=duration_sec,
+                protected_input=protected_input,
+                quiet_mode=quiet_mode,
+            )
+            driver_result = dict(result) if isinstance(result, Mapping) else None
+            observed_binary_frames = (
+                driver_result.pop("_observedBinaryFrames", None)
+                if driver_result is not None
+                else None
+            )
+            embedded_finalize = (
+                driver_result.pop("_finalizeResult", None)
+                if driver_result is not None
+                else None
+            )
+            scope_finalized = bool(
+                driver_result is not None
+                and driver_result.pop("_scopeFinalized", False) is True
+            )
+            finalized = (
+                embedded_finalize
+                if scope_finalized
+                else None
+            )
+            if not scope_finalized:
+                if callable(getattr(args, "candidate_control_json", None)):
+                    finalized = await _candidate_control_json(
+                        args, "POST", f"{journey_url}/finalize", {}
+                    )
+                else:
+                    finalize_post_task = own_task(
+                        _candidate_control_json_uncancelled(
+                            args,
+                            "POST",
+                            f"{journey_url}/finalize",
+                            {},
+                        ),
+                        "google-live-candidate-finalize-post",
+                    )
+                    finalized = await asyncio.shield(finalize_post_task)
+            finalized = _validate_candidate_finalization(
+                finalized,
+                result=driver_result,
+                journey_id=journey_id,
+                stage=name,
+            )
+            terminal_finalized = True
+            log_evidence = await _analyze_candidate_journey(
+                args, journey_id, output_path
+            )
+            if not isinstance(result, Mapping):
+                raise RuntimeError("candidate journey evidence is malformed")
+            analyzer_scope = log_evidence.get("evidenceScope")
+            if (
+                log_evidence.get("journeyType") != name
+                or not isinstance(analyzer_scope, Mapping)
+                or analyzer_scope.get("journeyType") != name
+                or analyzer_scope.get("proofProfile") != "candidate-lifecycle"
+            ):
+                raise RuntimeError("candidate log claims are invalid")
+            combined = driver_result
+            if isinstance(protected_input, _CandidateProtectedInput) and (
+                dict(analyzer_scope) != dict(finalized["evidenceScope"])
+                or log_evidence.get("candidateIdentity") != _candidate_identity(args)
+                or log_evidence.get("logWindow") != combined.get("logWindow")
+                or log_evidence.get("serverIssued") is not True
+                or name == "quiet"
+                and quiet_mode == "robot_speaking"
+                and (
+                    not isinstance(observed_binary_frames, int)
+                    or isinstance(observed_binary_frames, bool)
+                    or observed_binary_frames <= 0
+                )
+            ):
+                raise RuntimeError("candidate semantic evidence scope is invalid")
+            combined["task5LogEvidence"] = log_evidence
+            if isinstance(protected_input, _CandidateProtectedInput):
+                combined.update(
+                    _candidate_semantic_counters(
+                        name,
+                        log_evidence,
+                        quiet_mode=quiet_mode,
+                        requested_duration_sec=quiet_duration_sec,
+                        window_duration_sec=(
+                            _parse_utc_iso(combined["logWindow"]["end"])
+                            - _parse_utc_iso(combined["logWindow"]["start"])
+                        ).total_seconds()
+                        if name == "quiet"
+                        else None,
+                    )
+                )
+            if name == "quiet" and quiet_mode is not None:
+                combined["quietMode"] = quiet_mode
+                combined["observationDurationSec"] = (
+                    quiet_duration_sec
+                    if quiet_mode == "silence"
+                    else log_evidence["candidateSemanticEvidence"]["durationMs"]
+                    / 1000
+                )
+            trusted_latency = log_evidence.get("journeyLatencyEvidence", {})
+            if name in {"conversation", "conversation_after_lesson"}:
+                combined["latencies"] = {
+                    "firstAudioMs": [trusted_latency.get("firstAudioMs")]
+                }
+            elif name == "bargein":
+                transport = combined.get("task4TransportEvidence")
+                if isinstance(transport, Mapping):
+                    combined["task5CorrelatedEvidence"] = (
+                        correlate_websocket_bargein_evidence(
+                            transport,
+                            log_evidence,
+                            expected_candidate_identity=_candidate_identity(args),
+                        )
+                    )
+                combined["latencies"] = {
+                    "bargeinStopMs": [transport.get("bargeinStopMs")]
+                    if isinstance(transport, Mapping)
+                    else [],
+                    "serverOutputGapMs": [transport.get("maxServerOutputGapMs")]
+                    if isinstance(transport, Mapping)
+                    else [],
+                }
+            elif name in {"reopen", "reconnect"}:
+                combined["latencies"] = {
+                    "reconnectRecoveryMs": [
+                        trusted_latency.get("reconnectRecoveryMs")
+                    ]
+                }
+            return [combined] if name == "quiet_padding" else combined
+        except BaseException as lifecycle_error:
+            if semantic_key is not None:
+                sealed_plan.zeroize()
+            if enrollment_attempted and not terminal_finalized:
+                _UNRESOLVED_CANDIDATE_CLEANUPS.discard(journey_id)
+                enrollment_cleanup_task = own_task(
+                    cleanup_ambiguous_enrollment(
+                        enrollment_post_task,
+                        journey_url,
+                        journey_id=journey_id,
+                        journey_type=name,
+                        finalize_task=finalize_post_task,
+                        driver_result=driver_result,
+                    ),
+                    "google-live-candidate-enrollment-cleanup",
+                    unresolved_key=journey_id,
+                )
+                try:
+                    cleanup_complete = await wait_bounded(enrollment_cleanup_task)
+                except asyncio.CancelledError:
+                    raise
+                except BaseException:
+                    if isinstance(lifecycle_error, asyncio.CancelledError):
+                        raise lifecycle_error
+                    raise
+                if (
+                    not cleanup_complete
+                    and not isinstance(lifecycle_error, asyncio.CancelledError)
+                ):
+                    raise RuntimeError("candidate enrollment cleanup failed")
+            raise
+
+    async def execute(_args, *, name, index, label=None, **_kwargs):
+        return await run_lifecycle(
+            _args,
+            name=name,
+            index=index,
+            label=label,
+        )
+
+    async def monitor(_args, *, duration_sec):
+        return await run_lifecycle(
+            _args,
+            name="quiet_padding",
+            index=1,
+            duration_sec=duration_sec,
+        )
+
+    async def cleanup(_args, *, final_scope):
+        nonlocal cleanup_called
+        if cleanup_called:
+            raise RuntimeError("candidate cleanup called more than once")
+        cleanup_called = True
+        return await _invoke_candidate_driver(
+            args,
+            operation="cleanup",
+            final_scope=final_scope,
+        )
+
+    journeys = dict.fromkeys(
+        ("conversation", "bargein", "quiet", "reopen", "reconnect", "lesson"),
+        execute,
+    )
+    journeys["monitor"] = monitor
+    journeys["cleanup"] = cleanup
+    return journeys
+
+
+async def produce_candidate_evidence(
+    args,
+    *,
+    journeys=None,
+    sample_resources=sample_process_resources,
+    clock=time.monotonic,
+):
+    """Run the candidate workload and publish a closed replay manifest atomically."""
+    output = Path(getattr(args, "produce_candidate_evidence"))
+    if output.exists() or output.is_symlink():
+        raise ValueError("candidate evidence output must not already exist")
+    identity = _candidate_identity(args)
+    protected_input = None
+    if isinstance(journeys, Mapping):
+        source = journeys
+    else:
+        protected_stream = getattr(args, "candidate_protected_stdin", None)
+        if protected_stream is None:
+            protected_stream = sys.stdin.buffer
+        protected_input = _read_candidate_protected_input(
+            protected_stream,
+            output_paths=_candidate_generated_output_paths(args, output),
+            sample_rate=int(getattr(args, "sample_rate", 24000)),
+        )
+        source = build_candidate_journeys(args, protected_input=protected_input)
+    executions = []
+    padding = []
+    cleanup_records = []
+    resource_samples = []
+    sample_sequence = 0
+
+    def recorded_sample():
+        nonlocal sample_sequence
+        value = sample_resources()
+        if not _valid_resource_metrics(value):
+            raise ValueError("candidate evidence resource accounting is invalid")
+        sample_sequence += 1
+        sample = dict(value)
+        sample["sampleId"] = f"candidate-resource-{sample_sequence}"
+        resource_samples.append(dict(sample))
+        return sample
+
+    async def record_execution(_args, **kwargs):
+        callable_name = (
+            "conversation"
+            if kwargs.get("name") == "conversation_after_lesson"
+            else kwargs.get("name")
+        )
+        value = await source[callable_name](_args, **kwargs)
+        if isinstance(value, Mapping):
+            executions.append(dict(value))
+        return value
+
+    async def record_monitor(_args, **kwargs):
+        value = await source["monitor"](_args, **kwargs)
+        if isinstance(value, list):
+            padding.extend(dict(item) if isinstance(item, Mapping) else item for item in value)
+        return value
+
+    async def record_cleanup(_args, **kwargs):
+        if cleanup_records:
+            raise RuntimeError("candidate cleanup called more than once")
+        value = await source["cleanup"](_args, **kwargs)
+        cleanup_records.append(dict(value) if isinstance(value, Mapping) else value)
+        return value
+
+    recorded = dict.fromkeys(
+        ("conversation", "bargein", "quiet", "reopen", "reconnect", "lesson"),
+        record_execution,
+    )
+    recorded["monitor"] = record_monitor
+    recorded["cleanup"] = record_cleanup
+    try:
+        report = await run_candidate_soak(
+            args,
+            journeys=recorded,
+            sample_resources=recorded_sample,
+            clock=clock,
+        )
+    finally:
+        if protected_input is not None:
+            protected_input.zeroize()
+    if report.get("status") != "PASS" or len(cleanup_records) != 1:
+        return report
+    manifest = {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": "candidate_soak_evidence_manifest",
+        "candidateIdentity": identity,
+        "durationSec": report.get("durationSec"),
+        "runtimeElapsedSec": report.get("runtimeElapsedSec"),
+        "executions": executions,
+        "quietPadding": padding,
+        "cleanup": cleanup_records[0],
+        "resourceSamples": resource_samples,
+    }
+    _validate_candidate_manifest_structure(manifest, identity=identity)
+    reopened = _atomic_write_json_exclusive(output, manifest)
+    _validate_candidate_manifest_structure(reopened, identity=identity)
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": "candidate_soak_evidence_producer",
+        "status": "PASS",
+        "candidateIdentity": identity,
+        "executionCount": len(executions),
+        "exit_code": 0,
+    }
+
+
+def _lesson_manifest_digest(value):
+    manifest = _read_json_evidence(value, "lesson_manifest")
+    encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _normalized_key(value):
+    return re.sub(r"[^a-zA-Z0-9]", "", str(value)).lower()
+
+
+def _forbidden_evidence_fields(value, path=""):
+    hits = []
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            item_path = f"{path}.{key}" if path else str(key)
+            if _normalized_key(key) in _FORBIDDEN_EVIDENCE_KEYS:
+                hits.append(item_path)
+            else:
+                hits.extend(_forbidden_evidence_fields(item, item_path))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            hits.extend(_forbidden_evidence_fields(item, f"{path}[{index}]"))
+    elif isinstance(value, str) and _SENSITIVE_EVIDENCE_VALUE_RE.search(value):
+        hits.append(path or "value")
+    return hits
+
+
+def _finite_nonnegative(value):
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
+
+
+def _finite_positive(value):
+    return _finite_nonnegative(value) and value > 0
+
+
+def _strict_candidate_latency_metrics(value):
+    return (
+        isinstance(value, Mapping)
+        and set(value) == set(_CANDIDATE_LATENCY_METRICS)
+        and all(_finite_positive(value.get(metric)) for metric in _CANDIDATE_LATENCY_METRICS)
+    )
+
+
+def _publish_owned_cleanup_task(task, *, unresolved_key=None):
+    failed = task.cancelled()
+    if not failed:
+        try:
+            task.result()
+        except BaseException:
+            failed = True
+    if unresolved_key is not None:
+        if failed:
+            _UNRESOLVED_CANDIDATE_CLEANUPS.add(unresolved_key)
+        else:
+            _UNRESOLVED_CANDIDATE_CLEANUPS.discard(unresolved_key)
+    _OWNED_CLEANUP_TASKS.discard(task)
+
+
+def _release_owned_cleanup_task(task):
+    _publish_owned_cleanup_task(task)
+
+
+def _actual_pending_cleanup_tasks():
+    return len(_OWNED_CLEANUP_TASKS) + len(_UNRESOLVED_CANDIDATE_CLEANUPS)
+
+
+def _evidence_reuse_key(*, journey_id, connection_id, log_window):
+    if (
+        not isinstance(journey_id, str)
+        or not journey_id
+        or not isinstance(connection_id, str)
+        or not connection_id
+        or not isinstance(log_window, Mapping)
+    ):
+        return None
+    window_values = tuple(log_window.get(field) for field in ("windowId", "start", "end"))
+    if any(not isinstance(value, str) or not value for value in window_values):
+        return None
+    return (journey_id, connection_id, *window_values)
+
+
+def _validated_execution_server_scope(value, *, identity):
+    scope = value.get("evidenceScope")
+    log_window = value.get("logWindow")
+    transitions = value.get("liveConnectionTransitions")
+    if not isinstance(scope, Mapping) or not isinstance(log_window, Mapping):
+        return None
+    expected_scope = {
+        "journeyId": value.get("journeyId"),
+        "connectionId": value.get("connectionId"),
+        "liveConnectionId": value.get("liveConnectionId"),
+        "initialLiveConnectionId": value.get("initialLiveConnectionId"),
+        "peerIdentityHash": value.get("peerIdentityHash"),
+        "serverStartUtc": log_window.get("start"),
+        "journeyType": value.get("name"),
+        "proofProfile": "candidate-lifecycle",
+    }
+    valid = (
+        value.get("serverIssued") is True
+        and dict(scope) == expected_scope
+        and isinstance(expected_scope["journeyId"], str)
+        and bool(expected_scope["journeyId"])
+        and isinstance(expected_scope["connectionId"], str)
+        and bool(expected_scope["connectionId"])
+        and isinstance(expected_scope["liveConnectionId"], str)
+        and bool(expected_scope["liveConnectionId"])
+        and expected_scope["initialLiveConnectionId"]
+        == expected_scope["liveConnectionId"]
+        and isinstance(expected_scope["peerIdentityHash"], str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", expected_scope["peerIdentityHash"])
+        is not None
+        and _validated_live_connection_transition_chain(
+            value.get("initialLiveConnectionId"),
+            value.get("finalLiveConnectionId"),
+            transitions,
+        )
+        == value.get("finalLiveConnectionId")
+    )
+    if not valid:
+        return None
+    log_proof = value.get("task5LogEvidence")
+    if _validate_log_reliability_contract(
+        log_proof,
+        expected_candidate_identity=identity,
+        expected_log_window=dict(log_window),
+        expected_evidence_scope=dict(scope),
+    ) or any(
+        log_proof.get(field) != value.get(field)
+        for field in (
+            "initialLiveConnectionId",
+            "finalLiveConnectionId",
+            "liveConnectionTransitions",
+        )
+    ):
+        return None
+    stage = value.get("name")
+    if log_proof.get("journeyType") != stage:
+        return None
+    if stage in {"bargein", "quiet"}:
+        log_start = _parse_utc_iso(value["logWindow"]["start"])
+        log_end = _parse_utc_iso(value["logWindow"]["end"])
+        try:
+            semantic_counters = _candidate_semantic_counters(
+                stage,
+                log_proof,
+                quiet_mode=value.get("quietMode"),
+                requested_duration_sec=value.get("observationDurationSec"),
+                window_duration_sec=(log_end - log_start).total_seconds()
+                if log_start is not None and log_end is not None
+                else None,
+            )
+        except RuntimeError:
+            return None
+        if any(value.get(field) != expected for field, expected in semantic_counters.items()):
+            return None
+        if stage == "quiet" and value.get("quietMode") == "robot_speaking":
+            semantic = log_proof.get("candidateSemanticEvidence")
+            if (
+                not isinstance(semantic, Mapping)
+                or type(semantic.get("durationMs")) is not int
+                or not _finite_positive(value.get("observationDurationSec"))
+                or value.get("observationDurationSec")
+                != semantic["durationMs"] / 1000
+            ):
+                return None
+    flat_latencies = value.get("latencies")
+    proof_latencies = log_proof.get("journeyLatencyEvidence")
+    expected_flat_latencies = {}
+    expected_proof_latencies = {}
+    if stage in {"conversation", "conversation_after_lesson"}:
+        expected_proof_latencies = dict(proof_latencies) if isinstance(proof_latencies, Mapping) else {}
+        expected_flat_latencies = {
+            "firstAudioMs": [
+                proof_latencies.get("firstAudioMs")
+                if isinstance(proof_latencies, Mapping)
+                else None
+            ]
+        }
+    elif stage in {"reopen", "reconnect"}:
+        expected_proof_latencies = dict(proof_latencies) if isinstance(proof_latencies, Mapping) else {}
+        expected_flat_latencies = {
+            "reconnectRecoveryMs": [
+                proof_latencies.get("reconnectRecoveryMs")
+                if isinstance(proof_latencies, Mapping)
+                else None
+            ]
+        }
+    elif stage == "bargein":
+        transport = value.get("task4TransportEvidence")
+        correlated = value.get("task5CorrelatedEvidence")
+        expected_flat_latencies = {
+            "bargeinStopMs": [
+                correlated.get("bargeinStopMs")
+                if isinstance(correlated, Mapping)
+                else None
+            ],
+            "serverOutputGapMs": [
+                correlated.get("maxServerOutputGapMs")
+                if isinstance(correlated, Mapping)
+                else None
+            ],
+        }
+        if (
+            not isinstance(transport, Mapping)
+            or transport.get("bargeinStopMs")
+            != expected_flat_latencies["bargeinStopMs"][0]
+            or transport.get("maxServerOutputGapMs")
+            != expected_flat_latencies["serverOutputGapMs"][0]
+        ):
+            return None
+    if (
+        not isinstance(flat_latencies, Mapping)
+        or not isinstance(proof_latencies, Mapping)
+        or dict(proof_latencies) != expected_proof_latencies
+        or set(expected_proof_latencies) != (
+            {"firstAudioMs"}
+            if stage in {"conversation", "conversation_after_lesson"}
+            else {"reconnectRecoveryMs"}
+            if stage in {"reopen", "reconnect"}
+            else set()
+        )
+        or dict(flat_latencies) != expected_flat_latencies
+        or any(
+            not _finite_positive(samples[0])
+            for samples in expected_flat_latencies.values()
+        )
+    ):
+        return None
+    anchor = {
+        "connectionId": scope["connectionId"],
+        "peerIdentityHash": scope["peerIdentityHash"],
+    }
+    if stage != "bargein":
+        return anchor
+    transport = value.get("task4TransportEvidence")
+    correlated = value.get("task5CorrelatedEvidence")
+    normalized = correlate_websocket_bargein_evidence(
+        transport,
+        log_proof,
+        expected_candidate_identity=identity,
+    )
+    if normalized.get("status") != "PASS" or correlated != normalized:
+        return None
+    return anchor
+
+
+def _validate_upstream_layer(report, *, name, identity, failures, status="PASS"):
+    if not isinstance(report, Mapping):
+        failures.append({"code": "UPSTREAM_LAYER_MALFORMED", "layer": name})
+        return
+    if report.get("schemaVersion") != SCHEMA_VERSION or report.get("name") != name:
+        failures.append({"code": "UPSTREAM_LAYER_MALFORMED", "layer": name})
+    if report.get("status") != status:
+        failures.append({"code": "UPSTREAM_LAYER_NOT_PASSING", "layer": name})
+    if report.get("candidateIdentity") != identity:
+        failures.append({"code": "CANDIDATE_IDENTITY_MISMATCH", "layer": name})
+    if _forbidden_evidence_fields(report):
+        failures.append({"code": "FORBIDDEN_EVIDENCE_FIELD", "layer": name})
+
+
+def _validated_quiet_padding(
+    value,
+    *,
+    identity,
+    expected_connection_id,
+    expected_peer_identity_hash,
+    previous_end,
+    gap_budget_sec,
+    seen_journeys,
+    seen_windows,
+    seen_utc_windows,
+):
+    if not isinstance(value, Mapping) or _forbidden_evidence_fields(value):
+        return None
+    log_window = value.get("logWindow")
+    start_utc = (
+        _parse_utc_iso(log_window.get("start"))
+        if isinstance(log_window, Mapping)
+        else None
+    )
+    end_utc = (
+        _parse_utc_iso(log_window.get("end"))
+        if isinstance(log_window, Mapping)
+        else None
+    )
+    duration = (
+        (end_utc - start_utc).total_seconds()
+        if start_utc is not None and end_utc is not None
+        else None
+    )
+    gap = (
+        (start_utc - previous_end).total_seconds()
+        if start_utc is not None and previous_end is not None
+        else None
+    )
+    journey_id = value.get("journeyId")
+    window_id = value.get("windowId")
+    utc_window = (start_utc, end_utc)
+    expected_scope = {
+        "journeyId": journey_id,
+        "connectionId": expected_connection_id,
+        "liveConnectionId": value.get("liveConnectionId"),
+        "initialLiveConnectionId": value.get("initialLiveConnectionId"),
+        "peerIdentityHash": expected_peer_identity_hash,
+        "serverStartUtc": log_window.get("start")
+        if isinstance(log_window, Mapping)
+        else None,
+        "journeyType": "quiet_padding",
+        "proofProfile": "candidate-lifecycle",
+    }
+    valid = (
+        value.get("schemaVersion") == SCHEMA_VERSION
+        and value.get("name") == "quiet_padding"
+        and value.get("status") == "PASS"
+        and value.get("candidateIdentity") == identity
+        and value.get("connectionId") == expected_connection_id
+        and value.get("serverIssued") is True
+        and value.get("peerIdentityHash") == expected_peer_identity_hash
+        and value.get("evidenceScope") == expected_scope
+        and value.get("liveConnectionId") == value.get("initialLiveConnectionId")
+        and _validated_live_connection_transition_chain(
+            value.get("initialLiveConnectionId"),
+            value.get("finalLiveConnectionId"),
+            value.get("liveConnectionTransitions"),
+        )
+        == value.get("finalLiveConnectionId")
+        and value.get("falseInterrupts") == 0
+        and value.get("unexpectedFallbacks") == 0
+        and value.get("latencies", {}) == {}
+        and isinstance(value.get("resourceVerdict"), Mapping)
+        and value["resourceVerdict"].get("status") == "PASS"
+        and duration is not None
+        and duration > 0
+        and _finite_nonnegative(value.get("durationSec"))
+        and abs(float(value["durationSec"]) - duration) <= 1.0
+        and gap is not None
+        and 0 <= gap <= gap_budget_sec
+        and isinstance(journey_id, str)
+        and bool(journey_id)
+        and journey_id not in seen_journeys
+        and isinstance(window_id, str)
+        and bool(window_id)
+        and isinstance(log_window, Mapping)
+        and log_window.get("windowId") == window_id
+        and window_id not in seen_windows
+        and utc_window not in seen_utc_windows
+    )
+    if not valid:
+        return None
+    log_proof = value.get("task5LogEvidence")
+    if (
+        not isinstance(log_proof, Mapping)
+        or log_proof.get("journeyType") != "quiet_padding"
+        or log_proof.get("maxReceiveLoopsActive") != 1
+        or _validate_log_reliability_contract(
+            log_proof,
+            expected_candidate_identity=identity,
+            expected_log_window=dict(log_window),
+            expected_evidence_scope=dict(expected_scope),
+        )
+        or any(
+            log_proof.get(field) != value.get(field)
+            for field in (
+                "initialLiveConnectionId",
+                "finalLiveConnectionId",
+                "liveConnectionTransitions",
+            )
+        )
+        or log_proof.get("serverConnectionTransitions") != []
+    ):
+        return None
+    normalized = dict(value)
+    normalized["serverIssued"] = True
+    normalized["logStatus"] = "PASS"
+    return normalized, end_utc, utc_window
+
+
+def _latency_metrics(executions):
+    first_audio = []
+    bargein = []
+    server_output_gap = []
+    reconnect = []
+    for execution in executions:
+        stage = execution.get("name")
+        log_proof = execution.get("task5LogEvidence")
+        proof_latencies = (
+            log_proof.get("journeyLatencyEvidence")
+            if isinstance(log_proof, Mapping)
+            else None
+        )
+        if stage == "bargein":
+            correlated = execution.get("task5CorrelatedEvidence")
+            latencies = {
+                "bargeinStopMs": [
+                    correlated.get("bargeinStopMs")
+                    if isinstance(correlated, Mapping)
+                    else None
+                ],
+                "serverOutputGapMs": [
+                    correlated.get("maxServerOutputGapMs")
+                    if isinstance(correlated, Mapping)
+                    else None
+                ],
+            }
+        elif stage in {"conversation", "conversation_after_lesson"}:
+            latencies = {
+                "firstAudioMs": [
+                    proof_latencies.get("firstAudioMs")
+                    if isinstance(proof_latencies, Mapping)
+                    else None
+                ]
+            }
+        elif stage in {"reopen", "reconnect"}:
+            latencies = {
+                "reconnectRecoveryMs": [
+                    proof_latencies.get("reconnectRecoveryMs")
+                    if isinstance(proof_latencies, Mapping)
+                    else None
+                ]
+            }
+        else:
+            latencies = {}
+        if not isinstance(latencies, Mapping):
+            raise ValueError("latencies must be a mapping")
+        schema = {
+            "conversation": (("firstAudioMs", first_audio),),
+            "conversation_after_lesson": (("firstAudioMs", first_audio),),
+            "bargein": (
+                ("bargeinStopMs", bargein),
+                ("serverOutputGapMs", server_output_gap),
+            ),
+            "reopen": (("reconnectRecoveryMs", reconnect),),
+            "reconnect": (("reconnectRecoveryMs", reconnect),),
+            "quiet": (),
+            "lesson": (),
+        }.get(stage)
+        if schema is None or set(latencies) != {field for field, _target in schema}:
+            raise ValueError("latency fields do not match stage schema")
+        for field, target in schema:
+            values = latencies[field]
+            if (
+                not isinstance(values, list)
+                or len(values) != 1
+                or not _finite_positive(values[0])
+            ):
+                raise ValueError(f"{field} must contain exactly one positive sample")
+            target.extend(values)
+    metrics = {
+        "firstAudioP50Ms": percentile(first_audio, 50),
+        "firstAudioP95Ms": percentile(first_audio, 95),
+        "bargeinP95Ms": percentile(bargein, 95),
+        "reconnectRecoveryP95Ms": percentile(reconnect, 95),
+    }
+    expected_counts = {
+        "firstAudioMs": 18,
+        "bargeinStopMs": 10,
+        "serverOutputGapMs": 10,
+        "reconnectRecoveryMs": 2,
+    }
+    if (
+        len(first_audio) != expected_counts["firstAudioMs"]
+        or len(bargein) != expected_counts["bargeinStopMs"]
+        or len(server_output_gap) != expected_counts["serverOutputGapMs"]
+        or len(reconnect) != expected_counts["reconnectRecoveryMs"]
+    ):
+        raise ValueError("latency sample counts do not match candidate workload")
+    return metrics, percentile(server_output_gap, 95)
+
+
+async def _run_candidate_soak_impl(
+    args,
+    *,
+    journeys,
+    sample_resources=sample_process_resources,
+    clock=time.monotonic,
+):
+    """Run the fixed candidate workload and aggregate only bounded safe evidence."""
+    identity = _candidate_identity(args)
+    lesson_manifest_sha256 = _lesson_manifest_digest(args.lesson_manifest)
+    failures = []
+
+    def safe_sample():
+        try:
+            sample = sample_resources()
+        except Exception as exc:
+            failures.append(
+                {"code": "RESOURCE_EVIDENCE_MALFORMED", "errorClass": type(exc).__name__}
+            )
+            return {}
+        if not isinstance(sample, Mapping):
+            failures.append({"code": "RESOURCE_EVIDENCE_MALFORMED"})
+            return {}
+        return dict(sample)
+
+    started = clock()
+    samples = [safe_sample()]
+    executions = []
+    seen_journeys = set()
+    seen_windows = set()
+    seen_utc_windows = set()
+    seen_evidence_keys = set()
+    expected_sequence = 1
+    first_window_start = None
+    previous_window_end = None
+    last_window_end = None
+    monitored_duration = 0.0
+    gap_budget_sec = float(getattr(args, "evidence_gap_budget_sec", 10.0))
+    if not math.isfinite(gap_budget_sec) or not 0 < gap_budget_sec <= 10.0:
+        failures.append({"code": "EVIDENCE_GAP_BUDGET_INVALID"})
+    maximum_padding_windows = int(getattr(args, "maximum_padding_windows", 60))
+    execution_anchors = []
+    task5_server_anchor = None
+    current_server_connection = None
+    immutable_peer_identity_hash = None
+    previous_execution_scope = None
+    server_connection_transitions = 0
+    for stage_name, count in _CANDIDATE_STAGE_COUNTS:
+        callable_name = "conversation" if stage_name == "conversation_after_lesson" else stage_name
+        journey = journeys.get(callable_name)
+        if not callable(journey):
+            failures.append({"code": "JOURNEY_CALLABLE_MISSING", "stage": stage_name})
+            break
+        for index in range(1, count + 1):
+            try:
+                result = await journey(
+                    args,
+                    name=stage_name,
+                    index=index,
+                    label="conversation_after_lesson" if stage_name == "conversation_after_lesson" else None,
+                )
+            except Exception as exc:
+                failures.append(
+                    {"code": "JOURNEY_EXECUTION_FAILED", "stage": stage_name, "errorClass": type(exc).__name__}
+                )
+                break
+            samples.append(safe_sample())
+            if not isinstance(result, Mapping):
+                failures.append({"code": "JOURNEY_EVIDENCE_MALFORMED", "stage": stage_name})
+                break
+            result = dict(result)
+            forbidden = _forbidden_evidence_fields(result)
+            if forbidden:
+                failures.append({"code": "FORBIDDEN_EVIDENCE_FIELD", "stage": stage_name, "fields": forbidden})
+            if result.get("schemaVersion") != SCHEMA_VERSION or result.get("name") != stage_name:
+                failures.append({"code": "JOURNEY_EVIDENCE_MALFORMED", "stage": stage_name})
+            if result.get("status") != "PASS":
+                failures.append({"code": "JOURNEY_NOT_PASSING", "stage": stage_name})
+            if result.get("candidateIdentity") != identity:
+                failures.append({"code": "CANDIDATE_IDENTITY_MISMATCH", "stage": stage_name})
+            if result.get("evidenceSequence") != expected_sequence:
+                failures.append({"code": "EVIDENCE_SEQUENCE_INVALID", "stage": stage_name})
+            expected_sequence += 1
+            execution_anchor = _validated_execution_server_scope(
+                result,
+                identity=identity,
+            )
+            if execution_anchor is None:
+                failures.append(
+                    {"code": "EXECUTION_SERVER_SCOPE_INVALID", "stage": stage_name}
+                )
+            else:
+                execution_anchors.append(execution_anchor)
+                if stage_name == "bargein" and task5_server_anchor is None:
+                    task5_server_anchor = execution_anchor
+                log_proof = result.get("task5LogEvidence")
+                transitions = (
+                    log_proof.get("serverConnectionTransitions")
+                    if isinstance(log_proof, Mapping)
+                    else None
+                )
+                if current_server_connection is None:
+                    current_server_connection = execution_anchor["connectionId"]
+                    immutable_peer_identity_hash = execution_anchor[
+                        "peerIdentityHash"
+                    ]
+                if execution_anchor["peerIdentityHash"] != immutable_peer_identity_hash:
+                    failures.append(
+                        {"code": "EXECUTION_SERVER_ANCHOR_MISMATCH", "stage": stage_name}
+                    )
+                if stage_name == "reconnect":
+                    expected_transition = {
+                        "status": "PASS",
+                        "source": "server_log",
+                        "serverIssued": True,
+                        "sequence": 1,
+                        "reason": "same_device_reconnect",
+                        "fromJourneyId": previous_execution_scope.get("journeyId"),
+                        "fromConnectionId": current_server_connection,
+                        "toJourneyId": result.get("journeyId"),
+                        "toConnectionId": execution_anchor["connectionId"],
+                        "peerIdentityHash": immutable_peer_identity_hash,
+                    }
+                    if (
+                        not isinstance(transitions, list)
+                        or transitions != [expected_transition]
+                        or server_connection_transitions != 0
+                    ):
+                        failures.append({"code": "SERVER_CONNECTION_TRANSITION_INVALID"})
+                    else:
+                        server_connection_transitions += 1
+                        current_server_connection = expected_transition["toConnectionId"]
+                elif (
+                    transitions != []
+                    or execution_anchor["connectionId"] != current_server_connection
+                ):
+                    failures.append(
+                        {"code": "SERVER_CONNECTION_DRIFT", "stage": stage_name}
+                    )
+                previous_execution_scope = result.get("evidenceScope")
+            journey_id = result.get("journeyId")
+            window_id = result.get("windowId")
+            if not isinstance(journey_id, str) or not journey_id or journey_id in seen_journeys:
+                failures.append({"code": "EVIDENCE_JOURNEY_REUSED", "stage": stage_name})
+            else:
+                seen_journeys.add(journey_id)
+            if not isinstance(window_id, str) or not window_id or window_id in seen_windows:
+                failures.append({"code": "EVIDENCE_WINDOW_REUSED", "stage": stage_name})
+            else:
+                seen_windows.add(window_id)
+            connection_id = result.get("connectionId")
+            log_window = result.get("logWindow")
+            start_utc = (
+                _parse_utc_iso(log_window.get("start"))
+                if isinstance(log_window, Mapping)
+                else None
+            )
+            end_utc = (
+                _parse_utc_iso(log_window.get("end"))
+                if isinstance(log_window, Mapping)
+                else None
+            )
+            utc_window = (start_utc, end_utc)
+            if (
+                not isinstance(log_window, Mapping)
+                or log_window.get("windowId") != window_id
+                or start_utc is None
+                or end_utc is None
+                or end_utc <= start_utc
+            ):
+                failures.append({"code": "EVIDENCE_UTC_WINDOW_INVALID", "stage": stage_name})
+            else:
+                if utc_window in seen_utc_windows:
+                    failures.append({"code": "EVIDENCE_UTC_WINDOW_REUSED", "stage": stage_name})
+                else:
+                    seen_utc_windows.add(utc_window)
+                gap_sec = (
+                    (start_utc - previous_window_end).total_seconds()
+                    if previous_window_end is not None
+                    else 0.0
+                )
+                if previous_window_end is not None and (
+                    gap_sec < 0 or gap_sec > gap_budget_sec
+                ):
+                    failures.append({"code": "EVIDENCE_UTC_WINDOW_INVALID", "stage": stage_name})
+                else:
+                    first_window_start = first_window_start or start_utc
+                    previous_window_end = end_utc
+                    last_window_end = end_utc
+                    monitored_duration += (end_utc - start_utc).total_seconds()
+            evidence_key = _evidence_reuse_key(
+                journey_id=journey_id,
+                connection_id=connection_id,
+                log_window=log_window,
+            )
+            if evidence_key is None:
+                failures.append({"code": "EVIDENCE_SCOPE_MALFORMED", "stage": stage_name})
+            elif evidence_key in seen_evidence_keys:
+                failures.append({"code": "EVIDENCE_SCOPE_REUSED", "stage": stage_name})
+            else:
+                seen_evidence_keys.add(evidence_key)
+            if stage_name == "lesson" and result.get("lessonManifestSha256") != lesson_manifest_sha256:
+                failures.append({"code": "LESSON_MANIFEST_MISMATCH"})
+            executions.append(result)
+        if failures:
+            break
+
+    if (
+        task5_server_anchor is None
+        or len(execution_anchors) != len(executions)
+        or task5_server_anchor.get("peerIdentityHash")
+        != immutable_peer_identity_hash
+        or task5_server_anchor.get("connectionId")
+        != execution_anchors[0].get("connectionId")
+        or server_connection_transitions != 1
+    ):
+        failures.append({"code": "EXECUTION_SERVER_ANCHOR_MISMATCH"})
+
+    elapsed = clock() - started
+    minimum_duration = float(args.minimum_duration_sec)
+    padding_evidence = []
+    proven_duration = monitored_duration
+    replay_mode = bool(getattr(args, "replay_candidate_evidence", False))
+    if (proven_duration < minimum_duration or (elapsed < minimum_duration and not replay_mode)) and not failures:
+        monitor = journeys.get("monitor")
+        if callable(monitor):
+            try:
+                observed_padding = await monitor(
+                    args,
+                    duration_sec=max(
+                        0.0,
+                        minimum_duration - proven_duration,
+                        minimum_duration - elapsed,
+                    ),
+                )
+            except Exception as exc:
+                failures.append(
+                    {"code": "MONITORED_DURATION_FAILED", "errorClass": type(exc).__name__}
+                )
+                observed_padding = []
+            if (
+                not isinstance(observed_padding, list)
+                or not observed_padding
+                or len(observed_padding) > maximum_padding_windows
+            ):
+                failures.append({"code": "QUIET_PADDING_INVALID"})
+            else:
+                expected_connection = executions[-1].get("connectionId")
+                for padding in observed_padding:
+                    validated = _validated_quiet_padding(
+                        padding,
+                        identity=identity,
+                        expected_connection_id=expected_connection,
+                        expected_peer_identity_hash=immutable_peer_identity_hash,
+                        previous_end=last_window_end,
+                        gap_budget_sec=gap_budget_sec,
+                        seen_journeys=seen_journeys,
+                        seen_windows=seen_windows,
+                        seen_utc_windows=seen_utc_windows,
+                    )
+                    if validated is None:
+                        failures.append({"code": "QUIET_PADDING_INVALID"})
+                        continue
+                    safe_padding, last_window_end, utc_window = validated
+                    seen_journeys.add(safe_padding["journeyId"])
+                    seen_windows.add(safe_padding["windowId"])
+                    seen_utc_windows.add(utc_window)
+                    padding_evidence.append(safe_padding)
+                    monitored_duration += (utc_window[1] - utc_window[0]).total_seconds()
+                    samples.append(safe_sample())
+                elapsed = clock() - started
+        else:
+            failures.append({"code": "QUIET_PADDING_INVALID"})
+    cleanup = journeys["cleanup"]
+    final_execution = executions[-1] if executions else {}
+    final_evidence = padding_evidence[-1] if padding_evidence else final_execution
+    final_scope = {
+        "journeyId": final_evidence.get("journeyId"),
+        "connectionId": final_evidence.get("connectionId"),
+        "windowId": final_evidence.get("windowId"),
+        "serverEndUtc": last_window_end.isoformat()
+        if last_window_end is not None
+        else None,
+        "evidenceScope": final_evidence.get("evidenceScope"),
+        "logWindow": final_evidence.get("logWindow"),
+        "journeyType": final_evidence.get("name"),
+        "proofProfile": "candidate-lifecycle",
+        "initialLiveConnectionId": final_evidence.get("initialLiveConnectionId"),
+        "finalLiveConnectionId": final_evidence.get("finalLiveConnectionId"),
+        "liveConnectionTransitions": final_evidence.get(
+            "liveConnectionTransitions"
+        ),
+        "peerIdentityHash": final_evidence.get("peerIdentityHash"),
+        "serverIssued": final_evidence.get("serverIssued"),
+    }
+    cleanup_evidence = await cleanup(args, final_scope=final_scope)
+    samples.append(safe_sample())
+    final_sample = samples[-1]
+    required_sample_fields = (
+        "rssBytes",
+        "fdCount",
+        "asyncioTaskCount",
+        "threadCount",
+    )
+    final_sample_accounted = bool(final_sample) and all(
+        field in final_sample
+        and not isinstance(final_sample[field], bool)
+        and isinstance(final_sample[field], (int, float))
+        and math.isfinite(final_sample[field])
+        and final_sample[field] >= 0
+        for field in required_sample_fields
+    )
+    actual_pending_cleanup_tasks = _actual_pending_cleanup_tasks()
+    cleanup_pass = (
+        isinstance(cleanup_evidence, Mapping)
+        and not _forbidden_evidence_fields(cleanup_evidence)
+        and cleanup_evidence.get("schemaVersion") == SCHEMA_VERSION
+        and cleanup_evidence.get("name") == "candidate_cleanup"
+        and cleanup_evidence.get("status") == "PASS"
+        and cleanup_evidence.get("candidateIdentity") == identity
+        and cleanup_evidence.get("finalScope") == final_scope
+        and cleanup_evidence.get("serverAnchor")
+        == {
+            "connectionId": current_server_connection,
+            "peerIdentityHash": immutable_peer_identity_hash,
+        }
+        and cleanup_evidence.get("websocketClosed") is True
+        and cleanup_evidence.get("providerFinalizeStatus") == "PASS"
+        and cleanup_evidence.get("providerCloseStatus") == "PASS"
+        and type(cleanup_evidence.get("pendingOwnedTasks")) is int
+        and cleanup_evidence.get("pendingOwnedTasks") == 0
+        and type(cleanup_evidence.get("activeSessions")) is int
+        and cleanup_evidence.get("activeSessions") == 0
+        and type(cleanup_evidence.get("activeReceiveLoops")) is int
+        and cleanup_evidence.get("activeReceiveLoops") == 0
+        and cleanup_evidence.get("logStatus") == "PASS"
+        and cleanup_evidence.get("resourceEndSampleRequired") is True
+        and final_sample_accounted
+        and actual_pending_cleanup_tasks == 0
+    )
+    if not cleanup_pass:
+        failures.append({"code": "CLEANUP_FAILED"})
+    if _UNRESOLVED_CANDIDATE_CLEANUPS:
+        failures.append({"code": "CANDIDATE_CLEANUP_UNRESOLVED"})
+    accounting = journeys.get("accounting")
+    if callable(accounting):
+        try:
+            accounting_failures = accounting()
+        except Exception:
+            accounting_failures = [{"code": "UNEXPECTED_EVIDENCE"}]
+        if isinstance(accounting_failures, list):
+            failures.extend(
+                item
+                for item in accounting_failures
+                if isinstance(item, Mapping) and isinstance(item.get("code"), str)
+            )
+        else:
+            failures.append({"code": "UNEXPECTED_EVIDENCE"})
+
+    upstream = {}
+    for field in (
+        "real_api_report",
+        "transport_report",
+        "correlated_transport_report",
+        "log_reliability_report",
+    ):
+        try:
+            upstream[field] = _read_json_evidence(getattr(args, field), field)
+        except ValueError:
+            failures.append({"code": "UPSTREAM_LAYER_MALFORMED", "layer": field})
+            upstream[field] = {}
+    real_api = upstream["real_api_report"]
+    transport = upstream["transport_report"]
+    correlated = upstream["correlated_transport_report"]
+    log_report = upstream["log_reliability_report"]
+    _validate_upstream_layer(real_api, name="real_api", identity=identity, failures=failures)
+    _validate_upstream_layer(
+        transport,
+        name="websocket_audio_bargein_transport",
+        identity=identity,
+        failures=failures,
+        status="SKIPPED",
+    )
+    if (
+        transport.get("pendingCode") != "PENDING_BOUNDED_SERVER_LOG_VERIFICATION"
+        or transport.get("aggregateReleaseEligible") is not False
+    ):
+        failures.append({"code": "RAW_TRANSPORT_CONTRACT_INVALID"})
+    _validate_upstream_layer(
+        correlated, name="websocket_audio_bargein_correlated", identity=identity, failures=failures
+    )
+    if correlated.get("aggregateReleaseEligible") is not True or correlated.get("correlationStatus") != "PASS":
+        failures.append({"code": "CORRELATED_TRANSPORT_NOT_ELIGIBLE"})
+    _validate_upstream_layer(log_report, name="google_live_log_reliability", identity=identity, failures=failures)
+    log_contract = {
+        "receiveLoopBalance": 0,
+        "staleAudioAfterReplacement": 0,
+        "unrecoveredTimeouts": [],
+        "unreleasedLessonHandoffs": [],
+        "fatalHits": [],
+        "failures": [],
+    }
+    if any(log_report.get(key) != expected for key, expected in log_contract.items()) or log_report.get(
+        "maxReceiveLoopsActive"
+    ) not in {0, 1}:
+        failures.append({"code": "LOG_RELIABILITY_CONTRACT_INVALID"})
+    normalized_correlation = correlate_websocket_bargein_evidence(
+        transport,
+        log_report,
+        expected_candidate_identity=identity,
+    )
+    correlated_contract_fields = (
+        "schemaVersion",
+        "name",
+        "status",
+        "candidateIdentity",
+        "journeyId",
+        "evidenceScope",
+        "initialLiveConnectionId",
+        "finalLiveConnectionId",
+        "liveConnectionTransitions",
+        "logWindow",
+        "correlationSource",
+        "correlationStatus",
+        "aggregateReleaseEligible",
+    )
+    if normalized_correlation.get("status") != "PASS" or any(
+        correlated.get(field) != normalized_correlation.get(field)
+        for field in correlated_contract_fields
+    ):
+        failures.append({"code": "TASK5_CORRELATED_EVIDENCE_INVALID"})
+    upstream_scope = correlated.get("evidenceScope")
+    upstream_connection = (
+        upstream_scope.get("connectionId") if isinstance(upstream_scope, Mapping) else None
+    )
+    upstream_window = correlated.get("logWindow")
+    upstream_window_id = (
+        upstream_window.get("windowId") if isinstance(upstream_window, Mapping) else None
+    )
+    upstream_utc_window = (
+        (
+            _parse_utc_iso(upstream_window.get("start")),
+            _parse_utc_iso(upstream_window.get("end")),
+        )
+        if isinstance(upstream_window, Mapping)
+        else None
+    )
+    upstream_key = _evidence_reuse_key(
+        journey_id=correlated.get("journeyId"),
+        connection_id=upstream_connection,
+        log_window=upstream_window,
+    )
+    if upstream_key is None:
+        failures.append({"code": "UPSTREAM_EVIDENCE_SCOPE_MISMATCH"})
+    elif (
+        correlated.get("journeyId") in seen_journeys
+        or upstream_window_id in seen_windows
+        or upstream_utc_window in seen_utc_windows
+        or upstream_key in seen_evidence_keys
+    ):
+        failures.append({"code": "UPSTREAM_EVIDENCE_REUSED"})
+
+    total_fields = (
+        "successfulTurns",
+        "bargeins",
+        "latestIntentSuccesses",
+        "falseInterrupts",
+        "unexpectedFallbacks",
+    )
+    totals = dict.fromkeys(total_fields, 0)
+    for item in executions:
+        for key in total_fields:
+            value = item.get(key, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                failures.append({"code": "JOURNEY_EVIDENCE_MALFORMED", "field": key})
+                continue
+            totals[key] += value
+        expected_counts = {
+            "successfulTurns": 0 if item.get("name") in {"quiet", "lesson"} else 1,
+            "bargeins": 1 if item.get("name") == "bargein" else 0,
+            "falseInterrupts": 0,
+            "unexpectedFallbacks": 0,
+        }
+        latest_intent = item.get("latestIntentSuccesses", 0)
+        if any(
+            item.get(key, 0) != value for key, value in expected_counts.items()
+        ) or latest_intent not in ({0, 1} if item.get("name") == "bargein" else {0}):
+            failures.append(
+                {"code": "JOURNEY_MULTIPLICITY_INVALID", "stage": item.get("name")}
+            )
+    totals["latestIntentSuccessRate"] = (
+        round(totals["latestIntentSuccesses"] / totals["bargeins"], 3) if totals["bargeins"] else 0.0
+    )
+    if totals["successfulTurns"] < int(args.minimum_turns):
+        failures.append({"code": "MINIMUM_TURNS_NOT_MET"})
+    if totals["bargeins"] < int(args.bargein_cycles):
+        failures.append({"code": "MINIMUM_BARGEINS_NOT_MET"})
+    if totals["latestIntentSuccessRate"] < GOOGLE_LIVE_LIMITS["minimumLatestIntentSuccessRate"]:
+        failures.append({"code": "LATEST_INTENT_RATE_BELOW_BUDGET"})
+    if totals["falseInterrupts"]:
+        failures.append({"code": "FALSE_INTERRUPT_OBSERVED"})
+    if totals["unexpectedFallbacks"]:
+        failures.append({"code": "UNEXPECTED_FALLBACK_OBSERVED"})
+    proven_duration = monitored_duration
+    claimed_duration = getattr(args, "candidate_evidence_duration_sec", None)
+    if proven_duration < minimum_duration:
+        failures.append({"code": "PROVEN_DURATION_NOT_MET"})
+    if not replay_mode and elapsed < minimum_duration:
+        failures.append({"code": "ACTUAL_DURATION_NOT_MET"})
+    if claimed_duration is not None and (
+        not _finite_nonnegative(claimed_duration)
+        or abs(float(claimed_duration) - proven_duration) > 1.0
+    ):
+        failures.append({"code": "CLAIMED_DURATION_MISMATCH"})
+    claimed_runtime = getattr(args, "candidate_evidence_runtime_sec", None)
+    if replay_mode and claimed_runtime is not None and (
+        not _finite_nonnegative(claimed_runtime)
+        or float(claimed_runtime) < proven_duration
+    ):
+        failures.append({"code": "CLAIMED_RUNTIME_MISMATCH"})
+
+    try:
+        latency_metrics, server_output_gap_p95_ms = _latency_metrics(executions)
+    except ValueError:
+        latency_metrics = {
+            "firstAudioP50Ms": None,
+            "firstAudioP95Ms": None,
+            "bargeinP95Ms": None,
+            "reconnectRecoveryP95Ms": None,
+        }
+        server_output_gap_p95_ms = None
+    candidate_latency_valid = _strict_candidate_latency_metrics(latency_metrics)
+    if not candidate_latency_valid:
+        failures.append({"code": "LATENCY_EVIDENCE_MALFORMED"})
+    try:
+        baseline = _read_json_evidence(args.baseline_report, "baseline_report")
+    except ValueError:
+        baseline = {}
+    baseline_metrics = baseline.get("latencyMetrics")
+    baseline_valid = _strict_candidate_latency_metrics(baseline_metrics)
+    if not baseline_valid:
+        failures.append({"code": "BASELINE_EVIDENCE_INVALID"})
+    latency_comparison = compare_latency_baseline(
+        latency_metrics if candidate_latency_valid else {},
+        baseline_metrics if baseline_valid else {},
+    )
+    if not latency_comparison["pass"]:
+        failures.append({"code": "LATENCY_REGRESSION"})
+    hard_latency_pass = (
+        _finite_nonnegative(latency_metrics["firstAudioP50Ms"])
+        and latency_metrics["firstAudioP50Ms"] <= GOOGLE_LIVE_LIMITS["firstAudioP50Ms"]
+        and _finite_nonnegative(latency_metrics["firstAudioP95Ms"])
+        and latency_metrics["firstAudioP95Ms"] <= GOOGLE_LIVE_LIMITS["firstAudioP95Ms"]
+        and _finite_nonnegative(latency_metrics["bargeinP95Ms"])
+        and latency_metrics["bargeinP95Ms"] <= GOOGLE_LIVE_LIMITS["physicalBargeinP95Ms"]
+        and _finite_positive(server_output_gap_p95_ms)
+        and server_output_gap_p95_ms <= GOOGLE_LIVE_LIMITS["serverOutputGapMaxMs"]
+    )
+    if not hard_latency_pass:
+        failures.append({"code": "HARD_LATENCY_BUDGET_FAILED"})
+    try:
+        resources = resource_verdict(samples)
+    except (KeyError, TypeError, ValueError):
+        resources = {"status": "FAIL", "failures": [{"code": "RESOURCE_EVIDENCE_MALFORMED"}]}
+    if resources["status"] != "PASS":
+        failures.append({"code": "RESOURCE_BUDGET_FAILED"})
+
+    stages = [
+        {
+            "name": name,
+            "executions": count,
+            "status": "PASS" if sum(1 for item in executions if item.get("name") == name) == count else "FAIL",
+        }
+        for name, count in _CANDIDATE_STAGE_COUNTS
+    ]
+    report = {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": "candidate_soak",
+        "status": "PASS" if not failures else "FAIL",
+        "candidateIdentity": identity,
+        "durationSec": round(proven_duration, 3),
+        "runtimeElapsedSec": round(elapsed, 3),
+        "recordedRuntimeElapsedSec": float(claimed_runtime)
+        if replay_mode and _finite_nonnegative(claimed_runtime)
+        else None,
+        "replayCandidateEvidence": replay_mode,
+        "evidenceGapBudgetSec": gap_budget_sec,
+        "evidenceAnchors": {
+            "serverStartUtc": first_window_start.isoformat()
+            if first_window_start is not None
+            else None,
+            "serverEndUtc": last_window_end.isoformat()
+            if last_window_end is not None
+            else None,
+        },
+        "quietPadding": [
+            {
+                "journeyId": item.get("journeyId"),
+                "candidateIdentity": item.get("candidateIdentity"),
+                "connectionId": item.get("connectionId"),
+                "windowId": item.get("windowId"),
+                "logWindow": item.get("logWindow"),
+                "durationSec": item.get("durationSec"),
+                "status": item.get("status"),
+                "serverIssued": item.get("serverIssued"),
+                "peerIdentityHash": item.get("peerIdentityHash"),
+                "liveConnectionId": item.get("liveConnectionId"),
+                "initialLiveConnectionId": item.get("initialLiveConnectionId"),
+                "finalLiveConnectionId": item.get("finalLiveConnectionId"),
+                "liveConnectionTransitions": item.get("liveConnectionTransitions"),
+                "evidenceScope": item.get("evidenceScope"),
+                "falseInterrupts": item.get("falseInterrupts"),
+                "unexpectedFallbacks": item.get("unexpectedFallbacks"),
+                "resourceVerdict": item.get("resourceVerdict"),
+                "logStatus": item.get("logStatus"),
+            }
+            for item in padding_evidence
+        ],
+        "stages": stages,
+        "evidenceExecutions": [
+            {
+                "sequence": item.get("evidenceSequence"),
+                "stage": item.get("name"),
+                "journeyId": item.get("journeyId"),
+                "connectionId": item.get("connectionId"),
+                "windowId": item.get("windowId"),
+                "evidenceScope": item.get("evidenceScope"),
+                "initialLiveConnectionId": item.get("initialLiveConnectionId"),
+                "finalLiveConnectionId": item.get("finalLiveConnectionId"),
+                "liveConnectionTransitions": item.get("liveConnectionTransitions"),
+                "serverConnectionTransitions": (
+                    item.get("task5LogEvidence") or {}
+                ).get("serverConnectionTransitions"),
+                "logWindow": item.get("logWindow"),
+                "status": item.get("status"),
+            }
+            for item in executions
+        ],
+        "totals": totals,
+        "latencyMetrics": latency_metrics,
+        "serverOutputGapP95Ms": server_output_gap_p95_ms,
+        "latencyComparison": latency_comparison,
+        "resourceVerdict": resources,
+        "cleanupVerdict": {
+            "status": "PASS" if cleanup_pass else "FAIL",
+            "websocketClosed": isinstance(cleanup_evidence, Mapping)
+            and cleanup_evidence.get("websocketClosed") is True,
+            "pendingOwnedTasks": actual_pending_cleanup_tasks
+            if actual_pending_cleanup_tasks
+            else cleanup_evidence.get("pendingOwnedTasks")
+            if isinstance(cleanup_evidence, Mapping)
+            and type(cleanup_evidence.get("pendingOwnedTasks")) is int
+            else None,
+            "actualPendingCleanupTasks": actual_pending_cleanup_tasks,
+            "activeSessions": cleanup_evidence.get("activeSessions")
+            if isinstance(cleanup_evidence, Mapping)
+            and type(cleanup_evidence.get("activeSessions")) is int
+            else None,
+            "activeReceiveLoops": cleanup_evidence.get("activeReceiveLoops")
+            if isinstance(cleanup_evidence, Mapping)
+            and type(cleanup_evidence.get("activeReceiveLoops")) is int
+            else None,
+            "providerFinalizeStatus": "PASS"
+            if isinstance(cleanup_evidence, Mapping)
+            and cleanup_evidence.get("providerFinalizeStatus") == "PASS"
+            else "FAIL",
+            "providerCloseStatus": "PASS"
+            if isinstance(cleanup_evidence, Mapping)
+            and cleanup_evidence.get("providerCloseStatus") == "PASS"
+            else "FAIL",
+            "logStatus": "PASS"
+            if isinstance(cleanup_evidence, Mapping)
+            and cleanup_evidence.get("logStatus") == "PASS"
+            else "FAIL",
+            "resourceEndSampleAccounted": final_sample_accounted,
+        },
+        "upstreamLayers": [
+            {
+                "name": layer.get("name"),
+                "status": layer.get("status"),
+                "candidateIdentity": layer.get("candidateIdentity"),
+            }
+            for layer in (real_api, transport, correlated, log_report)
+        ],
+        "failures": failures,
+        "rawAudioPersisted": False,
+        "transcriptPersisted": False,
+        "exit_code": 0 if not failures else 1,
+    }
+    if report["status"] == "PASS":
+        contract_failures = validate_candidate_soak_report(
+            report, expected_candidate_identity=identity
+        )
+        if contract_failures:
+            report["status"] = "FAIL"
+            report["failures"].extend(contract_failures)
+            report["exit_code"] = 1
+    return redact_mapping(report)
+
+
+async def run_candidate_soak(
+    args,
+    *,
+    journeys,
+    sample_resources=sample_process_resources,
+    clock=time.monotonic,
+):
+    """Run candidate soak with mandatory exactly-once bounded cleanup."""
+    cleanup = journeys.get("cleanup") if isinstance(journeys, Mapping) else None
+    if not callable(cleanup):
+        return {
+            "schemaVersion": SCHEMA_VERSION,
+            "name": "candidate_soak",
+            "status": "FAIL",
+            "candidateIdentity": _candidate_identity(args),
+            "failures": [{"code": "CLEANUP_CALLABLE_MISSING"}],
+            "cleanupVerdict": {"status": "FAIL"},
+            "exit_code": 1,
+        }
+    identity = _candidate_identity(args)
+    cleanup_timeout_invalid = False
+    try:
+        cleanup_timeout = float(getattr(args, "cleanup_timeout_sec", 2.0))
+    except (TypeError, ValueError):
+        cleanup_timeout = 2.0
+        cleanup_timeout_invalid = True
+    if not math.isfinite(cleanup_timeout) or cleanup_timeout <= 0:
+        cleanup_timeout = 2.0
+        cleanup_timeout_invalid = True
+    cleanup_called = False
+    cleanup_result = None
+    cleanup_task = None
+
+    async def guarded_cleanup(_args, *, final_scope):
+        nonlocal cleanup_called, cleanup_result, cleanup_task
+        if cleanup_called:
+            return cleanup_result
+        cleanup_called = True
+
+        async def invoke_cleanup():
+            try:
+                value = cleanup(_args, final_scope=final_scope)
+            except Exception as exc:
+                return {
+                    "schemaVersion": SCHEMA_VERSION,
+                    "name": "candidate_cleanup",
+                    "status": "FAIL",
+                    "candidateIdentity": identity,
+                    "finalScope": final_scope,
+                    "failureCode": "CLEANUP_EXCEPTION",
+                    "errorClass": type(exc).__name__,
+                }
+            if not inspect.isawaitable(value):
+                return {
+                    "schemaVersion": SCHEMA_VERSION,
+                    "name": "candidate_cleanup",
+                    "status": "FAIL",
+                    "candidateIdentity": identity,
+                    "finalScope": final_scope,
+                    "failureCode": "CLEANUP_INVALID_RESULT",
+                }
+            return await value
+
+        cleanup_task = asyncio.create_task(invoke_cleanup())
+        cleanup_task.set_name("google-live-candidate-cleanup")
+        _OWNED_CLEANUP_TASKS.add(cleanup_task)
+        cleanup_task.add_done_callback(_release_owned_cleanup_task)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + cleanup_timeout
+        try:
+            done, _pending = await asyncio.wait(
+                {cleanup_task}, timeout=max(0.0, deadline - loop.time())
+            )
+        except asyncio.CancelledError:
+            done, _pending = await asyncio.shield(
+                asyncio.wait(
+                    {cleanup_task}, timeout=max(0.0, deadline - loop.time())
+                )
+            )
+            if not done:
+                cleanup_task.cancel()
+            raise
+        if not done:
+            cleanup_task.cancel()
+            cleanup_result = {
+                "schemaVersion": SCHEMA_VERSION,
+                "name": "candidate_cleanup",
+                "status": "FAIL",
+                "candidateIdentity": identity,
+                "finalScope": final_scope,
+                "failureCode": "CLEANUP_TIMEOUT",
+                "pendingOwnedTasks": 1,
+            }
+            return cleanup_result
+        try:
+            cleanup_result = cleanup_task.result()
+        except asyncio.CancelledError:
+            cleanup_result = {
+                "schemaVersion": SCHEMA_VERSION,
+                "name": "candidate_cleanup",
+                "status": "FAIL",
+                "candidateIdentity": identity,
+                "finalScope": final_scope,
+                "failureCode": "CLEANUP_CANCELLED",
+            }
+        except Exception as exc:
+            cleanup_result = {
+                "schemaVersion": SCHEMA_VERSION,
+                "name": "candidate_cleanup",
+                "status": "FAIL",
+                "candidateIdentity": identity,
+                "finalScope": final_scope,
+                "failureCode": "CLEANUP_EXCEPTION",
+                "errorClass": type(exc).__name__,
+            }
+        return cleanup_result
+
+    guarded_journeys = dict(journeys)
+    guarded_journeys["cleanup"] = guarded_cleanup
+    try:
+        report = await _run_candidate_soak_impl(
+            args,
+            journeys=guarded_journeys,
+            sample_resources=sample_resources,
+            clock=clock,
+        )
+        if cleanup_timeout_invalid:
+            report["failures"].append({"code": "CLEANUP_TIMEOUT_INVALID"})
+            report["status"] = "FAIL"
+            report["exit_code"] = 1
+        return report
+    finally:
+        if not cleanup_called:
+            await guarded_cleanup(
+                args,
+                final_scope={
+                    "journeyId": None,
+                    "connectionId": None,
+                    "windowId": None,
+                    "serverEndUtc": None,
+                },
+            )
+
+
 async def run_soak(args):
     if getattr(args, "scenario", None) == "tvideo-farm":
         if getattr(args, "dry_run", False):
             return _dry_run_tvideo_farm_report(args)
         return await _run_tvideo_farm_scenario(args)
     mode = getattr(args, "mode", None)
+    if mode == "candidate":
+        if getattr(args, "produce_candidate_evidence", None):
+            return await produce_candidate_evidence(args)
+        journeys = getattr(args, "candidate_journeys", None)
+        candidate_sampler = sample_process_resources
+        if not isinstance(journeys, Mapping):
+            manifest = _read_json_evidence(args.journey_evidence, "journey_evidence")
+            if _forbidden_evidence_fields(manifest):
+                raise ValueError("candidate evidence contains forbidden fields")
+            _validate_candidate_manifest_structure(
+                manifest,
+                identity=_candidate_identity(args),
+            )
+            recorded = manifest.get("executions")
+            if not isinstance(recorded, list):
+                raise ValueError("journey_evidence executions must be a list")
+            expected_count = sum(count for _name, count in _CANDIDATE_STAGE_COUNTS)
+            if len(recorded) != expected_count:
+                raise ValueError("journey evidence must contain exactly 33 executions")
+            evidence_duration = manifest.get("durationSec")
+            if not _finite_nonnegative(evidence_duration):
+                raise ValueError("journey evidence durationSec must be finite and non-negative")
+            args.candidate_evidence_duration_sec = evidence_duration
+            evidence_runtime = manifest.get("runtimeElapsedSec")
+            if evidence_runtime is not None and not _finite_nonnegative(evidence_runtime):
+                raise ValueError(
+                    "journey evidence runtimeElapsedSec must be finite and non-negative"
+                )
+            args.candidate_evidence_runtime_sec = evidence_runtime
+            args.replay_candidate_evidence = True
+            recorded_padding = manifest.get("quietPadding", [])
+            if not isinstance(recorded_padding, list):
+                raise ValueError("journey evidence quietPadding must be a list")
+            recorded_cleanup_evidence = manifest.get("cleanup")
+            recorded_samples = manifest.get("resourceSamples")
+            if not isinstance(recorded_samples, list):
+                raise ValueError("journey evidence resourceSamples must be a list")
+            sample_cursor = 0
+            seen_sample_ids = set()
+            resource_accounting_invalid = False
+
+            def recorded_sample():
+                nonlocal resource_accounting_invalid, sample_cursor
+                if sample_cursor >= len(recorded_samples):
+                    raise ValueError("resource evidence was over-consumed")
+                sample = recorded_samples[sample_cursor]
+                sample_cursor += 1
+                if not isinstance(sample, Mapping):
+                    raise ValueError("resource evidence sample must be an object")
+                sample_id = sample.get("sampleId")
+                if (
+                    not isinstance(sample_id, str)
+                    or not sample_id
+                    or sample_id in seen_sample_ids
+                ):
+                    resource_accounting_invalid = True
+                else:
+                    seen_sample_ids.add(sample_id)
+                return dict(sample)
+
+            candidate_sampler = recorded_sample
+
+            cursor = 0
+
+            async def recorded_journey(_args, *, name, **_kwargs):
+                nonlocal cursor
+                if cursor >= len(recorded):
+                    raise ValueError("journey evidence is incomplete")
+                evidence = recorded[cursor]
+                cursor += 1
+                if not isinstance(evidence, Mapping) or evidence.get("name") != name:
+                    raise ValueError("journey evidence order does not match candidate sequence")
+                return dict(evidence)
+
+            journeys = dict.fromkeys(
+                ("conversation", "bargein", "quiet", "reopen", "reconnect", "lesson"),
+                recorded_journey,
+            )
+
+            cleanup_consumed = 0
+
+            async def recorded_cleanup(_args, *, final_scope):
+                nonlocal cleanup_consumed
+                cleanup_consumed += 1
+                if cursor != len(recorded):
+                    raise ValueError("journey evidence was not fully consumed")
+                if not isinstance(recorded_cleanup_evidence, Mapping):
+                    return recorded_cleanup_evidence
+                return dict(recorded_cleanup_evidence)
+
+            journeys["cleanup"] = recorded_cleanup
+            padding_consumed = 0
+
+            async def recorded_monitor(_args, *, duration_sec):
+                nonlocal padding_consumed
+                if padding_consumed:
+                    return []
+                padding_consumed = len(recorded_padding)
+                return [dict(item) if isinstance(item, Mapping) else item for item in recorded_padding]
+
+            journeys["monitor"] = recorded_monitor
+
+            def recorded_accounting():
+                accounting_failures = []
+                if cursor != len(recorded):
+                    accounting_failures.append({"code": "UNEXPECTED_EVIDENCE"})
+                if padding_consumed != len(recorded_padding):
+                    accounting_failures.append({"code": "UNEXPECTED_EVIDENCE"})
+                if cleanup_consumed != 1:
+                    accounting_failures.append({"code": "UNEXPECTED_EVIDENCE"})
+                if sample_cursor != len(recorded_samples):
+                    accounting_failures.append({"code": "RESOURCE_SAMPLE_UNUSED"})
+                if resource_accounting_invalid:
+                    accounting_failures.append({"code": "RESOURCE_SAMPLE_UNUSED"})
+                return accounting_failures
+
+            journeys["accounting"] = recorded_accounting
+        return await run_candidate_soak(
+            args,
+            journeys=journeys,
+            sample_resources=candidate_sampler,
+        )
     if mode == "false_positive":
         return await _run_false_positive_mode(args)
     if mode == "bargein_latency":
@@ -1608,7 +5175,7 @@ def _build_argument_parser():
     # Mode selector for PR5 §6.4 modes
     parser.add_argument(
         "--mode",
-        choices=["false_positive", "bargein_latency", "rapid_interrupt"],
+        choices=["false_positive", "bargein_latency", "rapid_interrupt", "candidate"],
         default=None,
         help=(
             "false_positive: AC1 soliloquy false-positive count; "
@@ -1704,6 +5271,30 @@ def _build_argument_parser():
     parser.add_argument("--settle-timeout-sec", type=float, default=30.0)
     parser.add_argument("--bargein-latency-budget-ms", type=float, default=500.0)
     parser.add_argument("--ac1-goaway-budget", type=int, default=0)
+    parser.add_argument("--candidate-git-sha", default=None)
+    parser.add_argument("--candidate-image-digest", default=None)
+    parser.add_argument("--firmware-identity", default=None)
+    parser.add_argument("--fixture-sha256", default=None)
+    parser.add_argument("--config-json", default="{}")
+    parser.add_argument("--config-fingerprint", default=None)
+    parser.add_argument("--baseline-report", type=Path, default=None)
+    parser.add_argument("--real-api-report", type=Path, default=None)
+    parser.add_argument("--transport-report", type=Path, default=None)
+    parser.add_argument("--correlated-transport-report", type=Path, default=None)
+    parser.add_argument("--log-reliability-report", type=Path, default=None)
+    parser.add_argument("--journey-evidence", type=Path, default=None)
+    parser.add_argument("--produce-candidate-evidence", type=Path, default=None)
+    parser.add_argument("--evidence-control-url", default=None)
+    parser.add_argument(
+        "--evidence-mint-secret-env", default="TBOT_DEVICE_MINT_SECRET"
+    )
+    parser.add_argument("--server-log", type=Path, default=None)
+    parser.add_argument("--run-id", default=None)
+    parser.add_argument("--minimum-turns", type=int, default=30)
+    parser.add_argument("--minimum-duration-sec", type=float, default=1800.0)
+    parser.add_argument("--evidence-gap-budget-sec", type=float, default=10.0)
+    parser.add_argument("--maximum-padding-windows", type=int, default=60)
+    parser.add_argument("--lesson-manifest", type=Path, default=None)
     # Output
     parser.add_argument("--report", type=Path, default=None, help="write JSON report to this path (required for CI)")
     # Dry-run: validate args + emit placeholder report, no websocket connect
@@ -1713,9 +5304,81 @@ def _build_argument_parser():
     return parser
 
 
+def _validate_candidate_args(parser, args):
+    if args.mode != "candidate":
+        return
+    producing = bool(getattr(args, "produce_candidate_evidence", None))
+    replaying = bool(getattr(args, "journey_evidence", None))
+    if producing and replaying:
+        parser.error(
+            "candidate producer and --journey-evidence replay are mutually exclusive"
+        )
+    required = [
+        "candidate_git_sha",
+        "candidate_image_digest",
+        "firmware_identity",
+        "fixture_sha256",
+        "baseline_report",
+        "real_api_report",
+        "transport_report",
+        "correlated_transport_report",
+        "log_reliability_report",
+        "lesson_manifest",
+    ]
+    if producing:
+        required.extend(("evidence_control_url", "server_log", "run_id"))
+        if getattr(args, "inject_audio", None) or getattr(args, "inject_text", None):
+            parser.error(
+                "candidate producer audio and expected text must use protected stdin"
+            )
+        secret_name = getattr(args, "evidence_mint_secret_env", "")
+        if not isinstance(secret_name, str) or not secret_name or not os.environ.get(
+            secret_name
+        ):
+            parser.error("candidate producer mint-secret environment is unavailable")
+    else:
+        required.extend(("journey_evidence", "report"))
+    missing = [field for field in required if not getattr(args, field, None)]
+    if missing:
+        parser.error("candidate mode requires: " + ", ".join(missing))
+    if args.minimum_turns < GOOGLE_LIVE_LIMITS["minimumSoakTurns"]:
+        parser.error("candidate mode minimum-turns cannot be below 30")
+    if args.minimum_duration_sec < GOOGLE_LIVE_LIMITS["minimumSoakDurationSec"]:
+        parser.error("candidate mode minimum-duration-sec cannot be below 1800")
+    if args.bargein_cycles != GOOGLE_LIVE_LIMITS["minimumBargeins"]:
+        parser.error("candidate mode requires exactly 10 barge-in cycles")
+    if not math.isfinite(args.evidence_gap_budget_sec) or not 0 < args.evidence_gap_budget_sec <= 10.0:
+        parser.error("candidate mode evidence-gap-budget-sec must be in (0, 10]")
+    if args.maximum_padding_windows < 1 or args.maximum_padding_windows > 60:
+        parser.error("candidate mode maximum-padding-windows must be in [1, 60]")
+
+
+def _candidate_failure_report(args, error):
+    try:
+        identity = _candidate_identity(args)
+    except (AttributeError, TypeError, ValueError):
+        identity = {}
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": "candidate_soak",
+        "status": "FAIL",
+        "candidateIdentity": identity,
+        "failures": [
+            {
+                "code": "CANDIDATE_SOAK_EXECUTION_FAILED",
+                "errorClass": type(error).__name__,
+            }
+        ],
+        "rawAudioPersisted": False,
+        "transcriptPersisted": False,
+        "exit_code": 1,
+    }
+
+
 def main():
     parser = _build_argument_parser()
     args = parser.parse_args()
+    _validate_candidate_args(parser, args)
 
     # --inject-text overrides --interrupt-prompt when provided
     if args.inject_text:
@@ -1736,12 +5399,22 @@ def main():
     try:
         report = asyncio.run(run_soak(args))
     except Exception as exc:
-        print(f"SOAK_FAIL {exc}", file=sys.stderr)
+        detail = type(exc).__name__ if args.mode == "candidate" else str(exc)
+        print(f"SOAK_FAIL {detail}", file=sys.stderr)
         return 1
+
+    if args.produce_candidate_evidence:
+        if report.get("status") == "PASS":
+            print(f"Wrote candidate evidence: {args.produce_candidate_evidence}")
+        return report.get("exit_code", 1)
 
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(json.dumps(report, indent=2, default=str))
+        if args.mode == "candidate":
+            if not _publish_candidate_report(args.report, report):
+                return 1
+        else:
+            args.report.write_text(json.dumps(report, indent=2, default=str))
         print(f"Wrote soak report: {args.report}")
 
     if report.get("dry_run"):

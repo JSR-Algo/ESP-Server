@@ -5007,6 +5007,22 @@ class LessonRuntime:
             "lesson_progress step_completed "
             f"stepId={self._step_id} result=success stepType={step_type or ''}",
         )
+        journey_id = getattr(self.conn, "google_live_evidence_journey_id", None)
+        evidence_step_id = str(self._step_id or "")
+        if (
+            isinstance(journey_id, str)
+            and journey_id
+            and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", evidence_step_id)
+        ):
+            self._log(
+                "info",
+                "Google Live lesson_step_progress "
+                f"journey_id={journey_id} "
+                f"connection_id={getattr(self.conn, 'session_id', 'unknown')} "
+                "live_connection_id="
+                f"{getattr(self.conn, 'google_live_live_connection_id', 'none')} "
+                f"step_id={evidence_step_id}",
+            )
         self._close_child_response_window()
         self._step_completed = True
         if self._renderer_v2_enabled():

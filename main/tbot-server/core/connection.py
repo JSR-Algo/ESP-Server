@@ -1,73 +1,78 @@
-import os
-import sys
+import asyncio
 import copy
 import hashlib
+import inspect
 import json
-import re
-import uuid
-import time
+import os
 import queue
-import asyncio
-import threading
-import traceback
+import re
 import subprocess
+import sys
+import threading
+import time
+import traceback
+import uuid
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from typing import Any, Dict
+
 import websockets
 
-from core.utils.util import (
-    extract_json_from_string,
-    check_vad_update,
-    check_asr_update,
-    filter_sensitive_info,
-)
-from typing import Dict, Any
-from collections import deque
-from core.utils.modules_initialize import (
-    initialize_modules,
-    initialize_tts,
-    initialize_asr,
-)
-from core.handle.reportHandle import report, enqueue_tool_report
-from core.lesson.log_context import with_lesson_log_context
-from core.lesson import runtime_counters as lesson_runtime_counters
-from core.providers.tts.default import DefaultTTS
-from concurrent.futures import ThreadPoolExecutor
-from core.utils.dialogue import Message, Dialogue
-from core.providers.asr.dto.dto import InterfaceType
-from core.handle.textHandle import handleTextMessage
-from core.providers.tools.unified_tool_handler import UnifiedToolHandler
-from plugins_func.loadplugins import auto_import_modules
-from plugins_func.register import Action, ActionResponse
-from core.auth import AuthenticationError
 from config.config_loader import (
     get_private_config_from_api,
     merge_configs,
     normalize_voice_config,
 )
-from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
-from config.logger import setup_logging, build_module_string, create_connection_logger
-from config.manage_api_client import DeviceNotFoundException, DeviceBindException, generate_and_save_chat_title
-from core.utils.prompt_manager import PromptManager
-from core.utils.voiceprint_provider import VoiceprintProvider
-from core.voice.session_provider.factory import create_voice_session_provider
-from core.utils.util import get_system_error_response
-from core.utils import textUtils
-from core.voice.live_admission import LiveAdmissionGate, create_live_state_store
-from core.voice.session_orchestrator import SessionMode, normalize_session_mode
+from config.logger import build_module_string, create_connection_logger, setup_logging
+from config.manage_api_client import DeviceBindException, DeviceNotFoundException, generate_and_save_chat_title
 from core.activity_lease import ActivityLeaseCoordinator, ActivityOperation
+from core.auth import AuthenticationError
 from core.connection_headers import (
     preserve_request_headers,
     sanitize_headers_for_log,
     single_header,
 )
-
+from core.handle.reportHandle import enqueue_tool_report, report
+from core.handle.textHandle import handleTextMessage
+from core.lesson import runtime_counters as lesson_runtime_counters
+from core.lesson.log_context import with_lesson_log_context
+from core.providers.asr.dto.dto import InterfaceType
+from core.providers.tools.unified_tool_handler import UnifiedToolHandler
+from core.providers.tts.default import DefaultTTS
+from core.providers.tts.dto.dto import ContentType, SentenceType, TTSMessageDTO
+from core.utils import textUtils
+from core.utils.dialogue import Dialogue, Message
+from core.utils.modules_initialize import (
+    initialize_asr,
+    initialize_modules,
+    initialize_tts,
+)
+from core.utils.prompt_manager import PromptManager
+from core.utils.util import (
+    check_asr_update,
+    check_vad_update,
+    extract_json_from_string,
+    filter_sensitive_info,
+    get_system_error_response,
+)
+from core.utils.voiceprint_provider import VoiceprintProvider
+from core.voice.live_admission import LiveAdmissionGate, create_live_state_store
+from core.voice.session_orchestrator import SessionMode, normalize_session_mode
+from core.voice.session_provider.factory import create_voice_session_provider
+from plugins_func.loadplugins import auto_import_modules
+from plugins_func.register import Action, ActionResponse
 
 TAG = __name__
 
 _sanitize_headers_for_log = sanitize_headers_for_log
+
+
+def _utc_now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _float_or_none(value):
@@ -193,12 +198,14 @@ class ConnectionHandler:
             _memory,
             _intent,
             server=None,
+            evidence_registry=None,
     ):
         self.common_config = config
         self.config = copy.deepcopy(config)
         self.session_id = str(uuid.uuid4())
         self.logger = setup_logging()
         self.server = server  # Saveserverinstance reference
+        self.evidence_registry = evidence_registry
 
         self.need_bind = False  # NeedBind device
         self.bind_completed_event = asyncio.Event()
@@ -226,6 +233,7 @@ class ConnectionHandler:
         self.client_audio_input_authorized = False
         self.google_live_audio_out_started_at = None
         self.google_live_turn_started_at = None
+        self.google_live_evidence_lesson_released = False
         self.voice_metric_samples = deque(maxlen=100)
         self._lesson_asset_audio_inflight = 0
         self._lesson_asset_last_audio_at = 0.0
@@ -547,6 +555,9 @@ class ConnectionHandler:
 
     async def _route_message(self, message):
         """Message routing"""
+        if isinstance(message, str) and self._is_evidence_finalize_message(message):
+            await self._handle_evidence_finalize_message(message)
+            return
         listen_state = self._listen_control_state(message) if isinstance(message, str) else None
         if listen_state in {"stop", "detect"}:
             self.client_audio_input_authorized = False
@@ -811,6 +822,7 @@ class ConnectionHandler:
         # channel. Closing it here races with in-flight mic frames and forces a
         # reconnect flicker just as the device starts rendering the lesson.
         await self._persist_live_resumption_handle()
+        self.google_live_evidence_lesson_released = False
         self._set_session_mode(SessionMode.LESSON, reason=reason)
 
     async def request_lesson_preload_reset(
@@ -878,6 +890,7 @@ class ConnectionHandler:
         if normalize_session_mode(self.session_mode) == SessionMode.LESSON:
             await self._deactivate_live_lesson_context()
             await self.enter_dormant_mode(reason=reason)
+            self.google_live_evidence_lesson_released = True
 
     async def finish_lesson_mode(self, *, reason: str = "lesson_completed") -> None:
         if normalize_session_mode(self.session_mode) != SessionMode.LESSON:
@@ -925,6 +938,7 @@ class ConnectionHandler:
         else:
             await self.enter_dormant_mode(reason=reason)
         await self._deactivate_live_lesson_context()
+        self.google_live_evidence_lesson_released = True
         await self._send_lesson_emotion(self._lesson_terminal_emotion(reason))
 
     async def _deactivate_live_lesson_context(self) -> None:
@@ -1109,6 +1123,454 @@ class ConnectionHandler:
         except (TypeError, json.JSONDecodeError):
             return False
         return isinstance(payload, dict) and payload.get("type") == "abort"
+
+    @staticmethod
+    def _is_evidence_finalize_message(message):
+        try:
+            payload = json.loads(message)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return isinstance(payload, dict) and payload.get("type") == "evidence_finalize"
+
+    @staticmethod
+    def _validated_evidence_transition_result(scope, result):
+        if not isinstance(scope, dict) or not isinstance(result, dict):
+            return None
+        initial_id = scope.get("initialLiveConnectionId") or scope.get(
+            "liveConnectionId"
+        )
+        immutable_matches = (
+            result.get("journeyId") == scope.get("journeyId")
+            and result.get("connectionId") == scope.get("connectionId")
+            and result.get("peerIdentityHash") == scope.get("peerIdentityHash")
+            and result.get("initialLiveConnectionId") == initial_id
+        )
+        transitions = result.get("liveConnectionTransitions")
+        if not immutable_matches or not isinstance(transitions, list):
+            return None
+        current_id = initial_id
+        previous_attempt = 0
+        normalized = []
+        for transition in transitions:
+            if not isinstance(transition, dict):
+                return None
+            attempt = transition.get("attempt")
+            from_id = transition.get("fromLiveConnectionId")
+            to_id = transition.get("toLiveConnectionId")
+            if (
+                type(attempt) is not int
+                or attempt <= previous_attempt
+                or from_id != current_id
+                or not isinstance(to_id, str)
+                or not to_id
+                or to_id == from_id
+            ):
+                return None
+            normalized.append(
+                {
+                    "attempt": attempt,
+                    "fromLiveConnectionId": from_id,
+                    "toLiveConnectionId": to_id,
+                }
+            )
+            current_id = to_id
+            previous_attempt = attempt
+        if result.get("finalLiveConnectionId") != current_id:
+            return None
+        return {
+            "finalLiveConnectionId": current_id,
+            "liveConnectionTransitions": normalized,
+        }
+
+    async def _handle_evidence_finalize_message(self, message):
+        try:
+            payload = json.loads(message)
+        except (TypeError, json.JSONDecodeError):
+            payload = None
+        received_scope = payload.get("evidenceScope") if isinstance(payload, dict) else None
+        ack = await self.finalize_google_live_evidence(received_scope)
+        await self.websocket.send(json.dumps(ack))
+
+    async def finalize_google_live_evidence(
+        self, expected_scope
+    ) -> dict[str, object]:
+        cached = getattr(self, "google_live_evidence_finalize_result", None)
+        if isinstance(cached, dict):
+            if cached.get("evidenceScope") == expected_scope:
+                return dict(cached)
+            return {
+                "type": "evidence_finalized",
+                "status": "FAIL",
+                "failureCode": "EVIDENCE_SCOPE_MISMATCH",
+            }
+        lock = getattr(self, "google_live_evidence_finalize_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.google_live_evidence_finalize_lock = lock
+        async with lock:
+            cached = getattr(self, "google_live_evidence_finalize_result", None)
+            if isinstance(cached, dict):
+                if cached.get("evidenceScope") == expected_scope:
+                    return dict(cached)
+                return {
+                    "type": "evidence_finalized",
+                    "status": "FAIL",
+                    "failureCode": "EVIDENCE_SCOPE_MISMATCH",
+                }
+            return await self._finalize_google_live_evidence_once(expected_scope)
+
+    async def _finalize_google_live_evidence_once(
+        self, expected_scope
+    ) -> dict[str, object]:
+        scope = getattr(self, "google_live_evidence_scope", None)
+        failure_code = None
+        proof_failure_code = None
+        result = None
+        validated_transition_result = None
+        if not isinstance(scope, dict) or expected_scope != scope:
+            failure_code = "EVIDENCE_SCOPE_MISMATCH"
+        else:
+            registry = getattr(self, "evidence_registry", None)
+            journey_id = scope.get("journeyId")
+            snapshot = getattr(registry, "safe_snapshot", None)
+            active_claim_matches = getattr(registry, "active_claim_matches", None)
+            try:
+                proof_snapshot = (
+                    snapshot(journey_id)
+                    if callable(snapshot) and isinstance(journey_id, str)
+                    else None
+                )
+            except Exception:
+                proof_snapshot = None
+            proof_profile = (
+                proof_snapshot.get("proofProfile")
+                if isinstance(proof_snapshot, dict)
+                else None
+            )
+            journey_type = (
+                proof_snapshot.get("journeyType")
+                if isinstance(proof_snapshot, dict)
+                else None
+            )
+            claim_shape_matches = bool(
+                isinstance(proof_snapshot, dict)
+                and proof_snapshot.get("journeyId") == journey_id
+                and proof_profile in (
+                    "physical-transcript",
+                    "candidate-lifecycle",
+                )
+                and isinstance(journey_type, str)
+                and scope.get("proofProfile") == proof_profile
+                and scope.get("journeyType") == journey_type
+                and callable(active_claim_matches)
+            )
+            claims_match = False
+            if claim_shape_matches:
+                try:
+                    claims_match = active_claim_matches(
+                        device_id=str(getattr(self, "device_id", "") or ""),
+                        client_id=str(getattr(self, "client_id", "") or ""),
+                        journey_id=journey_id,
+                        journey_type=journey_type,
+                        proof_profile=proof_profile,
+                    ) is True
+                except Exception:
+                    pass
+            if not claims_match:
+                return {
+                    "type": "evidence_finalized",
+                    "status": "FAIL",
+                    "failureCode": "EVIDENCE_ENROLLMENT_INVALID",
+                    "evidenceScope": scope,
+                    "retryable": True,
+                }
+            if proof_profile == "physical-transcript" and proof_snapshot.get(
+                "transcriptProofEligible"
+            ) is False:
+                proof_failure_code = "EVIDENCE_TRANSCRIPT_INVALID"
+            elif proof_profile == "physical-transcript" and not proof_snapshot.get(
+                "readyToFinalize"
+            ):
+                return {
+                    "type": "evidence_finalized",
+                    "status": "FAIL",
+                    "failureCode": "EVIDENCE_TRANSCRIPT_NOT_READY",
+                    "evidenceScope": scope,
+                    "retryable": True,
+                }
+            elif (
+                proof_profile == "candidate-lifecycle"
+                and journey_type == "bargein"
+                and proof_snapshot.get("semanticProofKind") == "bargein-intent"
+            ):
+                if proof_snapshot.get("semanticEligible") is False:
+                    proof_failure_code = "EVIDENCE_SEMANTIC_INVALID"
+                elif proof_snapshot.get("semanticOwnershipReady") is not True:
+                    proof_failure_code = "EVIDENCE_SEMANTIC_NOT_READY"
+            provider = getattr(self, "voice_provider", None)
+            finalize = getattr(provider, "finalize_evidence", None)
+            if not callable(finalize):
+                failure_code = failure_code or "EVIDENCE_PROVIDER_UNAVAILABLE"
+            else:
+                timeout = 5.0
+                google_live = (self.config or {}).get("google_live") or {}
+                try:
+                    timeout = float(
+                        google_live.get("evidence_finalize_timeout_sec", timeout)
+                    )
+                except (TypeError, ValueError):
+                    timeout = 5.0
+                finalize_task = getattr(
+                    self, "google_live_evidence_finalize_task", None
+                )
+                if finalize_task is None:
+                    finalize_task = self.schedule_mcp_background_task(finalize())
+                    if finalize_task is None:
+                        return {
+                            "type": "evidence_finalized",
+                            "status": "FAIL",
+                            "failureCode": (
+                                "EVIDENCE_CLEANUP_INCOMPLETE"
+                                if proof_failure_code
+                                else "EVIDENCE_FINALIZE_UNAVAILABLE"
+                            ),
+                            "evidenceScope": scope,
+                            "retryable": True,
+                        }
+                    finalize_task.set_name("google-live-evidence-finalize")
+                    self.google_live_evidence_finalize_task = finalize_task
+                try:
+                    result = await asyncio.wait_for(
+                        asyncio.shield(finalize_task),
+                        timeout=max(0.1, min(timeout, 30.0)),
+                    )
+                except asyncio.TimeoutError:
+                    request_stop = getattr(
+                        provider, "request_evidence_finalize_stop", None
+                    )
+                    if callable(request_stop):
+                        try:
+                            stop_result = request_stop()
+                            if inspect.isawaitable(stop_result):
+                                await stop_result
+                        except Exception:
+                            pass
+                    cleanup_grace = max(0.1, min(timeout, 5.0))
+                    try:
+                        result = await asyncio.wait_for(
+                            asyncio.shield(finalize_task),
+                            timeout=cleanup_grace,
+                        )
+                    except asyncio.TimeoutError:
+                        return {
+                            "type": "evidence_finalized",
+                            "status": "FAIL",
+                            "failureCode": "EVIDENCE_FINALIZE_TIMEOUT",
+                            "evidenceScope": scope,
+                            "retryable": True,
+                        }
+                    except asyncio.CancelledError:
+                        current_task = asyncio.current_task()
+                        if current_task is not None and current_task.cancelling():
+                            raise
+                        return {
+                            "type": "evidence_finalized",
+                            "status": "FAIL",
+                            "failureCode": "EVIDENCE_FINALIZE_CANCELLED",
+                            "evidenceScope": scope,
+                            "retryable": True,
+                        }
+                    except Exception:
+                        failure_code = failure_code or "EVIDENCE_FINALIZE_FAILED"
+                except asyncio.CancelledError:
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling():
+                        raise
+                    return {
+                        "type": "evidence_finalized",
+                        "status": "FAIL",
+                        "failureCode": "EVIDENCE_FINALIZE_CANCELLED",
+                        "evidenceScope": scope,
+                        "retryable": True,
+                    }
+                except Exception:
+                    failure_code = failure_code or "EVIDENCE_FINALIZE_FAILED"
+                validated_transition_result = self._validated_evidence_transition_result(
+                    scope, result
+                )
+                cleanup_verified = (
+                    isinstance(result, dict)
+                    and result.get("status") == "PASS"
+                    and result.get("pendingTasks") == 0
+                    and validated_transition_result is not None
+                )
+                if (
+                    cleanup_verified
+                    and proof_profile == "candidate-lifecycle"
+                    and journey_type == "quiet"
+                    and proof_snapshot.get("semanticProofKind") == "quiet"
+                ):
+                    quiet_semantic = result.get("quietSemanticEvidence")
+                    quiet_mode = proof_snapshot.get("quietMode")
+                    quiet_shape_valid = bool(
+                        isinstance(quiet_semantic, dict)
+                        and set(quiet_semantic)
+                        == {
+                            "status", "mode", "durationMs", "responseGeneration",
+                            "responseDurationMs", "outputChunks",
+                            "setupTurnConsumed",
+                        }
+                        and quiet_semantic.get("status") == "PASS"
+                        and quiet_semantic.get("mode") == quiet_mode
+                        and type(quiet_semantic.get("durationMs")) is int
+                        and quiet_semantic.get("durationMs") > 0
+                    )
+                    mode_valid = bool(
+                        quiet_shape_valid
+                        and (
+                            quiet_mode == "silence"
+                            and quiet_semantic.get("responseGeneration") is None
+                            and quiet_semantic.get("responseDurationMs") == 0
+                            and quiet_semantic.get("outputChunks") == 0
+                            and quiet_semantic.get("setupTurnConsumed") is False
+                            or quiet_mode == "robot_speaking"
+                            and type(quiet_semantic.get("responseGeneration")) is int
+                            and quiet_semantic.get("responseGeneration") >= 0
+                            and type(quiet_semantic.get("responseDurationMs")) is int
+                            and quiet_semantic.get("responseDurationMs") > 0
+                            and type(quiet_semantic.get("outputChunks")) is int
+                            and quiet_semantic.get("outputChunks") > 0
+                            and quiet_semantic.get("setupTurnConsumed") is True
+                        )
+                    )
+                    if not mode_valid:
+                        proof_failure_code = "EVIDENCE_SEMANTIC_INVALID"
+                if proof_profile == "candidate-lifecycle" and not cleanup_verified:
+                    if finalize_task.done():
+                        prepare_retry = getattr(
+                            provider, "prepare_evidence_finalize_retry", None
+                        )
+                        retry_prepared = False
+                        if callable(prepare_retry):
+                            try:
+                                prepare_result = prepare_retry()
+                                if inspect.isawaitable(prepare_result):
+                                    close = getattr(prepare_result, "close", None)
+                                    if callable(close):
+                                        close()
+                                else:
+                                    retry_prepared = prepare_result is True
+                            except Exception:
+                                pass
+                        if retry_prepared:
+                            self.google_live_evidence_finalize_task = None
+                    return {
+                        "type": "evidence_finalized",
+                        "status": "FAIL",
+                        "failureCode": "EVIDENCE_CLEANUP_INCOMPLETE",
+                        "evidenceScope": scope,
+                        "retryable": True,
+                    }
+                if proof_failure_code and not cleanup_verified:
+                    if finalize_task.done():
+                        prepare_retry = getattr(
+                            provider, "prepare_evidence_finalize_retry", None
+                        )
+                        retry_prepared = False
+                        if callable(prepare_retry):
+                            try:
+                                prepare_result = prepare_retry()
+                                if inspect.isawaitable(prepare_result):
+                                    close = getattr(prepare_result, "close", None)
+                                    if callable(close):
+                                        close()
+                                else:
+                                    retry_prepared = prepare_result is True
+                            except Exception:
+                                pass
+                        if retry_prepared:
+                            self.google_live_evidence_finalize_task = None
+                    return {
+                        "type": "evidence_finalized",
+                        "status": "FAIL",
+                        "failureCode": "EVIDENCE_CLEANUP_INCOMPLETE",
+                        "evidenceScope": scope,
+                        "retryable": True,
+                    }
+                if proof_failure_code:
+                    failure_code = proof_failure_code
+                elif failure_code is None and not cleanup_verified:
+                    failure_code = "EVIDENCE_CLEANUP_INCOMPLETE"
+            if proof_profile == "candidate-lifecycle" and not callable(finalize):
+                return {
+                    "type": "evidence_finalized",
+                    "status": "FAIL",
+                    "failureCode": "EVIDENCE_CLEANUP_INCOMPLETE",
+                    "evidenceScope": scope,
+                    "retryable": True,
+                }
+            if proof_failure_code and not callable(finalize):
+                return {
+                    "type": "evidence_finalized",
+                    "status": "FAIL",
+                    "failureCode": "EVIDENCE_CLEANUP_INCOMPLETE",
+                    "evidenceScope": scope,
+                    "retryable": True,
+                }
+        ack = {
+            "type": "evidence_finalized",
+            "status": "FAIL" if failure_code else "PASS",
+        }
+        if failure_code:
+            ack["failureCode"] = failure_code
+        if isinstance(scope, dict):
+            ack["evidenceScope"] = scope
+        if not failure_code:
+            ack.update(validated_transition_result)
+            ack["serverEndUtc"] = _utc_now_iso()
+        registry = getattr(self, "evidence_registry", None)
+        journey_id = scope.get("journeyId") if isinstance(scope, dict) else None
+        scope_matched = isinstance(scope, dict) and expected_scope == scope
+        if registry is not None and isinstance(journey_id, str) and scope_matched:
+            active_claim_matches = getattr(registry, "active_claim_matches", None)
+            registry_finalize = getattr(registry, "finalize", None)
+            try:
+                claim_still_active = bool(
+                    callable(active_claim_matches)
+                    and active_claim_matches(
+                        device_id=str(getattr(self, "device_id", "") or ""),
+                        client_id=str(getattr(self, "client_id", "") or ""),
+                        journey_id=journey_id,
+                        journey_type=scope.get("journeyType"),
+                        proof_profile=scope.get("proofProfile"),
+                    )
+                    is True
+                )
+                if not claim_still_active or not callable(registry_finalize):
+                    raise RuntimeError("evidence enrollment is no longer active")
+                registry_finalize(
+                    journey_id,
+                    status="FAIL" if failure_code else "PASS",
+                    failure_code=failure_code,
+                )
+            except Exception:
+                return {
+                    "type": "evidence_finalized",
+                    "status": "FAIL",
+                    "failureCode": "EVIDENCE_ENROLLMENT_INVALID",
+                    "evidenceScope": scope,
+                    "retryable": True,
+                }
+        if scope_matched and ack.get("status") in ("PASS", "FAIL"):
+            server_end_utc = ack.get("serverEndUtc") or _utc_now_iso()
+            self.logger.bind(tag=TAG).info(
+                "Google Live reliability_window_end window_id={} server_end_utc={}",
+                journey_id,
+                server_end_utc,
+            )
+        if scope_matched:
+            self.google_live_evidence_finalize_result = dict(ack)
+        return dict(ack)
 
     async def _wait_for_voice_provider_ready(self):
         """In manager mode, keep early user input on the selected voice provider path."""
@@ -2553,6 +3015,19 @@ class ConnectionHandler:
             )
         except Exception:
             pass
+        journey_id = getattr(self, "google_live_evidence_journey_id", None)
+        if isinstance(journey_id, str) and journey_id:
+            self.logger.bind(tag=TAG).info(
+                "Google Live evidence_lesson_handoff_acquired journey_id={} "
+                "connection_id={} live_connection_id={} generation={} holder={} "
+                "reason={}",
+                journey_id,
+                str(self.session_id),
+                str(getattr(self, "google_live_live_connection_id", "none")),
+                lease[0],
+                lease[1],
+                reason,
+            )
         return lease
 
     def lesson_start_handoff_token(self):
@@ -2583,13 +3058,51 @@ class ConnectionHandler:
                 )
             except Exception:
                 pass
+            journey_id = getattr(self, "google_live_evidence_journey_id", None)
+            if isinstance(journey_id, str) and journey_id:
+                generation = (
+                    lease[0]
+                    if isinstance(lease, tuple) and len(lease) == 2
+                    else self._lesson_start_handoff_active_generation or 0
+                )
+                holder = (
+                    lease[1] if isinstance(lease, tuple) and len(lease) == 2 else 0
+                )
+                self.logger.bind(tag=TAG).info(
+                    "Google Live evidence_lesson_handoff_failed journey_id={} "
+                    "connection_id={} live_connection_id={} generation={} holder={} "
+                    "outcome={}",
+                    journey_id,
+                    str(self.session_id),
+                    str(getattr(self, "google_live_live_connection_id", "none")),
+                    generation,
+                    holder,
+                    outcome,
+                )
             return False
         if self._lesson_start_handoff_context.get() == lease:
             self._lesson_start_handoff_context.set(None)
+        released_leases = (
+            tuple(sorted(self._lesson_start_handoff_holders)) if force else (lease,)
+        )
         if force:
             self._lesson_start_handoff_holders.clear()
         else:
             self._lesson_start_handoff_holders.remove(lease)
+        journey_id = getattr(self, "google_live_evidence_journey_id", None)
+        if isinstance(journey_id, str) and journey_id:
+            for released_lease in released_leases:
+                self.logger.bind(tag=TAG).info(
+                    "Google Live evidence_lesson_handoff_released journey_id={} "
+                    "connection_id={} live_connection_id={} generation={} holder={} "
+                    "outcome={}",
+                    journey_id,
+                    str(self.session_id),
+                    str(getattr(self, "google_live_live_connection_id", "none")),
+                    released_lease[0],
+                    released_lease[1],
+                    outcome,
+                )
         if self._lesson_start_handoff_holders:
             try:
                 self.logger.bind(tag=TAG).info(
@@ -2849,13 +3362,140 @@ class ConnectionHandler:
 
     async def _close_mcp_background_tasks(self):
         self.mcp_tasks_closed = True
-        tasks = tuple(self.mcp_background_tasks)
+        provider_close_tasks = {
+            record["task"]
+            for record in getattr(self, "voice_provider_close_records", {}).values()
+            if not record["task"].done()
+        }
+        evidence_force_close_tasks = {
+            record["task"]
+            for record in getattr(
+                self, "google_live_evidence_force_close_records", {}
+            ).values()
+            if record["task"] is not None and not record["task"].done()
+        }
+        retained = {
+            task
+            for task in (
+                getattr(self, "google_live_evidence_finalize_task", None),
+                getattr(self, "google_live_evidence_force_close_task", None),
+            )
+            if task is not None and not task.done()
+        } | provider_close_tasks | evidence_force_close_tasks
+        tasks = tuple(self.mcp_background_tasks - retained)
         for task in tasks:
             if not task.done():
                 task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        self.mcp_background_tasks.clear()
+        self.mcp_background_tasks.difference_update(tasks)
+
+    async def _drain_evidence_finalize_task_for_teardown(self, timeout=None):
+        if timeout is None:
+            google_live = (self.config or {}).get("google_live") or {}
+            try:
+                timeout = float(
+                    google_live.get("evidence_finalize_teardown_timeout_sec", 1.0)
+                )
+            except (TypeError, ValueError):
+                timeout = 1.0
+        timeout = max(0.01, min(float(timeout), 5.0))
+        task = getattr(self, "google_live_evidence_finalize_task", None)
+        if task is None:
+            return
+        if task.cancelled():
+            await self._force_close_evidence_provider_for_teardown(timeout)
+            return
+        if task.done():
+            return
+        provider = getattr(self, "voice_provider", None)
+        request_stop = getattr(provider, "request_evidence_finalize_stop", None)
+        try:
+            if callable(request_stop):
+                try:
+                    stop_result = request_stop()
+                    if inspect.isawaitable(stop_result):
+                        await stop_result
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
+            await asyncio.wait_for(
+                asyncio.shield(task), timeout=max(0.0, float(timeout))
+            )
+        except asyncio.TimeoutError:
+            await self._cancel_and_force_close_evidence_finalize(task, timeout)
+        except asyncio.CancelledError:
+            await self._cancel_and_force_close_evidence_finalize(task, timeout)
+            raise
+        except Exception:
+            pass
+
+    async def _cancel_and_force_close_evidence_finalize(self, task, timeout):
+        if not task.done():
+            task.cancel()
+        google_live = (self.config or {}).get("google_live") or {}
+        try:
+            cancel_grace = float(
+                google_live.get("evidence_finalize_cancel_grace_sec", 0.25)
+            )
+        except (TypeError, ValueError):
+            cancel_grace = 0.25
+        cancel_grace = max(0.01, min(cancel_grace, 2.0))
+        await asyncio.wait({task}, timeout=cancel_grace)
+        await self._force_close_evidence_provider_for_teardown(
+            min(float(timeout), cancel_grace)
+        )
+
+    async def _force_close_evidence_provider_for_teardown(self, timeout):
+        provider = getattr(self, "voice_provider", None)
+        records = getattr(self, "google_live_evidence_force_close_records", None)
+        if records is None:
+            records = {}
+            self.google_live_evidence_force_close_records = records
+        record = records.get(id(provider))
+        if record is not None and record["provider"] is provider:
+            close_task = record["task"]
+            if close_task is not None:
+                self.google_live_evidence_force_close_task = close_task
+            return
+
+        force_close = getattr(
+            provider, "force_close_after_evidence_finalize_cancel", None
+        )
+        if not callable(force_close):
+            force_close = getattr(provider, "close", None)
+        if not callable(force_close):
+            return
+        record = {
+            "provider": provider,
+            "task": None,
+            "attempted": True,
+            "completed": False,
+        }
+        records[id(provider)] = record
+        try:
+            result = force_close()
+            if inspect.isawaitable(result):
+                close_task = self.schedule_mcp_background_task(result)
+                if close_task is None:
+                    return
+                close_task.set_name("google-live-evidence-force-close")
+                record["task"] = close_task
+                self.google_live_evidence_force_close_task = close_task
+                done, _pending = await asyncio.wait(
+                    {close_task}, timeout=max(0.01, float(timeout))
+                )
+                if close_task not in done:
+                    close_task.cancel()
+                    return
+                if close_task.cancelled() or close_task.exception() is not None:
+                    return
+            record["completed"] = True
+            self.google_live_evidence_force_close_completed = True
+            self.google_live_evidence_force_closed_provider = provider
+        except Exception:
+            pass
 
     async def _close_connection_owned_mcp_callers(self):
         """Stop every connection-owned path that can use device/server MCP."""
@@ -2868,6 +3508,7 @@ class ConnectionHandler:
                 restore_conversation=False,
                 force=True,
             )
+        await self._drain_evidence_finalize_task_for_teardown()
         await self._close_mcp_background_tasks()
 
         tasks = []
@@ -2960,11 +3601,60 @@ class ConnectionHandler:
             return {"state": "failed", "errorCode": "cached_sd_sync_failed"}
 
     async def _close_voice_provider_for_teardown(self):
-        if self.voice_provider is None:
+        provider = self.voice_provider
+        if provider is None:
             return
+        if (
+            getattr(self, "google_live_evidence_force_close_completed", False)
+            and getattr(self, "google_live_evidence_force_closed_provider", None)
+            is provider
+        ):
+            return
+        records = getattr(self, "voice_provider_close_records", None)
+        if records is None:
+            records = {}
+            self.voice_provider_close_records = records
+        record = records.get(id(provider))
+        if record is None or record["provider"] is not provider:
+            close_task = asyncio.create_task(provider.close())
+            close_task.set_name("voice-provider-close")
+            self.mcp_background_tasks.add(close_task)
+            close_task.add_done_callback(self._mcp_background_task_done)
+            record = {
+                "provider": provider,
+                "task": close_task,
+                "attempted": False,
+            }
+            records[id(provider)] = record
+        else:
+            close_task = record["task"]
+        self.voice_provider_close_task = close_task
+        if record["attempted"]:
+            return
+        record["attempted"] = True
+        google_live = (self.config or {}).get("google_live") or {}
         try:
-            await self.voice_provider.close()
-        except Exception as provider_cleanup_error:
+            timeout = float(
+                google_live.get("evidence_provider_close_timeout_sec", 1.0)
+            )
+        except (TypeError, ValueError):
+            timeout = 1.0
+        timeout = max(0.01, min(timeout, 5.0))
+        try:
+            done, _pending = await asyncio.wait({close_task}, timeout=timeout)
+        except asyncio.CancelledError:
+            if not close_task.done():
+                close_task.cancel()
+            await asyncio.wait({close_task}, timeout=timeout)
+            raise
+        if close_task not in done:
+            close_task.cancel()
+            await asyncio.wait({close_task}, timeout=timeout)
+            return
+        if close_task.cancelled():
+            return
+        provider_cleanup_error = close_task.exception()
+        if provider_cleanup_error is not None:
             self.logger.bind(tag=TAG).error(
                 f"Error cleaning voice provider: {provider_cleanup_error}"
             )
@@ -3057,10 +3747,13 @@ class ConnectionHandler:
                     )
 
             await self._close_voice_provider_for_teardown()
-            voice_provider_closed = True
 
             await self._drain_voice_provider_task_for_teardown()
             voice_provider_task_drained = True
+
+            # Initialization may replace the provider while its task is drained.
+            await self._close_voice_provider_for_teardown()
+            voice_provider_closed = True
 
             # Clear task queue
             self.clear_queues()
@@ -3121,7 +3814,10 @@ class ConnectionHandler:
             finally:
                 try:
                     if not voice_provider_task_drained:
-                        await self._drain_voice_provider_task_for_teardown()
+                        try:
+                            await self._drain_voice_provider_task_for_teardown()
+                        finally:
+                            await self._close_voice_provider_for_teardown()
                 finally:
                     try:
                         self._shutdown_executor_for_teardown()

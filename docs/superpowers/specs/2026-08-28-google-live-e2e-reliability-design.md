@@ -2,10 +2,11 @@
 
 ## Status
 
-Approved interactively on 2026-08-28. This design adds verification around the
-existing Google Live conversation and lesson flows. It does not change runtime
-behavior, production configuration, prompt content, session ownership, fallback
-policy, or firmware protocol.
+Approved interactively on 2026-08-28 and tightened against production history on
+2026-08-30. Baseline commit `b07038b8` is the compatibility reference. This
+design adds verification around the existing Google Live conversation and lesson
+flows. It does not change runtime behavior, production configuration, prompt
+content, session ownership, fallback policy, or firmware protocol.
 
 ## Goal
 
@@ -19,9 +20,17 @@ out of lesson mode. A passing run must demonstrate healthy behavior in steady
 state and under interruption, silence, transient network loss, Google Live
 session reopen, and device reconnect.
 
+"Production-ready" means the tested candidate preserves the accepted behavior
+contracts below, meets the latency and soak budgets, has no known release-blocking
+failure, and produces enough correlated evidence to diagnose a failure without
+guessing. It does not claim that arbitrary future defects are impossible.
+
 ## Constraints
 
 - Preserve the current product flow and runtime implementation.
+- Treat commit `b07038b8` and the behavior contracts in this document as the
+  regression baseline. Any intentional behavior change requires a separate
+  approved design rather than silently updating an E2E expectation.
 - Reuse the existing Google Live client, provider, WebSocket harnesses, log
   analyzer, physical audit, soak runner, and lesson E2E infrastructure.
 - Keep Google Live and `classic_pipeline` verification separate. Google Live
@@ -52,6 +61,101 @@ robot microphone or approved audio fixture
 The suite validates communication across this boundary. Unit-level DSP quality,
 model answer quality, lesson content pedagogy, and renderer pixel correctness
 remain covered by their existing dedicated suites.
+
+## Historical Behavior Compatibility Contract
+
+The E2E gate must explicitly protect behaviors introduced by earlier production
+fixes. Tests should assert externally observable outcomes and lifecycle state,
+not freeze incidental private implementation details.
+
+### Session establishment and ownership
+
+- Google Live may prewarm or open lazily according to the current orchestration,
+  but one device connection owns at most one usable Live session and one receive
+  loop at a time.
+- Session-resumption handles are restored and updated without logging their
+  values. A proactive or reactive reopen cannot duplicate a response or replay
+  buffered audio more than once.
+- Reconnect audio remains bounded by the existing deque capacity, preserves
+  order, and is discarded when replay is unsafe or ownership has changed.
+- Device WebSocket replacement, provider close, task cancellation, and server
+  drain release every connection-owned Live task and lease.
+
+### Audio turn lifecycle
+
+- WebSocket `hello` remains authoritative for Google Live input/output sample
+  rates. Existing Opus decode, resampling state, AEC reference, and output pacing
+  behavior stay continuous across chunks.
+- Starting model audio cancels stale idle-input and forced-interrupt flush tasks;
+  a late flush must not return an already-speaking turn to `WAITING_MODEL`.
+- A clean user turn opens once, finalizes once, and cannot be contaminated by
+  quiet frames or fragments from the previous turn.
+- Trigger fragments used for spoken lesson-start recovery are retained only for
+  the active turn, recover adjacent fragments, and are cleared on Live close.
+- Robot echo does not become a user request. Genuine speech during robot output
+  remains forwardable through the existing AEC/VAD path.
+- Firmware `ping` remains a WebSocket control frame handled by the heartbeat
+  path; Google Live routing must not swallow it and cause an otherwise healthy
+  robot connection to time out.
+
+### Interruption and response ordering
+
+- Barge-in cancels the current response id, clears queued stale output, sends a
+  terminal stop, captures/finalizes the replacement speech, and serves only the
+  newest intent.
+- Per-turn interruption and stop operations remain idempotent. Duplicate Live
+  events cannot send repeated destructive stops or reopen an old response.
+- Delayed transcript, audio, completion, or tool events from an interrupted
+  response are dropped and cannot alter the active interaction state.
+- Output unblock timers and other response guards cancel cleanly on completion,
+  interruption, reconnect, lesson transfer, and provider close.
+
+### Timeout, reconnect, and fallback
+
+- A Google Live receive timeout remains a typed lifecycle event rather than a
+  silent `None` result. Conversation and lesson runtimes must route it through
+  the existing bounded recovery path.
+- A post-resend lesson timeout advances the current retry policy or fails the
+  step cleanly; it cannot leave the lesson running indefinitely with only device
+  WebSocket pings.
+- GOAWAY/session-expiring and transient transport failures use the current
+  bounded reconnect/backoff policy. Authentication, quota, invalid model, and
+  invalid configuration errors do not enter a reconnect storm.
+- Fallback occurs only for the currently approved error classes and ownership
+  states. A fallback must provide an audible or explicit outcome rather than
+  dead air, and Google Live success must not be reported when classic fallback
+  actually served the turn.
+
+### Lesson and conversation handoff
+
+- Spoken `start_lesson` and protected lesson nudge use the same provisional
+  handoff ownership. Late mic, model output, and unrelated tools stay suppressed
+  until lesson startup succeeds or conversation is restored.
+- Duplicate lesson-start requests coalesce into one startup and cannot create a
+  second runtime or release a newer handoff lease from an older task.
+- Failed, refused, timed-out, or cancelled startup restores firmware listening
+  and normal Google Live interaction when the connection remains usable.
+- Successful startup transfers to durable lesson ownership before provisional
+  ownership is released.
+- Lesson prompt output waits for the existing device audio-drain acknowledgement
+  and playback-tail budget, preserving ordered prompt audio without arbitrary
+  sleeps or premature progression.
+- Approved semantic lesson tools remain fenced by active lesson, turn, attempt,
+  step, and response ownership. Stale or unapproved calls cannot advance lesson
+  state.
+- Lesson completion or exit returns to ordinary conversation with no stale
+  lesson prompt, model response, manual-listen latch, or orphan tool ownership.
+
+### Runtime performance and isolation
+
+- Audio rate control remains bound to the active event loop and closes without
+  cross-loop tasks or leaked pacing workers.
+- CPU-heavy audio work continues off the connection event loop according to the
+  current bridge contract; E2E response timing must not be achieved by bypassing
+  codec, AEC, safety, or ownership checks.
+- Google Live and `classic_pipeline` keep separate state, tests, and verdicts.
+  Passing fallback tests cannot mask a broken Live path, and Live test changes
+  cannot modify classic behavior.
 
 ## Test Architecture
 
@@ -160,6 +264,19 @@ The physical sequence is:
 Physical execution remains operator-controlled. The test plan may provide exact
 commands and evidence paths but must not autonomously flash or deploy firmware.
 
+### Layer 5: Production-candidate soak
+
+After the bounded physical journeys pass, run a production-candidate soak using
+the same image/configuration intended for release. The soak contains at least 30
+successful conversational turns over at least 30 minutes, including ten audio
+barge-ins, two controlled quiet windows, one Google Live reopen, one same-device
+WebSocket reconnect, one lesson entry/interactive turn/exit, and a final ordinary
+conversation turn.
+
+The soak fails on the first invariant violation but retains the full bounded
+evidence window. Model answer wording may vary; session ownership, event order,
+audio delivery, latency, cleanup, and error classification may not.
+
 ## Failure Injection
 
 Deterministic and server E2E layers cover these failures without changing the
@@ -174,6 +291,13 @@ normal flow:
 - device WebSocket close followed by same-device reconnect;
 - malformed or unrelated tool event during lesson handoff;
 - lesson startup refusal or timeout followed by conversation restoration.
+- stale idle-input flush firing after model audio starts;
+- firmware heartbeat ping arriving while Google Live owns conversation routing;
+- adjacent or split spoken lesson trigger fragments;
+- output completion arriving before device audio-drain acknowledgement;
+- an old task attempting to release a newer lesson handoff generation;
+- error classification selecting reconnect for auth/quota/config failures;
+- audio pacing or provider cleanup invoked from a replaced event loop.
 
 Faults are injected at test seams or through existing reproduction scripts. No
 production-only chaos switch is introduced.
@@ -205,14 +329,47 @@ production-only chaos switch is introduced.
 ### Reliability budgets
 
 - Real-API connect succeeds within the configured connect timeout.
-- First returned audio is at or below the existing physical gate of 1800 ms for
-  accepted steady-state turns; cold-start measurements are reported separately.
-- Physical barge-in stop latency p95 is at or below the existing 500 ms budget.
+- For steady-state accepted turns, end-of-user-input to first returned audio has
+  p50 at or below 1200 ms and p95 at or below the existing 1800 ms physical
+  gate. Cold starts and post-reconnect turns are reported separately and must
+  remain within their configured bounded timeout.
+- Server interruption-to-firmware-stop latency is at or below the existing
+  strict 250 ms gate, while physical speech-to-stop latency p95 remains at or
+  below the existing 500 ms end-to-end budget.
+- Within an active model response, binary output gaps caused by the TBOT server
+  must not exceed 250 ms unless the logs show an intentional interruption,
+  turn completion, backpressure, or transport recovery boundary.
 - Successful barge-in cycles serve the newest intent in at least 80 percent of
   physical cycles, matching the current soak contract.
 - False-positive interruptions are zero during each controlled idle cycle.
+- The candidate must not regress p50 or p95 first-audio, interruption-stop, or
+  reconnect-recovery latency by more than 15 percent versus a same-environment
+  baseline run from `b07038b8`. A hard budget failure cannot be waived by a good
+  relative comparison.
 - Unexpected fallback, duplicate active session, stale-response audio,
   unhandled exception, and fatal Google Live marker counts are all zero.
+
+### Soak and production readiness
+
+- All required deterministic, real-API, WebSocket, physical, and candidate-soak
+  journeys pass on the exact candidate identity.
+- At least 30 consecutive soak turns complete without a stuck state, missing
+  terminal event, duplicate response, stale audio, reconnect storm, unclassified
+  exception, or unexpected fallback.
+- Receive-loop starts and stops balance for closed/replaced sessions; all
+  connection-owned task counts return to baseline after the soak.
+- Process resources use the existing `course_mode_resource_soak.py` sampling
+  and verdict contract: RSS delta at most 32 MiB, file-descriptor delta at most
+  8, asyncio-task delta at most 4, thread delta at most 4, RSS growth slope at
+  most 1 MiB per sample, and FD/task/thread slope at most 0.25 per sample. The
+  Google Live soak samples before the first turn, after every completed turn or
+  reconnect, and after final cleanup; any monotonic per-turn ownership leak
+  fails even when the absolute delta remains under budget.
+- Every historical behavior contract above maps to at least one named automated
+  regression and, where applicable, one E2E or log-verifier assertion.
+- Any reproducible release-blocking defect remains a failure until fixed and
+  rerun. Flaky reruns without root-cause classification do not convert a failure
+  to pass.
 
 ### Regression safety
 
@@ -266,11 +423,15 @@ The gate is strictly layered:
 3. real Google Live API round trip;
 4. real TBOT WebSocket journeys;
 5. physical robot soak and lesson journey.
+6. production-candidate 30-turn/30-minute soak and baseline comparison.
 
 A lower-layer failure blocks higher-layer execution because hardware evidence
 would otherwise be ambiguous. A higher-layer infrastructure failure is reported
 separately from a product assertion failure. Release is allowed only when every
-required layer is `PASS`; required but unavailable layers remain blocking.
+required layer is `PASS`; required but unavailable layers remain blocking. The
+report records the candidate Git SHA, server image digest, effective redacted
+Google Live configuration fingerprint, firmware identity, fixture checksums, and
+baseline evidence id so production proof cannot be transferred to another build.
 
 ## File Responsibilities for the Implementation Plan
 

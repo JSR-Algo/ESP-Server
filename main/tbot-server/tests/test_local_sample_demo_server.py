@@ -1,7 +1,7 @@
 import importlib.util
+import inspect
 import sys
 from pathlib import Path
-
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "local_sample_demo_server.py"
 
@@ -66,3 +66,10 @@ def test_ensure_project_root_on_path_supports_direct_script_execution(monkeypatc
     module.ensure_project_root_on_path()
 
     assert sys.path[0] == root
+
+
+def test_local_sample_server_shares_websocket_evidence_registry():
+    module = _load_script()
+
+    source = inspect.getsource(module.serve)
+    assert "evidence_registry=ws.evidence_registry" in source

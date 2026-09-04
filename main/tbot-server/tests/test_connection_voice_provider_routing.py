@@ -4,6 +4,7 @@ import json
 import sys
 import types
 import unittest
+from unittest.mock import AsyncMock
 
 
 def _install_connection_import_stubs():
@@ -451,6 +452,34 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             _memory=None,
             _intent=None,
         )
+
+    @staticmethod
+    def _bind_physical_claim(handler, scope, *, snapshot=None, finalize=None):
+        scope.update(
+            {
+                "journeyType": "physical",
+                "proofProfile": "physical-transcript",
+            }
+        )
+        proof_snapshot = {
+            "journeyId": scope["journeyId"],
+            "journeyType": "physical",
+            "proofProfile": "physical-transcript",
+            "transcriptProofEligible": True,
+            "readyToFinalize": True,
+        }
+        if snapshot is not None:
+            proof_snapshot.update(snapshot)
+        handler.evidence_registry = types.SimpleNamespace(
+            safe_snapshot=lambda _journey: dict(proof_snapshot),
+            active_claim_matches=lambda **claims: (
+                claims["journey_id"] == scope["journeyId"]
+                and claims["journey_type"] == "physical"
+                and claims["proof_profile"] == "physical-transcript"
+            ),
+            finalize=finalize or (lambda *_args, **_kwargs: None),
+        )
+        return scope
 
     async def test_handle_connection_starts_classic_provider_before_private_config_finishes(
         self,
@@ -1049,6 +1078,1759 @@ class ConnectionVoiceProviderRoutingTest(unittest.IsolatedAsyncioTestCase):
             connection_module.handleTextMessage = original_handle_text
 
         self.assertEqual(classic_text_calls, ['{"type":"hello","version":1}'])
+
+    async def test_evidence_finalize_awaits_cleanup_and_acks_server_utc(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.websocket = _SendingWebSocket()
+        handler.google_live_evidence_scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        self._bind_physical_claim(handler, handler.google_live_evidence_scope)
+        cleanup_complete = asyncio.Event()
+
+        class Provider:
+            async def finalize_evidence(self):
+                cleanup_complete.set()
+                return {
+                    "status": "PASS",
+                    "journeyId": "bargein-1",
+                    "connectionId": "server-conn-1",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "initialLiveConnectionId": "live-7",
+                    "finalLiveConnectionId": "live-8",
+                    "liveConnectionTransitions": [
+                        {
+                            "attempt": 1,
+                            "fromLiveConnectionId": "live-7",
+                            "toLiveConnectionId": "live-8",
+                        }
+                    ],
+                    "pendingTasks": 0,
+                }
+
+        handler.voice_provider = Provider()
+        original_now = connection_module._utc_now_iso
+        connection_module._utc_now_iso = lambda: "2026-08-31T03:00:10+00:00"
+        try:
+            await handler._route_message(
+                json.dumps(
+                    {
+                        "type": "evidence_finalize",
+                        "evidenceScope": handler.google_live_evidence_scope,
+                    }
+                )
+            )
+        finally:
+            connection_module._utc_now_iso = original_now
+
+        self.assertTrue(cleanup_complete.is_set())
+        ack = json.loads(handler.websocket.sent[-1])
+        self.assertEqual(ack["type"], "evidence_finalized")
+        self.assertEqual(ack["status"], "PASS")
+        self.assertEqual(ack["evidenceScope"], handler.google_live_evidence_scope)
+        self.assertEqual(ack["finalLiveConnectionId"], "live-8")
+        self.assertEqual(len(ack["liveConnectionTransitions"]), 1)
+        self.assertEqual(ack["serverEndUtc"], "2026-08-31T03:00:10+00:00")
+
+    async def test_evidence_finalize_refuses_cleanup_until_transcript_proof_is_ready(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.google_live_evidence_scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        self._bind_physical_claim(
+            handler,
+            handler.google_live_evidence_scope,
+            snapshot={"readyToFinalize": False},
+        )
+        provider = types.SimpleNamespace(finalize_evidence=AsyncMock())
+        handler.voice_provider = provider
+
+        ack = await handler.finalize_google_live_evidence(
+            handler.google_live_evidence_scope
+        )
+
+        self.assertEqual(ack["status"], "FAIL")
+        self.assertEqual(ack["failureCode"], "EVIDENCE_TRANSCRIPT_NOT_READY")
+        self.assertTrue(ack["retryable"])
+        provider.finalize_evidence.assert_not_awaited()
+
+    async def test_evidence_finalize_cleans_up_and_terminally_fails_invalid_proof(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        finalized = []
+        self._bind_physical_claim(
+            handler,
+            scope,
+            snapshot={
+                "transcriptProofEligible": False,
+                "readyToFinalize": False,
+            },
+            finalize=lambda journey_id, status, failure_code=None: finalized.append(
+                (journey_id, status, failure_code)
+            ),
+        )
+        provider = types.SimpleNamespace(
+            finalize_evidence=AsyncMock(
+                return_value={
+                    "status": "PASS",
+                    "journeyId": "bargein-1",
+                    "connectionId": "server-conn-1",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "initialLiveConnectionId": "live-7",
+                    "finalLiveConnectionId": "live-7",
+                    "liveConnectionTransitions": [],
+                    "pendingTasks": 0,
+                }
+            )
+        )
+        handler.voice_provider = provider
+
+        ack = await handler.finalize_google_live_evidence(scope)
+
+        self.assertEqual(ack["status"], "FAIL")
+        self.assertEqual(ack["failureCode"], "EVIDENCE_TRANSCRIPT_INVALID")
+        provider.finalize_evidence.assert_awaited_once()
+        self.assertEqual(
+            finalized,
+            [("bargein-1", "FAIL", "EVIDENCE_TRANSCRIPT_INVALID")],
+        )
+
+    async def test_invalid_transcript_proof_stays_nonterminal_until_cleanup_verifies(self):
+        invalid_cleanup_results = (
+            {
+                "status": "FAIL",
+                "journeyId": "bargein-1",
+                "connectionId": "server-conn-1",
+                "peerIdentityHash": "sha256:" + "a" * 64,
+                "initialLiveConnectionId": "live-7",
+                "finalLiveConnectionId": "live-7",
+                "liveConnectionTransitions": [],
+                "pendingTasks": 0,
+            },
+            {
+                "status": "PASS",
+                "journeyId": "bargein-1",
+                "connectionId": "server-conn-1",
+                "peerIdentityHash": "sha256:" + "a" * 64,
+                "initialLiveConnectionId": "live-7",
+                "finalLiveConnectionId": "live-7",
+                "liveConnectionTransitions": [],
+                "pendingTasks": 1,
+            },
+            {
+                "status": "PASS",
+                "journeyId": "bargein-1",
+                "connectionId": "server-conn-1",
+                "peerIdentityHash": "sha256:" + "a" * 64,
+                "initialLiveConnectionId": "live-7",
+                "finalLiveConnectionId": "live-8",
+                "liveConnectionTransitions": [],
+                "pendingTasks": 0,
+            },
+            RuntimeError("cleanup secret detail"),
+        )
+        for invalid_result in invalid_cleanup_results:
+            with self.subTest(invalid_result=type(invalid_result).__name__):
+                handler = self._build_handler()
+                handler.config["voice_mode"] = {"type": "google_live"}
+                handler.logger = _RecordingLogger()
+                scope = {
+                    "journeyId": "bargein-1",
+                    "connectionId": "server-conn-1",
+                    "liveConnectionId": "live-7",
+                    "initialLiveConnectionId": "live-7",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "serverStartUtc": "2026-08-31T03:00:00+00:00",
+                }
+                handler.google_live_evidence_scope = scope
+                terminal = []
+                self._bind_physical_claim(
+                    handler,
+                    scope,
+                    snapshot={
+                        "transcriptProofEligible": False,
+                        "readyToFinalize": False,
+                    },
+                    finalize=lambda journey_id, status, failure_code=None: terminal.append(
+                        (journey_id, status, failure_code)
+                    ),
+                )
+                valid_cleanup = {
+                    "status": "PASS",
+                    "journeyId": "bargein-1",
+                    "connectionId": "server-conn-1",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "initialLiveConnectionId": "live-7",
+                    "finalLiveConnectionId": "live-7",
+                    "liveConnectionTransitions": [],
+                    "pendingTasks": 0,
+                }
+                class CachedFinalizeProvider:
+                    def __init__(self):
+                        self.results = [invalid_result, valid_cleanup]
+                        self.cached_result = None
+                        self.finalize_calls = 0
+                        self.retry_preparations = 0
+
+                    async def finalize_evidence(self):
+                        self.finalize_calls += 1
+                        if isinstance(self.cached_result, dict):
+                            return dict(self.cached_result)
+                        outcome = self.results.pop(0)
+                        if isinstance(outcome, Exception):
+                            raise outcome
+                        self.cached_result = dict(outcome)
+                        return dict(outcome)
+
+                    def prepare_evidence_finalize_retry(self):
+                        self.retry_preparations += 1
+                        self.cached_result = None
+                        return True
+
+                provider = CachedFinalizeProvider()
+                handler.voice_provider = provider
+
+                first = await handler.finalize_google_live_evidence(scope)
+
+                self.assertEqual(first["status"], "FAIL")
+                self.assertEqual(first["failureCode"], "EVIDENCE_CLEANUP_INCOMPLETE")
+                self.assertTrue(first["retryable"])
+                self.assertEqual(terminal, [])
+                self.assertFalse(
+                    any(
+                        "reliability_window_end" in record[1]
+                        for record in handler.logger.records
+                    )
+                )
+                self.assertFalse(
+                    hasattr(handler, "google_live_evidence_finalize_result")
+                    and isinstance(handler.google_live_evidence_finalize_result, dict)
+                )
+
+                second = await handler.finalize_google_live_evidence(scope)
+
+                self.assertEqual(second["status"], "FAIL")
+                self.assertEqual(second["failureCode"], "EVIDENCE_TRANSCRIPT_INVALID")
+                self.assertEqual(
+                    terminal,
+                    [("bargein-1", "FAIL", "EVIDENCE_TRANSCRIPT_INVALID")],
+                )
+                self.assertEqual(provider.finalize_calls, 2)
+                self.assertEqual(provider.retry_preparations, 1)
+
+    async def test_invalid_transcript_proof_maps_unavailable_cleanup_to_incomplete(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.logger = _RecordingLogger()
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        terminal = []
+        self._bind_physical_claim(
+            handler,
+            scope,
+            snapshot={
+                "transcriptProofEligible": False,
+                "readyToFinalize": False,
+            },
+            finalize=lambda *args, **kwargs: terminal.append((args, kwargs)),
+        )
+        handler.voice_provider = types.SimpleNamespace(
+            finalize_evidence=AsyncMock()
+        )
+        handler.mcp_tasks_closed = True
+
+        result = await handler.finalize_google_live_evidence(scope)
+
+        self.assertEqual(result["failureCode"], "EVIDENCE_CLEANUP_INCOMPLETE")
+        self.assertTrue(result["retryable"])
+        self.assertEqual(terminal, [])
+        self.assertFalse(
+            any("reliability_window_end" in record[1] for record in handler.logger.records)
+        )
+        self.assertIsNone(
+            getattr(handler, "google_live_evidence_finalize_result", None)
+        )
+
+    async def test_invalid_proof_retries_cache_preparation_before_rerunning_cleanup(self):
+        handler = self._build_handler()
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        self._bind_physical_claim(
+            handler,
+            scope,
+            snapshot={
+                "transcriptProofEligible": False,
+                "readyToFinalize": False,
+            },
+            finalize=lambda *_args, **_kwargs: None,
+        )
+        invalid_cleanup = {
+            "status": "FAIL",
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "initialLiveConnectionId": "live-7",
+            "finalLiveConnectionId": "live-7",
+            "liveConnectionTransitions": [],
+            "pendingTasks": 1,
+        }
+        valid_cleanup = {**invalid_cleanup, "status": "PASS", "pendingTasks": 0}
+
+        class Provider:
+            def __init__(self):
+                self.cached = invalid_cleanup
+                self.finalize_calls = 0
+                self.prepare_calls = 0
+
+            async def finalize_evidence(self):
+                self.finalize_calls += 1
+                return dict(self.cached)
+
+            def prepare_evidence_finalize_retry(self):
+                self.prepare_calls += 1
+                if self.prepare_calls == 1:
+                    raise RuntimeError("cache remains owned")
+                self.cached = valid_cleanup
+                return True
+
+        provider = Provider()
+        handler.voice_provider = provider
+
+        first = await handler.finalize_google_live_evidence(scope)
+        retained_task = handler.google_live_evidence_finalize_task
+        self.assertIsNotNone(retained_task)
+        second = await handler.finalize_google_live_evidence(scope)
+        self.assertIsNone(handler.google_live_evidence_finalize_task)
+        third = await handler.finalize_google_live_evidence(scope)
+
+        self.assertEqual(first["failureCode"], "EVIDENCE_CLEANUP_INCOMPLETE")
+        self.assertEqual(second["failureCode"], "EVIDENCE_CLEANUP_INCOMPLETE")
+        self.assertEqual(third["failureCode"], "EVIDENCE_TRANSCRIPT_INVALID")
+        self.assertEqual(provider.prepare_calls, 2)
+        self.assertEqual(provider.finalize_calls, 2)
+
+    async def test_invalid_proof_does_not_await_async_retry_preparation(self):
+        handler = self._build_handler()
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        self._bind_physical_claim(
+            handler,
+            scope,
+            snapshot={
+                "transcriptProofEligible": False,
+                "readyToFinalize": False,
+            },
+            finalize=lambda *_args, **_kwargs: None,
+        )
+        prepare_started = asyncio.Event()
+
+        async def stalled_prepare():
+            prepare_started.set()
+            await asyncio.Event().wait()
+
+        handler.voice_provider = types.SimpleNamespace(
+            finalize_evidence=AsyncMock(
+                return_value={"status": "FAIL", "pendingTasks": 1}
+            ),
+            prepare_evidence_finalize_retry=stalled_prepare,
+        )
+
+        result = await asyncio.wait_for(
+            handler.finalize_google_live_evidence(scope), timeout=0.1
+        )
+
+        self.assertEqual(result["failureCode"], "EVIDENCE_CLEANUP_INCOMPLETE")
+        self.assertFalse(prepare_started.is_set())
+        self.assertIsNotNone(handler.google_live_evidence_finalize_task)
+
+    async def test_evidence_finalize_exposes_shared_idempotent_lifecycle_method(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        self._bind_physical_claim(handler, scope)
+        handler.voice_provider = types.SimpleNamespace(
+            finalize_evidence=AsyncMock(return_value={
+                "status": "PASS",
+                "journeyId": "bargein-1",
+                "connectionId": "server-conn-1",
+                "peerIdentityHash": "sha256:" + "a" * 64,
+                "initialLiveConnectionId": "live-7",
+                "finalLiveConnectionId": "live-7",
+                "liveConnectionTransitions": [],
+                "pendingTasks": 0,
+            })
+        )
+
+        first = await handler.finalize_google_live_evidence(scope)
+        second = await handler.finalize_google_live_evidence(scope)
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["status"], "PASS")
+        handler.voice_provider.finalize_evidence.assert_awaited_once()
+
+    async def test_candidate_lifecycle_finalize_requires_matching_claims_and_cleanup(self):
+        handler = self._build_handler()
+        handler.logger = _RecordingLogger()
+        scope = {
+            "journeyId": "candidate.run-1",
+            "journeyType": "conversation",
+            "proofProfile": "candidate-lifecycle",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        terminal = []
+        handler.evidence_registry = types.SimpleNamespace(
+            safe_snapshot=lambda _journey: {
+                "journeyId": "candidate.run-1",
+                "journeyType": "conversation",
+                "proofProfile": "candidate-lifecycle",
+                "readyToFinalize": True,
+                "transcriptProofEligible": True,
+            },
+            active_claim_matches=lambda **claims: claims["journey_type"] == "conversation"
+            and claims["proof_profile"] == "candidate-lifecycle",
+            finalize=lambda journey_id, status, failure_code=None: terminal.append(
+                (journey_id, status, failure_code)
+            ),
+        )
+        handler.voice_provider = types.SimpleNamespace(
+            finalize_evidence=AsyncMock(
+                return_value={
+                    "status": "PASS",
+                    "journeyId": "candidate.run-1",
+                    "connectionId": "server-conn-1",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "initialLiveConnectionId": "live-7",
+                    "finalLiveConnectionId": "live-7",
+                    "liveConnectionTransitions": [],
+                    "pendingTasks": 0,
+                }
+            )
+        )
+
+        result = await handler.finalize_google_live_evidence(scope)
+        conflict = await handler.finalize_google_live_evidence(
+            {**scope, "journeyType": "bargein"}
+        )
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(conflict["status"], "FAIL")
+        self.assertEqual(conflict["failureCode"], "EVIDENCE_SCOPE_MISMATCH")
+        self.assertEqual(terminal, [("candidate.run-1", "PASS", None)])
+        handler.voice_provider.finalize_evidence.assert_awaited_once()
+
+    async def test_candidate_quiet_finalize_terminal_status_uses_provider_semantic_verdict(self):
+        for semantic_status, expected_status in (("PASS", "PASS"), ("FAIL", "FAIL")):
+            with self.subTest(semantic_status=semantic_status):
+                handler = self._build_handler()
+                scope = {
+                    "journeyId": f"candidate.quiet-{semantic_status.lower()}",
+                    "journeyType": "quiet",
+                    "proofProfile": "candidate-lifecycle",
+                    "connectionId": "server-conn-1",
+                    "liveConnectionId": "live-7",
+                    "initialLiveConnectionId": "live-7",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "serverStartUtc": "2026-08-31T03:00:00+00:00",
+                }
+                handler.google_live_evidence_scope = scope
+                terminal = []
+                handler.evidence_registry = types.SimpleNamespace(
+                    safe_snapshot=lambda _journey: {
+                        "journeyId": scope["journeyId"],
+                        "journeyType": "quiet",
+                        "proofProfile": "candidate-lifecycle",
+                        "semanticProofKind": "quiet",
+                        "quietMode": "silence",
+                    },
+                    active_claim_matches=lambda **_claims: True,
+                    finalize=lambda journey_id, status, failure_code=None: terminal.append(
+                        (journey_id, status, failure_code)
+                    ),
+                )
+                handler.voice_provider = types.SimpleNamespace(
+                    finalize_evidence=AsyncMock(
+                        return_value={
+                            "status": "PASS",
+                            "journeyId": scope["journeyId"],
+                            "connectionId": "server-conn-1",
+                            "peerIdentityHash": "sha256:" + "a" * 64,
+                            "initialLiveConnectionId": "live-7",
+                            "finalLiveConnectionId": "live-7",
+                            "liveConnectionTransitions": [],
+                            "pendingTasks": 0,
+                            "quietSemanticEvidence": {
+                                "status": semantic_status,
+                                "mode": "silence",
+                                "durationMs": 1000,
+                                "responseGeneration": None,
+                                "responseDurationMs": 0,
+                                "outputChunks": 0,
+                                "setupTurnConsumed": False,
+                            },
+                        }
+                    )
+                )
+
+                result = await handler.finalize_google_live_evidence(scope)
+
+                self.assertEqual(result["status"], expected_status)
+                self.assertEqual(terminal[0][1], expected_status)
+                if expected_status == "FAIL":
+                    self.assertEqual(
+                        result["failureCode"], "EVIDENCE_SEMANTIC_INVALID"
+                    )
+
+    async def test_candidate_bargein_semantic_failure_still_cleans_up_before_terminal_fail(self):
+        handler = self._build_handler()
+        scope = {
+            "journeyId": "candidate.bargein-1",
+            "journeyType": "bargein",
+            "proofProfile": "candidate-lifecycle",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-09-02T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        terminal = []
+        handler.evidence_registry = types.SimpleNamespace(
+            safe_snapshot=lambda _journey: {
+                "journeyId": scope["journeyId"],
+                "journeyType": "bargein",
+                "proofProfile": "candidate-lifecycle",
+                "semanticProofKind": "bargein-intent",
+                "semanticEligible": True,
+                "semanticOwnershipReady": False,
+            },
+            active_claim_matches=lambda **_claims: True,
+            finalize=lambda journey_id, status, failure_code=None: terminal.append(
+                (journey_id, status, failure_code)
+            ),
+        )
+        provider = types.SimpleNamespace(
+            finalize_evidence=AsyncMock(
+                return_value={
+                    "status": "PASS",
+                    "journeyId": scope["journeyId"],
+                    "connectionId": scope["connectionId"],
+                    "peerIdentityHash": scope["peerIdentityHash"],
+                    "initialLiveConnectionId": scope["initialLiveConnectionId"],
+                    "finalLiveConnectionId": scope["liveConnectionId"],
+                    "liveConnectionTransitions": [],
+                    "pendingTasks": 0,
+                }
+            )
+        )
+        handler.voice_provider = provider
+
+        result = await handler.finalize_google_live_evidence(scope)
+
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(result["failureCode"], "EVIDENCE_SEMANTIC_NOT_READY")
+        provider.finalize_evidence.assert_awaited_once()
+        self.assertEqual(
+            terminal,
+            [(scope["journeyId"], "FAIL", "EVIDENCE_SEMANTIC_NOT_READY")],
+        )
+
+    async def test_evidence_finalize_rejects_missing_or_unverifiable_registry_claim(self):
+        scope = {
+            "journeyId": "physical.run-1",
+            "journeyType": "physical",
+            "proofProfile": "physical-transcript",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+
+        def raises(_journey):
+            raise RuntimeError("private registry detail")
+
+        registries = {
+            "none": None,
+            "no_snapshot": types.SimpleNamespace(active_claim_matches=lambda **_kw: True),
+            "snapshot_raises": types.SimpleNamespace(
+                safe_snapshot=raises,
+                active_claim_matches=lambda **_kw: True,
+            ),
+            "snapshot_non_dict": types.SimpleNamespace(
+                safe_snapshot=lambda _journey: None,
+                active_claim_matches=lambda **_kw: True,
+            ),
+            "snapshot_wrong_journey": types.SimpleNamespace(
+                safe_snapshot=lambda _journey: {
+                    "journeyId": "physical.run-other",
+                    "journeyType": "physical",
+                    "proofProfile": "physical-transcript",
+                    "transcriptProofEligible": True,
+                    "readyToFinalize": True,
+                },
+                active_claim_matches=lambda **_kw: True,
+            ),
+            "no_matcher": types.SimpleNamespace(
+                safe_snapshot=lambda _journey: {
+                    "journeyId": "physical.run-1",
+                    "journeyType": "physical",
+                    "proofProfile": "physical-transcript",
+                    "transcriptProofEligible": True,
+                    "readyToFinalize": True,
+                },
+            ),
+            "matcher_false": types.SimpleNamespace(
+                safe_snapshot=lambda _journey: {
+                    "journeyId": "physical.run-1",
+                    "journeyType": "physical",
+                    "proofProfile": "physical-transcript",
+                    "transcriptProofEligible": True,
+                    "readyToFinalize": True,
+                },
+                active_claim_matches=lambda **_kw: False,
+            ),
+            "matcher_raises": types.SimpleNamespace(
+                safe_snapshot=lambda _journey: {
+                    "journeyId": "physical.run-1",
+                    "journeyType": "physical",
+                    "proofProfile": "physical-transcript",
+                    "transcriptProofEligible": True,
+                    "readyToFinalize": True,
+                },
+                active_claim_matches=lambda **_kw: raises("unused"),
+            ),
+            "claimless_snapshot": types.SimpleNamespace(
+                safe_snapshot=lambda _journey: {
+                    "transcriptProofEligible": True,
+                    "readyToFinalize": True,
+                },
+                active_claim_matches=lambda **_kw: True,
+            ),
+        }
+        for name, registry in registries.items():
+            with self.subTest(name=name):
+                handler = self._build_handler()
+                handler.logger = _RecordingLogger()
+                handler.google_live_evidence_scope = dict(scope)
+                handler.evidence_registry = registry
+                terminal = []
+                if registry is not None:
+                    registry.finalize = lambda *args, **kwargs: terminal.append(
+                        (args, kwargs)
+                    )
+                provider = types.SimpleNamespace(
+                    finalize_evidence=AsyncMock(
+                        return_value={
+                            "status": "PASS",
+                            "journeyId": "physical.run-1",
+                            "connectionId": "server-conn-1",
+                            "peerIdentityHash": "sha256:" + "a" * 64,
+                            "initialLiveConnectionId": "live-7",
+                            "finalLiveConnectionId": "live-7",
+                            "liveConnectionTransitions": [],
+                            "pendingTasks": 0,
+                        }
+                    )
+                )
+                handler.voice_provider = provider
+
+                result = await handler.finalize_google_live_evidence(scope)
+
+                self.assertEqual(result["status"], "FAIL")
+                self.assertEqual(
+                    result["failureCode"], "EVIDENCE_ENROLLMENT_INVALID"
+                )
+                self.assertTrue(result["retryable"])
+                provider.finalize_evidence.assert_not_awaited()
+                self.assertEqual(terminal, [])
+                self.assertFalse(
+                    any(
+                        "reliability_window_end" in record[1]
+                        for record in handler.logger.records
+                    )
+                )
+                self.assertIsNone(
+                    getattr(handler, "google_live_evidence_finalize_result", None)
+                )
+
+    async def test_candidate_lifecycle_claim_mismatch_does_not_run_cleanup_or_close_window(self):
+        handler = self._build_handler()
+        handler.logger = _RecordingLogger()
+        scope = {
+            "journeyId": "candidate.run-1",
+            "journeyType": "conversation",
+            "proofProfile": "candidate-lifecycle",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        terminal = []
+        handler.evidence_registry = types.SimpleNamespace(
+            safe_snapshot=lambda _journey: {
+                "journeyId": "candidate.run-1",
+                "journeyType": "bargein",
+                "proofProfile": "candidate-lifecycle",
+                "readyToFinalize": True,
+                "transcriptProofEligible": True,
+            },
+            active_claim_matches=lambda **_claims: False,
+            finalize=lambda *args, **kwargs: terminal.append((args, kwargs)),
+        )
+        provider = types.SimpleNamespace(finalize_evidence=AsyncMock())
+        handler.voice_provider = provider
+
+        result = await handler.finalize_google_live_evidence(scope)
+
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(result["failureCode"], "EVIDENCE_ENROLLMENT_INVALID")
+        self.assertTrue(result["retryable"])
+        provider.finalize_evidence.assert_not_awaited()
+        self.assertEqual(terminal, [])
+        self.assertFalse(
+            any("reliability_window_end" in record[1] for record in handler.logger.records)
+        )
+
+    async def test_candidate_lifecycle_invalid_cleanup_stays_retryable_and_nonterminal(self):
+        base_result = {
+            "status": "PASS",
+            "journeyId": "candidate.run-1",
+            "connectionId": "server-conn-1",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "initialLiveConnectionId": "live-7",
+            "finalLiveConnectionId": "live-7",
+            "liveConnectionTransitions": [],
+            "pendingTasks": 0,
+        }
+        invalid_results = (
+            {**base_result, "status": "FAIL"},
+            {**base_result, "pendingTasks": 1},
+            {**base_result, "finalLiveConnectionId": "live-8"},
+            RuntimeError("private cleanup detail"),
+        )
+        for invalid_result in invalid_results:
+            with self.subTest(invalid_result=type(invalid_result).__name__):
+                handler = self._build_handler()
+                handler.logger = _RecordingLogger()
+                scope = {
+                    "journeyId": "candidate.run-1",
+                    "journeyType": "conversation",
+                    "proofProfile": "candidate-lifecycle",
+                    "connectionId": "server-conn-1",
+                    "liveConnectionId": "live-7",
+                    "initialLiveConnectionId": "live-7",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "serverStartUtc": "2026-08-31T03:00:00+00:00",
+                }
+                handler.google_live_evidence_scope = scope
+                terminal = []
+                handler.evidence_registry = types.SimpleNamespace(
+                    safe_snapshot=lambda _journey: {
+                        "journeyId": "candidate.run-1",
+                        "journeyType": "conversation",
+                        "proofProfile": "candidate-lifecycle",
+                        "readyToFinalize": True,
+                        "transcriptProofEligible": True,
+                    },
+                    active_claim_matches=lambda **_claims: True,
+                    finalize=lambda *args, terminal=terminal, **kwargs: terminal.append(
+                        (args, kwargs)
+                    ),
+                )
+                if isinstance(invalid_result, Exception):
+                    finalize = AsyncMock(side_effect=invalid_result)
+                else:
+                    finalize = AsyncMock(return_value=invalid_result)
+                handler.voice_provider = types.SimpleNamespace(
+                    finalize_evidence=finalize
+                )
+
+                result = await handler.finalize_google_live_evidence(scope)
+
+                self.assertEqual(result["status"], "FAIL")
+                self.assertEqual(result["failureCode"], "EVIDENCE_CLEANUP_INCOMPLETE")
+                self.assertTrue(result["retryable"])
+                self.assertEqual(terminal, [])
+                self.assertFalse(
+                    any(
+                        "reliability_window_end" in record[1]
+                        for record in handler.logger.records
+                    )
+                )
+                self.assertIsNone(
+                    getattr(handler, "google_live_evidence_finalize_result", None)
+                )
+
+    async def test_candidate_lifecycle_retries_cleanup_only_after_explicit_prepare(self):
+        for hook_result, expected_calls in ((None, 1), (False, 1), (True, 2)):
+            with self.subTest(hook_result=hook_result):
+                handler = self._build_handler()
+                handler.logger = _RecordingLogger()
+                scope = {
+                    "journeyId": "candidate.run-1",
+                    "journeyType": "conversation",
+                    "proofProfile": "candidate-lifecycle",
+                    "connectionId": "server-conn-1",
+                    "liveConnectionId": "live-7",
+                    "initialLiveConnectionId": "live-7",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "serverStartUtc": "2026-08-31T03:00:00+00:00",
+                }
+                handler.google_live_evidence_scope = scope
+                terminal = []
+                handler.evidence_registry = types.SimpleNamespace(
+                    safe_snapshot=lambda _journey: {
+                        "journeyId": "candidate.run-1",
+                        "journeyType": "conversation",
+                        "proofProfile": "candidate-lifecycle",
+                        "readyToFinalize": True,
+                    },
+                    active_claim_matches=lambda **_claims: True,
+                    finalize=lambda journey_id, status, failure_code=None: terminal.append(
+                        (journey_id, status, failure_code)
+                    ),
+                )
+                invalid = {"status": "FAIL", "pendingTasks": 1}
+                valid = {
+                    "status": "PASS",
+                    "journeyId": "candidate.run-1",
+                    "connectionId": "server-conn-1",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "initialLiveConnectionId": "live-7",
+                    "finalLiveConnectionId": "live-7",
+                    "liveConnectionTransitions": [],
+                    "pendingTasks": 0,
+                }
+                provider = types.SimpleNamespace(
+                    finalize_evidence=AsyncMock(side_effect=[invalid, valid])
+                )
+                if hook_result is not None:
+                    provider.prepare_evidence_finalize_retry = lambda: hook_result
+                handler.voice_provider = provider
+
+                first = await handler.finalize_google_live_evidence(scope)
+                second = await handler.finalize_google_live_evidence(scope)
+
+                self.assertEqual(first["failureCode"], "EVIDENCE_CLEANUP_INCOMPLETE")
+                self.assertEqual(provider.finalize_evidence.await_count, expected_calls)
+                if hook_result is True:
+                    self.assertEqual(second["status"], "PASS")
+                    self.assertEqual(terminal, [("candidate.run-1", "PASS", None)])
+                else:
+                    self.assertEqual(second["failureCode"], "EVIDENCE_CLEANUP_INCOMPLETE")
+                    self.assertEqual(terminal, [])
+
+    async def test_registry_finalize_failure_after_cleanup_emits_no_terminal_boundary(self):
+        handler = self._build_handler()
+        handler.logger = _RecordingLogger()
+        scope = {
+            "journeyId": "candidate.run-1",
+            "journeyType": "conversation",
+            "proofProfile": "candidate-lifecycle",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        def fail_registry_finalize(*_args, **_kwargs):
+            raise RuntimeError("expired private state")
+
+        handler.evidence_registry = types.SimpleNamespace(
+            safe_snapshot=lambda _journey: {
+                "journeyId": "candidate.run-1",
+                "journeyType": "conversation",
+                "proofProfile": "candidate-lifecycle",
+                "readyToFinalize": True,
+            },
+            active_claim_matches=lambda **_claims: True,
+            finalize=fail_registry_finalize,
+        )
+        handler.voice_provider = types.SimpleNamespace(
+            finalize_evidence=AsyncMock(
+                return_value={
+                    "status": "PASS",
+                    "journeyId": "candidate.run-1",
+                    "connectionId": "server-conn-1",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "initialLiveConnectionId": "live-7",
+                    "finalLiveConnectionId": "live-7",
+                    "liveConnectionTransitions": [],
+                    "pendingTasks": 0,
+                }
+            )
+        )
+
+        result = await handler.finalize_google_live_evidence(scope)
+
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(result["failureCode"], "EVIDENCE_ENROLLMENT_INVALID")
+        self.assertTrue(result["retryable"])
+        self.assertFalse(
+            any("reliability_window_end" in record[1] for record in handler.logger.records)
+        )
+        self.assertIsNone(
+            getattr(handler, "google_live_evidence_finalize_result", None)
+        )
+
+    async def test_evidence_finalize_concurrent_callers_emit_one_terminal_boundary(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.logger = _RecordingLogger()
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        self._bind_physical_claim(handler, scope)
+        handler.voice_provider = types.SimpleNamespace(
+            finalize_evidence=AsyncMock(return_value={
+                "status": "PASS",
+                "journeyId": "bargein-1",
+                "connectionId": "server-conn-1",
+                "peerIdentityHash": "sha256:" + "a" * 64,
+                "initialLiveConnectionId": "live-7",
+                "finalLiveConnectionId": "live-7",
+                "liveConnectionTransitions": [],
+                "pendingTasks": 0,
+            })
+        )
+
+        first, second = await asyncio.gather(
+            handler.finalize_google_live_evidence(scope),
+            handler.finalize_google_live_evidence(scope),
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            sum("reliability_window_end" in record[1] for record in handler.logger.records),
+            1,
+        )
+
+    async def test_evidence_finalize_rejects_scope_mismatch_without_cleanup(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.websocket = _SendingWebSocket()
+        handler.google_live_evidence_scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        self._bind_physical_claim(handler, handler.google_live_evidence_scope)
+        provider = types.SimpleNamespace(finalize_evidence=AsyncMock())
+        handler.voice_provider = provider
+
+        await handler._route_message(
+            json.dumps(
+                {
+                    "type": "evidence_finalize",
+                    "evidenceScope": {
+                        **handler.google_live_evidence_scope,
+                        "connectionId": "other-connection",
+                    },
+                }
+            )
+        )
+
+        provider.finalize_evidence.assert_not_awaited()
+        ack = json.loads(handler.websocket.sent[-1])
+        self.assertEqual(ack["status"], "FAIL")
+        self.assertEqual(ack["failureCode"], "EVIDENCE_SCOPE_MISMATCH")
+
+    async def test_evidence_finalize_fails_closed_on_timeout(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.config["google_live"] = {"evidence_finalize_timeout_sec": 0.1}
+        handler.websocket = _SendingWebSocket()
+        handler.google_live_evidence_scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        self._bind_physical_claim(handler, handler.google_live_evidence_scope)
+
+        release_cleanup = asyncio.Event()
+        cancelled = []
+
+        async def never_finishes():
+            try:
+                await release_cleanup.wait()
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+        handler.voice_provider = types.SimpleNamespace(
+            finalize_evidence=never_finishes
+        )
+
+        await handler._route_message(
+            json.dumps(
+                {
+                    "type": "evidence_finalize",
+                    "evidenceScope": handler.google_live_evidence_scope,
+                }
+            )
+        )
+
+        ack = json.loads(handler.websocket.sent[-1])
+        self.assertEqual(ack["status"], "FAIL")
+        self.assertEqual(ack["failureCode"], "EVIDENCE_FINALIZE_TIMEOUT")
+        self.assertEqual(ack["evidenceScope"], handler.google_live_evidence_scope)
+        self.assertEqual(cancelled, [])
+        release_cleanup.set()
+        await asyncio.sleep(0)
+
+    async def test_evidence_finalize_timeout_leaves_boundary_open_until_cleanup_terminal(self):
+        handler = self._build_handler()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.config["google_live"] = {"evidence_finalize_timeout_sec": 0.1}
+        handler.logger = _RecordingLogger()
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        release = asyncio.Event()
+        terminal = []
+        self._bind_physical_claim(
+            handler,
+            scope,
+            finalize=lambda journey_id, status, failure_code=None: terminal.append(
+                (journey_id, status, failure_code)
+            ),
+        )
+
+        async def slow_cleanup():
+            await release.wait()
+            return {
+                "status": "PASS",
+                "journeyId": "bargein-1",
+                "connectionId": "server-conn-1",
+                "peerIdentityHash": "sha256:" + "a" * 64,
+                "initialLiveConnectionId": "live-7",
+                "finalLiveConnectionId": "live-7",
+                "liveConnectionTransitions": [],
+                "pendingTasks": 0,
+            }
+
+        handler.voice_provider = types.SimpleNamespace(
+            finalize_evidence=slow_cleanup,
+            request_evidence_finalize_stop=AsyncMock(),
+        )
+
+        first = await handler.finalize_google_live_evidence(scope)
+        self.assertEqual(first["failureCode"], "EVIDENCE_FINALIZE_TIMEOUT")
+        self.assertFalse(
+            any("reliability_window_end" in record[1] for record in handler.logger.records)
+        )
+        self.assertEqual(terminal, [])
+
+        release.set()
+        second, third = await asyncio.gather(
+            handler.finalize_google_live_evidence(scope),
+            handler.finalize_google_live_evidence(scope),
+        )
+        self.assertEqual(second, third)
+        self.assertEqual(second["status"], "PASS")
+        self.assertEqual(
+            sum("reliability_window_end" in record[1] for record in handler.logger.records),
+            1,
+        )
+        self.assertEqual(terminal, [("bargein-1", "PASS", None)])
+
+    async def test_connection_close_drains_tracked_evidence_finalize_task(self):
+        handler = self._build_handler()
+        handler.logger = _RecordingLogger()
+        handler.config["voice_mode"] = {"type": "google_live"}
+        handler.config["google_live"] = {"evidence_finalize_timeout_sec": 0.1}
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        self._bind_physical_claim(handler, scope)
+        release = asyncio.Event()
+        stop_requested = asyncio.Event()
+
+        async def hanging_cleanup():
+            await release.wait()
+            return {"status": "FAIL", "pendingTasks": 1}
+
+        handler.voice_provider = types.SimpleNamespace(
+            finalize_evidence=hanging_cleanup,
+            request_evidence_finalize_stop=AsyncMock(
+                side_effect=lambda: stop_requested.set()
+            ),
+            close=AsyncMock(),
+        )
+
+        timed_out = await handler.finalize_google_live_evidence(scope)
+        task = handler.google_live_evidence_finalize_task
+        self.assertEqual(timed_out["failureCode"], "EVIDENCE_FINALIZE_TIMEOUT")
+        self.assertIn(task, handler.mcp_background_tasks)
+        self.assertEqual(task.get_name(), "google-live-evidence-finalize")
+
+        await handler._drain_evidence_finalize_task_for_teardown(timeout=0.1)
+
+        self.assertTrue(stop_requested.is_set())
+        self.assertTrue(task.done())
+        self.assertNotIn(task, handler.mcp_background_tasks)
+        retry = await handler.finalize_google_live_evidence(scope)
+        self.assertTrue(retry["retryable"])
+        self.assertEqual(retry["failureCode"], "EVIDENCE_FINALIZE_CANCELLED")
+        self.assertFalse(
+            any("reliability_window_end" in record[1] for record in handler.logger.records)
+        )
+        self.assertIsNone(
+            getattr(handler, "google_live_evidence_finalize_result", None)
+        )
+        await handler._close_voice_provider_for_teardown()
+        handler.voice_provider.close.assert_awaited_once()
+
+    async def test_evidence_finalize_propagates_caller_cancel_during_cleanup_grace(self):
+        handler = self._build_handler()
+        handler.config["google_live"] = {"evidence_finalize_timeout_sec": 0.1}
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-7",
+            "initialLiveConnectionId": "live-7",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "serverStartUtc": "2026-08-31T03:00:00+00:00",
+        }
+        handler.google_live_evidence_scope = scope
+        self._bind_physical_claim(handler, scope)
+        release = asyncio.Event()
+
+        async def hanging_cleanup():
+            await release.wait()
+
+        handler.voice_provider = types.SimpleNamespace(
+            finalize_evidence=hanging_cleanup,
+            request_evidence_finalize_stop=AsyncMock(),
+        )
+        caller = asyncio.create_task(handler.finalize_google_live_evidence(scope))
+        await asyncio.sleep(0.15)
+        caller.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+
+        release.set()
+        await asyncio.gather(
+            handler.google_live_evidence_finalize_task, return_exceptions=True
+        )
+
+    async def test_failed_evidence_force_close_keeps_normal_close_fallback(self):
+        handler = self._build_handler()
+        handler.voice_provider = types.SimpleNamespace(
+            force_close_after_evidence_finalize_cancel=AsyncMock(
+                side_effect=RuntimeError("force close failed")
+            ),
+            close=AsyncMock(),
+        )
+
+        await handler._force_close_evidence_provider_for_teardown(0.1)
+        await handler._close_voice_provider_for_teardown()
+
+        handler.voice_provider.close.assert_awaited_once()
+
+    async def test_evidence_finalize_drain_propagates_caller_cancellation(self):
+        handler = self._build_handler()
+        release = asyncio.Event()
+
+        async def hanging_finalize():
+            await release.wait()
+
+        finalize_task = handler.schedule_mcp_background_task(hanging_finalize())
+        finalize_task.set_name("google-live-evidence-finalize")
+        handler.google_live_evidence_finalize_task = finalize_task
+        handler.voice_provider = types.SimpleNamespace(
+            request_evidence_finalize_stop=AsyncMock(),
+            force_close_after_evidence_finalize_cancel=AsyncMock(),
+            close=AsyncMock(),
+        )
+        drain = asyncio.create_task(
+            handler._drain_evidence_finalize_task_for_teardown(timeout=1.0)
+        )
+        await asyncio.sleep(0)
+        drain.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await drain
+
+        handler.voice_provider.request_evidence_finalize_stop.assert_awaited_once()
+        handler.voice_provider.force_close_after_evidence_finalize_cancel.assert_awaited_once()
+        self.assertTrue(finalize_task.done())
+        self.assertNotIn(finalize_task, handler.mcp_background_tasks)
+
+    async def test_evidence_finalize_drain_is_bounded_when_task_swallows_cancel(self):
+        handler = self._build_handler()
+        handler.logger = _RecordingLogger()
+        handler.config["google_live"] = {
+            "evidence_finalize_cancel_grace_sec": 0.05,
+        }
+        release = asyncio.Event()
+        cancellation_swallowed = asyncio.Event()
+        terminal = []
+        handler.evidence_registry = types.SimpleNamespace(
+            finalize=lambda *args, **kwargs: terminal.append((args, kwargs))
+        )
+
+        async def cancellation_resistant_finalize():
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    cancellation_swallowed.set()
+
+        finalize_task = handler.schedule_mcp_background_task(
+            cancellation_resistant_finalize()
+        )
+        finalize_task.set_name("google-live-evidence-finalize")
+        handler.google_live_evidence_finalize_task = finalize_task
+        handler.voice_provider = types.SimpleNamespace(
+            request_evidence_finalize_stop=AsyncMock(),
+            force_close_after_evidence_finalize_cancel=AsyncMock(),
+            close=AsyncMock(),
+        )
+
+        started = asyncio.get_running_loop().time()
+        await asyncio.wait_for(
+            handler._drain_evidence_finalize_task_for_teardown(timeout=0.05),
+            timeout=0.3,
+        )
+        elapsed = asyncio.get_running_loop().time() - started
+
+        self.assertLess(elapsed, 0.2)
+        self.assertTrue(cancellation_swallowed.is_set())
+        handler.voice_provider.force_close_after_evidence_finalize_cancel.assert_awaited_once()
+        self.assertFalse(finalize_task.done())
+        self.assertIn(finalize_task, handler.mcp_background_tasks)
+        self.assertIsNone(
+            getattr(handler, "google_live_evidence_finalize_result", None)
+        )
+        self.assertEqual(terminal, [])
+        self.assertFalse(
+            any("reliability_window_end" in record[1] for record in handler.logger.records)
+        )
+        await asyncio.wait_for(handler._close_mcp_background_tasks(), timeout=0.2)
+        self.assertIn(finalize_task, handler.mcp_background_tasks)
+        release.set()
+        await asyncio.wait_for(finalize_task, timeout=0.3)
+        await asyncio.sleep(0)
+        self.assertNotIn(finalize_task, handler.mcp_background_tasks)
+
+    async def test_cancelled_evidence_drain_is_bounded_when_task_swallows_cancel(self):
+        handler = self._build_handler()
+        handler.logger = _RecordingLogger()
+        handler.config["google_live"] = {
+            "evidence_finalize_cancel_grace_sec": 0.05,
+        }
+        release = asyncio.Event()
+        terminal = []
+        handler.evidence_registry = types.SimpleNamespace(
+            finalize=lambda *args, **kwargs: terminal.append((args, kwargs))
+        )
+
+        async def cancellation_resistant_finalize():
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    pass
+
+        finalize_task = handler.schedule_mcp_background_task(
+            cancellation_resistant_finalize()
+        )
+        finalize_task.set_name("google-live-evidence-finalize")
+        handler.google_live_evidence_finalize_task = finalize_task
+        handler.voice_provider = types.SimpleNamespace(
+            request_evidence_finalize_stop=AsyncMock(),
+            force_close_after_evidence_finalize_cancel=AsyncMock(),
+            close=AsyncMock(),
+        )
+        drain = asyncio.create_task(
+            handler._drain_evidence_finalize_task_for_teardown(timeout=1.0)
+        )
+        await asyncio.sleep(0)
+        started = asyncio.get_running_loop().time()
+        drain.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(drain, timeout=0.3)
+        elapsed = asyncio.get_running_loop().time() - started
+
+        self.assertLess(elapsed, 0.2)
+        handler.voice_provider.force_close_after_evidence_finalize_cancel.assert_awaited_once()
+        self.assertFalse(finalize_task.done())
+        self.assertIn(finalize_task, handler.mcp_background_tasks)
+        self.assertEqual(terminal, [])
+        self.assertFalse(
+            any("reliability_window_end" in record[1] for record in handler.logger.records)
+        )
+        release.set()
+        await asyncio.wait_for(finalize_task, timeout=0.3)
+        await asyncio.sleep(0)
+        self.assertNotIn(finalize_task, handler.mcp_background_tasks)
+
+    async def test_full_close_bounds_reentrant_provider_close_after_evidence_detach(self):
+        handler = self._build_handler()
+        handler.logger = _RecordingLogger()
+        handler.voice_provider_task = None
+        handler.config["google_live"] = {
+            "evidence_finalize_cancel_grace_sec": 0.05,
+            "evidence_finalize_teardown_timeout_sec": 0.05,
+            "evidence_provider_close_timeout_sec": 0.05,
+        }
+        release_finalize = asyncio.Event()
+        release_force_close = asyncio.Event()
+        close_calls = 0
+        terminal = []
+        handler.evidence_registry = types.SimpleNamespace(
+            finalize=lambda *args, **kwargs: terminal.append((args, kwargs))
+        )
+
+        async def cancellation_resistant(event):
+            while not event.is_set():
+                try:
+                    await event.wait()
+                except asyncio.CancelledError:
+                    pass
+
+        finalize_task = handler.schedule_mcp_background_task(
+            cancellation_resistant(release_finalize)
+        )
+        finalize_task.set_name("google-live-evidence-finalize")
+        handler.google_live_evidence_finalize_task = finalize_task
+
+        async def force_close():
+            await cancellation_resistant(release_force_close)
+
+        async def provider_close():
+            nonlocal close_calls
+            close_calls += 1
+            await finalize_task
+
+        handler.voice_provider = types.SimpleNamespace(
+            request_evidence_finalize_stop=AsyncMock(),
+            force_close_after_evidence_finalize_cancel=force_close,
+            close=provider_close,
+        )
+        close_task = asyncio.create_task(handler.close())
+        done, _pending = await asyncio.wait({close_task}, timeout=0.3)
+        bounded = close_task in done
+        finalize_pending = not finalize_task.done()
+        finalize_accounted = finalize_task in handler.mcp_background_tasks
+        release_finalize.set()
+        release_force_close.set()
+        await asyncio.wait_for(finalize_task, timeout=0.3)
+        if not close_task.done():
+            await asyncio.wait_for(close_task, timeout=0.3)
+
+        self.assertTrue(bounded)
+        self.assertEqual(close_calls, 1)
+        self.assertTrue(finalize_pending)
+        self.assertTrue(finalize_accounted)
+        self.assertEqual(terminal, [])
+        self.assertFalse(
+            any("reliability_window_end" in record[1] for record in handler.logger.records)
+        )
+        force_task = handler.google_live_evidence_force_close_task
+        provider_close_task = handler.voice_provider_close_task
+        await asyncio.wait_for(force_task, timeout=0.3)
+        await asyncio.wait_for(provider_close_task, timeout=0.3)
+        await asyncio.sleep(0)
+        self.assertNotIn(finalize_task, handler.mcp_background_tasks)
+        self.assertNotIn(force_task, handler.mcp_background_tasks)
+        self.assertNotIn(provider_close_task, handler.mcp_background_tasks)
+
+    async def test_full_close_propagates_cancel_with_reentrant_provider_close(self):
+        handler = self._build_handler()
+        handler.voice_provider_task = None
+        handler.config["google_live"] = {
+            "evidence_finalize_cancel_grace_sec": 0.05,
+            "evidence_finalize_teardown_timeout_sec": 0.05,
+            "evidence_provider_close_timeout_sec": 0.05,
+        }
+        release = asyncio.Event()
+        release_force_close = asyncio.Event()
+        stop_requested = asyncio.Event()
+        close_calls = 0
+
+        async def cancellation_resistant():
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    pass
+
+        finalize_task = handler.schedule_mcp_background_task(
+            cancellation_resistant()
+        )
+        finalize_task.set_name("google-live-evidence-finalize")
+        handler.google_live_evidence_finalize_task = finalize_task
+
+        async def request_stop():
+            stop_requested.set()
+
+        async def provider_close():
+            nonlocal close_calls
+            close_calls += 1
+            await finalize_task
+
+        handler.voice_provider = types.SimpleNamespace(
+            request_evidence_finalize_stop=request_stop,
+            force_close_after_evidence_finalize_cancel=lambda: cancellation_resistant_force_close(),
+            close=provider_close,
+        )
+
+        async def cancellation_resistant_force_close():
+            while not release_force_close.is_set():
+                try:
+                    await release_force_close.wait()
+                except asyncio.CancelledError:
+                    pass
+        close_task = asyncio.create_task(handler.close())
+        await asyncio.wait_for(stop_requested.wait(), timeout=0.2)
+        close_task.cancel()
+        done, _pending = await asyncio.wait({close_task}, timeout=0.3)
+        propagated_in_bound = close_task in done
+        finalize_pending = not finalize_task.done()
+        finalize_accounted = finalize_task in handler.mcp_background_tasks
+        release.set()
+        release_force_close.set()
+        await asyncio.wait_for(finalize_task, timeout=0.3)
+        if not close_task.done():
+            close_task.cancel()
+            await asyncio.gather(close_task, return_exceptions=True)
+
+        self.assertTrue(propagated_in_bound)
+        with self.assertRaises(asyncio.CancelledError):
+            await close_task
+        self.assertEqual(close_calls, 1)
+        self.assertTrue(finalize_pending)
+        self.assertTrue(finalize_accounted)
+        await asyncio.wait_for(handler.voice_provider_close_task, timeout=0.3)
+
+    async def test_full_close_closes_provider_replaced_during_voice_task_drain(self):
+        handler = self._build_handler()
+        handler.config["google_live"] = {
+            "evidence_provider_close_timeout_sec": 0.05,
+        }
+        events = []
+        provider_replaced = asyncio.Event()
+
+        class Provider:
+            def __init__(self, name):
+                self.name = name
+                self.close_calls = 0
+
+            async def close(self):
+                self.close_calls += 1
+                if self.name == "old":
+                    while not provider_replaced.is_set():
+                        try:
+                            await provider_replaced.wait()
+                        except asyncio.CancelledError:
+                            pass
+                events.append(f"close-{self.name}")
+
+        old_provider = Provider("old")
+        replacement_provider = Provider("replacement")
+        handler.voice_provider = old_provider
+
+        async def replace_during_drain():
+            try:
+                await asyncio.Event().wait()
+            finally:
+                handler.voice_provider = replacement_provider
+                events.append("provider-replaced")
+                provider_replaced.set()
+
+        handler.voice_provider_task = asyncio.create_task(replace_during_drain())
+
+        await asyncio.wait_for(handler.close(), timeout=0.3)
+        await asyncio.wait_for(handler.close(), timeout=0.3)
+
+        self.assertEqual(events, [
+            "provider-replaced",
+            "close-old",
+            "close-replacement",
+        ])
+        self.assertEqual(old_provider.close_calls, 1)
+        self.assertEqual(replacement_provider.close_calls, 1)
+
+    async def test_repeated_full_close_retains_resistant_provider_close_task(self):
+        handler = self._build_handler()
+        handler.voice_provider_task = None
+        handler.config["google_live"] = {
+            "evidence_provider_close_timeout_sec": 0.05,
+        }
+        release = asyncio.Event()
+        close_calls = 0
+
+        async def resistant_close():
+            nonlocal close_calls
+            close_calls += 1
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    pass
+
+        handler.voice_provider = types.SimpleNamespace(close=resistant_close)
+
+        await asyncio.wait_for(handler.close(), timeout=0.3)
+        close_task = handler.voice_provider_close_task
+        self.assertFalse(close_task.done())
+        self.assertIn(close_task, handler.mcp_background_tasks)
+
+        await asyncio.wait_for(handler.close(), timeout=0.3)
+
+        self.assertEqual(close_calls, 1)
+        self.assertFalse(close_task.done())
+        self.assertIn(close_task, handler.mcp_background_tasks)
+        release.set()
+        await asyncio.wait_for(close_task, timeout=0.3)
+        await asyncio.sleep(0)
+        self.assertNotIn(close_task, handler.mcp_background_tasks)
+
+    async def test_repeated_full_close_reuses_resistant_force_close_per_provider(self):
+        handler = self._build_handler()
+        handler.logger = _RecordingLogger()
+        handler.voice_provider_task = None
+        handler.config["google_live"] = {
+            "evidence_finalize_teardown_timeout_sec": 0.05,
+            "evidence_finalize_cancel_grace_sec": 0.05,
+            "evidence_provider_close_timeout_sec": 0.05,
+        }
+        release_finalize = asyncio.Event()
+        release_force_close = asyncio.Event()
+        self.addCleanup(release_finalize.set)
+        self.addCleanup(release_force_close.set)
+        force_close_calls = 0
+        stop_requests = 0
+        second_stop_requested = asyncio.Event()
+        terminal = []
+        handler.evidence_registry = types.SimpleNamespace(
+            finalize=lambda *args, **kwargs: terminal.append((args, kwargs))
+        )
+
+        async def cancellation_resistant(event):
+            while not event.is_set():
+                try:
+                    await event.wait()
+                except asyncio.CancelledError:
+                    pass
+
+        finalize_task = handler.schedule_mcp_background_task(
+            cancellation_resistant(release_finalize)
+        )
+        finalize_task.set_name("google-live-evidence-finalize")
+        handler.google_live_evidence_finalize_task = finalize_task
+
+        def force_close():
+            nonlocal force_close_calls
+            force_close_calls += 1
+            return cancellation_resistant(release_force_close)
+
+        async def request_stop():
+            nonlocal stop_requests
+            stop_requests += 1
+            if stop_requests == 2:
+                second_stop_requested.set()
+
+        provider = types.SimpleNamespace(
+            request_evidence_finalize_stop=request_stop,
+            force_close_after_evidence_finalize_cancel=force_close,
+            close=AsyncMock(),
+        )
+        handler.voice_provider = provider
+
+        await asyncio.wait_for(handler.close(), timeout=0.3)
+        first_force_task = handler.google_live_evidence_force_close_task
+        self.assertFalse(first_force_task.done())
+        self.assertIn(first_force_task, handler.mcp_background_tasks)
+
+        second_close = asyncio.create_task(handler.close())
+        await asyncio.wait_for(second_stop_requested.wait(), timeout=0.3)
+        second_close.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(second_close, timeout=0.3)
+
+        self.assertEqual(force_close_calls, 1)
+        self.assertIs(handler.google_live_evidence_force_close_task, first_force_task)
+        force_record = handler.google_live_evidence_force_close_records[id(provider)]
+        self.assertIs(force_record["provider"], provider)
+        self.assertIs(force_record["task"], first_force_task)
+        self.assertTrue(force_record["attempted"])
+        self.assertFalse(force_record["completed"])
+        self.assertFalse(first_force_task.done())
+        self.assertIn(first_force_task, handler.mcp_background_tasks)
+        self.assertIn(finalize_task, handler.mcp_background_tasks)
+        self.assertEqual(terminal, [])
+        self.assertFalse(
+            any("reliability_window_end" in record[1] for record in handler.logger.records)
+        )
+        release_finalize.set()
+        release_force_close.set()
+        await asyncio.wait_for(finalize_task, timeout=0.3)
+        await asyncio.wait_for(first_force_task, timeout=0.3)
+        await asyncio.sleep(0)
+        self.assertNotIn(finalize_task, handler.mcp_background_tasks)
+        self.assertNotIn(first_force_task, handler.mcp_background_tasks)
+
+    async def test_evidence_finalize_rejects_changed_live_id_or_pending_cleanup(self):
+        for result in (
+            {"status": "PASS", "liveConnectionId": "live-other", "pendingTasks": 0},
+            {"status": "PASS", "liveConnectionId": "live-7", "pendingTasks": 1},
+        ):
+            with self.subTest(result=result):
+                handler = self._build_handler()
+                handler.config["voice_mode"] = {"type": "google_live"}
+                handler.websocket = _SendingWebSocket()
+                handler.google_live_evidence_scope = {
+                    "journeyId": "bargein-1",
+                    "connectionId": "server-conn-1",
+                    "liveConnectionId": "live-7",
+                    "peerIdentityHash": "sha256:" + "a" * 64,
+                    "serverStartUtc": "2026-08-31T03:00:00+00:00",
+                }
+                self._bind_physical_claim(
+                    handler, handler.google_live_evidence_scope
+                )
+                handler.voice_provider = types.SimpleNamespace(
+                    finalize_evidence=AsyncMock(return_value=result)
+                )
+
+                await handler._route_message(
+                    json.dumps(
+                        {
+                            "type": "evidence_finalize",
+                            "evidenceScope": handler.google_live_evidence_scope,
+                        }
+                    )
+                )
+
+                ack = json.loads(handler.websocket.sent[-1])
+                self.assertEqual(ack["status"], "FAIL")
+                self.assertEqual(ack["failureCode"], "EVIDENCE_CLEANUP_INCOMPLETE")
+                self.assertEqual(
+                    ack["evidenceScope"], handler.google_live_evidence_scope
+                )
+
+    def test_evidence_transition_chain_rejects_missing_extra_reordered_or_fabricated(self):
+        scope = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "liveConnectionId": "live-1",
+            "initialLiveConnectionId": "live-1",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+        }
+        base = {
+            "journeyId": "bargein-1",
+            "connectionId": "server-conn-1",
+            "peerIdentityHash": "sha256:" + "a" * 64,
+            "initialLiveConnectionId": "live-1",
+            "finalLiveConnectionId": "live-3",
+            "liveConnectionTransitions": [
+                {"attempt": 1, "fromLiveConnectionId": "live-1", "toLiveConnectionId": "live-2"},
+                {"attempt": 2, "fromLiveConnectionId": "live-2", "toLiveConnectionId": "live-3"},
+            ],
+        }
+
+        self.assertIsNotNone(
+            ConnectionHandler._validated_evidence_transition_result(scope, base)
+        )
+        invalid = [
+            {**base, "liveConnectionTransitions": []},
+            {**base, "liveConnectionTransitions": list(reversed(base["liveConnectionTransitions"]))},
+            {**base, "liveConnectionTransitions": [*base["liveConnectionTransitions"], {"attempt": 3, "fromLiveConnectionId": "live-3", "toLiveConnectionId": "live-4"}]},
+            {**base, "liveConnectionTransitions": [{"attempt": 1, "fromLiveConnectionId": "live-x", "toLiveConnectionId": "live-3"}]},
+            {**base, "finalLiveConnectionId": "live-2", "liveConnectionTransitions": [{"attempt": True, "fromLiveConnectionId": "live-1", "toLiveConnectionId": "live-2"}]},
+        ]
+        for result in invalid:
+            with self.subTest(result=result):
+                self.assertIsNone(
+                    ConnectionHandler._validated_evidence_transition_result(scope, result)
+                )
 
     async def test_mcp_message_routes_before_manager_bind_ready(self):
         handler = self._build_handler()

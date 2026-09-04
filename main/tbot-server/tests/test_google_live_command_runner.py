@@ -1,0 +1,4019 @@
+import hashlib
+import io
+import json
+import os
+import signal
+import stat
+import subprocess
+import sys
+import tarfile
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+from scripts.google_live_command_runner import CommandSpec, execute_and_record
+
+IDENTITY = {
+    "gitSha": "a" * 40,
+    "imageDigest": "sha256:" + "b" * 64,
+    "firmwareIdentity": "firmware-v1",
+    "configFingerprint": "sha256:" + "c" * 64,
+    "fixtureSha256": "d" * 64,
+}
+PYTHON_EXECUTABLE_MANIFEST = (
+    json.dumps(
+        {
+            "profiles": [
+                {
+                    "machine": __import__("platform").machine().lower(),
+                    "pythonImplementation": sys.implementation.name,
+                    "pythonMajorMinor": f"{sys.version_info.major}.{sys.version_info.minor}",
+                    "sha256": hashlib.sha256(
+                        Path(sys.executable).resolve().read_bytes()
+                    ).hexdigest(),
+                    "size": Path(sys.executable).resolve().stat().st_size,
+                    "system": __import__("platform").system().lower(),
+                }
+            ],
+            "schemaVersion": "google-live-python-executables.v1",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    + "\n"
+).encode()
+
+
+@pytest.fixture(autouse=True)
+def _pin_python_executable_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.google_live_command_runner as runner
+
+    monkeypatch.setattr(
+        runner,
+        "_load_trusted_python_executable_manifest",
+        lambda _expected_git_sha: PYTHON_EXECUTABLE_MANIFEST,
+        raising=False,
+    )
+
+
+def _spec(root: Path, code: str, **changes) -> CommandSpec:
+    values = {
+        "command_id": "real_api.round_trip",
+        "argv": (sys.executable, "-c", code),
+        "cwd": root,
+        "candidate_identity": IDENTITY,
+        "outputs": (root / "real-api" / "report.json",),
+        "expected_exit_codes": (0,),
+        "timeout_sec": 3.0,
+        "cleanup_grace_sec": 0.1,
+    }
+    values.update(changes)
+    return CommandSpec(**values)
+
+
+def _write_report_code(payload: str = "ok") -> str:
+    return (
+        "from pathlib import Path; "
+        "p=Path('real-api/report.json'); p.parent.mkdir(parents=True, exist_ok=True); "
+        f"p.write_text({payload!r})"
+    )
+
+
+@pytest.mark.parametrize("command_id", ["candidate_soak.produce", "physical.capture_and_audit"])
+def test_mutable_relative_live_log_can_append_while_command_publishes_closed_output(
+    tmp_path: Path, command_id: str
+) -> None:
+    live_log = tmp_path / "server.log"
+    live_log.write_text("before\n", encoding="utf-8")
+    code = (
+        "from pathlib import Path; "
+        "Path('server.log').open('a').write('during\\n'); "
+        "p=Path('real-api/report.json'); p.parent.mkdir(parents=True, exist_ok=True); "
+        "p.write_text('closed')"
+    )
+    spec = _spec(
+        tmp_path,
+        code,
+        command_id=command_id,
+        argv=(sys.executable, "-c", code, "server.log"),
+    )
+
+    result = execute_and_record(spec, provenance=tmp_path / "commands.jsonl")
+
+    assert result.policy_satisfied is True
+    assert live_log.read_text(encoding="utf-8") == "before\nduring\n"
+    entry = json.loads((tmp_path / "commands.jsonl").read_text())
+    assert entry["inputs"] == []
+
+
+def _runtime_closure_manifest(resources: list[dict[str, object]]) -> dict[str, object]:
+    inventory = json.dumps(resources, sort_keys=True, separators=(",", ":")).encode()
+    return {
+        "distributions": [],
+        "limits": {
+            "maxPathDepth": 8,
+            "maxResourceBytes": 4096,
+            "maxResourceCount": 4,
+            "maxResourceFileBytes": 1024,
+        },
+        "platform": "darwin-arm64-cp314",
+        "resourceInventorySha256": hashlib.sha256(inventory).hexdigest(),
+        "resources": resources,
+        "runtime": {
+            "interpreterSha256": "c" * 64,
+            "pythonImplementation": "cpython",
+            "pythonMajorMinor": "3.14",
+        },
+        "schemaVersion": "google-live-runtime-closure.v1",
+    }
+
+
+def _canonical_json(value: object) -> bytes:
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def test_runtime_closure_manifest_parser_accepts_canonical_inventory() -> None:
+    import scripts.google_live_command_runner as runner
+
+    resources = [
+        {"gitBlob": "1" * 40, "kind": "config", "path": "config/server.yaml", "sha256": "a" * 64, "size": 2},
+        {"gitBlob": "2" * 40, "kind": "python", "path": "scripts/example.py", "sha256": "b" * 64, "size": 3},
+    ]
+    payload = _canonical_json(_runtime_closure_manifest(resources))
+    parsed = runner._parse_runtime_closure_manifest(payload, platform_name="darwin-arm64-cp314")
+    assert parsed["resources"][0]["path"] == "config/server.yaml"
+
+
+def test_runtime_closure_manifest_binds_dependency_distribution_files() -> None:
+    import scripts.google_live_command_runner as runner
+
+    resources = [
+        {"gitBlob": "1" * 40, "kind": "config", "path": "config/server.yaml", "sha256": "a" * 64, "size": 2},
+    ]
+    manifest = _runtime_closure_manifest(resources)
+    manifest["distributions"] = [{
+        "name": "websockets",
+        "version": "14.2",
+        "importRoots": ["websockets"],
+        "root": "/immutable/site-packages",
+        "fileCount": 1,
+        "totalBytes": 2,
+        "files": [{"path": "websockets/__init__.py", "sha256": "b" * 64, "size": 2}],
+    }]
+    payload = _canonical_json(manifest)
+    parsed = runner._parse_runtime_closure_manifest(payload, platform_name="darwin-arm64-cp314")
+    assert parsed["distributions"][0]["name"] == "websockets"
+
+
+def test_runtime_closure_manifest_rejects_unapproved_import_root() -> None:
+    import scripts.google_live_command_runner as runner
+
+    resources = [{"gitBlob": "1" * 40, "kind": "python", "path": "scripts/example.py", "sha256": "b" * 64, "size": 3}]
+    manifest = _runtime_closure_manifest(resources)
+    manifest["distributions"] = [{
+        "name": "websockets", "version": "14.2", "importRoots": ["websockets"],
+        "root": "relative/site-packages", "fileCount": 1, "totalBytes": 2,
+        "files": [{"path": "websockets/__init__.py", "sha256": "b" * 64, "size": 2}],
+    }]
+    with pytest.raises(ValueError, match="distribution root"):
+        runner._parse_runtime_closure_manifest(_canonical_json(manifest), platform_name="darwin-arm64-cp314")
+
+
+@pytest.mark.parametrize("path", ["ambient.pth", "websockets-14.2.dist-info/direct_url.json"])
+def test_runtime_closure_manifest_rejects_pth_and_editable_install(path: str) -> None:
+    import scripts.google_live_command_runner as runner
+
+    resources = [{"gitBlob": "1" * 40, "kind": "python", "path": "scripts/example.py", "sha256": "b" * 64, "size": 3}]
+    manifest = _runtime_closure_manifest(resources)
+    manifest["distributions"] = [{
+        "name": "websockets", "version": "14.2", "importRoots": ["websockets"],
+        "root": "/immutable/site-packages", "fileCount": 1, "totalBytes": 2,
+        "files": [{"path": path, "sha256": "b" * 64, "size": 2}],
+    }]
+    with pytest.raises(ValueError, match="injection|editable"):
+        runner._parse_runtime_closure_manifest(_canonical_json(manifest), platform_name="darwin-arm64-cp314")
+
+
+def test_runtime_closure_manifest_rejects_oversized_distribution_file() -> None:
+    import scripts.google_live_command_runner as runner
+
+    resources = [{"gitBlob": "1" * 40, "kind": "python", "path": "scripts/example.py", "sha256": "b" * 64, "size": 3}]
+    manifest = _runtime_closure_manifest(resources)
+    manifest["distributions"] = [{
+        "name": "websockets", "version": "14.2", "importRoots": ["websockets"],
+        "root": "/immutable/site-packages", "fileCount": 1,
+        "totalBytes": 33 * 1024 * 1024,
+        "files": [{"path": "websockets/x.py", "sha256": "b" * 64, "size": 33 * 1024 * 1024}],
+    }]
+    with pytest.raises(ValueError, match="distribution file"):
+        runner._parse_runtime_closure_manifest(_canonical_json(manifest), platform_name="darwin-arm64-cp314")
+
+
+def test_checked_runtime_closure_inventory_covers_existing_approved_commands() -> None:
+    import scripts.google_live_command_runner as runner
+
+    server_root = Path(__file__).resolve().parents[1]
+    manifest = json.loads(
+        (server_root / "tests/fixtures/google_live_runtime_closure_manifest.json").read_text()
+    )
+    paths = {resource["path"] for resource in manifest["resources"]}
+    required = {
+        "main/tbot-server/scripts/google_live_deterministic_evidence.py",
+        "main/tbot-server/scripts/google_live_deterministic_nodeid_plugin.py",
+        "main/tbot-server/scripts/google_live_smoke.py",
+        "main/tbot-server/scripts/voice_mode_websocket_audio_bargein.py",
+        "main/tbot-server/scripts/analyze_google_live_log.py",
+        "main/tbot-server/scripts/google_live_robot_soak.py",
+        "main/tbot-server/scripts/google_live_physical_evidence.py",
+        "main/tbot-server/scripts/google_live_evidence_runner.py",
+        "main/tbot-server/core/voice/google_live/client.py",
+        "main/tbot-server/core/utils/opus_encoder_utils.py",
+        "main/tbot-server/config/config_loader.py",
+        "main/tbot-server/config/server.yaml",
+        "main/tbot-server/config/voice.yaml",
+        "main/tbot-server/tests/fixtures/google_live_pytest_runtime_manifest.json",
+        "main/tbot-server/tests/fixtures/tvideo_farm_audio/adult_speech_24k_mono.wav",
+        "main/tbot-server/tests/fixtures/tvideo_farm_audio/synthetic_speech_24k_mono.wav",
+    }
+    assert required <= paths
+    assert not any("/.venv" in path or "/site-packages/" in path for path in paths)
+    assert runner.RUNTIME_CLOSURE_MANIFEST_GIT_PATH not in paths
+    for relative_script in (
+        "scripts/google_live_deterministic_evidence.py",
+        "scripts/google_live_smoke.py",
+        "scripts/voice_mode_websocket_audio_bargein.py",
+        "scripts/analyze_google_live_log.py",
+        "scripts/google_live_physical_evidence.py",
+        "scripts/google_live_robot_soak.py",
+    ):
+        project_root = runner._candidate_snapshot_project_root(
+            Path("/snapshot"), manifest, relative_script
+        )
+        assert project_root == Path("/snapshot/main/tbot-server")
+
+
+def test_checked_runtime_closure_manifest_parses() -> None:
+    import scripts.google_live_command_runner as runner
+
+    manifest_path = Path(__file__).parent / "fixtures" / "google_live_runtime_closure_manifest.json"
+    parsed = runner._parse_runtime_closure_manifest(
+        manifest_path.read_bytes(), platform_name="darwin-arm64-cp314"
+    )
+    assert {item["name"] for item in parsed["distributions"]} >= {
+        "numpy", "websockets", "PyYAML", "opuslib_next"
+    }
+    resources = {item["path"]: item for item in parsed["resources"]}
+    assert resources["main/tbot-server/pyproject.toml"]["kind"] == "config"
+    assert resources["main/tbot-server/docs/lesson-master-prompts.md"]["kind"] == "config"
+
+
+@pytest.mark.parametrize("module", ["yaml", "websockets", "opuslib_next", "numpy", "google.genai"])
+def test_checked_dependency_closure_imports_extension_backed_packages(
+    tmp_path: Path, module: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    manifest_path = Path(__file__).parent / "fixtures" / "google_live_runtime_closure_manifest.json"
+    manifest = runner._parse_runtime_closure_manifest(
+        manifest_path.read_bytes(), platform_name="darwin-arm64-cp314"
+    )
+    dependency_roots = runner._materialize_distribution_closure(
+        manifest, tmp_path / "dependencies"
+    )
+    code = (
+        "import json,sys,sysconfig; roots=json.loads(sys.argv[1]); "
+        "sys.path[:]=roots+[sysconfig.get_paths()['stdlib'],sysconfig.get_paths()['platstdlib'],sysconfig.get_config_var('DESTSHARED')]; "
+        f"import {module}"
+    )
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-I", "-S", "-B", "-c", code, json.dumps(dependency_roots)],
+            capture_output=True, text=True, timeout=10,
+        )
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(f"import {module} timed out: {exc}")
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize(
+    "mutate, message",
+    [
+        (lambda m: m["resources"].append(m["resources"][0].copy()), "inventory"),
+        (lambda m: m["resources"][0].update(path="../escape"), "relative"),
+        (lambda m: m.update(resourceInventorySha256="d" * 64), "digest"),
+        (lambda m: m.update(platform="linux-x86_64-cp314"), "platform"),
+        (lambda m: m["runtime"].update(pythonMajorMinor="3.13"), "runtime"),
+        (lambda m: m["limits"].update(maxResourceCount=1000000), "limits"),
+    ],
+)
+def test_runtime_closure_manifest_parser_rejects_invalid_inventory(
+    mutate, message: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    resources = [{"gitBlob": "1" * 40, "kind": "python", "path": "scripts/example.py", "sha256": "b" * 64, "size": 3}]
+    manifest = _runtime_closure_manifest(resources)
+    mutate(manifest)
+    payload = _canonical_json(manifest)
+    with pytest.raises(ValueError, match=message):
+        runner._parse_runtime_closure_manifest(payload, platform_name="darwin-arm64-cp314")
+
+
+def test_runtime_closure_manifest_rejects_noncanonical_json() -> None:
+    import scripts.google_live_command_runner as runner
+
+    resources = [{"gitBlob": "1" * 40, "kind": "python", "path": "scripts/example.py", "sha256": "b" * 64, "size": 3}]
+    with pytest.raises(ValueError, match="canonical"):
+        runner._parse_runtime_closure_manifest(json.dumps(_runtime_closure_manifest(resources), indent=2).encode(), platform_name="darwin-arm64-cp314")
+
+
+def _commit_runtime_manifest_repo(
+    tmp_path: Path,
+    *,
+    mode: str = "100644",
+    content: bytes = b"abc",
+    include_resource: bool = True,
+    resource_overrides: dict[str, object] | None = None,
+    runtime_overrides: dict[str, object] | None = None,
+) -> tuple[Path, str]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    resource_path = "main/tbot-server/scripts/example.py"
+    blob = subprocess.check_output(["git", "hash-object", "-w", "--stdin"], cwd=repo, input=content, text=False).decode().strip()
+    sha256 = hashlib.sha256(content).hexdigest()
+    resource = {"gitBlob": blob, "kind": "python", "path": resource_path, "sha256": sha256, "size": len(content)}
+    resource.update(resource_overrides or {})
+    resources = [resource]
+    manifest_value = _runtime_closure_manifest(resources)
+    manifest_value["runtime"]["interpreterSha256"] = hashlib.sha256(
+        Path(sys.executable).resolve().read_bytes()
+    ).hexdigest()
+    manifest_value["runtime"].update(runtime_overrides or {})
+    manifest = _canonical_json(manifest_value)
+    manifest_blob = subprocess.check_output(["git", "hash-object", "-w", "--stdin"], cwd=repo, input=manifest).decode().strip()
+    executable_manifest_blob = subprocess.check_output(
+        ["git", "hash-object", "-w", "--stdin"],
+        cwd=repo,
+        input=PYTHON_EXECUTABLE_MANIFEST,
+    ).decode().strip()
+    index = tmp_path / "index"
+    env = {**os.environ, "GIT_INDEX_FILE": str(index)}
+    if include_resource:
+        subprocess.run(["git", "update-index", "--add", "--cacheinfo", mode, blob, resource_path], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "update-index", "--add", "--cacheinfo", "100644", manifest_blob, "main/tbot-server/tests/fixtures/google_live_runtime_closure_manifest.json"], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "update-index", "--add", "--cacheinfo", "100644", executable_manifest_blob, "main/tbot-server/tests/fixtures/google_live_python_executable_manifest.json"], cwd=repo, env=env, check=True)
+    tree = subprocess.check_output(["git", "write-tree"], cwd=repo, env=env).decode().strip()
+    commit = subprocess.check_output(["git", "commit-tree", tree, "-m", "fixture"], cwd=repo, env=env).decode().strip()
+    subprocess.run(["git", "update-ref", "refs/heads/main", commit], cwd=repo, check=True)
+    subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=repo, check=True)
+    return repo, commit
+
+
+def _ignore_temp_repo_worktree_status(
+    monkeypatch: pytest.MonkeyPatch, runner: object
+) -> None:
+    trusted_output = runner._trusted_git_output
+    monkeypatch.setattr(
+        runner,
+        "_trusted_git_output",
+        lambda root, *args: b""
+        if args[0] == "status"
+        else trusted_output(root, *args),
+    )
+
+
+def test_runtime_closure_manifest_loader_verifies_git_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    repo, commit = _commit_runtime_manifest_repo(tmp_path)
+    _ignore_temp_repo_worktree_status(monkeypatch, runner)
+    result = runner._load_runtime_closure_manifest(commit, code_root=repo, platform_name="darwin-arm64-cp314")
+    assert result["resources"][0]["gitBlob"]
+
+
+def test_runtime_closure_manifest_loader_rejects_interpreter_digest_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    repo, commit = _commit_runtime_manifest_repo(
+        tmp_path, runtime_overrides={"interpreterSha256": "f" * 64}
+    )
+    _ignore_temp_repo_worktree_status(monkeypatch, runner)
+    with pytest.raises(ValueError, match="interpreter digest"):
+        runner._load_runtime_closure_manifest(
+            commit, code_root=repo, platform_name="darwin-arm64-cp314"
+        )
+
+
+@pytest.mark.parametrize(
+    "include_resource, overrides, message",
+    [
+        (False, None, "missing"),
+        (True, {"gitBlob": "f" * 40}, "regular verified blob"),
+        (True, {"sha256": "f" * 64}, "regular verified blob"),
+    ],
+)
+def test_resource_inventory_rejects_missing_or_mismatched_git_member(
+    tmp_path: Path,
+    include_resource: bool,
+    overrides: dict[str, object] | None,
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    repo, commit = _commit_runtime_manifest_repo(
+        tmp_path, include_resource=include_resource, resource_overrides=overrides
+    )
+    _ignore_temp_repo_worktree_status(monkeypatch, runner)
+    with pytest.raises(ValueError, match=message):
+        runner._load_runtime_closure_manifest(
+            commit, code_root=repo, platform_name="darwin-arm64-cp314"
+        )
+
+
+@pytest.mark.parametrize("mode", ["120000", "160000"])
+def test_resource_inventory_rejects_symlink_or_nonregular_git_member(
+    tmp_path: Path, mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    repo, commit = _commit_runtime_manifest_repo(tmp_path, mode=mode)
+    _ignore_temp_repo_worktree_status(monkeypatch, runner)
+    with pytest.raises(ValueError, match="regular"):
+        runner._load_runtime_closure_manifest(commit, code_root=repo, platform_name="darwin-arm64-cp314")
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin snapshots use hardlinks")
+def test_executable_read_allows_concurrent_snapshot_hardlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    source = Path(sys.executable).resolve(strict=True)
+    snapshot = tmp_path / "command-python"
+    real_read = runner.os.read
+    linked = False
+
+    def link_during_read(descriptor: int, size: int) -> bytes:
+        nonlocal linked
+        if not linked:
+            linked = True
+            os.link(source, snapshot)
+        return real_read(descriptor, size)
+
+    monkeypatch.setattr(runner.os, "read", link_during_read)
+    content = runner._trusted_executable_content(
+        str(source), runner._parse_python_executable_manifest(PYTHON_EXECUTABLE_MANIFEST)
+    )
+
+    assert linked
+    assert content == source.read_bytes()
+
+
+def _python_source_archive(files: dict[str, str]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        for name, source in sorted(files.items()):
+            content = source.encode()
+            info = tarfile.TarInfo(name)
+            info.mode = 0o644
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
+    return buffer.getvalue()
+
+
+def test_materialize_candidate_resources_uses_archived_bytes_and_verifies_digest(
+    tmp_path: Path,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    content = b"candidate-config"
+    archive = _python_source_archive({"config.json": content.decode()})
+    manifest = {
+        "limits": {
+            "maxPathDepth": 4,
+            "maxResourceBytes": 1024,
+            "maxResourceCount": 2,
+            "maxResourceFileBytes": 1024,
+        },
+        "resources": [
+            {
+                "path": "config.json",
+                "kind": "json",
+                "gitBlob": "a" * 40,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size": len(content),
+            }
+        ],
+    }
+    destination = tmp_path / "snapshot"
+    runner._materialize_candidate_resources(archive, destination, manifest)
+    assert (destination / "config.json").read_bytes() == content
+    runner._cleanup_candidate_snapshot(destination)
+
+
+def test_materialize_candidate_resources_sets_exact_modes_despite_umask(
+    tmp_path: Path,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    content = b"candidate"
+    archive = _resource_archive([("nested/config.json", content, None)])
+    destination = tmp_path / "snapshot"
+    previous = os.umask(0o777)
+    try:
+        runner._materialize_candidate_resources(
+            archive, destination, _resource_manifest({"nested/config.json": content})
+        )
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE((destination / "nested" / "config.json").stat().st_mode) == 0o400
+    assert stat.S_IMODE((destination / "nested").stat().st_mode) == 0o500
+    runner._cleanup_candidate_snapshot(destination)
+
+
+def test_materialized_resource_snapshot_can_be_cleaned_after_read_only_finalize(
+    tmp_path: Path,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    content = b"candidate"
+    destination = tmp_path / "snapshot"
+    runner._materialize_candidate_resources(
+        _resource_archive([("nested/config.json", content, None)]),
+        destination,
+        _resource_manifest({"nested/config.json": content}),
+    )
+    runner._cleanup_candidate_snapshot(destination)
+    assert not destination.exists()
+
+
+def test_materialize_candidate_resources_rejects_symlink_member(tmp_path: Path) -> None:
+    import scripts.google_live_command_runner as runner
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        info = tarfile.TarInfo("config.json")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "elsewhere"
+        archive.addfile(info)
+    manifest = {
+        "limits": {
+            "maxPathDepth": 4,
+            "maxResourceBytes": 1024,
+            "maxResourceCount": 2,
+            "maxResourceFileBytes": 1024,
+        },
+        "resources": [],
+    }
+    with pytest.raises(ValueError, match="archive"):
+        runner._materialize_candidate_resources(buffer.getvalue(), tmp_path / "snapshot", manifest)
+
+
+def _resource_manifest(files: dict[str, bytes], **limit_changes: int) -> dict[str, object]:
+    limits = {
+        "maxPathDepth": 8,
+        "maxResourceBytes": 4096,
+        "maxResourceCount": 8,
+        "maxResourceFileBytes": 2048,
+    }
+    limits.update(limit_changes)
+    return {
+        "limits": limits,
+        "resources": [
+            {
+                "path": path,
+                "kind": "python" if path.endswith(".py") else "config",
+                "gitBlob": f"{index + 1:040x}",
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size": len(content),
+            }
+            for index, (path, content) in enumerate(sorted(files.items()))
+        ],
+    }
+
+
+def _resource_archive(entries: list[tuple[str, bytes, bytes | None]]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        for name, content, member_type in entries:
+            info = tarfile.TarInfo(name)
+            info.type = member_type or tarfile.REGTYPE
+            info.size = len(content) if info.isreg() else 0
+            archive.addfile(info, io.BytesIO(content) if info.isreg() else None)
+    return buffer.getvalue()
+
+
+def _patch_candidate_resource_archive(
+    monkeypatch: pytest.MonkeyPatch, runner: object, archive: bytes
+) -> None:
+    files = {}
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as opened:
+        for member in opened:
+            if member.isfile():
+                source = opened.extractfile(member)
+                assert source is not None
+                files[member.name] = source.read()
+    manifest = _resource_manifest(files, maxResourceBytes=64 * 1024 * 1024)
+    monkeypatch.setattr(runner, "_load_runtime_closure_manifest", lambda _sha: manifest)
+    monkeypatch.setattr(
+        runner, "_load_candidate_resource_archive", lambda _sha, _manifest: archive
+    )
+
+
+@pytest.mark.parametrize(
+    "entries, files, limits, message",
+    [
+        ([], {"config.json": b"ok"}, {}, "missing"),
+        ([('config.json', b"no", None)], {"config.json": b"ok"}, {}, "digest"),
+        ([('config.json', b"12345", None)], {"config.json": b"12345"}, {"maxResourceFileBytes": 4}, "bound"),
+        ([('a', b"1", None), ('b', b"2", None)], {"a": b"1", "b": b"2"}, {"maxResourceCount": 1}, "bound"),
+        ([('a/b/c', b"1", None)], {"a/b/c": b"1"}, {"maxPathDepth": 2}, "archive"),
+        ([('config.json', b"ok", None), ('config.json', b"ok", None)], {"config.json": b"ok"}, {}, "archive"),
+        ([('../escape', b"ok", None)], {"../escape": b"ok"}, {}, "archive"),
+        ([('config.json', b"", tarfile.LNKTYPE)], {}, {}, "archive"),
+        ([('config.json', b"", tarfile.CHRTYPE)], {}, {}, "archive"),
+        ([('config.json', b"", tarfile.FIFOTYPE)], {}, {}, "archive"),
+    ],
+)
+def test_resource_snapshot_rejects_invalid_archive_members_and_limits(
+    tmp_path: Path,
+    entries: list[tuple[str, bytes, bytes | None]],
+    files: dict[str, bytes],
+    limits: dict[str, int],
+    message: str,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    destination = tmp_path / "snapshot"
+    with pytest.raises(ValueError, match=message):
+        runner._materialize_candidate_resources(
+            _resource_archive(entries), destination, _resource_manifest(files, **limits)
+        )
+    assert not destination.exists()
+
+
+def test_resource_snapshot_rejects_total_bytes(tmp_path: Path) -> None:
+    import scripts.google_live_command_runner as runner
+
+    files = {"a": b"12", "b": b"34"}
+    with pytest.raises(ValueError, match="bound"):
+        runner._materialize_candidate_resources(
+            _resource_archive([(name, data, None) for name, data in files.items()]),
+            tmp_path / "snapshot",
+            _resource_manifest(files, maxResourceBytes=3),
+        )
+    assert not (tmp_path / "snapshot").exists()
+
+
+@pytest.mark.parametrize("resource_name", ["fixture.wav", "settings.conf", "data.json", "lesson.yaml"])
+def test_resource_swap_after_archive_capture_reads_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resource_name: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    entry = f"from pathlib import Path\nPath('real-api').mkdir(exist_ok=True)\nPath('real-api/report.json').write_bytes(Path(__file__).with_name({resource_name!r}).read_bytes())\n".encode()
+    config = tmp_path / resource_name
+    config.write_bytes(b"mutable")
+    (tmp_path / "entry.py").write_bytes(b"raise SystemExit('mutable')\n")
+    files = {"entry.py": entry, resource_name: b"candidate"}
+    manifest = _resource_manifest(files)
+    archive = _resource_archive([(name, data, None) for name, data in sorted(files.items())])
+    monkeypatch.setattr(runner, "_load_runtime_closure_manifest", lambda _sha: manifest)
+
+    def capture_then_swap(_sha: str, _manifest: object) -> bytes:
+        config.write_bytes(b"swapped")
+        return archive
+
+    monkeypatch.setattr(runner, "_load_candidate_resource_archive", capture_then_swap)
+    execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py")),
+        provenance=tmp_path / "commands.jsonl",
+    )
+    assert (tmp_path / "real-api" / "report.json").read_bytes() == b"candidate"
+
+
+def test_candidate_relative_resource_argument_resolves_to_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    entry = b"import sys\nfrom pathlib import Path\nPath('real-api').mkdir(exist_ok=True)\nPath('real-api/report.json').write_bytes(Path(sys.argv[1]).read_bytes())\n"
+    (tmp_path / "entry.py").write_bytes(b"mutable")
+    (tmp_path / "config.json").write_bytes(b"mutable")
+    files = {"entry.py": entry, "config.json": b"candidate"}
+    archive = _resource_archive([(name, data, None) for name, data in sorted(files.items())])
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
+    execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py", "config.json")),
+        provenance=tmp_path / "commands.jsonl",
+    )
+    assert (tmp_path / "real-api" / "report.json").read_bytes() == b"candidate"
+
+
+def test_resource_archive_stdout_is_hard_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import contextlib
+    from types import SimpleNamespace
+
+    import scripts.google_live_command_runner as runner
+
+    expected_sha = "a" * 40
+    identity = SimpleNamespace(path=Path("/usr/bin/git"))
+    monkeypatch.setattr(runner, "trusted_git_session", lambda: contextlib.nullcontext(identity))
+    monkeypatch.setattr(
+        runner,
+        "_trusted_git_output",
+        lambda *_args: (
+            (str(tmp_path) + "\n").encode()
+            if "--show-toplevel" in _args
+            else (expected_sha + "\n").encode()
+        ),
+    )
+    monkeypatch.setattr(runner, "_trusted_git_command", lambda *_args: ["git"])
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = io.BytesIO(b"x" * (1024 * 1024 + 2))
+            self.killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def wait(self, timeout: int | None = None) -> int:
+            del timeout
+            return 0
+
+    process = FakeProcess()
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    manifest = _resource_manifest({"x": b"x"}, maxResourceBytes=1)
+    with pytest.raises(ValueError, match="exceeds bound"):
+        runner._load_candidate_resource_archive(expected_sha, manifest, code_root=tmp_path)
+    assert process.killed
+
+
+def test_resource_archive_partial_stdout_timeout_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import contextlib
+    from types import SimpleNamespace
+
+    import scripts.google_live_command_runner as runner
+
+    expected_sha = "a" * 40
+    identity = SimpleNamespace(path=Path("/usr/bin/git"))
+    monkeypatch.setattr(runner, "trusted_git_session", lambda: contextlib.nullcontext(identity))
+    monkeypatch.setattr(
+        runner,
+        "_trusted_git_output",
+        lambda *_args: (
+            (str(tmp_path) + "\n").encode()
+            if "--show-toplevel" in _args
+            else (expected_sha + "\n").encode()
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_trusted_git_command",
+        lambda *_args: [
+            sys.executable,
+            "-c",
+            "import sys,time;sys.stdout.buffer.write(b'x');sys.stdout.flush();time.sleep(1)",
+        ],
+    )
+    monkeypatch.setattr(runner, "_RESOURCE_ARCHIVE_TIMEOUT_SEC", 0.1, raising=False)
+    started = time.monotonic()
+    with pytest.raises(ValueError, match="timed out"):
+        runner._load_candidate_resource_archive(
+            expected_sha, _resource_manifest({"x": b"x"}), code_root=tmp_path
+        )
+    assert time.monotonic() - started < 0.5
+
+
+def test_executes_argv_and_records_only_secret_source(tmp_path: Path) -> None:
+    secret = "must-never-persist"
+    spec = _spec(
+        tmp_path,
+        "import os; " + _write_report_code("ok") + "; assert os.environ['GOOGLE_API_KEY']",
+        secret_env=("GOOGLE_API_KEY",),
+    )
+    provenance = tmp_path / "commands.jsonl"
+
+    result = execute_and_record(spec, env={"GOOGLE_API_KEY": secret}, provenance=provenance)
+
+    entry = json.loads(provenance.read_text().splitlines()[0])
+    assert result.exit_code == 0
+    assert result.classification == "expected_exit"
+    assert entry["secretSources"] == ["<env:GOOGLE_API_KEY>"]
+    assert entry["outputs"][0]["sha256"]
+    assert secret not in provenance.read_text()
+    assert secret not in (tmp_path / "commands.txt").read_text()
+
+
+def test_execution_is_bound_to_interpreter_opened_before_spawn(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    root.mkdir()
+    interpreter = tmp_path / f"python{sys.version_info.major}.{sys.version_info.minor}"
+    interpreter.symlink_to(sys.executable)
+    malicious = tmp_path / "malicious"
+    malicious.write_text(
+        "#!/bin/sh\nmkdir -p real-api\nprintf malicious > real-api/report.json\n",
+        encoding="utf-8",
+    )
+    malicious.chmod(0o700)
+
+    def swap_interpreter() -> None:
+        interpreter.unlink()
+        interpreter.symlink_to(malicious)
+
+    code = (
+        "import subprocess, sys; from pathlib import Path; "
+        "value=subprocess.check_output([sys.executable, '-c', \"print('ok')\"], "
+        "text=True).strip(); p=Path('real-api/report.json'); "
+        "p.parent.mkdir(parents=True, exist_ok=True); p.write_text(value)"
+    )
+    execute_and_record(
+        _spec(root, code, argv=(str(interpreter), "-c", code)),
+        provenance=root / "commands.jsonl",
+        _before_spawn=swap_interpreter,
+    )
+
+    assert (root / "real-api" / "report.json").read_text() == "ok"
+
+
+def test_execution_rejects_untrusted_interpreter_before_spawn(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    root.mkdir()
+    interpreter = tmp_path / f"python{sys.version_info.major}.{sys.version_info.minor}"
+    interpreter.write_text(
+        "#!/bin/sh\nmkdir -p real-api\nprintf malicious > real-api/report.json\n",
+        encoding="utf-8",
+    )
+    interpreter.chmod(0o700)
+
+    with pytest.raises(RuntimeError, match="spawn_failed"):
+        execute_and_record(
+            _spec(root, "pass", argv=(str(interpreter), "-c", "pass")),
+            provenance=root / "commands.jsonl",
+        )
+
+    assert not (root / "commands.jsonl").exists()
+
+
+def test_relative_python_script_executes_candidate_git_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    script = tmp_path / "entry.py"
+    marker = tmp_path.parent / f"{tmp_path.name}-mutable-script-marker"
+    script.write_text("raise SystemExit('mutable source executed')\n")
+    archive = _python_source_archive(
+        {
+            "entry.py": (
+                "from pathlib import Path\n"
+                "Path('real-api').mkdir(exist_ok=True)\n"
+                "Path('real-api/report.json').write_text('candidate')\n"
+            )
+        }
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
+
+    def swap_script() -> None:
+        script.write_text(
+            f"from pathlib import Path\nPath({str(marker)!r}).write_text('spawned')\n"
+        )
+
+    execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py")),
+        provenance=tmp_path / "commands.jsonl",
+        _before_spawn=swap_script,
+    )
+
+    assert (tmp_path / "real-api" / "report.json").read_text() == "candidate"
+    assert not marker.exists()
+
+
+def test_relative_python_script_imports_candidate_git_module_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path.parent / f"{tmp_path.name}-mutable-module-marker"
+    (tmp_path / "entry.py").write_text(
+        "from dependency import VALUE\n"
+        "from pathlib import Path\n"
+        "Path('real-api').mkdir(exist_ok=True)\n"
+        "Path('real-api/report.json').write_text(VALUE)\n"
+    )
+    dependency = tmp_path / "dependency.py"
+    dependency.write_text("VALUE = 'mutable'\n")
+    archive = _python_source_archive(
+        {
+            "entry.py": (
+                "from dependency import VALUE\n"
+                "from pathlib import Path\n"
+                "Path('real-api').mkdir(exist_ok=True)\n"
+                "Path('real-api/report.json').write_text(VALUE)\n"
+            ),
+            "dependency.py": "VALUE = 'candidate'\n",
+        }
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
+
+    def swap_module() -> None:
+        dependency.write_text(
+            f"from pathlib import Path\nPath({str(marker)!r}).write_text('spawned')\n"
+            "VALUE = 'malicious'\n"
+        )
+
+    execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py")),
+        provenance=tmp_path / "commands.jsonl",
+        _before_spawn=swap_module,
+    )
+
+    assert (tmp_path / "real-api" / "report.json").read_text() == "candidate"
+    assert not marker.exists()
+
+
+def test_relative_python_script_cannot_import_untracked_worktree_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path.parent / f"{tmp_path.name}-untracked-module-marker"
+    (tmp_path / "entry.py").write_text("raise SystemExit('mutable source executed')\n")
+    (tmp_path / "untracked_dependency.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('spawned')\n"
+    )
+    archive = _python_source_archive({"entry.py": "import untracked_dependency\n"})
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_relative_python_script_preserves_candidate_runtime_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    (tmp_path / "entry.py").write_text("raise SystemExit('mutable source executed')\n")
+    archive = _python_source_archive(
+        {
+            "entry.py": (
+                "import pytest\n"
+                "from pathlib import Path\n"
+                "Path('real-api').mkdir(exist_ok=True)\n"
+                "Path('real-api/report.json').write_text(pytest.__version__)\n"
+            )
+        }
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py")),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "expected_exit"
+    assert (tmp_path / "real-api" / "report.json").read_text() == pytest.__version__
+
+
+def test_git_bound_python_is_isolated_before_sitecustomize(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path.parent / f"{tmp_path.name}-sitecustomize-marker"
+    user_site = tmp_path / "userbase" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    user_site.mkdir(parents=True)
+    (user_site / "sitecustomize.py").write_text(
+        "import os\nfrom pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text(os.environ.get('GOOGLE_API_KEY', 'missing'))\n"
+    )
+    archive = _python_source_archive({"entry.py": "raise SystemExit(0)\n"})
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
+    original_child_environment = runner._child_environment
+    monkeypatch.setattr(
+        runner,
+        "_child_environment",
+        lambda spec, env: {
+            **original_child_environment(spec, env),
+            "PYTHONUSERBASE": str(tmp_path / "userbase"),
+            "PYTHONPATH": str(user_site),
+            "GOOGLE_API_KEY": "secret-sentinel",
+        },
+    )
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "expected_exit"
+    assert not marker.exists()
+
+
+def test_nested_git_bound_python_is_isolated_before_sitecustomize(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path.parent / f"{tmp_path.name}-nested-sitecustomize-marker"
+    user_site = tmp_path / "site"
+    user_site.mkdir()
+    (user_site / "sitecustomize.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('leaked')\n"
+    )
+    archive = _python_source_archive({
+        "entry.py": "import subprocess, sys\nsubprocess.run([sys.executable, 'child.py'], check=True)\n",
+        "child.py": "raise SystemExit(0)\n",
+    })
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
+    original_child_environment = runner._child_environment
+    monkeypatch.setattr(runner, "_child_environment", lambda spec, env: {
+        **original_child_environment(spec, env), "PYTHONPATH": str(user_site)
+    })
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "expected_exit"
+    assert not marker.exists()
+
+
+def test_nested_python_script_executes_candidate_git_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path.parent / f"{tmp_path.name}-nested-script-marker"
+    (tmp_path / "entry.py").write_text("raise SystemExit('mutable source executed')\n")
+    (tmp_path / "child.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('spawned')\n"
+    )
+    archive = _python_source_archive(
+        {
+            "entry.py": (
+                "import subprocess, sys\n"
+                "from pathlib import Path\n"
+                "subprocess.run([sys.executable, '-u', str(Path(__file__).with_name('child.py'))], check=True)\n"
+            ),
+            "child.py": (
+                "from pathlib import Path\n"
+                "Path('real-api').mkdir(exist_ok=True)\n"
+                "Path('real-api/report.json').write_text('candidate child')\n"
+            ),
+        }
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
+
+    execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py")),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert (tmp_path / "real-api" / "report.json").read_text() == "candidate child"
+    assert not marker.exists()
+
+
+def test_absolute_nested_project_script_is_candidate_bound_regression(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    project_root = tmp_path.parent / f"{tmp_path.name}-candidate-repo"
+    scripts = project_root / "scripts"
+    scripts.mkdir(parents=True)
+    mutable_entry = scripts / "google_live_robot_soak.py"
+    mutable = scripts / "analyze_google_live_log.py"
+    marker = tmp_path / "mutable-analyzer-executed"
+    mutable_entry.write_text("raise SystemExit('mutable robot soak executed')\n", encoding="utf-8")
+    mutable.write_text(
+        f"from pathlib import Path; Path({str(marker)!r}).write_text('mutable'); "
+        "Path('real-api').mkdir(exist_ok=True); Path('real-api/report.json').write_text('mutable')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "__file__", str(scripts / "google_live_command_runner.py"))
+    archive = _python_source_archive(
+        {
+            "scripts/google_live_robot_soak.py": (
+                "import subprocess, sys\n"
+                "from pathlib import Path\n"
+                "SERVER_ROOT = Path(__file__).resolve().parents[1]\n"
+                f"assert SERVER_ROOT != Path({str(project_root)!r})\n"
+                "assert SERVER_ROOT.name == 'candidate-source'\n"
+                f"subprocess.run([sys.executable, str(SERVER_ROOT / 'scripts' / 'analyze_google_live_log.py'), {str(tmp_path / 'journey.json')!r}], check=True)\n"
+            ),
+            "scripts/analyze_google_live_log.py": (
+                "import sys\n"
+                f"assert sys.argv[1:] == [{str(tmp_path / 'journey.json')!r}]\n"
+                "from pathlib import Path; Path('real-api').mkdir(exist_ok=True); "
+                "Path('real-api/report.json').write_text('candidate')\n"
+            ),
+        }
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
+    execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "scripts/google_live_robot_soak.py")),
+        provenance=tmp_path / "commands.jsonl",
+    )
+    assert (tmp_path / "real-api" / "report.json").read_text() == "candidate"
+    assert not marker.exists()
+
+
+def test_nested_python_script_outside_approved_roots_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.py"
+    marker = tmp_path / "outside-executed"
+    outside.write_text(
+        f"from pathlib import Path; Path({str(marker)!r}).write_text('executed')\n",
+        encoding="utf-8",
+    )
+    archive = _python_source_archive(
+        {
+            "entry.py": (
+                "import subprocess, sys\n"
+                f"subprocess.run([sys.executable, {str(outside)!r}], check=True)\n"
+            )
+        }
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_nested_python_command_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / "nested-command-executed"
+    nested_code = f"open({str(marker)!r}, 'w').write('executed')"
+    payload = (
+        "import subprocess, sys; "
+        f"subprocess.run([sys.executable, '-c', {nested_code!r}], check=True)"
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, _python_source_archive({"entry.py": payload}))
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_nested_python_module_escape_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / "nested-module-executed"
+    module_dir = tmp_path / "ambient"
+    module_dir.mkdir()
+    (module_dir / "escape_module.py").write_text(
+        f"open({str(marker)!r}, 'w').write('executed')\n"
+    )
+    payload = (
+        "import os, subprocess, sys; "
+        f"environment={{**os.environ, 'PYTHONPATH': {str(module_dir)!r}}}; "
+        "subprocess.run([sys.executable, '-m', 'escape_module'], env=environment, check=True)"
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, _python_source_archive({"entry.py": payload}))
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_nested_alternate_interpreter_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    alternate = tmp_path / "python-alternate"
+    alternate.symlink_to(sys.executable)
+    marker = tmp_path / "alternate-executed"
+    nested_code = f"open({str(marker)!r}, 'w').write('executed')"
+    payload = (
+        "import subprocess; "
+        f"subprocess.run([{str(alternate)!r}, '-c', {nested_code!r}], check=True)"
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, _python_source_archive({"entry.py": payload}))
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_nested_arbitrary_named_interpreter_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    alternate = tmp_path / "runner"
+    alternate.symlink_to(sys.executable)
+    marker = tmp_path / "arbitrary-interpreter-executed"
+    nested_code = f"open({str(marker)!r}, 'w').write('executed')"
+    payload = (
+        "import subprocess; "
+        f"subprocess.run([{str(alternate)!r}, '-c', {nested_code!r}], check=True)"
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, _python_source_archive({"entry.py": payload}))
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_nested_shell_python_command_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / "shell-python-executed"
+    payload = (
+        "import subprocess; "
+        f"subprocess.run('python -c \"open({str(marker)!r}, \'w\').write(\\\'executed\\\')\"', shell=True, check=True)"
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, _python_source_archive({"entry.py": payload}))
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_nested_shell_command_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / "shell-executed"
+    payload = (
+        "import subprocess; "
+        f"subprocess.run('touch {str(marker)}', shell=True, check=True)"
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, _python_source_archive({"entry.py": payload}))
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_nested_native_executable_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / "native-executable-ran"
+    payload = (
+        "import subprocess; "
+        f"subprocess.run(['/usr/bin/touch', {str(marker)!r}], check=True)"
+    )
+    _patch_candidate_resource_archive(
+        monkeypatch, runner, _python_source_archive({"entry.py": payload})
+    )
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_nested_ctypes_process_escape_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / "ctypes-process-ran"
+    payload = (
+        "import ctypes; "
+        f"ctypes.CDLL(None).system({('/usr/bin/touch ' + str(marker))!r}.encode())"
+    )
+    _patch_candidate_resource_archive(
+        monkeypatch, runner, _python_source_archive({"entry.py": payload})
+    )
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_nested_cffi_process_escape_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / "cffi-process-ran"
+    payload = (
+        "import cffi; ffi=cffi.FFI(); ffi.cdef('int system(const char *);'); "
+        f"ffi.dlopen(None).system({('/usr/bin/touch ' + str(marker))!r}.encode())"
+    )
+    _patch_candidate_resource_archive(
+        monkeypatch, runner, _python_source_archive({"entry.py": payload})
+    )
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_nested_posix_process_escape_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / "posix-process-ran"
+    payload = (
+        "import posix; "
+        f"posix.system({('/usr/bin/touch ' + str(marker))!r}.encode())"
+    )
+    _patch_candidate_resource_archive(
+        monkeypatch, runner, _python_source_archive({"entry.py": payload})
+    )
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    "escape_name", ["fork", "forkpty", "setsid", "setpgid", "setpgrp"]
+)
+def test_nested_process_group_escape_apis_are_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, escape_name: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    payload = (
+        "import os; "
+        f"assert getattr(os, {escape_name!r}).__name__ == 'blocked_process_escape'"
+    )
+    _patch_candidate_resource_archive(
+        monkeypatch, runner, _python_source_archive({"entry.py": payload})
+    )
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "expected_exit"
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "executable='/usr/bin/true'",
+        "start_new_session=True",
+        "preexec_fn=lambda: None",
+        "process_group=0",
+    ],
+)
+def test_nested_python_process_identity_overrides_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, override: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    archive = _python_source_archive(
+        {
+            "entry.py": (
+                "import subprocess, sys; "
+                f"subprocess.run([sys.executable, 'child.py'], {override}, check=True)"
+            ),
+            "child.py": "pass\n",
+        }
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+
+
+@pytest.mark.parametrize("spawn_name", ["posix_spawn", "posix_spawnp"])
+def test_nested_posix_spawn_escape_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawn_name: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / f"{spawn_name}-executed"
+    payload = (
+        "import os; "
+        f"os.{spawn_name}('/bin/sh', ['sh', '-c', 'touch {marker}'], os.environ)"
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, _python_source_archive({"entry.py": payload}))
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_nested_os_exec_escape_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / "exec-executed"
+    payload = (
+        "import os; "
+        f"os.system(\"python -c 'open({str(marker)!r}, \\\'w\\\').write(\\\'executed\\\')\")"
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, _python_source_archive({"entry.py": payload}))
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_nested_absolute_evidence_argument_is_preserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    evidence = tmp_path / "journey.json"
+    evidence.write_text("declared")
+    payload = (
+        "import subprocess, sys; from pathlib import Path; "
+        f"subprocess.run([sys.executable, 'child.py', {str(evidence)!r}], check=True)"
+    )
+    child = (
+        "import sys; from pathlib import Path; "
+        "Path('real-api').mkdir(exist_ok=True); "
+        "Path('real-api/report.json').write_text(Path(sys.argv[1]).read_text())"
+    )
+    _patch_candidate_resource_archive(
+        monkeypatch, runner, _python_source_archive({"entry.py": payload, "child.py": child})
+    )
+
+    execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py")),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert (tmp_path / "real-api" / "report.json").read_text() == "declared"
+
+
+@pytest.mark.parametrize("python_flag", ["-u", "-B"])
+def test_flagged_relative_python_script_executes_candidate_git_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, python_flag: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path.parent / f"{tmp_path.name}-flagged-script-marker"
+    (tmp_path / "entry.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('spawned')\n"
+    )
+    archive = _python_source_archive(
+        {
+            "entry.py": (
+                "from pathlib import Path\n"
+                "Path('real-api').mkdir(exist_ok=True)\n"
+                "Path('real-api/report.json').write_text('candidate')\n"
+            )
+        }
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
+
+    execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, python_flag, "entry.py")),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert (tmp_path / "real-api" / "report.json").read_text() == "candidate"
+    assert not marker.exists()
+
+
+def test_rejects_shell_strings_lists_and_argument_secrets(tmp_path: Path) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        _spec(tmp_path, "pass", argv="echo injected")
+    with pytest.raises((TypeError, ValueError)):
+        _spec(tmp_path, "pass", argv=[sys.executable, "-c", "pass"])
+    with pytest.raises(ValueError):
+        _spec(tmp_path, "pass", argv=(sys.executable, "-c", "pass", "GOOGLE_API_KEY=secret"))
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("field", ["timeout_sec", "cleanup_grace_sec"])
+def test_rejects_non_finite_terminal_timing(
+    tmp_path: Path, field: str, value: float
+) -> None:
+    with pytest.raises(ValueError):
+        _spec(tmp_path, "pass", **{field: value})
+
+
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "<env:GOOGLE_API_KEY>suffix",
+        "prefix<env:GOOGLE_API_KEY>",
+        "<stdin:protected_transcript_plan>suffix",
+        "prefix<stdin:protected_candidate_plan>",
+    ],
+)
+def test_rejects_placeholder_tokens_embedded_in_argv(
+    tmp_path: Path, argument: str
+) -> None:
+    with pytest.raises(ValueError, match="privacy contract"):
+        _spec(tmp_path, "pass", argv=(sys.executable, "-c", "pass", argument))
+
+
+def test_passes_only_allowlisted_environment_and_rejects_overlap(tmp_path: Path) -> None:
+    spec = _spec(
+        tmp_path,
+        "import os; assert os.environ.get('SAFE') == 'yes'; "
+        "assert 'UNRELATED' not in os.environ; " + _write_report_code(),
+        env_allowlist=("SAFE",),
+    )
+    with pytest.raises(ValueError, match="non-allowlisted"):
+        execute_and_record(
+            spec,
+            env={"SAFE": "yes", "UNRELATED": "no"},
+            provenance=tmp_path / "commands.jsonl",
+        )
+    execute_and_record(
+        spec,
+        env={"SAFE": "yes"},
+        provenance=tmp_path / "commands.jsonl",
+    )
+    with pytest.raises(ValueError):
+        _spec(tmp_path, "pass", env_allowlist=("SAFE",), secret_env=("SAFE",))
+
+
+def test_protected_stdin_is_passed_but_never_recorded(tmp_path: Path) -> None:
+    secret = b"private transcript plan"
+    spec = _spec(
+        tmp_path,
+        "import sys; from pathlib import Path; data=sys.stdin.buffer.read(); "
+        "assert data.startswith(b'private'); " + _write_report_code(),
+        stdin_source="protected_transcript_plan",
+    )
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(spec, provenance=provenance, stdin_bytes=secret)
+    rendered = provenance.read_bytes()
+    assert b"<stdin:protected_transcript_plan>" in rendered
+    assert secret not in rendered
+
+
+def test_protected_candidate_stdin_token_is_safe_in_persisted_provenance(
+    tmp_path: Path,
+) -> None:
+    secret = b"private candidate plan"
+    spec = _spec(
+        tmp_path,
+        "import sys; assert sys.stdin.buffer.read(); " + _write_report_code(),
+        stdin_source="protected_candidate_plan",
+    )
+    provenance = tmp_path / "commands.jsonl"
+
+    execute_and_record(spec, provenance=provenance, stdin_bytes=secret)
+
+    rendered = provenance.read_bytes()
+    assert b"<stdin:protected_candidate_plan>" in rendered
+    assert secret not in rendered
+
+
+def test_absolute_evidence_arguments_are_recorded_as_relative_labels(tmp_path: Path) -> None:
+    protected = tmp_path / "private-plan.json"
+    protected.write_text("safe fixture")
+    spec = _spec(
+        tmp_path,
+        _write_report_code(),
+        argv=(sys.executable, "-c", _write_report_code(), str(protected)),
+        inputs=(protected,),
+    )
+    execute_and_record(spec, provenance=tmp_path / "commands.jsonl")
+    entry = json.loads((tmp_path / "commands.jsonl").read_text())
+    assert str(protected) not in json.dumps(entry)
+    assert "<evidence:private-plan.json>" in entry["argv"]
+
+
+def test_absolute_input_argument_reads_bound_file(tmp_path: Path) -> None:
+    protected = tmp_path / "input.txt"
+    protected.write_text("bound-content")
+    output = tmp_path / "real-api" / "report.json"
+    code = (
+        "import pathlib,sys; data=pathlib.Path(sys.argv[1]).read_text(); "
+        "pathlib.Path(sys.argv[2]).write_text(data)"
+    )
+    execute_and_record(
+        _spec(
+            tmp_path,
+            code,
+            argv=(sys.executable, "-c", code, str(protected), str(output)),
+            inputs=(protected,),
+        ),
+        provenance=tmp_path / "commands.jsonl",
+    )
+    assert output.read_text() == "bound-content"
+
+
+def test_absolute_argument_must_be_an_exact_declared_artifact(tmp_path: Path) -> None:
+    undeclared = tmp_path / "undeclared.txt"
+    undeclared.write_text("no")
+    with pytest.raises(ValueError, match="declared artifact"):
+        execute_and_record(
+            _spec(
+                tmp_path,
+                "pass",
+                argv=(sys.executable, "-c", "pass", str(undeclared)),
+                outputs=(),
+            ),
+            provenance=tmp_path / "commands.jsonl",
+        )
+
+
+def test_absolute_input_parent_symlink_to_outside_is_rejected(tmp_path: Path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-argv-outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("outside-secret")
+    linked = tmp_path / "linked"
+    linked.symlink_to(outside, target_is_directory=True)
+    candidate = linked / "secret.txt"
+    with pytest.raises((ValueError, RuntimeError, OSError)):
+        execute_and_record(
+            _spec(
+                tmp_path,
+                "pass",
+                argv=(sys.executable, "-c", "pass", str(candidate)),
+                inputs=(candidate,),
+                outputs=(),
+            ),
+            provenance=tmp_path / "commands.jsonl",
+        )
+
+
+def test_absolute_input_parent_swap_cannot_change_child_bytes(tmp_path: Path) -> None:
+    parent = tmp_path / "inputs"
+    parent.mkdir()
+    source = parent / "value.txt"
+    source.write_text("approved")
+    outside = tmp_path / "replacement"
+    outside.mkdir()
+    (outside / "value.txt").write_text("outside")
+    observed = tmp_path / "real-api" / "report.json"
+    code = "import pathlib,sys; pathlib.Path(sys.argv[2]).write_text(pathlib.Path(sys.argv[1]).read_text())"
+
+    def swap() -> None:
+        parent.rename(tmp_path / "moved-inputs")
+        parent.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="(?:input parent|cwd) changed"):
+        execute_and_record(
+            _spec(
+                tmp_path,
+                code,
+                argv=(sys.executable, "-c", code, str(source), str(observed)),
+                inputs=(source,),
+            ),
+            provenance=tmp_path / "commands.jsonl",
+            _before_spawn=swap,
+        )
+    assert not observed.exists()
+
+
+def test_child_and_descendant_receive_no_directory_or_unrelated_fds(tmp_path: Path) -> None:
+    output = tmp_path / "real-api" / "report.json"
+    scan = (
+        "import os,stat\nresult=[]\n"
+        "for fd in range(3,128):\n"
+        " try:\n  opened=os.fstat(fd)\n"
+        " except OSError:\n  continue\n"
+        " if stat.S_ISDIR(opened.st_mode): result.append(fd)\n"
+        "print(result)\n"
+    )
+    code = (
+        "import json,os,pathlib,stat,subprocess,sys\n"
+        "fds=[]\n"
+        "for fd in range(3,128):\n"
+        " try:\n  opened=os.fstat(fd)\n"
+        " except OSError:\n  continue\n"
+        " if stat.S_ISDIR(opened.st_mode): fds.append(fd)\n"
+        f"child=subprocess.check_output([sys.executable,'-c',{scan!r}])\n"
+        "pathlib.Path(sys.argv[1]).write_text(json.dumps({'dirs':fds,'descendant':child.decode().strip()}))\n"
+    )
+    execute_and_record(
+        _spec(tmp_path, code, argv=(sys.executable, "-c", code, str(output))),
+        provenance=tmp_path / "commands.jsonl",
+    )
+    observed = json.loads(output.read_text())
+    assert observed == {"dirs": [], "descendant": "[]"}
+
+
+def test_rejects_absolute_command_argument_outside_evidence_root(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="absolute command argument"):
+        execute_and_record(
+            _spec(tmp_path, "pass", argv=(sys.executable, "-c", "pass", "/private/outside"), outputs=()),
+            provenance=tmp_path / "commands.jsonl",
+        )
+
+
+def test_rejects_paths_outside_evidence_root_and_input_output_aliases(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside"
+    with pytest.raises(ValueError):
+        execute_and_record(
+            _spec(tmp_path, "pass", inputs=(outside,)),
+            provenance=tmp_path / "commands.jsonl",
+        )
+    source = tmp_path / "input.txt"
+    source.write_text("input")
+    for kind in ("direct", "symlink", "hardlink"):
+        output = source if kind == "direct" else tmp_path / f"{kind}.txt"
+        if kind == "symlink":
+            output.symlink_to(source)
+        elif kind == "hardlink":
+            os.link(source, output)
+        with pytest.raises((ValueError, RuntimeError)):
+            execute_and_record(
+                _spec(tmp_path, "pass", inputs=(source,), outputs=(output,)),
+                provenance=tmp_path / f"{kind}.jsonl",
+            )
+
+
+@pytest.mark.parametrize("depth", ["first", "middle", "late"])
+def test_output_parent_symlink_never_creates_outside_directory(
+    tmp_path: Path, depth: str
+) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-mkdir-{depth}"
+    outside.mkdir()
+    if depth == "first":
+        (tmp_path / "link").symlink_to(outside, target_is_directory=True)
+        output = tmp_path / "link" / "created" / "report.json"
+    elif depth == "middle":
+        (tmp_path / "safe").mkdir()
+        (tmp_path / "safe" / "link").symlink_to(outside, target_is_directory=True)
+        output = tmp_path / "safe" / "link" / "created" / "report.json"
+    else:
+        (tmp_path / "safe" / "nested").mkdir(parents=True)
+        (tmp_path / "safe" / "nested" / "link").symlink_to(
+            outside, target_is_directory=True
+        )
+        output = tmp_path / "safe" / "nested" / "link" / "created" / "report.json"
+    with pytest.raises((ValueError, RuntimeError, OSError)):
+        execute_and_record(
+            _spec(tmp_path, "pass", outputs=(output,)),
+            provenance=tmp_path / "commands.jsonl",
+        )
+    assert not (outside / "created").exists()
+
+
+def test_file_component_cannot_be_materialized_as_output_parent(tmp_path: Path) -> None:
+    component = tmp_path / "file-component"
+    component.write_text("keep")
+    with pytest.raises((ValueError, RuntimeError, OSError)):
+        execute_and_record(
+            _spec(tmp_path, "pass", outputs=(component / "nested" / "report.json",)),
+            provenance=tmp_path / "commands.jsonl",
+        )
+    assert component.read_text() == "keep"
+
+
+def test_case_output_parent_alias_is_rejected(tmp_path: Path) -> None:
+    (tmp_path / "SAFE").mkdir()
+    with pytest.raises(ValueError, match="aliases|component"):
+        execute_and_record(
+            _spec(tmp_path, "pass", outputs=(tmp_path / "safe" / "report.json",)),
+            provenance=tmp_path / "commands.jsonl",
+        )
+
+
+@pytest.mark.parametrize(
+    ("component", "alias"),
+    [("safe", "SAFE"), ("k", "\u212a")],
+)
+def test_output_parent_alias_created_after_scan_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    component: str,
+    alias: str,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    def create_alias(stage: str, parent_fd: int, observed: str) -> None:
+        if stage == "after_scan" and observed == component:
+            os.mkdir(alias, dir_fd=parent_fd)
+
+    monkeypatch.setattr(runner, "_component_race_hook", create_alias)
+    with pytest.raises((ValueError, RuntimeError, OSError), match="aliases|component"):
+        runner._secure_materialize_directory(tmp_path, tmp_path / component)
+
+
+def test_output_parent_alias_winning_mkdir_eexist_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    real_mkdir = runner.os.mkdir
+
+    def alias_then_eexist(name, mode=0o777, *, dir_fd=None):
+        if name == "safe":
+            real_mkdir("SAFE", mode, dir_fd=dir_fd)
+            raise FileExistsError(name)
+        return real_mkdir(name, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(runner.os, "mkdir", alias_then_eexist)
+    with pytest.raises((ValueError, RuntimeError, OSError), match="aliases|component"):
+        runner._secure_materialize_directory(tmp_path, tmp_path / "safe")
+
+
+def test_output_parent_renamed_to_alias_after_open_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    (tmp_path / "safe").mkdir()
+
+    def rename_alias(stage: str, parent_fd: int, component: str) -> None:
+        if stage == "after_open" and component == "safe":
+            os.rename("safe", "SAFE", src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+
+    monkeypatch.setattr(runner, "_component_race_hook", rename_alias)
+    with pytest.raises((ValueError, RuntimeError, OSError), match="aliases|component"):
+        runner._secure_materialize_directory(tmp_path, tmp_path / "safe")
+
+
+def test_output_parent_renamed_after_validation_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    (tmp_path / "safe").mkdir()
+
+    def rename_alias(stage: str, parent_fd: int, component: str) -> None:
+        if stage == "before_return" and component == "safe":
+            os.rename("safe", "SAFE", src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+
+    monkeypatch.setattr(runner, "_component_race_hook", rename_alias)
+    with pytest.raises((ValueError, RuntimeError, OSError), match="aliases|component"):
+        runner._secure_materialize_directory(tmp_path, tmp_path / "safe")
+
+
+def test_output_parent_renamed_before_advancing_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    (tmp_path / "safe").mkdir()
+
+    def rename_alias(stage: str, parent_fd: int, component: str) -> None:
+        if stage == "before_advance" and component == "safe":
+            os.rename("safe", "SAFE", src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+
+    monkeypatch.setattr(runner, "_component_race_hook", rename_alias)
+    with pytest.raises((ValueError, RuntimeError, OSError), match="aliases|component"):
+        runner._secure_materialize_directory(tmp_path, tmp_path / "safe" / "nested")
+
+
+def test_unicode_output_parent_component_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="component"):
+        execute_and_record(
+            _spec(tmp_path, "pass", outputs=(tmp_path / "saf\u00e9" / "report.json",)),
+            provenance=tmp_path / "commands.jsonl",
+        )
+
+
+def test_valid_nested_output_parent_is_materialized_inside_root(tmp_path: Path) -> None:
+    output = tmp_path / "safe" / "nested" / "report.json"
+    code = "from pathlib import Path; Path('safe/nested/report.json').write_text('ok')"
+    execute_and_record(
+        _spec(tmp_path, code, outputs=(output,)),
+        provenance=tmp_path / "commands.jsonl",
+    )
+    assert output.read_text() == "ok"
+
+
+def test_provenance_parent_symlink_does_not_create_lock_outside(tmp_path: Path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-provenance-outside"
+    outside.mkdir()
+    linked = tmp_path / "linked-root"
+    linked.symlink_to(outside, target_is_directory=True)
+    with pytest.raises((ValueError, RuntimeError, OSError)):
+        execute_and_record(
+            _spec(linked, "pass", outputs=()),
+            provenance=linked / "commands.jsonl",
+        )
+    assert list(outside.iterdir()) == []
+
+
+def _second_provenance_entry(provenance: Path) -> dict:
+    entry = json.loads(provenance.read_text())
+    entry["commandId"] = "diagnostic.second"
+    entry["specSha256"] = "e" * 64
+    return entry
+
+
+def _provenance_entry(provenance: Path, command_id: str, digest: str) -> dict:
+    entry = json.loads(provenance.read_text().splitlines()[0])
+    entry["commandId"] = command_id
+    entry["specSha256"] = digest * 64
+    return entry
+
+
+def test_pair_pointer_is_canonical_and_binds_generation_hashes() -> None:
+    import scripts.google_live_command_runner as runner
+
+    pointer = runner.PairPointer(
+        generation="a" * 32,
+        jsonl_sha256="b" * 64,
+        projection_sha256="c" * 64,
+        entry_count=2,
+        spec_digest_sha256="d" * 64,
+    )
+    rendered = runner._render_pair_pointer(pointer)
+    assert runner._parse_pair_pointer(rendered) == pointer
+    assert rendered.endswith(b"\n")
+    for invalid in (
+        rendered.replace(b'"generation":"', b'"generation":"../', 1),
+        rendered.replace(b'"entryCount":2', b'"entryCount":-1', 1),
+        b" " + rendered,
+    ):
+        with pytest.raises(ValueError, match="pointer"):
+            runner._parse_pair_pointer(invalid)
+
+
+def test_successful_commit_creates_pointer_bound_immutable_generation(
+    tmp_path: Path,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    pointer = runner._parse_pair_pointer(
+        (tmp_path / ".commands.jsonl.pair").read_bytes()
+    )
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    jsonl_generation = generation_dir / f"{pointer.generation}.jsonl"
+    projection_generation = generation_dir / f"{pointer.generation}.txt"
+    assert jsonl_generation.read_bytes() == provenance.read_bytes()
+    assert projection_generation.read_bytes() == provenance.with_suffix(".txt").read_bytes()
+    assert stat.S_IMODE(jsonl_generation.stat().st_mode) == 0o400
+    assert stat.S_IMODE(projection_generation.stat().st_mode) == 0o400
+
+
+@pytest.mark.parametrize(
+    "failure_stage",
+    [
+        "after_generation_jsonl",
+        "after_generation_projection",
+        "after_public_jsonl",
+        "after_public_projection",
+        "before_pointer",
+        "after_pointer",
+    ],
+)
+def test_generation_commit_crash_boundaries_leave_complete_old_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    original_jsonl = provenance.read_bytes()
+    original_projection = provenance.with_suffix(".txt").read_bytes()
+
+    def fail(stage: str) -> None:
+        if stage == failure_stage:
+            raise RuntimeError(f"injected {failure_stage}")
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", fail)
+    with pytest.raises(RuntimeError, match="injected"):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+        )
+
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        committed = runner._read_committed_pair_at(
+            parent_fd, provenance.name, provenance.with_suffix(".txt").name
+        )
+    finally:
+        os.close(parent_fd)
+    assert committed.jsonl == original_jsonl
+    assert committed.projection == original_projection
+    assert provenance.read_bytes() == original_jsonl
+    assert provenance.with_suffix(".txt").read_bytes() == original_projection
+
+
+def test_next_commit_cleans_only_unreachable_known_generations(tmp_path: Path) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    stale = "e" * 32
+    stale_jsonl = generation_dir / f"{stale}.jsonl"
+    stale_projection = generation_dir / f"{stale}.txt"
+    stale_jsonl.write_bytes(provenance.read_bytes())
+    stale_projection.write_bytes(provenance.with_suffix(".txt").read_bytes())
+    stale_jsonl.chmod(0o400)
+    stale_projection.chmod(0o400)
+
+    runner._commit_entry(
+        provenance,
+        _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+    )
+
+    known = [
+        path
+        for path in generation_dir.iterdir()
+        if path.name.endswith((".jsonl", ".txt"))
+    ]
+    assert len(known) <= 4
+    assert not stale_jsonl.exists()
+    assert not stale_projection.exists()
+
+
+@pytest.mark.parametrize(
+    "kind", ["unknown", "lone_jsonl", "lone_txt", "forged", "symlink", "hardlink"]
+)
+def test_generation_cleanup_rejects_unsafe_inventory_without_deleting(
+    tmp_path: Path, kind: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    stale = "e" * 32
+    stale_jsonl = generation_dir / f"{stale}.jsonl"
+    stale_projection = generation_dir / f"{stale}.txt"
+    if kind == "unknown":
+        unsafe = generation_dir / "operator-note"
+        unsafe.write_text("keep")
+    elif kind == "lone_jsonl":
+        unsafe = stale_jsonl
+        unsafe.write_bytes(provenance.read_bytes())
+        unsafe.chmod(0o400)
+    elif kind == "lone_txt":
+        unsafe = stale_projection
+        unsafe.write_bytes(provenance.with_suffix(".txt").read_bytes())
+        unsafe.chmod(0o400)
+    elif kind == "forged":
+        stale_jsonl.write_bytes(b"forged\n")
+        stale_projection.write_bytes(b"forged\n")
+        stale_jsonl.chmod(0o400)
+        stale_projection.chmod(0o400)
+        unsafe = stale_jsonl
+    elif kind == "symlink":
+        unsafe = stale_jsonl
+        unsafe.symlink_to(provenance)
+        stale_projection.write_bytes(provenance.with_suffix(".txt").read_bytes())
+        stale_projection.chmod(0o400)
+    else:
+        unsafe = stale_jsonl
+        os.link(provenance, unsafe)
+        stale_projection.write_bytes(provenance.with_suffix(".txt").read_bytes())
+        stale_projection.chmod(0o400)
+    before = {path.name for path in generation_dir.iterdir()}
+
+    with pytest.raises((OSError, RuntimeError, ValueError), match="generation|pair|artifact|inventory"):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+        )
+
+    assert {path.name for path in generation_dir.iterdir()} == before
+    assert unsafe.exists() or unsafe.is_symlink()
+
+
+def test_interrupted_stale_generation_cleanup_recovers_on_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    stale = "e" * 32
+    stale_jsonl = generation_dir / f"{stale}.jsonl"
+    stale_projection = generation_dir / f"{stale}.txt"
+    stale_jsonl.write_bytes(provenance.read_bytes())
+    stale_projection.write_bytes(provenance.with_suffix(".txt").read_bytes())
+    stale_jsonl.chmod(0o400)
+    stale_projection.chmod(0o400)
+    interrupted = False
+
+    def interrupt_between_pair_unlinks(stage: str, name: str) -> None:
+        nonlocal interrupted
+        if (
+            stage == "stale_after_quarantine"
+            and name == stale_jsonl.name
+            and not interrupted
+        ):
+            interrupted = True
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner, "_generation_cleanup_hook", interrupt_between_pair_unlinks)
+    with pytest.raises(KeyboardInterrupt):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+        )
+    monkeypatch.setattr(runner, "_generation_cleanup_hook", lambda stage, name: None)
+
+    execute_and_record(
+        _spec(tmp_path, "pass", command_id="diagnostic.retry", outputs=()),
+        provenance=provenance,
+    )
+    assert not stale_jsonl.exists()
+    assert not stale_projection.exists()
+
+
+def test_stale_generation_cleanup_never_deletes_racing_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    stale = "e" * 32
+    target = generation_dir / f"{stale}.jsonl"
+    projection = generation_dir / f"{stale}.txt"
+    target.write_bytes(provenance.read_bytes())
+    projection.write_bytes(provenance.with_suffix(".txt").read_bytes())
+    target.chmod(0o400)
+    projection.chmod(0o400)
+
+    def replace(stage: str, name: str) -> None:
+        if stage == "generation_after_validation" and name == target.name:
+            quarantine = next(
+                path
+                for path in generation_dir.iterdir()
+                if runner.GENERATION_QUARANTINE.fullmatch(path.name)
+            )
+            quarantine.unlink()
+            quarantine.write_text("replacement")
+            quarantine.chmod(0o400)
+
+    monkeypatch.setattr(runner, "_generation_cleanup_hook", replace, raising=False)
+    with pytest.raises(RuntimeError, match="generation"):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+        )
+
+    assert any(path.read_text() == "replacement" for path in generation_dir.iterdir())
+
+
+def test_failed_generation_write_is_recovered_before_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+
+    def fail(stage: str) -> None:
+        if stage == "after_generation_jsonl":
+            raise RuntimeError("injected generation failure")
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", fail)
+    with pytest.raises(RuntimeError, match="generation failure"):
+        execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", lambda stage: None)
+
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    assert len(runner.parse_provenance(provenance.read_bytes())) == 1
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "after_generation_pending_journal",
+        "after_generation_jsonl_planned_journal",
+        "after_generation_jsonl_before_journal",
+        "after_generation_jsonl",
+        "after_generation_projection_planned_journal",
+        "after_generation_projection_before_journal",
+        "after_generation_projection",
+    ],
+)
+def test_generation_creation_checkpoint_recovers_without_ambiguous_component(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+
+    def crash(observed: str) -> None:
+        if observed == stage:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", crash)
+    with pytest.raises(KeyboardInterrupt):
+        execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", lambda _stage: None)
+
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    assert not any(path.name.endswith((".jsonl", ".txt")) for path in generation_dir.iterdir())
+    execute_and_record(
+        _spec(tmp_path, "pass", command_id="diagnostic.retry", outputs=()),
+        provenance=provenance,
+    )
+
+
+def test_pending_recovery_never_deletes_racing_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    generation = "e" * 32
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    generation_dir.mkdir(mode=0o700)
+    target = generation_dir / f"{generation}.jsonl"
+    target.write_text("transaction")
+    target.chmod(0o400)
+    directory_fd = os.open(generation_dir, os.O_RDONLY)
+    try:
+        snapshot = runner._read_existing_snapshot_at(directory_fd, target.name)
+    finally:
+        os.close(directory_fd)
+    assert snapshot is not None
+    pending = tmp_path / ".commands.jsonl.pending"
+    pending.write_bytes(
+        runner._render_pending_generation(
+            generation,
+            {"jsonl": snapshot.version, "txt": None},
+        )
+    )
+    pending.chmod(0o600)
+
+    def replace(stage: str, name: str) -> None:
+        if stage == "generation_after_validation" and name == target.name:
+            quarantine = next(
+                path
+                for path in generation_dir.iterdir()
+                if runner.GENERATION_QUARANTINE.fullmatch(path.name)
+            )
+            quarantine.unlink()
+            quarantine.write_text("replacement")
+            quarantine.chmod(0o400)
+
+    monkeypatch.setattr(runner, "_generation_cleanup_hook", replace, raising=False)
+    with pytest.raises(RuntimeError, match="generation"):
+        execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+
+    assert any(path.read_text() == "replacement" for path in generation_dir.iterdir())
+
+
+def test_pending_recovery_preserves_replacement_of_journal_owned_file(
+    tmp_path: Path,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    generation = "e" * 32
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    generation_dir.mkdir(mode=0o700)
+    target = generation_dir / f"{generation}.jsonl"
+    target.write_text("owned")
+    target.chmod(0o400)
+    directory_fd = os.open(generation_dir, os.O_RDONLY)
+    try:
+        snapshot = runner._read_existing_snapshot_at(directory_fd, target.name)
+    finally:
+        os.close(directory_fd)
+    assert snapshot is not None
+    pending = tmp_path / ".commands.jsonl.pending"
+    pending.write_bytes(
+        runner._render_pending_generation(
+            generation,
+            {"jsonl": snapshot.version, "txt": None},
+        )
+    )
+    pending.chmod(0o600)
+    target.unlink()
+    target.write_text("replacement")
+    target.chmod(0o400)
+
+    with pytest.raises(RuntimeError, match="pending generation"):
+        execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+
+    assert target.read_text() == "replacement"
+
+
+def test_pending_recovery_does_not_quarantine_generation_committed_mid_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    seed = tmp_path / "seed.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=seed)
+    generation = "e" * 32
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    generation_dir.mkdir(mode=0o700)
+    jsonl = generation_dir / f"{generation}.jsonl"
+    projection = generation_dir / f"{generation}.txt"
+    entries = [_provenance_entry(seed, "diagnostic.writer_a", "1")]
+    jsonl.write_bytes(runner.render_provenance(entries))
+    projection.write_bytes(runner.render_commands_projection(entries))
+    jsonl.chmod(0o400)
+    projection.chmod(0o400)
+    generation_fd = os.open(generation_dir, os.O_RDONLY)
+    try:
+        jsonl_snapshot = runner._read_existing_snapshot_at(generation_fd, jsonl.name)
+        projection_snapshot = runner._read_existing_snapshot_at(
+            generation_fd, projection.name
+        )
+    finally:
+        os.close(generation_fd)
+    assert jsonl_snapshot is not None
+    assert projection_snapshot is not None
+    pending = tmp_path / ".commands.jsonl.pending"
+    pending.write_bytes(
+        runner._render_pending_generation(
+            generation,
+            {
+                "jsonl": jsonl_snapshot.version,
+                "txt": projection_snapshot.version,
+            },
+        )
+    )
+    pending.chmod(0o600)
+    pointer = runner.PairPointer(
+        generation,
+        hashlib.sha256(jsonl.read_bytes()).hexdigest(),
+        hashlib.sha256(projection.read_bytes()).hexdigest(),
+        len(entries),
+        runner._spec_digest_summary(entries),
+    )
+
+    def publish_pointer(stage: str, _name: str) -> None:
+        if stage == "generation_after_validation":
+            path = tmp_path / ".commands.jsonl.pair"
+            path.write_bytes(runner._render_pair_pointer(pointer))
+            path.chmod(0o600)
+
+    monkeypatch.setattr(runner, "_generation_cleanup_hook", publish_pointer)
+
+    parent_fd = os.open(tmp_path, os.O_RDONLY)
+    try:
+        with pytest.raises(RuntimeError, match="pending generation is committed"):
+            runner._recover_pending_generation_at(parent_fd, provenance.name)
+    finally:
+        os.close(parent_fd)
+
+    assert jsonl.exists()
+    assert projection.exists()
+
+
+def test_interrupted_quarantine_compaction_resumes_from_owned_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    generation = "e" * 32
+    generation_dir = tmp_path / "generations"
+    generation_dir.mkdir(mode=0o700)
+    original = generation_dir / f"{generation}.jsonl"
+    original.write_bytes(b"owned generation payload\n")
+    original.chmod(0o400)
+    generation_fd = os.open(generation_dir, os.O_RDONLY)
+    try:
+        snapshot = runner._read_existing_snapshot_at(generation_fd, original.name)
+        assert snapshot is not None
+        quarantine = runner._generation_quarantine_name(original.name, snapshot)
+        runner._rename_noreplace_at(generation_fd, original.name, quarantine)
+        real_write = runner.os.write
+        interrupted = False
+
+        def interrupt_write(descriptor: int, content: bytes | memoryview) -> int:
+            nonlocal interrupted
+            if not interrupted:
+                interrupted = True
+                real_write(descriptor, bytes(content[:8]))
+                raise KeyboardInterrupt
+            return real_write(descriptor, content)
+
+        monkeypatch.setattr(runner.os, "write", interrupt_write)
+        with pytest.raises(KeyboardInterrupt):
+            runner._compact_generation_quarantine_at(
+                generation_fd, quarantine, snapshot
+            )
+        monkeypatch.setattr(runner.os, "write", real_write)
+
+        runner._recover_generation_quarantines_at(generation_fd, generation)
+        recovered = runner._read_existing_snapshot_at(generation_fd, quarantine)
+    finally:
+        os.close(generation_fd)
+
+    assert recovered is None
+
+
+def test_generation_quarantine_never_overwrites_racing_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    stale = "e" * 32
+    target = generation_dir / f"{stale}.jsonl"
+    projection = generation_dir / f"{stale}.txt"
+    target.write_bytes(provenance.read_bytes())
+    projection.write_bytes(provenance.with_suffix(".txt").read_bytes())
+    target.chmod(0o400)
+    projection.chmod(0o400)
+    replacement = b"racing destination must survive\n"
+
+    def occupy_destination(stage: str, name: str) -> None:
+        if stage != "stale_before_remove" or name != target.name:
+            return
+        generation_fd = os.open(generation_dir, os.O_RDONLY)
+        try:
+            snapshot = runner._read_existing_snapshot_at(generation_fd, name)
+        finally:
+            os.close(generation_fd)
+        assert snapshot is not None
+        destination = generation_dir / runner._generation_quarantine_name(name, snapshot)
+        destination.write_bytes(replacement)
+        destination.chmod(0o400)
+
+    monkeypatch.setattr(runner, "_generation_cleanup_hook", occupy_destination)
+
+    with pytest.raises((FileExistsError, RuntimeError)):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+        )
+
+    assert any(path.read_bytes() == replacement for path in generation_dir.iterdir())
+
+
+def test_cleaned_quarantines_do_not_exhaust_generation_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    stale = "e" * 32
+    (generation_dir / f"{stale}.jsonl").write_bytes(provenance.read_bytes())
+    (generation_dir / f"{stale}.txt").write_bytes(
+        provenance.with_suffix(".txt").read_bytes()
+    )
+    (generation_dir / f"{stale}.jsonl").chmod(0o400)
+    (generation_dir / f"{stale}.txt").chmod(0o400)
+    monkeypatch.setattr(runner, "_MAX_GENERATION_FILES", 6)
+    execute_and_record(
+        _spec(tmp_path, "pass", command_id="diagnostic.second", outputs=()),
+        provenance=provenance,
+    )
+    assert not any(
+        runner.GENERATION_QUARANTINE.fullmatch(path.name)
+        for path in generation_dir.iterdir()
+    )
+
+    monkeypatch.setattr(runner, "_MAX_GENERATION_FILES", 4)
+    execute_and_record(
+        _spec(tmp_path, "pass", command_id="diagnostic.third", outputs=()),
+        provenance=provenance,
+    )
+
+
+def test_long_run_generation_storage_remains_bounded(tmp_path: Path) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    for index in range(24):
+        execute_and_record(
+            _spec(
+                tmp_path,
+                "pass",
+                command_id=f"diagnostic.run_{index}",
+                outputs=(),
+            ),
+            provenance=provenance,
+        )
+
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    hidden_files = list(generation_dir.iterdir())
+    assert len(hidden_files) <= 4
+    assert all(runner.GENERATION_FILE.fullmatch(path.name) for path in hidden_files)
+    assert sum(path.stat().st_size for path in hidden_files) <= 2 * (
+        provenance.stat().st_size + provenance.with_suffix(".txt").stat().st_size
+    )
+
+
+def test_tombstone_cleanup_preserves_instrumented_racing_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    stale = "e" * 32
+    (generation_dir / f"{stale}.jsonl").write_bytes(provenance.read_bytes())
+    (generation_dir / f"{stale}.txt").write_bytes(
+        provenance.with_suffix(".txt").read_bytes()
+    )
+    (generation_dir / f"{stale}.jsonl").chmod(0o400)
+    (generation_dir / f"{stale}.txt").chmod(0o400)
+    replacement = b"preserve tombstone replacement\n"
+
+    def replace(stage: str, name: str) -> None:
+        if stage != "tombstone_before_unlink" or not name.endswith(".jsonl"):
+            return
+        tombstone = next(
+            path
+            for path in generation_dir.iterdir()
+            if runner.GENERATION_QUARANTINE.fullmatch(path.name)
+            and ".jsonl." in path.name
+        )
+        tombstone.unlink()
+        tombstone.write_bytes(replacement)
+        tombstone.chmod(0o400)
+
+    monkeypatch.setattr(runner, "_generation_cleanup_hook", replace)
+
+    with pytest.raises(RuntimeError, match="tombstone"):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+        )
+
+    assert any(path.read_bytes() == replacement for path in generation_dir.iterdir())
+
+
+def test_pending_journal_cannot_delete_committed_generation(tmp_path: Path) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    pointer = runner._parse_pair_pointer((tmp_path / ".commands.jsonl.pair").read_bytes())
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    committed = {
+        generation_dir / f"{pointer.generation}.jsonl",
+        generation_dir / f"{pointer.generation}.txt",
+    }
+    pending = tmp_path / ".commands.jsonl.pending"
+    pending.write_bytes(
+        runner._render_pending_generation(pointer.generation)
+    )
+    pending.chmod(0o600)
+
+    with pytest.raises(RuntimeError, match="provenance"):
+        execute_and_record(
+            _spec(tmp_path, "pass", command_id="diagnostic.retry", outputs=()),
+            provenance=provenance,
+        )
+
+    assert all(path.exists() for path in committed)
+    assert provenance.exists()
+    assert provenance.with_suffix(".txt").exists()
+
+
+def test_invalid_generation_inventory_fails_before_child_execution(
+    tmp_path: Path,
+) -> None:
+    provenance = tmp_path / "commands.jsonl"
+    generation_dir = tmp_path / ".commands.jsonl.generations"
+    generation_dir.mkdir(mode=0o700)
+    (generation_dir / "operator-file").write_bytes(b"unknown")
+    marker = tmp_path / "child-executed"
+    code = f"from pathlib import Path; Path({str(marker)!r}).write_text('bad')"
+
+    with pytest.raises(RuntimeError, match="generation inventory"):
+        execute_and_record(_spec(tmp_path, code, outputs=()), provenance=provenance)
+
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("kind", ["pointer_input", "generation_output"])
+def test_rejects_pointer_and_generation_control_artifacts(
+    tmp_path: Path, kind: str
+) -> None:
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    marker = tmp_path / "child-executed"
+    code = f"from pathlib import Path; Path({str(marker)!r}).write_text('bad')"
+    if kind == "pointer_input":
+        changes = {"inputs": (tmp_path / ".commands.jsonl.pair",), "outputs": ()}
+    else:
+        output = tmp_path / ".commands.jsonl.generations" / "command-output"
+        changes = {"inputs": (), "outputs": (output,)}
+        code += f"; Path({str(output)!r}).write_text('bad')"
+    with pytest.raises(ValueError, match="control"):
+        execute_and_record(
+            _spec(
+                tmp_path,
+                code,
+                command_id=f"diagnostic.{kind}",
+                **changes,
+            ),
+            provenance=provenance,
+        )
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("stage", "target_name"),
+    [
+        ("after_jsonl_final_check", "commands.jsonl"),
+        ("after_projection_final_check", "commands.txt"),
+    ],
+)
+def test_committed_pair_rejects_public_mutation_between_final_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    target_name: str,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    mutated = False
+
+    def mutate(
+        observed_stage: str,
+        directory_fd: int,
+        jsonl_name: str,
+        projection_name: str,
+    ) -> None:
+        nonlocal mutated
+        if (
+            observed_stage == stage
+            and jsonl_name == provenance.name
+            and not mutated
+        ):
+            mutated = True
+            name = target_name
+            descriptor = os.open(name, os.O_WRONLY | os.O_APPEND, dir_fd=directory_fd)
+            try:
+                os.write(descriptor, b"tampered")
+            finally:
+                os.close(descriptor)
+
+    monkeypatch.setattr(runner, "_provenance_pair_hook", mutate)
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(RuntimeError, match="pair|artifact|public"):
+            runner._read_committed_pair_at(
+                parent_fd, provenance.name, provenance.with_suffix(".txt").name
+            )
+    finally:
+        os.close(parent_fd)
+
+
+def test_committed_pair_rejects_pointer_aba_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    pointer = tmp_path / ".commands.jsonl.pair"
+    moved = tmp_path / ".commands.jsonl.pair.moved"
+    mutated = False
+
+    def aba(
+        stage: str,
+        directory_fd: int,
+        jsonl_name: str,
+        projection_name: str,
+    ) -> None:
+        del directory_fd, projection_name
+        nonlocal mutated
+        if stage == "before_pointer_recheck" and jsonl_name == provenance.name and not mutated:
+            mutated = True
+            pointer.rename(moved)
+            moved.rename(pointer)
+
+    monkeypatch.setattr(runner, "_provenance_pair_hook", aba)
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(RuntimeError, match="pointer|pair"):
+            runner._read_committed_pair_at(
+                parent_fd, provenance.name, provenance.with_suffix(".txt").name
+            )
+    finally:
+        os.close(parent_fd)
+
+
+def test_committed_pair_rejects_in_place_pointer_aba_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    pointer = tmp_path / ".commands.jsonl.pair"
+    original = pointer.read_bytes()
+    mutated = False
+
+    def aba(
+        stage: str,
+        directory_fd: int,
+        jsonl_name: str,
+        projection_name: str,
+    ) -> None:
+        del directory_fd, projection_name
+        nonlocal mutated
+        if stage == "before_pointer_recheck" and jsonl_name == provenance.name and not mutated:
+            mutated = True
+            pointer.write_bytes(b"tampered\n")
+            pointer.write_bytes(original)
+
+    monkeypatch.setattr(runner, "_provenance_pair_hook", aba)
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(RuntimeError, match="pointer|pair"):
+            runner._read_committed_pair_at(
+                parent_fd, provenance.name, provenance.with_suffix(".txt").name
+            )
+    finally:
+        os.close(parent_fd)
+
+
+def test_committed_read_does_not_create_missing_generation_directory(
+    tmp_path: Path,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    pointer = runner.PairPointer("a" * 32, "b" * 64, "c" * 64, 0, "d" * 64)
+    (tmp_path / ".commands.jsonl.pair").write_bytes(
+        runner._render_pair_pointer(pointer)
+    )
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises((FileNotFoundError, RuntimeError)):
+            runner._read_committed_pair_at(parent_fd, "commands.jsonl", "commands.txt")
+    finally:
+        os.close(parent_fd)
+    assert not (tmp_path / ".commands.jsonl.generations").exists()
+
+
+def test_committed_pair_rejects_pointer_wrong_mode(tmp_path: Path) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    (tmp_path / ".commands.jsonl.pair").chmod(0o644)
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(RuntimeError, match="pointer|artifact"):
+            runner._read_committed_pair_at(
+                parent_fd, provenance.name, provenance.with_suffix(".txt").name
+            )
+    finally:
+        os.close(parent_fd)
+
+
+def test_committed_pair_rejects_in_place_generation_aba_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    pointer = runner._parse_pair_pointer(
+        (tmp_path / ".commands.jsonl.pair").read_bytes()
+    )
+    generation = (
+        tmp_path / ".commands.jsonl.generations" / f"{pointer.generation}.jsonl"
+    )
+    original = generation.read_bytes()
+    mutated = False
+
+    def aba(
+        stage: str,
+        directory_fd: int,
+        jsonl_name: str,
+        projection_name: str,
+    ) -> None:
+        del directory_fd, projection_name
+        nonlocal mutated
+        if stage == "before_pointer_recheck" and jsonl_name == provenance.name and not mutated:
+            mutated = True
+            generation.chmod(0o600)
+            generation.write_bytes(b"tampered\n")
+            generation.write_bytes(original)
+            generation.chmod(0o400)
+
+    monkeypatch.setattr(runner, "_provenance_pair_hook", aba)
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(RuntimeError, match="committed|pair"):
+            runner._read_committed_pair_at(
+                parent_fd, provenance.name, provenance.with_suffix(".txt").name
+            )
+    finally:
+        os.close(parent_fd)
+
+
+@pytest.mark.parametrize("mutation", ["append", "hardlink"])
+def test_provenance_read_rejects_file_mutation_after_initial_stat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    artifact = tmp_path / "commands.jsonl"
+    artifact.write_bytes(b"original")
+
+    def mutate(stage: str, directory_fd: int, name: str) -> None:
+        if stage != "after_read":
+            return
+        if mutation == "append":
+            descriptor = os.open(name, os.O_WRONLY | os.O_APPEND, dir_fd=directory_fd)
+            try:
+                os.write(descriptor, b"changed")
+            finally:
+                os.close(descriptor)
+        else:
+            os.link(
+                name,
+                "commands.alias",
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+
+    monkeypatch.setattr(runner, "_provenance_read_hook", mutate)
+    directory_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(RuntimeError, match="artifact"):
+            runner._read_existing_at(directory_fd, artifact.name)
+    finally:
+        os.close(directory_fd)
+
+
+@pytest.mark.parametrize("mutation", ["recreate", "byte_restore", "hardlink"])
+def test_pair_snapshot_rejects_projection_mutation_during_jsonl_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    jsonl = tmp_path / "commands.jsonl"
+    projection = tmp_path / "commands.txt"
+    jsonl.write_bytes(b"jsonl")
+    projection.write_bytes(b"projection")
+    mutated = False
+
+    def mutate(stage: str, directory_fd: int, name: str) -> None:
+        nonlocal mutated
+        if stage != "after_read" or name != jsonl.name or mutated:
+            return
+        mutated = True
+        if mutation == "recreate":
+            projection.unlink()
+            projection.write_bytes(b"projection")
+        elif mutation == "byte_restore":
+            descriptor = os.open(projection.name, os.O_WRONLY, dir_fd=directory_fd)
+            try:
+                os.write(descriptor, b"X")
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                os.write(descriptor, b"p")
+            finally:
+                os.close(descriptor)
+        else:
+            os.link(projection, tmp_path / "projection.alias")
+
+    monkeypatch.setattr(runner, "_provenance_read_hook", mutate)
+    directory_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(RuntimeError, match="pair|artifact"):
+            runner._read_provenance_pair_at(
+                directory_fd, jsonl.name, projection.name
+            )
+    finally:
+        os.close(directory_fd)
+
+
+def test_absent_pair_snapshot_rejects_file_appearing_between_lookups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    def create_projection(
+        stage: str, directory_fd: int, jsonl_name: str, projection_name: str
+    ) -> None:
+        if stage == "after_jsonl_lookup":
+            descriptor = os.open(
+                projection_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            os.close(descriptor)
+
+    monkeypatch.setattr(runner, "_provenance_pair_hook", create_projection)
+    directory_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(RuntimeError, match="pair"):
+            runner._read_provenance_pair_at(
+                directory_fd, "commands.jsonl", "commands.txt"
+            )
+    finally:
+        os.close(directory_fd)
+
+
+def test_pair_snapshot_rejects_fifo_without_blocking(tmp_path: Path) -> None:
+    fifo = tmp_path / "commands.jsonl"
+    os.mkfifo(fifo)
+    script = (
+        "import os,sys\n"
+        "from scripts import google_live_command_runner as runner\n"
+        "fd=os.open(sys.argv[1], os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))\n"
+        "try:\n"
+        " runner._read_provenance_pair_at(fd, 'commands.jsonl', 'commands.txt')\n"
+        "except RuntimeError:\n"
+        " raise SystemExit(0)\n"
+        "finally:\n"
+        " os.close(fd)\n"
+        "raise SystemExit(2)\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)],
+        cwd=Path(__file__).parents[1],
+        timeout=3,
+        check=False,
+    )
+    assert completed.returncode == 0
+
+
+def test_final_pair_verification_rejects_jsonl_mutation_during_projection_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    original_jsonl = provenance.read_bytes()
+    original_projection = provenance.with_suffix(".txt").read_bytes()
+    armed = False
+    mutated = False
+
+    def arm(stage: str) -> None:
+        nonlocal armed
+        if stage == "before_verify":
+            armed = True
+
+    def mutate(stage: str, directory_fd: int, name: str) -> None:
+        nonlocal mutated
+        if (
+            armed
+            and not mutated
+            and stage == "after_read"
+            and name == provenance.with_suffix(".txt").name
+        ):
+            mutated = True
+            runner._atomic_replace_at(directory_fd, provenance.name, original_jsonl)
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", arm)
+    monkeypatch.setattr(runner, "_provenance_read_hook", mutate)
+    with pytest.raises(RuntimeError, match="pair|artifact|rollback"):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+        )
+    assert provenance.read_bytes() == original_jsonl
+    assert provenance.with_suffix(".txt").read_bytes() == original_projection
+
+
+def test_preflight_pair_race_never_allows_child_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    existing = runner.parse_provenance(provenance.read_bytes())
+    newer_jsonl = runner.render_provenance(
+        [*existing, _provenance_entry(provenance, "diagnostic.injected", "3")]
+    )
+    marker = tmp_path / "child-executed"
+    armed = False
+    mutated = False
+
+    def arm(stage: str) -> None:
+        nonlocal armed
+        if stage == "preflight_before_read":
+            armed = True
+
+    def mutate(stage: str, directory_fd: int, name: str) -> None:
+        nonlocal mutated
+        if (
+            armed
+            and not mutated
+            and stage == "after_read"
+            and name == provenance.with_suffix(".txt").name
+        ):
+            mutated = True
+            runner._atomic_replace_at(directory_fd, provenance.name, newer_jsonl)
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", arm)
+    monkeypatch.setattr(runner, "_provenance_read_hook", mutate)
+    code = f"from pathlib import Path; Path({str(marker)!r}).write_text('bad')"
+    with pytest.raises((RuntimeError, ValueError), match="pair|artifact|provenance"):
+        execute_and_record(
+            _spec(tmp_path, code, command_id="diagnostic.candidate", outputs=()),
+            provenance=provenance,
+        )
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("mutation", ["missing_jsonl", "missing_projection", "mismatch"])
+def test_preflight_repairs_public_views_from_committed_generation_before_child(
+    tmp_path: Path, mutation: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    projection = provenance.with_suffix(".txt")
+    if mutation == "missing_jsonl":
+        provenance.unlink()
+    elif mutation == "missing_projection":
+        projection.unlink()
+    else:
+        provenance.write_bytes(b"tampered\n")
+        projection.write_bytes(b"tampered\n")
+    marker = tmp_path / "child-executed"
+    code = f"from pathlib import Path; Path({str(marker)!r}).write_text('ok')"
+
+    execute_and_record(
+        _spec(
+            tmp_path,
+            code,
+            command_id=f"diagnostic.repair_{mutation}",
+            outputs=(marker,),
+        ),
+        provenance=provenance,
+    )
+
+    assert marker.read_text() == "ok"
+    entries = runner.parse_provenance(provenance.read_bytes())
+    assert entries[-1]["commandId"] == f"diagnostic.repair_{mutation}"
+    assert projection.read_bytes() == runner.render_commands_projection(entries)
+
+
+def test_preflight_repair_race_never_allows_child_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    provenance.with_suffix(".txt").write_bytes(b"tampered\n")
+    marker = tmp_path / "child-executed"
+
+    def mutate(stage: str) -> None:
+        if stage == "preflight_after_repair_jsonl":
+            provenance.write_bytes(b"raced\n")
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", mutate)
+    code = f"from pathlib import Path; Path({str(marker)!r}).write_text('bad')"
+    with pytest.raises((RuntimeError, ValueError), match="provenance|pair"):
+        execute_and_record(
+            _spec(
+                tmp_path,
+                code,
+                command_id="diagnostic.repair_race",
+                outputs=(),
+            ),
+            provenance=provenance,
+        )
+    assert not marker.exists()
+
+
+def test_initially_absent_pair_rolls_back_failure_after_first_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    seed_provenance = seed / "commands.jsonl"
+    execute_and_record(_spec(seed, "pass", outputs=()), provenance=seed_provenance)
+    target = tmp_path / "target"
+    target.mkdir()
+    provenance = target / "commands.jsonl"
+
+    def fail_after_jsonl(stage: str) -> None:
+        if stage == "after_jsonl_replace":
+            raise ValueError("injected first publish failure")
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", fail_after_jsonl)
+    with pytest.raises(ValueError, match="first publish failure"):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(seed_provenance, "diagnostic.writer_a", "1"),
+        )
+    assert not provenance.exists()
+    assert not provenance.with_suffix(".txt").exists()
+
+
+@pytest.mark.parametrize(
+    "swap_stage",
+    [
+        "after_lock",
+        "before_read",
+        "after_jsonl_replace",
+        "after_projection_replace",
+        "post_publish",
+    ],
+)
+def test_provenance_parent_swap_never_targets_replacement_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, swap_stage: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    parent = tmp_path / "evidence"
+    parent.mkdir()
+    provenance = parent / "commands.jsonl"
+    execute_and_record(_spec(parent, "pass", outputs=()), provenance=provenance)
+    entry = _second_provenance_entry(provenance)
+    original_jsonl = provenance.read_bytes()
+    original_projection = provenance.with_suffix(".txt").read_bytes()
+    moved = tmp_path / "moved-evidence"
+    swapped = False
+
+    def swap(stage: str) -> None:
+        nonlocal swapped
+        if stage == swap_stage and not swapped:
+            swapped = True
+            parent.rename(moved)
+            parent.mkdir()
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", swap)
+    with pytest.raises(RuntimeError, match="cwd changed"):
+        runner._commit_entry(provenance, entry)
+
+    assert list(parent.iterdir()) == []
+    assert (moved / "commands.jsonl").read_bytes() == original_jsonl
+    assert (moved / "commands.txt").read_bytes() == original_projection
+
+
+def test_provenance_rollback_remains_bound_after_parent_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    parent = tmp_path / "evidence"
+    parent.mkdir()
+    provenance = parent / "commands.jsonl"
+    execute_and_record(_spec(parent, "pass", outputs=()), provenance=provenance)
+    entry = _second_provenance_entry(provenance)
+    original_jsonl = provenance.read_bytes()
+    original_projection = provenance.with_suffix(".txt").read_bytes()
+    moved = tmp_path / "moved-evidence"
+
+    def fail_then_swap(stage: str) -> None:
+        if stage == "after_jsonl_replace":
+            raise ValueError("injected publish failure")
+        if stage == "before_rollback":
+            parent.rename(moved)
+            parent.mkdir()
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", fail_then_swap)
+    with pytest.raises(ValueError, match="injected publish failure"):
+        runner._commit_entry(provenance, entry)
+
+    assert list(parent.iterdir()) == []
+    assert (moved / "commands.jsonl").read_bytes() == original_jsonl
+    assert (moved / "commands.txt").read_bytes() == original_projection
+
+
+def test_provenance_preflight_rejects_parent_swap_after_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    parent = tmp_path / "evidence"
+    parent.mkdir()
+    provenance = parent / "commands.jsonl"
+    execute_and_record(_spec(parent, "pass", outputs=()), provenance=provenance)
+    moved = tmp_path / "moved-evidence"
+
+    def swap(stage: str) -> None:
+        if stage == "preflight_after_lock":
+            parent.rename(moved)
+            parent.mkdir()
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", swap)
+    with pytest.raises(RuntimeError, match="cwd changed"):
+        runner._preflight_provenance(provenance, "diagnostic.second")
+
+    assert list(parent.iterdir()) == []
+
+
+def test_replaced_lock_cannot_create_a_concurrent_lock_domain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    entry_a = _provenance_entry(provenance, "diagnostic.writer_a", "1")
+    entry_b = _provenance_entry(provenance, "diagnostic.writer_b", "2")
+    lock_path = tmp_path / ".commands.jsonl.lock"
+    writer_b_acquired = threading.Event()
+    writer_b_errors = []
+    writer_b = None
+    replaced = False
+
+    def run_writer_b() -> None:
+        try:
+            runner._commit_entry(provenance, entry_b)
+        except BaseException as exc:
+            writer_b_errors.append(exc)
+
+    def replace_lock(stage: str) -> None:
+        nonlocal replaced, writer_b
+        if threading.current_thread().name == "writer-b":
+            if stage == "after_lock":
+                writer_b_acquired.set()
+            return
+        if stage == "after_lock" and not replaced:
+            replaced = True
+            lock_path.unlink()
+            lock_path.write_bytes(b"")
+            lock_path.chmod(0o600)
+            writer_b = threading.Thread(target=run_writer_b, name="writer-b")
+            writer_b.start()
+            assert not writer_b_acquired.wait(0.2)
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", replace_lock)
+    with pytest.raises(RuntimeError, match="lock"):
+        runner._commit_entry(provenance, entry_a)
+    assert writer_b is not None
+    writer_b.join(timeout=3)
+    assert not writer_b.is_alive()
+    assert writer_b_errors == []
+    entries = runner.parse_provenance(provenance.read_bytes())
+    assert [entry["commandId"] for entry in entries] == [
+        "real_api.round_trip",
+        "diagnostic.writer_b",
+    ]
+    assert provenance.with_suffix(".txt").read_bytes() == runner.render_commands_projection(
+        entries
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation_stage", "forbidden_stage", "mutation"),
+    [
+        ("after_lock", "before_read", "replace"),
+        ("after_jsonl_replace", "after_projection_replace", "replace"),
+        ("after_projection_replace", "post_publish", "unlink"),
+        ("after_jsonl_replace", "after_projection_replace", "hardlink"),
+    ],
+)
+def test_lock_entry_is_revalidated_before_each_transaction_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation_stage: str,
+    forbidden_stage: str,
+    mutation: str,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    original_jsonl = provenance.read_bytes()
+    original_projection = provenance.with_suffix(".txt").read_bytes()
+    lock_path = tmp_path / ".commands.jsonl.lock"
+    reached_forbidden_boundary = False
+    mutated = False
+
+    def mutate_lock(stage: str) -> None:
+        nonlocal reached_forbidden_boundary, mutated
+        if stage == forbidden_stage:
+            reached_forbidden_boundary = True
+        if stage != mutation_stage or mutated:
+            return
+        mutated = True
+        if mutation == "hardlink":
+            os.link(lock_path, tmp_path / "lock.alias")
+        else:
+            lock_path.unlink()
+            if mutation == "replace":
+                lock_path.write_bytes(b"")
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", mutate_lock)
+    with pytest.raises(RuntimeError, match="lock"):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+        )
+    assert reached_forbidden_boundary is False
+    assert provenance.read_bytes() == original_jsonl
+    assert provenance.with_suffix(".txt").read_bytes() == original_projection
+
+
+@pytest.mark.parametrize(
+    "failure_stage",
+    ["after_jsonl_replace", "after_projection_replace", "post_publish"],
+)
+def test_rollback_compare_and_swap_preserves_newer_complete_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    entry_a = _provenance_entry(provenance, "diagnostic.writer_a", "1")
+    entry_b = _provenance_entry(provenance, "diagnostic.writer_b", "2")
+    existing = runner.parse_provenance(provenance.read_bytes())
+    newer_entries = [*existing, entry_b]
+    newer_jsonl = runner.render_provenance(newer_entries)
+    newer_projection = runner.render_commands_projection(newer_entries)
+    injected = False
+
+    def inject_newer_commit(stage: str) -> None:
+        nonlocal injected
+        if stage == failure_stage:
+            raise ValueError("injected writer A failure")
+        if stage == "before_rollback" and not injected:
+            injected = True
+            parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                runner._atomic_replace_at(parent_fd, provenance.name, newer_jsonl)
+                runner._atomic_replace_at(
+                    parent_fd, provenance.with_suffix(".txt").name, newer_projection
+                )
+            finally:
+                os.close(parent_fd)
+
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", inject_newer_commit)
+    with pytest.raises(RuntimeError, match="rollback conflict"):
+        runner._commit_entry(provenance, entry_a)
+    assert provenance.read_bytes() == newer_jsonl
+    assert provenance.with_suffix(".txt").read_bytes() == newer_projection
+
+
+def test_directory_fsync_failure_after_publish_rolls_back_complete_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    original_jsonl = provenance.read_bytes()
+    original_projection = provenance.with_suffix(".txt").read_bytes()
+    real_fsync = runner.os.fsync
+    failed = False
+
+    def fail_first_directory_sync(descriptor: int) -> None:
+        nonlocal failed
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode) and not failed:
+            failed = True
+            raise OSError("injected directory fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(runner.os, "fsync", fail_first_directory_sync)
+    with pytest.raises(OSError, match="directory fsync failure"):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+        )
+    assert provenance.read_bytes() == original_jsonl
+    assert provenance.with_suffix(".txt").read_bytes() == original_projection
+
+
+@pytest.mark.parametrize("original_exists", [True, False])
+def test_directory_fsync_failure_during_rollback_still_restores_complete_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    original_exists: bool,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    seed_provenance = seed / "commands.jsonl"
+    execute_and_record(_spec(seed, "pass", outputs=()), provenance=seed_provenance)
+    entry = _provenance_entry(seed_provenance, "diagnostic.writer_a", "1")
+    parent = tmp_path / "target"
+    parent.mkdir()
+    provenance = parent / "commands.jsonl"
+    if original_exists:
+        execute_and_record(_spec(parent, "pass", outputs=()), provenance=provenance)
+        original_jsonl = provenance.read_bytes()
+        original_projection = provenance.with_suffix(".txt").read_bytes()
+    else:
+        original_jsonl = None
+        original_projection = None
+    real_fsync = runner.os.fsync
+    directory_syncs = 0
+
+    def fail_first_rollback_directory_sync(descriptor: int) -> None:
+        nonlocal directory_syncs
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            directory_syncs += 1
+            if directory_syncs == 3:
+                raise OSError("injected rollback directory fsync failure")
+        real_fsync(descriptor)
+
+    def fail_after_both_publishes(stage: str) -> None:
+        if stage == "after_projection_replace":
+            raise ValueError("trigger rollback")
+
+    monkeypatch.setattr(runner.os, "fsync", fail_first_rollback_directory_sync)
+    monkeypatch.setattr(
+        runner, "_provenance_transaction_hook", fail_after_both_publishes
+    )
+    with pytest.raises(OSError, match="rollback directory fsync failure"):
+        runner._commit_entry(provenance, entry)
+    assert (
+        provenance.read_bytes() if provenance.exists() else None
+    ) == original_jsonl
+    projection = provenance.with_suffix(".txt")
+    assert (projection.read_bytes() if projection.exists() else None) == original_projection
+
+
+def test_pointer_rollback_failure_still_restores_both_public_views(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, "pass", outputs=()), provenance=provenance)
+    original_jsonl = provenance.read_bytes()
+    original_projection = provenance.with_suffix(".txt").read_bytes()
+    original_pointer = (tmp_path / ".commands.jsonl.pair").read_bytes()
+    real_replace = runner._atomic_replace_at
+
+    def fail_pointer_restore(directory_fd: int, name: str, content: bytes):
+        result = real_replace(directory_fd, name, content)
+        if name == ".commands.jsonl.pair" and content == original_pointer:
+            raise OSError("injected pointer rollback failure")
+        return result
+
+    def fail_after_pointer(stage: str) -> None:
+        if stage == "after_pointer":
+            raise ValueError("trigger rollback")
+
+    monkeypatch.setattr(runner, "_atomic_replace_at", fail_pointer_restore)
+    monkeypatch.setattr(runner, "_provenance_transaction_hook", fail_after_pointer)
+    with pytest.raises(OSError, match="pointer rollback failure"):
+        runner._commit_entry(
+            provenance,
+            _provenance_entry(provenance, "diagnostic.writer_a", "1"),
+        )
+    assert provenance.read_bytes() == original_jsonl
+    assert provenance.with_suffix(".txt").read_bytes() == original_projection
+    assert (tmp_path / ".commands.jsonl.pair").read_bytes() == original_pointer
+
+
+def test_parent_swap_during_secure_mkdir_never_mutates_outside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    safe = tmp_path / "safe"
+    safe.mkdir()
+    outside = tmp_path.parent / f"{tmp_path.name}-mkdir-swap"
+    outside.mkdir()
+    real_mkdir = runner.os.mkdir
+    swapped = False
+
+    def swapping_mkdir(name, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if name == "created" and not swapped:
+            swapped = True
+            safe.rename(tmp_path / "moved-safe")
+            safe.symlink_to(outside, target_is_directory=True)
+        return real_mkdir(name, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(runner.os, "mkdir", swapping_mkdir)
+    with pytest.raises((ValueError, RuntimeError, OSError)):
+        execute_and_record(
+            _spec(tmp_path, "pass", outputs=(safe / "created" / "report.json",)),
+            provenance=tmp_path / "commands.jsonl",
+        )
+    assert not (outside / "created").exists()
+
+
+def test_concurrent_commands_safely_share_new_nested_parent(tmp_path: Path) -> None:
+    provenance = tmp_path / "commands.jsonl"
+    errors = []
+
+    def run(index: int) -> None:
+        output = tmp_path / "shared" / "nested" / f"report-{index}.json"
+        code = f"from pathlib import Path; Path('shared/nested/report-{index}.json').write_text('ok')"
+        try:
+            execute_and_record(
+                _spec(
+                    tmp_path,
+                    code,
+                    command_id=f"diagnostic.nested{index}",
+                    outputs=(output,),
+                ),
+                provenance=provenance,
+            )
+        except Exception as exc:  # pragma: no cover - assertion reports details
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(index,)) for index in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert sorted(path.read_text() for path in (tmp_path / "shared" / "nested").iterdir()) == [
+        "ok",
+        "ok",
+    ]
+
+
+def test_rejects_cwd_symlink_to_outside_without_execution(tmp_path: Path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    escaped = outside / "escaped"
+    linked = tmp_path / "linked-cwd"
+    linked.symlink_to(outside, target_is_directory=True)
+    spec = _spec(
+        tmp_path,
+        f"from pathlib import Path; Path({str(escaped)!r}).write_text('bad')",
+        cwd=linked,
+        outputs=(),
+    )
+    with pytest.raises((ValueError, RuntimeError)):
+        execute_and_record(spec, provenance=tmp_path / "commands.jsonl")
+    assert not escaped.exists()
+
+
+def test_cwd_parent_swap_before_spawn_fails_without_outside_execution(tmp_path: Path) -> None:
+    cwd = tmp_path / "safe-cwd"
+    cwd.mkdir()
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-swap"
+    outside.mkdir()
+    escaped = outside / "escaped"
+
+    def swap() -> None:
+        cwd.rename(tmp_path / "moved-cwd")
+        cwd.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="cwd changed"):
+        execute_and_record(
+            _spec(
+                tmp_path,
+                f"from pathlib import Path; Path({str(escaped)!r}).write_text('bad')",
+                cwd=cwd,
+                outputs=(),
+            ),
+            provenance=tmp_path / "commands.jsonl",
+            _before_spawn=swap,
+        )
+    assert not escaped.exists()
+
+
+def test_nonzero_exit_is_recorded_only_when_expected(tmp_path: Path) -> None:
+    expected = _spec(tmp_path, "raise SystemExit(7)", outputs=(), expected_exit_codes=(7,))
+    result = execute_and_record(expected, provenance=tmp_path / "commands.jsonl")
+    assert result.exit_code == 7
+    assert result.classification == "expected_exit"
+
+    unexpected = _spec(tmp_path, "raise SystemExit(8)", outputs=(), expected_exit_codes=(0,))
+    result = execute_and_record(unexpected, provenance=tmp_path / "other.jsonl")
+    assert result.classification == "unexpected_exit"
+
+
+def test_spawn_failure_does_not_publish_provenance(tmp_path: Path) -> None:
+    spec = _spec(tmp_path, "pass", argv=(str(tmp_path / "missing"),), outputs=())
+    with pytest.raises(RuntimeError, match="spawn_failed"):
+        execute_and_record(spec, provenance=tmp_path / "commands.jsonl")
+    assert not (tmp_path / "commands.jsonl").exists()
+
+
+def test_timeout_terminates_owned_process_group_and_records_safe_classification(tmp_path: Path) -> None:
+    child = tmp_path / "child.pid"
+    spec = _spec(
+        tmp_path,
+        "import subprocess,sys,time; "
+        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); "
+        f"open({str(child)!r},'w').write(str(p.pid)); time.sleep(30)",
+        outputs=(),
+        timeout_sec=1.0,
+    )
+    result = execute_and_record(spec, provenance=tmp_path / "commands.jsonl")
+    assert result.classification == "timeout"
+    pid = int(child.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_cancellation_terminates_owned_process_and_records_classification(tmp_path: Path) -> None:
+    cancel = threading.Event()
+    timer = threading.Timer(0.1, cancel.set)
+    timer.start()
+    try:
+        result = execute_and_record(
+            _spec(tmp_path, "import time; time.sleep(30)", outputs=()),
+            provenance=tmp_path / "commands.jsonl",
+            cancel_event=cancel,
+        )
+    finally:
+        timer.cancel()
+    assert result.classification == "cancelled"
+    assert result.policy_satisfied is False
+
+
+def test_pre_cancelled_command_is_recorded_without_spawning_child(tmp_path: Path) -> None:
+    marker = tmp_path / "spawned"
+    cancel = threading.Event()
+    cancel.set()
+    code = f"from pathlib import Path; Path({str(marker)!r}).write_text('spawned')"
+
+    result = execute_and_record(
+        _spec(tmp_path, code),
+        provenance=tmp_path / "commands.jsonl",
+        cancel_event=cancel,
+    )
+
+    assert result.exit_code is None
+    assert result.classification == "cancelled"
+    assert result.policy_satisfied is False
+    assert not marker.exists()
+    assert not (tmp_path / "real-api").exists()
+
+
+def test_cancelled_before_spawn_removes_only_new_output_parents(tmp_path: Path) -> None:
+    cancel = threading.Event()
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    output = tmp_path / "new-parent" / "nested" / "report.json"
+
+    def cancel_before_spawn() -> None:
+        cancel.set()
+
+    result = execute_and_record(
+        _spec(tmp_path, _write_report_code(), outputs=(output,)),
+        provenance=tmp_path / "commands.jsonl",
+        cancel_event=cancel,
+        _before_spawn=cancel_before_spawn,
+    )
+
+    assert result.classification == "cancelled"
+    assert not output.exists()
+    assert not (tmp_path / "new-parent").exists()
+    assert existing.is_dir()
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("field", ["timeoutSec", "cleanupGraceSec"])
+def test_provenance_rejects_non_finite_terminal_timing(
+    tmp_path: Path, field: str, value: float
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(
+        _spec(tmp_path, _write_report_code()),
+        provenance=provenance,
+    )
+    entry = json.loads(provenance.read_text())
+    entry["terminalPolicy"][field] = value
+
+    with pytest.raises(ValueError, match="terminal policy"):
+        runner.validate_provenance_entries([entry])
+
+
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "<env:GOOGLE_API_KEY>suffix",
+        "prefix<env:GOOGLE_API_KEY>",
+        "<stdin:protected_transcript_plan>suffix",
+        "prefix<stdin:protected_candidate_plan>",
+    ],
+)
+def test_provenance_rejects_placeholder_tokens_embedded_in_argv(
+    tmp_path: Path, argument: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(
+        _spec(tmp_path, _write_report_code()),
+        provenance=provenance,
+    )
+    entry = json.loads(provenance.read_text())
+    entry["argv"].append(argument)
+
+    with pytest.raises(ValueError, match="privacy contract"):
+        runner.validate_provenance_entries([entry])
+
+
+def test_provenance_rejects_embedded_placeholder_in_nested_identity(
+    tmp_path: Path,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(
+        _spec(tmp_path, _write_report_code()),
+        provenance=provenance,
+    )
+    entry = json.loads(provenance.read_text())
+    entry["candidateIdentity"]["firmwareIdentity"] = (
+        "prefix<stdin:protected_candidate_plan>suffix"
+    )
+
+    with pytest.raises(ValueError, match="privacy contract"):
+        runner.validate_provenance_entries([entry])
+
+
+def test_keyboard_interrupt_cleans_group_and_records_terminal_state(monkeypatch, tmp_path: Path) -> None:
+    import scripts.google_live_command_runner as runner
+
+    real = runner.subprocess.Popen.communicate
+    calls = 0
+
+    def interrupt_once(process, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise KeyboardInterrupt
+        return real(process, *args, **kwargs)
+
+    monkeypatch.setattr(runner.subprocess.Popen, "communicate", interrupt_once)
+    with pytest.raises(KeyboardInterrupt):
+        execute_and_record(
+            _spec(tmp_path, "import time; time.sleep(30)", outputs=()),
+            provenance=tmp_path / "commands.jsonl",
+        )
+    entry = json.loads((tmp_path / "commands.jsonl").read_text())
+    assert entry["terminalPolicy"]["classification"] == "keyboard_interrupt"
+
+
+def test_repeated_keyboard_interrupt_still_kills_drains_and_records(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    real = runner.subprocess.Popen.communicate
+    calls = 0
+
+    def interrupt_twice(process, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise KeyboardInterrupt
+        return real(process, *args, **kwargs)
+
+    monkeypatch.setattr(runner.subprocess.Popen, "communicate", interrupt_twice)
+    with pytest.raises(KeyboardInterrupt):
+        execute_and_record(
+            _spec(tmp_path, "import time; time.sleep(30)", outputs=()),
+            provenance=tmp_path / "commands.jsonl",
+        )
+    entry = json.loads((tmp_path / "commands.jsonl").read_text())
+    assert entry["terminalPolicy"]["classification"] == "keyboard_interrupt"
+    assert calls >= 3
+
+
+def test_process_output_is_discarded_without_pipe_buffering(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    real = runner.subprocess.Popen
+    observed = {}
+
+    def capture(*args, **kwargs):
+        observed.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(runner.subprocess, "Popen", capture)
+    execute_and_record(
+        _spec(
+            tmp_path,
+            "import sys; sys.stdout.write('x' * 1000000); sys.stderr.write('y' * 1000000)",
+            outputs=(),
+        ),
+        provenance=tmp_path / "commands.jsonl",
+    )
+    assert observed["stdout"] is subprocess.DEVNULL
+    assert observed["stderr"] is subprocess.DEVNULL
+
+
+def test_missing_or_mutated_output_fails_without_provenance(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="output"):
+        execute_and_record(_spec(tmp_path, "pass"), provenance=tmp_path / "commands.jsonl")
+    assert not (tmp_path / "commands.jsonl").exists()
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_commit_failure_cleans_only_unchanged_execution_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: bool,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    output = tmp_path / "real-api" / "report.json"
+
+    def fail_commit(path: Path, entry: dict) -> None:
+        del path, entry
+        if replacement:
+            output.unlink()
+            output.write_text("attacker")
+        raise RuntimeError("injected commit failure")
+
+    monkeypatch.setattr(runner, "_commit_entry", fail_commit)
+    with pytest.raises(RuntimeError, match="commit failure"):
+        execute_and_record(
+            _spec(tmp_path, _write_report_code()),
+            provenance=provenance,
+        )
+
+    if replacement:
+        assert output.read_text() == "attacker"
+    else:
+        assert not output.exists()
+    assert not provenance.exists()
+
+
+def test_commit_failure_cleanup_does_not_unlink_racing_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    output = tmp_path / "real-api" / "report.json"
+    real_rename = runner.os.rename
+    swapped = False
+
+    def swap_before_quarantine(source, destination, *args, **kwargs):
+        nonlocal swapped
+        if source == output.name and not swapped:
+            swapped = True
+            output.unlink()
+            output.write_text("replacement")
+        return real_rename(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(runner, "_commit_entry", lambda path, entry: (_ for _ in ()).throw(RuntimeError("commit")))
+    monkeypatch.setattr(runner.os, "rename", swap_before_quarantine)
+    with pytest.raises(RuntimeError, match="commit"):
+        execute_and_record(_spec(tmp_path, _write_report_code()), provenance=provenance)
+
+    assert output.read_text() == "replacement"
+
+
+def test_duplicate_ids_fail_closed_and_corrupt_public_log_is_repaired(
+    tmp_path: Path,
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, _write_report_code()), provenance=provenance)
+    (tmp_path / "real-api" / "report.json").unlink()
+    with pytest.raises(ValueError, match="duplicate"):
+        execute_and_record(_spec(tmp_path, _write_report_code()), provenance=provenance)
+    provenance.write_text('{"truncated":')
+    execute_and_record(
+        _spec(tmp_path, _write_report_code(), command_id="diagnostic.retry"),
+        provenance=provenance,
+    )
+    assert [
+        entry["commandId"]
+        for entry in runner.parse_provenance(provenance.read_bytes())
+    ] == ["real_api.round_trip", "diagnostic.retry"]
+
+
+def test_concurrent_writers_preserve_both_complete_entries(tmp_path: Path) -> None:
+    provenance = tmp_path / "commands.jsonl"
+    errors = []
+
+    def run(index: int) -> None:
+        try:
+            execute_and_record(
+                _spec(
+                    tmp_path,
+                    f"from pathlib import Path; p=Path('out{index}'); p.write_text('ok')",
+                    command_id=f"diagnostic.command{index}",
+                    outputs=(tmp_path / f"out{index}",),
+                ),
+                provenance=provenance,
+            )
+        except Exception as exc:  # pragma: no cover - assertion reports details
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(index,)) for index in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert {json.loads(line)["commandId"] for line in provenance.read_text().splitlines()} == {
+        "diagnostic.command0",
+        "diagnostic.command1",
+    }
+    assert (tmp_path / "commands.txt").read_text().count("diagnostic.") == 2
+
+
+def test_inconsistent_projection_is_repaired_from_committed_generation(
+    tmp_path: Path,
+) -> None:
+    provenance = tmp_path / "commands.jsonl"
+    execute_and_record(_spec(tmp_path, _write_report_code()), provenance=provenance)
+    (tmp_path / "commands.txt").write_text("tampered\n")
+    execute_and_record(
+        _spec(tmp_path, "pass", command_id="diagnostic.retry", outputs=()),
+        provenance=provenance,
+    )
+    import scripts.google_live_command_runner as runner
+
+    entries = runner.parse_provenance(provenance.read_bytes())
+    assert (tmp_path / "commands.txt").read_bytes() == runner.render_commands_projection(
+        entries
+    )

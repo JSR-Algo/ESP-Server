@@ -29,6 +29,7 @@ from core.lesson.global_generation_sync import GlobalGenerationSync
 from core.lesson.sd_pack_retry_worker import LessonSdOnlineIndex
 from core.utils.gc_manager import get_gc_manager
 from core.utils.util import check_ffmpeg_installed, get_local_ip, validate_mcp_endpoint
+from core.voice.google_live.evidence_enrollment import EvidenceEnrollmentRegistry
 from core.websocket_server import WebSocketServer
 
 # Pre-import Google Live client at server startup. This forces the heavy
@@ -114,6 +115,29 @@ def _generation_enabled(config) -> bool:
     )
 
 
+def _call_evidence_factory(factory, *args, evidence_registry, **kwargs):
+    try:
+        parameters = inspect.signature(factory).parameters.values()
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"{factory!r} must expose an evidence_registry constructor argument"
+        ) from exc
+    accepts_registry = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        or (
+            parameter.name == "evidence_registry"
+            and parameter.kind
+            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        )
+        for parameter in parameters
+    )
+    if not accepts_registry:
+        raise RuntimeError(
+            f"{factory!r} must accept evidence_registry to preserve shared evidence state"
+        )
+    return factory(*args, evidence_registry=evidence_registry, **kwargs)
+
+
 def _build_servers(
     config,
     *,
@@ -129,16 +153,21 @@ def _build_servers(
     websocket_server_factory = websocket_server_factory or WebSocketServer
     http_server_factory = http_server_factory or SimpleHttpServer
     lesson_sd_online_index = LessonSdOnlineIndex(api_base=_lesson_sd_api_base(config))
+    evidence_registry = EvidenceEnrollmentRegistry()
     if _generation_enabled(config):
         raise RuntimeError("enabled generation servers require _build_servers_async")
-    ws_server = websocket_server_factory(
+    ws_server = _call_evidence_factory(
+        websocket_server_factory,
         config,
         lesson_sd_online_index=lesson_sd_online_index,
+        evidence_registry=evidence_registry,
     )
-    ota_server = http_server_factory(
+    ota_server = _call_evidence_factory(
+        http_server_factory,
         config,
         ws_server.lesson_connections,
         lesson_sd_online_index=lesson_sd_online_index,
+        evidence_registry=evidence_registry,
     )
     ws_server.remote_unpair_handler = getattr(ota_server, "remote_unpair_handler", None)
     return ws_server, ota_server
@@ -202,21 +231,32 @@ async def _build_servers_async(
         poller = poller_factory(config, store, generation_sync.apply)
         status = status_factory(store, sessions)
         lesson_sd_online_index = LessonSdOnlineIndex(api_base=_lesson_sd_api_base(config))
+        evidence_registry = EvidenceEnrollmentRegistry()
         websocket_server_factory = websocket_server_factory or WebSocketServer
         http_server_factory = http_server_factory or SimpleHttpServer
-        ws_server = websocket_server_factory(
+        ws_kwargs = {
+            "lesson_sd_online_index": lesson_sd_online_index,
+            "global_generation_sessions": sessions,
+        }
+        ws_server = _call_evidence_factory(
+            websocket_server_factory,
             config,
-            lesson_sd_online_index=lesson_sd_online_index,
-            global_generation_sessions=sessions,
+            evidence_registry=evidence_registry,
+            **ws_kwargs,
         )
-        ota_server = http_server_factory(
+        http_kwargs = {
+            "lesson_sd_online_index": lesson_sd_online_index,
+            "generation_poller": poller,
+            "generation_status": status,
+            "generation_redis": redis,
+            "owns_generation_redis": True,
+        }
+        ota_server = _call_evidence_factory(
+            http_server_factory,
             config,
             ws_server.lesson_connections,
-            lesson_sd_online_index=lesson_sd_online_index,
-            generation_poller=poller,
-            generation_status=status,
-            generation_redis=redis,
-            owns_generation_redis=True,
+            evidence_registry=evidence_registry,
+            **http_kwargs,
         )
         ws_server.remote_unpair_handler = getattr(ota_server, "remote_unpair_handler", None)
         return ws_server, ota_server

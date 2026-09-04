@@ -11,16 +11,39 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
 import re
+import stat
 import statistics
 import sys
+import tempfile
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from scripts.google_live_reliability import (
+    GOOGLE_LIVE_LIMITS,
+    SCHEMA_VERSION,
+    redact_mapping,
+    reliability_verdict,
+)
+from scripts.google_live_reliability import (
+    validate_log_reliability_contract as _shared_validate_log_reliability_contract,
+)
+from scripts.physical_smoke_audit import (
+    FATAL_PATTERNS as PHYSICAL_FATAL_PATTERNS,
+)
+from scripts.physical_smoke_audit import (
+    FATAL_REGEX_PATTERNS as PHYSICAL_FATAL_REGEX_PATTERNS,
+)
 
 TS_RE = re.compile(r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+SAFE_EVIDENCE_JOURNEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 
 P_INPUT_DIAG = re.compile(
     r"input_audio_diag encoded_bytes=(?P<enc>\d+|unknown) "
@@ -50,6 +73,21 @@ P_SERVER_INT_IGNORED = re.compile(r"Google Live server interruption ignored by c
 P_CONN_OPEN = re.compile(r"core\.connection - (?P<ip>\S+) conn - Headers:")
 P_GOAWAY = re.compile(r"goAway|go_away|sent 1011|received 1011|1008", re.I)
 P_RECV_TIMEOUT = re.compile(r"Google Live receive timed out")
+P_EVIDENCE_RECV_LOOP = re.compile(
+    r"Google Live evidence_receive_loop_(?P<event>started|stopped) "
+    r"journey_id=(?P<journey_id>\S+) connection_id=(?P<connection_id>\S+) "
+    r"live_connection_id=(?P<live_connection_id>\S+) generation=(?P<generation>\d+)"
+)
+P_EVIDENCE_RECV_TIMEOUT = re.compile(
+    r"Google Live evidence_receive_timeout journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"generation=(?P<generation>\d+)"
+)
+P_EVIDENCE_RECV_TIMEOUT_OUTCOME = re.compile(
+    r"Google Live evidence_receive_timeout_outcome journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"generation=(?P<generation>\d+) outcome=(?P<outcome>handled|unhandled|failed)"
+)
 P_ECHO_SUPPRESSED = re.compile(
     r"Google Live echo_suppressed reason=(?P<reason>\w+) bytes=(?P<bytes>\d+) rms=(?P<rms>\d+|n/a)"
 )
@@ -120,6 +158,371 @@ P_MODEL_OUTPUT_CHUNK_DROPPED = re.compile(
 P_MODEL_OUTPUT_UNBLOCK_TRIGGER = re.compile(
     r"model_output_unblock_trigger source=(?P<source>\S+)"
 )
+
+P_RELIABILITY_WINDOW_START = re.compile(
+    r"Google Live reliability_window_start window_id=(?P<window_id>[A-Za-z0-9._:-]+) "
+    r"(?:journey_id=(?P<journey_id>[A-Za-z0-9._:-]+) )?"
+    r"(?:journeys=(?P<journeys>[A-Za-z0-9._:,-]+) )?"
+    r"(?:proof_profile=(?P<proof_profile>[A-Za-z0-9._:-]+) )?"
+    r"(?:semantic_proof_kind=(?P<semantic_proof_kind>none|bargein-intent|quiet) )?"
+    r"(?:quiet_mode=(?P<quiet_mode>none|silence|robot_speaking) )?"
+    r"(?:connection_id=(?P<connection_id>[A-Za-z0-9._:-]+) )?"
+    r"(?:live_connection_id=(?P<live_connection_id>[A-Za-z0-9._:-]+) )?"
+    r"(?:initial_live_connection_id=(?P<initial_live_connection_id>[A-Za-z0-9._:-]+) )?"
+    r"(?:peer_identity_hash=(?P<peer_identity_hash>sha256:[0-9a-f]{64}) )?"
+    r"(?:server_start_utc=(?P<server_start_utc>\S+) )?"
+    r"(?:server_issued=(?P<server_issued>true) )?"
+    r"candidate_identity=(?P<candidate_identity>\{.*\})$"
+)
+P_RELIABILITY_WINDOW_END = re.compile(
+    r"Google Live reliability_window_end window_id=(?P<window_id>[A-Za-z0-9._:-]+)"
+    r"(?: server_end_utc=(?P<server_end_utc>\S+))?$"
+)
+P_SERVER_CONNECTION_TRANSITION = re.compile(
+    r"Google Live evidence_server_connection_transition "
+    r"from_journey_id=(?P<from_journey_id>[A-Za-z0-9._:-]+) "
+    r"from_connection_id=(?P<from_connection_id>[A-Za-z0-9._:-]+) "
+    r"to_journey_id=(?P<to_journey_id>[A-Za-z0-9._:-]+) "
+    r"to_connection_id=(?P<to_connection_id>[A-Za-z0-9._:-]+) "
+    r"peer_identity_hash=(?P<peer_identity_hash>sha256:[0-9a-f]{64}) "
+    r"sequence=(?P<sequence>\d+) reason=(?P<reason>[A-Za-z0-9._:-]+)$"
+)
+P_RESPONSE_AUDIO_START = re.compile(
+    r"Google Live model_audio_start_hold_input response_id=(?P<response_id>\d+)"
+)
+P_RESPONSE_AUDIO_END = re.compile(
+    r"Google Live model_audio_end_ready_to_listen response_id=(?P<response_id>\d+)"
+)
+P_RESPONSE_AUDIO_FORWARDED = re.compile(
+    r"Google Live model_output_chunk_forwarded response_id=(?P<response_id>\d+)\b"
+)
+P_EVIDENCE_RESPONSE_START = re.compile(
+    r"Google Live evidence_response_started journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"response_id=(?P<response_id>\d+)"
+)
+P_EVIDENCE_RESPONSE_END = re.compile(
+    r"Google Live evidence_response_ended journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"response_id=(?P<response_id>\d+)"
+)
+P_EVIDENCE_FORWARDED = re.compile(
+    r"Google Live model_output_chunk_forwarded journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"response_id=(?P<response_id>\d+)"
+)
+P_EVIDENCE_INTERRUPT_STARTED = re.compile(
+    r"Google Live user_interrupt_started journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"(?:cancelled_live_connection_id=(?P<cancelled_live_connection_id>\S+) "
+    r"replacement_live_connection_id=(?P<replacement_live_connection_id>\S+) )?"
+    r"reason=(?P<reason>\S+) cancelled_response_id=(?P<cancelled>\d+) "
+    r"next_response_id=(?P<next>\d+)"
+)
+P_EVIDENCE_INTERRUPT_STOPPED = re.compile(
+    r"Google Live interrupt_output_stopped journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"(?:cancelled_live_connection_id=(?P<cancelled_live_connection_id>\S+) "
+    r"replacement_live_connection_id=(?P<replacement_live_connection_id>\S+) )?"
+    r"cancelled_response_id=(?P<cancelled>\d+) next_response_id=(?P<next>\d+)"
+)
+P_EVIDENCE_USER_INTERRUPTED = re.compile(
+    r"Google Live evidence_user_interrupted journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"(?:cancelled_live_connection_id=(?P<cancelled_live_connection_id>\S+) "
+    r"replacement_live_connection_id=(?P<replacement_live_connection_id>\S+) )?"
+    r"reason=(?P<reason>\S+) cancelled_response_id=(?P<cancelled>\d+) "
+    r"next_response_id=(?P<next>\d+)"
+)
+P_EVIDENCE_CONNECTION_CLOSE = re.compile(
+    r"Google Live evidence_connection_close journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"pending_tasks=(?P<pending_tasks>\d+) "
+    r"(?:active_sessions=(?P<active_sessions>\d+) )?"
+    r"close_code=(?P<close_code>\d+) "
+    r"reason=(?P<reason>\S+)"
+)
+P_EVIDENCE_STALE_DROP = re.compile(
+    r"Google Live evidence_stale_model_drop journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"response_id=(?P<response_id>\d+) current_response_id=(?P<current_response_id>\d+)"
+)
+P_EVIDENCE_INTERRUPT_REPLAYED = re.compile(
+    r"Google Live evidence_interrupt_audio_replayed journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"(?:cancelled_live_connection_id=(?P<cancelled_live_connection_id>\S+) "
+    r"replacement_live_connection_id=(?P<replacement_live_connection_id>\S+) )?"
+    r"response_id=(?P<response_id>\d+)"
+)
+P_EVIDENCE_INTERRUPT_FINALIZED = re.compile(
+    r"Google Live evidence_interrupt_input_finalized journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"(?:cancelled_live_connection_id=(?P<cancelled_live_connection_id>\S+) "
+    r"replacement_live_connection_id=(?P<replacement_live_connection_id>\S+) )?"
+    r"response_id=(?P<response_id>\d+)"
+)
+P_CLIENT_DISCONNECTED = re.compile(
+    r"Client disconnected\b.*\bclose_code=(?P<close_code>\d+)\b"
+)
+P_EVIDENCE_RECONNECT_STARTED = re.compile(
+    r"Google Live evidence_reconnect_started journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) from_live_connection_id=(?P<from_live_connection_id>\S+) "
+    r"attempt=(?P<attempt>\d+) reason=(?P<reason>\S+)"
+)
+P_EVIDENCE_REOPEN_READY = re.compile(
+    r"Google Live evidence_reopen_ready journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) attempt=(?P<attempt>\d+) "
+    r"from_live_connection_id=(?P<from_live_connection_id>\S+) "
+    r"to_live_connection_id=(?P<to_live_connection_id>\S+)"
+)
+P_EVIDENCE_REPLAYED_BUFFERED = re.compile(
+    r"Google Live evidence_replayed_buffered_audio journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) attempt=(?P<attempt>\d+) "
+    r"from_live_connection_id=(?P<from_live_connection_id>\S+) "
+    r"to_live_connection_id=(?P<to_live_connection_id>\S+)"
+    r"(?: reason=(?P<reason>\S+))?"
+    r"(?: frames=(?P<frames>\d+) bytes=(?P<bytes>\d+))?$"
+)
+P_EVIDENCE_RECONNECT_OUTCOME = re.compile(
+    r"Google Live evidence_reconnect_(?P<outcome>succeeded|failed) "
+    r"journey_id=(?P<journey_id>\S+) connection_id=(?P<connection_id>\S+) "
+    r"attempt=(?P<attempt>\d+) from_live_connection_id=(?P<from_live_connection_id>\S+) "
+    r"(?:(?:to_live_connection_id=(?P<to_live_connection_id>\S+))|"
+    r"(?:live_connection_id=(?P<live_connection_id>\S+)))"
+    r"(?: error_class=(?P<error_class>\S+))?"
+)
+P_EVIDENCE_HANDOFF_ACQUIRED = re.compile(
+    r"Google Live evidence_lesson_handoff_acquired journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) live_connection_id=(?P<live_connection_id>\S+) "
+    r"generation=(?P<generation>\d+) holder=(?P<holder>\d+) reason=(?P<reason>\S+)"
+)
+P_EVIDENCE_HANDOFF_TERMINAL = re.compile(
+    r"Google Live evidence_lesson_handoff_(?P<event>released|failed) "
+    r"journey_id=(?P<journey_id>\S+) connection_id=(?P<connection_id>\S+) "
+    r"live_connection_id=(?P<live_connection_id>\S+) generation=(?P<generation>\d+) "
+    r"holder=(?P<holder>\d+) outcome=(?P<outcome>\S+)"
+)
+_CANDIDATE_PROVIDER_INFO_PREFIX = (
+    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} - [^\r\n]+ - "
+    r"core\.voice\.session_provider\.google_live - INFO - "
+    r"GoogleLive - "
+)
+P_EVIDENCE_CANDIDATE_INTENT_MATCH = re.compile(
+    _CANDIDATE_PROVIDER_INFO_PREFIX
+    + r"Google Live evidence_candidate_intent_match "
+    r"journey_id=(?P<journey_id>[A-Za-z0-9._:-]{1,64}) "
+    r"slot=(?P<slot>\d+) role=(?P<role>initial|newest) "
+    r"chars=(?P<chars>\d+) matched=(?P<matched>true|false) "
+    r"response_generation=(?P<response_generation>\d+)$"
+)
+P_EVIDENCE_CANDIDATE_INTENT_REPLACEMENT = re.compile(
+    _CANDIDATE_PROVIDER_INFO_PREFIX
+    + r"Google Live evidence_candidate_intent_replacement "
+    r"journey_id=(?P<journey_id>[A-Za-z0-9._:-]{1,64}) "
+    r"old_generation=(?P<old_generation>\d+) new_generation=(?P<new_generation>\d+) "
+    r"old_stopped=(?P<old_stopped>true|false) "
+    r"replacement_started=(?P<replacement_started>true|false) "
+    r"replacement_completed=(?P<replacement_completed>true|false) "
+    r"stale_old_audio=(?P<stale_old_audio>\d+)$"
+)
+P_EVIDENCE_CANDIDATE_QUIET = re.compile(
+    _CANDIDATE_PROVIDER_INFO_PREFIX
+    + r"Google Live evidence_candidate_quiet "
+    r"journey_id=(?P<journey_id>[A-Za-z0-9._:-]{1,64}) "
+    r"mode=(?P<mode>silence|robot_speaking) duration_ms=(?P<duration_ms>\d+) "
+    r"response_generation=(?P<response_generation>none|\d+) "
+    r"response_duration_ms=(?P<response_duration_ms>\d+) "
+    r"setup_consumed=(?P<setup_consumed>true|false) "
+    r"user_turns=(?P<user_turns>\d+) response_starts=(?P<response_starts>\d+) "
+    r"response_ends=(?P<response_ends>\d+) interrupts=(?P<interrupts>\d+) "
+    r"replacements=(?P<replacements>\d+) reconnects=(?P<reconnects>\d+) "
+    r"fallbacks=(?P<fallbacks>\d+) stale_audio=(?P<stale_audio>\d+) "
+    r"delivery_failures=(?P<delivery_failures>\d+)$"
+)
+P_EVIDENCE_CANDIDATE_FALLBACK = re.compile(
+    _CANDIDATE_PROVIDER_INFO_PREFIX
+    + r"Google Live evidence_candidate_fallback "
+    r"journey_id=(?P<journey_id>[A-Za-z0-9._:-]{1,64}) "
+    r"fallbacks=(?P<fallbacks>\d+)$"
+)
+_CANDIDATE_SEMANTIC_HINT = re.compile(r"Google Live evidence_candidate_")
+_CANDIDATE_SEMANTIC_PATTERNS = (
+    P_EVIDENCE_CANDIDATE_INTENT_MATCH,
+    P_EVIDENCE_CANDIDATE_INTENT_REPLACEMENT,
+    P_EVIDENCE_CANDIDATE_QUIET,
+    P_EVIDENCE_CANDIDATE_FALLBACK,
+)
+_SCOPED_EVIDENCE_PATTERNS = (
+    P_SERVER_CONNECTION_TRANSITION,
+    P_EVIDENCE_RESPONSE_START,
+    P_EVIDENCE_RESPONSE_END,
+    P_EVIDENCE_FORWARDED,
+    P_EVIDENCE_INTERRUPT_STARTED,
+    P_EVIDENCE_INTERRUPT_STOPPED,
+    P_EVIDENCE_USER_INTERRUPTED,
+    P_EVIDENCE_CONNECTION_CLOSE,
+    P_EVIDENCE_STALE_DROP,
+    P_EVIDENCE_INTERRUPT_REPLAYED,
+    P_EVIDENCE_INTERRUPT_FINALIZED,
+    P_EVIDENCE_RECONNECT_STARTED,
+    P_EVIDENCE_REOPEN_READY,
+    P_EVIDENCE_REPLAYED_BUFFERED,
+    P_EVIDENCE_RECONNECT_OUTCOME,
+    P_EVIDENCE_RECV_LOOP,
+    P_EVIDENCE_RECV_TIMEOUT,
+    P_EVIDENCE_RECV_TIMEOUT_OUTCOME,
+    P_EVIDENCE_HANDOFF_ACQUIRED,
+    P_EVIDENCE_HANDOFF_TERMINAL,
+    *_CANDIDATE_SEMANTIC_PATTERNS,
+)
+P_STALE_MODEL_DROP_IDS = re.compile(
+    r"Google Live stale_model_event_dropped type=(?P<type>\w+) reason=(?P<reason>\w+) "
+    r"response_id=(?P<response_id>\d+) current_response_id=(?P<current_response_id>\d+)"
+)
+P_REPLAYED_BUFFERED_AUDIO = re.compile(
+    r"Google Live replayed_buffered_audio frames=(?P<frames>\d+) bytes=(?P<bytes>\d+)"
+)
+P_WAITING_MODEL_TIMEOUT = re.compile(r"Google Live waiting_model_timeout\b")
+P_TIMEOUT_TERMINAL = re.compile(
+    r"Google Live waiting_model_timeout released_without_audio\b|"
+    r"Google Live silent_session_reopen_suppressed\b|"
+    r"Google Live lesson_step_failed\b"
+)
+P_NON_RETRIABLE_CLASSIFICATION = re.compile(
+    r"Google Live classify_error kind=(?P<kind>\S+) retry=no"
+)
+P_RECONNECT_REASON = re.compile(
+    r"reconnect_started reason=(?P<reason>\S+) attempt=(?P<attempt>\d+)"
+)
+P_SILENT_SESSION_REOPEN = re.compile(r"Google Live silent_session_reopen\b")
+P_REOPEN_READY = re.compile(
+    r"Google Live reopen_ready reason=(?P<reason>\S+) attempt=(?P<attempt>\d+) "
+    r"live_connection_id=(?P<live_connection_id>\S+)"
+)
+P_HANDOFF_ACQUIRED = re.compile(r"lesson_start_handoff_(?:acquired|coalesced)\b")
+P_HANDOFF_RELEASED = re.compile(r"lesson_start_handoff_released\b")
+P_PENDING_TASK_CLOSE = re.compile(
+    r"Google Live connection_close pending_tasks=(?P<tasks>\S+)"
+)
+P_LESSON_STEP_START = re.compile(r"Google Live lesson_step_started step_id=(?P<step_id>\S+)")
+P_LESSON_STEP_PROGRESS = re.compile(
+    r"Google Live lesson_(?:step_progress|conversation_progress) .*?step_id=(?P<step_id>\S+)"
+)
+P_LESSON_STEP_END = re.compile(r"Google Live lesson_step_ended step_id=(?P<step_id>\S+)")
+P_FIRMWARE_LESSON_PING = re.compile(r"firmware_ping .*?lesson_step=(?P<step_id>\S+)")
+P_SCOPED_LESSON_STEP_PROGRESS = re.compile(
+    r"Google Live lesson_(?:step_progress|conversation_progress) "
+    r"journey_id=(?P<journey_id>\S+) connection_id=(?P<connection_id>\S+) "
+    r"live_connection_id=(?P<live_connection_id>\S+) step_id=(?P<step_id>\S+)"
+)
+P_SCOPED_FIRMWARE_LESSON_PING = re.compile(
+    r"Google Live firmware_ping journey_id=(?P<journey_id>\S+) "
+    r"connection_id=(?P<connection_id>\S+) "
+    r"live_connection_id=(?P<live_connection_id>\S+) lesson_step=(?P<step_id>\S+)"
+)
+P_CLEAN_CONNECTION_CLOSE = re.compile(
+    r"Client disconnected\b.*\bclose_code=(?:1000|1001)\b|Google Live clean_close\b"
+)
+
+_RELIABILITY_MARKERS = (
+    P_RELIABILITY_WINDOW_START,
+    P_RELIABILITY_WINDOW_END,
+    P_SERVER_CONNECTION_TRANSITION,
+    P_RECV_START,
+    P_RECV_STOP,
+    P_RESPONSE_AUDIO_START,
+    P_RESPONSE_AUDIO_END,
+    P_RESPONSE_AUDIO_FORWARDED,
+    P_EVIDENCE_RESPONSE_START,
+    P_EVIDENCE_RESPONSE_END,
+    P_EVIDENCE_FORWARDED,
+    P_EVIDENCE_INTERRUPT_STARTED,
+    P_EVIDENCE_INTERRUPT_STOPPED,
+    P_EVIDENCE_USER_INTERRUPTED,
+    P_EVIDENCE_CONNECTION_CLOSE,
+    P_EVIDENCE_STALE_DROP,
+    P_EVIDENCE_INTERRUPT_REPLAYED,
+    P_EVIDENCE_INTERRUPT_FINALIZED,
+    P_CLIENT_DISCONNECTED,
+    P_EVIDENCE_RECONNECT_STARTED,
+    P_EVIDENCE_REOPEN_READY,
+    P_EVIDENCE_REPLAYED_BUFFERED,
+    P_EVIDENCE_RECONNECT_OUTCOME,
+    P_INTERRUPT,
+    P_TTS_STOP_SENT,
+    P_STALE_MODEL_DROP_IDS,
+    P_REPLAYED_INTERRUPT_AUDIO,
+    P_INTERRUPT_INPUT_FINALIZED,
+    P_REPLAYED_BUFFERED_AUDIO,
+    P_WAITING_MODEL_TIMEOUT,
+    P_RECV_TIMEOUT,
+    P_EVIDENCE_RECV_LOOP,
+    P_EVIDENCE_RECV_TIMEOUT,
+    P_EVIDENCE_RECV_TIMEOUT_OUTCOME,
+    P_RECONNECT_STARTED,
+    P_SILENT_SESSION_REOPEN,
+    P_REOPEN_READY,
+    P_RECONNECT_SUCCEEDED,
+    P_RECONNECT_FAILED,
+    P_FALLBACK,
+    P_FALLBACK_DISABLED,
+    P_NON_RETRIABLE_CLASSIFICATION,
+    P_HANDOFF_ACQUIRED,
+    P_HANDOFF_RELEASED,
+    P_EVIDENCE_HANDOFF_ACQUIRED,
+    P_EVIDENCE_HANDOFF_TERMINAL,
+    P_PENDING_TASK_CLOSE,
+    P_LESSON_STEP_START,
+    P_LESSON_STEP_PROGRESS,
+    P_LESSON_STEP_END,
+    P_FIRMWARE_LESSON_PING,
+    P_CLEAN_CONNECTION_CLOSE,
+    *_CANDIDATE_SEMANTIC_PATTERNS,
+)
+
+_SCOPED_MARKER_FAMILIES = (
+    (_CANDIDATE_SEMANTIC_HINT, _CANDIDATE_SEMANTIC_PATTERNS),
+    (re.compile(r"Google Live evidence_"), _SCOPED_EVIDENCE_PATTERNS),
+    (re.compile(r"Google Live user_interrupt_started\b"), (P_EVIDENCE_INTERRUPT_STARTED,)),
+    (re.compile(r"Google Live interrupt_output_stopped\b"), (P_EVIDENCE_INTERRUPT_STOPPED,)),
+    (
+        re.compile(r"Google Live model_output_chunk_forwarded\s+journey"),
+        (P_EVIDENCE_FORWARDED,),
+    ),
+    (
+        re.compile(r"Google Live lesson_step_progress\s+journey"),
+        (P_SCOPED_LESSON_STEP_PROGRESS,),
+    ),
+    (
+        re.compile(r"Google Live lesson_conversation_progress\s+journey"),
+        (P_SCOPED_LESSON_STEP_PROGRESS,),
+    ),
+    (
+        re.compile(r"Google Live firmware_ping\s+journey"),
+        (P_SCOPED_FIRMWARE_LESSON_PING,),
+    ),
+)
+
+_STATEFULLY_ALLOWED_PHYSICAL_MARKERS = frozenset(
+    {
+        "Client disconnected",
+        "Google Live receive timed out",
+        "Google Live waiting_model_timeout",
+        "Google Live reconnect attempt",
+        "reconnect_started",
+        "interrupt_started reason=loud_input",
+        "Google Live user_interrupted reason=loud_input",
+        "audio_decision decision=suppress_echo reason=robot_speaking",
+        "audio_decision decision=hold_interrupt_audio reason=blocked_output",
+        "Google Live echo_bypass",
+        "Google Live echo_suppressed reason=robot_speaking",
+    }
+)
+_FORBIDDEN_LOG_MARKERS = tuple(
+    (pattern, re.compile(re.escape(pattern)))
+    for pattern in PHYSICAL_FATAL_PATTERNS
+    if pattern not in _STATEFULLY_ALLOWED_PHYSICAL_MARKERS
+) + tuple(PHYSICAL_FATAL_REGEX_PATTERNS)
 
 # ---------------------------------------------------------------------------
 # Latency-span extraction for PR5 §5.1 --check-chain
@@ -1015,9 +1418,3501 @@ def summarize_pains(log_path: Path) -> dict:
     }
 
 
-def main():
+def _failure(code: str, line: int, detail: str) -> dict[str, Any]:
+    return {"code": code, "line": line, "detail": detail}
+
+
+def _candidate_identity_valid(identity: Any) -> bool:
+    if not isinstance(identity, dict):
+        return False
+    required = {
+        "gitSha",
+        "imageDigest",
+        "firmwareIdentity",
+        "fixtureSha256",
+        "configFingerprint",
+    }
+    if set(identity) != required:
+        return False
+    if any(not isinstance(identity[key], str) or not identity[key] for key in required):
+        return False
+    return bool(
+        re.fullmatch(r"sha256:[0-9a-fA-F]{64}", identity["imageDigest"])
+        and re.fullmatch(r"[0-9a-fA-F]{64}", identity["fixtureSha256"])
+        and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", identity["configFingerprint"])
+    )
+
+
+def _parse_utc_iso(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        return None
+    return parsed
+
+
+def _is_reliability_line(line: str) -> bool:
+    return (
+        "Google Live reliability_window_" in line
+        or _CANDIDATE_SEMANTIC_HINT.search(line) is not None
+        or any(pattern.search(line) for pattern in _RELIABILITY_MARKERS)
+        or any(pattern.search(line) for _label, pattern in _FORBIDDEN_LOG_MARKERS)
+    )
+
+
+def _safe_failure_report(code: str) -> dict[str, Any]:
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": "google_live_log_reliability",
+        "status": "FAIL",
+        "candidateIdentity": None,
+        "evidenceScope": None,
+        "journeyType": None,
+        "journeyLatencyEvidence": {},
+        "initialLiveConnectionId": None,
+        "finalLiveConnectionId": None,
+        "liveConnectionTransitions": [],
+        "serverConnectionTransitions": [],
+        "logWindow": None,
+        "receiveLoopBalance": 0,
+        "maxReceiveLoopsActive": 0,
+        "replayCountsByReopen": {},
+        "duplicateResponseIds": [],
+        "staleAudioAfterReplacement": 0,
+        "unrecoveredTimeouts": [],
+        "unreleasedLessonHandoffs": [],
+        "fatalHits": [],
+        "correlation": None,
+        "correlations": [],
+        "failures": [{"code": code}],
+    }
+
+
+def _atomic_write_json(path: Path, report: Mapping[str, Any]) -> None:
+    parent = path.parent
+    if (
+        not parent.exists()
+        or not parent.is_dir()
+        or parent.resolve() != parent.absolute()
+        or path.is_symlink()
+    ):
+        raise ValueError("unsafe output path")
+    encoded = json.dumps(redact_mapping(dict(report)), indent=2, sort_keys=True) + "\n"
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _bounded_server_window(lines: list[str], journey_id: str) -> list[str]:
+    matches: list[tuple[int, int]] = []
+    active: dict[str, tuple[int, re.Match[str]]] = {}
+    intervals: list[tuple[int, int, re.Match[str]]] = []
+    for index, line in enumerate(lines):
+        start = P_RELIABILITY_WINDOW_START.search(line)
+        end = P_RELIABILITY_WINDOW_END.search(line)
+        if "Google Live reliability_window_start" in line and start is None:
+            raise ValueError("malformed reliability window start")
+        if "Google Live reliability_window_end" in line and end is None:
+            raise ValueError("malformed reliability window end")
+        if start:
+            window_id = start.group("window_id")
+            if window_id in active:
+                raise ValueError("duplicate reliability window start")
+            active[window_id] = (index, start)
+        if end:
+            window_id = end.group("window_id")
+            opened = active.pop(window_id, None)
+            if opened is None:
+                raise ValueError("orphan reliability window end")
+            start_index, start_match = opened
+            intervals.append((start_index, index, start_match))
+            if start_match.group("journey_id") == journey_id:
+                matches.append((start_index, index))
+    target_still_open = journey_id in active or any(
+        match.group("journey_id") == journey_id for _index, match in active.values()
+    )
+    if target_still_open or len(matches) != 1:
+        raise ValueError("requested reliability window is not unique")
+    start_index, end_index = matches[0]
+    start = P_RELIABILITY_WINDOW_START.search(lines[start_index])
+    end = P_RELIABILITY_WINDOW_END.search(lines[end_index])
+    if (
+        start is None
+        or end is None
+        or start.group("window_id") != journey_id
+        or start.group("journey_id") != journey_id
+        or start.group("connection_id") is None
+        or start.group("live_connection_id") is None
+        or start.group("server_start_utc") is None
+        or start.group("server_issued") != "true"
+        or end.group("server_end_utc") is None
+    ):
+        raise ValueError("requested reliability anchors are not server scoped")
+    target_connection_id = start.group("connection_id")
+
+    def authenticated_semantic_foreign_window(
+        foreign_start_index: int,
+        foreign_end_index: int,
+        foreign_match: re.Match[str],
+    ) -> bool:
+        foreign_end_match = P_RELIABILITY_WINDOW_END.search(
+            lines[foreign_end_index]
+        )
+        try:
+            identity = json.loads(foreign_match.group("candidate_identity"))
+        except json.JSONDecodeError:
+            return False
+        foreign_journey = foreign_match.group("journey_id")
+        foreign_server_start = _parse_utc_iso(
+            foreign_match.group("server_start_utc")
+        )
+        foreign_server_end = (
+            _parse_utc_iso(foreign_end_match.group("server_end_utc"))
+            if foreign_end_match is not None
+            else None
+        )
+        kind = foreign_match.group("semantic_proof_kind")
+        mode = foreign_match.group("quiet_mode")
+        semantic_claim_valid = (
+            foreign_match.group("journeys") == "bargein"
+            and kind == "bargein-intent"
+            and mode == "none"
+        ) or (
+            foreign_match.group("journeys") == "quiet"
+            and kind == "quiet"
+            and mode in {"silence", "robot_speaking"}
+        )
+        return bool(
+            foreign_end_match
+            and foreign_journey
+            and foreign_match.group("window_id") == foreign_journey
+            and foreign_end_match.group("window_id") == foreign_journey
+            and foreign_match.group("proof_profile") == "candidate-lifecycle"
+            and foreign_match.group("server_issued") == "true"
+            and foreign_match.group("connection_id")
+            and foreign_match.group("live_connection_id")
+            and foreign_match.group("initial_live_connection_id")
+            and foreign_match.group("peer_identity_hash")
+            and foreign_server_start
+            and foreign_server_end
+            and foreign_server_end >= foreign_server_start
+            and _candidate_identity_valid(identity)
+            and semantic_claim_valid
+            and foreign_start_index < foreign_end_index
+        )
+
+    authenticated_semantic_foreign_intervals = [
+        (foreign_start, foreign_end, foreign_match.group("journey_id"))
+        for foreign_start, foreign_end, foreign_match in intervals
+        if foreign_match.group("journey_id") != journey_id
+        and foreign_start < end_index
+        and foreign_end > start_index
+        and authenticated_semantic_foreign_window(
+            foreign_start, foreign_end, foreign_match
+        )
+    ]
+    foreign_intervals = [
+        (
+            foreign_start,
+            foreign_end,
+            foreign_match.group("journey_id"),
+            foreign_match.group("connection_id"),
+        )
+        for foreign_start, foreign_end, foreign_match in intervals
+        if foreign_match.group("journey_id") != journey_id
+        and foreign_start < end_index
+        and foreign_end > start_index
+    ] + [
+        (
+            foreign_start,
+            len(lines),
+            foreign_match.group("journey_id"),
+            foreign_match.group("connection_id"),
+        )
+        for foreign_start, foreign_match in active.values()
+        if foreign_match.group("journey_id") != journey_id
+        and foreign_start < end_index
+    ]
+    selected = [lines[start_index]]
+    for index in range(start_index + 1, end_index):
+        line = lines[index]
+        foreign_start = P_RELIABILITY_WINDOW_START.search(line)
+        foreign_end = P_RELIABILITY_WINDOW_END.search(line)
+        if foreign_start or foreign_end:
+            continue
+        marker_journey = re.search(r"\bjourney_id=([A-Za-z0-9._:-]+)", line)
+        semantic_marker = next(
+            (
+                match
+                for pattern in _CANDIDATE_SEMANTIC_PATTERNS
+                if (match := pattern.fullmatch(line)) is not None
+            ),
+            None,
+        )
+        if _CANDIDATE_SEMANTIC_HINT.search(line) is not None:
+            semantic_foreign_owners = [
+                foreign_journey
+                for foreign_start_index, foreign_end_index, foreign_journey
+                in authenticated_semantic_foreign_intervals
+                if foreign_start_index < index < foreign_end_index
+                and marker_journey is not None
+                and foreign_journey == marker_journey.group(1)
+            ]
+            if len(semantic_foreign_owners) == 1 and semantic_marker is not None:
+                continue
+            if len(semantic_foreign_owners) > 1:
+                raise ValueError("ambiguous foreign candidate semantic marker")
+        scoped_marker, scoped_valid = _scoped_marker_validation(line)
+        if scoped_marker and not scoped_valid:
+            raise ValueError("malformed scoped evidence marker")
+        marker_connection = re.search(r"\bconnection_id=([A-Za-z0-9._:-]+)", line)
+        server_transition = P_SERVER_CONNECTION_TRANSITION.search(line)
+        if server_transition is not None:
+            if server_transition.group("to_journey_id") != journey_id:
+                if any(
+                    foreign_start < index < foreign_end
+                    and foreign_journey == server_transition.group("to_journey_id")
+                    and foreign_connection
+                    == server_transition.group("to_connection_id")
+                    for (
+                        foreign_start,
+                        foreign_end,
+                        foreign_journey,
+                        foreign_connection,
+                    ) in foreign_intervals
+                ):
+                    continue
+                raise ValueError("unanchored foreign reliability marker")
+            if server_transition.group("to_connection_id") != target_connection_id:
+                raise ValueError("target reliability marker scope mismatch")
+        elif semantic_marker is not None:
+            if semantic_marker.group("journey_id") != journey_id:
+                raise ValueError("foreign candidate semantic marker")
+        elif scoped_marker and marker_journey is not None:
+            if marker_journey.group(1) != journey_id:
+                if any(
+                    foreign_start < index < foreign_end
+                    and foreign_journey == marker_journey.group(1)
+                    and marker_connection is not None
+                    and foreign_connection == marker_connection.group(1)
+                    for (
+                        foreign_start,
+                        foreign_end,
+                        foreign_journey,
+                        foreign_connection,
+                    ) in foreign_intervals
+                ):
+                    continue
+                raise ValueError("unanchored foreign reliability marker")
+            if (
+                marker_connection is None
+                or marker_connection.group(1) != target_connection_id
+            ):
+                raise ValueError("target reliability marker scope mismatch")
+        elif _is_reliability_line(line) and any(
+            foreign_start < index < foreign_end
+            for foreign_start, foreign_end, _journey, _connection in foreign_intervals
+        ):
+            raise ValueError("ambiguous reliability marker")
+        selected.append(line)
+    selected.append(lines[end_index])
+    return selected
+
+
+def _open_log_without_symlinks(path: Path) -> int:
+    absolute = Path(os.path.abspath(path))
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(absolute.anchor, directory_flags)
+    try:
+        for component in absolute.parts[1:-1]:
+            next_fd = os.open(
+                component,
+                directory_flags | nofollow,
+                dir_fd=directory_fd,
+            )
+            os.close(directory_fd)
+            directory_fd = next_fd
+        return os.open(
+            absolute.name,
+            os.O_RDONLY | nofollow,
+            dir_fd=directory_fd,
+        )
+    finally:
+        os.close(directory_fd)
+
+
+def _opened_file_aliases(path: Path, opened_stat: os.stat_result) -> bool:
+    try:
+        candidate = os.stat(path)
+    except FileNotFoundError:
+        return False
+    return (candidate.st_dev, candidate.st_ino) == (
+        opened_stat.st_dev,
+        opened_stat.st_ino,
+    )
+
+
+def _persist_reliability_window(log_path: Path, journey_id: str, out_path: Path) -> int:
+    try:
+        if SAFE_EVIDENCE_JOURNEY_RE.fullmatch(journey_id) is None:
+            raise ValueError("invalid journey")
+        fd = _open_log_without_symlinks(log_path)
+        try:
+            opened_stat = os.fstat(fd)
+            if not stat.S_ISREG(opened_stat.st_mode):
+                raise ValueError("log file unavailable")
+            if _opened_file_aliases(out_path, opened_stat):
+                return 1
+            if log_path.absolute() == out_path.absolute():
+                return 1
+            with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as handle:
+                fd = None
+                lines = handle.read().splitlines()
+        finally:
+            if fd is not None:
+                os.close(fd)
+        selected = _bounded_server_window(lines, journey_id)
+        with tempfile.TemporaryDirectory() as directory:
+            bounded = Path(directory) / "server-window.log"
+            bounded.write_text("\n".join(selected) + "\n", encoding="utf-8")
+            report = analyze_reliability_window(bounded)
+        _atomic_write_json(out_path, report)
+        return 0 if report.get("status") == "PASS" else 1
+    except Exception:
+        try:
+            if log_path.absolute() != out_path.absolute():
+                _atomic_write_json(out_path, _safe_failure_report("BOUNDED_LOG_INVALID"))
+        except Exception:
+            pass
+        return 1
+
+
+def analyze_reliability_window(log_path: Path) -> dict[str, Any]:
+    """Verify one explicitly anchored Google Live evidence window in linear time."""
+    failures: list[dict[str, Any]] = []
+    fatal_hits: list[str] = []
+    start_anchor: dict[str, Any] | None = None
+    end_anchor: dict[str, Any] | None = None
+    active = False
+    previous_ts: datetime | None = None
+    receive_loops_active = 0
+    max_receive_loops_active = 0
+    response_starts: dict[Any, int] = defaultdict(int)
+    response_start_lines: dict[tuple[str, str, int], int] = {}
+    response_end_lines: dict[tuple[str, str, int], int] = {}
+    forwarded_counts: dict[tuple[str, str, int], int] = defaultdict(int)
+    replay_counts_by_reopen: dict[str, int] = {}
+    current_reopen: str | None = None
+    current_reopen_ready = False
+    pending_timeouts: list[dict[str, int]] = []
+    non_retriable_error_line: int | None = None
+    handoff_balance = 0
+    handoff_lines: list[int] = []
+    stale_audio_after_replacement = 0
+    interrupt_records: list[dict[str, Any]] = []
+    active_lesson_step: dict[str, Any] | None = None
+    observed_marker_families: dict[str, set[str]] = defaultdict(set)
+    scoped_cleanup_pending_tasks: int | None = None
+    scoped_cleanup_active_sessions: int | None = None
+    scoped_interrupts: list[dict[str, Any]] = []
+    scoped_reconnects: dict[tuple[str, str, int], dict[str, Any]] = {}
+    scoped_active_responses: dict[tuple[str, str], int] = {}
+    scoped_ambiguous_response_scopes: set[tuple[str, str]] = set()
+    scoped_lesson_pending_pings: dict[str, int] = {}
+    scoped_receive_generations: set[int] = set()
+    scoped_receive_start_count = 0
+    scoped_receive_stop_count = 0
+    scoped_response_start_count = 0
+    scoped_response_end_count = 0
+    scoped_timeout_generations: dict[int, list[int]] = defaultdict(list)
+    scoped_handoff_generations: dict[tuple[int, int], list[int]] = defaultdict(list)
+    scoped_initial_live_connection_id = None
+    scoped_current_live_connection_id = None
+    scoped_live_connection_transitions: list[dict[str, Any]] = []
+    scoped_last_transition_attempt = 0
+    scoped_last_started_attempt = 0
+    scoped_active_reconnect_key: tuple[str, str, int] | None = None
+    server_connection_transitions: list[dict[str, Any]] = []
+    first_response_started_ms: float | None = None
+    reconnect_recovery_ms: list[float] = []
+    reconnect_journey_started_at: dict[tuple[str, str], datetime] = {}
+    completed_reconnect_journeys: set[tuple[str, str]] = set()
+    candidate_intent_matches: list[dict[str, Any]] = []
+    candidate_intent_replacements: list[dict[str, Any]] = []
+    candidate_quiet_observations: list[dict[str, Any]] = []
+    candidate_fallback_observations: list[dict[str, Any]] = []
+
+    def parse_scoped_uint(text: str | None, max_value: int) -> int | None:
+        if text is None or len(text) > 10:
+            return None
+        value = int(text)
+        return value if value <= max_value else None
+
+    def parse_semantic_uint(
+        groups: Mapping[str, str | None],
+        name: str,
+        max_value: int = 1_000_000_000,
+    ) -> int | None:
+        return parse_scoped_uint(groups.get(name), max_value)
+
+    def interrupt_owner_ids(match: re.Match[str]) -> tuple[str, str]:
+        live_id = match.group("live_connection_id")
+        groups = match.groupdict()
+        return (
+            groups.get("cancelled_live_connection_id") or live_id,
+            groups.get("replacement_live_connection_id") or live_id,
+        )
+
+    def scoped_marker_targets_anchor(match: re.Match[str], line_number: int) -> bool:
+        anchor_scope = start_anchor.get("evidenceScope") if start_anchor else None
+        if not isinstance(anchor_scope, Mapping):
+            return True
+        groups = match.groupdict()
+        if groups.get("journey_id") != anchor_scope.get("journeyId"):
+            return False
+        connection_id = groups.get("connection_id")
+        live_connection_id = groups.get("live_connection_id")
+        if connection_id != anchor_scope.get("connectionId") or (
+            live_connection_id is not None
+            and live_connection_id != scoped_current_live_connection_id
+        ):
+            failures.append(
+                _failure(
+                    "EVIDENCE_SCOPE_MISMATCH",
+                    line_number,
+                    "same journey marker does not match anchored connection scope",
+                )
+            )
+            return False
+        return True
+
+    def scoped_marker_targets_immutable_anchor(
+        match: re.Match[str], line_number: int
+    ) -> bool:
+        anchor_scope = start_anchor.get("evidenceScope") if start_anchor else None
+        if not isinstance(anchor_scope, Mapping):
+            return True
+        if match.group("journey_id") != anchor_scope.get("journeyId"):
+            return False
+        if match.group("connection_id") != anchor_scope.get("connectionId"):
+            failures.append(
+                _failure(
+                    "EVIDENCE_SCOPE_MISMATCH",
+                    line_number,
+                    "same journey marker does not match anchored connection scope",
+                )
+            )
+            return False
+        return True
+
+    with log_path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line_number, raw_line in enumerate(fh, 1):
+            line = raw_line.rstrip("\n")
+            start_match = P_RELIABILITY_WINDOW_START.search(line)
+            end_match = P_RELIABILITY_WINDOW_END.search(line)
+
+            if start_match:
+                if start_anchor is not None:
+                    failures.append(
+                        _failure(
+                            "DUPLICATE_WINDOW_START",
+                            line_number,
+                            "bounded window has more than one start anchor",
+                        )
+                    )
+                    continue
+                ts = parse_timestamp(line)
+                if ts is None:
+                    failures.append(
+                        _failure(
+                            "MALFORMED_WINDOW_START",
+                            line_number,
+                            "start anchor timestamp is invalid",
+                        )
+                    )
+                    continue
+                try:
+                    candidate_identity = json.loads(start_match.group("candidate_identity"))
+                except json.JSONDecodeError:
+                    candidate_identity = None
+                if not _candidate_identity_valid(candidate_identity):
+                    failures.append(
+                        _failure(
+                            "MALFORMED_CANDIDATE_IDENTITY",
+                            line_number,
+                            "start anchor candidate identity is invalid",
+                        )
+                    )
+                scope_values = {
+                    "journeyId": start_match.group("journey_id"),
+                    "connectionId": start_match.group("connection_id"),
+                    "liveConnectionId": start_match.group("live_connection_id"),
+                    "initialLiveConnectionId": start_match.group(
+                        "initial_live_connection_id"
+                    ),
+                    "peerIdentityHash": start_match.group("peer_identity_hash"),
+                    "serverStartUtc": start_match.group("server_start_utc"),
+                }
+                evidence_scope = None
+                scoped_anchor_present = any(
+                    scope_values[field] is not None
+                        for field in (
+                            "connectionId",
+                            "liveConnectionId",
+                            "initialLiveConnectionId",
+                        "peerIdentityHash",
+                        "serverStartUtc",
+                    )
+                )
+                if scoped_anchor_present:
+                    if (
+                        any(value is None for value in scope_values.values())
+                        or _parse_utc_iso(scope_values["serverStartUtc"]) is None
+                    ):
+                        failures.append(
+                            _failure(
+                                "MALFORMED_EVIDENCE_SCOPE",
+                                line_number,
+                                "start anchor evidence scope is incomplete or non-UTC",
+                            )
+                        )
+                    else:
+                        evidence_scope = scope_values
+                        if start_match.group("proof_profile") is not None:
+                            evidence_scope["journeyType"] = start_match.group(
+                                "journeys"
+                            )
+                            evidence_scope["proofProfile"] = start_match.group(
+                                "proof_profile"
+                            )
+                        if start_match.group("semantic_proof_kind") is not None:
+                            evidence_scope["semanticProofKind"] = start_match.group(
+                                "semantic_proof_kind"
+                            )
+                        if start_match.group("quiet_mode") is not None:
+                            evidence_scope["quietMode"] = start_match.group(
+                                "quiet_mode"
+                            )
+                        scoped_initial_live_connection_id = (
+                            scope_values.get("initialLiveConnectionId")
+                            or scope_values.get("liveConnectionId")
+                        )
+                        scoped_current_live_connection_id = (
+                            scoped_initial_live_connection_id
+                        )
+                claimed_journey_list = list(
+                    filter(None, (start_match.group("journeys") or "").split(","))
+                )
+                start_anchor = {
+                    "windowId": start_match.group("window_id"),
+                    "timestamp": ts,
+                    "line": line_number,
+                    "candidateIdentity": candidate_identity,
+                    "journeyId": start_match.group("journey_id"),
+                    "evidenceScope": evidence_scope,
+                    "claimedJourneys": set(claimed_journey_list),
+                    "claimedJourneyList": claimed_journey_list,
+                    "serverIssued": start_match.group("server_issued") == "true",
+                }
+                active = True
+                previous_ts = ts
+                continue
+
+            if end_match:
+                if start_anchor is None:
+                    failures.append(
+                        _failure(
+                            "WINDOW_START_MISSING",
+                            line_number,
+                            "end anchor appeared before a start anchor",
+                        )
+                    )
+                    continue
+                if end_anchor is not None:
+                    failures.append(
+                        _failure(
+                            "DUPLICATE_WINDOW_END",
+                            line_number,
+                            "bounded window has more than one end anchor",
+                        )
+                    )
+                    continue
+                ts = parse_timestamp(line)
+                if ts is None:
+                    failures.append(
+                        _failure(
+                            "MALFORMED_WINDOW_END",
+                            line_number,
+                            "end anchor timestamp is invalid",
+                        )
+                    )
+                    continue
+                if end_match.group("window_id") != start_anchor["windowId"]:
+                    failures.append(
+                        _failure(
+                            "WINDOW_ID_MISMATCH",
+                            line_number,
+                            "start and end anchors identify different windows",
+                        )
+                    )
+                if previous_ts is not None and ts < previous_ts:
+                    failures.append(
+                        _failure(
+                            "LOG_TIMESTAMP_REGRESSION",
+                            line_number,
+                            "end anchor precedes an earlier in-window event",
+                        )
+                    )
+                end_anchor = {
+                    "windowId": end_match.group("window_id"),
+                    "timestamp": ts,
+                    "line": line_number,
+                    "serverEndUtc": end_match.group("server_end_utc"),
+                }
+                if end_anchor["serverEndUtc"] is not None:
+                    server_end = _parse_utc_iso(end_anchor["serverEndUtc"])
+                    server_start = _parse_utc_iso(
+                        (start_anchor.get("evidenceScope") or {}).get("serverStartUtc")
+                    )
+                    if server_end is None or server_start is None or server_end < server_start:
+                        failures.append(
+                            _failure(
+                                "MALFORMED_EVIDENCE_WINDOW",
+                                line_number,
+                                "server evidence end must be UTC and not precede start",
+                            )
+                        )
+                active = False
+                continue
+
+            if not active:
+                if _is_reliability_line(line):
+                    failures.append(
+                        _failure(
+                            "OUT_OF_WINDOW_RELIABILITY_MARKER",
+                            line_number,
+                            "reliability marker is outside the explicit anchors",
+                        )
+                    )
+                continue
+            ts = parse_timestamp(line)
+            if ts is None:
+                if _is_reliability_line(line):
+                    failures.append(
+                        _failure(
+                            "MALFORMED_RELIABILITY_LOG_LINE",
+                            line_number,
+                            "reliability marker has no valid timestamp",
+                        )
+                    )
+                continue
+            timestamp_regressed = previous_ts is not None and ts < previous_ts
+            if timestamp_regressed:
+                failures.append(
+                    _failure(
+                        "LOG_TIMESTAMP_REGRESSION",
+                        line_number,
+                        "in-window timestamps are not monotonic",
+                    )
+                )
+            previous_ts = ts
+
+            transition_match = P_SERVER_CONNECTION_TRANSITION.search(line)
+            if transition_match and start_anchor is not None:
+                sequence = parse_scoped_uint(transition_match.group("sequence"), 1000)
+                scope = start_anchor.get("evidenceScope") or {}
+                valid_transition = (
+                    sequence is not None
+                    and sequence == len(server_connection_transitions) + 1
+                    and transition_match.group("reason") == "same_device_reconnect"
+                    and transition_match.group("to_journey_id")
+                    == start_anchor.get("journeyId")
+                    and transition_match.group("to_connection_id")
+                    == scope.get("connectionId")
+                    and transition_match.group("peer_identity_hash")
+                    == scope.get("peerIdentityHash")
+                    and transition_match.group("from_connection_id")
+                    != transition_match.group("to_connection_id")
+                )
+                if not valid_transition:
+                    failures.append(
+                        _failure(
+                            "SERVER_CONNECTION_TRANSITION_INVALID",
+                            line_number,
+                            "server reconnect marker does not match anchored scope",
+                        )
+                    )
+                elif not timestamp_regressed:
+                    server_connection_transitions.append(
+                        {
+                            "status": "PASS",
+                            "source": "server_log",
+                            "serverIssued": True,
+                            "sequence": sequence,
+                            "reason": "same_device_reconnect",
+                            "peerIdentityHash": transition_match.group(
+                                "peer_identity_hash"
+                            ),
+                            "fromJourneyId": transition_match.group(
+                                "from_journey_id"
+                            ),
+                            "fromConnectionId": transition_match.group(
+                                "from_connection_id"
+                            ),
+                            "toJourneyId": transition_match.group("to_journey_id"),
+                            "toConnectionId": transition_match.group(
+                                "to_connection_id"
+                            ),
+                        }
+                    )
+                continue
+
+            anchor_scope = start_anchor.get("evidenceScope") if start_anchor else None
+            exact_scope_active = isinstance(anchor_scope, Mapping)
+
+            if _CANDIDATE_SEMANTIC_HINT.search(line) is not None:
+                semantic_match = next(
+                    (
+                        match
+                        for pattern in _CANDIDATE_SEMANTIC_PATTERNS
+                        if (match := pattern.fullmatch(line)) is not None
+                    ),
+                    None,
+                )
+                if semantic_match is None:
+                    failures.append(
+                        _failure(
+                            "MALFORMED_CANDIDATE_SEMANTIC_MARKER",
+                            line_number,
+                            "candidate semantic marker is not a canonical provider INFO record",
+                        )
+                    )
+                    continue
+                groups = semantic_match.groupdict()
+                anchored_journey = (
+                    anchor_scope.get("journeyId")
+                    if isinstance(anchor_scope, Mapping)
+                    else None
+                )
+                if (
+                    not exact_scope_active
+                    or not start_anchor.get("serverIssued")
+                    or (anchor_scope or {}).get("proofProfile")
+                    != "candidate-lifecycle"
+                    or groups["journey_id"] != anchored_journey
+                ):
+                    failures.append(
+                        _failure(
+                            "CANDIDATE_SEMANTIC_SCOPE_MISMATCH",
+                            line_number,
+                            "candidate semantic marker does not match the authenticated scope",
+                        )
+                    )
+                    continue
+
+                if semantic_match.re is P_EVIDENCE_CANDIDATE_INTENT_MATCH:
+                    chars = parse_semantic_uint(groups, "chars")
+                    generation = parse_semantic_uint(groups, "response_generation")
+                    if chars is None or chars == 0 or generation is None:
+                        failures.append(
+                            _failure(
+                                "MALFORMED_CANDIDATE_SEMANTIC_MARKER",
+                                line_number,
+                                "intent marker counters are out of bounds",
+                            )
+                        )
+                        continue
+                    active_response_ids = []
+                    if isinstance(anchor_scope, Mapping):
+                        anchored_response_scope = (
+                            anchor_scope.get("connectionId"),
+                            scoped_current_live_connection_id,
+                        )
+                        active_response_ids = [
+                            response_id
+                            for (connection_id, live_connection_id), response_id
+                            in scoped_active_responses.items()
+                            if connection_id == anchor_scope.get("connectionId")
+                            and live_connection_id == scoped_current_live_connection_id
+                        ]
+                        if anchored_response_scope in scoped_ambiguous_response_scopes:
+                            active_response_ids = []
+                    candidate_intent_matches.append(
+                        {
+                            "line": line_number,
+                            "slot": int(groups["slot"]),
+                            "role": groups["role"],
+                            "chars": chars,
+                            "matched": groups["matched"] == "true",
+                            "responseGeneration": generation,
+                            "activeResponseIds": tuple(active_response_ids),
+                            "activeResponseId": (
+                                active_response_ids[0]
+                                if len(active_response_ids) == 1
+                                else None
+                            ),
+                        }
+                    )
+                elif semantic_match.re is P_EVIDENCE_CANDIDATE_INTENT_REPLACEMENT:
+                    numeric = {
+                        name: parse_semantic_uint(groups, name)
+                        for name in (
+                            "old_generation",
+                            "new_generation",
+                            "stale_old_audio",
+                        )
+                    }
+                    if any(value is None for value in numeric.values()):
+                        failures.append(
+                            _failure(
+                                "MALFORMED_CANDIDATE_SEMANTIC_MARKER",
+                                line_number,
+                                "replacement marker counters are out of bounds",
+                            )
+                        )
+                        continue
+                    candidate_intent_replacements.append(
+                        {
+                            "line": line_number,
+                            "oldGeneration": numeric["old_generation"],
+                            "newGeneration": numeric["new_generation"],
+                            "oldStopped": groups["old_stopped"] == "true",
+                            "replacementStarted": groups["replacement_started"]
+                            == "true",
+                            "replacementCompleted": groups[
+                                "replacement_completed"
+                            ]
+                            == "true",
+                            "staleOldAudio": numeric["stale_old_audio"],
+                        }
+                    )
+                elif semantic_match.re is P_EVIDENCE_CANDIDATE_QUIET:
+                    numeric_names = (
+                        "duration_ms",
+                        "response_duration_ms",
+                        "user_turns",
+                        "response_starts",
+                        "response_ends",
+                        "interrupts",
+                        "replacements",
+                        "reconnects",
+                        "fallbacks",
+                        "stale_audio",
+                        "delivery_failures",
+                    )
+                    numeric = {
+                        name: parse_semantic_uint(groups, name)
+                        for name in numeric_names
+                    }
+                    if any(value is None for value in numeric.values()):
+                        failures.append(
+                            _failure(
+                                "MALFORMED_CANDIDATE_SEMANTIC_MARKER",
+                                line_number,
+                                "quiet marker counters are out of bounds",
+                            )
+                        )
+                        continue
+                    candidate_quiet_observations.append(
+                        {
+                            "line": line_number,
+                            "mode": groups["mode"],
+                            "response_generation": (
+                                None
+                                if groups["response_generation"] == "none"
+                                else int(groups["response_generation"])
+                            ),
+                            "setup_consumed": groups["setup_consumed"] == "true",
+                            **numeric,
+                        }
+                    )
+                else:
+                    fallbacks = parse_semantic_uint(groups, "fallbacks")
+                    if fallbacks is None:
+                        failures.append(
+                            _failure(
+                                "MALFORMED_CANDIDATE_SEMANTIC_MARKER",
+                                line_number,
+                                "fallback marker count is out of bounds",
+                            )
+                        )
+                        continue
+                    candidate_fallback_observations.append(
+                        {"line": line_number, "fallbacks": fallbacks}
+                    )
+                continue
+
+            if (
+                exact_scope_active
+                and "Google Live evidence_replayed_buffered_audio" in line
+                and P_EVIDENCE_REPLAYED_BUFFERED.search(line) is None
+            ):
+                marker_journey = re.search(r"\bjourney_id=(\S+)", line)
+                anchored_journey = start_anchor.get("journeyId") if start_anchor else None
+                if (
+                    anchored_journey is None
+                    or marker_journey is None
+                    or marker_journey.group(1) == anchored_journey
+                ):
+                    failures.append(
+                        _failure(
+                            "MALFORMED_RELIABILITY_LOG_LINE",
+                            line_number,
+                            "scoped replay marker has incomplete or invalid fields",
+                        )
+                    )
+                    continue
+
+            if isinstance(anchor_scope, Mapping) and (
+                "Google Live evidence_reconnect_started" in line
+                or "Google Live evidence_reconnect_succeeded" in line
+                or "Google Live evidence_reconnect_failed" in line
+            ):
+                reconnect_marker_valid = any(
+                    pattern.search(line)
+                    for pattern in (
+                        P_EVIDENCE_RECONNECT_STARTED,
+                        P_EVIDENCE_RECONNECT_OUTCOME,
+                    )
+                )
+                marker_journey = re.search(r"\bjourney_id=(\S+)", line)
+                if (
+                    not reconnect_marker_valid
+                    and marker_journey is not None
+                    and marker_journey.group(1) == anchor_scope.get("journeyId")
+                ):
+                    failures.append(
+                        _failure(
+                            "MALFORMED_RELIABILITY_LOG_LINE",
+                            line_number,
+                            "target reconnect marker is missing exact scope fields",
+                        )
+                    )
+                    continue
+
+            for label, pattern in _FORBIDDEN_LOG_MARKERS:
+                if pattern.search(line):
+                    if label not in fatal_hits:
+                        fatal_hits.append(label)
+                    failures.append(
+                        _failure("FORBIDDEN_LOG_MARKER", line_number, label)
+                    )
+
+            disconnected = P_CLIENT_DISCONNECTED.search(line)
+            if (
+                not exact_scope_active
+                and disconnected
+                and disconnected.group("close_code") not in {"1000", "1001"}
+            ):
+                failures.append(
+                    _failure(
+                        "ABNORMAL_CONNECTION_CLOSE",
+                        line_number,
+                        f"unexpected close code {disconnected.group('close_code')}",
+                    )
+                )
+
+            scoped_start = P_EVIDENCE_RESPONSE_START.search(line)
+            if scoped_start:
+                if not scoped_marker_targets_anchor(scoped_start, line_number):
+                    continue
+                scoped_response_start_count += 1
+                observed_marker_families[scoped_start.group("journey_id")].add(
+                    "response_started"
+                )
+                if first_response_started_ms is None and start_anchor is not None:
+                    first_response_started_ms = round(
+                        (ts - start_anchor["timestamp"]).total_seconds() * 1000,
+                        3,
+                    )
+                response_key = (
+                    scoped_start.group("connection_id"),
+                    scoped_start.group("live_connection_id"),
+                    int(scoped_start.group("response_id")),
+                )
+                response_starts[response_key] += 1
+                response_start_lines.setdefault(response_key, line_number)
+                response_scope = response_key[:2]
+                active_response_id = scoped_active_responses.get(response_scope)
+                if active_response_id is not None:
+                    scoped_ambiguous_response_scopes.add(response_scope)
+                    failures.append(
+                        _failure(
+                            "RESPONSE_OVERLAP"
+                            if active_response_id != response_key[2]
+                            else "DUPLICATE_RESPONSE_ID",
+                            line_number,
+                            str(response_key),
+                        )
+                    )
+                else:
+                    scoped_active_responses[response_scope] = response_key[2]
+                for record in scoped_interrupts:
+                    if (
+                        record["journeyId"] == scoped_start.group("journey_id")
+                        and record["connectionId"] == scoped_start.group("connection_id")
+                        and record["replacementLiveConnectionId"] == scoped_start.group("live_connection_id")
+                        and record["replacementResponseId"] == int(scoped_start.group("response_id"))
+                    ):
+                        record["orderInvalid"] |= record["phase"] != 4
+                        record["phase"] = 5
+                continue
+            scoped_end = P_EVIDENCE_RESPONSE_END.search(line)
+            if scoped_end:
+                if not scoped_marker_targets_anchor(scoped_end, line_number):
+                    continue
+                scoped_response_end_count += 1
+                observed_marker_families[scoped_end.group("journey_id")].add(
+                    "response_ended"
+                )
+                response_scope = (
+                    scoped_end.group("connection_id"),
+                    scoped_end.group("live_connection_id"),
+                )
+                response_id = int(scoped_end.group("response_id"))
+                response_end_lines.setdefault(
+                    (*response_scope, response_id), line_number
+                )
+                if scoped_active_responses.get(response_scope) != response_id:
+                    failures.append(
+                        _failure(
+                            "RESPONSE_END_WITHOUT_START",
+                            line_number,
+                            str((*response_scope, response_id)),
+                        )
+                    )
+                else:
+                    scoped_active_responses.pop(response_scope, None)
+                for record in scoped_interrupts:
+                    if (
+                        record["journeyId"] == scoped_end.group("journey_id")
+                        and record["connectionId"] == scoped_end.group("connection_id")
+                        and record["replacementLiveConnectionId"] == scoped_end.group("live_connection_id")
+                        and record["replacementResponseId"] == int(scoped_end.group("response_id"))
+                    ):
+                        record["orderInvalid"] |= record["phase"] != 6
+                        record["phase"] = 7
+                continue
+            scoped_forwarded = P_EVIDENCE_FORWARDED.search(line)
+            if scoped_forwarded:
+                forwarded_response_id = int(scoped_forwarded.group("response_id"))
+                forwarded_live_id = scoped_forwarded.group("live_connection_id")
+                cancelled_owner_match = any(
+                    record["journeyId"] == scoped_forwarded.group("journey_id")
+                    and record["connectionId"] == scoped_forwarded.group("connection_id")
+                    and record["cancelledLiveConnectionId"] == forwarded_live_id
+                    and record["cancelledResponseId"] == forwarded_response_id
+                    for record in scoped_interrupts
+                )
+                if not cancelled_owner_match and not scoped_marker_targets_anchor(
+                    scoped_forwarded, line_number
+                ):
+                    continue
+                observed_marker_families[scoped_forwarded.group("journey_id")].add(
+                    "forwarded"
+                )
+                response_scope = (
+                    scoped_forwarded.group("connection_id"),
+                    scoped_forwarded.group("live_connection_id"),
+                )
+                if scoped_active_responses.get(response_scope) != forwarded_response_id:
+                    failures.append(
+                        _failure(
+                            "RESPONSE_CHUNK_WITHOUT_ACTIVE_RESPONSE",
+                            line_number,
+                            str((*response_scope, forwarded_response_id)),
+                        )
+                    )
+                forwarded_counts[(*response_scope, forwarded_response_id)] += 1
+                for record in scoped_interrupts:
+                    if (
+                        record["journeyId"] == scoped_forwarded.group("journey_id")
+                        and record["connectionId"] == scoped_forwarded.group("connection_id")
+                        and record["cancelledLiveConnectionId"] == forwarded_live_id
+                        and record["phase"] >= 5
+                        and forwarded_response_id == record["cancelledResponseId"]
+                    ):
+                        stale_audio_after_replacement += 1
+                        failures.append(
+                            _failure(
+                                "STALE_AUDIO_AFTER_REPLACEMENT",
+                                line_number,
+                                "non-replacement response emitted after replacement start",
+                            )
+                        )
+                for record in scoped_interrupts:
+                    if (
+                        record["journeyId"] == scoped_forwarded.group("journey_id")
+                        and record["connectionId"] == scoped_forwarded.group("connection_id")
+                        and record["replacementLiveConnectionId"] == forwarded_live_id
+                        and record["replacementResponseId"] == forwarded_response_id
+                    ):
+                        record["orderInvalid"] |= record["phase"] not in {5, 6}
+                        record["phase"] = 6
+                continue
+            scoped_interrupt_start = P_EVIDENCE_INTERRUPT_STARTED.search(line)
+            if scoped_interrupt_start:
+                if not scoped_marker_targets_anchor(scoped_interrupt_start, line_number):
+                    continue
+                observed_marker_families[
+                    scoped_interrupt_start.group("journey_id")
+                ].add("interrupt_started")
+                cancelled_owner, replacement_owner = interrupt_owner_ids(
+                    scoped_interrupt_start
+                )
+                scoped_interrupts.append(
+                    {
+                        "journeyId": scoped_interrupt_start.group("journey_id"),
+                        "connectionId": scoped_interrupt_start.group("connection_id"),
+                        "liveConnectionId": replacement_owner,
+                        "cancelledLiveConnectionId": cancelled_owner,
+                        "replacementLiveConnectionId": replacement_owner,
+                        "ownerMigrationCount": 0,
+                        "cancelledResponseId": int(scoped_interrupt_start.group("cancelled")),
+                        "replacementResponseId": int(scoped_interrupt_start.group("next")),
+                        "line": line_number,
+                        "phase": 0,
+                        "orderInvalid": False,
+                    }
+                )
+                if (
+                    cancelled_owner != scoped_interrupt_start.group("live_connection_id")
+                    or replacement_owner != cancelled_owner
+                ):
+                    failures.append(
+                        _failure(
+                            "INTERRUPT_REPLACEMENT_OWNER_INVALID",
+                            line_number,
+                            str((cancelled_owner, replacement_owner)),
+                        )
+                    )
+                response_scope = (
+                    scoped_interrupt_start.group("connection_id"),
+                    scoped_interrupt_start.group("live_connection_id"),
+                )
+                cancelled_response_id = int(
+                    scoped_interrupt_start.group("cancelled")
+                )
+                active_response_id = scoped_active_responses.get(response_scope)
+                if active_response_id == cancelled_response_id:
+                    scoped_active_responses.pop(response_scope, None)
+                elif active_response_id is None:
+                    failures.append(
+                        _failure(
+                            "INTERRUPT_WITHOUT_ACTIVE_RESPONSE",
+                            line_number,
+                            str((*response_scope, cancelled_response_id)),
+                        )
+                    )
+                else:
+                    failures.append(
+                        _failure(
+                            "INTERRUPT_RESPONSE_OWNERSHIP_MISMATCH",
+                            line_number,
+                            str((*response_scope, active_response_id)),
+                        )
+                    )
+                continue
+            scoped_interrupt_stop = P_EVIDENCE_INTERRUPT_STOPPED.search(line)
+            if scoped_interrupt_stop:
+                if not scoped_marker_targets_anchor(scoped_interrupt_stop, line_number):
+                    continue
+                observed_marker_families[
+                    scoped_interrupt_stop.group("journey_id")
+                ].add("interrupt_stopped")
+                cancelled_owner, replacement_owner = interrupt_owner_ids(
+                    scoped_interrupt_stop
+                )
+                for record in scoped_interrupts:
+                    if (
+                        record["journeyId"] == scoped_interrupt_stop.group("journey_id")
+                        and record["connectionId"] == scoped_interrupt_stop.group("connection_id")
+                        and record["cancelledLiveConnectionId"] == cancelled_owner
+                        and record["replacementLiveConnectionId"] == replacement_owner
+                        and cancelled_owner == scoped_interrupt_stop.group("live_connection_id")
+                        and record["cancelledResponseId"] == int(scoped_interrupt_stop.group("cancelled"))
+                        and record["replacementResponseId"] == int(scoped_interrupt_stop.group("next"))
+                    ):
+                        record["orderInvalid"] |= record["phase"] != 0
+                        record["phase"] = 1
+                continue
+            scoped_interrupted = P_EVIDENCE_USER_INTERRUPTED.search(line)
+            if scoped_interrupted:
+                if not scoped_marker_targets_immutable_anchor(
+                    scoped_interrupted, line_number
+                ):
+                    continue
+                observed_marker_families[scoped_interrupted.group("journey_id")].add(
+                    "interrupt_finalized"
+                )
+                cancelled_owner, replacement_owner = interrupt_owner_ids(
+                    scoped_interrupted
+                )
+                if (
+                    (
+                        scoped_current_live_connection_id is not None
+                        and replacement_owner != scoped_current_live_connection_id
+                    )
+                    or replacement_owner
+                    != scoped_interrupted.group("live_connection_id")
+                ):
+                    failures.append(
+                        _failure(
+                            "INTERRUPT_REPLACEMENT_OWNER_INVALID",
+                            line_number,
+                            str((cancelled_owner, replacement_owner)),
+                        )
+                    )
+                for record in scoped_interrupts:
+                    if (
+                        record["journeyId"] == scoped_interrupted.group("journey_id")
+                        and record["connectionId"] == scoped_interrupted.group("connection_id")
+                        and record["cancelledLiveConnectionId"] == cancelled_owner
+                        and record["replacementLiveConnectionId"] == replacement_owner
+                        and replacement_owner == scoped_interrupted.group("live_connection_id")
+                        and record["cancelledResponseId"] == int(scoped_interrupted.group("cancelled"))
+                        and record["replacementResponseId"] == int(scoped_interrupted.group("next"))
+                    ):
+                        record["orderInvalid"] |= record["phase"] != 1
+                        record["phase"] = 2
+                continue
+            scoped_close = P_EVIDENCE_CONNECTION_CLOSE.search(line)
+            if scoped_close:
+                anchor_scope = start_anchor.get("evidenceScope") if start_anchor else None
+                cleanup_scope_matches = not isinstance(anchor_scope, Mapping) or (
+                    scoped_close.group("journey_id") == anchor_scope.get("journeyId")
+                    and scoped_close.group("connection_id")
+                    == anchor_scope.get("connectionId")
+                    and scoped_close.group("live_connection_id")
+                    == scoped_current_live_connection_id
+                )
+                cleanup_semantics_valid = (
+                    scoped_close.group("close_code") == "1000"
+                    and scoped_close.group("reason") == "evidence_finalize"
+                )
+                if cleanup_scope_matches and cleanup_semantics_valid:
+                    observed_marker_families[scoped_close.group("journey_id")].add(
+                        "cleanup"
+                    )
+                    scoped_cleanup_pending_tasks = int(
+                        scoped_close.group("pending_tasks")
+                    )
+                    active_sessions = scoped_close.group("active_sessions")
+                    scoped_cleanup_active_sessions = (
+                        int(active_sessions)
+                        if active_sessions is not None
+                        else None
+                    )
+                elif (
+                    isinstance(anchor_scope, Mapping)
+                    and scoped_close.group("journey_id")
+                    == anchor_scope.get("journeyId")
+                ):
+                    failures.append(
+                        _failure(
+                            "EVIDENCE_CLEANUP_SCOPE_MISMATCH",
+                            line_number,
+                            "cleanup marker does not match anchored evidence scope",
+                        )
+                    )
+                if (
+                    cleanup_scope_matches
+                    and int(scoped_close.group("pending_tasks")) != 0
+                ):
+                    failures.append(
+                        _failure(
+                            "PENDING_TASK_AT_CLOSE",
+                            line_number,
+                            "scoped connection closed with provider-owned work pending",
+                        )
+                    )
+                if cleanup_scope_matches and not cleanup_semantics_valid:
+                    failures.append(
+                        _failure(
+                            "EVIDENCE_CLEANUP_SEMANTICS_INVALID",
+                            line_number,
+                            "cleanup must be close_code=1000 reason=evidence_finalize",
+                        )
+                    )
+                continue
+            scoped_reconnect_start = P_EVIDENCE_RECONNECT_STARTED.search(line)
+            if scoped_reconnect_start:
+                if not scoped_marker_targets_anchor(scoped_reconnect_start, line_number):
+                    continue
+                journey_id = scoped_reconnect_start.group("journey_id")
+                attempt = parse_scoped_uint(
+                    scoped_reconnect_start.group("attempt"), 1_000_000
+                )
+                if attempt is None or attempt == 0:
+                    failures.append(
+                        _failure(
+                            "MALFORMED_RELIABILITY_LOG_LINE",
+                            line_number,
+                            "scoped reconnect attempt is out of bounds",
+                        )
+                    )
+                    continue
+                if attempt <= scoped_last_started_attempt:
+                    failures.append(
+                        _failure(
+                            "RECONNECT_ATTEMPT_ORDER_INVALID",
+                            line_number,
+                            f"attempt {attempt} is not greater than {scoped_last_started_attempt}",
+                        )
+                    )
+                    continue
+                scoped_last_started_attempt = attempt
+                key = (
+                    journey_id,
+                    scoped_reconnect_start.group("connection_id"),
+                    attempt,
+                )
+                reconnect_journey_key = (journey_id, key[1])
+                if reconnect_journey_key in completed_reconnect_journeys:
+                    failures.append(
+                        _failure(
+                            "RECONNECT_JOURNEY_BOUNDARY_REQUIRED",
+                            line_number,
+                            str(reconnect_journey_key),
+                        )
+                    )
+                reconnect_journey_started_at.setdefault(reconnect_journey_key, ts)
+                if scoped_active_reconnect_key is not None:
+                    failures.append(
+                        _failure(
+                            "RECONNECT_ATTEMPT_OVERLAP",
+                            line_number,
+                            f"active={scoped_active_reconnect_key} new={key}",
+                        )
+                    )
+                    continue
+                if key in scoped_reconnects:
+                    failures.append(
+                        _failure("DUPLICATE_RECONNECT_ATTEMPT", line_number, str(key))
+                    )
+                scoped_reconnects[key] = {
+                    "ready": False,
+                    "replayed": False,
+                    "terminalCount": 0,
+                    "reason": scoped_reconnect_start.group("reason"),
+                    "fromLiveConnectionId": scoped_reconnect_start.group(
+                        "from_live_connection_id"
+                    ),
+                    "startedAt": ts,
+                }
+                scoped_active_reconnect_key = key
+                if scoped_current_live_connection_id is None:
+                    scoped_initial_live_connection_id = (
+                        scoped_reconnect_start.group("from_live_connection_id")
+                    )
+                    scoped_current_live_connection_id = (
+                        scoped_initial_live_connection_id
+                    )
+                if (
+                    scoped_reconnect_start.group("from_live_connection_id")
+                    != scoped_current_live_connection_id
+                ):
+                    failures.append(
+                        _failure("RECONNECT_FROM_ID_MISMATCH", line_number, str(key))
+                    )
+                observed_marker_families[journey_id].add("reconnect_started")
+                continue
+            scoped_reopen_ready = P_EVIDENCE_REOPEN_READY.search(line)
+            if scoped_reopen_ready:
+                if not scoped_marker_targets_anchor(scoped_reopen_ready, line_number):
+                    continue
+                attempt = parse_scoped_uint(
+                    scoped_reopen_ready.group("attempt"), 1_000_000
+                )
+                if attempt is None:
+                    failures.append(
+                        _failure(
+                            "MALFORMED_RELIABILITY_LOG_LINE",
+                            line_number,
+                            "scoped reopen attempt is out of bounds",
+                        )
+                    )
+                    continue
+                journey_id = scoped_reopen_ready.group("journey_id")
+                key = (
+                    journey_id,
+                    scoped_reopen_ready.group("connection_id"),
+                    attempt,
+                )
+                if scoped_active_reconnect_key != key:
+                    failures.append(
+                        _failure(
+                            "REOPEN_READY_WITHOUT_ATTEMPT",
+                            line_number,
+                            str(key),
+                        )
+                    )
+                    continue
+                state = scoped_reconnects.get(key)
+                if state is None:
+                    failures.append(
+                        _failure("REOPEN_READY_WITHOUT_ATTEMPT", line_number, str(key))
+                    )
+                elif state.get("terminalCount"):
+                    failures.append(
+                        _failure("RECONNECT_MARKER_AFTER_TERMINAL", line_number, str(key))
+                    )
+                else:
+                    from_id = scoped_reopen_ready.group("from_live_connection_id")
+                    to_id = scoped_reopen_ready.group("to_live_connection_id")
+                    if (
+                        state.get("ready")
+                        or attempt <= scoped_last_transition_attempt
+                        or from_id != state.get("fromLiveConnectionId")
+                        or from_id != scoped_current_live_connection_id
+                        or to_id == from_id
+                    ):
+                        code = (
+                            "RECONNECT_ATTEMPT_ORDER_INVALID"
+                            if not state.get("ready")
+                            and attempt <= scoped_last_transition_attempt
+                            else "REOPEN_READY_TRANSITION_INVALID"
+                        )
+                        failures.append(_failure(code, line_number, str(key)))
+                    else:
+                        state["ready"] = True
+                        state["toLiveConnectionId"] = to_id
+                        scoped_current_live_connection_id = to_id
+                        scoped_last_transition_attempt = attempt
+                observed_marker_families[journey_id].add("reopen_ready")
+                continue
+            scoped_buffer_replay = P_EVIDENCE_REPLAYED_BUFFERED.search(line)
+            if scoped_buffer_replay:
+                if not exact_scope_active:
+                    continue
+                if not scoped_marker_targets_anchor(scoped_buffer_replay, line_number):
+                    continue
+                journey_id = scoped_buffer_replay.group("journey_id")
+                attempt = parse_scoped_uint(
+                    scoped_buffer_replay.group("attempt"), 1_000_000
+                )
+                if attempt is None:
+                    failures.append(
+                        _failure(
+                            "MALFORMED_RELIABILITY_LOG_LINE",
+                            line_number,
+                            "scoped replay attempt is out of bounds",
+                        )
+                    )
+                    continue
+                key = (
+                    journey_id,
+                    scoped_buffer_replay.group("connection_id"),
+                    attempt,
+                )
+                state = scoped_reconnects.get(key)
+                replay_reason = scoped_buffer_replay.group("reason")
+                replay_frames_text = scoped_buffer_replay.group("frames")
+                replay_bytes_text = scoped_buffer_replay.group("bytes")
+                if (
+                    replay_reason is None
+                    or replay_frames_text is None
+                    or replay_bytes_text is None
+                    or len(replay_frames_text) > 10
+                    or len(replay_bytes_text) > 10
+                ):
+                    failures.append(
+                        _failure(
+                            "MALFORMED_RELIABILITY_LOG_LINE",
+                            line_number,
+                            "scoped replay marker is missing reason, frames, or bytes",
+                        )
+                    )
+                    continue
+                replay_frames = parse_scoped_uint(replay_frames_text, 1_000_000)
+                replay_bytes = parse_scoped_uint(replay_bytes_text, 1_000_000_000)
+                replay_counts_valid = (
+                    replay_frames == 0 and replay_bytes == 0
+                ) or (
+                    replay_frames is not None
+                    and replay_bytes is not None
+                    and replay_frames > 0
+                    and replay_bytes > 0
+                )
+                if not replay_counts_valid:
+                    failures.append(
+                        _failure(
+                            "MALFORMED_RELIABILITY_LOG_LINE",
+                            line_number,
+                            "scoped replay frames/bytes tuple is inconsistent or out of bounds",
+                        )
+                    )
+                    continue
+                if (
+                    state is None
+                    or not state.get("ready")
+                    or state.get("fromLiveConnectionId")
+                    != scoped_buffer_replay.group("from_live_connection_id")
+                    or state.get("toLiveConnectionId")
+                    != scoped_buffer_replay.group("to_live_connection_id")
+                    or state.get("reason") != replay_reason
+                ):
+                    failures.append(
+                        _failure(
+                            "BUFFER_REPLAY_WITHOUT_SUCCESSFUL_REOPEN",
+                            line_number,
+                            str(key),
+                        )
+                    )
+                elif state.get("terminalCount"):
+                    failures.append(
+                        _failure("RECONNECT_MARKER_AFTER_TERMINAL", line_number, str(key))
+                    )
+                elif state.get("replayed"):
+                    failures.append(
+                        _failure(
+                            "DUPLICATE_BUFFER_REPLAY",
+                            line_number,
+                            str(key),
+                        )
+                    )
+                else:
+                    state["replayed"] = True
+                observed_marker_families[journey_id].add("reconnect_replay")
+                continue
+            scoped_reconnect_outcome = P_EVIDENCE_RECONNECT_OUTCOME.search(line)
+            if scoped_reconnect_outcome:
+                outcome = scoped_reconnect_outcome.group("outcome")
+                scope_matches = (
+                    scoped_marker_targets_immutable_anchor(
+                        scoped_reconnect_outcome, line_number
+                    )
+                    if outcome == "failed"
+                    else scoped_marker_targets_anchor(
+                        scoped_reconnect_outcome, line_number
+                    )
+                )
+                if not scope_matches:
+                    continue
+                journey_id = scoped_reconnect_outcome.group("journey_id")
+                attempt = parse_scoped_uint(
+                    scoped_reconnect_outcome.group("attempt"), 1_000_000
+                )
+                if attempt is None:
+                    failures.append(
+                        _failure(
+                            "MALFORMED_RELIABILITY_LOG_LINE",
+                            line_number,
+                            "scoped reconnect outcome attempt is out of bounds",
+                        )
+                    )
+                    continue
+                key = (
+                    journey_id,
+                    scoped_reconnect_outcome.group("connection_id"),
+                    attempt,
+                )
+                if scoped_active_reconnect_key != key:
+                    failures.append(
+                        _failure(
+                            "RECONNECT_OUTCOME_WITHOUT_ACTIVE_ATTEMPT",
+                            line_number,
+                            str(key),
+                        )
+                    )
+                    continue
+                state = scoped_reconnects.get(key)
+                if state is None:
+                    failures.append(
+                        _failure("RECONNECT_OUTCOME_WITHOUT_ATTEMPT", line_number, str(key))
+                    )
+                elif outcome == "succeeded" and (
+                    not state.get("ready")
+                    or state.get("fromLiveConnectionId")
+                    != scoped_reconnect_outcome.group("from_live_connection_id")
+                    or state.get("toLiveConnectionId")
+                    != scoped_reconnect_outcome.group("to_live_connection_id")
+                ):
+                    failures.append(
+                        _failure("RECONNECT_SUCCESS_WITHOUT_READY", line_number, str(key))
+                    )
+                if state is not None:
+                    journey_started_at = reconnect_journey_started_at.get(
+                        (journey_id, key[1])
+                    )
+                    if outcome == "succeeded" and isinstance(
+                        journey_started_at, datetime
+                    ):
+                        reconnect_recovery_ms.append(
+                            round(
+                                (ts - journey_started_at).total_seconds() * 1000,
+                                3,
+                            )
+                        )
+                        reconnect_journey_started_at.pop((journey_id, key[1]), None)
+                        completed_reconnect_journeys.add((journey_id, key[1]))
+                    if (
+                        exact_scope_active
+                        and outcome == "succeeded"
+                        and not state.get("replayed")
+                    ):
+                        failures.append(
+                            _failure(
+                                "COVERAGE_MISSING",
+                                line_number,
+                                "reconnect_replay",
+                            )
+                        )
+                    if (
+                        outcome == "succeeded"
+                        and state.get("terminalCount") == 0
+                        and state.get("ready")
+                        and state.get("fromLiveConnectionId")
+                        == scoped_reconnect_outcome.group("from_live_connection_id")
+                        and state.get("toLiveConnectionId")
+                        == scoped_reconnect_outcome.group("to_live_connection_id")
+                    ):
+                        from_id = state.get("fromLiveConnectionId")
+                        to_id = state.get("toLiveConnectionId")
+                        scoped_live_connection_transitions.append(
+                            {
+                                "attempt": key[2],
+                                "fromLiveConnectionId": from_id,
+                                "toLiveConnectionId": to_id,
+                            }
+                        )
+                        for record in scoped_interrupts:
+                            if (
+                                record["journeyId"] == journey_id
+                                and record["connectionId"] == key[1]
+                                and record["phase"] == 1
+                                and record["replacementLiveConnectionId"] == from_id
+                                and state.get("reason") == "hard_interrupt"
+                            ):
+                                if record["ownerMigrationCount"] != 0:
+                                    failures.append(
+                                        _failure(
+                                            "INTERRUPT_REPLACEMENT_OWNER_INVALID",
+                                            line_number,
+                                            str(key),
+                                        )
+                                    )
+                                else:
+                                    record["ownerMigrationCount"] = 1
+                                    record["replacementLiveConnectionId"] = to_id
+                                    record["liveConnectionId"] = to_id
+                    elif outcome == "failed" and state.get("ready"):
+                        failures.append(
+                            _failure(
+                                "REOPEN_READY_TERMINATED_FAILED",
+                                line_number,
+                                str(key),
+                            )
+                        )
+                    if outcome == "failed":
+                        rollback_owner = state.get("fromLiveConnectionId")
+                        if (
+                            scoped_reconnect_outcome.group("live_connection_id")
+                            != rollback_owner
+                        ):
+                            failures.append(
+                                _failure(
+                                    "RECONNECT_FAILURE_ROLLBACK_OWNER_MISMATCH",
+                                    line_number,
+                                    str(key),
+                                )
+                            )
+                        scoped_current_live_connection_id = rollback_owner
+                    if (
+                        outcome == "failed"
+                        and scoped_reconnect_outcome.group("from_live_connection_id")
+                        != state.get("fromLiveConnectionId")
+                    ):
+                        failures.append(
+                            _failure("RECONNECT_FAILURE_SCOPE_INVALID", line_number, str(key))
+                        )
+                    state["terminalCount"] += 1
+                    if state["terminalCount"] > 1:
+                        failures.append(
+                            _failure(
+                                "DUPLICATE_RECONNECT_OUTCOME",
+                                line_number,
+                                str(key),
+                            )
+                        )
+                    if (
+                        outcome == "failed" and state.get("replayed")
+                    ):
+                        failures.append(
+                            _failure(
+                                "REOPEN_FAILED_AFTER_BUFFER_REPLAY",
+                                line_number,
+                                str(key),
+                            )
+                        )
+                    scoped_active_reconnect_key = None
+                observed_marker_families[journey_id].add("reconnect_outcome")
+                continue
+            scoped_stale = P_EVIDENCE_STALE_DROP.search(line)
+            if scoped_stale:
+                stale_owner_match = any(
+                    record["journeyId"] == scoped_stale.group("journey_id")
+                    and record["connectionId"] == scoped_stale.group("connection_id")
+                    and record["cancelledLiveConnectionId"]
+                    == scoped_stale.group("live_connection_id")
+                    and record["cancelledResponseId"]
+                    == int(scoped_stale.group("response_id"))
+                    for record in scoped_interrupts
+                )
+                if not stale_owner_match and not scoped_marker_targets_anchor(
+                    scoped_stale, line_number
+                ):
+                    continue
+                continue
+            scoped_replay = P_EVIDENCE_INTERRUPT_REPLAYED.search(line)
+            if scoped_replay:
+                if not scoped_marker_targets_anchor(scoped_replay, line_number):
+                    continue
+                cancelled_owner, replacement_owner = interrupt_owner_ids(scoped_replay)
+                for record in scoped_interrupts:
+                    if (
+                        record["journeyId"] == scoped_replay.group("journey_id")
+                        and record["connectionId"] == scoped_replay.group("connection_id")
+                        and record["cancelledLiveConnectionId"] == cancelled_owner
+                        and record["replacementLiveConnectionId"] == replacement_owner
+                        and replacement_owner == scoped_replay.group("live_connection_id")
+                        and record["replacementResponseId"] == int(scoped_replay.group("response_id"))
+                    ):
+                        record["orderInvalid"] |= record["phase"] != 2
+                        record["phase"] = 3
+                continue
+            scoped_finalized = P_EVIDENCE_INTERRUPT_FINALIZED.search(line)
+            if scoped_finalized:
+                if not scoped_marker_targets_anchor(scoped_finalized, line_number):
+                    continue
+                cancelled_owner, replacement_owner = interrupt_owner_ids(
+                    scoped_finalized
+                )
+                for record in scoped_interrupts:
+                    if (
+                        record["journeyId"] == scoped_finalized.group("journey_id")
+                        and record["connectionId"] == scoped_finalized.group("connection_id")
+                        and record["cancelledLiveConnectionId"] == cancelled_owner
+                        and record["replacementLiveConnectionId"] == replacement_owner
+                        and replacement_owner == scoped_finalized.group("live_connection_id")
+                        and record["replacementResponseId"] == int(scoped_finalized.group("response_id"))
+                    ):
+                        record["orderInvalid"] |= record["phase"] != 3
+                        record["phase"] = 4
+                continue
+
+            scoped_receive_loop = P_EVIDENCE_RECV_LOOP.search(line)
+            if scoped_receive_loop:
+                if not scoped_marker_targets_anchor(scoped_receive_loop, line_number):
+                    continue
+                generation = int(scoped_receive_loop.group("generation"))
+                if scoped_receive_loop.group("event") == "started":
+                    scoped_receive_start_count += 1
+                    if scoped_receive_generations:
+                        failures.append(
+                            _failure(
+                                "RECEIVE_LOOP_OVERLAP",
+                                line_number,
+                                "more than one scoped receive loop is active",
+                            )
+                        )
+                    scoped_receive_generations.add(generation)
+                elif generation not in scoped_receive_generations:
+                    scoped_receive_stop_count += 1
+                    failures.append(
+                        _failure(
+                            "RECEIVE_LOOP_STOP_WITHOUT_START",
+                            line_number,
+                            str(generation),
+                        )
+                    )
+                else:
+                    scoped_receive_stop_count += 1
+                    scoped_receive_generations.remove(generation)
+                receive_loops_active = len(scoped_receive_generations)
+                max_receive_loops_active = max(
+                    max_receive_loops_active, receive_loops_active
+                )
+                continue
+            scoped_receive_timeout = P_EVIDENCE_RECV_TIMEOUT.search(line)
+            if scoped_receive_timeout:
+                if not scoped_marker_targets_anchor(
+                    scoped_receive_timeout, line_number
+                ):
+                    continue
+                generation = int(scoped_receive_timeout.group("generation"))
+                scoped_timeout_generations[generation].append(line_number)
+                continue
+            scoped_timeout_outcome = P_EVIDENCE_RECV_TIMEOUT_OUTCOME.search(line)
+            if scoped_timeout_outcome:
+                if not scoped_marker_targets_anchor(
+                    scoped_timeout_outcome, line_number
+                ):
+                    continue
+                generation = int(scoped_timeout_outcome.group("generation"))
+                pending_generation_timeouts = scoped_timeout_generations.get(generation)
+                if not pending_generation_timeouts:
+                    failures.append(
+                        _failure(
+                            "TIMEOUT_OUTCOME_WITHOUT_TIMEOUT",
+                            line_number,
+                            str(generation),
+                        )
+                    )
+                outcome = scoped_timeout_outcome.group("outcome")
+                timeout_line = None
+                if pending_generation_timeouts:
+                    timeout_line = pending_generation_timeouts.pop(0)
+                    if not pending_generation_timeouts:
+                        scoped_timeout_generations.pop(generation, None)
+                if outcome == "unhandled" and timeout_line is not None:
+                    failures.append(
+                        _failure(
+                            "RECEIVE_TIMEOUT_UNHANDLED",
+                            line_number,
+                            f"generation {generation} timeout at line {timeout_line}",
+                        )
+                    )
+                if outcome == "failed":
+                    failures.append(
+                        _failure(
+                            "RECEIVE_TIMEOUT_RECOVERY_FAILED",
+                            line_number,
+                            str(generation),
+                        )
+                    )
+                continue
+            scoped_handoff_acquired = P_EVIDENCE_HANDOFF_ACQUIRED.search(line)
+            if scoped_handoff_acquired:
+                if not scoped_marker_targets_anchor(
+                    scoped_handoff_acquired, line_number
+                ):
+                    continue
+                generation = int(scoped_handoff_acquired.group("generation"))
+                holder = int(scoped_handoff_acquired.group("holder"))
+                handoff_key = (generation, holder)
+                if scoped_handoff_generations[handoff_key]:
+                    failures.append(
+                        _failure(
+                            "DUPLICATE_LESSON_HANDOFF_ACQUIRE",
+                            line_number,
+                            str(handoff_key),
+                        )
+                    )
+                scoped_handoff_generations[handoff_key].append(line_number)
+                continue
+            scoped_handoff_terminal = P_EVIDENCE_HANDOFF_TERMINAL.search(line)
+            if scoped_handoff_terminal:
+                if not scoped_marker_targets_anchor(
+                    scoped_handoff_terminal, line_number
+                ):
+                    continue
+                generation = int(scoped_handoff_terminal.group("generation"))
+                holder = int(scoped_handoff_terminal.group("holder"))
+                handoff_key = (generation, holder)
+                pending_handoffs = scoped_handoff_generations.get(handoff_key)
+                if not pending_handoffs:
+                    failures.append(
+                        _failure(
+                            "HANDOFF_TERMINAL_WITHOUT_ACQUIRE",
+                            line_number,
+                            str(handoff_key),
+                        )
+                    )
+                else:
+                    pending_handoffs.pop(0)
+                    if not pending_handoffs:
+                        scoped_handoff_generations.pop(handoff_key, None)
+                if scoped_handoff_terminal.group("event") == "failed":
+                    failures.append(
+                        _failure(
+                            "LESSON_HANDOFF_FAILED",
+                            line_number,
+                            scoped_handoff_terminal.group("outcome"),
+                        )
+                    )
+                continue
+
+            if exact_scope_active and (
+                P_INTERRUPT.search(line)
+                or P_RESPONSE_AUDIO_START.search(line)
+                or P_RESPONSE_AUDIO_END.search(line)
+                or P_RESPONSE_AUDIO_FORWARDED.search(line)
+                or P_RECONNECT_REASON.search(line)
+                or P_REOPEN_READY.search(line)
+                or P_RECONNECT_SUCCEEDED.search(line)
+                or P_RECONNECT_FAILED.search(line)
+                or P_REPLAYED_BUFFERED_AUDIO.search(line)
+                or P_PENDING_TASK_CLOSE.search(line)
+                or P_CLEAN_CONNECTION_CLOSE.search(line)
+                or P_RECV_START.search(line)
+                or P_RECV_STOP.search(line)
+                or P_WAITING_MODEL_TIMEOUT.search(line)
+                or P_RECV_TIMEOUT.search(line)
+                or P_HANDOFF_ACQUIRED.search(line)
+                or P_HANDOFF_RELEASED.search(line)
+            ):
+                if P_REPLAYED_BUFFERED_AUDIO.search(line):
+                    pass
+                continue
+
+            if P_RECV_START.search(line):
+                receive_loops_active += 1
+                max_receive_loops_active = max(
+                    max_receive_loops_active, receive_loops_active
+                )
+                if receive_loops_active > 1:
+                    failures.append(
+                        _failure(
+                            "RECEIVE_LOOP_OVERLAP",
+                            line_number,
+                            "more than one receive loop is active",
+                        )
+                    )
+                continue
+            if P_RECV_STOP.search(line):
+                receive_loops_active -= 1
+                if receive_loops_active < 0:
+                    failures.append(
+                        _failure(
+                            "RECEIVE_LOOP_STOP_WITHOUT_START",
+                            line_number,
+                            "receive loop stop has no active owner",
+                        )
+                    )
+                continue
+
+            match = P_INTERRUPT.search(line)
+            if match:
+                if any(
+                    record["cancelledResponseId"] == int(match.group("cancelled"))
+                    and record["replacementResponseId"] == int(match.group("next"))
+                    for record in scoped_interrupts
+                ):
+                    continue
+                interrupt_records.append(
+                    {
+                        "line": line_number,
+                        "cancelledResponseId": int(match.group("cancelled")),
+                        "replacementResponseId": int(match.group("next")),
+                        "oldResponseStopped": False,
+                        "staleSuppressed": False,
+                        "interruptAudioReplayed": False,
+                        "interruptInputFinalized": False,
+                        "replacementStarted": False,
+                        "replacementStopped": False,
+                        "phase": 0,
+                        "orderInvalid": False,
+                    }
+                )
+                continue
+
+            start = P_RESPONSE_AUDIO_START.search(line)
+            if start:
+                response_id = int(start.group("response_id"))
+                if not start_anchor.get("journeyId"):
+                    response_starts[response_id] += 1
+                for record in interrupt_records:
+                    if response_id == record["replacementResponseId"]:
+                        if record["phase"] != 4:
+                            record["orderInvalid"] = True
+                        record["replacementStarted"] = True
+                        record["phase"] = max(record["phase"], 5)
+                continue
+            end = P_RESPONSE_AUDIO_END.search(line)
+            if end:
+                response_id = int(end.group("response_id"))
+                for record in interrupt_records:
+                    if response_id == record["replacementResponseId"]:
+                        if record["phase"] != 5:
+                            record["orderInvalid"] = True
+                        record["replacementStopped"] = True
+                        record["phase"] = max(record["phase"], 6)
+                continue
+            forwarded = P_RESPONSE_AUDIO_FORWARDED.search(line)
+            if forwarded:
+                response_id = int(forwarded.group("response_id"))
+                for record in interrupt_records:
+                    if (
+                        record["replacementStarted"]
+                        and response_id == record["cancelledResponseId"]
+                    ):
+                        stale_audio_after_replacement += 1
+                        failures.append(
+                            _failure(
+                                "STALE_AUDIO_AFTER_REPLACEMENT",
+                                line_number,
+                                "cancelled response emitted audio after replacement start",
+                            )
+                        )
+                continue
+
+            if P_TTS_STOP_SENT.search(line) and "reason=interrupt" in line:
+                response_match = re.search(r"response_id=(\d+)", line)
+                for record in interrupt_records:
+                    if response_match is None or int(response_match.group(1)) == record["cancelledResponseId"]:
+                        if record["phase"] != 0:
+                            record["orderInvalid"] = True
+                        record["oldResponseStopped"] = True
+                        record["phase"] = max(record["phase"], 1)
+                        break
+                continue
+            stale = P_STALE_MODEL_DROP_IDS.search(line)
+            if stale:
+                old_id = int(stale.group("response_id"))
+                current_id = int(stale.group("current_response_id"))
+                for record in interrupt_records:
+                    if (
+                        old_id == record["cancelledResponseId"]
+                        and current_id == record["replacementResponseId"]
+                    ):
+                        if record["phase"] != 1:
+                            record["orderInvalid"] = True
+                        record["staleSuppressed"] = True
+                        record["phase"] = max(record["phase"], 2)
+                continue
+            replay = P_REPLAYED_INTERRUPT_AUDIO.search(line)
+            if replay:
+                response_id = int(replay.group("response_id"))
+                for record in interrupt_records:
+                    if response_id == record["replacementResponseId"]:
+                        if record["phase"] != 2:
+                            record["orderInvalid"] = True
+                        record["interruptAudioReplayed"] = True
+                        record["phase"] = max(record["phase"], 3)
+                continue
+            finalized = P_INTERRUPT_INPUT_FINALIZED.search(line)
+            if finalized:
+                response_id = int(finalized.group("response_id"))
+                for record in interrupt_records:
+                    if response_id == record["replacementResponseId"]:
+                        if record["phase"] != 3:
+                            record["orderInvalid"] = True
+                        record["interruptInputFinalized"] = True
+                        record["phase"] = max(record["phase"], 4)
+                continue
+
+            reconnect_owner = P_RECONNECT_REASON.search(line)
+            if start_anchor.get("journeyId") and (
+                reconnect_owner
+                or P_REOPEN_READY.search(line)
+                or P_RECONNECT_SUCCEEDED.search(line)
+                or P_RECONNECT_FAILED.search(line)
+                or P_REPLAYED_BUFFERED_AUDIO.search(line)
+            ):
+                if P_REPLAYED_BUFFERED_AUDIO.search(line):
+                    pass
+                continue
+            if reconnect_owner:
+                current_reopen = f"attempt-{reconnect_owner.group('attempt')}"
+                replay_counts_by_reopen.setdefault(current_reopen, 0)
+                current_reopen_ready = False
+            reopen_ready = P_REOPEN_READY.search(line)
+            if reopen_ready:
+                ready_key = f"attempt-{reopen_ready.group('attempt')}"
+                if current_reopen is None:
+                    current_reopen = ready_key
+                    replay_counts_by_reopen.setdefault(current_reopen, 0)
+                if current_reopen == ready_key:
+                    current_reopen_ready = True
+            reconnect_succeeded = P_RECONNECT_SUCCEEDED.search(line)
+            if reconnect_succeeded:
+                if current_reopen is None:
+                    current_reopen = f"attempt-{reconnect_succeeded.group('attempt')}"
+                    replay_counts_by_reopen.setdefault(current_reopen, 0)
+                current_reopen_ready = True
+                pending_timeouts.clear()
+                continue
+            buffered_replay = P_REPLAYED_BUFFERED_AUDIO.search(line)
+            if buffered_replay:
+                if current_reopen is None or not current_reopen_ready:
+                    failures.append(
+                        _failure(
+                            "BUFFER_REPLAY_WITHOUT_SUCCESSFUL_REOPEN",
+                            line_number,
+                            "buffered audio replay has no successful reopen marker",
+                        )
+                    )
+                else:
+                    replay_counts_by_reopen[current_reopen] += 1
+                    if replay_counts_by_reopen[current_reopen] > 1:
+                        failures.append(
+                            _failure(
+                                "DUPLICATE_BUFFER_REPLAY",
+                                line_number,
+                                "one reopen replayed buffered audio more than once",
+                            )
+                        )
+                continue
+
+            if P_WAITING_MODEL_TIMEOUT.search(line) or P_RECV_TIMEOUT.search(line):
+                pending_timeouts.append({"line": line_number})
+                if P_TIMEOUT_TERMINAL.search(line):
+                    pending_timeouts.clear()
+                continue
+            if P_CLEAN_CONNECTION_CLOSE.search(line):
+                pending_timeouts.clear()
+                non_retriable_error_line = None
+                current_reopen = None
+                continue
+            if (
+                P_RECONNECT_FAILED.search(line)
+                or P_FALLBACK.search(line)
+                or P_FALLBACK_DISABLED.search(line)
+                or P_TIMEOUT_TERMINAL.search(line)
+            ):
+                pending_timeouts.clear()
+                if P_RECONNECT_FAILED.search(line):
+                    if (
+                        current_reopen is not None
+                        and replay_counts_by_reopen.get(current_reopen, 0) > 0
+                    ):
+                        failures.append(
+                            _failure(
+                                "REOPEN_FAILED_AFTER_BUFFER_REPLAY",
+                                line_number,
+                                "reopen failed after buffered audio replay began",
+                            )
+                        )
+                    current_reopen = None
+                    current_reopen_ready = False
+
+            classified = P_NON_RETRIABLE_CLASSIFICATION.search(line)
+            if classified:
+                non_retriable_error_line = line_number
+                continue
+            reconnect = reconnect_owner
+            if reconnect and non_retriable_error_line is not None:
+                failures.append(
+                    _failure(
+                        "NON_RETRIABLE_RECONNECT",
+                        line_number,
+                        "non-retriable error was followed by reconnect",
+                    )
+                )
+                continue
+
+            if P_HANDOFF_ACQUIRED.search(line):
+                handoff_balance += 1
+                handoff_lines.append(line_number)
+                continue
+            if P_HANDOFF_RELEASED.search(line):
+                handoff_balance = 0
+                handoff_lines.clear()
+                continue
+            pending_close = P_PENDING_TASK_CLOSE.search(line)
+            if pending_close:
+                tasks = pending_close.group("tasks").strip().lower()
+                if tasks not in {"none", "[]", "0"}:
+                    failures.append(
+                        _failure(
+                            "PENDING_TASK_AT_CLOSE",
+                            line_number,
+                            "connection closed with provider-owned work pending",
+                        )
+                    )
+                continue
+
+            lesson_start = P_LESSON_STEP_START.search(line)
+            scoped_lesson_ping = P_SCOPED_FIRMWARE_LESSON_PING.search(line)
+            if scoped_lesson_ping:
+                if not scoped_marker_targets_anchor(scoped_lesson_ping, line_number):
+                    continue
+                observed_marker_families[
+                    scoped_lesson_ping.group("journey_id")
+                ].add("lesson_ping")
+                scoped_lesson_pending_pings[
+                    scoped_lesson_ping.group("step_id")
+                ] = line_number
+            scoped_lesson_progress = P_SCOPED_LESSON_STEP_PROGRESS.search(line)
+            if scoped_lesson_progress:
+                if not scoped_marker_targets_anchor(
+                    scoped_lesson_progress, line_number
+                ):
+                    continue
+                step_id = scoped_lesson_progress.group("step_id")
+                if step_id in scoped_lesson_pending_pings:
+                    observed_marker_families[
+                        scoped_lesson_progress.group("journey_id")
+                    ].add("lesson_progress")
+                    scoped_lesson_pending_pings.pop(step_id, None)
+            if exact_scope_active and lesson_start:
+                continue
+            if lesson_start:
+                active_lesson_step = {
+                    "stepId": lesson_start.group("step_id"),
+                    "pingLine": None,
+                    "progressAfterPing": False,
+                }
+                continue
+            lesson_ping = P_FIRMWARE_LESSON_PING.search(line)
+            if lesson_ping and active_lesson_step is not None:
+                if lesson_ping.group("step_id") == active_lesson_step["stepId"]:
+                    active_lesson_step["pingLine"] = line_number
+                    active_lesson_step["progressAfterPing"] = False
+                continue
+            lesson_progress = P_LESSON_STEP_PROGRESS.search(line)
+            if lesson_progress and active_lesson_step is not None:
+                if (
+                    lesson_progress.group("step_id") == active_lesson_step["stepId"]
+                    and active_lesson_step["pingLine"] is not None
+                    and line_number > active_lesson_step["pingLine"]
+                ):
+                    active_lesson_step["progressAfterPing"] = True
+                continue
+            lesson_end = P_LESSON_STEP_END.search(line)
+            if exact_scope_active and lesson_end:
+                continue
+            if lesson_end and active_lesson_step is not None:
+                if (
+                    lesson_end.group("step_id") == active_lesson_step["stepId"]
+                    and active_lesson_step["pingLine"] is not None
+                    and not active_lesson_step["progressAfterPing"]
+                ):
+                    failures.append(
+                        _failure(
+                            "LESSON_PING_WITHOUT_PROGRESS",
+                            active_lesson_step["pingLine"],
+                            "firmware pings continued without lesson-step progress",
+                        )
+                    )
+                active_lesson_step = None
+
+    if start_anchor is None:
+        failures.append(_failure("WINDOW_START_MISSING", 0, "start anchor is required"))
+    if end_anchor is None:
+        failures.append(_failure("WINDOW_END_MISSING", 0, "end anchor is required"))
+    if receive_loops_active != 0:
+        failures.append(
+            _failure(
+                "RECEIVE_LOOP_IMBALANCE",
+                end_anchor["line"] if end_anchor else 0,
+                "receive loop starts and stops are not balanced",
+            )
+        )
+    if pending_timeouts:
+        for timeout in pending_timeouts:
+            failures.append(
+                _failure(
+                    "UNRECOVERED_TIMEOUT",
+                    timeout["line"],
+                    "waiting-model timeout has no bounded terminal outcome",
+                )
+            )
+    for generation, timeout_lines in scoped_timeout_generations.items():
+        for timeout_line in timeout_lines:
+            failures.append(
+                _failure(
+                    "UNRECOVERED_TIMEOUT",
+                    timeout_line,
+                    f"scoped receive timeout generation {generation} has no handled outcome",
+                )
+            )
+    for handoff_key, handoff_lines in scoped_handoff_generations.items():
+        for handoff_line in handoff_lines:
+            failures.append(
+                _failure(
+                    "UNRELEASED_LESSON_HANDOFF",
+                    handoff_line,
+                    f"scoped handoff {handoff_key} has no terminal outcome",
+                )
+            )
+    for response_scope, response_id in scoped_active_responses.items():
+        failures.append(
+            _failure(
+                "RESPONSE_START_WITHOUT_END",
+                end_anchor["line"] if end_anchor else 0,
+                str((*response_scope, response_id)),
+            )
+        )
+    for reconnect_key, state in scoped_reconnects.items():
+        if state.get("terminalCount") != 1:
+            failures.append(
+                _failure(
+                    "RECONNECT_ATTEMPT_UNFINISHED",
+                    end_anchor["line"] if end_anchor else 0,
+                    str(reconnect_key),
+                )
+            )
+    if handoff_balance:
+        for line_number in handoff_lines:
+            failures.append(
+                _failure(
+                    "UNRELEASED_LESSON_HANDOFF",
+                    line_number,
+                    "lesson handoff was not transferred or released",
+                )
+            )
+    if (
+        active_lesson_step is not None
+        and active_lesson_step["pingLine"] is not None
+        and not active_lesson_step["progressAfterPing"]
+    ):
+        failures.append(
+            _failure(
+                "LESSON_PING_WITHOUT_PROGRESS",
+                active_lesson_step["pingLine"],
+                "firmware pings continued without subsequent lesson-step progress",
+            )
+        )
+    for step_id, ping_line in scoped_lesson_pending_pings.items():
+        failures.append(
+            _failure(
+                "LESSON_PING_WITHOUT_PROGRESS",
+                ping_line,
+                f"scoped lesson step {step_id} has no later matching progress",
+            )
+        )
+
+    duplicate_response_ids = [
+        response_id for response_id, count in response_starts.items() if count > 1
+    ]
+    for response_id in duplicate_response_ids:
+        failures.append(
+            _failure(
+                "DUPLICATE_RESPONSE_ID",
+                0,
+                f"response {response_id} started more than once",
+            )
+        )
+
+    required_correlation_fields = (
+        "oldResponseStopped",
+        "staleSuppressed",
+        "interruptAudioReplayed",
+        "interruptInputFinalized",
+        "replacementStarted",
+        "replacementStopped",
+    )
+    correlation_failures = []
+    for record in interrupt_records:
+        if record["orderInvalid"]:
+            failures.append(
+                _failure(
+                    "BARGEIN_CORRELATION_ORDER_INVALID",
+                    record["line"],
+                    "barge-in evidence markers are not in causal order",
+                )
+            )
+        missing = [field for field in required_correlation_fields if not record[field]]
+        if missing:
+            correlation_failures.append(
+                {
+                    "line": record["line"],
+                    "missing": missing,
+                }
+            )
+    if correlation_failures:
+        for item in correlation_failures:
+            failures.append(
+                _failure(
+                    "BARGEIN_CORRELATION_INCOMPLETE",
+                    item["line"],
+                    ",".join(item["missing"]),
+                )
+            )
+    valid_correlations = [
+        {
+            "status": "PASS",
+            "cancelledResponseId": record["cancelledResponseId"],
+            "replacementResponseId": record["replacementResponseId"],
+        }
+        for record in interrupt_records
+        if not record["orderInvalid"]
+        and all(record[field] for field in required_correlation_fields)
+    ]
+    if scoped_interrupts:
+        reported_correlations = [
+            {
+                "status": "PASS" if not item["orderInvalid"] and item["phase"] == 7 else "FAIL",
+                **{
+                    key: value
+                    for key, value in item.items()
+                    if key not in {"phase", "orderInvalid", "ownerMigrationCount"}
+                },
+            }
+            for item in scoped_interrupts
+        ]
+    else:
+        reported_correlations = valid_correlations
+    for item in reported_correlations:
+        if item.get("status") == "FAIL":
+            failures.append(
+                _failure(
+                    "SCOPED_BARGEIN_CORRELATION_INVALID",
+                    0,
+                    str(item.get("journeyId", "unknown")),
+                )
+            )
+    if scoped_interrupts and len(reported_correlations) == 1 and reported_correlations[0]["status"] == "PASS":
+        correlation = {
+            "status": "PASS",
+            "cancelledResponseId": reported_correlations[0]["cancelledResponseId"],
+            "replacementResponseId": reported_correlations[0]["replacementResponseId"],
+        }
+    elif len(valid_correlations) == 1:
+        record = valid_correlations[0]
+        correlation = {
+            "status": "PASS",
+            "cancelledResponseId": record["cancelledResponseId"],
+            "replacementResponseId": record["replacementResponseId"],
+        }
+    elif not interrupt_records and not scoped_interrupts:
+        correlation = {"status": "NOT_OBSERVED"}
+    else:
+        correlation = {
+            "status": "FAIL" if correlation_failures else "MULTIPLE",
+            "observedInterrupts": len(interrupt_records),
+        }
+
+    claimed_journeys = start_anchor.get("claimedJourneys", set()) if start_anchor else set()
+    claimed_journey_list = (
+        start_anchor.get("claimedJourneyList", []) if start_anchor else []
+    )
+    exact_scope_bound = bool(
+        start_anchor and isinstance(start_anchor.get("evidenceScope"), Mapping)
+    )
+    recognized_journeys = {
+        "physical",
+        "bargein",
+        "conversation",
+        "conversation_after_lesson",
+        "lesson",
+        "reconnect",
+        "reopen",
+        "quiet",
+        "quiet_padding",
+        "websocket",
+    }
+    trusted_journey_type = None
+    if exact_scope_bound:
+        server_issued_claim = bool(start_anchor.get("serverIssued"))
+        proof_profile = (
+            (start_anchor.get("evidenceScope") or {}).get("proofProfile")
+        )
+        semantic_proof_kind = (
+            (start_anchor.get("evidenceScope") or {}).get("semanticProofKind")
+        )
+        quiet_mode_claim = (
+            (start_anchor.get("evidenceScope") or {}).get("quietMode")
+        )
+        semantic_claim_valid = (
+            (
+                claimed_journey_list == ["bargein"]
+                and semantic_proof_kind == "bargein-intent"
+                and quiet_mode_claim == "none"
+            )
+            or (
+                claimed_journey_list == ["quiet"]
+                and semantic_proof_kind == "quiet"
+                and quiet_mode_claim in {"silence", "robot_speaking"}
+            )
+            or (
+                claimed_journey_list not in (["bargein"], ["quiet"])
+                and semantic_proof_kind == "none"
+                and quiet_mode_claim == "none"
+            )
+        )
+        claim_invalid = (
+            (
+                len(claimed_journey_list) != 1
+                if server_issued_claim
+                else bool(claimed_journey_list)
+                and len(claimed_journey_list) != 1
+            )
+            or len(claimed_journey_list) != len(set(claimed_journey_list))
+            or not set(claimed_journey_list).issubset(recognized_journeys)
+            or (server_issued_claim and proof_profile is None)
+            or (server_issued_claim and not semantic_claim_valid)
+            or (
+                proof_profile is not None
+                and not (
+                    (
+                        proof_profile == "physical-transcript"
+                        and claimed_journey_list == ["physical"]
+                    )
+                    or (
+                        proof_profile == "candidate-lifecycle"
+                        and len(claimed_journey_list) == 1
+                        and claimed_journey_list[0] != "physical"
+                    )
+                )
+            )
+        )
+        if claim_invalid:
+            failures.append(
+                _failure(
+                    "JOURNEY_CLAIM_INVALID",
+                    start_anchor["line"],
+                    ",".join(claimed_journey_list) or "empty",
+                )
+            )
+        elif claimed_journey_list:
+            trusted_journey_type = claimed_journey_list[0]
+        if scoped_interrupts and "bargein" not in claimed_journeys:
+            failures.append(
+                _failure(
+                    "JOURNEY_CLAIM_MISSING",
+                    start_anchor["line"],
+                    "bargein",
+                )
+            )
+
+    candidate_semantic: dict[str, Any] | None = None
+    semantic_cleanup_valid = (
+        scoped_cleanup_pending_tasks == 0
+        and scoped_cleanup_active_sessions == 0
+        and receive_loops_active == 0
+    )
+    semantic_required = bool(
+        exact_scope_bound
+        and start_anchor
+        and start_anchor.get("serverIssued")
+        and (start_anchor.get("evidenceScope") or {}).get("proofProfile")
+        == "candidate-lifecycle"
+    )
+    if (
+        semantic_required
+        and trusted_journey_type == "bargein"
+    ):
+        exact_matches = (
+            len(candidate_intent_matches) == 2
+            and [(item["slot"], item["role"]) for item in candidate_intent_matches]
+            == [(1, "initial"), (2, "newest")]
+        )
+        initial = candidate_intent_matches[0] if exact_matches else None
+        newest = candidate_intent_matches[1] if exact_matches else None
+        replacement = (
+            candidate_intent_replacements[0]
+            if len(candidate_intent_replacements) == 1
+            else None
+        )
+        correlated = (
+            reported_correlations[0]
+            if len(reported_correlations) == 1
+            and reported_correlations[0].get("status") == "PASS"
+            else None
+        )
+        old_start_line = None
+        replacement_start_line = None
+        replacement_end_line = None
+        interrupt_line = None
+        if correlated is not None:
+            old_key = (
+                correlated["connectionId"],
+                correlated["cancelledLiveConnectionId"],
+                correlated["cancelledResponseId"],
+            )
+            replacement_key = (
+                correlated["connectionId"],
+                correlated["replacementLiveConnectionId"],
+                correlated["replacementResponseId"],
+            )
+            old_start_line = response_start_lines.get(old_key)
+            replacement_start_line = response_start_lines.get(replacement_key)
+            replacement_end_line = response_end_lines.get(replacement_key)
+            interrupt_line = next(
+                (
+                    item["line"]
+                    for item in scoped_interrupts
+                    if item["connectionId"] == correlated["connectionId"]
+                    and item["cancelledLiveConnectionId"]
+                    == correlated["cancelledLiveConnectionId"]
+                    and item["replacementLiveConnectionId"]
+                    == correlated["replacementLiveConnectionId"]
+                    and item["cancelledResponseId"]
+                    == correlated["cancelledResponseId"]
+                    and item["replacementResponseId"]
+                    == correlated["replacementResponseId"]
+                ),
+                None,
+            )
+        ordering_valid = bool(
+            initial
+            and newest
+            and replacement
+            and old_start_line is not None
+            and replacement_start_line is not None
+            and replacement_end_line is not None
+            and interrupt_line is not None
+            and initial["line"] < old_start_line < newest["line"] < interrupt_line
+            and interrupt_line < replacement_start_line
+            and replacement_start_line < replacement_end_line < replacement["line"]
+        )
+        initial_matched = bool(initial and initial["matched"])
+        initial_owned = bool(
+            initial_matched
+            and replacement
+            and correlated
+            and initial["responseGeneration"] == replacement["oldGeneration"]
+            and initial["responseGeneration"] == correlated["cancelledResponseId"]
+            and old_start_line is not None
+        )
+        newest_matched = bool(
+            newest
+            and newest["matched"]
+            and len(newest["activeResponseIds"]) == 1
+            and newest["responseGeneration"] == newest["activeResponseId"]
+        )
+        replacement_owned = bool(
+            newest_matched
+            and replacement
+            and correlation.get("status") == "PASS"
+            and newest["activeResponseId"]
+            == correlation.get("cancelledResponseId")
+            and newest["responseGeneration"]
+            == correlation.get("cancelledResponseId")
+            and replacement["oldGeneration"] == newest["responseGeneration"]
+            and replacement["oldGeneration"]
+            == correlation.get("cancelledResponseId")
+            and replacement["newGeneration"]
+            == correlation.get("replacementResponseId")
+            and replacement["oldStopped"]
+            and replacement["replacementStarted"]
+            and replacement["replacementCompleted"]
+            and replacement["staleOldAudio"] == 0
+            and stale_audio_after_replacement == 0
+        )
+        semantic_pass = bool(
+            ordering_valid
+            and initial_owned
+            and newest_matched
+            and replacement_owned
+            and len(candidate_fallback_observations) == 1
+            and candidate_fallback_observations[0]["fallbacks"] == 0
+            and semantic_cleanup_valid
+            and correlation.get("status") == "PASS"
+            and not candidate_quiet_observations
+        )
+        candidate_semantic = {
+            "status": "PASS" if semantic_pass else "FAIL",
+            "kind": "bargein-intent",
+            "initialSlotMatched": initial_matched,
+            "initialIntentOwnedOldGeneration": initial_owned,
+            "newestSlotMatched": newest_matched,
+            "orderingValid": ordering_valid,
+            "latestIntentMatched": newest_matched and replacement_owned,
+            "replacementOwnedByNewestGeneration": replacement_owned,
+        }
+        if not semantic_pass:
+            failures.append(
+                _failure(
+                    "CANDIDATE_SEMANTIC_EVIDENCE_INVALID",
+                    start_anchor["line"] if start_anchor else 0,
+                    "barge-in semantic evidence is incomplete or not owned",
+                )
+            )
+    elif semantic_required and trusted_journey_type == "quiet":
+        quiet = (
+            candidate_quiet_observations[0]
+            if len(candidate_quiet_observations) == 1
+            else None
+        )
+        mode = quiet["mode"] if quiet else None
+        authenticated_mode = (
+            (start_anchor.get("evidenceScope") or {}).get("quietMode")
+        )
+        expected_response_count = 0 if mode == "silence" else 1
+        response_generation = quiet["response_generation"] if quiet else None
+        exact_response_key = (
+            (start_anchor.get("evidenceScope") or {}).get("connectionId"),
+            scoped_current_live_connection_id,
+            response_generation,
+        ) if quiet and isinstance(response_generation, int) else None
+        output_chunks = (
+            forwarded_counts.get(exact_response_key, 0)
+            if exact_response_key is not None
+            else 0
+        )
+        if mode == "silence" and quiet:
+            response_proof_valid = bool(
+                response_generation is None
+                and quiet["setup_consumed"] is False
+                and quiet["response_duration_ms"] == 0
+                and not forwarded_counts
+            )
+        else:
+            response_proof_valid = bool(
+                quiet
+                and exact_response_key is not None
+                and quiet["setup_consumed"] is True
+                and quiet["response_duration_ms"] > 0
+                and quiet["response_duration_ms"] <= quiet["duration_ms"]
+                and exact_response_key in response_start_lines
+                and exact_response_key in response_end_lines
+                and output_chunks > 0
+                and sum(forwarded_counts.values()) == output_chunks
+            )
+        quiet_pass = bool(
+            quiet
+            and mode == authenticated_mode
+            and quiet["duration_ms"] > 0
+            and quiet["user_turns"] == 0
+            and quiet["response_starts"] == expected_response_count
+            and quiet["response_ends"] == expected_response_count
+            and scoped_response_start_count == expected_response_count
+            and scoped_response_end_count == expected_response_count
+            and response_proof_valid
+            and quiet["interrupts"] == 0
+            and quiet["replacements"] == 0
+            and quiet["reconnects"] == 0
+            and quiet["fallbacks"] == 0
+            and quiet["stale_audio"] == 0
+            and quiet["delivery_failures"] == 0
+            and len(candidate_fallback_observations) == 1
+            and candidate_fallback_observations[0]["fallbacks"] == 0
+            and semantic_cleanup_valid
+            and not scoped_interrupts
+            and not scoped_reconnects
+            and stale_audio_after_replacement == 0
+            and not candidate_intent_matches
+            and not candidate_intent_replacements
+        )
+        candidate_semantic = {
+            "status": "PASS" if quiet_pass else "FAIL",
+            "kind": "quiet",
+            "mode": mode,
+            "durationMs": quiet["duration_ms"] if quiet else 0,
+            "responseGeneration": response_generation,
+            "responseDurationMs": quiet["response_duration_ms"] if quiet else 0,
+            "outputChunks": output_chunks,
+            "setupTurnConsumed": quiet["setup_consumed"] if quiet else False,
+            "falseInterrupts": 0 if quiet_pass else None,
+            "responseStarts": quiet["response_starts"] if quiet else 0,
+            "responseEnds": quiet["response_ends"] if quiet else 0,
+            "replacements": quiet["replacements"] if quiet else 0,
+            "fallbacks": quiet["fallbacks"] if quiet else 0,
+        }
+        if not quiet_pass:
+            failures.append(
+                _failure(
+                    "CANDIDATE_SEMANTIC_EVIDENCE_INVALID",
+                    start_anchor["line"] if start_anchor else 0,
+                    "quiet semantic evidence is incomplete or violates its mode",
+                )
+            )
+    elif candidate_intent_matches or candidate_intent_replacements or candidate_quiet_observations:
+        failures.append(
+            _failure(
+                "CANDIDATE_SEMANTIC_SCOPE_MISMATCH",
+                start_anchor["line"] if start_anchor else 0,
+                "semantic evidence is incompatible with the trusted journey type",
+            )
+        )
+    elif candidate_fallback_observations and (
+        len(candidate_fallback_observations) != 1
+        or candidate_fallback_observations[0]["fallbacks"] != 0
+    ):
+        failures.append(
+            _failure(
+                "CANDIDATE_SEMANTIC_EVIDENCE_INVALID",
+                candidate_fallback_observations[0]["line"],
+                "candidate fallback evidence must be exactly one zero-count marker",
+            )
+        )
+    candidate_journeys = claimed_journeys - {"physical"}
+    if candidate_journeys and exact_scope_bound:
+        if scoped_receive_start_count == 0 or scoped_receive_stop_count == 0:
+            failures.append(
+                _failure(
+                    "COVERAGE_MISSING",
+                    start_anchor["line"] if start_anchor else 0,
+                    "receive_loop_lifecycle",
+                )
+            )
+        if max_receive_loops_active != 1 or receive_loops_active != 0:
+            failures.append(
+                _failure(
+                    "RECEIVE_LOOP_COVERAGE_INVALID",
+                    start_anchor["line"] if start_anchor else 0,
+                    f"max_active={max_receive_loops_active} balance={receive_loops_active}",
+                )
+            )
+    if "bargein" in claimed_journeys:
+        required_families = {
+            "interrupt_started",
+            "interrupt_stopped",
+            "interrupt_finalized",
+            "response_started",
+            "forwarded",
+            "response_ended",
+            "cleanup",
+        }
+        journey_id = start_anchor.get("journeyId") if start_anchor else None
+        missing_families = sorted(
+            required_families - observed_marker_families.get(journey_id, set())
+        )
+        if missing_families:
+            failures.append(
+                _failure(
+                    "COVERAGE_MISSING",
+                    start_anchor["line"] if start_anchor else 0,
+                    ",".join(missing_families),
+                )
+            )
+    if "reconnect" in claimed_journeys:
+        reconnect_families = {
+            "reconnect_started",
+            "reopen_ready",
+            "reconnect_outcome",
+        }
+        journey_id = start_anchor.get("journeyId") if start_anchor else None
+        missing_families = sorted(
+            reconnect_families - observed_marker_families.get(journey_id, set())
+        )
+        if missing_families:
+            failures.append(
+                _failure(
+                    "COVERAGE_MISSING",
+                    start_anchor["line"] if start_anchor else 0,
+                    ",".join(missing_families),
+                )
+            )
+    if "lesson" in claimed_journeys:
+        lesson_families = {"lesson_ping", "lesson_progress"}
+        journey_id = start_anchor.get("journeyId") if start_anchor else None
+        missing_families = sorted(
+            lesson_families - observed_marker_families.get(journey_id, set())
+        )
+        if missing_families:
+            failures.append(
+                _failure(
+                    "COVERAGE_MISSING",
+                    start_anchor["line"] if start_anchor else 0,
+                    ",".join(missing_families),
+                )
+            )
+
+    journey_latency_evidence: dict[str, float] = {}
+    if claimed_journeys & {"conversation", "conversation_after_lesson"}:
+        if first_response_started_ms is None or first_response_started_ms <= 0:
+            failures.append(
+                _failure(
+                    "COVERAGE_MISSING",
+                    start_anchor["line"] if start_anchor else 0,
+                    "first_response_latency",
+                )
+            )
+        else:
+            journey_latency_evidence["firstAudioMs"] = first_response_started_ms
+    if claimed_journeys & {"reopen", "reconnect"}:
+        total_reconnect_recovery_ms = round(sum(reconnect_recovery_ms), 3)
+        if not reconnect_recovery_ms or total_reconnect_recovery_ms <= 0:
+            failures.append(
+                _failure(
+                    "COVERAGE_MISSING",
+                    start_anchor["line"] if start_anchor else 0,
+                    "reconnect_recovery_latency",
+                )
+            )
+        else:
+            journey_latency_evidence["reconnectRecoveryMs"] = (
+                total_reconnect_recovery_ms
+            )
+
+    replayed_ledger_owner = scoped_initial_live_connection_id
+    for transition in scoped_live_connection_transitions:
+        if transition["fromLiveConnectionId"] != replayed_ledger_owner:
+            failures.append(
+                _failure(
+                    "LIVE_CONNECTION_TRANSITION_STATE_MISMATCH",
+                    0,
+                    str(transition),
+                )
+            )
+            break
+        replayed_ledger_owner = transition["toLiveConnectionId"]
+    if replayed_ledger_owner != scoped_current_live_connection_id:
+        failures.append(
+            _failure(
+                "LIVE_CONNECTION_TRANSITION_STATE_MISMATCH",
+                0,
+                "final owner does not equal replayed committed transition ledger",
+            )
+        )
+
+    candidate_identity = (
+        start_anchor.get("candidateIdentity") if start_anchor is not None else None
+    )
+    log_window = None
+    if start_anchor is not None and end_anchor is not None:
+        server_start = (start_anchor.get("evidenceScope") or {}).get("serverStartUtc")
+        server_end = end_anchor.get("serverEndUtc")
+        log_window = {
+            "windowId": start_anchor["windowId"],
+            "start": server_start or start_anchor["timestamp"].isoformat(),
+            "end": server_end or end_anchor["timestamp"].isoformat(),
+        }
+    report = {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": "google_live_log_reliability",
+        "status": "PASS" if not failures else "FAIL",
+        "candidateIdentity": candidate_identity,
+        "evidenceScope": start_anchor.get("evidenceScope") if start_anchor else None,
+        "journeyType": trusted_journey_type,
+        "journeyLatencyEvidence": journey_latency_evidence,
+        **(
+            {"candidateSemanticEvidence": candidate_semantic}
+            if candidate_semantic is not None
+            else {}
+        ),
+        "initialLiveConnectionId": scoped_initial_live_connection_id,
+        "finalLiveConnectionId": scoped_current_live_connection_id,
+        "liveConnectionTransitions": scoped_live_connection_transitions,
+        "serverConnectionTransitions": server_connection_transitions,
+        "serverIssued": bool(
+            isinstance(start_anchor, Mapping)
+            and start_anchor.get("serverIssued") is True
+        ),
+        "cleanupEvidence": {
+            "status": (
+                "PASS"
+                if scoped_cleanup_pending_tasks == 0
+                and scoped_cleanup_active_sessions == 0
+                and receive_loops_active == 0
+                else "FAIL"
+            ),
+            "pendingOwnedTasks": scoped_cleanup_pending_tasks,
+            "activeSessions": scoped_cleanup_active_sessions,
+            "activeReceiveLoops": receive_loops_active,
+        },
+        "logWindow": log_window,
+        "receiveLoopBalance": receive_loops_active,
+        "maxReceiveLoopsActive": max_receive_loops_active,
+        "replayCountsByReopen": replay_counts_by_reopen,
+        "duplicateResponseIds": duplicate_response_ids,
+        "staleAudioAfterReplacement": stale_audio_after_replacement,
+        "unrecoveredTimeouts": [item["line"] for item in pending_timeouts],
+        "unreleasedLessonHandoffs": handoff_lines,
+        "fatalHits": fatal_hits,
+        "correlation": correlation,
+        "correlations": reported_correlations,
+        "failures": failures,
+    }
+    return redact_mapping(report)
+
+
+def correlate_websocket_bargein_evidence(
+    transport_observation: Any,
+    log_verdict: Any,
+    *,
+    expected_candidate_identity: dict[str, Any],
+) -> dict[str, Any]:
+    """Upgrade Task 4's pending transport record only with exact bounded log proof."""
+    failures: list[dict[str, Any]] = []
+    if not isinstance(transport_observation, Mapping):
+        failures.append(
+            {"code": "TRANSPORT_CONTRACT_MISMATCH", "field": "transport"}
+        )
+        transport_observation = {}
+    safe_log_verdict = log_verdict if isinstance(log_verdict, Mapping) else {}
+    log_contract_failures = _validate_log_reliability_contract(
+        safe_log_verdict,
+        expected_candidate_identity=expected_candidate_identity,
+        expected_log_window=transport_observation.get("logWindow"),
+        expected_evidence_scope=transport_observation.get("evidenceScope"),
+    )
+    failures.extend(log_contract_failures)
+    expected_pending = "PENDING_BOUNDED_SERVER_LOG_VERIFICATION"
+    required_transport = {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": "websocket_audio_bargein_transport",
+        "status": "SKIPPED",
+        "pendingCode": expected_pending,
+        "correlationSource": "server_log",
+        "correlationStatus": expected_pending,
+        "aggregateReleaseEligible": False,
+        "interruptStopMarkerObserved": True,
+        "replacementResponseStarted": True,
+        "replacementResponseStopped": True,
+    }
+    for contract_field, expected in required_transport.items():
+        if transport_observation.get(contract_field) != expected:
+            failures.append(
+                {"code": "TRANSPORT_CONTRACT_MISMATCH", "field": contract_field}
+            )
+    replacement_chunks = transport_observation.get("replacementBinaryChunks")
+    if (
+        isinstance(replacement_chunks, bool)
+        or not isinstance(replacement_chunks, int)
+        or replacement_chunks < 1
+    ):
+        failures.append({"code": "TRANSPORT_REPLACEMENT_AUDIO_MISSING"})
+        replacement_chunks = 0
+    bargein_stop_ms = transport_observation.get("bargeinStopMs")
+    if (
+        isinstance(bargein_stop_ms, bool)
+        or not isinstance(bargein_stop_ms, (int, float))
+        or not math.isfinite(bargein_stop_ms)
+        or bargein_stop_ms < 0
+    ):
+        failures.append({"code": "TRANSPORT_LATENCY_INVALID"})
+        bargein_stop_ms = None
+    elif bargein_stop_ms > GOOGLE_LIVE_LIMITS["physicalBargeinP95Ms"]:
+        failures.append({"code": "BARGEIN_STOP_LATENCY_EXCEEDED"})
+    max_output_gap_ms = transport_observation.get("maxServerOutputGapMs")
+    if (
+        isinstance(max_output_gap_ms, bool)
+        or not isinstance(max_output_gap_ms, (int, float))
+        or not math.isfinite(max_output_gap_ms)
+        or max_output_gap_ms < 0
+    ):
+        failures.append({"code": "TRANSPORT_OUTPUT_GAP_INVALID"})
+        max_output_gap_ms = None
+    elif max_output_gap_ms > GOOGLE_LIVE_LIMITS["serverOutputGapMaxMs"]:
+        failures.append({"code": "SERVER_OUTPUT_GAP_EXCEEDED"})
+    if _contains_response_id_key(transport_observation):
+        failures.append({"code": "TRANSPORT_RESPONSE_ID_NOT_ALLOWED"})
+    if transport_observation.get("candidateIdentity") != expected_candidate_identity:
+        failures.append({"code": "CANDIDATE_IDENTITY_MISMATCH", "layer": "transport"})
+    if safe_log_verdict.get("candidateIdentity") != expected_candidate_identity:
+        failures.append({"code": "CANDIDATE_IDENTITY_MISMATCH", "layer": "server_log"})
+    if transport_observation.get("logWindow") != safe_log_verdict.get("logWindow"):
+        failures.append({"code": "LOG_WINDOW_MISMATCH"})
+    journey_id = transport_observation.get("journeyId")
+    evidence_scope = transport_observation.get("evidenceScope")
+    if not isinstance(evidence_scope, Mapping):
+        failures.append({"code": "TRANSPORT_EVIDENCE_SCOPE_INVALID"})
+        evidence_scope = {}
+    expected_scope_fields = {
+        "journeyId": journey_id,
+        "connectionId": transport_observation.get("serverConnectionId"),
+        "liveConnectionId": transport_observation.get("liveConnectionId"),
+        "initialLiveConnectionId": transport_observation.get(
+            "initialLiveConnectionId"
+        ),
+        "peerIdentityHash": transport_observation.get("peerIdentityHash"),
+    }
+    for scope_field, expected in expected_scope_fields.items():
+        if (
+            not isinstance(expected, str)
+            or not expected
+            or evidence_scope.get(scope_field) != expected
+        ):
+            failures.append(
+                {"code": "TRANSPORT_EVIDENCE_SCOPE_MISMATCH", "field": scope_field}
+            )
+    peer_hash = evidence_scope.get("peerIdentityHash")
+    if not isinstance(peer_hash, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", peer_hash) is None:
+        failures.append({"code": "TRANSPORT_PEER_IDENTITY_HASH_INVALID"})
+    server_start = evidence_scope.get("serverStartUtc")
+    log_window = transport_observation.get("logWindow")
+    server_start_dt = _parse_utc_iso(server_start)
+    server_end_dt = (
+        _parse_utc_iso(log_window.get("end")) if isinstance(log_window, Mapping) else None
+    )
+    if server_start_dt is None or server_end_dt is None or server_end_dt < server_start_dt:
+        failures.append({"code": "TRANSPORT_EVIDENCE_WINDOW_INVALID"})
+    if not isinstance(log_window, Mapping) or log_window.get("start") != server_start:
+        failures.append({"code": "TRANSPORT_EVIDENCE_WINDOW_MISMATCH"})
+    if safe_log_verdict.get("evidenceScope") != dict(evidence_scope):
+        failures.append({"code": "SERVER_LOG_EVIDENCE_SCOPE_MISMATCH"})
+    for transition_field in (
+        "initialLiveConnectionId",
+        "finalLiveConnectionId",
+        "liveConnectionTransitions",
+    ):
+        if transport_observation.get(transition_field) != safe_log_verdict.get(
+            transition_field
+        ):
+            failures.append(
+                {"code": "LIVE_CONNECTION_TRANSITION_MISMATCH", "field": transition_field}
+            )
+    final_live_connection_id = _validated_live_connection_transition_chain(
+        transport_observation.get("initialLiveConnectionId"),
+        transport_observation.get("finalLiveConnectionId"),
+        transport_observation.get("liveConnectionTransitions"),
+    )
+    if final_live_connection_id is None:
+        failures.append({"code": "LIVE_CONNECTION_TRANSITION_INVALID"})
+    if not isinstance(journey_id, str) or not journey_id:
+        failures.append({"code": "TRANSPORT_JOURNEY_ID_INVALID"})
+        matching_correlations = []
+    else:
+        correlations = safe_log_verdict.get("correlations", [])
+        matching_correlations = (
+            [
+                item
+                for item in correlations
+                if isinstance(item, Mapping)
+                and item.get("journeyId") == journey_id
+                and item.get("connectionId") == evidence_scope.get("connectionId")
+                and item.get("liveConnectionId") == final_live_connection_id
+            ]
+            if isinstance(correlations, list)
+            else []
+        )
+    if len(matching_correlations) != 1:
+        failures.append(
+            {
+                "code": "SERVER_LOG_SCOPE_CORRELATION_COUNT",
+                "observed": len(matching_correlations),
+            }
+        )
+    elif matching_correlations[0].get("status") != "PASS":
+        failures.append({"code": "SERVER_LOG_JOURNEY_CORRELATION_NOT_PASS"})
+
+    transport_layer = {
+        "name": "websocket_audio_bargein_transport",
+        "status": "PASS" if not failures else "FAIL",
+        "candidateIdentity": transport_observation.get("candidateIdentity"),
+    }
+    log_layer = {
+        "name": "google_live_log_reliability",
+        "status": "FAIL" if log_contract_failures else safe_log_verdict.get("status"),
+        "candidateIdentity": safe_log_verdict.get("candidateIdentity"),
+    }
+    verdict = reliability_verdict(
+        expected_candidate_identity,
+        [transport_layer, log_layer],
+    )
+    failures.extend(verdict["failures"])
+    status = "PASS" if not failures else "FAIL"
+    correlation = (
+        matching_correlations[0]
+        if len(matching_correlations) == 1
+        and matching_correlations[0].get("status") == "PASS"
+        else {}
+    )
+    report = {
+        "schemaVersion": SCHEMA_VERSION,
+        "name": "websocket_audio_bargein_correlated",
+        "status": status,
+        "candidateIdentity": expected_candidate_identity,
+        "journeyId": journey_id,
+        "evidenceScope": dict(evidence_scope),
+        "initialLiveConnectionId": transport_observation.get(
+            "initialLiveConnectionId"
+        ),
+        "finalLiveConnectionId": transport_observation.get("finalLiveConnectionId"),
+        "liveConnectionTransitions": transport_observation.get(
+            "liveConnectionTransitions"
+        ),
+        "logWindow": safe_log_verdict.get("logWindow"),
+        "correlationSource": "server_log",
+        "correlationStatus": "PASS" if status == "PASS" else "FAIL",
+        "aggregateReleaseEligible": status == "PASS",
+        "oldResponseStopped": status == "PASS",
+        "replacementResponseStarted": bool(
+            transport_observation.get("replacementResponseStarted")
+        ),
+        "replacementResponseStopped": bool(
+            transport_observation.get("replacementResponseStopped")
+        ),
+        "replacementBinaryChunks": replacement_chunks,
+        "bargeinStopMs": bargein_stop_ms,
+        "maxServerOutputGapMs": max_output_gap_ms,
+        "cancelledResponseId": correlation.get("cancelledResponseId"),
+        "replacementResponseId": correlation.get("replacementResponseId"),
+        "layers": verdict["layers"],
+        "failures": failures,
+    }
+    return redact_mapping(report)
+
+
+def _validated_live_connection_transition_chain(initial_id, final_id, transitions):
+    if not isinstance(initial_id, str) or not initial_id or not isinstance(transitions, list):
+        return None
+    current_id = initial_id
+    previous_attempt = 0
+    for transition in transitions:
+        if not isinstance(transition, Mapping):
+            return None
+        attempt = transition.get("attempt")
+        from_id = transition.get("fromLiveConnectionId")
+        to_id = transition.get("toLiveConnectionId")
+        if (
+            type(attempt) is not int
+            or attempt <= previous_attempt
+            or from_id != current_id
+            or not isinstance(to_id, str)
+            or not to_id
+            or to_id == from_id
+        ):
+            return None
+        previous_attempt = attempt
+        current_id = to_id
+    return current_id if final_id == current_id else None
+
+
+def _validate_log_reliability_contract(
+    report: Any,
+    *,
+    expected_candidate_identity: dict[str, Any],
+    expected_log_window: Any,
+    expected_evidence_scope: Any,
+) -> list[dict[str, Any]]:
+    return _shared_validate_log_reliability_contract(
+        report,
+        expected_candidate_identity=expected_candidate_identity,
+        expected_log_window=expected_log_window,
+        expected_evidence_scope=expected_evidence_scope,
+    )
+
+
+def _contains_response_id_key(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized = re.sub(r"[^a-zA-Z0-9]", "", str(key)).lower()
+            if "responseid" in normalized or _contains_response_id_key(item):
+                return True
+    elif isinstance(value, list):
+        return any(_contains_response_id_key(item) for item in value)
+    return False
+
+
+def _sanitize_reliability_cli_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Remove legacy analyzer fields that can contain raw exception text."""
+    safe = dict(report)
+    safe_sessions = []
+    for session in report.get("per_session", []):
+        safe_session = dict(session)
+        safe_session.pop("drop_event", None)
+        safe_session.pop("fallback_reason", None)
+        safe_session.pop("fallback_disabled_reason", None)
+        safe_sessions.append(safe_session)
+    safe["per_session"] = safe_sessions
+    return redact_mapping(safe)
+
+
+def _scoped_marker_validation(line: str) -> tuple[bool, bool]:
+    for hint, patterns in _SCOPED_MARKER_FAMILIES:
+        if hint.search(line) is None:
+            continue
+        valid = any(
+            (match := pattern.search(line)) is not None and match.end() == len(line)
+            for pattern in patterns
+        )
+        return True, valid
+    return False, False
+
+
+def _correlate_transport_cli(
+    *,
+    log_path: Path,
+    transport_path: Path,
+    expected_candidate_path: Path,
+    log_timezone_name: str = "UTC",
+) -> dict[str, Any]:
+    try:
+        transport = json.loads(transport_path.read_text(encoding="utf-8"))
+        expected_candidate = json.loads(
+            expected_candidate_path.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        return redact_mapping(
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "name": "websocket_audio_bargein_correlated",
+                "status": "FAIL",
+                "failures": [{"code": "EVIDENCE_JSON_INVALID", "detail": type(exc).__name__}],
+            }
+        )
+    if not isinstance(transport, Mapping):
+        return {
+            "schemaVersion": SCHEMA_VERSION,
+            "name": "websocket_audio_bargein_correlated",
+            "status": "FAIL",
+            "failures": [
+                {"code": "EVIDENCE_JSON_INVALID", "field": "transport"}
+            ],
+        }
+    if not isinstance(expected_candidate, Mapping):
+        return {
+            "schemaVersion": SCHEMA_VERSION,
+            "name": "websocket_audio_bargein_correlated",
+            "status": "FAIL",
+            "failures": [
+                {"code": "EVIDENCE_JSON_INVALID", "field": "expectedCandidate"}
+            ],
+        }
+    failures = []
+    journey_id = transport.get("journeyId")
+    evidence_scope = transport.get("evidenceScope")
+    log_window = transport.get("logWindow")
+    if transport.get("schemaVersion") != SCHEMA_VERSION:
+        failures.append({"code": "TRANSPORT_SCHEMA_INVALID"})
+    if transport.get("candidateIdentity") != expected_candidate:
+        failures.append({"code": "CANDIDATE_IDENTITY_MISMATCH"})
+    if not isinstance(journey_id, str) or re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", journey_id) is None:
+        failures.append({"code": "TRANSPORT_JOURNEY_ID_INVALID"})
+    if not isinstance(evidence_scope, Mapping):
+        failures.append({"code": "TRANSPORT_EVIDENCE_SCOPE_INVALID"})
+        evidence_scope = {}
+    expected_scope = {
+        "journeyId": journey_id,
+        "connectionId": transport.get("serverConnectionId"),
+        "liveConnectionId": transport.get("liveConnectionId"),
+        "initialLiveConnectionId": transport.get("initialLiveConnectionId"),
+        "peerIdentityHash": transport.get("peerIdentityHash"),
+        "serverStartUtc": (log_window or {}).get("start") if isinstance(log_window, Mapping) else None,
+    }
+    if dict(evidence_scope) != expected_scope:
+        failures.append({"code": "TRANSPORT_EVIDENCE_SCOPE_MISMATCH"})
+    if (
+        not isinstance(expected_scope["connectionId"], str)
+        or re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", expected_scope["connectionId"] or "") is None
+        or not isinstance(expected_scope["liveConnectionId"], str)
+        or re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", expected_scope["liveConnectionId"] or "") is None
+        or not isinstance(expected_scope["peerIdentityHash"], str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", expected_scope["peerIdentityHash"] or "") is None
+    ):
+        failures.append({"code": "TRANSPORT_EVIDENCE_SCOPE_INVALID"})
+    if not isinstance(log_window, dict):
+        failures.append({"code": "TRANSPORT_LOG_WINDOW_INVALID"})
+        start = end = None
+    else:
+        try:
+            start = datetime.fromisoformat(log_window["start"])
+            end = datetime.fromisoformat(log_window["end"])
+            if (
+                start.tzinfo is None
+                or end.tzinfo is None
+                or start.utcoffset() != timedelta(0)
+                or end.utcoffset() != timedelta(0)
+                or start > end
+                or log_window.get("windowId") != journey_id
+            ):
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            failures.append({"code": "TRANSPORT_LOG_WINDOW_INVALID"})
+            start = end = None
+    if failures:
+        return redact_mapping(
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "name": "websocket_audio_bargein_correlated",
+                "status": "FAIL",
+                "journeyId": journey_id,
+                "candidateIdentity": expected_candidate,
+                "failures": failures,
+            }
+        )
+    if not _candidate_identity_valid(expected_candidate):
+        return redact_mapping(
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "name": "websocket_audio_bargein_correlated",
+                "status": "FAIL",
+                "journeyId": journey_id,
+                "candidateIdentity": expected_candidate,
+                "failures": [{"code": "EXPECTED_CANDIDATE_IDENTITY_INVALID"}],
+            }
+        )
+
+    try:
+        log_timezone = ZoneInfo(log_timezone_name)
+    except (TypeError, ZoneInfoNotFoundError):
+        return redact_mapping(
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "name": "websocket_audio_bargein_correlated",
+                "status": "FAIL",
+                "journeyId": journey_id,
+                "candidateIdentity": expected_candidate,
+                "failures": [{"code": "LOG_TIMEZONE_INVALID"}],
+            }
+        )
+
+    selected_lines = []
+    with log_path.open("r", encoding="utf-8", errors="replace") as fh:
+        for raw_line in fh:
+            timestamp = parse_timestamp(raw_line)
+            window_marker_line = "Google Live reliability_window_" in raw_line
+            stripped_line = raw_line.rstrip("\r\n")
+            scoped_marker_line, scoped_marker_valid = _scoped_marker_validation(
+                stripped_line
+            )
+            timestamp_utc = (
+                timestamp.replace(tzinfo=log_timezone).astimezone(timezone.utc)
+                if timestamp is not None
+                else None
+            )
+            in_window = timestamp_utc is not None and start <= timestamp_utc <= end
+            malformed_scoped = (
+                in_window and scoped_marker_line and not scoped_marker_valid
+            )
+            malformed_window = in_window and window_marker_line and not (
+                P_RELIABILITY_WINDOW_START.search(stripped_line)
+                or P_RELIABILITY_WINDOW_END.search(stripped_line)
+            )
+            if (
+                malformed_scoped
+                or malformed_window
+                or (
+                    timestamp is None
+                    and (
+                        scoped_marker_line
+                        or window_marker_line
+                        or _is_reliability_line(raw_line)
+                    )
+                )
+            ):
+                return redact_mapping(
+                    {
+                        "schemaVersion": SCHEMA_VERSION,
+                        "name": "websocket_audio_bargein_correlated",
+                        "status": "FAIL",
+                        "journeyId": journey_id,
+                        "candidateIdentity": expected_candidate,
+                        "failures": [{"code": "MALFORMED_BOUNDED_LOG_MARKER"}],
+                    }
+                )
+            if timestamp_utc is not None and start <= timestamp_utc <= end:
+                selected_lines.append(raw_line.rstrip("\n"))
+    identity = json.dumps(expected_candidate, sort_keys=True, separators=(",", ":"))
+    local_start = start.astimezone(log_timezone)
+    local_end = end.astimezone(log_timezone)
+    bounded_lines = [
+        f"{local_start:%Y-%m-%d %H:%M:%S} Google Live reliability_window_start "
+        f"window_id={journey_id} journey_id={journey_id} journeys=bargein "
+        f"connection_id={evidence_scope['connectionId']} "
+        f"live_connection_id={evidence_scope['liveConnectionId']} "
+        f"initial_live_connection_id={evidence_scope['initialLiveConnectionId']} "
+        f"peer_identity_hash={evidence_scope['peerIdentityHash']} "
+        f"server_start_utc={log_window['start']} "
+        f"candidate_identity={identity}",
+        *selected_lines,
+        f"{local_end:%Y-%m-%d %H:%M:%S} Google Live reliability_window_end "
+        f"window_id={journey_id} server_end_utc={log_window['end']}",
+    ]
+    with tempfile.TemporaryDirectory() as temp_dir:
+        bounded_path = Path(temp_dir) / "bounded.log"
+        bounded_path.write_text("\n".join(bounded_lines), encoding="utf-8")
+        log_verdict = analyze_reliability_window(bounded_path)
+    return correlate_websocket_bargein_evidence(
+        transport,
+        log_verdict,
+        expected_candidate_identity=expected_candidate,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--log", required=True, type=Path, help="Path to server.log")
+    parser.add_argument(
+        "--log-timezone",
+        default=os.environ.get("TBOT_LOG_TIMEZONE", os.environ.get("TZ", "UTC")),
+        help="IANA timezone used by naive server.log timestamps",
+    )
     parser.add_argument("--out-json", type=Path, help="Optional JSON output path")
     parser.add_argument(
         "--out-md", type=Path, help="Optional markdown evidence file path"
@@ -1042,10 +4937,47 @@ def main():
             "P3 response-overlap, P4 function-calls, P5 music-ducking."
         ),
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--check-reliability",
+        action="store_true",
+        help=(
+            "Verify the explicitly anchored Google Live reliability window, "
+            "embed the result in JSON output, and exit non-zero on failure."
+        ),
+    )
+    parser.add_argument("--correlate-transport", type=Path)
+    parser.add_argument("--expected-candidate-json", type=Path)
+    parser.add_argument("--reliability-window", action="store_true")
+    parser.add_argument("--journey-id")
+    args = parser.parse_args(argv)
+
+    if args.reliability_window:
+        if not args.journey_id or args.out_json is None:
+            return 1
+        return _persist_reliability_window(args.log, args.journey_id, args.out_json)
 
     if not args.log.exists():
         raise SystemExit(f"Log file not found: {args.log}")
+
+    if args.correlate_transport is not None:
+        if args.expected_candidate_json is None or args.out_json is None:
+            raise SystemExit(
+                "--correlate-transport requires --expected-candidate-json and --out-json"
+            )
+        correlated = _correlate_transport_cli(
+            log_path=args.log,
+            transport_path=args.correlate_transport,
+            expected_candidate_path=args.expected_candidate_json,
+            log_timezone_name=args.log_timezone,
+        )
+        args.out_json.parent.mkdir(parents=True, exist_ok=True)
+        args.out_json.write_text(
+            json.dumps(redact_mapping(correlated), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        if correlated.get("status") != "PASS":
+            raise SystemExit(1)
+        return 0
 
     if getattr(args, "check_chain", False):
         chain_report = check_chain(args.log)
@@ -1057,14 +4989,19 @@ def main():
                 file=sys.stderr,
             )
             raise SystemExit(1)
-        return
+        return 0
 
     if getattr(args, "pain_summary", False):
         pain_report = summarize_pains(args.log)
         print(json.dumps(pain_report, indent=2, default=str))
-        return
+        return 0
 
     report = analyze(args.log)
+    reliability = None
+    if getattr(args, "check_reliability", False):
+        report = _sanitize_reliability_cli_report(report)
+        reliability = analyze_reliability_window(args.log)
+        report["reliability"] = reliability
     if args.out_json:
         args.out_json.parent.mkdir(parents=True, exist_ok=True)
         args.out_json.write_text(json.dumps(report, indent=2, default=str))
@@ -1075,7 +5012,10 @@ def main():
         print(f"Wrote markdown report: {args.out_md}")
     if not args.out_json and not args.out_md:
         print(json.dumps(report, indent=2, default=str))
+    if reliability is not None and reliability["status"] != "PASS":
+        raise SystemExit(1)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

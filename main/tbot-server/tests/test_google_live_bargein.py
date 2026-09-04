@@ -128,6 +128,54 @@ class _Controller:
 
 
 class InterruptDebounceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_evidence_interrupt_markers_preserve_stop_before_final_order(self):
+        conn = _Conn()
+        conn.google_live_evidence_journey_id = "bargein-journey-1"
+        client = _Client()
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        await provider.start_session()
+
+        await provider._begin_user_interrupt("audio_input")
+        await provider.close()
+
+        records = [args for _level, args, _kwargs in conn.logger.messages if args]
+        messages = [str(args[0]) for args in records]
+        started = next(
+            index for index, message in enumerate(messages)
+            if "Google Live user_interrupt_started journey_id=" in message
+        )
+        stopped = next(
+            index for index, message in enumerate(messages)
+            if "Google Live interrupt_output_stopped journey_id=" in message
+        )
+        finalized = next(
+            index for index, message in enumerate(messages)
+            if "Google Live user_interrupted reason=" in message
+        )
+
+        self.assertLess(started, stopped)
+        self.assertLess(stopped, finalized)
+        self.assertEqual(records[started][1:4], ("bargein-journey-1", "s-1", "1"))
+        self.assertEqual(records[started][-2:], (0, 1))
+        self.assertEqual(records[stopped][1:4], ("bargein-journey-1", "s-1", "1"))
+        self.assertEqual(records[stopped][-2:], (0, 1))
+
+    async def test_evidence_markers_are_absent_without_active_journey(self):
+        conn = _Conn()
+        client = _Client()
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        await provider.start_session()
+
+        await provider._begin_user_interrupt("audio_input")
+        await provider.close()
+
+        messages = " ".join(
+            str(args[0]) for _level, args, _kwargs in conn.logger.messages if args
+        )
+        self.assertNotIn("Google Live user_interrupt_started journey_id=", messages)
+        self.assertNotIn("Google Live interrupt_output_stopped journey_id=", messages)
+        self.assertNotIn("Google Live evidence_connection_close journey_id=", messages)
+
     async def test_clean_user_turn_records_latency_start_timestamp(self):
         conn = _Conn()
         provider = GoogleLiveProvider(conn, client_factory=lambda *_: _Client())
@@ -568,8 +616,11 @@ class TurnIsolationBarrierTest(unittest.IsolatedAsyncioTestCase):
         bridge = _PrerollCapturingBridge(conn, _Client(), _Logger())
         sent_packets = []
 
-        async def fake_send_audio(_conn, packets):
+        async def fake_send_audio(_conn, packets, **kwargs):
             sent_packets.extend(packets if not isinstance(packets, bytes) else [packets])
+            kwargs["on_delivery_complete"](
+                len(packets) if not isinstance(packets, bytes) else 1
+            )
 
         with patch("core.handle.sendAudioHandle.sendAudio", fake_send_audio):
             await bridge.handle_event({"type": "audio_start"})
@@ -715,6 +766,35 @@ class TranscriptBargeInTest(unittest.IsolatedAsyncioTestCase):
         await bridge.handle_event({"type": "transcript", "source": "user", "text": "stop"})
         await bridge.close()
         self.assertEqual(captured, ["stop"])
+
+    async def test_normal_and_barge_callbacks_share_one_physical_event_token(self):
+        conn = _Conn()
+        conn.config["google_live"]["barge_in_via_transcript"] = True
+        conn.google_live_audio_out_started_at = time.monotonic() - 5
+        observed_tokens = []
+
+        async def normal(_text):
+            observed_tokens.append(conn.google_live_transcript_event_token)
+            return False
+
+        async def barge(_text):
+            observed_tokens.append(conn.google_live_transcript_event_token)
+
+        bridge = GoogleLiveAudioBridge(
+            conn,
+            _Client(),
+            _Logger(),
+            user_transcript_handler=normal,
+            user_transcript_barge_in_handler=barge,
+        )
+        await bridge.handle_event(
+            {"type": "transcript", "source": "user", "text": "stop"}
+        )
+        await bridge.close()
+
+        self.assertEqual(len(observed_tokens), 2)
+        self.assertIs(observed_tokens[0], observed_tokens[1])
+        self.assertIsNone(conn.google_live_transcript_event_token)
 
     async def test_no_fire_when_feature_flag_off(self):
         conn = _Conn()
@@ -1106,6 +1186,52 @@ class RobotOutputEchoGateTest(unittest.IsolatedAsyncioTestCase):
                 for _, args, _ in conn.logger.messages
             )
         )
+
+    async def test_aec_live_vad_forward_does_not_admit_clean_user_turn(self):
+        conn = _Conn()
+        conn.client_is_speaking = True
+        conn.google_live_audio_out_started_at = time.monotonic() - 1.0
+        conn.config["google_live"].update(
+            {
+                "interrupt_on_input_while_speaking": True,
+                "disable_server_side_interruptions": False,
+                "server_side_vad_enabled": True,
+                "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
+            }
+        )
+
+        class BoundClient(_Client):
+            def __init__(self):
+                super().__init__()
+                self.bound_generations = []
+
+            def bind_response_generation(self, generation):
+                self.bound_generations.append(generation)
+                return True
+
+        client = BoundClient()
+        provider = GoogleLiveProvider(conn, client_factory=lambda *_: client)
+        provider._client = client
+        provider._bridge = _AecPassthroughBridge(rms=300)
+        provider._response_generation = 7
+        provider._interaction.response_id = 7
+        provider._should_suppress_robot_output_echo = lambda _audio: False
+        provider._should_hold_interrupt_audio = lambda _audio: False
+        provider._can_forward_aec_audio_for_live_vad = lambda _config: True
+        provider._should_interrupt_for_input = lambda _audio: False
+        provider._should_drop_input_during_output = lambda: False
+        provider._should_drop_conversation_start_noise = lambda _audio: False
+
+        handled = await provider.handle_audio_bytes(b"\x01\x02" * 320)
+
+        self.assertTrue(handled)
+        self.assertEqual(provider._bridge.forwarded, [b"\x01\x02" * 320])
+        self.assertEqual(provider.current_response_id(), 7)
+        self.assertEqual(provider._cancelled_response_ids, set())
+        self.assertEqual(client.bound_generations, [])
+        self.assertIsNone(provider._user_stream_started_at)
+        self.assertIsNone(provider._input_flush_task)
+        self.assertIsNone(conn.google_live_turn_started_at)
 
     async def test_moderate_user_audio_interrupts_immediately_while_robot_speaks(self):
         conn = _Conn()

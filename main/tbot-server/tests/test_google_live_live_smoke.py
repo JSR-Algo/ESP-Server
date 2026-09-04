@@ -2,6 +2,7 @@ import os
 import unittest
 
 from core.voice.google_live.client import GoogleLiveClient
+from scripts import google_live_smoke as smoke
 
 
 class _DummyLogger:
@@ -45,3 +46,26 @@ class GoogleLiveSmokeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(client.connected)
         await client.close()
         self.assertFalse(client.connected)
+
+    async def test_real_audio_round_trip(self):
+        fixture = smoke.DEFAULT_AUDIO_FIXTURE
+        config = smoke._build_env_config(
+            os.environ.get("GOOGLE_LIVE_MODEL", smoke.GOOGLE_LIVE_DEFAULTS["model"]),
+            os.environ.get(
+                "GOOGLE_LIVE_VOICE_NAME",
+                smoke.DEFAULT_GOOGLE_LIVE_VOICE_NAME,
+            ),
+        )
+        client = GoogleLiveClient(
+            smoke._build_round_trip_config(config, fixture), _DummyLogger()
+        )
+
+        report = await smoke._run_audio_round_trip(
+            client,
+            pcm_chunks=smoke._read_pcm_chunks(fixture, chunk_ms=20),
+            event_timeout_sec=20,
+        )
+
+        self.assertEqual(report["status"], "PASS")
+        self.assertGreater(report["audioChunks"], 0)
+        self.assertLessEqual(report["firstAudioMs"], 1800.0)

@@ -252,6 +252,8 @@ def _action_response(action, *, result=None, response=None):
 class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
     async def test_lesson_start_handoff_uses_generation_token_and_rejects_stale_release(self):
         handler = _build_handler()
+        handler.google_live_evidence_journey_id = "journey-1"
+        handler.google_live_live_connection_id = "live-1"
         handler.voice_provider = types.SimpleNamespace(
             restore_after_lesson_start_handoff=AsyncMock()
         )
@@ -279,6 +281,51 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         handler.voice_provider.restore_after_lesson_start_handoff.assert_awaited_once_with(
             outcome="failed"
         )
+        scoped = [
+            args
+            for level, args, _kwargs in handler.logger.messages
+            if level == "info"
+            and args
+            and "Google Live evidence_lesson_handoff_" in str(args[0])
+        ]
+        self.assertEqual(
+            scoped,
+            [
+                (
+                    "Google Live evidence_lesson_handoff_acquired journey_id={} "
+                    "connection_id={} live_connection_id={} generation={} holder={} "
+                    "reason={}",
+                    "journey-1",
+                    str(handler.session_id),
+                    "live-1",
+                    lease[0],
+                    lease[1],
+                    "spoken_start",
+                ),
+                (
+                    "Google Live evidence_lesson_handoff_failed journey_id={} "
+                    "connection_id={} live_connection_id={} generation={} holder={} "
+                    "outcome={}",
+                    "journey-1",
+                    str(handler.session_id),
+                    "live-1",
+                    lease[0] + 1,
+                    lease[1],
+                    "stale",
+                ),
+                (
+                    "Google Live evidence_lesson_handoff_released journey_id={} "
+                    "connection_id={} live_connection_id={} generation={} holder={} "
+                    "outcome={}",
+                    "journey-1",
+                    str(handler.session_id),
+                    "live-1",
+                    lease[0],
+                    lease[1],
+                    "failed",
+                ),
+            ],
+        )
 
     async def test_lesson_start_handoff_consumes_late_microphone_audio(self):
         handler = _build_handler()
@@ -291,6 +338,8 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_coalesced_lesson_start_handoff_stays_active_until_all_holders_release(self):
         handler = _build_handler()
+        handler.google_live_evidence_journey_id = "journey-1"
+        handler.google_live_live_connection_id = "live-1"
         handler.voice_provider = types.SimpleNamespace(
             restore_after_lesson_start_handoff=AsyncMock()
         )
@@ -319,6 +368,14 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(handler.lesson_start_handoff_active())
         handler.voice_provider.restore_after_lesson_start_handoff.assert_not_awaited()
+        terminals = [
+            args
+            for level, args, _kwargs in handler.logger.messages
+            if level == "info"
+            and args
+            and "evidence_lesson_handoff_released" in str(args[0])
+        ]
+        self.assertEqual([item[-2] for item in terminals], [first_token[1], second_token[1]])
 
     async def test_disconnect_force_clears_all_coalesced_handoff_holders(self):
         handler = _build_handler()
@@ -738,8 +795,11 @@ class ConnectionEdgeTest(unittest.IsolatedAsyncioTestCase):
                 "voice-task-finished",
                 "executor-shutdown",
                 "coordinator-close",
-                "provider-close",
             ],
+        )
+        self.assertEqual(
+            sum(item[0] == "provider-close" for item in observations),
+            1,
         )
         provider_snapshot = observations[0][1]
         self.assertFalse(provider_snapshot["closed"])
