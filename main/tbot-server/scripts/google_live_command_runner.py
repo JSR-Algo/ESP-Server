@@ -752,7 +752,7 @@ def _load_runtime_closure_manifest(
                     "-z",
                     expected_git_sha,
                     "--",
-                    resource["path"],
+                    f":(top){resource['path']}",
                 )
                 tree_meta, blob_name = tree_entry.rstrip(b"\0").decode().split("\t", 1)
                 mode, _type, tree_blob = tree_meta.split()
