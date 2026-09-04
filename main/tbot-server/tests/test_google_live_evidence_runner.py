@@ -171,6 +171,31 @@ def test_multi_command_layers_stay_running_until_authoritative_output(tmp_path: 
     assert [item[0] for item in calls] == list(COMMAND_ORDER)
 
 
+def test_command_order_is_enforced_independently_of_layer_state(tmp_path: Path):
+    runner = _runner(tmp_path)
+    with pytest.raises(EvidenceStateError, match="command order"):
+        runner.execute_layer(
+            "real_api.round_trip",
+            executor=lambda *args, **kwargs: SimpleNamespace(policy_satisfied=True),
+        )
+
+
+def test_synthetic_dry_run_uses_execute_and_finalize_paths(tmp_path: Path):
+    runner = _runner(tmp_path)
+    seen = []
+
+    def execute(spec, **kwargs):
+        seen.append(spec.command_id)
+        return SimpleNamespace(policy_satisfied=True)
+
+    result = runner.synthetic_dry_run(executor=execute)
+    assert seen == list(COMMAND_ORDER)
+    recorded = [json.loads(line)["commandId"] for line in (runner.root / "commands.jsonl").read_text().splitlines()]
+    assert recorded == list(COMMAND_ORDER)
+    assert result["status"] == "PASS"
+    assert (runner.root / "release-verdict.json").is_file()
+
+
 def test_finalize_refuses_nonpassing_layer_and_hashes_closed_artifacts(tmp_path: Path):
     runner = _runner(tmp_path)
     with pytest.raises(EvidenceStateError):

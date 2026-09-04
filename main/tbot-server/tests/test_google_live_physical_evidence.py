@@ -91,6 +91,7 @@ def test_client_always_deletes_enrollment_after_timeout():
 
 def test_client_finalizes_without_any_hardware_control_request():
     calls = []
+    finalized = False
     ready = {
         "journeyId": "physical.run",
         "status": "ACTIVE",
@@ -108,12 +109,14 @@ def test_client_finalizes_without_any_hardware_control_request():
     }
 
     def request(method, path, body=None):
+        nonlocal finalized
         calls.append((method, path, body))
         if path.endswith("/finalize"):
+            finalized = True
             return {**ready, "status": "PASS"}
         if method == "POST":
             return {"data": {"registered": True, "journeyId": "physical.run"}}
-        return ready
+        return {**ready, "status": "PASS"} if finalized else ready
 
     client = PhysicalEvidenceClient(
         "http://127.0.0.1:8003", "device-1", "secret", request=request
@@ -127,7 +130,8 @@ def test_client_finalizes_without_any_hardware_control_request():
     )
     assert result["status"] == "PASS"
     assert [method for method, path, _ in calls if path.endswith("candidate-identity")] == ["PUT"]
-    assert calls[-1][1].endswith("/finalize")
+    assert calls[-2][1].endswith("/finalize")
+    assert calls[-1][:2] == ("GET", "/internal/devices/device-1/google-live-evidence/physical.run")
     assert all(not any(word in path for word in ("deploy", "flash", "reset")) for _, path, _ in calls)
 
 

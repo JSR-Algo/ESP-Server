@@ -101,7 +101,7 @@ class EvidenceRunner:
         root.mkdir(mode=0o700, parents=True)
         for directory in ("deterministic", "server-regression", "real-api", "websocket-e2e", "physical", "candidate-soak"):
             (root / directory).mkdir(mode=0o700)
-        state = {"schemaVersion": "google-live-evidence-run.v1", "unified": True, "runId": run_id, "candidateIdentity": dict(identity), "createdAt": _now(), "layers": {name: {"state": "PENDING", "startedAt": None, "endedAt": None, "firstFailure": None, "artifactSha256": {}} for name in LAYERS}}
+        state = {"schemaVersion": "google-live-evidence-run.v1", "unified": True, "runId": run_id, "nextCommandIndex": 0, "candidateIdentity": dict(identity), "createdAt": _now(), "layers": {name: {"state": "PENDING", "startedAt": None, "endedAt": None, "firstFailure": None, "artifactSha256": {}} for name in LAYERS}}
         _atomic(root / "run-state.json", (json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n").encode())
         return cls(root, run_id, identity, state, operator_config)
 
@@ -187,6 +187,9 @@ class EvidenceRunner:
     def execute_layer(self, command_id: str, *, stdin_bytes: bytes | None = None, env: dict[str, str] | None = None, executor: Any | None = None) -> Any:
         if command_id not in COMMAND_ORDER:
             raise ValueError("unknown command ID")
+        expected_index = self._state.get("nextCommandIndex", 0)
+        if expected_index >= len(COMMAND_ORDER) or COMMAND_ORDER[expected_index] != command_id:
+            raise EvidenceStateError("command order is invalid")
         layer = {"deterministic.produce": "deterministic", "real_api.round_trip": "real_api", "websocket.transport": "websocket_e2e", "websocket.log_analysis": "server_regression", "websocket.correlation": "websocket_e2e", "candidate_soak.produce": "candidate_soak", "candidate_soak.replay": "candidate_soak", "physical.capture_and_audit": "physical"}[command_id]
         if self.state(layer) == "PENDING":
             self.start_layer(layer)
@@ -200,6 +203,8 @@ class EvidenceRunner:
             executor = execute_and_record
         try:
             result = executor(spec, provenance=self.root / "commands.jsonl", env=env, stdin_bytes=stdin_bytes)
+            self._state["nextCommandIndex"] = expected_index + 1
+            self._save()
             terminal_command = command_id in {"deterministic.produce", "real_api.round_trip", "websocket.log_analysis", "websocket.correlation", "candidate_soak.replay", "physical.capture_and_audit"}
             if getattr(result, "policy_satisfied", False) and terminal_command:
                 self.finish_layer(layer, "PASS")
@@ -251,6 +256,25 @@ class EvidenceRunner:
             raise EvidenceStateError("release gate rejected unified evidence")
         return checksum
 
+    def synthetic_dry_run(self, *, executor: Any | None = None) -> dict[str, Any]:
+        """Exercise the production orchestration path with deterministic fakes."""
+        class Result:
+            policy_satisfied = True
+        entries = []
+        for index, command_id in enumerate(COMMAND_ORDER):
+            layer = {"deterministic.produce": "deterministic", "real_api.round_trip": "real_api", "websocket.transport": "websocket_e2e", "websocket.log_analysis": "server_regression", "websocket.correlation": "websocket_e2e", "candidate_soak.produce": "candidate_soak", "candidate_soak.replay": "candidate_soak", "physical.capture_and_audit": "physical"}[command_id]
+            for output in next(item for item in self.command_specs() if item.command_id == command_id).outputs:
+                output.parent.mkdir(parents=True, exist_ok=True)
+                if not output.exists():
+                    output.write_bytes(b"{}\n")
+            spec = next(item for item in self.command_specs() if item.command_id == command_id)
+            self.execute_layer(command_id, executor=executor or (lambda *args, **kwargs: Result()))
+            entries.append({"argv": list(spec.argv), "candidateIdentity": dict(self.identity), "commandId": command_id, "cwd": ".", "endedAtUtc": f"2026-01-01T00:00:{index:02d}.500000Z", "environmentSources": [], "exitCode": 0, "inputs": [], "outputs": [], "schemaVersion": "google-live-command-provenance.v1", "secretSources": [f"<env:{name}>" for name in spec.secret_env], "specSha256": hashlib.sha256(command_id.encode()).hexdigest(), "startedAtUtc": f"2026-01-01T00:00:{index:02d}.000000Z", "stdinSource": None if spec.stdin_source is None else f"<stdin:{spec.stdin_source}>", "terminalPolicy": {"classification": "expected_exit", "cleanupGraceSec": 2.0, "expectedExitCodes": [0], "satisfied": True, "timeoutSec": 300.0}})
+        from scripts.google_live_command_runner import render_provenance
+        _atomic(self.root / "commands.jsonl", render_provenance(entries))
+        self.finalize(release_gate_fn=lambda identity, paths, checksums, **kwargs: {"status": "PASS", "candidateIdentity": identity})
+        return {"status": "PASS", "runId": self.run_id}
+
     def _check_layer(self, layer: str) -> None:
         if layer not in LAYERS:
             raise ValueError("unknown evidence layer")
@@ -265,6 +289,17 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument("--identity-json", type=Path, required=True)
     status = sub.add_parser("status")
     status.add_argument("run_root", type=Path)
+    for name in ("deterministic", "real-api", "websocket", "candidate-soak"):
+        command = sub.add_parser(name)
+        command.add_argument("run_root", type=Path)
+        command.add_argument("--operator-config", type=Path, required=True)
+    physical = sub.add_parser("physical")
+    physical.add_argument("run_root", type=Path)
+    physical.add_argument("--operator-confirmed", action="store_true")
+    physical.add_argument("--transcript-plan-stdin", action="store_true")
+    physical.add_argument("--operator-config", type=Path, required=True)
+    finalize = sub.add_parser("finalize")
+    finalize.add_argument("run_root", type=Path)
     sub.add_parser("synthetic-dry-run").add_argument("evidence_root", type=Path)
     args = parser.parse_args(argv)
     if args.command == "init":
@@ -275,13 +310,26 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "status":
         print(Path(args.run_root, "run-state.json").read_text(encoding="utf-8"), end="")
         return 0
+    if args.command == "finalize":
+        EvidenceRunner.open(args.run_root).finalize()
+        return 0
+    if args.command == "physical":
+        runner = EvidenceRunner.open(args.run_root)
+        runner.operator_config = json.loads(args.operator_config.read_text(encoding="utf-8"))
+        runner.require_physical_confirmation(operator_confirmed=args.operator_confirmed, transcript_plan_stdin=args.transcript_plan_stdin)
+        runner.execute_layer("physical.capture_and_audit", stdin_bytes=__import__("sys").stdin.buffer.read())
+        return 0
+    command_map = {"deterministic": "deterministic.produce", "real-api": "real_api.round_trip", "websocket": "websocket.transport", "candidate-soak": "candidate_soak.produce"}
+    if args.command in command_map:
+        runner = EvidenceRunner.open(args.run_root)
+        runner.operator_config = json.loads(args.operator_config.read_text(encoding="utf-8"))
+        runner.execute_layer(command_map[args.command], stdin_bytes=__import__("sys").stdin.buffer.read() if args.command == "candidate-soak" else None)
+        return 0
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     identity = {"gitSha": "0" * 40, "imageDigest": "sha256:" + "0" * 64, "firmwareIdentity": "synthetic", "configFingerprint": "sha256:" + "0" * 64, "fixtureSha256": "0" * 64}
     runner = EvidenceRunner.initialize(args.evidence_root, run_id=run_id, identity=identity)
-    for layer in ("deterministic", "real_api", "websocket_e2e", "candidate_soak", "physical"):
-        runner.start_layer(layer)
-        runner.finish_layer(layer, "PASS")
-    print(json.dumps(runner._state, sort_keys=True))
+    result = runner.synthetic_dry_run()
+    print(json.dumps(result, sort_keys=True))
     return 0
 
 
