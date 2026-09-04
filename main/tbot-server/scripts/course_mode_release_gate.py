@@ -396,6 +396,12 @@ TASK4_ASSIGNMENT_PORT_ENV = (
     "LESSON_STUDIO_E2E_BACKEND_HOST_PORT", "LESSON_STUDIO_E2E_WEB_HOST_PORT",
     "TASK4_ASSIGNMENT_MEDIA_HOST_PORT",
 )
+PLAYWRIGHT_COMPOSE_ENV = (
+    "COURSE_MODE_ADMIN_E2E_READY", "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME",
+    "LESSON_STUDIO_E2E_RESOURCE_PREFIX", "JWT_PUBLIC_KEY", "TBOT_DEVICE_MINT_SECRET",
+    "LESSON_ASSET_ORIGIN_BASE", "ROBOT_ESP_BASE_URL",
+    "LESSON_STUDIO_E2E_BACKEND_HOST_PORT", "LESSON_STUDIO_E2E_WEB_HOST_PORT",
+)
 TASK4_STANDARD_HOST_PORTS = frozenset({3100, 8102, 18443})
 TASK4_BACKEND_MOUNT_ROOTS = (
     "src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json",
@@ -2005,7 +2011,7 @@ FULL_LANES = (
             f"admin-course-mode-playwright-{project.removeprefix('course-mode-')}",
             "adminEsp", "main/manager-web",
             ("npm", "run", "test:e2e:course-mode", "--", f"--project={project}"),
-            1200.0, ("COURSE_MODE_ADMIN_E2E_READY",),
+            1200.0, PLAYWRIGHT_COMPOSE_ENV,
             required_source_contract="course-mode-playwright",
         )
         for project in PLAYWRIGHT_PROJECTS
@@ -3336,6 +3342,16 @@ def _child_environment(
     assignment = _assignment_candidate_environment(candidate, lane)
     if assignment is not None:
         environment.update(assignment)
+    if lane.name.startswith("admin-course-mode-playwright-"):
+        for name in (
+            "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME", "LESSON_STUDIO_E2E_RESOURCE_PREFIX",
+            "JWT_PUBLIC_KEY", "TBOT_DEVICE_MINT_SECRET", "LESSON_ASSET_ORIGIN_BASE",
+            "ROBOT_ESP_BASE_URL", "LESSON_STUDIO_E2E_BACKEND_HOST_PORT",
+            "LESSON_STUDIO_E2E_WEB_HOST_PORT",
+        ):
+            value = source.get(name)
+            if value:
+                environment[name] = value
     if _container_tools_required(lane):
         environment.update({
             "TBOT_DOCKER_EXECUTABLE": candidate["tools"]["docker"]["path"],
@@ -3517,7 +3533,10 @@ def _assignment_source_snapshot(source: Mapping[str, str]) -> dict[str, str] | N
 
 
 def _assignment_candidate_environment(candidate: dict, lane: Lane) -> dict[str, str] | None:
-    if lane.name not in STATEFUL_ASSIGNMENT_LANES:
+    if (
+        lane.name not in STATEFUL_ASSIGNMENT_LANES
+        and not lane.name.startswith("admin-course-mode-playwright-")
+    ):
         return {}
     try:
         images = candidate["images"]

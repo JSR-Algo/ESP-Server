@@ -4778,6 +4778,48 @@ def test_admin_browser_environment_is_only_candidate_bound_descriptor(candidate_
     assert "PLAYWRIGHT_BROWSERS_PATH" not in environment
 
 
+def test_playwright_environment_binds_compose_candidate_inputs(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(
+        lane for lane in gate.FULL_LANES
+        if lane.name == "admin-course-mode-playwright-chromium-desktop"
+    )
+
+    environment = gate._child_environment(candidate, {
+        name: "true" for name in gate.PLAYWRIGHT_COMPOSE_ENV
+    }, lane)
+
+    assert environment is not None
+    assert environment["TBOT_BACKEND_WORKTREE"] == candidate["repositories"]["backend"]["path"]
+    assert environment["TBOT_FIRMWARE_WORKTREE"] == candidate["repositories"]["firmware"]["path"]
+    assert environment["TBOT_LESSON_STUDIO_BACKEND_IMAGE"] == candidate["images"]["lessonStudioBackend"]["id"]
+    assert environment["TBOT_LESSON_STUDIO_WEB_IMAGE"] == candidate["images"]["lessonStudioWeb"]["id"]
+
+
+def test_playwright_environment_forwards_exact_stack_coordinates(candidate_file: Path) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(
+        lane for lane in gate.FULL_LANES
+        if lane.name == "admin-course-mode-playwright-chromium-desktop"
+    )
+    source = {
+        "COURSE_MODE_ADMIN_E2E_READY": "true",
+        "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME": "tbot-ls-e2e",
+        "LESSON_STUDIO_E2E_RESOURCE_PREFIX": "tbot-ls-e2e",
+        "JWT_PUBLIC_KEY": "local-public-key",
+        "TBOT_DEVICE_MINT_SECRET": "local-mint-secret",
+        "LESSON_ASSET_ORIGIN_BASE": "http://127.0.0.1:18102/tvideo-demo",
+        "ROBOT_ESP_BASE_URL": "http://host.docker.internal:9",
+        "LESSON_STUDIO_E2E_BACKEND_HOST_PORT": "13100",
+        "LESSON_STUDIO_E2E_WEB_HOST_PORT": "18102",
+    }
+
+    environment = gate._child_environment(candidate, source, lane)
+
+    assert lane.required_environment == tuple(source)
+    assert {key: environment[key] for key in source} == source
+
+
 def test_admin_browser_snapshot_preserves_playwright_platform_layout(candidate_file: Path) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
