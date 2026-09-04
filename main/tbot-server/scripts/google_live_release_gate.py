@@ -276,6 +276,10 @@ def _trusted_command_argv_patterns(
             "scripts/google_live_physical_evidence.py",
             "--candidate-soak-report",
             "<evidence:candidate-soak/report.json>",
+            "--server-report-output",
+            "<evidence:physical/server-report.json>",
+            "--terminal-report",
+            "<evidence:physical/terminal-snapshot.json>",
             "--report",
             "<evidence:physical/report.json>",
             "--operator-confirmed",
@@ -306,7 +310,7 @@ def _trusted_command_specs(identity: Mapping[str, Any]) -> dict[str, TrustedComm
         "websocket.correlation": ("websocket-e2e/report.json",),
         "candidate_soak.produce": ("candidate-soak/journey-evidence.json",),
         "candidate_soak.replay": ("candidate-soak/report.json",),
-        "physical.capture_and_audit": ("physical/server-window.log", "physical/server-report.json", "physical/report.json"),
+        "physical.capture_and_audit": ("physical/server-window.log", "physical/server-report.json", "physical/terminal-snapshot.json", "physical/report.json"),
     }
     mint_commands = {
         "websocket.transport",
@@ -792,7 +796,7 @@ def _physical_valid(report: Any, expected_identity: Mapping[str, Any]) -> bool:
     return (
         _generic_report_valid(report, "physical")
         and set(report)
-        == {
+        in ({
             "schemaVersion",
             "name",
             "status",
@@ -802,7 +806,18 @@ def _physical_valid(report: Any, expected_identity: Mapping[str, Any]) -> bool:
             "logEvidence",
             "candidateSoakEvidence",
             "failures",
-        }
+        }, {
+            "schemaVersion", "name", "status", "candidateIdentity", "auditReport",
+            "productionProfile", "logEvidence", "candidateSoakEvidence", "failures",
+            "terminalSnapshot",
+        })
+        and ("terminalSnapshot" not in report or (
+            isinstance(report["terminalSnapshot"], Mapping)
+            and report["terminalSnapshot"].get("status") == "PASS"
+            and report["terminalSnapshot"].get("transcriptMatchedCount") == 11
+            and report["terminalSnapshot"].get("transcriptMismatchCount") == 0
+            and report["terminalSnapshot"].get("finalizedAt")
+        ))
         and not validate_physical_candidate_report(
             report.get("auditReport"),
             expected_candidate_identity=expected_identity,
@@ -837,7 +852,11 @@ def _timeline_metadata(layer: str, report: Mapping[str, Any]) -> dict[str, Any]:
             if all(isinstance(lw.get(k), str) and lw.get(k) for k in ("windowId", "start", "end")) and isinstance(item.get("journeyId"), str):
                 windows.append(validate_window({"journeyId": item["journeyId"], "windowId": lw["windowId"], "startedAtUtc": lw["start"], "endedAtUtc": lw["end"]}))
         anchors = report.get("evidenceAnchors", {})
-        if windows and any(windows[index]["startedAtUtc"] < windows[index - 1]["endedAtUtc"] for index in range(1, len(windows))):
+        if windows and any(
+            datetime.fromisoformat(windows[index]["startedAtUtc"].replace("Z", "+00:00"))
+            < datetime.fromisoformat(windows[index - 1]["endedAtUtc"].replace("Z", "+00:00"))
+            for index in range(1, len(windows))
+        ):
             raise ValueError("timeline windows overlap")
         if windows and (anchors.get("serverStartUtc") != windows[0]["startedAtUtc"] or anchors.get("serverEndUtc") != windows[-1]["endedAtUtc"]):
             raise ValueError("timeline anchors do not bind all windows")
@@ -1661,20 +1680,24 @@ def aggregate_release_evidence(
         if [item["label"] for item in physical_outputs] != [
             "physical/server-window.log",
             "physical/server-report.json",
+            "physical/terminal-snapshot.json",
             "physical/report.json",
         ]:
             raise ValueError
         physical_window = _read_bound_release_input(root / physical_outputs[0]["label"])
         physical_server = _read_bound_release_input(root / physical_outputs[1]["label"])
+        physical_terminal = _read_bound_release_input(root / physical_outputs[2]["label"])
         physical_report = loaded_reports.get("physical")
         if (
             not hmac.compare_digest(physical_window.sha256, physical_outputs[0]["sha256"])
             or not hmac.compare_digest(physical_server.sha256, physical_outputs[1]["sha256"])
+            or not hmac.compare_digest(physical_terminal.sha256, physical_outputs[2]["sha256"])
         ):
             raise ValueError
         physical_output_binding_invalid = (
             not isinstance(physical_report, Mapping)
             or json.loads(physical_server.content) != physical_report.get("logEvidence")
+            or json.loads(physical_terminal.content) != physical_report.get("terminalSnapshot")
         )
         exact_mint_source = ["<env:TBOT_DEVICE_MINT_SECRET>"]
         mint_commands = {

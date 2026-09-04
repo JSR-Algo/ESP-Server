@@ -155,8 +155,23 @@ def test_live_server_log_is_runtime_source_not_immutable_command_input(tmp_path:
     assert specs["physical.capture_and_audit"].outputs == (
         runner.root / "physical/server-window.log",
         runner.root / "physical/server-report.json",
+        runner.root / "physical/terminal-snapshot.json",
         runner.root / "physical/report.json",
     )
+
+
+@pytest.mark.parametrize("value", ["../outside.log", "alias.log"])
+def test_live_server_log_must_be_regular_file_inside_evidence_root(tmp_path: Path, value: str):
+    runner = _runner(tmp_path)
+    outside = runner.root.parent / "outside.log"
+    outside.write_text("x")
+    if value == "alias.log":
+        (runner.root / value).symlink_to(outside)
+    else:
+        value = str(runner.root / value)
+    runner.operator_config["server_log"] = value
+    with pytest.raises(EvidenceStateError, match="server log"):
+        runner.command_specs()
 
 
 def test_multi_command_layers_stay_running_until_authoritative_output(tmp_path: Path):
@@ -165,6 +180,9 @@ def test_multi_command_layers_stay_running_until_authoritative_output(tmp_path: 
 
     def execute(spec, **kwargs):
         calls.append((spec.command_id, kwargs))
+        for output in spec.outputs:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text("{}\n")
         return SimpleNamespace(policy_satisfied=True)
 
     runner.execute_layer("deterministic.produce", executor=execute)

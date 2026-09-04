@@ -162,6 +162,25 @@ def test_client_rejects_terminal_snapshot_for_another_journey():
         client.capture(journey_id="physical.run", enrollment={"clientId": "client-1"}, timeout_sec=1, poll_interval_sec=0)
 
 
+def test_terminal_snapshot_is_retained_for_report_binding():
+    ready = {"journeyId": "physical.run", "status": "ACTIVE", "transcriptExpectedCount": 11, "transcriptObservedCount": 11, "transcriptMatchedCount": 11, "transcriptMismatchCount": 0, "transcriptMissingCount": 0, "transcriptMatchedSlots": list(range(1, 12)), "transcriptMatchedPhases": ["interrupt"] * 10 + ["post_lesson"], "transcriptOrderingProof": True, "postInterruptVerdict": True, "postLessonVerdict": True, "readyToFinalize": True}
+    terminal = {**ready, "status": "PASS", "finalizedAt": "2026-09-04T01:02:03Z"}
+    finalized = False
+    def request(method, path, body=None):
+        nonlocal finalized
+        if method == "POST" and path.endswith("/finalize"):
+            finalized = True
+            return terminal
+        if method == "POST":
+            return {"data": {"registered": True, "journeyId": "physical.run"}}
+        if method == "DELETE":
+            return {}
+        return terminal if finalized else ready
+    result = PhysicalEvidenceClient("http://127.0.0.1:8003", "device-1", "secret", request=request).capture(journey_id="physical.run", enrollment={"clientId": "client-1"}, timeout_sec=1, poll_interval_sec=0)
+    assert result["transcriptMatchedCount"] == 11
+    assert result["finalizedAt"] == "2026-09-04T01:02:03Z"
+
+
 def test_composition_invokes_existing_audit_and_writes_bound_report(tmp_path: Path):
     log = tmp_path / "server.log"
     log.write_text("websocket evidence\nphysical evidence\n")

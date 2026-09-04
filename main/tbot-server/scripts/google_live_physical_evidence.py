@@ -100,6 +100,8 @@ class PhysicalEvidenceClient:
                         if terminal.get("status") == "PASS":
                             if terminal.get("journeyId") != journey_id:
                                 raise PhysicalEvidenceError("physical evidence terminal journey mismatch")
+                            if candidate_identity is not None and terminal.get("candidateIdentity") not in (None, candidate_identity):
+                                raise PhysicalEvidenceError("physical evidence terminal candidate mismatch")
                             completed = True
                             return terminal
                         if terminal.get("status") in {"FAIL", "EXPIRED"}:
@@ -116,12 +118,17 @@ class PhysicalEvidenceClient:
                     pass
 
 
-def compose_physical_report(*, raw_server_log: Path, journey_id: str, candidate_soak_report: dict[str, Any], candidate_identity: dict[str, Any], device_id: str, client_id: str, output: Path, bounded_log_output: Path | None = None, server_report_output: Path | None = None, audit_fn: Callable[..., dict[str, Any]] | None = None, selector_fn: Callable[[list[str], str], list[str]] | None = None, analyzer_fn: Callable[[Path], dict[str, Any]] | None = None) -> dict[str, Any]:
+def compose_physical_report(*, raw_server_log: Path, journey_id: str, candidate_soak_report: dict[str, Any], candidate_identity: dict[str, Any], device_id: str, client_id: str, output: Path, terminal_snapshot: dict[str, Any] | None = None, bounded_log_output: Path | None = None, server_report_output: Path | None = None, audit_fn: Callable[..., dict[str, Any]] | None = None, selector_fn: Callable[[list[str], str], list[str]] | None = None, analyzer_fn: Callable[[Path], dict[str, Any]] | None = None) -> dict[str, Any]:
     """Run the existing production physical validator over one bounded log."""
     if not raw_server_log.is_file() or raw_server_log.is_symlink():
         raise PhysicalEvidenceError("bounded server log is unavailable")
     if not isinstance(journey_id, str) or not journey_id:
         raise PhysicalEvidenceError("bounded server journey is unavailable")
+    if terminal_snapshot is not None:
+        if terminal_snapshot.get("journeyId") != journey_id or terminal_snapshot.get("status") != "PASS":
+            raise PhysicalEvidenceError("terminal snapshot is not authoritative")
+        if terminal_snapshot.get("candidateIdentity") not in (None, candidate_identity):
+            raise PhysicalEvidenceError("terminal snapshot candidate identity mismatch")
     if selector_fn is None:
         from scripts.analyze_google_live_log import _bounded_server_window
         selector_fn = _bounded_server_window
@@ -187,6 +194,8 @@ def compose_physical_report(*, raw_server_log: Path, journey_id: str, candidate_
     report["logEvidence"] = server_report
     report["candidateSoakEvidence"] = candidate_soak_report
     report["candidateIdentity"] = dict(candidate_identity)
+    if terminal_snapshot is not None:
+        report["terminalSnapshot"] = dict(terminal_snapshot)
     _atomic_write(output, (json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode())
     return report
 
@@ -195,6 +204,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Capture privacy-safe physical Google Live evidence")
     parser.add_argument("--candidate-soak-report", type=Path, required=True)
     parser.add_argument("--server-report", type=Path)
+    parser.add_argument("--server-report-output", type=Path)
+    parser.add_argument("--terminal-report", type=Path)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--candidate-git-sha", required=True)
     parser.add_argument("--candidate-image-digest", required=True)
@@ -219,7 +230,9 @@ def main(argv: list[str] | None = None) -> int:
         enrollment = build_enrollment(device_id=args.device_id, client_id=str(plan["clientId"]), journey_id=str(plan["journeyId"]), transcript_plan=list(plan["transcriptPlan"]), hmac_key=key, ttl_sec=int(plan.get("ttlSec", 300)))
         identity = {"gitSha": args.candidate_git_sha, "imageDigest": args.candidate_image_digest, "firmwareIdentity": args.firmware_identity, "configFingerprint": config_fingerprint, "fixtureSha256": args.fixture_sha256}
         result = PhysicalEvidenceClient(args.base_url, args.device_id, __import__("os").environ.get("TBOT_DEVICE_MINT_SECRET", "")).capture(journey_id=str(plan["journeyId"]), enrollment=enrollment, candidate_identity=identity, on_ready=lambda journey: print("READY journey_id=" + journey, flush=True))
-        compose_physical_report(raw_server_log=args.server_log, journey_id=str(result.get("journeyId") or plan["journeyId"]), candidate_soak_report=candidate_report, candidate_identity=identity, device_id=args.device_id, client_id=args.client_id, output=args.report, bounded_log_output=args.report.with_name("server-window.log"), server_report_output=args.report.with_name("server-report.json"))
+        if args.terminal_report is not None:
+            _atomic_write(args.terminal_report, (json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n").encode())
+        compose_physical_report(raw_server_log=args.server_log, journey_id=str(result.get("journeyId") or plan["journeyId"]), terminal_snapshot=result, candidate_soak_report=candidate_report, candidate_identity=identity, device_id=args.device_id, client_id=args.client_id, output=args.report, bounded_log_output=args.report.with_name("server-window.log"), server_report_output=args.server_report_output or args.report.with_name("server-report.json"))
         return 0
     except Exception:
         return 1
