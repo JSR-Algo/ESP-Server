@@ -146,6 +146,19 @@ def test_command_specs_preserve_exact_order_and_secret_assignment(tmp_path: Path
     assert specs[7].stdin_source == "protected_transcript_plan"
 
 
+def test_live_server_log_is_runtime_source_not_immutable_command_input(tmp_path: Path):
+    runner = _runner(tmp_path)
+    specs = {spec.command_id: spec for spec in runner.command_specs()}
+
+    assert runner.root / "server.log" not in specs["candidate_soak.produce"].inputs
+    assert runner.root / "server.log" not in specs["physical.capture_and_audit"].inputs
+    assert specs["physical.capture_and_audit"].outputs == (
+        runner.root / "physical/server-window.log",
+        runner.root / "physical/server-report.json",
+        runner.root / "physical/report.json",
+    )
+
+
 def test_multi_command_layers_stay_running_until_authoritative_output(tmp_path: Path):
     runner = _runner(tmp_path)
     calls = []
@@ -220,3 +233,34 @@ def test_finalize_refuses_nonpassing_layer_and_hashes_closed_artifacts(tmp_path:
     )
     assert "timeline.log" in checksum.read_text()
     assert json.loads((runner.root / "release-verdict.json").read_text())["status"] == "PASS"
+
+
+def test_finalize_timeline_uses_each_layers_own_window_metadata(tmp_path: Path):
+    runner = _runner(tmp_path)
+    for layer in LAYERS:
+        runner._state["layers"][layer].update(state="PASS")
+    runner._save()
+    reports = {
+        "deterministic": {"status": "PASS"},
+        "server_regression": {"evidenceScope": {"journeyId": "websocket"}, "logWindow": {"windowId": "ws-window", "start": "2026-01-01T00:00:00Z", "end": "2026-01-01T00:01:00Z"}},
+        "real_api": {"status": "PASS"},
+        "websocket_e2e": {"logEvidence": {"evidenceScope": {"journeyId": "websocket"}, "logWindow": {"windowId": "ws-window", "start": "2026-01-01T00:00:00Z", "end": "2026-01-01T00:01:00Z"}}},
+        "physical": {"logEvidence": {"evidenceScope": {"journeyId": "physical"}, "logWindow": {"windowId": "physical-window", "start": "2026-01-01T02:00:00Z", "end": "2026-01-01T02:01:00Z"}}},
+        "candidate_soak": {"evidenceAnchors": {"serverStartUtc": "2026-01-01T01:00:00Z", "serverEndUtc": "2026-01-01T01:30:00Z"}, "evidenceExecutions": [{"journeyId": "soak-1", "windowId": "soak-window-1", "logWindow": {"windowId": "soak-window-1", "start": "2026-01-01T01:00:00Z", "end": "2026-01-01T01:10:00Z"}}], "quietPadding": [{"journeyId": "padding-1", "windowId": "padding-window-1", "logWindow": {"windowId": "padding-window-1", "start": "2026-01-01T01:10:00Z", "end": "2026-01-01T01:30:00Z"}}]},
+    }
+    for layer, report in reports.items():
+        path = runner.root / layer.replace("_", "-") / "report.json"
+        path.write_text(json.dumps(report) + "\n")
+    for relative in ("deterministic/node-manifest.txt", "deterministic/pytest.xml", "physical/server-window.log", "physical/server-report.json"):
+        path = runner.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n")
+    (runner.root / "commands.jsonl").write_text("")
+
+    runner.finalize(release_gate_fn=lambda identity, paths, checksums, output: {"status": "PASS"})
+
+    rows = {row["layer"]: row for row in map(json.loads, (runner.root / "timeline.log").read_text().splitlines())}
+    assert rows["deterministic"]["journeyId"] is None
+    assert rows["websocket_e2e"]["journeyId"] == "websocket"
+    assert rows["physical"]["journeyId"] == "physical"
+    assert [item["journeyId"] for item in rows["candidate_soak"]["windows"]] == ["soak-1", "padding-1"]

@@ -135,10 +135,36 @@ def test_client_finalizes_without_any_hardware_control_request():
     assert all(not any(word in path for word in ("deploy", "flash", "reset")) for _, path, _ in calls)
 
 
+def test_client_rejects_terminal_snapshot_for_another_journey():
+    ready = {
+        "journeyId": "physical.run", "status": "ACTIVE", "transcriptExpectedCount": 11,
+        "transcriptObservedCount": 11, "transcriptMatchedCount": 11, "transcriptMismatchCount": 0,
+        "transcriptMissingCount": 0, "transcriptMatchedSlots": list(range(1, 12)),
+        "transcriptMatchedPhases": ["interrupt"] * 10 + ["post_lesson"],
+        "transcriptOrderingProof": True, "postInterruptVerdict": True,
+        "postLessonVerdict": True, "readyToFinalize": True,
+    }
+    finalized = False
+
+    def request(method, path, body=None):
+        nonlocal finalized
+        if method == "POST" and path.endswith("/finalize"):
+            finalized = True
+            return {**ready, "status": "PASS"}
+        if method == "POST":
+            return {"data": {"registered": True, "journeyId": "physical.run"}}
+        if method == "DELETE":
+            return {}
+        return {**ready, "journeyId": "other.run", "status": "PASS"} if finalized else ready
+
+    client = PhysicalEvidenceClient("http://127.0.0.1:8003", "device-1", "secret", request=request)
+    with pytest.raises(PhysicalEvidenceError, match="journey mismatch"):
+        client.capture(journey_id="physical.run", enrollment={"clientId": "client-1"}, timeout_sec=1, poll_interval_sec=0)
+
+
 def test_composition_invokes_existing_audit_and_writes_bound_report(tmp_path: Path):
-    log = tmp_path / "window.log"
-    log.write_text("safe bounded markers\n")
-    server = {"status": "PASS", "logWindow": {"journeyId": "physical.run"}}
+    log = tmp_path / "server.log"
+    log.write_text("websocket evidence\nphysical evidence\n")
     soak = {"status": "PASS", "candidateIdentity": IDENTITY}
     seen = {}
 
@@ -148,18 +174,29 @@ def test_composition_invokes_existing_audit_and_writes_bound_report(tmp_path: Pa
         return {"passed": True, "missing": []}
 
     output = tmp_path / "physical" / "report.json"
+    bounded = tmp_path / "physical" / "server-window.log"
+    server_output = tmp_path / "physical" / "server-report.json"
     report = compose_physical_report(
         raw_server_log=log,
-        server_report=server,
+        journey_id="physical.run",
         candidate_soak_report=soak,
         candidate_identity=IDENTITY,
         device_id="device-1",
         client_id="client-1",
         output=output,
+        bounded_log_output=bounded,
+        server_report_output=server_output,
         audit_fn=audit,
-        selector_fn=lambda lines, journey: lines,
+        selector_fn=lambda lines, journey: [line for line in lines if journey.split(".")[0] in line],
+        analyzer_fn=lambda path: {
+            "status": "PASS",
+            "evidenceScope": {"journeyId": "physical.run"},
+            "logWindow": {"windowId": "physical-window", "start": "2026-01-01T00:00:00Z", "end": "2026-01-01T00:01:00Z"},
+        },
     )
     assert seen["require_receive_loop_balance"] is True
     assert seen["min_interrupts"] == 10
-    assert report["logEvidence"] == server
+    assert report["logEvidence"]["evidenceScope"]["journeyId"] == "physical.run"
+    assert "websocket" not in bounded.read_text()
+    assert json.loads(server_output.read_text()) == report["logEvidence"]
     assert json.loads(output.read_text())["candidateSoakEvidence"] == soak

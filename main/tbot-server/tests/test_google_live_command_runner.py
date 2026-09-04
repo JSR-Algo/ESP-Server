@@ -82,6 +82,33 @@ def _write_report_code(payload: str = "ok") -> str:
     )
 
 
+@pytest.mark.parametrize("command_id", ["candidate_soak.produce", "physical.capture_and_audit"])
+def test_mutable_relative_live_log_can_append_while_command_publishes_closed_output(
+    tmp_path: Path, command_id: str
+) -> None:
+    live_log = tmp_path / "server.log"
+    live_log.write_text("before\n", encoding="utf-8")
+    code = (
+        "from pathlib import Path; "
+        "Path('server.log').open('a').write('during\\n'); "
+        "p=Path('real-api/report.json'); p.parent.mkdir(parents=True, exist_ok=True); "
+        "p.write_text('closed')"
+    )
+    spec = _spec(
+        tmp_path,
+        code,
+        command_id=command_id,
+        argv=(sys.executable, "-c", code, "server.log"),
+    )
+
+    result = execute_and_record(spec, provenance=tmp_path / "commands.jsonl")
+
+    assert result.policy_satisfied is True
+    assert live_log.read_text(encoding="utf-8") == "before\nduring\n"
+    entry = json.loads((tmp_path / "commands.jsonl").read_text())
+    assert entry["inputs"] == []
+
+
 def _runtime_closure_manifest(resources: list[dict[str, object]]) -> dict[str, object]:
     inventory = json.dumps(resources, sort_keys=True, separators=(",", ":")).encode()
     return {

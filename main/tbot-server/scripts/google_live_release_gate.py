@@ -14,6 +14,7 @@ import sys
 from collections.abc import Mapping
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -275,8 +276,6 @@ def _trusted_command_argv_patterns(
             "scripts/google_live_physical_evidence.py",
             "--candidate-soak-report",
             "<evidence:candidate-soak/report.json>",
-            "--server-report",
-            "<evidence:server-regression/report.json>",
             "--report",
             "<evidence:physical/report.json>",
             "--operator-confirmed",
@@ -307,7 +306,7 @@ def _trusted_command_specs(identity: Mapping[str, Any]) -> dict[str, TrustedComm
         "websocket.correlation": ("websocket-e2e/report.json",),
         "candidate_soak.produce": ("candidate-soak/journey-evidence.json",),
         "candidate_soak.replay": ("candidate-soak/report.json",),
-        "physical.capture_and_audit": ("physical/report.json",),
+        "physical.capture_and_audit": ("physical/server-window.log", "physical/server-report.json", "physical/report.json"),
     }
     mint_commands = {
         "websocket.transport",
@@ -329,7 +328,6 @@ def _trusted_command_specs(identity: Mapping[str, Any]) -> dict[str, TrustedComm
                     "server-regression/report.json",
                 ),
                 "candidate_soak.produce": (
-                    "server.log",
                     "baseline/report.json",
                     "real-api/report.json",
                     "websocket-e2e/transport.json",
@@ -348,8 +346,6 @@ def _trusted_command_specs(identity: Mapping[str, Any]) -> dict[str, TrustedComm
                 ),
                 "physical.capture_and_audit": (
                     "candidate-soak/report.json",
-                    "server-regression/report.json",
-                    "server.log",
                 ),
             }.get(command_id, ()),
             output_labels=outputs[command_id],
@@ -815,6 +811,38 @@ def _physical_valid(report: Any, expected_identity: Mapping[str, Any]) -> bool:
             production_profile=report.get("productionProfile"),
         )
     )
+
+
+def _timeline_metadata(layer: str, report: Mapping[str, Any]) -> dict[str, Any]:
+    def validate_window(item: dict[str, str]) -> dict[str, str]:
+        start = datetime.fromisoformat(item["startedAtUtc"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(item["endedAtUtc"].replace("Z", "+00:00"))
+        if end <= start:
+            raise ValueError("timeline window is not forward-moving")
+        return item
+
+    source = report.get("logEvidence") if layer in {"websocket_e2e", "physical"} else report
+    window = source.get("logWindow") if isinstance(source, Mapping) else None
+    scope = source.get("evidenceScope") if isinstance(source, Mapping) else None
+    journey = (scope.get("journeyId") if isinstance(scope, Mapping) else None) or (source.get("journeyId") if isinstance(source, Mapping) else None)
+    if isinstance(window, Mapping) and all(isinstance(window.get(k), str) and window.get(k) for k in ("windowId", "start", "end")) and isinstance(journey, str) and journey:
+        item = validate_window({"journeyId": journey, "windowId": window["windowId"], "startedAtUtc": window["start"], "endedAtUtc": window["end"]})
+        return {**item, "windows": [item]}
+    if layer == "candidate_soak":
+        windows = []
+        for item in [*report.get("evidenceExecutions", []), *report.get("quietPadding", [])]:
+            if not isinstance(item, Mapping) or not isinstance(item.get("logWindow"), Mapping):
+                continue
+            lw = item["logWindow"]
+            if all(isinstance(lw.get(k), str) and lw.get(k) for k in ("windowId", "start", "end")) and isinstance(item.get("journeyId"), str):
+                windows.append(validate_window({"journeyId": item["journeyId"], "windowId": lw["windowId"], "startedAtUtc": lw["start"], "endedAtUtc": lw["end"]}))
+        anchors = report.get("evidenceAnchors", {})
+        if windows and any(windows[index]["startedAtUtc"] < windows[index - 1]["endedAtUtc"] for index in range(1, len(windows))):
+            raise ValueError("timeline windows overlap")
+        if windows and (anchors.get("serverStartUtc") != windows[0]["startedAtUtc"] or anchors.get("serverEndUtc") != windows[-1]["endedAtUtc"]):
+            raise ValueError("timeline anchors do not bind all windows")
+        return {"journeyId": None, "windowId": None, "startedAtUtc": anchors.get("serverStartUtc"), "endedAtUtc": anchors.get("serverEndUtc"), "windows": windows}
+    return {"journeyId": None, "windowId": None, "startedAtUtc": None, "endedAtUtc": None, "windows": []}
 
 
 def _layer_valid(layer: str, report: Any, expected_identity: Mapping[str, Any]) -> bool:
@@ -1337,11 +1365,25 @@ def aggregate_release_evidence(
         )
     physical = loaded_reports.get("physical")
     if isinstance(physical, Mapping) and (
-        physical.get("logEvidence") != loaded_reports.get("server_regression")
-        or physical.get("candidateSoakEvidence") != loaded_reports.get("candidate_soak")
+        physical.get("candidateSoakEvidence") != loaded_reports.get("candidate_soak")
     ):
         binding_failure = _failure("PHYSICAL_UPSTREAM_BINDING_MISMATCH", "physical")
         failures.append(binding_failure)
+        for item in layers:
+            if item["name"] == "physical":
+                item["status"] = "FAIL"
+                break
+    try:
+        physical_server_path = Path(layer_paths[COMMAND_PROVENANCE_SUPPORT]).parent / "physical/server-report.json"
+        if not unified and not physical_server_path.exists():
+            raise FileNotFoundError
+        physical_server_report = json.loads(physical_server_path.read_bytes())
+        if not isinstance(physical, Mapping) or physical.get("logEvidence") != physical_server_report:
+            raise ValueError
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        binding_failure = _failure("PHYSICAL_UPSTREAM_BINDING_MISMATCH", "physical")
+        if binding_failure not in failures:
+            failures.append(binding_failure)
         for item in layers:
             if item["name"] == "physical":
                 item["status"] = "FAIL"
@@ -1520,6 +1562,7 @@ def aggregate_release_evidence(
         failures.append(_failure("RUNTIME_CLOSURE_INVALID"))
     provenance_path = layer_paths.get(COMMAND_PROVENANCE_SUPPORT)
     provenance_checksum = expected_checksums.get(COMMAND_PROVENANCE_SUPPORT)
+    physical_output_binding_invalid = False
     try:
         if (
             provenance_path is None
@@ -1614,6 +1657,25 @@ def aggregate_release_evidence(
         intermediate = _read_bound_release_input(root / producer_outputs[0]["label"])
         if not hmac.compare_digest(intermediate.sha256, producer_outputs[0]["sha256"]):
             raise ValueError
+        physical_outputs = by_id["physical.capture_and_audit"]["outputs"]
+        if [item["label"] for item in physical_outputs] != [
+            "physical/server-window.log",
+            "physical/server-report.json",
+            "physical/report.json",
+        ]:
+            raise ValueError
+        physical_window = _read_bound_release_input(root / physical_outputs[0]["label"])
+        physical_server = _read_bound_release_input(root / physical_outputs[1]["label"])
+        physical_report = loaded_reports.get("physical")
+        if (
+            not hmac.compare_digest(physical_window.sha256, physical_outputs[0]["sha256"])
+            or not hmac.compare_digest(physical_server.sha256, physical_outputs[1]["sha256"])
+        ):
+            raise ValueError
+        physical_output_binding_invalid = (
+            not isinstance(physical_report, Mapping)
+            or json.loads(physical_server.content) != physical_report.get("logEvidence")
+        )
         exact_mint_source = ["<env:TBOT_DEVICE_MINT_SECRET>"]
         mint_commands = {
             "websocket.transport",
@@ -1653,6 +1715,12 @@ def aggregate_release_evidence(
             raise ValueError
     except (KeyError, OSError, RuntimeError, TypeError, UnicodeError, ValueError):
         failures.append(_failure("COMMAND_PROVENANCE_INVALID"))
+    if physical_output_binding_invalid:
+        failures.append(_failure("PHYSICAL_UPSTREAM_BINDING_MISMATCH", "physical"))
+        for item in layers:
+            if item["name"] == "physical":
+                item["status"] = "FAIL"
+                break
     orchestration_supports_absent = (
         layer_paths.get(COMMAND_PROJECTION_SUPPORT) is None
         and layer_paths.get(TIMELINE_INDEX_SUPPORT) is None
@@ -1712,27 +1780,33 @@ def aggregate_release_evidence(
                 not isinstance(row, dict)
                 or not {"layer", "artifact", "journeyId", "windowId", "startedAtUtc", "endedAtUtc"} <= set(row)
                 or not set(row) <= {
-                    "layer", "artifact", "journeyId", "windowId", "startedAtUtc", "endedAtUtc"
+                    "layer", "artifact", "journeyId", "windowId", "startedAtUtc", "endedAtUtc", "windows"
                 }
                 or row["layer"] not in REQUIRED_LAYERS
                 or row["artifact"]
                 != Path(layer_paths[row["layer"]]).relative_to(timeline_path.parent).as_posix()
-                or any(not isinstance(row[field], str) or not row[field] for field in ("journeyId", "windowId", "startedAtUtc", "endedAtUtc"))
+                or any(row[field] is not None and (not isinstance(row[field], str) or not row[field]) for field in ("journeyId", "windowId", "startedAtUtc", "endedAtUtc"))
+                or ("windows" in row and not isinstance(row["windows"], list))
                 or forbidden_report_fields(row)
             ):
                 raise ValueError
-            server_report = loaded_reports.get("server_regression")
-            server_scope = server_report.get("evidenceScope", {}) if isinstance(server_report, Mapping) else {}
-            server_window = server_report.get("logWindow", {}) if isinstance(server_report, Mapping) else {}
-            if row != {
-                "layer": row["layer"],
-                "artifact": row["artifact"],
-                "journeyId": server_scope.get("journeyId"),
-                "windowId": server_window.get("windowId"),
-                "startedAtUtc": server_window.get("start"),
-                "endedAtUtc": server_window.get("end"),
-            }:
-                raise ValueError
+            expected = _timeline_metadata(row["layer"], loaded_reports[row["layer"]])
+            if "windows" in row:
+                if row != {"layer": row["layer"], "artifact": row["artifact"], **expected}:
+                    raise ValueError
+            else:
+                server = loaded_reports.get("server_regression", {})
+                legacy_scope = server.get("evidenceScope", {})
+                legacy_window = server.get("logWindow", {})
+                if row != {
+                    "layer": row["layer"],
+                    "artifact": row["artifact"],
+                    "journeyId": legacy_scope.get("journeyId"),
+                    "windowId": legacy_window.get("windowId"),
+                    "startedAtUtc": legacy_window.get("start"),
+                    "endedAtUtc": legacy_window.get("end"),
+                }:
+                    raise ValueError
             timeline_rows.append(row)
         if [row["layer"] for row in timeline_rows] != list(REQUIRED_LAYERS):
             raise ValueError

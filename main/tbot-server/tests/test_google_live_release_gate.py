@@ -39,6 +39,7 @@ from scripts.google_live_deterministic_evidence import (
     parse_manifest,
     parse_pytest_runtime_manifest,
 )
+from scripts.google_live_evidence_runner import EvidenceRunner, LAYERS
 
 _PHYSICAL_CASE = physical_fixture.PhysicalSmokeAuditTest()
 _OPTIONS = _PHYSICAL_CASE._candidate_audit_options()
@@ -129,7 +130,7 @@ def _planned_command_argv(
         "websocket.correlation": (sys.executable, "scripts/analyze_google_live_log.py", "--log", None, "--correlate-transport", "<evidence:websocket-e2e/transport.json>", "--expected-candidate-json", None, "--out-json", "<evidence:websocket-e2e/report.json>"),
         "candidate_soak.produce": (sys.executable, "scripts/google_live_robot_soak.py", "--mode", "candidate", "--produce-candidate-evidence", "<evidence:candidate-soak/journey-evidence.json>", "--evidence-control-url", None, "--server-log", None, "--run-id", None, *soak_support, *candidate),
         "candidate_soak.replay": (sys.executable, "scripts/google_live_robot_soak.py", "--mode", "candidate", "--journey-evidence", "<evidence:candidate-soak/journey-evidence.json>", "--report", "<evidence:candidate-soak/report.json>", *soak_support, *candidate),
-        "physical.capture_and_audit": (sys.executable, "scripts/google_live_physical_evidence.py", "--candidate-soak-report", "<evidence:candidate-soak/report.json>", "--server-report", "<evidence:server-regression/report.json>", "--report", "<evidence:physical/report.json>", "--operator-confirmed", "--transcript-plan-stdin", "--base-url", None, "--device-id", None, "--client-id", None, "--server-log", None, *candidate),
+        "physical.capture_and_audit": (sys.executable, "scripts/google_live_physical_evidence.py", "--candidate-soak-report", "<evidence:candidate-soak/report.json>", "--report", "<evidence:physical/report.json>", "--operator-confirmed", "--transcript-plan-stdin", "--base-url", None, "--device-id", None, "--client-id", None, "--server-log", None, *candidate),
     }
     return common[command_id]
 
@@ -679,15 +680,10 @@ def _write_evidence(
                 copy.deepcopy(transport_artifact),
                 {"label": "server-regression/report.json", "sha256": checksums["server_regression"]},
             ],
-            "candidate_soak.produce": [
-                {"label": "server.log", "sha256": hashlib.sha256(server_log.read_bytes()).hexdigest()},
-                *copy.deepcopy(soak_inputs),
-            ],
+            "candidate_soak.produce": copy.deepcopy(soak_inputs),
             "candidate_soak.replay": [copy.deepcopy(journey_evidence_artifact), *copy.deepcopy(soak_inputs)],
             "physical.capture_and_audit": [
                 {"label": "candidate-soak/report.json", "sha256": checksums["candidate_soak"]},
-                {"label": "server-regression/report.json", "sha256": checksums["server_regression"]},
-                {"label": "server.log", "sha256": hashlib.sha256((root / "server.log").read_bytes()).hexdigest()},
             ],
         }.get(command_id, [])
         outputs = [
@@ -698,6 +694,15 @@ def _write_evidence(
             outputs.append(copy.deepcopy(transport_artifact))
         if command_id == "candidate_soak.produce":
             outputs.append(copy.deepcopy(journey_evidence_artifact))
+        if command_id == "physical.capture_and_audit":
+            physical_window = root / "physical" / "server-window.log"
+            physical_window.write_text("bounded physical evidence\n", encoding="utf-8")
+            physical_server = root / "physical" / "server-report.json"
+            physical_server.write_text(json.dumps(reports["physical"]["logEvidence"], sort_keys=True) + "\n", encoding="utf-8")
+            outputs[:0] = [
+                {"label": "physical/server-window.log", "sha256": hashlib.sha256(physical_window.read_bytes()).hexdigest()},
+                {"label": "physical/server-report.json", "sha256": hashlib.sha256(physical_server.read_bytes()).hexdigest()},
+            ]
         command = {
                 "argv": ["runtime-value" if value is None else value for value in argv_patterns[command_id]],
                 "candidateIdentity": copy.deepcopy(IDENTITY),
@@ -780,6 +785,36 @@ def test_release_accepts_bound_orchestration_supports(tmp_path):
     paths, checksums, _ = _write_evidence(tmp_path)
     _add_orchestration_supports(paths, checksums)
     assert aggregate_release_evidence(IDENTITY, paths, checksums)["status"] == "PASS"
+
+
+def test_unified_runner_finalize_publishes_through_real_release_gate(tmp_path):
+    paths, _, _ = _write_evidence(tmp_path / "20260904T010203Z")
+    root = paths["command_provenance"].parent
+    state = {
+        "schemaVersion": "google-live-evidence-run.v1", "unified": True,
+        "runId": "20260904T010203Z", "nextCommandIndex": 8,
+        "candidateIdentity": copy.deepcopy(IDENTITY), "createdAt": "2026-09-04T01:02:03Z",
+        "layers": {layer: {"state": "PASS", "startedAt": None, "endedAt": None, "firstFailure": None, "artifactSha256": {}} for layer in LAYERS},
+    }
+    runner = EvidenceRunner(root, state["runId"], IDENTITY, state)
+
+    runner.finalize()
+
+    assert json.loads((root / "release-verdict.json").read_text())["status"] == "PASS"
+
+
+def test_release_rejects_temporally_false_per_layer_timeline(tmp_path):
+    paths, checksums, _ = _write_evidence(tmp_path)
+    _add_orchestration_supports(paths, checksums)
+    rows = [json.loads(line) for line in paths["timeline_index"].read_text().splitlines()]
+    for row in rows:
+        row["windows"] = []
+    physical = next(row for row in rows if row["layer"] == "physical")
+    physical["windows"] = [{"journeyId": "physical-1", "windowId": "physical-window", "startedAtUtc": "2026-08-31T13:15:01+00:00", "endedAtUtc": "2026-08-31T13:10:00+00:00"}]
+    paths["timeline_index"].write_text("".join(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n" for row in rows))
+    checksums["timeline_index"] = hashlib.sha256(paths["timeline_index"].read_bytes()).hexdigest()
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+    assert verdict["status"] == "FAIL"
 
 
 @pytest.mark.parametrize("support", ["command_projection", "timeline_index"])

@@ -10,6 +10,8 @@ import time
 import urllib.request
 import argparse
 import base64
+import os
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
@@ -18,6 +20,20 @@ NORMALIZATION_VERSION = "google-live-transcript-nfkc-casefold.v1"
 
 class PhysicalEvidenceError(RuntimeError):
     pass
+
+
+def _atomic_write(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def _normalize(value: str) -> str:
@@ -82,6 +98,8 @@ class PhysicalEvidenceClient:
                     while time.monotonic() < deadline:
                         terminal = self._request("GET", path)
                         if terminal.get("status") == "PASS":
+                            if terminal.get("journeyId") != journey_id:
+                                raise PhysicalEvidenceError("physical evidence terminal journey mismatch")
                             completed = True
                             return terminal
                         if terminal.get("status") in {"FAIL", "EXPIRED"}:
@@ -98,15 +116,11 @@ class PhysicalEvidenceClient:
                     pass
 
 
-def compose_physical_report(*, raw_server_log: Path, server_report: dict[str, Any], candidate_soak_report: dict[str, Any], candidate_identity: dict[str, Any], device_id: str, client_id: str, output: Path, audit_fn: Callable[..., dict[str, Any]] | None = None, selector_fn: Callable[[list[str], str], list[str]] | None = None) -> dict[str, Any]:
+def compose_physical_report(*, raw_server_log: Path, journey_id: str, candidate_soak_report: dict[str, Any], candidate_identity: dict[str, Any], device_id: str, client_id: str, output: Path, bounded_log_output: Path | None = None, server_report_output: Path | None = None, audit_fn: Callable[..., dict[str, Any]] | None = None, selector_fn: Callable[[list[str], str], list[str]] | None = None, analyzer_fn: Callable[[Path], dict[str, Any]] | None = None) -> dict[str, Any]:
     """Run the existing production physical validator over one bounded log."""
     if not raw_server_log.is_file() or raw_server_log.is_symlink():
         raise PhysicalEvidenceError("bounded server log is unavailable")
-    journey_id = (
-        server_report.get("evidenceScope", {}).get("journeyId")
-        or server_report.get("logWindow", {}).get("journeyId")
-    )
-    if not isinstance(journey_id, str):
+    if not isinstance(journey_id, str) or not journey_id:
         raise PhysicalEvidenceError("bounded server journey is unavailable")
     if selector_fn is None:
         from scripts.analyze_google_live_log import _bounded_server_window
@@ -116,6 +130,21 @@ def compose_physical_report(*, raw_server_log: Path, server_report: dict[str, An
         journey_id,
     )
     bounded_log = "\n".join(selected) + "\n"
+    bounded_log_output = bounded_log_output or output.with_name("server-window.log")
+    _atomic_write(bounded_log_output, bounded_log.encode())
+    if analyzer_fn is None:
+        from scripts.analyze_google_live_log import analyze_reliability_window
+        analyzer_fn = analyze_reliability_window
+    server_report = dict(analyzer_fn(bounded_log_output))
+    scope = server_report.get("evidenceScope", {})
+    if server_report.get("status") != "PASS" or scope.get("journeyId") != journey_id:
+        raise PhysicalEvidenceError("physical server evidence does not match terminal journey")
+    if server_report.get("candidateIdentity") is None:
+        server_report["candidateIdentity"] = dict(candidate_identity)
+    elif server_report.get("candidateIdentity") != candidate_identity:
+        raise PhysicalEvidenceError("physical server evidence candidate mismatch")
+    if server_report_output is not None:
+        _atomic_write(server_report_output, (json.dumps(server_report, sort_keys=True, separators=(",", ":")) + "\n").encode())
     if audit_fn is None:
         from scripts.physical_smoke_audit import audit_log
         audit_fn = audit_log
@@ -158,17 +187,14 @@ def compose_physical_report(*, raw_server_log: Path, server_report: dict[str, An
     report["logEvidence"] = server_report
     report["candidateSoakEvidence"] = candidate_soak_report
     report["candidateIdentity"] = dict(candidate_identity)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name("." + output.name + ".tmp")
-    temporary.write_text(json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
-    temporary.replace(output)
+    _atomic_write(output, (json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode())
     return report
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Capture privacy-safe physical Google Live evidence")
     parser.add_argument("--candidate-soak-report", type=Path, required=True)
-    parser.add_argument("--server-report", type=Path, required=True)
+    parser.add_argument("--server-report", type=Path)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--candidate-git-sha", required=True)
     parser.add_argument("--candidate-image-digest", required=True)
@@ -185,7 +211,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("physical evidence requires --operator-confirmed, --transcript-plan-stdin, --base-url, and --device-id")
     try:
         plan = json.load(__import__("sys").stdin)
-        server_report = json.loads(args.server_report.read_text(encoding="utf-8"))
         candidate_report = json.loads(args.candidate_soak_report.read_text(encoding="utf-8"))
         config_fingerprint = candidate_report.get("candidateIdentity", {}).get("configFingerprint")
         if not isinstance(config_fingerprint, str):
@@ -194,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
         enrollment = build_enrollment(device_id=args.device_id, client_id=str(plan["clientId"]), journey_id=str(plan["journeyId"]), transcript_plan=list(plan["transcriptPlan"]), hmac_key=key, ttl_sec=int(plan.get("ttlSec", 300)))
         identity = {"gitSha": args.candidate_git_sha, "imageDigest": args.candidate_image_digest, "firmwareIdentity": args.firmware_identity, "configFingerprint": config_fingerprint, "fixtureSha256": args.fixture_sha256}
         result = PhysicalEvidenceClient(args.base_url, args.device_id, __import__("os").environ.get("TBOT_DEVICE_MINT_SECRET", "")).capture(journey_id=str(plan["journeyId"]), enrollment=enrollment, candidate_identity=identity, on_ready=lambda journey: print("READY journey_id=" + journey, flush=True))
-        compose_physical_report(raw_server_log=args.server_log, server_report=server_report, candidate_soak_report=candidate_report, candidate_identity=identity, device_id=args.device_id, client_id=args.client_id, output=args.report)
+        compose_physical_report(raw_server_log=args.server_log, journey_id=str(result.get("journeyId") or plan["journeyId"]), candidate_soak_report=candidate_report, candidate_identity=identity, device_id=args.device_id, client_id=args.client_id, output=args.report, bounded_log_output=args.report.with_name("server-window.log"), server_report_output=args.report.with_name("server-report.json"))
         return 0
     except Exception:
         return 1
