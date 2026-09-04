@@ -132,21 +132,24 @@ def test_reopen_rejects_unrelated_repository_change(tmp_path: Path, monkeypatch)
 
     import scripts.google_live_trusted_git as trusted_git
 
-    monkeypatch.setattr(
-        trusted_git, "trusted_git_session", lambda: contextlib.nullcontext()
-    )
-    monkeypatch.setattr(
-        trusted_git,
-        "git_output",
-        lambda _root, *args: (
+    calls = []
+
+    def git_output(_root, *args):
+        calls.append(args)
+        return (
             (IDENTITY["gitSha"] + "\n").encode()
             if args == ("rev-parse", "HEAD")
             else b"?? unrelated.txt\0"
-        ),
+        )
+
+    monkeypatch.setattr(
+        trusted_git, "trusted_git_session", lambda: contextlib.nullcontext()
     )
+    monkeypatch.setattr(trusted_git, "git_output", git_output)
 
     with pytest.raises(EvidenceStateError, match="repository changed"):
         EvidenceRunner.open(runner.root)
+    assert "--no-renames" in calls[-1]
 
 
 def test_state_write_is_atomic_when_replace_fails(tmp_path: Path, monkeypatch):

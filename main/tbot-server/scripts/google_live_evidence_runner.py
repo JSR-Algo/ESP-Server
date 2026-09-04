@@ -149,7 +149,14 @@ class EvidenceRunner:
                 raise ValueError("effective config or fixture identity mismatch")
             with trusted_git_session():
                 head = git_output(repository_root, "rev-parse", "HEAD").decode().strip()
-                status = git_output(repository_root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+                status = git_output(
+                    repository_root,
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                    "--no-renames",
+                )
             if head != identity["gitSha"]:
                 raise ValueError("candidate git SHA does not match repository HEAD")
             if status:
@@ -179,7 +186,14 @@ class EvidenceRunner:
             run_root = Path(root).resolve(strict=True)
             with trusted_git_session():
                 head = git_output(repo, "rev-parse", "HEAD").decode().strip()
-                status = git_output(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+                status = git_output(
+                    repo,
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                    "--no-renames",
+                )
             if head != state["candidateIdentity"]["gitSha"]:
                 raise EvidenceStateError("candidate repository changed")
             allowed_prefix = None
