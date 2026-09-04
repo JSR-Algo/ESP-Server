@@ -1,4 +1,6 @@
 import json
+import contextlib
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -101,6 +103,50 @@ def test_invalid_run_id_and_evidence_root_alias_fail_closed(tmp_path: Path):
     alias.symlink_to(tmp_path, target_is_directory=True)
     with pytest.raises(ValueError):
         EvidenceRunner.initialize(alias, run_id="20260904T010205Z", identity=IDENTITY, verify_repository=False)
+
+
+def test_production_init_binds_effective_config_and_fixture(tmp_path: Path):
+    config = tmp_path / "config.json"
+    fixture = tmp_path / "fixture.wav"
+    config.write_text("{}\n")
+    fixture.write_bytes(b"fixture")
+    identity = dict(IDENTITY)
+    identity["fixtureSha256"] = hashlib.sha256(fixture.read_bytes()).hexdigest()
+
+    with pytest.raises(ValueError, match="identity mismatch"):
+        EvidenceRunner.initialize(
+            tmp_path,
+            run_id="20260904T010205Z",
+            identity=identity,
+            effective_config_json=config,
+            fixture_path=fixture,
+        )
+
+
+def test_reopen_rejects_unrelated_repository_change(tmp_path: Path, monkeypatch):
+    runner = _runner(tmp_path)
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    runner._state["repositoryRoot"] = str(repository)
+    runner._save()
+
+    import scripts.google_live_trusted_git as trusted_git
+
+    monkeypatch.setattr(
+        trusted_git, "trusted_git_session", lambda: contextlib.nullcontext()
+    )
+    monkeypatch.setattr(
+        trusted_git,
+        "git_output",
+        lambda _root, *args: (
+            (IDENTITY["gitSha"] + "\n").encode()
+            if args == ("rev-parse", "HEAD")
+            else b"?? unrelated.txt\0"
+        ),
+    )
+
+    with pytest.raises(EvidenceStateError, match="repository changed"):
+        EvidenceRunner.open(runner.root)
 
 
 def test_state_write_is_atomic_when_replace_fails(tmp_path: Path, monkeypatch):

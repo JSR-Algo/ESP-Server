@@ -110,7 +110,7 @@ class EvidenceRunner:
         self.operator_config = dict(operator_config or {})
 
     @classmethod
-    def initialize(cls, evidence_root: Path, *, run_id: str, identity: dict[str, str], operator_config: dict[str, str] | None = None, verify_repository: bool = True, repository_root: Path | None = None) -> "EvidenceRunner":
+    def initialize(cls, evidence_root: Path, *, run_id: str, identity: dict[str, str], operator_config: dict[str, str] | None = None, verify_repository: bool = True, repository_root: Path | None = None, effective_config_json: Path | None = None, fixture_path: Path | None = None) -> "EvidenceRunner":
         evidence_root = Path(evidence_root)
         if evidence_root.is_symlink() or not evidence_root.is_absolute():
             raise ValueError("evidence root must be an absolute non-alias path")
@@ -130,6 +130,23 @@ class EvidenceRunner:
         if verify_repository:
             from scripts.google_live_trusted_git import git_output, trusted_git_session
             repository_root = Path(__file__).resolve().parents[3] if repository_root is None else repository_root
+            if effective_config_json is None or fixture_path is None:
+                raise ValueError("effective config and fixture are required")
+            try:
+                config = json.loads(Path(effective_config_json).read_text(encoding="utf-8"))
+                fixture = Path(fixture_path).read_bytes()
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise ValueError("effective config or fixture is invalid") from exc
+            from scripts.google_live_reliability import build_candidate_identity
+            bound_identity = build_candidate_identity(
+                git_sha=identity["gitSha"],
+                image_digest=identity["imageDigest"],
+                firmware_identity=identity["firmwareIdentity"],
+                config=config,
+                fixture_sha256=hashlib.sha256(fixture).hexdigest(),
+            )
+            if bound_identity != identity:
+                raise ValueError("effective config or fixture identity mismatch")
             with trusted_git_session():
                 head = git_output(repository_root, "rev-parse", "HEAD").decode().strip()
                 status = git_output(repository_root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
@@ -145,7 +162,7 @@ class EvidenceRunner:
             (root / directory).mkdir(mode=0o700)
         closure_source = Path(__file__).resolve().parents[1] / "tests/fixtures/google_live_runtime_closure_manifest.json"
         _atomic(root / "runtime-closure.json", closure_source.read_bytes())
-        state = {"schemaVersion": "google-live-evidence-run.v1", "unified": True, "runId": run_id, "nextCommandIndex": 0, "candidateIdentity": dict(identity), "createdAt": _now(), "layers": {name: {"state": "PENDING", "startedAt": None, "endedAt": None, "firstFailure": None, "artifactSha256": {}} for name in LAYERS}}
+        state = {"schemaVersion": "google-live-evidence-run.v1", "unified": True, "runId": run_id, "nextCommandIndex": 0, "candidateIdentity": dict(identity), "repositoryRoot": str(Path(repository_root).resolve()) if verify_repository else None, "createdAt": _now(), "layers": {name: {"state": "PENDING", "startedAt": None, "endedAt": None, "firstFailure": None, "artifactSha256": {}} for name in LAYERS}}
         _atomic(root / "run-state.json", (json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n").encode())
         return cls(root, run_id, identity, state, operator_config)
 
@@ -155,6 +172,24 @@ class EvidenceRunner:
         failed = any(item["state"] == "FAIL" or (item["state"] == "SKIPPED" and name != "websocket_e2e") for name, item in state["layers"].items())
         if resume or failed:
             raise EvidenceStateError("failed evidence runs cannot be resumed; create a new RUN_ID")
+        repository = state.get("repositoryRoot")
+        if repository:
+            from scripts.google_live_trusted_git import git_output, trusted_git_session
+            repo = Path(repository).resolve(strict=True)
+            run_root = Path(root).resolve(strict=True)
+            with trusted_git_session():
+                head = git_output(repo, "rev-parse", "HEAD").decode().strip()
+                status = git_output(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+            if head != state["candidateIdentity"]["gitSha"]:
+                raise EvidenceStateError("candidate repository changed")
+            allowed_prefix = None
+            try:
+                allowed_prefix = run_root.relative_to(repo).as_posix().rstrip("/") + "/"
+            except ValueError:
+                pass
+            entries = [item for item in status.decode().split("\0") if item]
+            if any(allowed_prefix is None or not item[3:].startswith(allowed_prefix) for item in entries):
+                raise EvidenceStateError("candidate repository changed")
         return cls(Path(root), state["runId"], state["candidateIdentity"], state)
 
     def _save(self) -> None:
@@ -520,6 +555,8 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument("evidence_root", type=Path)
     init.add_argument("--run-id", required=True)
     init.add_argument("--identity-json", type=Path, required=True)
+    init.add_argument("--effective-config-json", type=Path, required=True)
+    init.add_argument("--fixture", type=Path, required=True)
     status = sub.add_parser("status")
     status.add_argument("run_root", type=Path)
     cli_commands = {
@@ -546,7 +583,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "init":
         identity = json.loads(args.identity_json.read_text(encoding="utf-8"))
-        runner = EvidenceRunner.initialize(args.evidence_root, run_id=args.run_id, identity=identity)
+        runner = EvidenceRunner.initialize(
+            args.evidence_root,
+            run_id=args.run_id,
+            identity=identity,
+            effective_config_json=args.effective_config_json,
+            fixture_path=args.fixture,
+        )
         print(json.dumps(runner._state, sort_keys=True))
         return 0
     if args.command == "status":
