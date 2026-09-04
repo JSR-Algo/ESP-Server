@@ -516,7 +516,7 @@ test('replaceWithCopy leaves copy failures recoverable by the next rerun', async
   assert.notEqual((await stat(destination)).ino, (await stat(source)).ino);
 });
 
-test('Task 4 assignment phases recreate only the backend and preserve PostgreSQL state', () => {
+test('Task 4 assignment phases preserve PostgreSQL state while refreshing candidate-bound services', () => {
   for (const phase of ['new', 'rollback']) {
     const compose = readFileSync(
       resolve(__dirname, `../../../docs/docker/task4-admin-assignment/docker-compose.${phase}.yml`),
@@ -585,6 +585,11 @@ test('Task 4 release commands run candidate-bound NEW and ROLLBACK orchestration
   assert.doesNotMatch(source, /run\('docker', \[\.\.\.compose/);
   assert.match(source, /\['new', 'rollback'\]/);
   assert.match(source, /docker-compose\.\$\{phase\}\.yml/);
+  assert.match(
+    source,
+    /composeRun\('up', '-d', '--wait', '--no-deps', '--force-recreate', 'backend', 'web'\)/,
+    'ROLLBACK must wait for refreshed candidate-bound services to become healthy',
+  );
   assert.match(source, /bootstrap\.cjs/);
   assert.match(source, /playwright\.assignment-rollback\.config\.js/);
   assert.match(source, /const mediaHostname = 'task4-media\.localhost'/);

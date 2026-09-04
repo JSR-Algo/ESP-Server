@@ -131,7 +131,7 @@ if (phase === 'new') {
   composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', 'rollout-v9');
   composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', 'cancel-v9-assignment');
 } else {
-  composeRun('up', '-d', '--no-deps', '--force-recreate', 'backend');
+  composeRun('up', '-d', '--wait', '--no-deps', '--force-recreate', 'backend', 'web');
   composeRun('up', '-d', '--no-deps', 'derivative-media');
   composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', 'verify-new');
 }
