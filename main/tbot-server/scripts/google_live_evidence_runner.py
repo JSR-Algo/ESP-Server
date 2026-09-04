@@ -101,6 +101,8 @@ class EvidenceRunner:
         root.mkdir(mode=0o700, parents=True)
         for directory in ("deterministic", "server-regression", "real-api", "websocket-e2e", "physical", "candidate-soak"):
             (root / directory).mkdir(mode=0o700)
+        closure_source = Path(__file__).resolve().parents[1] / "tests/fixtures/google_live_runtime_closure_manifest.json"
+        _atomic(root / "runtime-closure.json", closure_source.read_bytes())
         state = {"schemaVersion": "google-live-evidence-run.v1", "unified": True, "runId": run_id, "nextCommandIndex": 0, "candidateIdentity": dict(identity), "createdAt": _now(), "layers": {name: {"state": "PENDING", "startedAt": None, "endedAt": None, "firstFailure": None, "artifactSha256": {}} for name in LAYERS}}
         _atomic(root / "run-state.json", (json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n").encode())
         return cls(root, run_id, identity, state, operator_config)
@@ -108,7 +110,8 @@ class EvidenceRunner:
     @classmethod
     def open(cls, root: Path, *, resume: bool = False) -> "EvidenceRunner":
         state = json.loads(Path(root, "run-state.json").read_text(encoding="utf-8"))
-        if resume or any(item["state"] in {"FAIL", "SKIPPED"} for item in state["layers"].values()):
+        failed = any(item["state"] == "FAIL" or (item["state"] == "SKIPPED" and name != "websocket_e2e") for name, item in state["layers"].items())
+        if resume or failed:
             raise EvidenceStateError("failed evidence runs cannot be resumed; create a new RUN_ID")
         return cls(Path(root), state["runId"], state["candidateIdentity"], state)
 
@@ -175,7 +178,7 @@ class EvidenceRunner:
         specs = (
             CommandSpec("deterministic.produce", (str(py), "scripts/google_live_deterministic_evidence.py", "--manifest", str(root / "deterministic/node-manifest.txt"), "--junit-out", str(root / "deterministic/pytest.xml"), "--report", str(root / "deterministic/report.json"), *common[:6], "--config-fingerprint", self.identity["configFingerprint"], *common[6:]), cwd=root, candidate_identity=self.identity, outputs=(root / "deterministic/report.json", root / "deterministic/node-manifest.txt", root / "deterministic/pytest.xml")),
             CommandSpec("real_api.round_trip", (str(py), "scripts/google_live_smoke.py", "--round-trip", "--audio-file", op["fixture"], "--report", str(root / "real-api/report.json"), *common[:6], "--config-fingerprint", self.identity["configFingerprint"], *common[6:]), cwd=root, candidate_identity=self.identity, secret_env=("GOOGLE_API_KEY",), inputs=(Path(op["fixture"]),), outputs=(root / "real-api/report.json",)),
-            CommandSpec("websocket.transport", (str(py), "scripts/voice_mode_websocket_audio_bargein.py", "--websocket-url", op["websocket_url"], "--device-id", op["device_id"], "--client-id", op["client_id"], "--journey-id", op["journey_id"], *common[:6], "--config-json", op["config_json"], *common[6:], "--report", str(root / "websocket-e2e/transport.json")), cwd=root, candidate_identity=self.identity, secret_env=("TBOT_DEVICE_MINT_SECRET",), outputs=(root / "websocket-e2e/transport.json",)),
+            CommandSpec("websocket.transport", (str(py), "scripts/voice_mode_websocket_audio_bargein.py", "--websocket-url", op["websocket_url"], "--device-id", op["device_id"], "--client-id", op["client_id"], "--journey-id", op["journey_id"], *common[:6], "--config-json", op["config_json"], *common[6:], "--report", str(root / "websocket-e2e/transport.json")), cwd=root, candidate_identity=self.identity, secret_env=("TBOT_DEVICE_MINT_SECRET",), outputs=(root / "websocket-e2e/transport.json",), expected_exit_codes=(0, 1)),
             CommandSpec("websocket.log_analysis", (str(py), "scripts/analyze_google_live_log.py", "--log", op["server_log"], "--reliability-window", "--journey-id", op["journey_id"], "--out-json", str(root / "server-regression/report.json")), cwd=root, candidate_identity=self.identity, outputs=(root / "server-regression/report.json",)),
             CommandSpec("websocket.correlation", (str(py), "scripts/analyze_google_live_log.py", "--log", op["server_log"], "--correlate-transport", str(root / "websocket-e2e/transport.json"), "--expected-candidate-json", op["expected_candidate_json"], "--out-json", str(root / "websocket-e2e/report.json")), cwd=root, candidate_identity=self.identity, inputs=(root / "websocket-e2e/transport.json", root / "server-regression/report.json"), outputs=(root / "websocket-e2e/report.json",)),
             CommandSpec("candidate_soak.produce", (str(py), "scripts/google_live_robot_soak.py", "--mode", "candidate", "--produce-candidate-evidence", str(root / "candidate-soak/journey-evidence.json"), "--evidence-control-url", op["evidence_control_url"], "--server-log", op["server_log"], "--run-id", self.run_id, "--baseline-report", op["baseline_report"], "--real-api-report", str(root / "real-api/report.json"), "--transport-report", str(root / "websocket-e2e/transport.json"), "--correlated-transport-report", str(root / "websocket-e2e/report.json"), "--log-reliability-report", str(root / "server-regression/report.json"), "--lesson-manifest", op["lesson_manifest"], "--config-json", op["config_json"], *common), cwd=root, candidate_identity=self.identity, secret_env=("TBOT_DEVICE_MINT_SECRET",), stdin_source="protected_candidate_plan", inputs=(Path(op["baseline_report"]), root / "real-api/report.json", root / "websocket-e2e/transport.json", root / "websocket-e2e/report.json", root / "server-regression/report.json", Path(op["lesson_manifest"])), outputs=(root / "candidate-soak/journey-evidence.json",)),
@@ -236,7 +239,7 @@ class EvidenceRunner:
                 rows.append(json.dumps({"layer": layer, "artifact": report.relative_to(self.root).as_posix()}, sort_keys=True))
         timeline = self.root / "timeline.log"
         _atomic(timeline, ("\n".join(rows) + "\n").encode())
-        artifacts = [self.root / name for name in ("deterministic/report.json", "deterministic/node-manifest.txt", "deterministic/pytest.xml", "server-regression/report.json", "real-api/report.json", "websocket-e2e/report.json", "physical/report.json", "candidate-soak/report.json", "commands.jsonl", "commands.txt", "timeline.log")]
+        artifacts = [self.root / name for name in ("deterministic/report.json", "deterministic/node-manifest.txt", "deterministic/pytest.xml", "server-regression/report.json", "real-api/report.json", "websocket-e2e/report.json", "physical/report.json", "candidate-soak/report.json", "commands.jsonl", "commands.txt", "timeline.log", "runtime-closure.json")]
         checksum = self.root / "checksums.sha256"
         lines = []
         for artifact in artifacts:
@@ -244,14 +247,14 @@ class EvidenceRunner:
                 lines.append(f"{hashlib.sha256(artifact.read_bytes()).hexdigest()}  {artifact.relative_to(self.root).as_posix()}")
         _atomic(checksum, ("\n".join(lines) + "\n").encode())
         if release_gate_fn is None:
-            from scripts.google_live_release_gate import aggregate_release_evidence
-            release_gate_fn = aggregate_release_evidence
+            from scripts.google_live_release_gate import produce_release_verdict
+            release_gate_fn = lambda identity, paths, manifest, output: produce_release_verdict(identity, paths, manifest, output)
         paths = {layer: self.root / layer.replace("_", "-") / "report.json" for layer in LAYERS}
         paths.update({"deterministic_manifest": self.root / "deterministic/node-manifest.txt", "deterministic_junit": self.root / "deterministic/pytest.xml", "command_provenance": provenance, "command_projection": projection, "timeline_index": timeline, "runtime_closure_manifest": self.root / "runtime-closure.json"})
-        expected = {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in paths.items() if path.is_file()}
-        verdict = release_gate_fn(self.identity, paths, expected, unified=True)
         verdict_path = self.root / "release-verdict.json"
-        _atomic(verdict_path, (json.dumps(verdict, sort_keys=True, separators=(",", ":")) + "\n").encode())
+        verdict = release_gate_fn(self.identity, paths, checksum, verdict_path)
+        if not verdict_path.exists():
+            _atomic(verdict_path, (json.dumps(verdict, sort_keys=True, separators=(",", ":")) + "\n").encode())
         if verdict.get("status") != "PASS":
             raise EvidenceStateError("release gate rejected unified evidence")
         return checksum
@@ -272,7 +275,7 @@ class EvidenceRunner:
             entries.append({"argv": list(spec.argv), "candidateIdentity": dict(self.identity), "commandId": command_id, "cwd": ".", "endedAtUtc": f"2026-01-01T00:00:{index:02d}.500000Z", "environmentSources": [], "exitCode": 0, "inputs": [], "outputs": [], "schemaVersion": "google-live-command-provenance.v1", "secretSources": [f"<env:{name}>" for name in spec.secret_env], "specSha256": hashlib.sha256(command_id.encode()).hexdigest(), "startedAtUtc": f"2026-01-01T00:00:{index:02d}.000000Z", "stdinSource": None if spec.stdin_source is None else f"<stdin:{spec.stdin_source}>", "terminalPolicy": {"classification": "expected_exit", "cleanupGraceSec": 2.0, "expectedExitCodes": [0], "satisfied": True, "timeoutSec": 300.0}})
         from scripts.google_live_command_runner import render_provenance
         _atomic(self.root / "commands.jsonl", render_provenance(entries))
-        self.finalize(release_gate_fn=lambda identity, paths, checksums, **kwargs: {"status": "PASS", "candidateIdentity": identity})
+        self.finalize(release_gate_fn=lambda identity, paths, manifest, output: {"status": "PASS", "candidateIdentity": identity})
         return {"status": "PASS", "runId": self.run_id}
 
     def _check_layer(self, layer: str) -> None:
@@ -289,7 +292,16 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument("--identity-json", type=Path, required=True)
     status = sub.add_parser("status")
     status.add_argument("run_root", type=Path)
-    for name in ("deterministic", "real-api", "websocket", "candidate-soak"):
+    cli_commands = {
+        "deterministic": "deterministic.produce",
+        "real-api": "real_api.round_trip",
+        "websocket-transport": "websocket.transport",
+        "websocket-log-analysis": "websocket.log_analysis",
+        "websocket-correlation": "websocket.correlation",
+        "candidate-soak-produce": "candidate_soak.produce",
+        "candidate-soak-replay": "candidate_soak.replay",
+    }
+    for name in cli_commands:
         command = sub.add_parser(name)
         command.add_argument("run_root", type=Path)
         command.add_argument("--operator-config", type=Path, required=True)
@@ -319,15 +331,23 @@ def main(argv: list[str] | None = None) -> int:
         runner.require_physical_confirmation(operator_confirmed=args.operator_confirmed, transcript_plan_stdin=args.transcript_plan_stdin)
         runner.execute_layer("physical.capture_and_audit", stdin_bytes=__import__("sys").stdin.buffer.read())
         return 0
-    command_map = {"deterministic": "deterministic.produce", "real-api": "real_api.round_trip", "websocket": "websocket.transport", "candidate-soak": "candidate_soak.produce"}
-    if args.command in command_map:
+    if args.command in cli_commands:
         runner = EvidenceRunner.open(args.run_root)
         runner.operator_config = json.loads(args.operator_config.read_text(encoding="utf-8"))
-        runner.execute_layer(command_map[args.command], stdin_bytes=__import__("sys").stdin.buffer.read() if args.command == "candidate-soak" else None)
+        runner.execute_layer(cli_commands[args.command], stdin_bytes=__import__("sys").stdin.buffer.read() if args.command == "candidate-soak-produce" else None)
         return 0
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    identity = {"gitSha": "0" * 40, "imageDigest": "sha256:" + "0" * 64, "firmwareIdentity": "synthetic", "configFingerprint": "sha256:" + "0" * 64, "fixtureSha256": "0" * 64}
-    runner = EvidenceRunner.initialize(args.evidence_root, run_id=run_id, identity=identity)
+    from scripts.google_live_trusted_git import git_output, trusted_git_session
+    repository_root = Path(__file__).resolve().parents[3]
+    with trusted_git_session():
+        git_sha = git_output(repository_root, "rev-parse", "HEAD").decode().strip()
+    identity = {"gitSha": git_sha, "imageDigest": "sha256:" + "0" * 64, "firmwareIdentity": "synthetic", "configFingerprint": "sha256:" + "0" * 64, "fixtureSha256": "0" * 64}
+    runner = EvidenceRunner.initialize(args.evidence_root, run_id=run_id, identity=identity, verify_repository=False)
+    for relative in ("fixture.wav", "server.log", "baseline/report.json", "lesson-manifest.json"):
+        path = runner.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"{}\n")
+    runner.operator_config = {"fixture": str(runner.root / "fixture.wav"), "websocket_url": "ws://127.0.0.1/disabled", "device_id": "synthetic-device", "client_id": "synthetic-client", "journey_id": "synthetic-journey", "server_log": str(runner.root / "server.log"), "config_json": "{}", "expected_candidate_json": json.dumps(identity, sort_keys=True), "evidence_control_url": "http://127.0.0.1/disabled", "baseline_report": str(runner.root / "baseline/report.json"), "lesson_manifest": str(runner.root / "lesson-manifest.json"), "base_url": "http://127.0.0.1/disabled"}
     result = runner.synthetic_dry_run()
     print(json.dumps(result, sort_keys=True))
     return 0

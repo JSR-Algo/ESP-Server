@@ -210,7 +210,7 @@ def test_finalize_refuses_nonpassing_layer_and_hashes_closed_artifacts(tmp_path:
     (runner.root / "commands.jsonl").write_text("")
     (runner.root / "commands.txt").write_text("")
     checksum = runner.finalize(
-        release_gate_fn=lambda identity, paths, checksums, **kwargs: {
+        release_gate_fn=lambda identity, paths, checksums, output: {
             "status": "PASS",
             "candidateIdentity": identity,
         }
