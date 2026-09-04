@@ -36,6 +36,7 @@ from scripts.google_live_deterministic_evidence import (
 )
 from scripts.google_live_command_runner import (
     RUNTIME_CLOSURE_MANIFEST_GIT_PATH,
+    _MAX_CLOSURE_FILE_BYTES,
     _load_runtime_closure_manifest,
     _read_committed_pair_at,
     parse_provenance,
@@ -386,7 +387,9 @@ def _canonical_runtime_closure(manifest: Mapping[str, Any]) -> bytes:
     return (json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
 
 
-def _read_runtime_distribution_file(root: Path, relative: str) -> tuple[bytes, os.stat_result]:
+def _read_runtime_distribution_file(
+    root: Path, relative: str, expected_size: int
+) -> tuple[bytes, os.stat_result]:
     parts = relative.split("/")
     descriptors: list[int] = []
     try:
@@ -409,8 +412,10 @@ def _read_runtime_distribution_file(root: Path, relative: str) -> tuple[bytes, o
         )
         descriptors.append(file_descriptor)
         before = os.fstat(file_descriptor)
+        if before.st_size != expected_size or before.st_size > _MAX_CLOSURE_FILE_BYTES:
+            raise ValueError("runtime closure distribution size changed")
         chunks: list[bytes] = []
-        remaining = before.st_size + 1
+        remaining = expected_size + 1
         while remaining:
             chunk = os.read(file_descriptor, min(1024 * 1024, remaining))
             if not chunk:
@@ -452,7 +457,9 @@ def _validate_runtime_closure_distributions(
     for distribution in manifest.get("distributions", []):
         root = Path(distribution["root"])
         for item in distribution["files"]:
-            data, info = _read_runtime_distribution_file(root, item["path"])
+            data, info = _read_runtime_distribution_file(
+                root, item["path"], item["size"]
+            )
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise ValueError("runtime closure distribution is not a regular file")
             if info.st_size != item["size"]:
@@ -1242,6 +1249,7 @@ def aggregate_release_evidence(
     expected_checksums: Mapping[str, str],
     *,
     input_contents: Mapping[str, bytes] | None = None,
+    runtime_closure_distribution_snapshot: tuple[tuple[int, ...], ...] | None = None,
 ) -> dict[str, Any]:
     """Read and validate all required reports without executing any journey."""
     failures = []
@@ -1317,6 +1325,7 @@ def aggregate_release_evidence(
                 break
     deterministic = loaded_reports.get("deterministic")
     coverage = deterministic.get("coverageProof") if isinstance(deterministic, Mapping) else None
+    observed_distribution_snapshot = None
     try:
         trusted_manifest_path = _trusted_manifest_path()
         trusted_manifest_content = _load_trusted_deterministic_manifest(
@@ -1335,7 +1344,9 @@ def aggregate_release_evidence(
         trusted_runtime_closure = _load_runtime_closure_manifest(
             str(expected_identity.get("gitSha", ""))
         )
-        _validate_runtime_closure_distributions(trusted_runtime_closure)
+        observed_distribution_snapshot = _validate_runtime_closure_distributions(
+            trusted_runtime_closure, runtime_closure_distribution_snapshot
+        )
         if (
             trusted_runtime_closure.get("platform") != APPROVED_RUNTIME_PLATFORM
             or trusted_runtime_closure["runtime"]["pythonMajorMinor"]
@@ -1609,7 +1620,9 @@ def aggregate_release_evidence(
         revalidated_runtime_closure = _load_runtime_closure_manifest(
             str(expected_identity.get("gitSha", ""))
         )
-        _validate_runtime_closure_distributions(revalidated_runtime_closure)
+        _validate_runtime_closure_distributions(
+            revalidated_runtime_closure, observed_distribution_snapshot
+        )
         if not hmac.compare_digest(
             _canonical_runtime_closure(revalidated_runtime_closure),
             trusted_runtime_closure_content,
@@ -1729,6 +1742,16 @@ def _produce_release_verdict(
     if _output_aliases_evidence(output_path, evidence_paths, Path(checksum_path)):
         raise ValueError("output aliases release evidence")
 
+    runtime_closure_distribution_snapshot = None
+    try:
+        runtime_closure = _load_runtime_closure_manifest(
+            str(expected_identity.get("gitSha", ""))
+        )
+        runtime_closure_distribution_snapshot = _validate_runtime_closure_distributions(
+            runtime_closure
+        )
+    except (OSError, RuntimeError, ValueError):
+        pass
     bindings = {"checksums": _read_bound_release_input(checksum_path)}
     bindings.update(
         {name: _read_bound_release_input(path) for name, path in layer_paths.items()}
@@ -1770,9 +1793,18 @@ def _produce_release_verdict(
         layer_paths,
         checksums,
         input_contents=contents,
+        runtime_closure_distribution_snapshot=runtime_closure_distribution_snapshot,
     )
     if after_inputs_parsed is not None:
         after_inputs_parsed()
+    if verdict["status"] == "PASS":
+        try:
+            _validate_runtime_closure_distributions(
+                _load_runtime_closure_manifest(str(expected_identity.get("gitSha", ""))),
+                runtime_closure_distribution_snapshot,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise RuntimeError("release evidence changed") from exc
     _require_all_release_inputs_unchanged(bindings)
     rendered = json.dumps(verdict, indent=2, sort_keys=True) + "\n"
     output_parent_identity = snapshot_output_parent(output_path)
@@ -1784,7 +1816,8 @@ def _produce_release_verdict(
         if verdict["status"] == "PASS":
             try:
                 _validate_runtime_closure_distributions(
-                    _load_runtime_closure_manifest(str(expected_identity.get("gitSha", "")))
+                    _load_runtime_closure_manifest(str(expected_identity.get("gitSha", ""))),
+                    runtime_closure_distribution_snapshot,
                 )
             except (OSError, RuntimeError, ValueError) as exc:
                 raise RuntimeError("release evidence changed") from exc
@@ -1801,7 +1834,8 @@ def _produce_release_verdict(
         if verdict["status"] == "PASS":
             try:
                 _validate_runtime_closure_distributions(
-                    _load_runtime_closure_manifest(str(expected_identity.get("gitSha", "")))
+                    _load_runtime_closure_manifest(str(expected_identity.get("gitSha", ""))),
+                    runtime_closure_distribution_snapshot,
                 )
             except (OSError, RuntimeError, ValueError) as exc:
                 raise RuntimeError("release evidence changed") from exc

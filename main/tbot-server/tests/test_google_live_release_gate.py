@@ -343,6 +343,92 @@ def test_runtime_closure_distribution_file_is_revalidated(
         os.link(package_file, package_root / "alias.py")
     with pytest.raises(ValueError, match="distribution"):
         release_gate._validate_runtime_closure_distributions(manifest, snapshot)
+
+
+def test_runtime_closure_rejects_oversized_replacement_before_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package_root = tmp_path / "site-packages"
+    package_root.mkdir()
+    package_file = package_root / "example.py"
+    package_file.write_bytes(b"trusted")
+    manifest = {
+        "distributions": [{
+            "fileCount": 1, "files": [{"path": "example.py", "sha256": hashlib.sha256(b"trusted").hexdigest(), "size": 7}],
+            "importRoots": ["example"], "name": "example", "root": str(package_root), "totalBytes": 7, "version": "1",
+        }],
+    }
+    package_file.write_bytes(b"x" * (1024 * 1024))
+    real_read = os.read
+
+    def bounded_read(descriptor: int, size: int) -> bytes:
+        assert size <= 8
+        return real_read(descriptor, size)
+
+    monkeypatch.setattr(os, "read", bounded_read)
+    with pytest.raises(ValueError, match="distribution size"):
+        release_gate._validate_runtime_closure_distributions(manifest)
+
+
+@pytest.mark.parametrize(
+    ("boundary", "mutation_call"),
+    [("initial_recheck", 2), ("post_provenance", 3), ("after_inputs_parsed", None),
+     ("pre_publish", None), ("post_publish", None)],
+)
+def test_release_rejects_same_byte_distribution_identity_replacement_at_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+    mutation_call: int | None,
+) -> None:
+    package_root = tmp_path / "site-packages"
+    package_root.mkdir()
+    package_file = package_root / "private_dependency.py"
+    trusted = b"trusted-dependency"
+    package_file.write_bytes(trusted)
+    closure = copy.deepcopy(RUNTIME_CLOSURE)
+    closure["distributions"] = [{
+        "fileCount": 1,
+        "files": [{"path": package_file.name, "sha256": hashlib.sha256(trusted).hexdigest(), "size": len(trusted)}],
+        "importRoots": ["private_dependency"],
+        "name": "private-dependency",
+        "root": str(package_root),
+        "totalBytes": len(trusted),
+        "version": "1",
+    }]
+    closure_content = (json.dumps(closure, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    closure_digest = hashlib.sha256(closure_content).hexdigest()
+    monkeypatch.setattr(sys.modules[__name__], "RUNTIME_CLOSURE_MANIFEST", closure_content)
+    monkeypatch.setattr(sys.modules[__name__], "RUNTIME_CLOSURE_SHA256", closure_digest)
+    paths, _, checksum_manifest = _write_evidence(tmp_path / "evidence")
+    calls = 0
+
+    def replace_identity() -> None:
+        replacement = package_root / "replacement.py"
+        replacement.write_bytes(trusted)
+        os.replace(replacement, package_file)
+
+    def load_closure(_sha: str) -> dict:
+        nonlocal calls
+        calls += 1
+        if calls == mutation_call:
+            replace_identity()
+        return copy.deepcopy(closure)
+
+    monkeypatch.setattr(release_gate, "_load_runtime_closure_manifest", load_closure)
+    out = tmp_path / "release.json"
+    hooks = {} if mutation_call is not None else {boundary: replace_identity}
+    try:
+        verdict = release_gate.produce_release_verdict(
+            IDENTITY, paths, checksum_manifest, out, **hooks
+        )
+    except RuntimeError:
+        verdict = None
+
+    if verdict is not None:
+        assert verdict["status"] == "FAIL"
+        assert "private_dependency" not in json.dumps(verdict)
+    assert not out.exists() or json.loads(out.read_text())["status"] == "FAIL"
 def _reports(test_count: int = len(CANONICAL_NODES)) -> dict[str, dict]:
     physical_audit = _PHYSICAL_CASE._candidate_audit(
         _PHYSICAL_CASE._candidate_physical_log()
