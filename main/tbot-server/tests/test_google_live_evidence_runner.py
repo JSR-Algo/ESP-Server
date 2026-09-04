@@ -30,6 +30,8 @@ def _runner(tmp_path: Path, run_id: str = "20260904T010203Z") -> EvidenceRunner:
         path = runner.root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"{}\n")
+    candidate_identity = runner.root / "candidate-identity.json"
+    candidate_identity.write_text(json.dumps(IDENTITY, sort_keys=True) + "\n")
     runner.operator_config = {
         "fixture": str(runner.root / "fixture.wav"),
         "websocket_url": "ws://127.0.0.1/ws",
@@ -38,7 +40,7 @@ def _runner(tmp_path: Path, run_id: str = "20260904T010203Z") -> EvidenceRunner:
         "journey_id": "journey-1",
         "server_log": str(runner.root / "server.log"),
         "config_json": "{}",
-        "expected_candidate_json": json.dumps(IDENTITY, sort_keys=True),
+        "expected_candidate_json": str(candidate_identity),
         "evidence_control_url": "http://127.0.0.1/internal",
         "baseline_report": str(runner.root / "baseline/report.json"),
         "lesson_manifest": str(runner.root / "lesson-manifest.json"),

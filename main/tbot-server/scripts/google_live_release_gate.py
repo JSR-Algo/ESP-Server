@@ -330,6 +330,7 @@ def _trusted_command_specs(identity: Mapping[str, Any]) -> dict[str, TrustedComm
                     "server.log",
                     "websocket-e2e/transport.json",
                     "websocket-e2e/server-report.json",
+                    "candidate-identity.json",
                 ),
                 "candidate_soak.produce": (
                     "baseline/report.json",
