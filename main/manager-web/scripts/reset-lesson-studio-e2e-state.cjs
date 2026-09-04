@@ -84,6 +84,31 @@ function resetLessonStudioE2EState(options = resetOptionsFromEnvironment()) {
   }
 }
 
+function preflightLessonStudioE2EStack({ env = process.env, run = (command, args) => {
+  const result = spawnSync(command, args, { encoding: 'utf8', env });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(result.stderr || `command failed: ${command}`);
+  return result.stdout.trim();
+} } = {}) {
+  const compose = composeExecutableFromEnvironment(env, { requireExplicit: env.CI === '1' || env.CI === 'true' });
+  const project = (env.COMPOSE_PROJECT_NAME || env.LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME || 'tbot-ls-e2e');
+  const file = DEFAULT_COMPOSE_FILE;
+  const services = ['redis', 'postgres', 'mysql', 'backend', 'seed-postgres', 'web', 'seed-mysql'];
+  for (const service of services) {
+    const container = run(compose, ['-p', project, '-f', file, 'ps', '-q', service]);
+    if (!container) throw new Error(`required ${service} service is not running`);
+    const inspect = run(env.TBOT_DOCKER_EXECUTABLE || 'docker', [
+      'inspect', '--format={{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}} {{.Image}}', container,
+    ]);
+    const [health, imageId] = inspect.split(/\s+/, 2);
+    if (health !== 'healthy') throw new Error(`required ${service} service is not healthy`);
+    if (service === 'backend' || service === 'web') {
+      const expected = service === 'backend' ? env.TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID : env.TBOT_LESSON_STUDIO_WEB_IMAGE_ID;
+      if (!expected || imageId !== expected) throw new Error(`started ${service} container image ID mismatch`);
+    }
+  }
+}
+
 if (require.main === module) {
   resetLessonStudioE2EState();
 }
@@ -93,5 +118,6 @@ module.exports = {
   composeExecutableFromEnvironment,
   composeEnvironment,
   resetLessonStudioE2EState,
+  preflightLessonStudioE2EStack,
   resetOptionsFromEnvironment,
 };

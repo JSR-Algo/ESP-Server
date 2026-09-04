@@ -5,6 +5,7 @@ const {
   buildResetCommands,
   composeExecutableFromEnvironment,
   composeEnvironment,
+  preflightLessonStudioE2EStack,
   resetOptionsFromEnvironment,
 } = require('./reset-lesson-studio-e2e-state.cjs');
 
@@ -119,4 +120,55 @@ test('reset and global setup supply parse-only fallbacks without overriding live
     LESSON_ASSET_ORIGIN_BASE: 'http://192.168.1.25:8180',
     ROBOT_ESP_BASE_URL: 'http://192.168.1.25:8002',
   });
+});
+
+test('preflight rejects a healthy stack running a non-candidate image', () => {
+  const env = {
+    CI: '1',
+    TBOT_DOCKER_EXECUTABLE: '/trusted/docker',
+    TBOT_DOCKER_COMPOSE_EXECUTABLE: '/trusted/docker-compose',
+    TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID: `sha256:${'1'.repeat(64)}`,
+    TBOT_LESSON_STUDIO_WEB_IMAGE_ID: `sha256:${'2'.repeat(64)}`,
+  };
+  const containers = Object.fromEntries(
+    ['redis', 'postgres', 'mysql', 'backend', 'seed-postgres', 'web', 'seed-mysql']
+      .map((service) => [service, `${service}-container`]),
+  );
+  const run = (_command, args) => {
+    const service = args.at(-1);
+    if (args.includes('ps')) return containers[service];
+    const container = args.at(-1);
+    if (container === containers.backend) return `healthy ${'sha256:' + '9'.repeat(64)}`;
+    if (container === containers.web) return `healthy ${env.TBOT_LESSON_STUDIO_WEB_IMAGE_ID}`;
+    return 'healthy sha256:fixture';
+  };
+
+  assert.throws(
+    () => preflightLessonStudioE2EStack({ env, run }),
+    /started backend container image ID mismatch/,
+  );
+});
+
+test('preflight accepts only a healthy candidate-bound stack', () => {
+  const env = {
+    CI: '1',
+    TBOT_DOCKER_EXECUTABLE: '/trusted/docker',
+    TBOT_DOCKER_COMPOSE_EXECUTABLE: '/trusted/docker-compose',
+    TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID: `sha256:${'1'.repeat(64)}`,
+    TBOT_LESSON_STUDIO_WEB_IMAGE_ID: `sha256:${'2'.repeat(64)}`,
+  };
+  const containers = Object.fromEntries(
+    ['redis', 'postgres', 'mysql', 'backend', 'seed-postgres', 'web', 'seed-mysql']
+      .map((service) => [service, `${service}-container`]),
+  );
+  const run = (_command, args) => {
+    const service = args.at(-1);
+    if (args.includes('ps')) return containers[service];
+    const container = args.at(-1);
+    if (container === containers.backend) return `healthy ${env.TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID}`;
+    if (container === containers.web) return `healthy ${env.TBOT_LESSON_STUDIO_WEB_IMAGE_ID}`;
+    return 'healthy sha256:fixture';
+  };
+
+  assert.doesNotThrow(() => preflightLessonStudioE2EStack({ env, run }));
 });
