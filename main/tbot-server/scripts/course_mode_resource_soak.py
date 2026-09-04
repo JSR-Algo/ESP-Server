@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import hashlib
 import json
+import os
 import resource
+import struct
 import sys
 import tempfile
 import threading
@@ -20,8 +23,6 @@ from typing import Any
 SERVER_ROOT = Path(__file__).resolve().parents[1]
 if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
-
-import websockets  # noqa: E402
 
 from core.lesson.course_orchestrator import CourseDecision, SessionState  # noqa: E402
 from core.lesson.embodied_intent import EmbodiedIntent  # noqa: E402
@@ -487,6 +488,121 @@ class _SoakTerminalStore:
         self.batches.pop((device_id, batch["assignmentId"]), None)
 
 
+class _LoopbackWebSocket:
+    """Minimal RFC6455 text transport used when third-party imports are unavailable."""
+
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, *, mask_outgoing: bool, expect_masked: bool) -> None:
+        self._reader = reader
+        self._writer = writer
+        self._mask_outgoing = mask_outgoing
+        self._expect_masked = expect_masked
+        self._closed = False
+
+    async def recv(self) -> str:
+        while True:
+            header = await self._reader.readexactly(2)
+            first, second = header
+            if first & 0x80 == 0 or first & 0x70:
+                raise RuntimeError("unsupported websocket frame")
+            opcode = first & 0x0F
+            masked = bool(second & 0x80)
+            length = second & 0x7F
+            if length == 126:
+                length = struct.unpack("!H", await self._reader.readexactly(2))[0]
+            elif length == 127:
+                length = struct.unpack("!Q", await self._reader.readexactly(8))[0]
+            if length > 1 << 20:
+                raise RuntimeError("websocket frame too large")
+            if masked:
+                key = await self._reader.readexactly(4)
+            else:
+                key = b""
+            payload = await self._reader.readexactly(length)
+            if masked:
+                payload = bytes(value ^ key[index % 4] for index, value in enumerate(payload))
+            if opcode == 0x9:  # ping
+                await self._write_frame(0xA, payload)
+                continue
+            if opcode == 0x8:
+                await self._write_frame(0x8, payload[:125])
+                raise EOFError("websocket closed")
+            if opcode != 0x1 or masked != self._expect_masked:
+                raise RuntimeError("expected masked text websocket frame")
+            return payload.decode("utf-8")
+
+    async def send(self, value: str) -> None:
+        if not isinstance(value, str):
+            raise TypeError("loopback websocket only supports text messages")
+        await self._write_frame(0x1, value.encode("utf-8"))
+
+    async def _write_frame(self, opcode: int, payload: bytes) -> None:
+        if len(payload) < 126:
+            length = bytes((len(payload),))
+        elif len(payload) <= 0xFFFF:
+            length = b"\x7e" + struct.pack("!H", len(payload))
+        else:
+            length = b"\x7f" + struct.pack("!Q", len(payload))
+        mask = os.urandom(4) if self._mask_outgoing else b""
+        second = length[0] | (0x80 if mask else 0)
+        body = bytes(value ^ mask[index % 4] for index, value in enumerate(payload)) if mask else payload
+        self._writer.write(bytes((0x80 | opcode, second)) + length[1:] + mask + body)
+        await self._writer.drain()
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            await self._write_frame(0x8, b"")
+        except (ConnectionError, RuntimeError):
+            pass
+        self._writer.close()
+        try:
+            await self._writer.wait_closed()
+        except OSError:
+            # The peer may have already closed after receiving its frame.
+            pass
+
+    async def __aenter__(self) -> "_LoopbackWebSocket":
+        return self
+
+    async def __aexit__(self, _type, _value, _traceback) -> None:
+        await self.aclose()
+
+
+def _http_headers(raw: bytes) -> dict[str, str]:
+    lines = raw.decode("latin-1").split("\r\n")
+    return {
+        key.strip().lower(): value.strip()
+        for line in lines[1:]
+        if ":" in line
+        for key, value in [line.split(":", 1)]
+    }
+
+
+async def _loopback_server_handshake(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> _LoopbackWebSocket:
+    request = await reader.readuntil(b"\r\n\r\n")
+    headers = _http_headers(request)
+    key = headers.get("sec-websocket-key")
+    if not key or "websocket" not in headers.get("upgrade", "").lower():
+        raise RuntimeError("invalid websocket upgrade")
+    accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+    writer.write(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept + "\r\n\r\n").encode("ascii"))
+    await writer.drain()
+    return _LoopbackWebSocket(reader, writer, mask_outgoing=False, expect_masked=True)
+
+
+async def _loopback_client_connect(port: int, path: str) -> _LoopbackWebSocket:
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    key = base64.b64encode(os.urandom(16)).decode("ascii")
+    writer.write((f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode("ascii"))
+    await writer.drain()
+    response = await reader.readuntil(b"\r\n\r\n")
+    if not response.startswith(b"HTTP/1.1 101"):
+        raise RuntimeError("websocket upgrade rejected")
+    return _LoopbackWebSocket(reader, writer, mask_outgoing=True, expect_masked=False)
+
+
 async def _exercise_websocket_reconnects(
     manifest: dict[str, Any], reconnects: int, retry_counts: dict[str, int],
     totals: dict[str, int], sample: Callable[[str], None],
@@ -595,27 +711,61 @@ async def _exercise_websocket_reconnects(
                 totals["wsConnectionsClosed"] += 1
             await completed.put((index, error))
 
-    async with websockets.serve(handle_socket, "127.0.0.1", 0) as server:
-        port = server.sockets[0].getsockname()[1]
-        uri = f"ws://127.0.0.1:{port}/course-mode-soak"
-        for index in range(reconnects):
+    if sys.platform == "darwin":
+        async def accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            websocket = None
             try:
-                async with websockets.connect(uri) as websocket:
-                    await websocket.send(json.dumps({"index": index}))
-                    frame = json.loads(await asyncio.wait_for(websocket.recv(), timeout=2.0))
-                    if (
-                        frame.get("type") != "lesson_course_activity"
-                        or frame.get("sessionId") != session_id
-                    ):
-                        raise RuntimeError("course mode reconnect frame identity diverged")
-                completed_index, error = await asyncio.wait_for(completed.get(), timeout=2.0)
-                if completed_index != index or error is not None:
-                    raise error or RuntimeError("course mode reconnect teardown diverged")
-            except Exception:
-                retry_counts["wsReconnect"] += 1
-                raise
-            totals["wsReconnects"] += 1
-            sample("wsReconnect")
+                websocket = await _loopback_server_handshake(reader, writer)
+                await handle_socket(websocket)
+            finally:
+                if websocket is not None:
+                    await websocket.aclose()
+                else:
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except OSError:
+                        pass
+
+        server = await asyncio.start_server(accept, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        async with server:
+            for index in range(reconnects):
+                try:
+                    websocket = await _loopback_client_connect(port, "/course-mode-soak")
+                    async with websocket:
+                        await websocket.send(json.dumps({"index": index}))
+                        frame = json.loads(await asyncio.wait_for(websocket.recv(), timeout=2.0))
+                        if frame.get("type") != "lesson_course_activity" or frame.get("sessionId") != session_id:
+                            raise RuntimeError("course mode reconnect frame identity diverged")
+                    completed_index, error = await asyncio.wait_for(completed.get(), timeout=2.0)
+                    if completed_index != index or error is not None:
+                        raise error or RuntimeError("course mode reconnect teardown diverged")
+                except Exception:
+                    retry_counts["wsReconnect"] += 1
+                    raise
+                totals["wsReconnects"] += 1
+                sample("wsReconnect")
+    else:
+        import websockets
+        async with websockets.serve(handle_socket, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            uri = f"ws://127.0.0.1:{port}/course-mode-soak"
+            for index in range(reconnects):
+                try:
+                    async with websockets.connect(uri) as websocket:
+                        await websocket.send(json.dumps({"index": index}))
+                        frame = json.loads(await asyncio.wait_for(websocket.recv(), timeout=2.0))
+                        if frame.get("type") != "lesson_course_activity" or frame.get("sessionId") != session_id:
+                            raise RuntimeError("course mode reconnect frame identity diverged")
+                    completed_index, error = await asyncio.wait_for(completed.get(), timeout=2.0)
+                    if completed_index != index or error is not None:
+                        raise error or RuntimeError("course mode reconnect teardown diverged")
+                except Exception:
+                    retry_counts["wsReconnect"] += 1
+                    raise
+                totals["wsReconnects"] += 1
+                sample("wsReconnect")
     totals["forwarderPosts"] = post_count
     totals["terminalOutboxStores"] = terminal_store.stores
     totals["terminalOutboxClears"] = terminal_store.clears

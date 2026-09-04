@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from scripts import course_mode_resource_soak as resource_soak
 from scripts.course_mode_resource_soak import (
     ResourceSoakConfig,
     bounded_verdict,
@@ -79,7 +80,10 @@ def test_bounded_verdict_fails_injected_resource_leaks() -> None:
     }
 
 
-def test_resource_soak_exercises_real_runtime_restore_and_sd_gc(tmp_path) -> None:
+def test_resource_soak_exercises_real_runtime_restore_and_sd_gc(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(resource_soak.sys, "platform", "darwin")
+    monkeypatch.setattr(resource_soak, "websockets", None, raising=False)
+
     report = asyncio.run(
         run_resource_soak(
             ResourceSoakConfig(cycles=2, ws_reconnects=3, sd_cycles=2, idle_mode="virtual", idle_seconds=60),
