@@ -1686,6 +1686,7 @@ def _private_pytest_runtime(
     expected_git_sha: str,
     *,
     candidate_root: Path | None = None,
+    snapshot_control_root: Path | None = None,
 ):
     temporary = Path(tempfile.mkdtemp(prefix="google-live-pytest-runtime-"))
     try:
@@ -1698,10 +1699,21 @@ def _private_pytest_runtime(
             candidate_import_names.add(
                 relative.stem if len(relative.parts) == 1 else relative.parts[0]
             )
-        manifest_content, manifest = _load_trusted_pytest_runtime_manifest(
-            repo_root,
-            expected_git_sha,
-        )
+        manifest_path = None
+        manifest_bound = None
+        if snapshot_control_root is None:
+            manifest_content, manifest = _load_trusted_pytest_runtime_manifest(
+                repo_root,
+                expected_git_sha,
+            )
+        else:
+            manifest_path = (
+                snapshot_control_root
+                / "tests/fixtures/google_live_pytest_runtime_manifest.json"
+            )
+            manifest_bound = read_bound_file(manifest_path)
+            manifest_content = manifest_bound.content
+            manifest = parse_pytest_runtime_manifest(manifest_content)
         if (
             manifest["pythonImplementation"] != sys.implementation.name
             or manifest["pythonMajorMinor"] != f"{sys.version_info.major}.{sys.version_info.minor}"
@@ -1714,11 +1726,22 @@ def _private_pytest_runtime(
         private_native = temporary / "native" / variant["nativeLibraries"][0]["basename"]
         _write_private_snapshot_file(private_native, native_bound.content)
         plugin = temporary / "control" / "pinned_nodeid_plugin.py"
-        plugin_content = _load_trusted_nodeid_plugin(
-            repo_root,
-            expected_git_sha,
-            manifest,
-        )
+        plugin_path = None
+        plugin_bound = None
+        if snapshot_control_root is None:
+            plugin_content = _load_trusted_nodeid_plugin(
+                repo_root,
+                expected_git_sha,
+                manifest,
+            )
+        else:
+            plugin_path = snapshot_control_root / "scripts/google_live_deterministic_nodeid_plugin.py"
+            plugin_bound = read_bound_file(plugin_path)
+            plugin_content = plugin_bound.content
+            if not secrets.compare_digest(
+                _sha256(plugin_content), manifest["plugin"]["sha256"]
+            ):
+                raise RuntimeError("trusted pytest nodeid plugin integrity check failed")
         _write_private_snapshot_file(
             plugin,
             plugin_content,
@@ -1747,6 +1770,10 @@ def _private_pytest_runtime(
         _verify_private_pytest_runtime(runtime)
         yield runtime
         _verify_private_pytest_runtime(runtime)
+        if manifest_path is not None and manifest_bound is not None:
+            require_file_unchanged(manifest_path, manifest_bound)
+        if plugin_path is not None and plugin_bound is not None:
+            require_file_unchanged(plugin_path, plugin_bound)
     finally:
         _make_runtime_writable(temporary)
         shutil.rmtree(temporary, ignore_errors=True)
@@ -1829,8 +1856,23 @@ def _produce(
     git_head: Callable[[], str] | None = None,
     approved_test_files: Sequence[str] = APPROVED_TEST_FILES,
     canonical_manifest_path: Path | None = None,
+    outer_execution_context: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     repo_root = repo_root.resolve(strict=True)
+    if outer_execution_context is not None:
+        if (
+            set(outer_execution_context)
+            != {"evidenceRoot", "gitSha", "projectRoot", "sourceRoot"}
+            or outer_execution_context["gitSha"] != identity.get("gitSha")
+            or Path(outer_execution_context["sourceRoot"]).resolve(strict=True)
+            != repo_root
+        ):
+            raise ValueError("outer candidate execution context is invalid")
+        outer_evidence_root = Path(
+            outer_execution_context["evidenceRoot"]
+        ).resolve(strict=True)
+    else:
+        outer_evidence_root = None
     paths = [manifest_path, junit_out, report_path]
     bound_targets = _runner_bound_output_targets(paths)
     logical_manifest, logical_junit, logical_report = (
@@ -1848,16 +1890,28 @@ def _produce(
         not evidence_root.is_dir()
         or evidence_root.is_symlink()
         or evidence_root == repo_root
-        or repo_root not in evidence_root.resolve(strict=True).parents
+        or (
+            outer_evidence_root is None
+            and repo_root not in evidence_root.resolve(strict=True).parents
+        )
+        or (
+            outer_evidence_root is not None
+            and evidence_root.resolve(strict=True) != outer_evidence_root
+        )
     ):
         raise ValueError("evidence root must be a preexisting runner-owned directory")
-    initial_status = git_status() if git_status else _git_output(
-        repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=all"
-    )
-    validate_porcelain_status(initial_status, repo_root, evidence_root)
-    baseline_untracked = _untracked_paths(initial_status)
+    if outer_execution_context is None:
+        initial_status = git_status() if git_status else _git_output(
+            repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=all"
+        )
+        validate_porcelain_status(initial_status, repo_root, evidence_root)
+        baseline_untracked = _untracked_paths(initial_status)
+    else:
+        baseline_untracked = frozenset()
 
     def verify_repository(*allowed_generated: Path) -> None:
+        if outer_execution_context is not None:
+            return
         status = git_status() if git_status else _git_output(
             repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=all"
         )
@@ -1880,7 +1934,7 @@ def _produce(
     )
     canonical_bound = (
         read_bound_file(canonical_path)
-        if canonical_manifest_path is not None
+        if canonical_manifest_path is not None or outer_execution_context is not None
         else _read_candidate_tracked_file(repo_root, canonical_path, identity["gitSha"])
     )
     if bound_targets is not None:
@@ -1895,7 +1949,10 @@ def _produce(
     nodes = parse_manifest(manifest_bound.content)
     verify_repository()
     child_environment = _pytest_child_environment()
-    if run is _default_run:
+    if outer_execution_context is not None:
+        git_root = repo_root
+        module_path = Path(".")
+    elif run is _default_run:
         git_root = Path(
             _git_output(repo_root, "rev-parse", "--show-toplevel").decode().strip()
         ).resolve(strict=True)
@@ -1905,6 +1962,8 @@ def _produce(
         module_path = Path(".")
 
     def candidate_snapshot():
+        if outer_execution_context is not None:
+            return nullcontext(repo_root)
         if run is _default_run:
             return _private_candidate_snapshot(git_root, identity["gitSha"], module_path)
         return nullcontext(repo_root)
@@ -1914,6 +1973,7 @@ def _produce(
             repo_root,
             identity["gitSha"],
             candidate_root=candidate_root,
+            snapshot_control_root=(repo_root if outer_execution_context is not None else None),
         ) as pytest_runtime:
             runtime_manifest_content = pytest_runtime.manifest_content
             collect = run(
@@ -1950,6 +2010,9 @@ def _produce(
                 repo_root,
                 identity["gitSha"],
                 candidate_root=candidate_root,
+                snapshot_control_root=(
+                    repo_root if outer_execution_context is not None else None
+                ),
             ) as pytest_runtime:
                 if not secrets.compare_digest(
                     runtime_manifest_content,
@@ -1971,7 +2034,7 @@ def _produce(
         normalized = canonicalize_junit_summary(read_bound_file(temporary_path).content)
         parse_passing_junit(normalized, nodes)
         verify_repository(temporary_path)
-        require_file_unchanged(manifest_path, manifest_bound)
+        require_file_unchanged(logical_manifest, manifest_bound)
         require_file_unchanged(canonical_path, canonical_bound)
         verify_repository(temporary_path)
         if bound_targets is None:
@@ -1996,7 +2059,7 @@ def _produce(
             published_junit.content,
             runtime_manifest_content,
         )
-        require_file_unchanged(junit_out, published_junit)
+        require_file_unchanged(logical_junit, published_junit)
         report_content = (json.dumps(report, indent=2, sort_keys=True) + "\n").encode()
         if bound_targets is None:
             atomic_write_exclusive(
@@ -2037,7 +2100,22 @@ def produce(
     git_head: Callable[[], str] | None = None,
     approved_test_files: Sequence[str] = APPROVED_TEST_FILES,
     canonical_manifest_path: Path | None = None,
+    outer_execution_context: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
+    if outer_execution_context is not None:
+        return _produce(
+            manifest_path=manifest_path,
+            junit_out=junit_out,
+            report_path=report_path,
+            identity=identity,
+            repo_root=repo_root,
+            run=run,
+            git_status=git_status,
+            git_head=git_head,
+            approved_test_files=approved_test_files,
+            canonical_manifest_path=canonical_manifest_path,
+            outer_execution_context=outer_execution_context,
+        )
     with trusted_git_session():
         return _produce(
             manifest_path=manifest_path,
@@ -2050,6 +2128,7 @@ def produce(
             git_head=git_head,
             approved_test_files=approved_test_files,
             canonical_manifest_path=canonical_manifest_path,
+            outer_execution_context=None,
         )
 
 
@@ -2071,6 +2150,7 @@ def main(argv: list[str] | None = None) -> int:
         "configFingerprint": args.config_fingerprint,
         "fixtureSha256": args.fixture_sha256,
     }
+    outer_execution_context = globals().get("__google_live_execution_context__")
     try:
         produce(
             manifest_path=args.manifest,
@@ -2078,6 +2158,7 @@ def main(argv: list[str] | None = None) -> int:
             report_path=args.report,
             identity=identity,
             repo_root=Path(__file__).resolve().parents[1],
+            outer_execution_context=outer_execution_context,
         )
     except (OSError, UnicodeError, ValueError, RuntimeError):
         return 1

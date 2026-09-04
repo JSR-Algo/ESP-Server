@@ -115,9 +115,9 @@ except BaseException:
 """
 _GIT_SOURCE_EXEC = """import importlib.machinery, importlib.util, os, subprocess, sys, threading
 bootstrap_path = os.path.abspath(sys.argv[0])
-source_root, original_root, project_root, script_relative, original_file, dependency_roots_json = sys.argv[1:7]
+source_root, original_root, project_root, script_relative, original_file, dependency_roots_json, candidate_git_sha = sys.argv[1:8]
 dependency_roots = __import__('json').loads(dependency_roots_json)
-script_arguments = sys.argv[7:]
+script_arguments = sys.argv[8:]
 class BlockedProjectPath:
     @staticmethod
     def find_spec(fullname, target=None):
@@ -319,7 +319,7 @@ def candidate_popen(arguments, *args, **kwargs):
             arguments = [
                 arguments[0], "-I", "-S", "-B", *arguments[1:script_index], bootstrap_path,
                 source_root, child_original_root, project_root, child_relative, child_file,
-                dependency_roots_json,
+                dependency_roots_json, candidate_git_sha,
                 *arguments[script_index + 1:]
             ]
         else:
@@ -339,6 +339,12 @@ namespace = {
     "__file__": source_path,
     "__package__": None,
     "__cached__": None,
+    "__google_live_execution_context__": {
+        "evidenceRoot": original_root,
+        "gitSha": candidate_git_sha,
+        "projectRoot": project_root,
+        "sourceRoot": source_root,
+    },
 }
 exec(compile(source, source_path, "exec"), namespace, namespace)
 """
@@ -1663,6 +1669,7 @@ def _git_bound_python_argv(
         script_relative,
         str(original_file),
         json.dumps(dependency_roots or [], separators=(",", ":")),
+        str(spec.candidate_identity.get("gitSha", "")),
         *runtime_argv[script_index + 1 :],
     )
 
