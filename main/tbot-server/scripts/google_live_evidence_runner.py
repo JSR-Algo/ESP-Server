@@ -252,6 +252,17 @@ class EvidenceRunner:
         return bind_identity(value)
 
     def _write_synthetic_outputs(self, command_id: str) -> None:
+        def write_output(path: Path, payload: bytes) -> None:
+            # The command runner pre-creates bound output descriptors. Preserve
+            # their inode exactly as a real child writing through /dev/fd does.
+            if path.exists():
+                with path.open("wb") as stream:
+                    stream.write(payload)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                return
+            _atomic(path, payload)
+
         if command_id == "deterministic.produce":
             manifest_source = (
                 Path(__file__).resolve().parents[1]
@@ -294,9 +305,9 @@ class EvidenceRunner:
                 ).hexdigest(),
                 "pytestRuntimeSchema": runtime["schemaVersion"],
             }
-            _atomic(self.root / "deterministic/node-manifest.txt", manifest)
-            _atomic(self.root / "deterministic/pytest.xml", junit)
-            _atomic(self.root / "deterministic/report.json", (json.dumps(report, sort_keys=True) + "\n").encode())
+            write_output(self.root / "deterministic/node-manifest.txt", manifest)
+            write_output(self.root / "deterministic/pytest.xml", junit)
+            write_output(self.root / "deterministic/report.json", (json.dumps(report, sort_keys=True) + "\n").encode())
             return
         if command_id == "real_api.round_trip":
             outputs = {"real-api/report.json": self._synthetic_report("real_api")}
@@ -320,7 +331,10 @@ class EvidenceRunner:
         else:
             raise EvidenceStateError("unknown synthetic command")
         for relative, value in outputs.items():
-            _atomic(self.root / relative, (json.dumps(value, sort_keys=True) + "\n").encode())
+            write_output(
+                self.root / relative,
+                (json.dumps(value, sort_keys=True) + "\n").encode(),
+            )
 
     def command_specs(self) -> tuple[Any, ...]:
         """Return the immutable command declarations used by this run."""
