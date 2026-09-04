@@ -309,19 +309,24 @@ def _load_candidate_resource_archive(
     cap = _candidate_resource_archive_bound(manifest)
     paths = [resource["path"] for resource in manifest["resources"]]
     with trusted_git_session() as identity:
-        if _trusted_git_output(code_root, "rev-parse", "HEAD").decode().strip() != expected_git_sha:
+        repo_root = Path(
+            _trusted_git_output(code_root, "rev-parse", "--show-toplevel")
+            .decode()
+            .strip()
+        ).resolve(strict=True)
+        if _trusted_git_output(repo_root, "rev-parse", "HEAD").decode().strip() != expected_git_sha:
             raise ValueError("candidate git SHA does not match repository HEAD")
         process = subprocess.Popen(
             _trusted_git_command(
                 identity.path,
-                code_root,
+                repo_root,
                 "archive",
                 "--format=tar",
                 expected_git_sha,
                 "--",
                 *paths,
             ),
-            cwd=code_root,
+            cwd=repo_root,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             env={"GIT_ATTR_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
@@ -713,16 +718,21 @@ def _load_runtime_closure_manifest(
         Path(__file__).resolve().parents[1] if code_root is None else code_root
     ).resolve(strict=True)
     with trusted_git_session():
-        observed = _trusted_git_output(code_root, "rev-parse", "HEAD").decode().strip()
+        repo_root = Path(
+            _trusted_git_output(code_root, "rev-parse", "--show-toplevel")
+            .decode()
+            .strip()
+        ).resolve(strict=True)
+        observed = _trusted_git_output(repo_root, "rev-parse", "HEAD").decode().strip()
         if observed != expected_git_sha:
             raise ValueError("candidate git SHA does not match repository HEAD")
         if _trusted_git_output(
-            code_root, "status", "--porcelain=v1", "-z", "--untracked-files=no"
+            repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=no"
         ):
             raise ValueError("candidate worktree contains tracked or staged modifications")
         try:
             content = _trusted_git_output(
-                code_root,
+                repo_root,
                 "show",
                 f"{expected_git_sha}:{RUNTIME_CLOSURE_MANIFEST_GIT_PATH}",
             )
@@ -747,19 +757,19 @@ def _load_runtime_closure_manifest(
             spec = f"{expected_git_sha}:{resource['path']}"
             try:
                 tree_entry = _trusted_git_output(
-                    code_root,
+                    repo_root,
                     "ls-tree",
                     "-z",
                     "--full-name",
                     expected_git_sha,
                     "--",
-                    f":(top){resource['path']}",
+                    resource["path"],
                 )
                 tree_meta, blob_name = tree_entry.rstrip(b"\0").decode().split("\t", 1)
                 mode, _type, tree_blob = tree_meta.split()
-                kind = _trusted_git_output(code_root, "cat-file", "-t", spec).decode().strip()
-                blob = _trusted_git_output(code_root, "rev-parse", spec).decode().strip()
-                data = _trusted_git_output(code_root, "show", spec)
+                kind = _trusted_git_output(repo_root, "cat-file", "-t", spec).decode().strip()
+                blob = _trusted_git_output(repo_root, "rev-parse", spec).decode().strip()
+                data = _trusted_git_output(repo_root, "show", spec)
             except Exception as exc:
                 raise ValueError("runtime closure resource is missing from Git") from exc
             if (
@@ -774,10 +784,10 @@ def _load_runtime_closure_manifest(
             ):
                 raise ValueError("runtime closure resource is not a regular verified blob")
         if (
-            _trusted_git_output(code_root, "rev-parse", "HEAD").decode().strip()
+            _trusted_git_output(repo_root, "rev-parse", "HEAD").decode().strip()
             != expected_git_sha
             or _trusted_git_output(
-                code_root, "status", "--porcelain=v1", "-z", "--untracked-files=no"
+                repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=no"
             )
         ):
             raise ValueError("candidate repository changed during closure validation")
