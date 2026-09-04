@@ -12,15 +12,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 import test_physical_smoke_audit as physical_fixture
 
-from scripts.analyze_google_live_log import correlate_websocket_bargein_evidence
 from scripts import google_live_release_gate as release_gate
 from scripts import google_live_robot_soak as robot_soak
-from scripts.google_live_release_gate import (
-    RELEASE_SCHEMA_VERSION,
-    REQUIRED_LAYERS,
-    aggregate_release_evidence,
-    load_checksum_manifest,
-)
+from scripts.analyze_google_live_log import correlate_websocket_bargein_evidence
 from scripts.google_live_command_runner import (
     COMMAND_PROVENANCE_SCHEMA,
     CommandSpec,
@@ -39,7 +33,13 @@ from scripts.google_live_deterministic_evidence import (
     parse_manifest,
     parse_pytest_runtime_manifest,
 )
-from scripts.google_live_evidence_runner import EvidenceRunner, LAYERS
+from scripts.google_live_evidence_runner import LAYERS, EvidenceRunner
+from scripts.google_live_release_gate import (
+    RELEASE_SCHEMA_VERSION,
+    REQUIRED_LAYERS,
+    aggregate_release_evidence,
+    load_checksum_manifest,
+)
 
 _PHYSICAL_CASE = physical_fixture.PhysicalSmokeAuditTest()
 _OPTIONS = _PHYSICAL_CASE._candidate_audit_options()
