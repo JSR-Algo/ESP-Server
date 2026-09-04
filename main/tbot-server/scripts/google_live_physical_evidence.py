@@ -79,8 +79,11 @@ class PhysicalEvidenceClient:
                     result = self._request("POST", path + "/finalize")
                     if result.get("status") != "PASS":
                         raise PhysicalEvidenceError("physical evidence finalization failed")
+                    terminal = self._request("GET", path)
+                    if terminal.get("status") != "PASS":
+                        raise PhysicalEvidenceError("physical evidence terminal status unavailable")
                     completed = True
-                    return result
+                    return terminal
                 time.sleep(poll_interval_sec)
             raise PhysicalEvidenceError("physical evidence timed out")
         finally:
