@@ -264,6 +264,8 @@ def test_checked_runtime_closure_manifest_parses() -> None:
     assert {item["name"] for item in parsed["distributions"]} >= {
         "numpy", "websockets", "PyYAML", "opuslib_next"
     }
+    resources = {item["path"]: item for item in parsed["resources"]}
+    assert resources["main/tbot-server/pyproject.toml"]["kind"] == "config"
 
 
 @pytest.mark.parametrize("module", ["yaml", "websockets", "opuslib_next", "numpy", "google.genai"])
