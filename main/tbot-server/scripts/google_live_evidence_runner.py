@@ -263,6 +263,8 @@ class EvidenceRunner:
                 self.finish_layer(layer, "PASS")
                 if command_id == "physical.capture_and_audit" and self.state("server_regression") == "RUNNING":
                     self.finish_layer("server_regression", "PASS")
+            elif command_id == "websocket.log_analysis" and getattr(result, "policy_satisfied", False):
+                self.finish_layer("server_regression", "PASS")
             elif not getattr(result, "policy_satisfied", False):
                 self.finish_layer(layer, "SKIPPED" if command_id == "websocket.transport" else "FAIL", failure={"code": "PROVIDER"})
             return result
