@@ -1,6 +1,7 @@
 import contextlib
 import hashlib
 import json
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,16 +24,21 @@ IDENTITY = {
 }
 
 
-def _runner(tmp_path: Path, run_id: str = "20260904T010203Z") -> EvidenceRunner:
+def _runner(
+    tmp_path: Path,
+    run_id: str = "20260904T010203Z",
+    *,
+    identity: dict[str, str] = IDENTITY,
+) -> EvidenceRunner:
     runner = EvidenceRunner.initialize(
-        tmp_path, run_id=run_id, identity=IDENTITY, verify_repository=False
+        tmp_path, run_id=run_id, identity=identity, verify_repository=False
     )
     for relative in ("fixture.wav", "server.log", "baseline/report.json", "lesson-manifest.json"):
         path = runner.root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"{}\n")
     candidate_identity = runner.root / "candidate-identity.json"
-    candidate_identity.write_text(json.dumps(IDENTITY, sort_keys=True) + "\n")
+    candidate_identity.write_text(json.dumps(identity, sort_keys=True) + "\n")
     runner.operator_config = {
         "fixture": str(runner.root / "fixture.wav"),
         "websocket_url": "ws://127.0.0.1/ws",
@@ -47,6 +53,29 @@ def _runner(tmp_path: Path, run_id: str = "20260904T010203Z") -> EvidenceRunner:
         "base_url": "http://127.0.0.1",
     }
     return runner
+
+
+def test_real_deterministic_layer_runs_through_git_bound_executor() -> None:
+    from scripts.google_live_trusted_git import git_output
+
+    server_root = Path(__file__).resolve().parents[1]
+    identity = dict(IDENTITY)
+    identity["gitSha"] = git_output(server_root, "rev-parse", "HEAD").decode().strip()
+    with tempfile.TemporaryDirectory(
+        dir=server_root, prefix=".google-live-deterministic-e2e-"
+    ) as directory:
+        runner = _runner(Path(directory), identity=identity)
+
+        result = runner.execute_layer("deterministic.produce")
+
+        assert result.policy_satisfied
+        assert runner.state("deterministic") == "PASS"
+        assert (runner.root / "deterministic/node-manifest.txt").stat().st_size > 0
+        assert (runner.root / "deterministic/pytest.xml").stat().st_size > 0
+        report = json.loads(
+            (runner.root / "deterministic/report.json").read_text(encoding="utf-8")
+        )
+        assert report["status"] == "PASS"
 
 
 def test_terminal_failure_is_immutable_and_blocks_dependents(tmp_path: Path):
