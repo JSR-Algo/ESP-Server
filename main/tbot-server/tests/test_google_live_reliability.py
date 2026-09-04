@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +21,24 @@ from scripts.google_live_reliability import (
     sample_process_resources,
     validate_real_api_pass_report,
 )
+
+
+def test_reliability_helpers_do_not_import_course_mode_runtime() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import sys; sys.path.insert(0, sys.argv[1]); "
+            "from scripts import google_live_reliability; "
+            "raise SystemExit('scripts.course_mode_resource_soak' in sys.modules)",
+            str(Path(__file__).resolve().parents[1]),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+    )
+
+    assert completed.returncode == 0
 
 
 def test_forbidden_report_fields_is_recursive_normalized_and_value_safe() -> None:

@@ -7,12 +7,13 @@ import hashlib
 import json
 import math
 import re
+import resource
+import sys
 import threading
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
-
-from scripts.course_mode_resource_soak import _fd_count, _process_rss_bytes, monotonic_growth_slope
 
 SCHEMA_VERSION = "google-live-reliability.v1"
 NORMALIZED_SECRET_KEYS = frozenset(
@@ -83,6 +84,48 @@ GOOGLE_LIVE_LIMITS = {
     "asyncioTaskSlopePerSample": 0.25,
     "threadSlopePerSample": 0.25,
 }
+
+
+def monotonic_growth_slope(values: Sequence[int | float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    midpoint = (len(values) - 1) / 2
+    denominator = sum((index - midpoint) ** 2 for index in range(len(values)))
+    if denominator == 0:
+        return 0.0
+    mean = sum(float(value) for value in values) / len(values)
+    slope = sum(
+        (index - midpoint) * (float(value) - mean)
+        for index, value in enumerate(values)
+    ) / denominator
+    return max(0.0, slope)
+
+
+def _process_rss_bytes() -> int:
+    try:
+        import psutil
+
+        return int(psutil.Process().memory_info().rss)
+    except (ImportError, AttributeError, OSError):
+        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return int(usage if sys.platform == "darwin" else usage * 1024)
+
+
+def _fd_count() -> int:
+    try:
+        import psutil
+
+        counter = getattr(psutil.Process(), "num_fds", None)
+        if counter is not None:
+            return int(counter())
+    except (ImportError, AttributeError, OSError):
+        pass
+    for directory in (Path("/proc/self/fd"), Path("/dev/fd")):
+        try:
+            return len(list(directory.iterdir()))
+        except OSError:
+            continue
+    return 0
 
 
 def redact_mapping(value: Any) -> Any:
