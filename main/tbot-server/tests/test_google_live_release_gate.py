@@ -627,6 +627,15 @@ def _write_evidence(
         "label": "fixture.wav",
         "sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
     }
+    candidate_identity = root / "candidate-identity.json"
+    candidate_identity.write_text(
+        json.dumps(IDENTITY, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    candidate_identity_artifact = {
+        "label": "candidate-identity.json",
+        "sha256": hashlib.sha256(candidate_identity.read_bytes()).hexdigest(),
+    }
     transport = root / "websocket-e2e" / "transport.json"
     transport.write_text('{"status":"PENDING"}\n', encoding="utf-8")
     transport_artifact = {
@@ -689,6 +698,7 @@ def _write_evidence(
                 {"label": "server.log", "sha256": hashlib.sha256(server_log.read_bytes()).hexdigest()},
                 copy.deepcopy(transport_artifact),
                 copy.deepcopy(websocket_server_artifact),
+                copy.deepcopy(candidate_identity_artifact),
             ],
             "candidate_soak.produce": copy.deepcopy(soak_inputs),
             "candidate_soak.replay": [copy.deepcopy(journey_evidence_artifact), *copy.deepcopy(soak_inputs)],
