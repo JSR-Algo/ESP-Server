@@ -73,6 +73,27 @@ async def test_remote_unpair_times_out_without_ack():
 
 
 @pytest.mark.asyncio
+async def test_remote_unpair_fails_immediately_when_pending_connection_is_lost():
+    websocket = SimpleNamespace(send=AsyncMock())
+    connection = SimpleNamespace(websocket=websocket, session_id="session-1")
+    connections = {"robot-connection-key": connection}
+    handler = RemoteUnpairHandler({}, connections, ack_timeout=10)
+
+    with (
+        patch.dict(os.environ, {"TBOT_DEVICE_MINT_SECRET": "mint-secret"}, clear=False),
+        patch.object(handler._connection_finder, "_find_connection", AsyncMock(return_value=connection)),
+    ):
+        request_task = asyncio.create_task(handler.handle_post(_Request()))
+        while not handler._pending_acks:
+            await asyncio.sleep(0)
+        await handler.cancel_for_connection(connection)
+        response = await asyncio.wait_for(request_task, timeout=0.1)
+
+    assert response.status == 409
+    assert json.loads(response.text)["error"] == "DEVICE_NOT_ONLINE"
+
+
+@pytest.mark.asyncio
 async def test_wifi_setup_targets_resolved_live_connection_without_unpairing():
     websocket = SimpleNamespace(send=AsyncMock())
     connection = SimpleNamespace(websocket=websocket, session_id="session-1")

@@ -140,6 +140,7 @@ def _build_servers(
         ws_server.lesson_connections,
         lesson_sd_online_index=lesson_sd_online_index,
     )
+    ws_server.remote_unpair_handler = getattr(ota_server, "remote_unpair_handler", None)
     return ws_server, ota_server
 
 
@@ -217,6 +218,7 @@ async def _build_servers_async(
             generation_redis=redis,
             owns_generation_redis=True,
         )
+        ws_server.remote_unpair_handler = getattr(ota_server, "remote_unpair_handler", None)
         return ws_server, ota_server
     except BaseException:
         if poller is not None:

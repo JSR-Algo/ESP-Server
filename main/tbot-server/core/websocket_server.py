@@ -244,6 +244,7 @@ class WebSocketServer:
                 await self._issue_liveness_lease(handler, device_id)
                 superseded = await self.lesson_connections.replace(device_id, handler)
                 if superseded is not None:
+                    await self._cancel_remote_unpair_for_connection(superseded)
                     self._scrap_superseded_connection(superseded, handler, device_id)
                 sessions = self.global_generation_sessions
                 if sessions is not None:
@@ -265,6 +266,7 @@ class WebSocketServer:
                     0, self._active_device_connections - 1
                 )
                 if device_id:
+                    await self._cancel_remote_unpair_for_connection(handler)
                     await self.lesson_connections.remove_if_current(
                         device_id, handler
                     )
@@ -297,6 +299,12 @@ class WebSocketServer:
         finally:
             if current_task is not None:
                 self._connection_tasks.discard(current_task)
+
+    async def _cancel_remote_unpair_for_connection(self, connection):
+        remote_unpair = getattr(self, "remote_unpair_handler", None)
+        cancel = getattr(remote_unpair, "cancel_for_connection", None)
+        if callable(cancel):
+            await cancel(connection)
 
     async def _issue_liveness_lease(self, handler, device_id):
         """T2.5 — stamp the accepted connection with a monotonic liveness lease.

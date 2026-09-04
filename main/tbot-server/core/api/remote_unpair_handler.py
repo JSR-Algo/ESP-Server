@@ -58,7 +58,9 @@ class RemoteUnpairHandler:
         if request_id:
             pending = self._pending_acks[device_id]
             try:
-                await asyncio.wait_for(asyncio.shield(pending[2]), timeout=self._ack_timeout)
+                acknowledged = await asyncio.wait_for(
+                    asyncio.shield(pending[2]), timeout=self._ack_timeout
+                )
             except asyncio.TimeoutError:
                 return web.json_response(
                     {
@@ -70,6 +72,8 @@ class RemoteUnpairHandler:
             finally:
                 if self._pending_acks.get(device_id) is pending:
                     self._pending_acks.pop(device_id, None)
+            if not acknowledged:
+                return self._offline_response()
 
         return web.json_response({"data": {"delivered": True}}, status=202)
 
@@ -85,6 +89,12 @@ class RemoteUnpairHandler:
             return False
         future.set_result(True)
         return True
+
+    async def cancel_for_connection(self, connection) -> None:
+        """Wake requests waiting on a socket that was replaced or disconnected."""
+        for pending in tuple(self._pending_acks.values()):
+            if pending[1] is connection and not pending[2].done():
+                pending[2].set_result(False)
 
     def _is_current(self, connection) -> bool:
         if self.connections is None:

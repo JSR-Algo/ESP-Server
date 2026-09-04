@@ -929,6 +929,7 @@ def test_build_servers_disabled_preserves_legacy_constructor_shape(monkeypatch):
         def __init__(self, config, connections, *, lesson_sd_online_index=None):
             captures["http_index"] = lesson_sd_online_index
             captures["connections"] = connections
+            self.remote_unpair_handler = object()
 
     ws, http = app._build_servers(
         {"server": {"api_url": "http://backend.test"}},
@@ -939,6 +940,7 @@ def test_build_servers_disabled_preserves_legacy_constructor_shape(monkeypatch):
     assert ws is not None and http is not None
     assert captures["ws_index"] is captures["http_index"]
     assert captures["connections"] is ws.lesson_connections
+    assert ws.remote_unpair_handler is http.remote_unpair_handler
 
 
 @pytest.mark.asyncio

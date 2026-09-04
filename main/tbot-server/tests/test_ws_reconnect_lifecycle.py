@@ -171,6 +171,13 @@ class _RecordingHandler:
 async def test_duplicate_device_connection_marks_and_closes_the_previous_socket(monkeypatch):
     server = _build_server(monkeypatch)
     handlers = []
+    cancelled_connections = []
+
+    class RemoteUnpair:
+        async def cancel_for_connection(self, connection):
+            cancelled_connections.append(connection)
+
+    server.remote_unpair_handler = RemoteUnpair()
 
     class Handler(_RecordingHandler):
         def __init__(self, *args):
@@ -217,10 +224,12 @@ async def test_duplicate_device_connection_marks_and_closes_the_previous_socket(
         await asyncio.sleep(0)
     assert old_socket.close_calls == [(1001, "superseded by newer connection")]
     assert new_socket.close_calls == []
+    assert old in cancelled_connections
 
     old._release.set()
     new._release.set()
     await asyncio.gather(first, second)
+    assert new in cancelled_connections
     # The old handler's teardown must not evict its replacement's registration.
     assert DEVICE_ID not in server.lesson_connections
 
