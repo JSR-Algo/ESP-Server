@@ -1332,6 +1332,39 @@ def test_nested_native_executable_fails_closed(
     assert not marker.exists()
 
 
+@pytest.mark.parametrize(
+    "override",
+    [
+        "executable='/usr/bin/true'",
+        "start_new_session=True",
+        "preexec_fn=lambda: None",
+        "process_group=0",
+    ],
+)
+def test_nested_python_process_identity_overrides_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, override: str
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    archive = _python_source_archive(
+        {
+            "entry.py": (
+                "import subprocess, sys; "
+                f"subprocess.run([sys.executable, 'child.py'], {override}, check=True)"
+            ),
+            "child.py": "pass\n",
+        }
+    )
+    _patch_candidate_resource_archive(monkeypatch, runner, archive)
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+
+
 @pytest.mark.parametrize("spawn_name", ["posix_spawn", "posix_spawnp"])
 def test_nested_posix_spawn_escape_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawn_name: str

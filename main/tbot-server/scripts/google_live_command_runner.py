@@ -213,6 +213,14 @@ def python_script_index(arguments):
 def candidate_popen(arguments, *args, **kwargs):
     if kwargs.get("shell", False):
         raise PermissionError("shell execution is not approved")
+    if (
+        kwargs.get("executable") is not None
+        or kwargs.get("preexec_fn") is not None
+        or kwargs.get("start_new_session", False)
+        or kwargs.get("process_group") not in {None, -1}
+        or kwargs.get("creationflags", 0) != 0
+    ):
+        raise PermissionError("candidate child process overrides are not approved")
     if not isinstance(arguments, (list, tuple)) or not arguments:
         raise PermissionError("candidate child executable is not approved")
     script_index = python_script_index(arguments) if isinstance(arguments, (list, tuple)) else None
