@@ -114,6 +114,7 @@ class EvidenceRunner:
         evidence_root = Path(evidence_root)
         if evidence_root.is_symlink() or not evidence_root.is_absolute():
             raise ValueError("evidence root must be an absolute non-alias path")
+        evidence_root = evidence_root.resolve(strict=True)
         if RUN_ID_RE.fullmatch(run_id) is None:
             raise ValueError("run ID is invalid")
         required = {"gitSha", "imageDigest", "firmwareIdentity", "configFingerprint", "fixtureSha256"}
