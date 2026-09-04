@@ -750,6 +750,7 @@ def _load_runtime_closure_manifest(
                     code_root,
                     "ls-tree",
                     "-z",
+                    "--full-name",
                     expected_git_sha,
                     "--",
                     f":(top){resource['path']}",
