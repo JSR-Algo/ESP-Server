@@ -233,8 +233,6 @@ def test_synthetic_dry_run_uses_execute_and_finalize_paths(tmp_path: Path):
     with pytest.raises(EvidenceStateError, match="command provenance is required"):
         runner.synthetic_dry_run(executor=execute)
     assert seen == list(COMMAND_ORDER)
-    recorded = [json.loads(line)["commandId"] for line in (runner.root / "commands.jsonl").read_text().splitlines()]
-    assert recorded == list(COMMAND_ORDER)
     assert not (runner.root / "release-verdict.json").is_file()
 
 

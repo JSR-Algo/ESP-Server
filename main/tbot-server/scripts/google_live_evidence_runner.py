@@ -469,7 +469,16 @@ class EvidenceRunner:
             if external_executor:
                 self._write_synthetic_outputs(command_id)
             stdin = b"{}" if spec.stdin_source is not None else None
-            self.execute_layer(command_id, executor=executor, env=synthetic_env, stdin_bytes=stdin)
+            command_env = {
+                name: synthetic_env[name]
+                for name in (*spec.env_allowlist, *spec.secret_env)
+            }
+            self.execute_layer(
+                command_id,
+                executor=executor,
+                env=command_env,
+                stdin_bytes=stdin,
+            )
         self.finalize()
         return {"status": "PASS", "runId": self.run_id}
 
