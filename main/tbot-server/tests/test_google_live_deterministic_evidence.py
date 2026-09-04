@@ -780,6 +780,55 @@ def test_producer_uses_isolated_allowlisted_pytest_process(
     assert all(not Path(json.loads(command[6])["trusted"][0]).exists() for command, _ in calls)
 
 
+def test_producer_writes_runner_bound_output_descriptors(tmp_path: Path) -> None:
+    node = "tests/test_a.py::test_one"
+    canonical_manifest = tmp_path / "canonical-nodes.txt"
+    canonical_manifest.write_text(node + "\n", encoding="utf-8")
+    deterministic_dir = tmp_path / "evidence" / "deterministic"
+    deterministic_dir.mkdir(parents=True)
+    outputs = {
+        name: deterministic_dir / name
+        for name in ("node-manifest.txt", "pytest.xml", "report.json")
+    }
+    descriptors = {
+        name: os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        for name, path in outputs.items()
+    }
+    identities = {name: os.fstat(fd).st_ino for name, fd in descriptors.items()}
+
+    def run(command, **_kwargs):
+        if "--collect-only" in command:
+            return subprocess.CompletedProcess(command, 0, stdout=node + "\n", stderr="")
+        junit_arg = next(value for value in command if value.startswith("--junitxml="))
+        Path(junit_arg.split("=", 1)[1]).write_bytes(_junit([node]))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    try:
+        report = deterministic.produce(
+            manifest_path=Path(f"/dev/fd/{descriptors['node-manifest.txt']}"),
+            junit_out=Path(f"/dev/fd/{descriptors['pytest.xml']}"),
+            report_path=Path(f"/dev/fd/{descriptors['report.json']}"),
+            identity=IDENTITY,
+            repo_root=tmp_path,
+            run=run,
+            git_status=lambda: b"",
+            git_head=lambda: IDENTITY["gitSha"],
+            approved_test_files=("tests/test_a.py",),
+            canonical_manifest_path=canonical_manifest,
+        )
+    finally:
+        for descriptor in descriptors.values():
+            os.close(descriptor)
+
+    assert report["status"] == "PASS"
+    assert outputs["node-manifest.txt"].read_text(encoding="utf-8") == node + "\n"
+    assert deterministic.parse_passing_junit(
+        outputs["pytest.xml"].read_bytes(), [node]
+    )["tests"] == 1
+    assert json.loads(outputs["report.json"].read_text(encoding="utf-8"))["status"] == "PASS"
+    assert {name: path.stat().st_ino for name, path in outputs.items()} == identities
+
+
 def test_isolated_pytest_process_ignores_environment_injection(tmp_path: Path) -> None:
     sentinel = "must-never-reach-child"
     injection = tmp_path / "injection"

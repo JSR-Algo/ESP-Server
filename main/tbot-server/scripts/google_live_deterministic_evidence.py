@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import fcntl
 import hashlib
 import io
 import json
@@ -54,6 +55,7 @@ _RUNTIME_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _RUNTIME_PACKAGE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _RUNTIME_PATH = re.compile(r"[A-Za-z0-9_./-]+")
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+_BOUND_DESCRIPTOR_PATH = re.compile(r"/(?:dev/fd|proc/self/fd)/([0-9]+)")
 _XML_DECLARATIONS = (
     '<?xml version="1.0" encoding="utf-8"?>',
     "<?xml version='1.0' encoding='utf-8'?>",
@@ -802,6 +804,80 @@ def validate_distinct_paths(paths: Sequence[Path]) -> None:
     for index, left in enumerate(paths):
         if any(_same_file(left, right) for right in paths[index + 1 :]):
             raise ValueError("evidence path alias detected")
+
+
+def _bound_descriptor_target(path: Path) -> Path | None:
+    match = _BOUND_DESCRIPTOR_PATH.fullmatch(path.as_posix())
+    if match is None:
+        return None
+    descriptor = os.open(path, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise ValueError("bound evidence output is invalid")
+        if hasattr(fcntl, "F_GETPATH"):
+            raw_target = fcntl.fcntl(descriptor, fcntl.F_GETPATH, b"\0" * 1024)
+            target = Path(raw_target.split(b"\0", 1)[0].decode()).resolve(strict=True)
+        else:
+            target = Path(os.readlink(f"/proc/self/fd/{descriptor}")).resolve(strict=True)
+        target_stat = target.stat(follow_symlinks=False)
+        if target.is_symlink() or (
+            target_stat.st_dev,
+            target_stat.st_ino,
+        ) != (opened.st_dev, opened.st_ino):
+            raise ValueError("bound evidence output is invalid")
+        return target
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("bound evidence output is invalid") from exc
+    finally:
+        os.close(descriptor)
+
+
+def _runner_bound_output_targets(paths: Sequence[Path]) -> tuple[Path, ...] | None:
+    targets = tuple(_bound_descriptor_target(path) for path in paths)
+    if all(target is None for target in targets):
+        return None
+    if any(target is None for target in targets):
+        raise ValueError("bound evidence outputs must be supplied together")
+    resolved = tuple(target for target in targets if target is not None)
+    validate_distinct_paths(resolved)
+    return resolved
+
+
+def _write_runner_bound_output(path: Path, target: Path, content: bytes) -> None:
+    descriptor = os.open(path, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
+    try:
+        before = os.fstat(descriptor)
+        target_before = target.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or target.is_symlink()
+            or (before.st_dev, before.st_ino)
+            != (target_before.st_dev, target_before.st_ino)
+        ):
+            raise RuntimeError("bound evidence output changed")
+        os.ftruncate(descriptor, 0)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        remaining = memoryview(content)
+        while remaining:
+            count = os.write(descriptor, remaining)
+            if count <= 0:
+                raise OSError("bound evidence output write failed")
+            remaining = remaining[count:]
+        os.fsync(descriptor)
+        after = os.fstat(descriptor)
+        target_after = target.stat(follow_symlinks=False)
+        if (
+            (after.st_dev, after.st_ino, after.st_nlink, after.st_size)
+            != (before.st_dev, before.st_ino, 1, len(content))
+            or (target_after.st_dev, target_after.st_ino)
+            != (before.st_dev, before.st_ino)
+        ):
+            raise RuntimeError("bound evidence output changed")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+    finally:
+        os.close(descriptor)
 
 
 def validate_porcelain_status(status: bytes, repo_root: Path, allowed_root: Path) -> None:
@@ -1756,12 +1832,18 @@ def _produce(
 ) -> dict[str, Any]:
     repo_root = repo_root.resolve(strict=True)
     paths = [manifest_path, junit_out, report_path]
-    validate_distinct_paths(paths)
-    if junit_out.exists() or report_path.exists():
+    bound_targets = _runner_bound_output_targets(paths)
+    logical_manifest, logical_junit, logical_report = (
+        bound_targets if bound_targets is not None else tuple(paths)
+    )
+    validate_distinct_paths((logical_manifest, logical_junit, logical_report))
+    if bound_targets is None and (junit_out.exists() or report_path.exists()):
         raise ValueError("deterministic outputs must not already exist")
-    if junit_out.parent.resolve(strict=False) != report_path.parent.resolve(strict=False):
+    if bound_targets is not None and any(path.stat().st_size != 0 for path in bound_targets):
+        raise ValueError("bound deterministic outputs must be empty")
+    if logical_junit.parent.resolve(strict=False) != logical_report.parent.resolve(strict=False):
         raise ValueError("deterministic outputs must share one owned directory")
-    evidence_root = junit_out.parent.parent
+    evidence_root = logical_junit.parent.parent
     if (
         not evidence_root.is_dir()
         or evidence_root.is_symlink()
@@ -1793,7 +1875,6 @@ def _produce(
             raise ValueError("candidate git SHA does not match repository HEAD")
 
     verify_repository()
-    manifest_bound = read_bound_file(manifest_path)
     canonical_path = canonical_manifest_path or (
         repo_root / "tests" / "fixtures" / "google_live_deterministic_nodes.txt"
     )
@@ -1802,6 +1883,13 @@ def _produce(
         if canonical_manifest_path is not None
         else _read_candidate_tracked_file(repo_root, canonical_path, identity["gitSha"])
     )
+    if bound_targets is not None:
+        _write_runner_bound_output(
+            manifest_path,
+            logical_manifest,
+            canonical_bound.content,
+        )
+    manifest_bound = read_bound_file(logical_manifest)
     if manifest_bound.content != canonical_bound.content:
         raise ValueError("manifest does not match the checked-in canonical manifest")
     nodes = parse_manifest(manifest_bound.content)
@@ -1845,9 +1933,9 @@ def _produce(
         line for line in collect.stdout.splitlines() if NODE_PATTERN.fullmatch(line)
     ]
     require_exact_nodes(collected, nodes, label="collection")
-    output_parent_identity = snapshot_output_parent(junit_out)
+    output_parent_identity = snapshot_output_parent(logical_junit)
     descriptor, temporary = tempfile.mkstemp(
-        dir=junit_out.parent,
+        dir=logical_junit.parent,
         prefix=".pytest.",
         suffix=".xml",
     )
@@ -1886,17 +1974,22 @@ def _produce(
         require_file_unchanged(manifest_path, manifest_bound)
         require_file_unchanged(canonical_path, canonical_bound)
         verify_repository(temporary_path)
-        atomic_write_exclusive(
-            junit_out,
-            normalized,
-            pre_publish=lambda publish_temp: verify_repository(
-                temporary_path, publish_temp
-            ),
-            post_publish=lambda: verify_repository(temporary_path, junit_out),
-            expected_parent_identity=output_parent_identity,
-        )
+        if bound_targets is None:
+            atomic_write_exclusive(
+                junit_out,
+                normalized,
+                pre_publish=lambda publish_temp: verify_repository(
+                    temporary_path, publish_temp
+                ),
+                post_publish=lambda: verify_repository(temporary_path, junit_out),
+                expected_parent_identity=output_parent_identity,
+            )
+        else:
+            verify_repository(temporary_path, logical_junit)
+            _write_runner_bound_output(junit_out, logical_junit, normalized)
+            verify_repository(temporary_path, logical_junit)
         temporary_path.unlink()
-        published_junit = read_bound_file(junit_out)
+        published_junit = read_bound_file(logical_junit)
         report = build_report(
             identity,
             manifest_bound.content,
@@ -1904,21 +1997,31 @@ def _produce(
             runtime_manifest_content,
         )
         require_file_unchanged(junit_out, published_junit)
-        atomic_write_exclusive(
-            report_path,
-            (json.dumps(report, indent=2, sort_keys=True) + "\n").encode(),
-            pre_publish=lambda publish_temp: verify_repository(
-                junit_out, publish_temp
-            ),
-            post_publish=lambda: verify_repository(junit_out, report_path),
-            expected_parent_identity=output_parent_identity,
-        )
+        report_content = (json.dumps(report, indent=2, sort_keys=True) + "\n").encode()
+        if bound_targets is None:
+            atomic_write_exclusive(
+                report_path,
+                report_content,
+                pre_publish=lambda publish_temp: verify_repository(
+                    junit_out, publish_temp
+                ),
+                post_publish=lambda: verify_repository(junit_out, report_path),
+                expected_parent_identity=output_parent_identity,
+            )
+        else:
+            verify_repository(logical_junit, logical_report)
+            _write_runner_bound_output(report_path, logical_report, report_content)
+            verify_repository(logical_junit, logical_report)
         completed_successfully = True
         return report
     finally:
         if temporary_path.exists():
             temporary_path.unlink()
-        if not completed_successfully and published_junit is not None:
+        if (
+            bound_targets is None
+            and not completed_successfully
+            and published_junit is not None
+        ):
             _unlink_if_bound(junit_out, published_junit)
 
 
