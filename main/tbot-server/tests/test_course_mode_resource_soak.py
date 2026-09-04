@@ -8,6 +8,8 @@ import pytest
 from scripts import course_mode_resource_soak as resource_soak
 from scripts.course_mode_resource_soak import (
     ResourceSoakConfig,
+    _loopback_client_connect,
+    _loopback_server_handshake,
     bounded_verdict,
     main,
     monotonic_growth_slope,
@@ -78,6 +80,35 @@ def test_bounded_verdict_fails_injected_resource_leaks() -> None:
         "FD_SLOPE_EXCEEDED",
         "ASYNCIO_TASK_SLOPE_EXCEEDED",
     }
+
+
+@pytest.mark.parametrize("payload_size", [126, 65_536])
+def test_loopback_websocket_round_trips_extended_length_text_frames(payload_size: int) -> None:
+    async def exercise() -> None:
+        received: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            websocket = await _loopback_server_handshake(reader, writer)
+            try:
+                message = await websocket.recv()
+                received.set_result(message)
+                await websocket.send(message)
+            finally:
+                await websocket.aclose()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        payload = "x" * payload_size
+        async with server:
+            client = await _loopback_client_connect(port, "/extended-length-test")
+            try:
+                await client.send(payload)
+                assert await client.recv() == payload
+                assert await received == payload
+            finally:
+                await client.aclose()
+
+    asyncio.run(exercise())
 
 
 def test_resource_soak_exercises_real_runtime_restore_and_sd_gc(tmp_path, monkeypatch) -> None:
