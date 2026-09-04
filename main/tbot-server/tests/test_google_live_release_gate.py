@@ -310,6 +310,23 @@ def test_release_rejects_unsupported_runtime_closure_platform(
 
     assert verdict["status"] == "FAIL"
     assert any(item["code"] == "DETERMINISTIC_TRUSTED_MANIFEST_INVALID" for item in verdict["failures"])
+
+
+def test_runtime_closure_distribution_digest_is_revalidated(tmp_path: Path) -> None:
+    package_root = tmp_path / "site-packages"
+    package_root.mkdir()
+    package_file = package_root / "example.py"
+    package_file.write_bytes(b"trusted")
+    manifest = {
+        "distributions": [{
+            "fileCount": 1, "files": [{"path": "example.py", "sha256": hashlib.sha256(b"trusted").hexdigest(), "size": 7}],
+            "importRoots": ["example"], "name": "example", "root": str(package_root), "totalBytes": 7, "version": "1",
+        }],
+    }
+    release_gate._validate_runtime_closure_distributions(manifest)
+    package_file.write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="distribution"):
+        release_gate._validate_runtime_closure_distributions(manifest)
 def _reports(test_count: int = len(CANONICAL_NODES)) -> dict[str, dict]:
     physical_audit = _PHYSICAL_CASE._candidate_audit(
         _PHYSICAL_CASE._candidate_physical_log()

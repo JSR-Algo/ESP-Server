@@ -386,6 +386,24 @@ def _canonical_runtime_closure(manifest: Mapping[str, Any]) -> bytes:
     return (json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
 
 
+def _validate_runtime_closure_distributions(manifest: Mapping[str, Any]) -> None:
+    """Recheck mutable dependency files named by the Git-bound closure."""
+    for distribution in manifest.get("distributions", []):
+        root = Path(distribution["root"])
+        for item in distribution["files"]:
+            path = root.joinpath(*item["path"].split("/"))
+            try:
+                info = path.lstat()
+            except OSError as exc:
+                raise ValueError("runtime closure distribution is unavailable") from exc
+            if path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError("runtime closure distribution is not a regular file")
+            if info.st_size != item["size"]:
+                raise ValueError("runtime closure distribution size changed")
+            if hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
+                raise ValueError("runtime closure distribution digest changed")
+
+
 def parse_trusted_python_executable_manifest(content: bytes) -> dict[str, Any]:
     try:
         value = json.loads(content)
@@ -1245,6 +1263,7 @@ def aggregate_release_evidence(
         trusted_runtime_closure = _load_runtime_closure_manifest(
             str(expected_identity.get("gitSha", ""))
         )
+        _validate_runtime_closure_distributions(trusted_runtime_closure)
         if (
             trusted_runtime_closure.get("platform") != APPROVED_RUNTIME_PLATFORM
             or trusted_runtime_closure["runtime"]["pythonMajorMinor"]
@@ -1518,6 +1537,7 @@ def aggregate_release_evidence(
         revalidated_runtime_closure = _load_runtime_closure_manifest(
             str(expected_identity.get("gitSha", ""))
         )
+        _validate_runtime_closure_distributions(revalidated_runtime_closure)
         if not hmac.compare_digest(
             _canonical_runtime_closure(revalidated_runtime_closure),
             trusted_runtime_closure_content,
@@ -1689,6 +1709,13 @@ def _produce_release_verdict(
         output_parent_identity = _snapshot_release_directory(output_path.parent)
         if pre_publish is not None:
             pre_publish()
+        if verdict["status"] == "PASS":
+            try:
+                _validate_runtime_closure_distributions(
+                    _load_runtime_closure_manifest(str(expected_identity.get("gitSha", "")))
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise RuntimeError("release evidence changed") from exc
         _require_all_release_inputs_unchanged(
             bindings,
             allowed_changed_directory=output_path.parent,
@@ -1699,6 +1726,13 @@ def _produce_release_verdict(
         output_parent_identity = _snapshot_release_directory(output_path.parent)
         if post_publish is not None:
             post_publish()
+        if verdict["status"] == "PASS":
+            try:
+                _validate_runtime_closure_distributions(
+                    _load_runtime_closure_manifest(str(expected_identity.get("gitSha", "")))
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise RuntimeError("release evidence changed") from exc
         _require_all_release_inputs_unchanged(
             bindings,
             allowed_changed_directory=output_path.parent,
