@@ -3343,6 +3343,11 @@ def _child_environment(
     if assignment is not None:
         environment.update(assignment)
     if lane.name.startswith("admin-course-mode-playwright-"):
+        mount_candidate = source_candidate if source_candidate is not None else candidate
+        environment.update({
+            "TBOT_LESSON_STUDIO_BACKEND_MOUNT_ROOT": mount_candidate["repositories"]["backend"]["path"],
+            "TBOT_LESSON_STUDIO_FIRMWARE_MOUNT_ROOT": mount_candidate["repositories"]["firmware"]["path"],
+        })
         for name in (
             "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME", "LESSON_STUDIO_E2E_RESOURCE_PREFIX",
             "JWT_PUBLIC_KEY", "TBOT_DEVICE_MINT_SECRET", "LESSON_ASSET_ORIGIN_BASE",

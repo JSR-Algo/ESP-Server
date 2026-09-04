@@ -16,4 +16,22 @@ function verifyStartedServiceImages(expected, inspectServiceImage) {
   }
 }
 
-module.exports = { inspectAndPinCandidateImages, verifyStartedServiceImages };
+function verifyStartedServicePortBindings(expected, inspectServicePorts) {
+  for (const [service, binding] of Object.entries(expected)) {
+    const ports = inspectServicePorts(service);
+    const observed = ports && ports[binding.containerPort];
+    if (
+      !Array.isArray(observed) || observed.length !== 1
+      || observed[0].HostIp !== '127.0.0.1'
+      || observed[0].HostPort !== binding.hostPort
+    ) {
+      throw new Error(`started ${service} container host port binding mismatch`);
+    }
+  }
+}
+
+module.exports = {
+  inspectAndPinCandidateImages,
+  verifyStartedServiceImages,
+  verifyStartedServicePortBindings,
+};

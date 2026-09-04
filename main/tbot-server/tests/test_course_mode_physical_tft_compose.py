@@ -98,7 +98,7 @@ ComposeLoader.add_constructor(
 )
 
 
-def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
+def test_physical_tft_override_is_one_device_scoped_with_explicit_lan_assets():
     raw = OVERLAY_COMPOSE.read_text(encoding="utf-8")
     overlay = yaml.load(raw, Loader=ComposeLoader)
 
@@ -234,6 +234,10 @@ def test_physical_tft_override_is_loopback_only_and_one_device_scoped():
     assert postgres["ports"] == [{
         "mode": "ingress", "host_ip": "127.0.0.1", "target": 5432,
         "published": "5432", "protocol": "tcp",
+    }]
+    assert web["ports"] == [{
+        "mode": "ingress", "host_ip": "0.0.0.0", "target": 8002,
+        "published": "8102", "protocol": "tcp",
     }]
     assert backend["extra_hosts"] == ["host.docker.internal=host-gateway"]
     required_environment = (

@@ -105,11 +105,11 @@ test('lesson studio host ports are configurable without changing container ports
 
   assert.match(
     backend,
-    /"\$\{LESSON_STUDIO_E2E_BACKEND_HOST_PORT:-3100\}:3000"/,
+    /"127\.0\.0\.1:\$\{LESSON_STUDIO_E2E_BACKEND_HOST_PORT:-3100\}:3000"/,
   );
   assert.match(
     web,
-    /"\$\{LESSON_STUDIO_E2E_WEB_HOST_PORT:-8102\}:8002"/,
+    /"127\.0\.0\.1:\$\{LESSON_STUDIO_E2E_WEB_HOST_PORT:-8102\}:8002"/,
   );
 });
 

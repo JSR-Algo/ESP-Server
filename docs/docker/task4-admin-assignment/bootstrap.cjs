@@ -408,7 +408,7 @@ async function verifyServedBytes(url, expectedSha, expectedBytes) {
     const hash = createHash('sha256');
     let bytes = 0;
     const reachable = new URL(url);
-    if (reachable.hostname === 'task4-media.localhost') reachable.hostname = 'host.docker.internal';
+    if (reachable.hostname === 'task4-media.localhost') reachable.port = '8443';
     const request = httpsGet(reachable, {
       ca: readFileSync('/task4-tls/cert.pem'),
       servername: 'task4-media.localhost',

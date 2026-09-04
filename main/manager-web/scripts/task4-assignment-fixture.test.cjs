@@ -10,6 +10,7 @@ const test = require('node:test');
 const {
   inspectAndPinCandidateImages,
   verifyStartedServiceImages,
+  verifyStartedServicePortBindings,
 } = require('./task4-image-identity.cjs');
 const { validateAssignmentRuntimeCapsule } = require('./task4-assignment-runtime.cjs');
 
@@ -391,6 +392,13 @@ test('Task 4 pins inspected image IDs and rejects retag or started-container dri
   assert.throws(() => verifyStartedServiceImages(
     { backend: candidate.backendId }, () => `sha256:${'4'.repeat(64)}`,
   ), /started backend container image ID mismatch/);
+  assert.doesNotThrow(() => verifyStartedServicePortBindings({
+    'derivative-media': { containerPort: '8443/tcp', hostPort: '28434' },
+  }, () => ({ '8443/tcp': [{ HostIp: '127.0.0.1', HostPort: '28434' }] })));
+  assert.throws(() => verifyStartedServicePortBindings({
+    'derivative-media': { containerPort: '8443/tcp', hostPort: '28434' },
+  }, () => ({ '8443/tcp': [{ HostIp: '0.0.0.0', HostPort: '28434' }] })),
+  /started derivative-media container host port binding mismatch/);
 });
 
 test('Task 4 assignment fixture uses canonical backend authoring and rollout code', () => {
@@ -517,6 +525,11 @@ test('Task 4 assignment phases recreate only the backend and preserve PostgreSQL
     assert.match(compose, /LESSON_ROLLOUT_DEVICE_ALLOWLIST:\s*91deb5af-c1c0-416b-956d-266d510eac5e/);
     assert.match(compose, /derivative-media:/);
     assert.match(compose, /TASK4_ASSIGNMENT_MEDIA_ROOT/);
+    assert.match(
+      compose,
+      /"127\.0\.0\.1:\$\{TASK4_ASSIGNMENT_MEDIA_HOST_PORT:-18443\}:8443"/,
+    );
+    assert.match(compose, /aliases:\s*\[task4-media\.localhost\]/);
     assert.match(compose, /\.\/task4-admin-assignment\/copy-file\.cjs:\/task4-fixture\/copy-file\.cjs:ro/);
   }
 });
@@ -575,6 +588,8 @@ test('Task 4 release commands run candidate-bound NEW and ROLLBACK orchestration
   assert.match(source, /bootstrap\.cjs/);
   assert.match(source, /playwright\.assignment-rollback\.config\.js/);
   assert.match(source, /const mediaHostname = 'task4-media\.localhost'/);
+  assert.match(source, /LESSON_STUDIO_E2E_BACKEND_HOST_PORT: process\.env\.LESSON_STUDIO_E2E_BACKEND_HOST_PORT \|\| '3100'/);
+  assert.match(source, /LESSON_STUDIO_E2E_WEB_HOST_PORT: process\.env\.LESSON_STUDIO_E2E_WEB_HOST_PORT \|\| '8102'/);
   assert.match(source, /TBOT_FIRMWARE_WORKTREE lacks required candidate asset/);
   assert.match(source, /docker[\s\S]*image[\s\S]*inspect/);
   assert.match(imageIdentitySource, /candidate backend image ID mismatch/);
@@ -588,6 +603,8 @@ test('Task 4 release commands run candidate-bound NEW and ROLLBACK orchestration
   assert.doesNotMatch(source, /TASK4_ASSIGNMENT_MEDIA_ORIGIN:\s*`https:\/\/127\.0\.0\.1:/);
   const fixture = readFileSync(fixturePath, 'utf8');
   const session = readFileSync(resolve(__dirname, '../e2e/lesson-studio/helpers/session.js'), 'utf8');
+  assert.match(fixture, /reachable\.port = '8443'/);
+  assert.doesNotMatch(fixture, /reachable\.hostname = 'host\.docker\.internal'/);
   assert.match(session, /page\.route\(\/\^https:\\\/\\\/task4-media\\\.localhost/);
   assert.match(session, /ca,\s*servername: 'task4-media\.localhost'/s);
   assert.doesNotMatch(session, /ignoreHTTPSErrors|rejectUnauthorized:\s*false/);

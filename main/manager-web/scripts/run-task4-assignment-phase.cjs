@@ -6,6 +6,7 @@ const { isAbsolute, resolve } = require('node:path');
 const {
   inspectAndPinCandidateImages,
   verifyStartedServiceImages,
+  verifyStartedServicePortBindings,
 } = require('./task4-image-identity.cjs');
 const { validateAssignmentRuntimeCapsule } = require('./task4-assignment-runtime.cjs');
 const { composeExecutableFromEnvironment } = require('./reset-lesson-studio-e2e-state.cjs');
@@ -60,6 +61,8 @@ const mediaHostname = 'task4-media.localhost';
 const environment = {
   ...process.env,
   TBOT_BACKEND_WORKTREE: backendRoot,
+  LESSON_STUDIO_E2E_BACKEND_HOST_PORT: process.env.LESSON_STUDIO_E2E_BACKEND_HOST_PORT || '3100',
+  LESSON_STUDIO_E2E_WEB_HOST_PORT: process.env.LESSON_STUDIO_E2E_WEB_HOST_PORT || '8102',
   TASK4_ASSIGNMENT_MEDIA_ROOT: mediaRoot,
   TASK4_ASSIGNMENT_TLS_ROOT: tlsRoot,
   TASK4_ASSIGNMENT_MEDIA_HOST_PORT: hostPort,
@@ -145,6 +148,19 @@ verifyStartedServiceImages({
   return execFileSync(dockerExecutable, ['inspect', '--format={{.Image}}', container], {
     cwd: repoRoot, env: environment, encoding: 'utf8',
   }).trim();
+});
+verifyStartedServicePortBindings({
+  backend: { containerPort: '3000/tcp', hostPort: environment.LESSON_STUDIO_E2E_BACKEND_HOST_PORT },
+  web: { containerPort: '8002/tcp', hostPort: environment.LESSON_STUDIO_E2E_WEB_HOST_PORT },
+  'derivative-media': { containerPort: '8443/tcp', hostPort },
+}, (service) => {
+  const container = execFileSync(composeExecutable, [...compose, 'ps', '-q', service], {
+    cwd: repoRoot, env: environment, encoding: 'utf8',
+  }).trim();
+  if (!container) return null;
+  return JSON.parse(execFileSync(dockerExecutable, [
+    'inspect', '--format={{json .NetworkSettings.Ports}}', container,
+  ], { cwd: repoRoot, env: environment, encoding: 'utf8' }));
 });
 
 run(process.execPath, [

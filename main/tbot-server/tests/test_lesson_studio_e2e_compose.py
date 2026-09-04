@@ -28,10 +28,10 @@ def test_lesson_studio_compose_is_test_owned_and_complete():
     for service in ("postgres:", "redis:", "mysql:", "backend:", "web:", "seed-postgres:", "seed-mysql:"):
         assert service in compose
 
-    assert '"${LESSON_STUDIO_E2E_BACKEND_HOST_PORT:-3100}:3000"' in compose
-    assert '"${LESSON_STUDIO_E2E_WEB_HOST_PORT:-8102}:8002"' in compose
-    assert "local/tbot-backend:lesson-studio-e2e" in compose
-    assert "local/tbot-server-web:lesson-studio-e2e" in compose
+    assert '"127.0.0.1:${LESSON_STUDIO_E2E_BACKEND_HOST_PORT:-3100}:3000"' in compose
+    assert '"127.0.0.1:${LESSON_STUDIO_E2E_WEB_HOST_PORT:-8102}:8002"' in compose
+    assert "${TBOT_LESSON_STUDIO_BACKEND_IMAGE:?set the candidate backend image}" in compose
+    assert "${TBOT_LESSON_STUDIO_WEB_IMAGE:?set the candidate web image}" in compose
     assert "/src/lessons/fixtures/tvideo-raw-code/assets:/usr/share/nginx/html/tvideo-demo:ro" not in compose
     assert "/src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json:/usr/share/nginx/html/tvideo-demo/asset-manifest.json:ro" in compose
     assert "/src/lessons/fixtures/tvideo-raw-code/assets/admin:/usr/share/nginx/html/tvideo-demo/admin:ro" in compose

@@ -80,7 +80,7 @@ services:
       LESSON_STUDIO_ROLLBACK_ASSIGNMENTS_ENABLED: "false"
       SKIP_MIGRATIONS: "false"
     ports:
-      - "${LESSON_STUDIO_E2E_BACKEND_HOST_PORT:-3100}:3000"
+      - "127.0.0.1:${LESSON_STUDIO_E2E_BACKEND_HOST_PORT:-3100}:3000"
     healthcheck:
       test:
         - CMD
@@ -140,7 +140,7 @@ services:
       TBOT_E2E_CAPTCHA_ENABLED: "true"
       TBOT_E2E_CAPTCHA_CODE: E2E42
     ports:
-      - "${LESSON_STUDIO_E2E_WEB_HOST_PORT:-8102}:8002"
+      - "127.0.0.1:${LESSON_STUDIO_E2E_WEB_HOST_PORT:-8102}:8002"
     volumes:
       - ${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}/src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json:/usr/share/nginx/html/tvideo-demo/asset-manifest.json:ro
       - ${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}/src/lessons/fixtures/tvideo-raw-code/assets/admin:/usr/share/nginx/html/tvideo-demo/admin:ro

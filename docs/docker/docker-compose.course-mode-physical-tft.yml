@@ -53,6 +53,8 @@ services:
     profiles: [disabled-course-mode-physical-tft]
 
   web:
+    ports: !override
+      - "0.0.0.0:8102:8002"
     depends_on: !override
       backend:
         condition: service_healthy

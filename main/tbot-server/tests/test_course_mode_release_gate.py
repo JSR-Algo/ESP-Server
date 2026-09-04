@@ -4971,6 +4971,12 @@ def test_playwright_lane_uses_stable_backend_authority_environment(
     stable_backend = Path(observed["TBOT_BACKEND_WORKTREE"])
     assert stable_backend == Path(observed["COURSE_MODE_BACKEND_ROOT"])
     assert stable_backend.parent.parent.name.startswith("course-mode-stage-")
+    assert Path(observed["TBOT_LESSON_STUDIO_BACKEND_MOUNT_ROOT"]) == Path(
+        candidate["repositories"]["backend"]["path"]
+    )
+    assert Path(observed["TBOT_LESSON_STUDIO_FIRMWARE_MOUNT_ROOT"]) == Path(
+        candidate["repositories"]["firmware"]["path"]
+    )
     assert not stable_backend.is_relative_to(Path(observed["HOME"]).parents[1])
     assert observed["COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY_SHA256"]
 

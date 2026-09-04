@@ -26,7 +26,7 @@ services:
       TASK4_ASSIGNMENT_MEDIA_ROOT: /task4-media
       TASK4_ASSIGNMENT_MEDIA_PORT: "8443"
     ports:
-      - "${TASK4_ASSIGNMENT_MEDIA_HOST_PORT:-18443}:8443"
+      - "127.0.0.1:${TASK4_ASSIGNMENT_MEDIA_HOST_PORT:-18443}:8443"
     volumes:
       - ./task4-admin-assignment/serve-media.cjs:/task4-fixture/serve-media.cjs:ro
       - ${TASK4_ASSIGNMENT_MEDIA_ROOT:?set the Task4 runtime media directory}:/task4-media
@@ -35,4 +35,6 @@ services:
       - ${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}/src/lessons/fixtures/tvideo-raw-code/assets/admin:/task4-source/admin:ro
       - ${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}/src/lessons/fixtures/tvideo-raw-code/assets/esp-tft:/task4-source/esp-tft:ro
       - ${TBOT_FIRMWARE_WORKTREE:?set the candidate firmware worktree}/lesson/assets:/task4-source/assets:ro
-    networks: [lesson-studio-e2e]
+    networks:
+      lesson-studio-e2e:
+        aliases: [task4-media.localhost]

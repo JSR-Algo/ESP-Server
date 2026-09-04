@@ -94,6 +94,8 @@ function preflightLessonStudioE2EStack({ env = process.env, run = (command, args
   const project = (env.COMPOSE_PROJECT_NAME || env.LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME || 'tbot-ls-e2e');
   const file = DEFAULT_COMPOSE_FILE;
   const services = ['redis', 'postgres', 'mysql', 'backend', 'seed-postgres', 'web', 'seed-mysql'];
+  const backendRoot = env.TBOT_LESSON_STUDIO_BACKEND_MOUNT_ROOT || env.TBOT_BACKEND_WORKTREE;
+  const firmwareRoot = env.TBOT_LESSON_STUDIO_FIRMWARE_MOUNT_ROOT || env.TBOT_FIRMWARE_WORKTREE;
   for (const service of services) {
     const container = run(compose, ['-p', project, '-f', file, 'ps', '-q', service]);
     if (!container) throw new Error(`required ${service} service is not running`);
@@ -105,6 +107,54 @@ function preflightLessonStudioE2EStack({ env = process.env, run = (command, args
     if (service === 'backend' || service === 'web') {
       const expected = service === 'backend' ? env.TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID : env.TBOT_LESSON_STUDIO_WEB_IMAGE_ID;
       if (!expected || imageId !== expected) throw new Error(`started ${service} container image ID mismatch`);
+      const containerPort = service === 'backend' ? '3000/tcp' : '8002/tcp';
+      const expectedHostPort = service === 'backend'
+        ? (env.LESSON_STUDIO_E2E_BACKEND_HOST_PORT || '3100')
+        : (env.LESSON_STUDIO_E2E_WEB_HOST_PORT || '8102');
+      let ports;
+      try {
+        ports = JSON.parse(run(env.TBOT_DOCKER_EXECUTABLE || 'docker', [
+          'inspect', '--format={{json .NetworkSettings.Ports}}', container,
+        ]));
+      } catch {
+        throw new Error(`started ${service} container host port binding mismatch`);
+      }
+      const bindings = ports && ports[containerPort];
+      if (
+        !expectedHostPort || !Array.isArray(bindings) || bindings.length !== 1
+        || bindings[0].HostIp !== '127.0.0.1'
+        || bindings[0].HostPort !== expectedHostPort
+      ) {
+        throw new Error(`started ${service} container host port binding mismatch`);
+      }
+    }
+    if (service === 'web') {
+      if (!backendRoot || !firmwareRoot) {
+        throw new Error('candidate lesson asset mount roots are required');
+      }
+      let mounts;
+      try {
+        mounts = JSON.parse(run(env.TBOT_DOCKER_EXECUTABLE || 'docker', [
+          'inspect', '--format={{json .Mounts}}', container,
+        ]));
+      } catch {
+        throw new Error('started web container lesson asset mounts mismatch');
+      }
+      const expectedMounts = new Map([
+        ['/usr/share/nginx/html/tvideo-demo/asset-manifest.json', path.resolve(backendRoot, 'src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json')],
+        ['/usr/share/nginx/html/tvideo-demo/admin', path.resolve(backendRoot, 'src/lessons/fixtures/tvideo-raw-code/assets/admin')],
+        ['/usr/share/nginx/html/tvideo-demo/esp-tft', path.resolve(backendRoot, 'src/lessons/fixtures/tvideo-raw-code/assets/esp-tft')],
+        ['/usr/share/nginx/html/tvideo-demo/assets', path.resolve(firmwareRoot, 'lesson/assets')],
+      ]);
+      const observed = new Map(
+        Array.isArray(mounts) ? mounts.map((mount) => [mount.Destination, mount]) : [],
+      );
+      for (const [destination, source] of expectedMounts) {
+        const mount = observed.get(destination);
+        if (!mount || mount.Type !== 'bind' || mount.Source !== source || mount.RW !== false) {
+          throw new Error('started web container lesson asset mounts mismatch');
+        }
+      }
     }
   }
 }
