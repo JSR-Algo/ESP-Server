@@ -129,7 +129,7 @@ def _planned_command_argv(
         "websocket.correlation": (sys.executable, "scripts/analyze_google_live_log.py", "--log", None, "--correlate-transport", "<evidence:websocket-e2e/transport.json>", "--expected-candidate-json", None, "--out-json", "<evidence:websocket-e2e/report.json>"),
         "candidate_soak.produce": (sys.executable, "scripts/google_live_robot_soak.py", "--mode", "candidate", "--produce-candidate-evidence", "<evidence:candidate-soak/journey-evidence.json>", "--evidence-control-url", None, "--server-log", None, "--run-id", None, *soak_support, *candidate),
         "candidate_soak.replay": (sys.executable, "scripts/google_live_robot_soak.py", "--mode", "candidate", "--journey-evidence", "<evidence:candidate-soak/journey-evidence.json>", "--report", "<evidence:candidate-soak/report.json>", *soak_support, *candidate),
-        "physical.capture_and_audit": (sys.executable, "scripts/google_live_physical_evidence.py", "--candidate-soak-report", "<evidence:candidate-soak/report.json>", "--server-report", "<evidence:server-regression/report.json>", "--report", "<evidence:physical/report.json>", *candidate),
+        "physical.capture_and_audit": (sys.executable, "scripts/google_live_physical_evidence.py", "--candidate-soak-report", "<evidence:candidate-soak/report.json>", "--server-report", "<evidence:server-regression/report.json>", "--report", "<evidence:physical/report.json>", "--operator-confirmed", "--transcript-plan-stdin", "--base-url", None, "--device-id", None, "--client-id", None, "--server-log", None, *candidate),
     }
     return common[command_id]
 

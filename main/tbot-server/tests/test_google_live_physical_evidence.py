@@ -154,6 +154,7 @@ def test_composition_invokes_existing_audit_and_writes_bound_report(tmp_path: Pa
         output=output,
         audit_fn=audit,
     )
-    assert seen["production_google_live_candidate"] is True
+    assert seen["require_receive_loop_balance"] is True
+    assert seen["min_interrupts"] == 10
     assert report["logEvidence"] == server
     assert json.loads(output.read_text())["candidateSoakEvidence"] == soak

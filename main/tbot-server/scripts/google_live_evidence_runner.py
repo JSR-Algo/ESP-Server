@@ -155,7 +155,7 @@ class EvidenceRunner:
             CommandSpec("websocket.correlation", (str(py), "scripts/analyze_google_live_log.py", "--correlate-transport", str(root / "websocket-e2e/transport.json"), "--out-json", str(root / "websocket-e2e/report.json")), cwd=root, candidate_identity=self.identity, outputs=(root / "websocket-e2e/report.json",)),
             CommandSpec("candidate_soak.produce", (str(py), "scripts/google_live_robot_soak.py", "--mode", "candidate", "--produce-candidate-evidence", str(root / "candidate-soak/journey-evidence.json"), *common), cwd=root, candidate_identity=self.identity, secret_env=("TBOT_DEVICE_MINT_SECRET",), stdin_source="protected_candidate_plan", outputs=(root / "candidate-soak/journey-evidence.json",)),
             CommandSpec("candidate_soak.replay", (str(py), "scripts/google_live_robot_soak.py", "--mode", "candidate", "--journey-evidence", str(root / "candidate-soak/journey-evidence.json"), "--report", str(root / "candidate-soak/report.json"), *common), cwd=root, candidate_identity=self.identity, inputs=(root / "candidate-soak/journey-evidence.json",), outputs=(root / "candidate-soak/report.json",)),
-            CommandSpec("physical.capture_and_audit", (str(py), "scripts/google_live_physical_evidence.py", "--candidate-soak-report", str(root / "candidate-soak/report.json"), "--server-report", str(root / "server-regression/report.json"), "--report", str(root / "physical/report.json"), *common), cwd=root, candidate_identity=self.identity, secret_env=("TBOT_DEVICE_MINT_SECRET",), stdin_source="protected_transcript_plan", inputs=(root / "candidate-soak/report.json",), outputs=(root / "server-regression/report.json", root / "physical/report.json")),
+            CommandSpec("physical.capture_and_audit", (str(py), "scripts/google_live_physical_evidence.py", "--candidate-soak-report", str(root / "candidate-soak/report.json"), "--server-report", str(root / "server-regression/report.json"), "--report", str(root / "physical/report.json"), "--operator-confirmed", "--transcript-plan-stdin", "--base-url", "http://127.0.0.1", "--device-id", "runtime-device", "--client-id", "runtime-client", "--server-log", str(root / "server.log"), *common), cwd=root, candidate_identity=self.identity, secret_env=("TBOT_DEVICE_MINT_SECRET",), stdin_source="protected_transcript_plan", inputs=(root / "candidate-soak/report.json",), outputs=(root / "server-regression/report.json", root / "physical/report.json")),
         )
         return specs
 
@@ -188,6 +188,13 @@ class EvidenceRunner:
     def finalize(self) -> Path:
         if not self.all_passed():
             raise EvidenceStateError("all evidence layers must pass before finalize")
+        provenance = self.root / "commands.jsonl"
+        projection = self.root / "commands.txt"
+        if not provenance.is_file():
+            raise EvidenceStateError("command provenance is required before finalize")
+        from scripts.google_live_command_runner import parse_provenance, render_commands_projection
+        entries = parse_provenance(provenance.read_bytes())
+        _atomic(projection, render_commands_projection(entries))
         rows = []
         for layer in LAYERS:
             report = next(self.root.glob(f"{layer.replace('_', '-')}/report.json"), None)
