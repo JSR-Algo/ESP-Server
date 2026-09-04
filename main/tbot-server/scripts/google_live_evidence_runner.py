@@ -473,12 +473,17 @@ class EvidenceRunner:
                 name: synthetic_env[name]
                 for name in (*spec.env_allowlist, *spec.secret_env)
             }
-            self.execute_layer(
-                command_id,
-                executor=executor,
-                env=command_env,
-                stdin_bytes=stdin,
-            )
+            try:
+                self.execute_layer(
+                    command_id,
+                    executor=executor,
+                    env=command_env,
+                    stdin_bytes=stdin,
+                )
+            except Exception as exc:
+                raise EvidenceStateError(
+                    f"synthetic command failed: {command_id}"
+                ) from exc
         self.finalize()
         return {"status": "PASS", "runId": self.run_id}
 
