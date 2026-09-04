@@ -153,8 +153,7 @@ def test_live_server_log_is_runtime_source_not_immutable_command_input(tmp_path:
     assert runner.root / "server.log" not in specs["candidate_soak.produce"].inputs
     assert runner.root / "server.log" not in specs["physical.capture_and_audit"].inputs
     assert specs["physical.capture_and_audit"].outputs == (
-        runner.root / "physical/server-window.log",
-        runner.root / "physical/server-report.json",
+        runner.root / "server-regression/report.json",
         runner.root / "physical/terminal-snapshot.json",
         runner.root / "physical/report.json",
     )

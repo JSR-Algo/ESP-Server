@@ -130,7 +130,7 @@ def _planned_command_argv(
         "websocket.correlation": (sys.executable, "scripts/analyze_google_live_log.py", "--log", None, "--correlate-transport", "<evidence:websocket-e2e/transport.json>", "--expected-candidate-json", None, "--out-json", "<evidence:websocket-e2e/report.json>"),
         "candidate_soak.produce": (sys.executable, "scripts/google_live_robot_soak.py", "--mode", "candidate", "--produce-candidate-evidence", "<evidence:candidate-soak/journey-evidence.json>", "--evidence-control-url", None, "--server-log", None, "--run-id", None, *soak_support, *candidate),
         "candidate_soak.replay": (sys.executable, "scripts/google_live_robot_soak.py", "--mode", "candidate", "--journey-evidence", "<evidence:candidate-soak/journey-evidence.json>", "--report", "<evidence:candidate-soak/report.json>", *soak_support, *candidate),
-        "physical.capture_and_audit": (sys.executable, "scripts/google_live_physical_evidence.py", "--candidate-soak-report", "<evidence:candidate-soak/report.json>", "--server-report-output", "<evidence:physical/server-report.json>", "--terminal-report", "<evidence:physical/terminal-snapshot.json>", "--report", "<evidence:physical/report.json>", "--operator-confirmed", "--transcript-plan-stdin", "--base-url", None, "--device-id", None, "--client-id", None, "--server-log", None, *candidate),
+        "physical.capture_and_audit": (sys.executable, "scripts/google_live_physical_evidence.py", "--candidate-soak-report", "<evidence:candidate-soak/report.json>", "--server-report-output", "<evidence:server-regression/report.json>", "--terminal-report", "<evidence:physical/terminal-snapshot.json>", "--report", "<evidence:physical/report.json>", "--operator-confirmed", "--transcript-plan-stdin", "--base-url", None, "--device-id", None, "--client-id", None, "--server-log", None, *candidate),
     }
     return common[command_id]
 
@@ -696,15 +696,12 @@ def _write_evidence(
         if command_id == "candidate_soak.produce":
             outputs.append(copy.deepcopy(journey_evidence_artifact))
         if command_id == "physical.capture_and_audit":
-            physical_window = root / "physical" / "server-window.log"
-            physical_window.write_text("bounded physical evidence\n", encoding="utf-8")
-            physical_server = root / "physical" / "server-report.json"
+            physical_server = root / "server-regression" / "report.json"
             physical_server.write_text(json.dumps(reports["physical"]["logEvidence"], sort_keys=True) + "\n", encoding="utf-8")
             physical_terminal = root / "physical" / "terminal-snapshot.json"
             physical_terminal.write_text(json.dumps(reports["physical"]["terminalSnapshot"], sort_keys=True) + "\n", encoding="utf-8")
             outputs[:0] = [
-                {"label": "physical/server-window.log", "sha256": hashlib.sha256(physical_window.read_bytes()).hexdigest()},
-                {"label": "physical/server-report.json", "sha256": hashlib.sha256(physical_server.read_bytes()).hexdigest()},
+                {"label": "server-regression/report.json", "sha256": hashlib.sha256(physical_server.read_bytes()).hexdigest()},
                 {"label": "physical/terminal-snapshot.json", "sha256": hashlib.sha256(physical_terminal.read_bytes()).hexdigest()},
             ]
         command = {

@@ -12,6 +12,7 @@ import argparse
 import base64
 import os
 import tempfile
+import contextlib
 from pathlib import Path
 from typing import Any, Callable
 
@@ -137,12 +138,20 @@ def compose_physical_report(*, raw_server_log: Path, journey_id: str, candidate_
         journey_id,
     )
     bounded_log = "\n".join(selected) + "\n"
-    bounded_log_output = bounded_log_output or output.with_name("server-window.log")
+    temporary_window = bounded_log_output is None
+    if temporary_window:
+        handle = tempfile.NamedTemporaryFile(prefix="google-live-window-", suffix=".log", delete=False)
+        bounded_log_output = Path(handle.name)
+        handle.close()
     _atomic_write(bounded_log_output, bounded_log.encode())
     if analyzer_fn is None:
         from scripts.analyze_google_live_log import analyze_reliability_window
         analyzer_fn = analyze_reliability_window
-    server_report = dict(analyzer_fn(bounded_log_output))
+    try:
+        server_report = dict(analyzer_fn(bounded_log_output))
+    finally:
+        if temporary_window:
+            bounded_log_output.unlink(missing_ok=True)
     scope = server_report.get("evidenceScope", {})
     if server_report.get("status") != "PASS" or scope.get("journeyId") != journey_id:
         raise PhysicalEvidenceError("physical server evidence does not match terminal journey")
@@ -232,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
         result = PhysicalEvidenceClient(args.base_url, args.device_id, __import__("os").environ.get("TBOT_DEVICE_MINT_SECRET", "")).capture(journey_id=str(plan["journeyId"]), enrollment=enrollment, candidate_identity=identity, on_ready=lambda journey: print("READY journey_id=" + journey, flush=True))
         if args.terminal_report is not None:
             _atomic_write(args.terminal_report, (json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n").encode())
-        compose_physical_report(raw_server_log=args.server_log, journey_id=str(result.get("journeyId") or plan["journeyId"]), terminal_snapshot=result, candidate_soak_report=candidate_report, candidate_identity=identity, device_id=args.device_id, client_id=args.client_id, output=args.report, bounded_log_output=args.report.with_name("server-window.log"), server_report_output=args.server_report_output or args.report.with_name("server-report.json"))
+        compose_physical_report(raw_server_log=args.server_log, journey_id=str(result.get("journeyId") or plan["journeyId"]), terminal_snapshot=result, candidate_soak_report=candidate_report, candidate_identity=identity, device_id=args.device_id, client_id=args.client_id, output=args.report, server_report_output=args.server_report_output or args.report.with_name("server-report.json"))
         return 0
     except Exception:
         return 1

@@ -277,7 +277,7 @@ def _trusted_command_argv_patterns(
             "--candidate-soak-report",
             "<evidence:candidate-soak/report.json>",
             "--server-report-output",
-            "<evidence:physical/server-report.json>",
+            "<evidence:server-regression/report.json>",
             "--terminal-report",
             "<evidence:physical/terminal-snapshot.json>",
             "--report",
@@ -310,7 +310,7 @@ def _trusted_command_specs(identity: Mapping[str, Any]) -> dict[str, TrustedComm
         "websocket.correlation": ("websocket-e2e/report.json",),
         "candidate_soak.produce": ("candidate-soak/journey-evidence.json",),
         "candidate_soak.replay": ("candidate-soak/report.json",),
-        "physical.capture_and_audit": ("physical/server-window.log", "physical/server-report.json", "physical/terminal-snapshot.json", "physical/report.json"),
+        "physical.capture_and_audit": ("server-regression/report.json", "physical/terminal-snapshot.json", "physical/report.json"),
     }
     mint_commands = {
         "websocket.transport",
@@ -1393,7 +1393,7 @@ def aggregate_release_evidence(
                 item["status"] = "FAIL"
                 break
     try:
-        physical_server_path = Path(layer_paths[COMMAND_PROVENANCE_SUPPORT]).parent / "physical/server-report.json"
+        physical_server_path = Path(layer_paths[COMMAND_PROVENANCE_SUPPORT]).parent / "server-regression/report.json"
         if not unified and not physical_server_path.exists():
             raise FileNotFoundError
         physical_server_report = json.loads(physical_server_path.read_bytes())
@@ -1678,20 +1678,17 @@ def aggregate_release_evidence(
             raise ValueError
         physical_outputs = by_id["physical.capture_and_audit"]["outputs"]
         if [item["label"] for item in physical_outputs] != [
-            "physical/server-window.log",
-            "physical/server-report.json",
+            "server-regression/report.json",
             "physical/terminal-snapshot.json",
             "physical/report.json",
         ]:
             raise ValueError
-        physical_window = _read_bound_release_input(root / physical_outputs[0]["label"])
-        physical_server = _read_bound_release_input(root / physical_outputs[1]["label"])
-        physical_terminal = _read_bound_release_input(root / physical_outputs[2]["label"])
+        physical_server = _read_bound_release_input(root / physical_outputs[0]["label"])
+        physical_terminal = _read_bound_release_input(root / physical_outputs[1]["label"])
         physical_report = loaded_reports.get("physical")
         if (
-            not hmac.compare_digest(physical_window.sha256, physical_outputs[0]["sha256"])
-            or not hmac.compare_digest(physical_server.sha256, physical_outputs[1]["sha256"])
-            or not hmac.compare_digest(physical_terminal.sha256, physical_outputs[2]["sha256"])
+            not hmac.compare_digest(physical_server.sha256, physical_outputs[0]["sha256"])
+            or not hmac.compare_digest(physical_terminal.sha256, physical_outputs[1]["sha256"])
         ):
             raise ValueError
         physical_output_binding_invalid = (
