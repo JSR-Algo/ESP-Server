@@ -18,6 +18,13 @@ from scripts.course_mode_resource_soak import (
 )
 
 
+def _frame(*, opcode: int, payload: bytes, fin: bool = True, masked: bool = True) -> bytes:
+    mask = b"test" if masked else b""
+    encoded = bytes(value ^ mask[index % 4] for index, value in enumerate(payload)) if masked else payload
+    length = bytes((len(payload),)) if len(payload) < 126 else b"\x7e" + len(payload).to_bytes(2, "big")
+    return bytes(((0x80 if fin else 0) | opcode, (0x80 if masked else 0) | length[0])) + length[1:] + mask + encoded
+
+
 def _sample(index: int, *, rss: int, fds: int, tasks: int, threads: int, cache: int) -> dict:
     return {
         "index": index,
@@ -107,6 +114,112 @@ def test_loopback_websocket_round_trips_extended_length_text_frames(payload_size
                 assert await received == payload
             finally:
                 await client.aclose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(("fin", "payload"), [(False, b"x"), (True, b"x" * 126)])
+def test_loopback_websocket_rejects_invalid_control_frames(fin: bool, payload: bytes) -> None:
+    async def exercise() -> None:
+        class Writer:
+            def write(self, _value: bytes) -> None:
+                pass
+
+            async def drain(self) -> None:
+                pass
+
+        reader = asyncio.StreamReader()
+        reader.feed_data(_frame(opcode=0x9, payload=payload, fin=fin))
+        reader.feed_eof()
+        websocket = resource_soak._LoopbackWebSocket(
+            reader, Writer(), mask_outgoing=False, expect_masked=True,
+        )
+        with pytest.raises(RuntimeError, match="websocket"):
+            await websocket.recv()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("request_bytes", [
+    b"POST / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+    b"GET / HTTP/1.0\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+    b"GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: bad\r\nSec-WebSocket-Version: 13\r\n\r\n",
+    b"GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\nSec-WebSocket-Version: 12\r\n\r\n",
+])
+def test_loopback_websocket_handshake_rejects_malformed_request(request_bytes: bytes) -> None:
+    async def exercise() -> None:
+        outcome: asyncio.Future[Exception | None] = asyncio.get_running_loop().create_future()
+
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                await _loopback_server_handshake(reader, writer)
+            except Exception as error:
+                outcome.set_result(error)
+            else:
+                outcome.set_result(None)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        async with server:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(request_bytes)
+            await writer.drain()
+            error = await asyncio.wait_for(outcome, timeout=1)
+            assert isinstance(error, RuntimeError)
+            assert "invalid websocket upgrade" in str(error)
+            writer.close()
+            await writer.wait_closed()
+
+    asyncio.run(exercise())
+
+
+def test_loopback_websocket_handshake_bounds_request_headers() -> None:
+    async def exercise() -> None:
+        outcome: asyncio.Future[Exception | None] = asyncio.get_running_loop().create_future()
+
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                await _loopback_server_handshake(reader, writer)
+            except Exception as error:
+                outcome.set_result(error)
+            else:
+                outcome.set_result(None)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        async with server:
+            _reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(b"GET / HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\nSec-WebSocket-Version: 13\r\nX-Fill: " + b"x" * 20_000 + b"\r\n\r\n")
+            await writer.drain()
+            error = await asyncio.wait_for(outcome, timeout=1)
+            assert isinstance(error, RuntimeError)
+            assert "websocket header too large" in str(error)
+            writer.close()
+            await writer.wait_closed()
+
+    asyncio.run(exercise())
+
+
+def test_loopback_websocket_client_rejects_invalid_accept_headers() -> None:
+    async def exercise() -> None:
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        async with server:
+            with pytest.raises(RuntimeError, match="websocket upgrade rejected"):
+                await _loopback_client_connect(port, "/invalid")
 
     asyncio.run(exercise())
 

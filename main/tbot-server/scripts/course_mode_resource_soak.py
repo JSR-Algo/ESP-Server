@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import binascii
 import hashlib
 import json
 import os
@@ -49,6 +50,7 @@ LIMITS = {
     "threadSlopePerSample": 0.25,
     "cacheSlopeBytesPerSample": 4 * 1024,
 }
+_WEBSOCKET_HEADER_LIMIT = 16 * 1024
 
 SampleInjector = Callable[[int, dict[str, Any]], dict[str, Any]]
 Sleeper = Callable[[float], Awaitable[Any]]
@@ -502,17 +504,24 @@ class _LoopbackWebSocket:
         while True:
             header = await self._reader.readexactly(2)
             first, second = header
-            if first & 0x80 == 0 or first & 0x70:
+            fin = bool(first & 0x80)
+            if first & 0x70:
                 raise RuntimeError("unsupported websocket frame")
             opcode = first & 0x0F
             masked = bool(second & 0x80)
             length = second & 0x7F
+            if opcode >= 0x8 and (not fin or length >= 126):
+                raise RuntimeError("invalid websocket control frame")
+            if not fin:
+                raise RuntimeError("unsupported websocket frame")
             if length == 126:
                 length = struct.unpack("!H", await self._reader.readexactly(2))[0]
             elif length == 127:
                 length = struct.unpack("!Q", await self._reader.readexactly(8))[0]
             if length > 1 << 20:
                 raise RuntimeError("websocket frame too large")
+            if masked != self._expect_masked:
+                raise RuntimeError("unexpected websocket frame masking")
             if masked:
                 key = await self._reader.readexactly(4)
             else:
@@ -526,8 +535,8 @@ class _LoopbackWebSocket:
             if opcode == 0x8:
                 await self._write_frame(0x8, payload[:125])
                 raise EOFError("websocket closed")
-            if opcode != 0x1 or masked != self._expect_masked:
-                raise RuntimeError("expected masked text websocket frame")
+            if opcode != 0x1:
+                raise RuntimeError("expected text websocket frame")
             return payload.decode("utf-8")
 
     async def send(self, value: str) -> None:
@@ -580,11 +589,38 @@ def _http_headers(raw: bytes) -> dict[str, str]:
     }
 
 
+async def _read_http_headers(reader: asyncio.StreamReader) -> bytes:
+    try:
+        raw = await reader.readuntil(b"\r\n\r\n")
+    except asyncio.LimitOverrunError as error:
+        raise RuntimeError("websocket header too large") from error
+    if len(raw) > _WEBSOCKET_HEADER_LIMIT:
+        raise RuntimeError("websocket header too large")
+    return raw
+
+
+def _header_has_token(headers: dict[str, str], name: str, token: str) -> bool:
+    return token.lower() in {value.strip().lower() for value in headers.get(name, "").split(",")}
+
+
 async def _loopback_server_handshake(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> _LoopbackWebSocket:
-    request = await reader.readuntil(b"\r\n\r\n")
+    request = await _read_http_headers(reader)
     headers = _http_headers(request)
     key = headers.get("sec-websocket-key")
-    if not key or "websocket" not in headers.get("upgrade", "").lower():
+    request_line = request.split(b"\r\n", 1)[0].decode("latin-1").split()
+    try:
+        decoded_key = base64.b64decode(key or "", validate=True)
+    except (binascii.Error, ValueError):
+        decoded_key = b""
+    if (
+        len(request_line) != 3
+        or request_line[0] != "GET"
+        or request_line[2] != "HTTP/1.1"
+        or headers.get("upgrade", "").lower() != "websocket"
+        or not _header_has_token(headers, "connection", "upgrade")
+        or headers.get("sec-websocket-version") != "13"
+        or len(decoded_key) != 16
+    ):
         raise RuntimeError("invalid websocket upgrade")
     accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
     writer.write(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept + "\r\n\r\n").encode("ascii"))
@@ -595,12 +631,29 @@ async def _loopback_server_handshake(reader: asyncio.StreamReader, writer: async
 async def _loopback_client_connect(port: int, path: str) -> _LoopbackWebSocket:
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
     key = base64.b64encode(os.urandom(16)).decode("ascii")
-    writer.write((f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode("ascii"))
-    await writer.drain()
-    response = await reader.readuntil(b"\r\n\r\n")
-    if not response.startswith(b"HTTP/1.1 101"):
-        raise RuntimeError("websocket upgrade rejected")
-    return _LoopbackWebSocket(reader, writer, mask_outgoing=True, expect_masked=False)
+    try:
+        writer.write((f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode("ascii"))
+        await writer.drain()
+        response = await _read_http_headers(reader)
+        headers = _http_headers(response)
+        expected_accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+        status = response.split(b"\r\n", 1)[0].split(maxsplit=2)
+        if (
+            len(status) < 2
+            or status[:2] != [b"HTTP/1.1", b"101"]
+            or headers.get("upgrade", "").lower() != "websocket"
+            or not _header_has_token(headers, "connection", "upgrade")
+            or headers.get("sec-websocket-accept") != expected_accept
+        ):
+            raise RuntimeError("websocket upgrade rejected")
+        return _LoopbackWebSocket(reader, writer, mask_outgoing=True, expect_masked=False)
+    except BaseException:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass
+        raise
 
 
 async def _exercise_websocket_reconnects(
