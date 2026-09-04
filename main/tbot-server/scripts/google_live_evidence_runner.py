@@ -16,6 +16,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 LAYERS = ("deterministic", "server_regression", "real_api", "websocket_e2e", "physical", "candidate_soak")
 DEPENDENCIES = {
     "real_api": ("deterministic",),
@@ -564,13 +567,15 @@ def main(argv: list[str] | None = None) -> int:
     repository_root = Path(__file__).resolve().parents[3]
     with trusted_git_session():
         git_sha = git_output(repository_root, "rev-parse", "HEAD").decode().strip()
-    identity = {"gitSha": git_sha, "imageDigest": "sha256:" + "0" * 64, "firmwareIdentity": "synthetic", "configFingerprint": "sha256:" + "0" * 64, "fixtureSha256": "0" * 64}
+    identity = {
+        "gitSha": git_sha,
+        "imageDigest": "sha256:" + "0" * 64,
+        "firmwareIdentity": "synthetic",
+        "configFingerprint": "sha256:" + "0" * 64,
+        "fixtureSha256": hashlib.sha256(b"synthetic fixture\n").hexdigest(),
+    }
     runner = EvidenceRunner.initialize(args.evidence_root, run_id=run_id, identity=identity, verify_repository=False)
-    for relative in ("fixture.wav", "server.log", "baseline/report.json", "lesson-manifest.json"):
-        path = runner.root / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"{}\n")
-    runner.operator_config = {"fixture": str(runner.root / "fixture.wav"), "websocket_url": "ws://127.0.0.1/disabled", "device_id": "synthetic-device", "client_id": "synthetic-client", "journey_id": "synthetic-journey", "server_log": str(runner.root / "server.log"), "config_json": "{}", "expected_candidate_json": json.dumps(identity, sort_keys=True), "evidence_control_url": "http://127.0.0.1/disabled", "baseline_report": str(runner.root / "baseline/report.json"), "lesson_manifest": str(runner.root / "lesson-manifest.json"), "base_url": "http://127.0.0.1/disabled"}
+    runner.configure_synthetic_inputs()
     result = runner.synthetic_dry_run()
     print(json.dumps(result, sort_keys=True))
     return 0
