@@ -23,7 +23,26 @@ IDENTITY = {
 
 
 def _runner(tmp_path: Path, run_id: str = "20260904T010203Z") -> EvidenceRunner:
-    return EvidenceRunner.initialize(tmp_path, run_id=run_id, identity=IDENTITY)
+    runner = EvidenceRunner.initialize(tmp_path, run_id=run_id, identity=IDENTITY)
+    for relative in ("fixture.wav", "server.log", "baseline/report.json", "lesson-manifest.json"):
+        path = runner.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"{}\n")
+    runner.operator_config = {
+        "fixture": str(runner.root / "fixture.wav"),
+        "websocket_url": "ws://127.0.0.1/ws",
+        "device_id": "device-1",
+        "client_id": "client-1",
+        "journey_id": "journey-1",
+        "server_log": str(runner.root / "server.log"),
+        "config_json": "{}",
+        "expected_candidate_json": json.dumps(IDENTITY, sort_keys=True),
+        "evidence_control_url": "http://127.0.0.1/internal",
+        "baseline_report": str(runner.root / "baseline/report.json"),
+        "lesson_manifest": str(runner.root / "lesson-manifest.json"),
+        "base_url": "http://127.0.0.1",
+    }
+    return runner
 
 
 def test_terminal_failure_is_immutable_and_blocks_dependents(tmp_path: Path):
@@ -154,7 +173,7 @@ def test_finalize_refuses_nonpassing_layer_and_hashes_closed_artifacts(tmp_path:
     runner = _runner(tmp_path)
     with pytest.raises(EvidenceStateError):
         runner.finalize()
-    for layer in ("deterministic", "real_api", "websocket_e2e", "candidate_soak", "physical", "server_regression"):
+    for layer in ("deterministic", "real_api", "websocket_e2e", "server_regression", "candidate_soak", "physical"):
         runner.start_layer(layer) if runner.state(layer) == "PENDING" and runner.can_start(layer) else None
         if runner.state(layer) == "RUNNING":
             runner.finish_layer(layer, "PASS")

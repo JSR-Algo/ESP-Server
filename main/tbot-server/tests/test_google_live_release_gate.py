@@ -638,6 +638,8 @@ def _write_evidence(
     lesson = root / "lesson-manifest.json"
     lesson.write_text('{}\n', encoding="utf-8")
     lesson_artifact = {"label": "lesson-manifest.json", "sha256": hashlib.sha256(lesson.read_bytes()).hexdigest()}
+    server_log = root / "server.log"
+    server_log.write_text("bounded evidence log\n", encoding="utf-8")
     soak_inputs = [
         copy.deepcopy(baseline_artifact),
         {"label": "real-api/report.json", "sha256": checksums["real_api"]},
@@ -654,7 +656,7 @@ def _write_evidence(
         "websocket.correlation": ("websocket_e2e",),
         "candidate_soak.produce": (),
         "candidate_soak.replay": ("candidate_soak",),
-        "physical.capture_and_audit": ("server_regression", "physical"),
+        "physical.capture_and_audit": ("physical",),
     }
     commands = []
     argv_patterns = {
@@ -676,7 +678,9 @@ def _write_evidence(
             "candidate_soak.produce": copy.deepcopy(soak_inputs),
             "candidate_soak.replay": [copy.deepcopy(journey_evidence_artifact), *copy.deepcopy(soak_inputs)],
             "physical.capture_and_audit": [
-                {"label": "candidate-soak/report.json", "sha256": checksums["candidate_soak"]}
+                {"label": "candidate-soak/report.json", "sha256": checksums["candidate_soak"]},
+                {"label": "server-regression/report.json", "sha256": checksums["server_regression"]},
+                {"label": "server.log", "sha256": hashlib.sha256((root / "server.log").read_bytes()).hexdigest()},
             ],
         }.get(command_id, [])
         outputs = [

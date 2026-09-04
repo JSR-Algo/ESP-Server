@@ -9,6 +9,7 @@ import tempfile
 import argparse
 import hashlib
 import sys
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,7 +20,7 @@ DEPENDENCIES = {
     "real_api": ("deterministic",),
     "websocket_e2e": ("deterministic", "real_api"),
     "candidate_soak": ("deterministic", "real_api", "websocket_e2e"),
-    "physical": ("deterministic", "real_api", "websocket_e2e", "candidate_soak"),
+    "physical": ("deterministic", "real_api", "websocket_e2e", "candidate_soak", "server_regression"),
     "server_regression": ("websocket_e2e",),
 }
 SAFE_FAILURE_CODES = {"AUTH", "CONFIG", "QUOTA", "PROTOCOL", "TIMEOUT", "NETWORK", "PROVIDER", "CLEANUP", "RESOURCE", "IDENTITY", "PRIVACY", "EVIDENCE_INTEGRITY", "CANCELLED"}
@@ -59,15 +60,16 @@ def _atomic(path: Path, payload: bytes) -> None:
 
 
 class EvidenceRunner:
-    def __init__(self, root: Path, run_id: str, identity: dict[str, str], state: dict[str, Any]):
+    def __init__(self, root: Path, run_id: str, identity: dict[str, str], state: dict[str, Any], operator_config: dict[str, str] | None = None):
         self.root = root
         self.run_id = run_id
         self.identity = dict(identity)
         self.state_path = root / "run-state.json"
         self._state = state
+        self.operator_config = dict(operator_config or {})
 
     @classmethod
-    def initialize(cls, evidence_root: Path, *, run_id: str, identity: dict[str, str]) -> "EvidenceRunner":
+    def initialize(cls, evidence_root: Path, *, run_id: str, identity: dict[str, str], operator_config: dict[str, str] | None = None) -> "EvidenceRunner":
         evidence_root = Path(evidence_root)
         if evidence_root.is_symlink() or not evidence_root.is_absolute():
             raise ValueError("evidence root must be an absolute non-alias path")
@@ -84,13 +86,13 @@ class EvidenceRunner:
             (root / directory).mkdir(mode=0o700)
         state = {"schemaVersion": "google-live-evidence-run.v1", "runId": run_id, "candidateIdentity": dict(identity), "createdAt": _now(), "layers": {name: {"state": "PENDING", "startedAt": None, "endedAt": None, "firstFailure": None, "artifactSha256": {}} for name in LAYERS}}
         _atomic(root / "run-state.json", (json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n").encode())
-        return cls(root, run_id, identity, state)
+        return cls(root, run_id, identity, state, operator_config)
 
     @classmethod
     def open(cls, root: Path, *, resume: bool = False) -> "EvidenceRunner":
-        if resume:
-            raise EvidenceStateError("failed evidence runs cannot be resumed; create a new RUN_ID")
         state = json.loads(Path(root, "run-state.json").read_text(encoding="utf-8"))
+        if resume or any(item["state"] in {"FAIL", "SKIPPED"} for item in state["layers"].values()):
+            raise EvidenceStateError("failed evidence runs cannot be resumed; create a new RUN_ID")
         return cls(Path(root), state["runId"], state["candidateIdentity"], state)
 
     def _save(self) -> None:
@@ -105,6 +107,8 @@ class EvidenceRunner:
         record = self._state["layers"][layer]
         if layer == "server_regression":
             return record["state"] == "PENDING" and self.state("websocket_e2e") in {"RUNNING", "PASS"}
+        if layer == "websocket_e2e" and record["state"] == "SKIPPED":
+            return False
         return record["state"] == "PENDING" and all(self.state(dep) == "PASS" for dep in DEPENDENCIES.get(layer, ()))
 
     def start_layer(self, layer: str) -> None:
@@ -146,16 +150,20 @@ class EvidenceRunner:
         from scripts.google_live_command_runner import CommandSpec
         root = self.root
         py = Path(sys.executable)
-        common = ("--candidate-git-sha", self.identity["gitSha"], "--candidate-image-digest", self.identity["imageDigest"], "--firmware-identity", self.identity["firmwareIdentity"], "--config-fingerprint", self.identity["configFingerprint"], "--fixture-sha256", self.identity["fixtureSha256"])
+        required_operator = {"fixture", "websocket_url", "device_id", "client_id", "journey_id", "server_log", "config_json", "expected_candidate_json", "evidence_control_url", "baseline_report", "lesson_manifest", "base_url"}
+        if set(self.operator_config) != required_operator:
+            raise EvidenceStateError("validated operator configuration is required")
+        op = self.operator_config
+        common = ("--candidate-git-sha", self.identity["gitSha"], "--candidate-image-digest", self.identity["imageDigest"], "--firmware-identity", self.identity["firmwareIdentity"], "--fixture-sha256", self.identity["fixtureSha256"])
         specs = (
-            CommandSpec("deterministic.produce", (str(py), "scripts/google_live_deterministic_evidence.py", "--report", str(root / "deterministic/report.json"), *common), cwd=root, candidate_identity=self.identity, outputs=(root / "deterministic/report.json", root / "deterministic/node-manifest.txt", root / "deterministic/pytest.xml")),
-            CommandSpec("real_api.round_trip", (str(py), "scripts/google_live_smoke.py", "--round-trip", "--report", str(root / "real-api/report.json"), *common), cwd=root, candidate_identity=self.identity, secret_env=("GOOGLE_API_KEY",), outputs=(root / "real-api/report.json",)),
-            CommandSpec("websocket.transport", (str(py), "scripts/voice_mode_websocket_audio_bargein.py", "--report", str(root / "websocket-e2e/transport.json"), *common), cwd=root, candidate_identity=self.identity, secret_env=("TBOT_DEVICE_MINT_SECRET",), outputs=(root / "websocket-e2e/transport.json",)),
-            CommandSpec("websocket.log_analysis", (str(py), "scripts/analyze_google_live_log.py", "--reliability-window", "--out-json", str(root / "server-regression/report.json")), cwd=root, candidate_identity=self.identity, outputs=(root / "server-regression/report.json",)),
-            CommandSpec("websocket.correlation", (str(py), "scripts/analyze_google_live_log.py", "--correlate-transport", str(root / "websocket-e2e/transport.json"), "--out-json", str(root / "websocket-e2e/report.json")), cwd=root, candidate_identity=self.identity, outputs=(root / "websocket-e2e/report.json",)),
-            CommandSpec("candidate_soak.produce", (str(py), "scripts/google_live_robot_soak.py", "--mode", "candidate", "--produce-candidate-evidence", str(root / "candidate-soak/journey-evidence.json"), *common), cwd=root, candidate_identity=self.identity, secret_env=("TBOT_DEVICE_MINT_SECRET",), stdin_source="protected_candidate_plan", outputs=(root / "candidate-soak/journey-evidence.json",)),
-            CommandSpec("candidate_soak.replay", (str(py), "scripts/google_live_robot_soak.py", "--mode", "candidate", "--journey-evidence", str(root / "candidate-soak/journey-evidence.json"), "--report", str(root / "candidate-soak/report.json"), *common), cwd=root, candidate_identity=self.identity, inputs=(root / "candidate-soak/journey-evidence.json",), outputs=(root / "candidate-soak/report.json",)),
-            CommandSpec("physical.capture_and_audit", (str(py), "scripts/google_live_physical_evidence.py", "--candidate-soak-report", str(root / "candidate-soak/report.json"), "--server-report", str(root / "server-regression/report.json"), "--report", str(root / "physical/report.json"), "--operator-confirmed", "--transcript-plan-stdin", "--base-url", "http://127.0.0.1", "--device-id", "runtime-device", "--client-id", "runtime-client", "--server-log", str(root / "server.log"), *common), cwd=root, candidate_identity=self.identity, secret_env=("TBOT_DEVICE_MINT_SECRET",), stdin_source="protected_transcript_plan", inputs=(root / "candidate-soak/report.json",), outputs=(root / "server-regression/report.json", root / "physical/report.json")),
+            CommandSpec("deterministic.produce", (str(py), "scripts/google_live_deterministic_evidence.py", "--manifest", str(root / "deterministic/node-manifest.txt"), "--junit-out", str(root / "deterministic/pytest.xml"), "--report", str(root / "deterministic/report.json"), *common[:6], "--config-fingerprint", self.identity["configFingerprint"], *common[6:]), cwd=root, candidate_identity=self.identity, outputs=(root / "deterministic/report.json", root / "deterministic/node-manifest.txt", root / "deterministic/pytest.xml")),
+            CommandSpec("real_api.round_trip", (str(py), "scripts/google_live_smoke.py", "--round-trip", "--audio-file", op["fixture"], "--report", str(root / "real-api/report.json"), *common[:6], "--config-fingerprint", self.identity["configFingerprint"], *common[6:]), cwd=root, candidate_identity=self.identity, secret_env=("GOOGLE_API_KEY",), inputs=(Path(op["fixture"]),), outputs=(root / "real-api/report.json",)),
+            CommandSpec("websocket.transport", (str(py), "scripts/voice_mode_websocket_audio_bargein.py", "--websocket-url", op["websocket_url"], "--device-id", op["device_id"], "--client-id", op["client_id"], "--journey-id", op["journey_id"], *common[:6], "--config-json", op["config_json"], *common[6:], "--report", str(root / "websocket-e2e/transport.json")), cwd=root, candidate_identity=self.identity, secret_env=("TBOT_DEVICE_MINT_SECRET",), outputs=(root / "websocket-e2e/transport.json",)),
+            CommandSpec("websocket.log_analysis", (str(py), "scripts/analyze_google_live_log.py", "--log", op["server_log"], "--reliability-window", "--journey-id", op["journey_id"], "--out-json", str(root / "server-regression/report.json")), cwd=root, candidate_identity=self.identity, outputs=(root / "server-regression/report.json",)),
+            CommandSpec("websocket.correlation", (str(py), "scripts/analyze_google_live_log.py", "--log", op["server_log"], "--correlate-transport", str(root / "websocket-e2e/transport.json"), "--expected-candidate-json", op["expected_candidate_json"], "--out-json", str(root / "websocket-e2e/report.json")), cwd=root, candidate_identity=self.identity, inputs=(root / "websocket-e2e/transport.json", root / "server-regression/report.json"), outputs=(root / "websocket-e2e/report.json",)),
+            CommandSpec("candidate_soak.produce", (str(py), "scripts/google_live_robot_soak.py", "--mode", "candidate", "--produce-candidate-evidence", str(root / "candidate-soak/journey-evidence.json"), "--evidence-control-url", op["evidence_control_url"], "--server-log", op["server_log"], "--run-id", self.run_id, "--baseline-report", op["baseline_report"], "--real-api-report", str(root / "real-api/report.json"), "--transport-report", str(root / "websocket-e2e/transport.json"), "--correlated-transport-report", str(root / "websocket-e2e/report.json"), "--log-reliability-report", str(root / "server-regression/report.json"), "--lesson-manifest", op["lesson_manifest"], "--config-json", op["config_json"], *common), cwd=root, candidate_identity=self.identity, secret_env=("TBOT_DEVICE_MINT_SECRET",), stdin_source="protected_candidate_plan", inputs=(Path(op["baseline_report"]), root / "real-api/report.json", root / "websocket-e2e/transport.json", root / "websocket-e2e/report.json", root / "server-regression/report.json", Path(op["lesson_manifest"])), outputs=(root / "candidate-soak/journey-evidence.json",)),
+            CommandSpec("candidate_soak.replay", (str(py), "scripts/google_live_robot_soak.py", "--mode", "candidate", "--journey-evidence", str(root / "candidate-soak/journey-evidence.json"), "--report", str(root / "candidate-soak/report.json"), "--baseline-report", op["baseline_report"], "--real-api-report", str(root / "real-api/report.json"), "--transport-report", str(root / "websocket-e2e/transport.json"), "--correlated-transport-report", str(root / "websocket-e2e/report.json"), "--log-reliability-report", str(root / "server-regression/report.json"), "--lesson-manifest", op["lesson_manifest"], "--config-json", op["config_json"], *common), cwd=root, candidate_identity=self.identity, inputs=(root / "candidate-soak/journey-evidence.json", Path(op["baseline_report"]), root / "real-api/report.json", root / "websocket-e2e/transport.json", root / "websocket-e2e/report.json", root / "server-regression/report.json", Path(op["lesson_manifest"])), outputs=(root / "candidate-soak/report.json",)),
+            CommandSpec("physical.capture_and_audit", (str(py), "scripts/google_live_physical_evidence.py", "--candidate-soak-report", str(root / "candidate-soak/report.json"), "--server-report", str(root / "server-regression/report.json"), "--report", str(root / "physical/report.json"), "--operator-confirmed", "--transcript-plan-stdin", "--base-url", op["base_url"], "--device-id", op["device_id"], "--client-id", op["client_id"], "--server-log", op["server_log"], *common), cwd=root, candidate_identity=self.identity, secret_env=("TBOT_DEVICE_MINT_SECRET",), stdin_source="protected_transcript_plan", inputs=(root / "candidate-soak/report.json", root / "server-regression/report.json", Path(op["server_log"])), outputs=(root / "physical/report.json",)),
         )
         return specs
 
@@ -165,6 +173,10 @@ class EvidenceRunner:
         layer = {"deterministic.produce": "deterministic", "real_api.round_trip": "real_api", "websocket.transport": "websocket_e2e", "websocket.log_analysis": "server_regression", "websocket.correlation": "websocket_e2e", "candidate_soak.produce": "candidate_soak", "candidate_soak.replay": "candidate_soak", "physical.capture_and_audit": "physical"}[command_id]
         if self.state(layer) == "PENDING":
             self.start_layer(layer)
+        elif command_id == "websocket.correlation" and self.state(layer) == "SKIPPED":
+            self._state["layers"][layer]["state"] = "RUNNING"
+            self._state["layers"][layer]["startedAt"] = _now()
+            self._save()
         spec = next(item for item in self.command_specs() if item.command_id == command_id)
         if executor is None:
             from scripts.google_live_command_runner import execute_and_record
@@ -175,7 +187,7 @@ class EvidenceRunner:
             if getattr(result, "policy_satisfied", False) and terminal_command:
                 self.finish_layer(layer, "PASS")
             elif not getattr(result, "policy_satisfied", False):
-                self.finish_layer(layer, "FAIL", failure={"code": "PROVIDER"})
+                self.finish_layer(layer, "SKIPPED" if command_id == "websocket.transport" else "FAIL", failure={"code": "PROVIDER"})
             return result
         except KeyboardInterrupt:
             self.finish_layer(layer, "FAIL", failure={"code": "CANCELLED"})

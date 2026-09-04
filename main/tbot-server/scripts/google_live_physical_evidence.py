@@ -62,13 +62,15 @@ class PhysicalEvidenceClient:
         with urllib.request.urlopen(req, timeout=10) as response:
             return json.loads(response.read())
 
-    def capture(self, *, journey_id: str, enrollment: dict[str, Any], candidate_identity: dict[str, Any] | None = None, timeout_sec: float = 300.0, poll_interval_sec: float = 1.0) -> dict[str, Any]:
+    def capture(self, *, journey_id: str, enrollment: dict[str, Any], candidate_identity: dict[str, Any] | None = None, timeout_sec: float = 300.0, poll_interval_sec: float = 1.0, on_ready: Callable[[str], None] | None = None) -> dict[str, Any]:
         path = f"/internal/devices/{self.device_id}/google-live-evidence/{journey_id}"
         completed = False
         try:
             self._request("POST", f"/internal/devices/{self.device_id}/google-live-evidence", enrollment)
             if candidate_identity is not None:
                 self._request("PUT", path + "/candidate-identity", {"candidateIdentity": candidate_identity})
+            if on_ready is not None:
+                on_ready(journey_id)
             deadline = time.monotonic() + timeout_sec
             while time.monotonic() < deadline:
                 snapshot = self._request("GET", path)
@@ -89,15 +91,29 @@ class PhysicalEvidenceClient:
                     pass
 
 
-def compose_physical_report(*, raw_server_log: Path, server_report: dict[str, Any], candidate_soak_report: dict[str, Any], candidate_identity: dict[str, Any], device_id: str, client_id: str, output: Path, audit_fn: Callable[..., dict[str, Any]] | None = None) -> dict[str, Any]:
+def compose_physical_report(*, raw_server_log: Path, server_report: dict[str, Any], candidate_soak_report: dict[str, Any], candidate_identity: dict[str, Any], device_id: str, client_id: str, output: Path, audit_fn: Callable[..., dict[str, Any]] | None = None, selector_fn: Callable[[list[str], str], list[str]] | None = None) -> dict[str, Any]:
     """Run the existing production physical validator over one bounded log."""
     if not raw_server_log.is_file() or raw_server_log.is_symlink():
         raise PhysicalEvidenceError("bounded server log is unavailable")
+    journey_id = (
+        server_report.get("evidenceScope", {}).get("journeyId")
+        or server_report.get("logWindow", {}).get("journeyId")
+    )
+    if not isinstance(journey_id, str):
+        raise PhysicalEvidenceError("bounded server journey is unavailable")
+    if selector_fn is None:
+        from scripts.analyze_google_live_log import _bounded_server_window
+        selector_fn = _bounded_server_window
+    selected = selector_fn(
+        raw_server_log.read_text(encoding="utf-8", errors="replace").splitlines(),
+        journey_id,
+    )
+    bounded_log = "\n".join(selected) + "\n"
     if audit_fn is None:
         from scripts.physical_smoke_audit import audit_log
         audit_fn = audit_log
     report = audit_fn(
-        raw_server_log.read_text(encoding="utf-8", errors="replace"),
+        bounded_log,
         device_id=device_id,
         client_id=client_id,
         min_interrupts=10,
@@ -150,7 +166,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--candidate-git-sha", required=True)
     parser.add_argument("--candidate-image-digest", required=True)
     parser.add_argument("--firmware-identity", required=True)
-    parser.add_argument("--config-fingerprint", required=True)
     parser.add_argument("--fixture-sha256", required=True)
     parser.add_argument("--device-id")
     parser.add_argument("--client-id")
@@ -163,14 +178,16 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("physical evidence requires --operator-confirmed, --transcript-plan-stdin, --base-url, and --device-id")
     try:
         plan = json.load(__import__("sys").stdin)
-        key = bytearray(__import__("secrets").token_bytes(32))
-        enrollment = build_enrollment(device_id=args.device_id, client_id=str(plan["clientId"]), journey_id=str(plan["journeyId"]), transcript_plan=list(plan["transcriptPlan"]), hmac_key=key, ttl_sec=int(plan.get("ttlSec", 300)))
-        identity = {"gitSha": args.candidate_git_sha, "imageDigest": args.candidate_image_digest, "firmwareIdentity": args.firmware_identity, "configFingerprint": args.config_fingerprint, "fixtureSha256": args.fixture_sha256}
-        result = PhysicalEvidenceClient(args.base_url, args.device_id, __import__("os").environ.get("TBOT_DEVICE_MINT_SECRET", "")).capture(journey_id=str(plan["journeyId"]), enrollment=enrollment, candidate_identity=identity)
         server_report = json.loads(args.server_report.read_text(encoding="utf-8"))
         candidate_report = json.loads(args.candidate_soak_report.read_text(encoding="utf-8"))
+        config_fingerprint = candidate_report.get("candidateIdentity", {}).get("configFingerprint")
+        if not isinstance(config_fingerprint, str):
+            raise PhysicalEvidenceError("candidate configuration identity is unavailable")
+        key = bytearray(__import__("secrets").token_bytes(32))
+        enrollment = build_enrollment(device_id=args.device_id, client_id=str(plan["clientId"]), journey_id=str(plan["journeyId"]), transcript_plan=list(plan["transcriptPlan"]), hmac_key=key, ttl_sec=int(plan.get("ttlSec", 300)))
+        identity = {"gitSha": args.candidate_git_sha, "imageDigest": args.candidate_image_digest, "firmwareIdentity": args.firmware_identity, "configFingerprint": config_fingerprint, "fixtureSha256": args.fixture_sha256}
+        result = PhysicalEvidenceClient(args.base_url, args.device_id, __import__("os").environ.get("TBOT_DEVICE_MINT_SECRET", "")).capture(journey_id=str(plan["journeyId"]), enrollment=enrollment, candidate_identity=identity, on_ready=lambda journey: print("READY journey_id=" + journey, flush=True))
         compose_physical_report(raw_server_log=args.server_log, server_report=server_report, candidate_soak_report=candidate_report, candidate_identity=identity, device_id=args.device_id, client_id=args.client_id, output=args.report)
-        print("READY journey_id=" + str(plan["journeyId"]))
         return 0
     except Exception:
         return 1

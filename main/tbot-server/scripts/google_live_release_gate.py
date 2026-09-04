@@ -306,10 +306,7 @@ def _trusted_command_specs(identity: Mapping[str, Any]) -> dict[str, TrustedComm
         "websocket.correlation": ("websocket-e2e/report.json",),
         "candidate_soak.produce": ("candidate-soak/journey-evidence.json",),
         "candidate_soak.replay": ("candidate-soak/report.json",),
-        "physical.capture_and_audit": (
-            "server-regression/report.json",
-            "physical/report.json",
-        ),
+        "physical.capture_and_audit": ("physical/report.json",),
     }
     mint_commands = {
         "websocket.transport",
@@ -345,7 +342,11 @@ def _trusted_command_specs(identity: Mapping[str, Any]) -> dict[str, TrustedComm
                     "server-regression/report.json",
                     "lesson-manifest.json",
                 ),
-                "physical.capture_and_audit": ("candidate-soak/report.json",),
+                "physical.capture_and_audit": (
+                    "candidate-soak/report.json",
+                    "server-regression/report.json",
+                    "server.log",
+                ),
             }.get(command_id, ()),
             output_labels=outputs[command_id],
             secret_sources=("<env:GOOGLE_API_KEY>",)
@@ -1581,7 +1582,7 @@ def aggregate_release_evidence(
             "real_api.round_trip": {"real_api"},
             "websocket.correlation": {"websocket_e2e"},
             "candidate_soak.replay": {"candidate_soak"},
-            "physical.capture_and_audit": {"server_regression", "physical"},
+            "physical.capture_and_audit": {"physical"},
         }
         for command_id, names in expected_output_bindings.items():
             if any(
