@@ -1811,6 +1811,18 @@ def _pytest_command(runtime: Mapping[str, Any], *arguments: str) -> list[str]:
     ]
 
 
+def _snapshot_pytest_arguments(candidate_root: Path, arguments: Sequence[str]) -> list[str]:
+    resolved = []
+    for argument in arguments:
+        test_path, separator, node_suffix = argument.partition("::")
+        if test_path.startswith("tests/"):
+            argument = str(candidate_root.joinpath(*test_path.split("/")))
+            if separator:
+                argument += separator + node_suffix
+        resolved.append(argument)
+    return resolved
+
+
 def _git_output(repo_root: Path, *arguments: str) -> bytes:
     return _trusted_git_output(repo_root, *arguments)
 
@@ -2004,26 +2016,39 @@ def _produce(
         return nullcontext(repo_root)
 
     with candidate_snapshot() as candidate_root:
-        with _private_pytest_runtime(
-            repo_root,
-            identity["gitSha"],
-            candidate_root=candidate_root,
-            snapshot_control_root=(repo_root if outer_execution_context is not None else None),
-            approved_package_roots=outer_dependency_roots,
-        ) as pytest_runtime:
-            runtime_manifest_content = pytest_runtime.manifest_content
-            collect = run(
-                _pytest_command(
-                    pytest_runtime,
-                    *approved_test_files,
-                    "--collect-only",
-                    "-qq",
+        pytest_arguments = (
+            _snapshot_pytest_arguments(candidate_root, approved_test_files)
+            if outer_execution_context is not None
+            else list(approved_test_files)
+        )
+        working_directory = (
+            tempfile.TemporaryDirectory(prefix="google-live-pytest-work-")
+            if outer_execution_context is not None
+            else nullcontext(str(candidate_root))
+        )
+        with working_directory as pytest_cwd:
+            with _private_pytest_runtime(
+                repo_root,
+                identity["gitSha"],
+                candidate_root=candidate_root,
+                snapshot_control_root=(
+                    repo_root if outer_execution_context is not None else None
                 ),
-                cwd=candidate_root,
-                env=child_environment,
-            )
-            if collect.returncode != 0:
-                raise RuntimeError("pytest collection failed")
+                approved_package_roots=outer_dependency_roots,
+            ) as pytest_runtime:
+                runtime_manifest_content = pytest_runtime.manifest_content
+                collect = run(
+                    _pytest_command(
+                        pytest_runtime,
+                        *pytest_arguments,
+                        "--collect-only",
+                        "-qq",
+                    ),
+                    cwd=Path(pytest_cwd),
+                    env=child_environment,
+                )
+                if collect.returncode != 0:
+                    raise RuntimeError("pytest collection failed")
     verify_repository()
     collected = [
         line for line in collect.stdout.splitlines() if NODE_PATTERN.fullmatch(line)
@@ -2042,30 +2067,41 @@ def _produce(
     completed_successfully = False
     try:
         with candidate_snapshot() as candidate_root:
-            with _private_pytest_runtime(
-                repo_root,
-                identity["gitSha"],
-                candidate_root=candidate_root,
-                snapshot_control_root=(
-                    repo_root if outer_execution_context is not None else None
-                ),
-                approved_package_roots=outer_dependency_roots,
-            ) as pytest_runtime:
-                if not secrets.compare_digest(
-                    runtime_manifest_content,
-                    pytest_runtime.manifest_content,
-                ):
-                    raise RuntimeError("trusted pytest runtime manifest changed")
-                completed = run(
-                    _pytest_command(
-                        pytest_runtime,
-                        *nodes,
-                        f"--junitxml={temporary_path}",
-                        "-q",
+            pytest_arguments = (
+                _snapshot_pytest_arguments(candidate_root, nodes)
+                if outer_execution_context is not None
+                else list(nodes)
+            )
+            working_directory = (
+                tempfile.TemporaryDirectory(prefix="google-live-pytest-work-")
+                if outer_execution_context is not None
+                else nullcontext(str(candidate_root))
+            )
+            with working_directory as pytest_cwd:
+                with _private_pytest_runtime(
+                    repo_root,
+                    identity["gitSha"],
+                    candidate_root=candidate_root,
+                    snapshot_control_root=(
+                        repo_root if outer_execution_context is not None else None
                     ),
-                    cwd=candidate_root,
-                    env=child_environment,
-                )
+                    approved_package_roots=outer_dependency_roots,
+                ) as pytest_runtime:
+                    if not secrets.compare_digest(
+                        runtime_manifest_content,
+                        pytest_runtime.manifest_content,
+                    ):
+                        raise RuntimeError("trusted pytest runtime manifest changed")
+                    completed = run(
+                        _pytest_command(
+                            pytest_runtime,
+                            *pytest_arguments,
+                            f"--junitxml={temporary_path}",
+                            "-q",
+                        ),
+                        cwd=Path(pytest_cwd),
+                        env=child_environment,
+                    )
         if completed.returncode != 0:
             raise RuntimeError("pytest failed; deterministic evidence was not published")
         normalized = canonicalize_junit_summary(read_bound_file(temporary_path).content)
