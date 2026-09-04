@@ -118,7 +118,7 @@ def _planned_command_argv(
         "--real-api-report", "<evidence:real-api/report.json>",
         "--transport-report", "<evidence:websocket-e2e/transport.json>",
         "--correlated-transport-report", "<evidence:websocket-e2e/report.json>",
-        "--log-reliability-report", "<evidence:server-regression/report.json>",
+        "--log-reliability-report", "<evidence:websocket-e2e/server-report.json>",
         "--lesson-manifest", "<evidence:lesson-manifest.json>",
         "--config-json", None,
     )
@@ -126,7 +126,7 @@ def _planned_command_argv(
         "deterministic.produce": (sys.executable, "scripts/google_live_deterministic_evidence.py", "--manifest", "<evidence:deterministic/node-manifest.txt>", "--junit-out", "<evidence:deterministic/pytest.xml>", "--report", "<evidence:deterministic/report.json>", *candidate[:6], "--config-fingerprint", identity["configFingerprint"], *candidate[6:]),
         "real_api.round_trip": (sys.executable, "scripts/google_live_smoke.py", "--round-trip", "--audio-file", "<evidence:fixture.wav>", "--report", "<evidence:real-api/report.json>", *candidate[:6], "--config-fingerprint", identity["configFingerprint"], *candidate[6:]),
         "websocket.transport": (sys.executable, "scripts/voice_mode_websocket_audio_bargein.py", "--websocket-url", None, "--device-id", None, "--client-id", None, "--journey-id", None, *candidate[:6], "--config-json", None, *candidate[6:], "--report", "<evidence:websocket-e2e/transport.json>"),
-        "websocket.log_analysis": (sys.executable, "scripts/analyze_google_live_log.py", "--log", None, "--reliability-window", "--journey-id", None, "--out-json", "<evidence:server-regression/report.json>"),
+        "websocket.log_analysis": (sys.executable, "scripts/analyze_google_live_log.py", "--log", None, "--reliability-window", "--journey-id", None, "--out-json", "<evidence:websocket-e2e/server-report.json>"),
         "websocket.correlation": (sys.executable, "scripts/analyze_google_live_log.py", "--log", None, "--correlate-transport", "<evidence:websocket-e2e/transport.json>", "--expected-candidate-json", None, "--out-json", "<evidence:websocket-e2e/report.json>"),
         "candidate_soak.produce": (sys.executable, "scripts/google_live_robot_soak.py", "--mode", "candidate", "--produce-candidate-evidence", "<evidence:candidate-soak/journey-evidence.json>", "--evidence-control-url", None, "--server-log", None, "--run-id", None, *soak_support, *candidate),
         "candidate_soak.replay": (sys.executable, "scripts/google_live_robot_soak.py", "--mode", "candidate", "--journey-evidence", "<evidence:candidate-soak/journey-evidence.json>", "--report", "<evidence:candidate-soak/report.json>", *soak_support, *candidate),
@@ -633,6 +633,15 @@ def _write_evidence(
         "label": "websocket-e2e/transport.json",
         "sha256": hashlib.sha256(transport.read_bytes()).hexdigest(),
     }
+    websocket_server = root / "websocket-e2e" / "server-report.json"
+    websocket_server.write_text(
+        json.dumps(reports["websocket_e2e"]["logEvidence"], sort_keys=True),
+        encoding="utf-8",
+    )
+    websocket_server_artifact = {
+        "label": "websocket-e2e/server-report.json",
+        "sha256": hashlib.sha256(websocket_server.read_bytes()).hexdigest(),
+    }
     baseline = root / "baseline" / "report.json"
     baseline.parent.mkdir()
     baseline.write_text('{}\n', encoding="utf-8")
@@ -647,14 +656,14 @@ def _write_evidence(
         {"label": "real-api/report.json", "sha256": checksums["real_api"]},
         copy.deepcopy(transport_artifact),
         {"label": "websocket-e2e/report.json", "sha256": checksums["websocket_e2e"]},
-        {"label": "server-regression/report.json", "sha256": checksums["server_regression"]},
+        copy.deepcopy(websocket_server_artifact),
         copy.deepcopy(lesson_artifact),
     ]
     command_outputs = {
         "deterministic.produce": ("deterministic", "deterministic_manifest", "deterministic_junit"),
         "real_api.round_trip": ("real_api",),
         "websocket.transport": (),
-        "websocket.log_analysis": ("server_regression",),
+        "websocket.log_analysis": (),
         "websocket.correlation": ("websocket_e2e",),
         "candidate_soak.produce": (),
         "candidate_soak.replay": ("candidate_soak",),
@@ -679,7 +688,7 @@ def _write_evidence(
             "websocket.correlation": [
                 {"label": "server.log", "sha256": hashlib.sha256(server_log.read_bytes()).hexdigest()},
                 copy.deepcopy(transport_artifact),
-                {"label": "server-regression/report.json", "sha256": checksums["server_regression"]},
+                copy.deepcopy(websocket_server_artifact),
             ],
             "candidate_soak.produce": copy.deepcopy(soak_inputs),
             "candidate_soak.replay": [copy.deepcopy(journey_evidence_artifact), *copy.deepcopy(soak_inputs)],
@@ -693,6 +702,8 @@ def _write_evidence(
         ]
         if command_id == "websocket.transport":
             outputs.append(copy.deepcopy(transport_artifact))
+        if command_id == "websocket.log_analysis":
+            outputs.append(copy.deepcopy(websocket_server_artifact))
         if command_id == "candidate_soak.produce":
             outputs.append(copy.deepcopy(journey_evidence_artifact))
         if command_id == "physical.capture_and_audit":

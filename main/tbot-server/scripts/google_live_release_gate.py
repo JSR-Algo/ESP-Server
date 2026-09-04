@@ -168,7 +168,7 @@ def _trusted_command_argv_patterns(
         "--correlated-transport-report",
         "<evidence:websocket-e2e/report.json>",
         "--log-reliability-report",
-        "<evidence:server-regression/report.json>",
+        "<evidence:websocket-e2e/server-report.json>",
         "--lesson-manifest",
         "<evidence:lesson-manifest.json>",
         "--config-json",
@@ -229,7 +229,7 @@ def _trusted_command_argv_patterns(
             "--journey-id",
             None,
             "--out-json",
-            "<evidence:server-regression/report.json>",
+            "<evidence:websocket-e2e/server-report.json>",
         ),
         "websocket.correlation": (
             python,
@@ -306,7 +306,7 @@ def _trusted_command_specs(identity: Mapping[str, Any]) -> dict[str, TrustedComm
         ),
         "real_api.round_trip": ("real-api/report.json",),
         "websocket.transport": ("websocket-e2e/transport.json",),
-        "websocket.log_analysis": ("server-regression/report.json",),
+        "websocket.log_analysis": ("websocket-e2e/server-report.json",),
         "websocket.correlation": ("websocket-e2e/report.json",),
         "candidate_soak.produce": ("candidate-soak/journey-evidence.json",),
         "candidate_soak.replay": ("candidate-soak/report.json",),
@@ -329,14 +329,14 @@ def _trusted_command_specs(identity: Mapping[str, Any]) -> dict[str, TrustedComm
                 "websocket.correlation": (
                     "server.log",
                     "websocket-e2e/transport.json",
-                    "server-regression/report.json",
+                    "websocket-e2e/server-report.json",
                 ),
                 "candidate_soak.produce": (
                     "baseline/report.json",
                     "real-api/report.json",
                     "websocket-e2e/transport.json",
                     "websocket-e2e/report.json",
-                    "server-regression/report.json",
+                    "websocket-e2e/server-report.json",
                     "lesson-manifest.json",
                 ),
                 "candidate_soak.replay": (
@@ -345,7 +345,7 @@ def _trusted_command_specs(identity: Mapping[str, Any]) -> dict[str, TrustedComm
                     "real-api/report.json",
                     "websocket-e2e/transport.json",
                     "websocket-e2e/report.json",
-                    "server-regression/report.json",
+                    "websocket-e2e/server-report.json",
                     "lesson-manifest.json",
                 ),
                 "physical.capture_and_audit": (

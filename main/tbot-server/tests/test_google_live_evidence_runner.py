@@ -159,6 +159,18 @@ def test_live_server_log_is_runtime_source_not_immutable_command_input(tmp_path:
     )
 
 
+def test_release_gate_trusts_the_same_authoritative_server_report_paths(tmp_path: Path):
+    from scripts.google_live_release_gate import _trusted_command_specs
+
+    runner = _runner(tmp_path)
+    actual = {spec.command_id: spec for spec in runner.command_specs()}
+    trusted = _trusted_command_specs(IDENTITY)
+
+    for command_id in COMMAND_ORDER:
+        assert tuple(path.relative_to(runner.root).as_posix() for path in actual[command_id].inputs) == trusted[command_id].input_labels
+        assert tuple(path.relative_to(runner.root).as_posix() for path in actual[command_id].outputs) == trusted[command_id].output_labels
+
+
 @pytest.mark.parametrize("value", ["../outside.log", "alias.log"])
 def test_live_server_log_must_be_regular_file_inside_evidence_root(tmp_path: Path, value: str):
     runner = _runner(tmp_path)
