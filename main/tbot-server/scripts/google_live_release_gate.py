@@ -1264,6 +1264,7 @@ def aggregate_release_evidence(
     *,
     input_contents: Mapping[str, bytes] | None = None,
     runtime_closure_distribution_snapshot: tuple[tuple[int, ...], ...] | None = None,
+    unified: bool = False,
 ) -> dict[str, Any]:
     """Read and validate all required reports without executing any journey."""
     failures = []
@@ -1719,7 +1720,7 @@ def aggregate_release_evidence(
         if [row["layer"] for row in timeline_rows] != list(REQUIRED_LAYERS):
             raise ValueError
     except (KeyError, OSError, TypeError, UnicodeError, ValueError, json.JSONDecodeError):
-        if not orchestration_supports_absent:
+        if unified or not orchestration_supports_absent:
             failures.append(_failure("ORCHESTRATION_SUPPORT_INVALID"))
     return {
         "schemaVersion": RELEASE_SCHEMA_VERSION,

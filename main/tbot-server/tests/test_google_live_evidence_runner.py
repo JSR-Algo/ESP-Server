@@ -182,5 +182,11 @@ def test_finalize_refuses_nonpassing_layer_and_hashes_closed_artifacts(tmp_path:
         path.write_text(json.dumps({"status": "PASS"}) + "\n")
     (runner.root / "commands.jsonl").write_text("")
     (runner.root / "commands.txt").write_text("")
-    checksum = runner.finalize()
+    checksum = runner.finalize(
+        release_gate_fn=lambda identity, paths, checksums, **kwargs: {
+            "status": "PASS",
+            "candidateIdentity": identity,
+        }
+    )
     assert "timeline.log" in checksum.read_text()
+    assert json.loads((runner.root / "release-verdict.json").read_text())["status"] == "PASS"

@@ -84,7 +84,7 @@ class EvidenceRunner:
         root.mkdir(mode=0o700, parents=True)
         for directory in ("deterministic", "server-regression", "real-api", "websocket-e2e", "physical", "candidate-soak"):
             (root / directory).mkdir(mode=0o700)
-        state = {"schemaVersion": "google-live-evidence-run.v1", "runId": run_id, "candidateIdentity": dict(identity), "createdAt": _now(), "layers": {name: {"state": "PENDING", "startedAt": None, "endedAt": None, "firstFailure": None, "artifactSha256": {}} for name in LAYERS}}
+        state = {"schemaVersion": "google-live-evidence-run.v1", "unified": True, "runId": run_id, "candidateIdentity": dict(identity), "createdAt": _now(), "layers": {name: {"state": "PENDING", "startedAt": None, "endedAt": None, "firstFailure": None, "artifactSha256": {}} for name in LAYERS}}
         _atomic(root / "run-state.json", (json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n").encode())
         return cls(root, run_id, identity, state, operator_config)
 
@@ -197,7 +197,7 @@ class EvidenceRunner:
                 self.finish_layer(layer, "FAIL", failure={"code": "EVIDENCE_INTEGRITY"})
             raise
 
-    def finalize(self) -> Path:
+    def finalize(self, *, release_gate_fn: Any | None = None) -> Path:
         if not self.all_passed():
             raise EvidenceStateError("all evidence layers must pass before finalize")
         provenance = self.root / "commands.jsonl"
@@ -221,6 +221,17 @@ class EvidenceRunner:
             if artifact.is_file():
                 lines.append(f"{hashlib.sha256(artifact.read_bytes()).hexdigest()}  {artifact.relative_to(self.root).as_posix()}")
         _atomic(checksum, ("\n".join(lines) + "\n").encode())
+        if release_gate_fn is None:
+            from scripts.google_live_release_gate import aggregate_release_evidence
+            release_gate_fn = aggregate_release_evidence
+        paths = {layer: self.root / layer.replace("_", "-") / "report.json" for layer in LAYERS}
+        paths.update({"deterministic_manifest": self.root / "deterministic/node-manifest.txt", "deterministic_junit": self.root / "deterministic/pytest.xml", "command_provenance": provenance, "command_projection": projection, "timeline_index": timeline, "runtime_closure_manifest": self.root / "runtime-closure.json"})
+        expected = {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in paths.items() if path.is_file()}
+        verdict = release_gate_fn(self.identity, paths, expected, unified=True)
+        verdict_path = self.root / "release-verdict.json"
+        _atomic(verdict_path, (json.dumps(verdict, sort_keys=True, separators=(",", ":")) + "\n").encode())
+        if verdict.get("status") != "PASS":
+            raise EvidenceStateError("release gate rejected unified evidence")
         return checksum
 
     def _check_layer(self, layer: str) -> None:
