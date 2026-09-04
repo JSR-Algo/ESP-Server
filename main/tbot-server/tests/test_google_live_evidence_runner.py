@@ -2,10 +2,13 @@ import json
 from pathlib import Path
 
 import pytest
+from types import SimpleNamespace
 
 from scripts.google_live_evidence_runner import (
+    COMMAND_ORDER,
     EvidenceRunner,
     EvidenceStateError,
+    LAYERS,
     TerminalLayerStateError,
 )
 
@@ -104,3 +107,61 @@ def test_physical_command_requires_explicit_operator_confirmation(tmp_path: Path
             operator_confirmed=True, transcript_plan_stdin=False
         )
 
+
+def test_command_specs_preserve_exact_order_and_secret_assignment(tmp_path: Path):
+    runner = _runner(tmp_path)
+    specs = runner.command_specs()
+    assert [spec.command_id for spec in specs] == [
+        "deterministic.produce", "real_api.round_trip", "websocket.transport",
+        "websocket.log_analysis", "websocket.correlation",
+        "candidate_soak.produce", "candidate_soak.replay",
+        "physical.capture_and_audit",
+    ]
+    assert [spec.command_id for spec in specs if spec.secret_env] == [
+        "real_api.round_trip", "websocket.transport", "candidate_soak.produce",
+        "physical.capture_and_audit",
+    ]
+    assert specs[5].stdin_source == "protected_candidate_plan"
+    assert specs[7].stdin_source == "protected_transcript_plan"
+
+
+def test_multi_command_layers_stay_running_until_authoritative_output(tmp_path: Path):
+    runner = _runner(tmp_path)
+    calls = []
+
+    def execute(spec, **kwargs):
+        calls.append((spec.command_id, kwargs))
+        return SimpleNamespace(policy_satisfied=True)
+
+    runner.execute_layer("deterministic.produce", executor=execute)
+    runner.execute_layer("real_api.round_trip", executor=execute)
+    runner.execute_layer("websocket.transport", executor=execute)
+    assert runner.state("websocket_e2e") == "RUNNING"
+    runner.execute_layer("websocket.log_analysis", executor=execute)
+    assert runner.state("server_regression") == "PASS"
+    runner.execute_layer("websocket.correlation", executor=execute)
+    assert runner.state("websocket_e2e") == "PASS"
+    runner.execute_layer("candidate_soak.produce", stdin_bytes=b"{}", executor=execute)
+    assert runner.state("candidate_soak") == "RUNNING"
+    runner.execute_layer("candidate_soak.replay", executor=execute)
+    assert runner.state("candidate_soak") == "PASS"
+    runner.execute_layer("physical.capture_and_audit", stdin_bytes=b"{}", executor=execute)
+    assert runner.state("physical") == "PASS"
+    assert [item[0] for item in calls] == list(COMMAND_ORDER)
+
+
+def test_finalize_refuses_nonpassing_layer_and_hashes_closed_artifacts(tmp_path: Path):
+    runner = _runner(tmp_path)
+    with pytest.raises(EvidenceStateError):
+        runner.finalize()
+    for layer in ("deterministic", "real_api", "websocket_e2e", "candidate_soak", "physical", "server_regression"):
+        runner.start_layer(layer) if runner.state(layer) == "PENDING" and runner.can_start(layer) else None
+        if runner.state(layer) == "RUNNING":
+            runner.finish_layer(layer, "PASS")
+    for layer in LAYERS:
+        path = runner.root / layer.replace("_", "-") / "report.json"
+        path.write_text(json.dumps({"status": "PASS"}) + "\n")
+    (runner.root / "commands.jsonl").write_text("")
+    (runner.root / "commands.txt").write_text("")
+    checksum = runner.finalize()
+    assert "timeline.log" in checksum.read_text()
