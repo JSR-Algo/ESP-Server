@@ -35,6 +35,7 @@ from scripts.google_live_deterministic_evidence import (
     snapshot_output_parent,
 )
 from scripts.google_live_command_runner import (
+    RUNTIME_CLOSURE_MANIFEST_GIT_PATH,
     _load_runtime_closure_manifest,
     _read_committed_pair_at,
     parse_provenance,
@@ -68,8 +69,8 @@ REQUIRED_LAYERS = (
 )
 DETERMINISTIC_SUPPORTS = ("deterministic_manifest", "deterministic_junit")
 COMMAND_PROVENANCE_SUPPORT = "command_provenance"
-REQUIRED_SUPPORTS = (*DETERMINISTIC_SUPPORTS, COMMAND_PROVENANCE_SUPPORT)
 RUNTIME_CLOSURE_SUPPORT = "runtime_closure_manifest"
+REQUIRED_SUPPORTS = (*DETERMINISTIC_SUPPORTS, RUNTIME_CLOSURE_SUPPORT, COMMAND_PROVENANCE_SUPPORT)
 REQUIRED_COMMAND_IDS = (
     "deterministic.produce",
     "real_api.round_trip",
@@ -90,6 +91,7 @@ IDENTITY_FIELDS = (
 SHA256 = re.compile(r"[0-9a-f]{64}")
 TAGGED_SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 CANONICAL_DETERMINISTIC_NODE_COUNT = 783
+APPROVED_RUNTIME_PLATFORM = "darwin-arm64-cp314"
 CANONICAL_DETERMINISTIC_MANIFEST = Path(
     "main/tbot-server/tests/fixtures/google_live_deterministic_nodes.txt"
 )
@@ -378,6 +380,10 @@ def _recorded_command_spec_digest(entry: Mapping[str, Any], runtime_closure_sha2
 
 def _runtime_closure_digest(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+def _canonical_runtime_closure(manifest: Mapping[str, Any]) -> bytes:
+    return (json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
 
 
 def parse_trusted_python_executable_manifest(content: bytes) -> dict[str, Any]:
@@ -1239,11 +1245,18 @@ def aggregate_release_evidence(
         trusted_runtime_closure = _load_runtime_closure_manifest(
             str(expected_identity.get("gitSha", ""))
         )
-        if trusted_runtime_closure["runtime"]["pythonMajorMinor"] != trusted_runtime["pythonMajorMinor"]:
+        if (
+            trusted_runtime_closure.get("platform") != APPROVED_RUNTIME_PLATFORM
+            or trusted_runtime_closure["runtime"]["pythonMajorMinor"]
+            != trusted_runtime["pythonMajorMinor"]
+        ):
             raise ValueError("runtime closure does not match deterministic runtime")
-        runtime_closure_sha256 = hashlib.sha256(
-            (json.dumps(trusted_runtime_closure, sort_keys=True, separators=(",", ":")) + "\n").encode()
-        ).hexdigest() if trusted_runtime_closure.get("schemaVersion") else None
+        trusted_runtime_closure_content = _canonical_runtime_closure(
+            trusted_runtime_closure
+        )
+        runtime_closure_sha256 = _runtime_closure_digest(
+            trusted_runtime_closure_content
+        )
     except (OSError, RuntimeError, UnicodeError, ValueError):
         trusted_manifest_path = None
         trusted_manifest_content = None
@@ -1252,6 +1265,7 @@ def aggregate_release_evidence(
         trusted_executable_content = None
         trusted_executable = None
         trusted_runtime_closure = None
+        trusted_runtime_closure_content = None
         runtime_closure_sha256 = None
         failures.append(_failure("DETERMINISTIC_TRUSTED_MANIFEST_INVALID", "deterministic"))
     support_contents: dict[str, bytes] = {}
@@ -1340,6 +1354,45 @@ def aggregate_release_evidence(
             if item["name"] == "deterministic":
                 item["status"] = "FAIL"
                 break
+    closure_path_value = layer_paths.get(RUNTIME_CLOSURE_SUPPORT)
+    closure_checksum = expected_checksums.get(RUNTIME_CLOSURE_SUPPORT)
+    try:
+        if (
+            closure_path_value is None
+            or type(closure_checksum) is not str
+            or SHA256.fullmatch(closure_checksum) is None
+            or trusted_runtime_closure_content is None
+        ):
+            raise ValueError
+        closure_path = Path(closure_path_value)
+        closure_stat = closure_path.lstat()
+        if (
+            closure_path.is_symlink()
+            or not stat.S_ISREG(closure_stat.st_mode)
+            or closure_stat.st_nlink != 1
+        ):
+            raise ValueError
+        trusted_closure_path = _trusted_manifest_path().parents[4] / Path(
+            RUNTIME_CLOSURE_MANIFEST_GIT_PATH
+        )
+        if _same_file(closure_path, trusted_closure_path):
+            raise ValueError
+        closure_content = (
+            input_contents[RUNTIME_CLOSURE_SUPPORT]
+            if input_contents is not None
+            else closure_path.read_bytes()
+        )
+        if (
+            not hmac.compare_digest(
+                _runtime_closure_digest(closure_content), closure_checksum
+            )
+            or not hmac.compare_digest(
+                closure_content, trusted_runtime_closure_content
+            )
+        ):
+            raise ValueError
+    except (KeyError, OSError, TypeError, ValueError):
+        failures.append(_failure("RUNTIME_CLOSURE_INVALID"))
     provenance_path = layer_paths.get(COMMAND_PROVENANCE_SUPPORT)
     provenance_checksum = expected_checksums.get(COMMAND_PROVENANCE_SUPPORT)
     try:
@@ -1462,6 +1515,14 @@ def aggregate_release_evidence(
                 or by_id[command_id]["stdinSource"] != expected_stdin
             ):
                 raise ValueError
+        revalidated_runtime_closure = _load_runtime_closure_manifest(
+            str(expected_identity.get("gitSha", ""))
+        )
+        if not hmac.compare_digest(
+            _canonical_runtime_closure(revalidated_runtime_closure),
+            trusted_runtime_closure_content,
+        ):
+            raise ValueError
     except (KeyError, OSError, RuntimeError, TypeError, UnicodeError, ValueError):
         failures.append(_failure("COMMAND_PROVENANCE_INVALID"))
     return {
@@ -1513,7 +1574,11 @@ def _output_aliases_evidence(
 
 
 def _evidence_paths_alias(paths: list[Path]) -> bool:
-    if any(path.is_symlink() for path in paths):
+    if any(
+        path.is_symlink()
+        or (path.exists() and path.is_file() and path.stat().st_nlink != 1)
+        for path in paths
+    ):
         return True
     return any(
         _same_file(left, right)

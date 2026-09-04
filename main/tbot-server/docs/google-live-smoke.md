@@ -9,6 +9,19 @@ Never put a real key, OTA token, cookie, transcript, prompt, exception text, or
 session-resumption handle in `commands.txt` or a report. Raw child audio is not
 stored by default. Use only the checked-in synthetic/consenting-adult fixture.
 
+The runner also requires the internal Git-tracked runtime-closure manifest at
+`tests/fixtures/google_live_runtime_closure_manifest.json`. It binds the
+candidate source/resource inventory, dependency file digests, and interpreter
+bytes. The only approved profile is `darwin-arm64-cp314`; unsupported
+platforms, interpreters, aliases, or changed closure members fail closed before
+any child command runs. Closure contents are internal support evidence and are
+not copied into public `commands.jsonl` or `commands.txt` fields.
+
+Task 5 verification is synthetic-only. It must not use live credentials,
+hardware automation, or a real Google Live call. A release candidate may carry
+separate operator evidence, but the closure gate itself is deterministic and
+offline.
+
 ## 1. Candidate identity and evidence root
 
 Use one UTC run ID and one exact identity for every layer. `CONFIG_JSON` is the

@@ -62,6 +62,24 @@ transcripts or prompts, cookies, credentials, tokens, keys, session-resumption
 handles, or raw exception text. Session-resumption handles may exist in runtime
 memory but their values must never enter artifacts.
 
+## Runtime closure release boundary
+
+Before release aggregation, the internal Git-tracked runtime-closure manifest
+must be present, checksummed, and byte-identical to the candidate Git object.
+It binds the approved `darwin-arm64-cp314` interpreter, dependency files,
+tracked source, and resource inventory. The release gate revalidates that
+closure after command provenance is parsed; any changed source/resource,
+dependency, manifest, unsupported platform/interpreter, symlink, or hardlink
+returns a safe integrity failure and never includes raw paths or content in the
+verdict. Public `commands.jsonl` and `commands.txt` grammar and command order
+remain unchanged.
+
+Closure validation is synthetic-only and does not automate live credentials,
+Google API calls, or hardware actions. The known deterministic opus-origin
+hang is residual only when a same-environment baseline/current A/B run records
+the exact node id and timeout evidence; exclude only that exact documented
+baseline-equivalent node, never an expanded subset.
+
 ## 2. Preflight and bounded log capture
 
 All checks must pass before judging audio behavior:

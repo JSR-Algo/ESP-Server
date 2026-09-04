@@ -75,6 +75,28 @@ PYTHON_EXECUTABLE_MANIFEST = (
 PYTHON_EXECUTABLE_TRUST = release_gate.parse_trusted_python_executable_manifest(
     PYTHON_EXECUTABLE_MANIFEST
 )
+RUNTIME_CLOSURE = {
+    "distributions": [],
+    "platform": "darwin-arm64-cp314",
+    "resourceInventory": {
+        "fileCount": 0,
+        "sha256": hashlib.sha256(b"").hexdigest(),
+        "totalBytes": 0,
+    },
+    "resources": [],
+    "runtime": {
+        "interpreterSha256": hashlib.sha256(
+            Path(sys.executable).resolve().read_bytes()
+        ).hexdigest(),
+        "pythonImplementation": PYTEST_RUNTIME["pythonImplementation"],
+        "pythonMajorMinor": PYTEST_RUNTIME["pythonMajorMinor"],
+    },
+    "schemaVersion": "google-live-runtime-closure.v1",
+}
+RUNTIME_CLOSURE_MANIFEST = (
+    json.dumps(RUNTIME_CLOSURE, sort_keys=True, separators=(",", ":")) + "\n"
+).encode()
+RUNTIME_CLOSURE_SHA256 = hashlib.sha256(RUNTIME_CLOSURE_MANIFEST).hexdigest()
 REAL_LOAD_TRUSTED_MANIFEST = release_gate._load_trusted_deterministic_manifest
 REAL_LOAD_TRUSTED_PYTHON_EXECUTABLE_MANIFEST = (
     release_gate._load_trusted_python_executable_manifest
@@ -135,7 +157,7 @@ def _pin_release_manifest_loader(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         release_gate,
         "_load_runtime_closure_manifest",
-        lambda _expected_git_sha: {"runtime": {"pythonMajorMinor": PYTEST_RUNTIME["pythonMajorMinor"]}},
+        lambda _expected_git_sha: copy.deepcopy(RUNTIME_CLOSURE),
         raising=False,
     )
 
@@ -204,6 +226,90 @@ def test_command_spec_digest_binds_runtime_closure_identity() -> None:
     first = release_gate._recorded_command_spec_digest(entry, "a" * 64)
     second = release_gate._recorded_command_spec_digest(entry, "b" * 64)
     assert first != second
+
+
+def test_release_requires_complete_runtime_closure_support(tmp_path: Path) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+
+    assert verdict["status"] == "PASS"
+    assert verdict["failures"] == []
+
+
+@pytest.mark.parametrize("artifact", ["resource", "dependency", "manifest", "source"])
+def test_release_revalidates_runtime_closure_before_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, artifact: str
+) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    calls = 0
+
+    def drifted_loader(_sha: str) -> dict:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return copy.deepcopy(RUNTIME_CLOSURE)
+        raise ValueError(f"{artifact} drift")
+
+    monkeypatch.setattr(release_gate, "_load_runtime_closure_manifest", drifted_loader)
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+    encoded = json.dumps(verdict)
+
+    assert verdict["status"] == "FAIL"
+    assert calls >= 2
+    assert artifact not in encoded
+    assert "drift" not in encoded
+
+
+def test_release_rejects_tampered_runtime_closure_support_without_leaking_content(
+    tmp_path: Path,
+) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    secret = "closure-private-content"
+    paths["runtime_closure_manifest"].write_bytes(secret.encode())
+    checksums["runtime_closure_manifest"] = hashlib.sha256(
+        secret.encode()
+    ).hexdigest()
+
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+
+    assert verdict["status"] == "FAIL"
+    assert "closure-private-content" not in json.dumps(verdict)
+    assert any(item["code"] == "RUNTIME_CLOSURE_INVALID" for item in verdict["failures"])
+
+
+@pytest.mark.parametrize("alias_kind", ["symlink", "hardlink"])
+def test_release_rejects_runtime_closure_support_alias(
+    tmp_path: Path, alias_kind: str
+) -> None:
+    paths, checksums, checksum_manifest = _write_evidence(tmp_path)
+    target = paths["runtime_closure_manifest"]
+    alias = tmp_path / f"closure-{alias_kind}.json"
+    if alias_kind == "symlink":
+        alias.symlink_to(target)
+    else:
+        os.link(target, alias)
+    paths["runtime_closure_manifest"] = alias
+    with pytest.raises(ValueError, match="alias"):
+        release_gate.produce_release_verdict(
+            IDENTITY, paths, checksum_manifest, tmp_path / "release.json"
+        )
+
+
+def test_release_rejects_unsupported_runtime_closure_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, checksums, _ = _write_evidence(tmp_path)
+    unsupported = copy.deepcopy(RUNTIME_CLOSURE)
+    unsupported["platform"] = "linux-x86_64-cp314"
+    monkeypatch.setattr(
+        release_gate, "_load_runtime_closure_manifest", lambda _sha: unsupported
+    )
+
+    verdict = aggregate_release_evidence(IDENTITY, paths, checksums)
+
+    assert verdict["status"] == "FAIL"
+    assert any(item["code"] == "DETERMINISTIC_TRUSTED_MANIFEST_INVALID" for item in verdict["failures"])
 def _reports(test_count: int = len(CANONICAL_NODES)) -> dict[str, dict]:
     physical_audit = _PHYSICAL_CASE._candidate_audit(
         _PHYSICAL_CASE._candidate_physical_log()
@@ -358,6 +464,11 @@ def _write_evidence(
         paths[name] = support
         checksums[name] = digest
         rows.append(f"{digest}  {support.relative_to(root)}")
+    runtime_closure = root / "runtime-closure.json"
+    runtime_closure.write_bytes(RUNTIME_CLOSURE_MANIFEST)
+    paths["runtime_closure_manifest"] = runtime_closure
+    checksums["runtime_closure_manifest"] = RUNTIME_CLOSURE_SHA256
+    rows.append(f"{RUNTIME_CLOSURE_SHA256}  {runtime_closure.relative_to(root)}")
     journey_evidence = root / "candidate-soak" / "journey-evidence.json"
     journey_evidence.write_text('{"closed":true}\n', encoding="utf-8")
     journey_evidence_artifact = {
@@ -463,7 +574,9 @@ def _write_evidence(
                     "timeoutSec": 300.0,
                 },
             }
-        command["specSha256"] = release_gate._recorded_command_spec_digest(command)
+        command["specSha256"] = release_gate._recorded_command_spec_digest(
+            command, RUNTIME_CLOSURE_SHA256
+        )
         commands.append(command)
     provenance = root / "commands.jsonl"
     provenance.write_bytes(render_provenance(commands))
@@ -706,7 +819,9 @@ def test_release_accepts_approved_interpreter_symlink(tmp_path: Path) -> None:
     entries = [json.loads(line) for line in paths["command_provenance"].read_text().splitlines()]
     for entry in entries:
         entry["argv"][0] = str(interpreter)
-        entry["specSha256"] = release_gate._recorded_command_spec_digest(entry)
+        entry["specSha256"] = release_gate._recorded_command_spec_digest(
+            entry, RUNTIME_CLOSURE_SHA256
+        )
     content = render_provenance(entries)
     paths["command_provenance"].write_bytes(content)
     checksums["command_provenance"] = hashlib.sha256(content).hexdigest()
@@ -1676,6 +1791,8 @@ def test_cli_reads_checksum_manifest_and_writes_deterministic_failure(tmp_path: 
             "--support",
             f"deterministic_junit={paths['deterministic_junit']}",
             "--support",
+            f"runtime_closure_manifest={paths['runtime_closure_manifest']}",
+            "--support",
             f"command_provenance={paths['command_provenance']}",
         ]
     )
@@ -1833,6 +1950,7 @@ def _run_cli(paths: dict[str, Path], manifest: Path, out: Path) -> subprocess.Co
         command.extend(["--layer", f"{layer}={paths[layer]}"])
     command.extend(["--support", f"deterministic_manifest={paths['deterministic'].parent / 'node-manifest.txt'}"])
     command.extend(["--support", f"deterministic_junit={paths['deterministic'].parent / 'pytest.xml'}"])
+    command.extend(["--support", f"runtime_closure_manifest={paths['runtime_closure_manifest']}"])
     command.extend(["--support", f"command_provenance={paths['command_provenance']}"])
     return subprocess.run(command, text=True, capture_output=True, check=False)
 
