@@ -1554,6 +1554,34 @@ def test_private_pytest_runtime_preimports_trusted_packages_before_candidate_rep
     assert sentinel not in completed.stdout + completed.stderr
 
 
+def test_pytest_child_reloads_preimported_control_packages_from_private_runtime(
+    tmp_path: Path,
+) -> None:
+    _install_pytest_child(tmp_path)
+    child = tmp_path / "scripts/google_live_pytest_child.py"
+    ambient_root = Path(deterministic.distribution("packaging").locate_file(""))
+    child.write_text(
+        f"import sys\nsys.path.insert(0, {str(ambient_root)!r})\nimport packaging\n"
+        + child.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    test_file = tmp_path / "test_candidate.py"
+    test_file.write_text("def test_candidate():\n    assert True\n", encoding="utf-8")
+
+    with deterministic._private_pytest_runtime(tmp_path, IDENTITY["gitSha"]) as runtime:
+        completed = subprocess.run(
+            deterministic._pytest_command(runtime, str(test_file), "-q"),
+            cwd=tmp_path,
+            env=deterministic._pytest_child_environment(),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "1 passed" in completed.stdout
+
+
 @pytest.mark.parametrize("phase", ["collect", "run"])
 def test_producer_rejects_private_runtime_mutation_even_when_candidate_restores_bytes(
     tmp_path: Path,
