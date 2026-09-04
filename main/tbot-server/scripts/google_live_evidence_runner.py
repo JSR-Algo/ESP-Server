@@ -294,7 +294,7 @@ class EvidenceRunner:
             report = self._synthetic_report("deterministic")
             report["testVerdict"]["total"] = len(nodes)
             report["coverageProof"] = {
-                "manifestSchema": "google-live-deterministic-manifest.v1",
+                "manifestSchema": "google-live-deterministic-nodes.v1",
                 "manifestSha256": hashlib.sha256(manifest).hexdigest(),
                 "manifestNodeCount": len(nodes),
                 "executedNodeCount": len(nodes),
