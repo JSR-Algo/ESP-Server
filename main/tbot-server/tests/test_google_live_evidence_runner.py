@@ -104,6 +104,19 @@ def test_invalid_run_id_and_evidence_root_alias_fail_closed(tmp_path: Path):
         EvidenceRunner.initialize(alias, run_id="20260904T010205Z", identity=IDENTITY, verify_repository=False)
 
 
+def test_smoke_runbook_creates_synthetic_evidence_root_before_running_cli():
+    runbook = (Path(__file__).resolve().parents[1] / "docs/google-live-smoke.md").read_text(
+        encoding="utf-8"
+    )
+
+    root_assignment = 'SYNTHETIC_ROOT="$(mktemp -d)/google-live-evidence"'
+    root_creation = 'mkdir -m 700 "$SYNTHETIC_ROOT"'
+    runner_command = (
+        'python3 scripts/google_live_evidence_runner.py synthetic-dry-run "$SYNTHETIC_ROOT"'
+    )
+    assert runbook.index(root_assignment) < runbook.index(root_creation) < runbook.index(runner_command)
+
+
 def test_production_init_binds_effective_config_and_fixture(tmp_path: Path):
     config = tmp_path / "config.json"
     fixture = tmp_path / "fixture.wav"

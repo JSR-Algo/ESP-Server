@@ -19,6 +19,7 @@ credentials, network endpoint, microphone, speaker, or hardware:
 ```bash
 cd main/tbot-server
 SYNTHETIC_ROOT="$(mktemp -d)/google-live-evidence"
+mkdir -m 700 "$SYNTHETIC_ROOT"
 python3 scripts/google_live_evidence_runner.py synthetic-dry-run "$SYNTHETIC_ROOT"
 ```
 
