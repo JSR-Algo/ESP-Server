@@ -7,6 +7,7 @@ from scripts.google_live_physical_evidence import (
     PhysicalEvidenceClient,
     PhysicalEvidenceError,
     build_enrollment,
+    compose_physical_report,
     validate_ready_snapshot,
 )
 
@@ -128,3 +129,31 @@ def test_client_finalizes_without_any_hardware_control_request():
     assert [method for method, path, _ in calls if path.endswith("candidate-identity")] == ["PUT"]
     assert calls[-1][1].endswith("/finalize")
     assert all(not any(word in path for word in ("deploy", "flash", "reset")) for _, path, _ in calls)
+
+
+def test_composition_invokes_existing_audit_and_writes_bound_report(tmp_path: Path):
+    log = tmp_path / "window.log"
+    log.write_text("safe bounded markers\n")
+    server = {"status": "PASS", "logWindow": {"journeyId": "physical.run"}}
+    soak = {"status": "PASS", "candidateIdentity": IDENTITY}
+    seen = {}
+
+    def audit(text, **kwargs):
+        seen.update(kwargs)
+        assert "private" not in text
+        return {"passed": True, "missing": []}
+
+    output = tmp_path / "physical" / "report.json"
+    report = compose_physical_report(
+        raw_server_log=log,
+        server_report=server,
+        candidate_soak_report=soak,
+        candidate_identity=IDENTITY,
+        device_id="device-1",
+        client_id="client-1",
+        output=output,
+        audit_fn=audit,
+    )
+    assert seen["production_google_live_candidate"] is True
+    assert report["logEvidence"] == server
+    assert json.loads(output.read_text())["candidateSoakEvidence"] == soak

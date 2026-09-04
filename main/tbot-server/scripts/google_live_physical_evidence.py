@@ -89,6 +89,33 @@ class PhysicalEvidenceClient:
                     pass
 
 
+def compose_physical_report(*, raw_server_log: Path, server_report: dict[str, Any], candidate_soak_report: dict[str, Any], candidate_identity: dict[str, Any], device_id: str, client_id: str, output: Path, audit_fn: Callable[..., dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Run the existing production physical validator over one bounded log."""
+    if not raw_server_log.is_file() or raw_server_log.is_symlink():
+        raise PhysicalEvidenceError("bounded server log is unavailable")
+    if audit_fn is None:
+        from scripts.physical_smoke_audit import audit_log
+        audit_fn = audit_log
+    report = audit_fn(
+        raw_server_log.read_text(encoding="utf-8", errors="replace"),
+        device_id=device_id,
+        client_id=client_id,
+        production_google_live_candidate=True,
+        candidate_identity=candidate_identity,
+        reliability_report=server_report,
+        candidate_soak_report=candidate_soak_report,
+    )
+    report = dict(report)
+    report["logEvidence"] = server_report
+    report["candidateSoakEvidence"] = candidate_soak_report
+    report["candidateIdentity"] = dict(candidate_identity)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name("." + output.name + ".tmp")
+    temporary.write_text(json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    temporary.replace(output)
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Capture privacy-safe physical Google Live evidence")
     parser.add_argument("--candidate-soak-report", type=Path, required=True)
@@ -100,11 +127,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config-fingerprint", required=True)
     parser.add_argument("--fixture-sha256", required=True)
     parser.add_argument("--device-id")
+    parser.add_argument("--client-id")
+    parser.add_argument("--server-log", type=Path)
     parser.add_argument("--base-url")
     parser.add_argument("--operator-confirmed", action="store_true")
     parser.add_argument("--transcript-plan-stdin", action="store_true")
     args = parser.parse_args(argv)
-    if not args.operator_confirmed or not args.transcript_plan_stdin or not args.base_url or not args.device_id:
+    if not args.operator_confirmed or not args.transcript_plan_stdin or not args.base_url or not args.device_id or not args.client_id or args.server_log is None:
         parser.error("physical evidence requires --operator-confirmed, --transcript-plan-stdin, --base-url, and --device-id")
     try:
         plan = json.load(__import__("sys").stdin)
@@ -112,8 +141,9 @@ def main(argv: list[str] | None = None) -> int:
         enrollment = build_enrollment(device_id=args.device_id, client_id=str(plan["clientId"]), journey_id=str(plan["journeyId"]), transcript_plan=list(plan["transcriptPlan"]), hmac_key=key, ttl_sec=int(plan.get("ttlSec", 300)))
         identity = {"gitSha": args.candidate_git_sha, "imageDigest": args.candidate_image_digest, "firmwareIdentity": args.firmware_identity, "configFingerprint": args.config_fingerprint, "fixtureSha256": args.fixture_sha256}
         result = PhysicalEvidenceClient(args.base_url, args.device_id, __import__("os").environ.get("TBOT_DEVICE_MINT_SECRET", "")).capture(journey_id=str(plan["journeyId"]), enrollment=enrollment, candidate_identity=identity)
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(json.dumps(result, sort_keys=True) + "\n", encoding="utf-8")
+        server_report = json.loads(args.server_report.read_text(encoding="utf-8"))
+        candidate_report = json.loads(args.candidate_soak_report.read_text(encoding="utf-8"))
+        compose_physical_report(raw_server_log=args.server_log, server_report=server_report, candidate_soak_report=candidate_report, candidate_identity=identity, device_id=args.device_id, client_id=args.client_id, output=args.report)
         print("READY journey_id=" + str(plan["journeyId"]))
         return 0
     except Exception:
