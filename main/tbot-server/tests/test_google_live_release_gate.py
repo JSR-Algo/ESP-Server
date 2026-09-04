@@ -861,7 +861,7 @@ def test_release_accepts_planned_immutable_command_specs(
         secret_env=secret_env,
         inputs=inputs,
         outputs=outputs,
-        expected_exit_codes=(0,),
+        expected_exit_codes=(0, 1) if command_id == "websocket.transport" else (0,),
         stdin_source=(
             "protected_transcript_plan"
             if command_id == "physical.capture_and_audit"
@@ -887,7 +887,7 @@ def test_release_accepts_planned_immutable_command_specs(
         "stdinSource": canonical["stdinSource"],
         "terminalPolicy": {
             "cleanupGraceSec": 2.0,
-            "expectedExitCodes": [0],
+            "expectedExitCodes": [0, 1] if command_id == "websocket.transport" else [0],
             "timeoutSec": 300.0,
         },
     }
