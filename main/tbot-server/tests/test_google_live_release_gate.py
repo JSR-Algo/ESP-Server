@@ -697,11 +697,10 @@ def _write_evidence(
             outputs.append(copy.deepcopy(journey_evidence_artifact))
         if command_id == "physical.capture_and_audit":
             physical_server = root / "server-regression" / "report.json"
-            physical_server.write_text(json.dumps(reports["physical"]["logEvidence"], sort_keys=True) + "\n", encoding="utf-8")
             physical_terminal = root / "physical" / "terminal-snapshot.json"
             physical_terminal.write_text(json.dumps(reports["physical"]["terminalSnapshot"], sort_keys=True) + "\n", encoding="utf-8")
             outputs[:0] = [
-                {"label": "server-regression/report.json", "sha256": hashlib.sha256(physical_server.read_bytes()).hexdigest()},
+                {"label": "server-regression/report.json", "sha256": checksums["server_regression"]},
                 {"label": "physical/terminal-snapshot.json", "sha256": hashlib.sha256(physical_terminal.read_bytes()).hexdigest()},
             ]
         command = {

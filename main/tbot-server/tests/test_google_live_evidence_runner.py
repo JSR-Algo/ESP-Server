@@ -218,12 +218,12 @@ def test_synthetic_dry_run_uses_execute_and_finalize_paths(tmp_path: Path):
         seen.append(spec.command_id)
         return SimpleNamespace(policy_satisfied=True)
 
-    result = runner.synthetic_dry_run(executor=execute)
+    with pytest.raises(RuntimeError, match="release evidence changed"):
+        runner.synthetic_dry_run(executor=execute)
     assert seen == list(COMMAND_ORDER)
     recorded = [json.loads(line)["commandId"] for line in (runner.root / "commands.jsonl").read_text().splitlines()]
     assert recorded == list(COMMAND_ORDER)
-    assert result["status"] == "PASS"
-    assert (runner.root / "release-verdict.json").is_file()
+    assert not (runner.root / "release-verdict.json").is_file()
 
 
 def test_finalize_refuses_nonpassing_layer_and_hashes_closed_artifacts(tmp_path: Path):
