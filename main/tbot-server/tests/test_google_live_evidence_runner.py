@@ -1,19 +1,18 @@
-import json
 import contextlib
 import hashlib
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-from types import SimpleNamespace
 
 from scripts.google_live_evidence_runner import (
     COMMAND_ORDER,
+    LAYERS,
     EvidenceRunner,
     EvidenceStateError,
-    LAYERS,
     TerminalLayerStateError,
 )
-
 
 IDENTITY = {
     "gitSha": "a" * 40,
