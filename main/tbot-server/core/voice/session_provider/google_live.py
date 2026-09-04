@@ -10,19 +10,18 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 from core.activity_lease import ActivityOperation
+from core.lesson.log_context import with_lesson_log_context
+from core.providers.tools.product_toolset import LESSON_SEMANTIC_TOOLS, product_tool_names
 from core.voice.google_live import GoogleLiveAudioBridge, GoogleLiveClientFactory
-from core.voice.output_safety_judge import judge_output_unsafe
 from core.voice.google_live.interaction_controller import (
     GoogleLiveInteractionController,
     InteractionState,
 )
-from core.voice.session_provider.base import VoiceSessionProvider
-from core.providers.tools.product_toolset import LESSON_SEMANTIC_TOOLS, product_tool_names
 from core.voice.live_admission import AdmissionDecision, AdmissionReason, LiveAdmissionGate
+from core.voice.output_safety_judge import judge_output_unsafe
 from core.voice.session_orchestrator import SessionMode, normalize_session_mode
+from core.voice.session_provider.base import VoiceSessionProvider
 from plugins_func.register import Action
-from core.lesson.log_context import with_lesson_log_context
-
 
 LESSON_LIVE_TEXT_INSTRUCTION = (
     "Đọc nguyên văn câu sau bằng giọng Google Live đã cấu hình. "

@@ -17,8 +17,8 @@ import site
 import stat
 import subprocess
 import sys
-import tempfile
 import tarfile
+import tempfile
 import unicodedata
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -36,6 +36,8 @@ from scripts import google_live_deterministic_nodeid_plugin as nodeid_plugin
 from scripts.google_live_reliability import SCHEMA_VERSION
 from scripts.google_live_trusted_git import (
     git_output as _trusted_git_output,
+)
+from scripts.google_live_trusted_git import (
     trusted_git_session,
 )
 

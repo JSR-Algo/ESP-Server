@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import os
 import re
-import tempfile
-import argparse
-import hashlib
-import sys
 import subprocess
-from xml.sax.saxutils import escape
+import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))

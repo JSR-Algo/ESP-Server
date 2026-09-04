@@ -11,8 +11,7 @@ import platform
 import re
 import stat
 import sys
-from collections.abc import Mapping
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +21,14 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.analyze_google_live_log import correlate_websocket_bargein_evidence
+from scripts.google_live_command_runner import (
+    _MAX_CLOSURE_FILE_BYTES,
+    RUNTIME_CLOSURE_MANIFEST_GIT_PATH,
+    _load_runtime_closure_manifest,
+    _read_committed_pair_at,
+    parse_provenance,
+    render_commands_projection,
+)
 from scripts.google_live_deterministic_evidence import (
     APPROVED_TEST_FILES,
     MANIFEST_SCHEMA,
@@ -35,14 +42,6 @@ from scripts.google_live_deterministic_evidence import (
     parse_pytest_runtime_manifest,
     snapshot_output_parent,
 )
-from scripts.google_live_command_runner import (
-    RUNTIME_CLOSURE_MANIFEST_GIT_PATH,
-    _MAX_CLOSURE_FILE_BYTES,
-    _load_runtime_closure_manifest,
-    _read_committed_pair_at,
-    parse_provenance,
-    render_commands_projection,
-)
 from scripts.google_live_reliability import (
     SCHEMA_VERSION,
     forbidden_report_fields,
@@ -52,6 +51,8 @@ from scripts.google_live_reliability import (
 )
 from scripts.google_live_trusted_git import (
     git_output as _trusted_git_output,
+)
+from scripts.google_live_trusted_git import (
     trusted_git_session,
 )
 from scripts.physical_smoke_audit import validate_physical_candidate_report

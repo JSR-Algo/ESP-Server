@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import fcntl
 import ctypes
 import errno
+import fcntl
 import hashlib
 import hmac
 import io
@@ -15,6 +15,7 @@ import platform
 import re
 import secrets
 import selectors
+import shutil
 import signal
 import stat
 import subprocess
@@ -24,9 +25,8 @@ import tempfile
 import threading
 import time
 import unicodedata
-import shutil
-from dataclasses import dataclass, field
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -38,10 +38,9 @@ from scripts.google_live_deterministic_evidence import (
     require_file_unchanged,
 )
 from scripts.google_live_reliability import forbidden_report_fields
-from scripts.google_live_trusted_git import git_output as _trusted_git_output
 from scripts.google_live_trusted_git import _git_command as _trusted_git_command
+from scripts.google_live_trusted_git import git_output as _trusted_git_output
 from scripts.google_live_trusted_git import trusted_git_session
-
 
 COMMAND_PROVENANCE_SCHEMA = "google-live-command-provenance.v1"
 COMMAND_EXECUTION_POLICY = "candidate-git-python-source.v1"
