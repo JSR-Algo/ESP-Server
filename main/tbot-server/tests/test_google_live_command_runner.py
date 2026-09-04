@@ -728,7 +728,15 @@ def test_resource_archive_stdout_is_hard_bounded(
     expected_sha = "a" * 40
     identity = SimpleNamespace(path=Path("/usr/bin/git"))
     monkeypatch.setattr(runner, "trusted_git_session", lambda: contextlib.nullcontext(identity))
-    monkeypatch.setattr(runner, "_trusted_git_output", lambda *_args: (expected_sha + "\n").encode())
+    monkeypatch.setattr(
+        runner,
+        "_trusted_git_output",
+        lambda *_args: (
+            (str(tmp_path) + "\n").encode()
+            if "--show-toplevel" in _args
+            else (expected_sha + "\n").encode()
+        ),
+    )
     monkeypatch.setattr(runner, "_trusted_git_command", lambda *_args: ["git"])
 
     class FakeProcess:
@@ -761,7 +769,15 @@ def test_resource_archive_partial_stdout_timeout_is_bounded(
     expected_sha = "a" * 40
     identity = SimpleNamespace(path=Path("/usr/bin/git"))
     monkeypatch.setattr(runner, "trusted_git_session", lambda: contextlib.nullcontext(identity))
-    monkeypatch.setattr(runner, "_trusted_git_output", lambda *_args: (expected_sha + "\n").encode())
+    monkeypatch.setattr(
+        runner,
+        "_trusted_git_output",
+        lambda *_args: (
+            (str(tmp_path) + "\n").encode()
+            if "--show-toplevel" in _args
+            else (expected_sha + "\n").encode()
+        ),
+    )
     monkeypatch.setattr(
         runner,
         "_trusted_git_command",
