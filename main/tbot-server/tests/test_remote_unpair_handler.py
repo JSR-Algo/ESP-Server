@@ -1,5 +1,6 @@
 import json
 import os
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -30,6 +31,18 @@ async def test_remote_unpair_targets_resolved_live_connection_with_fixed_command
     connections = {"robot-connection-key": connection}
     handler = RemoteUnpairHandler({}, connections)
 
+    async def send_and_ack(raw):
+        payload = json.loads(raw)
+        asyncio.get_running_loop().call_soon(
+            lambda: asyncio.create_task(
+                handler.acknowledge(
+                    "backend-device-uuid", connection, payload["request_id"]
+                )
+            )
+        )
+
+    websocket.send.side_effect = send_and_ack
+
     with (
         patch.dict(os.environ, {"TBOT_DEVICE_MINT_SECRET": "mint-secret"}, clear=False),
         patch.object(handler._connection_finder, "_find_connection", AsyncMock(return_value=connection)),
@@ -37,9 +50,26 @@ async def test_remote_unpair_targets_resolved_live_connection_with_fixed_command
         response = await handler.handle_post(_Request())
 
     assert response.status == 202
-    websocket.send.assert_awaited_once_with(
-        json.dumps({"type": "system", "command": "unpair"}, separators=(",", ":"))
-    )
+    sent = json.loads(websocket.send.await_args.args[0])
+    assert sent["type"] == "system"
+    assert sent["command"] == "unpair"
+    assert sent["request_id"]
+
+
+@pytest.mark.asyncio
+async def test_remote_unpair_times_out_without_ack():
+    websocket = SimpleNamespace(send=AsyncMock())
+    connection = SimpleNamespace(websocket=websocket, session_id="session-1")
+    handler = RemoteUnpairHandler({}, {"robot-connection-key": connection}, ack_timeout=0.01)
+
+    with (
+        patch.dict(os.environ, {"TBOT_DEVICE_MINT_SECRET": "mint-secret"}, clear=False),
+        patch.object(handler._connection_finder, "_find_connection", AsyncMock(return_value=connection)),
+    ):
+        response = await handler.handle_post(_Request())
+
+    assert response.status == 504
+    assert json.loads(response.text)["error"] == "DEVICE_UNPAIR_ACK_TIMEOUT"
 
 
 @pytest.mark.asyncio
