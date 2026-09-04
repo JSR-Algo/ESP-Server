@@ -200,6 +200,8 @@ def test_checked_runtime_closure_inventory_covers_existing_approved_commands() -
         "main/tbot-server/scripts/voice_mode_websocket_audio_bargein.py",
         "main/tbot-server/scripts/analyze_google_live_log.py",
         "main/tbot-server/scripts/google_live_robot_soak.py",
+        "main/tbot-server/scripts/google_live_physical_evidence.py",
+        "main/tbot-server/scripts/google_live_evidence_runner.py",
         "main/tbot-server/core/voice/google_live/client.py",
         "main/tbot-server/core/utils/opus_encoder_utils.py",
         "main/tbot-server/config/config_loader.py",
@@ -211,13 +213,13 @@ def test_checked_runtime_closure_inventory_covers_existing_approved_commands() -
     }
     assert required <= paths
     assert not any("/.venv" in path or "/site-packages/" in path for path in paths)
-    assert "main/tbot-server/scripts/google_live_physical_evidence.py" not in paths
     assert runner.RUNTIME_CLOSURE_MANIFEST_GIT_PATH not in paths
     for relative_script in (
         "scripts/google_live_deterministic_evidence.py",
         "scripts/google_live_smoke.py",
         "scripts/voice_mode_websocket_audio_bargein.py",
         "scripts/analyze_google_live_log.py",
+        "scripts/google_live_physical_evidence.py",
         "scripts/google_live_robot_soak.py",
     ):
         project_root = runner._candidate_snapshot_project_root(
