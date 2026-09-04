@@ -113,7 +113,7 @@ except BaseException:
             pass
     os._exit(126)
 """
-_GIT_SOURCE_EXEC = """import importlib.machinery, importlib.util, os, subprocess, sys
+_GIT_SOURCE_EXEC = """import importlib.machinery, importlib.util, os, subprocess, sys, threading
 bootstrap_path = os.path.abspath(sys.argv[0])
 source_root, original_root, project_root, script_relative, original_file, dependency_roots_json = sys.argv[1:7]
 dependency_roots = __import__('json').loads(dependency_roots_json)
@@ -180,6 +180,8 @@ else:
 if dependency_roots:
     os.environ['PYTHONNOUSERSITE'] = '1'
 original_popen = subprocess.Popen
+original_fork_exec = subprocess._fork_exec
+spawn_state = threading.local()
 def blocked_process_escape(*args, **kwargs):
     del args, kwargs
     raise PermissionError("candidate process escape API is not approved")
@@ -187,8 +189,35 @@ def candidate_audit(event, args):
     del args
     if event in {"ctypes.dlopen", "ctypes.dlsym"}:
         raise PermissionError("candidate native FFI is not approved")
+    if event in {"os.system", "os.fork", "os.forkpty", "os.exec", "os.posix_spawn", "subprocess.Popen"} and not getattr(spawn_state, "approved", False):
+        raise PermissionError("candidate process escape API is not approved")
 sys.addaudithook(candidate_audit)
+def blocked_cffi_dlopen(*args, **kwargs):
+    del args, kwargs
+    raise PermissionError("candidate native FFI is not approved")
+try:
+    import opuslib_next
+except Exception:
+    pass
+try:
+    import _cffi_backend, cffi.api
+except Exception:
+    pass
+else:
+    cffi.api.FFI.dlopen = blocked_cffi_dlopen
+    cffi.api._make_ffi_library = blocked_cffi_dlopen
+    _cffi_backend.FFI = blocked_cffi_dlopen
+def guarded_fork_exec(*args, **kwargs):
+    if not getattr(spawn_state, "approved", False):
+        raise PermissionError("candidate process escape API is not approved")
+    return original_fork_exec(*args, **kwargs)
+subprocess._fork_exec = guarded_fork_exec
+try:
+    __import__('_posixsubprocess').fork_exec = guarded_fork_exec
+except (ImportError, AttributeError):
+    pass
 os.system = blocked_process_escape
+process_module = __import__('posix') if os.name == 'posix' else None
 for _name in (
     "execv", "execve", "execvp", "execvpe", "execl", "execle", "execlp",
     "fork", "forkpty", "posix_spawn", "posix_spawnp", "setpgid", "setpgrp",
@@ -196,6 +225,8 @@ for _name in (
 ):
     if hasattr(os, _name):
         setattr(os, _name, blocked_process_escape)
+    if process_module is not None and hasattr(process_module, _name):
+        setattr(process_module, _name, blocked_process_escape)
 def python_script_index(arguments):
     no_value = {"-b", "-B", "-d", "-E", "-i", "-I", "-O", "-OO", "-P", "-q", "-R", "-s", "-S", "-u", "-v", "-V", "-x"}
     with_value = {"-W", "-X", "--check-hash-based-pycs"}
@@ -289,7 +320,11 @@ def candidate_popen(arguments, *args, **kwargs):
             ]
         else:
             raise PermissionError("Python child script is outside candidate project")
-    return original_popen(arguments, *args, **kwargs)
+    spawn_state.approved = True
+    try:
+        return original_popen(arguments, *args, **kwargs)
+    finally:
+        spawn_state.approved = False
 subprocess.Popen = candidate_popen
 sys.argv = [original_file, *script_arguments]
 source_path = os.path.join(source_root, *script_relative.split("/"))

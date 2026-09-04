@@ -13,7 +13,6 @@ import pytest
 
 from scripts import google_live_deterministic_evidence as deterministic
 
-
 IDENTITY = {
     "gitSha": "a" * 40,
     "imageDigest": "sha256:" + "b" * 64,
@@ -30,6 +29,13 @@ PINNED_NODEID_PLUGIN = (
 ).read_bytes()
 REAL_LOAD_RUNTIME_MANIFEST = deterministic._load_trusted_pytest_runtime_manifest
 REAL_LOAD_NODEID_PLUGIN = deterministic._load_trusted_nodeid_plugin
+
+
+def _install_pytest_child(root: Path) -> None:
+    scripts = root / "scripts"
+    scripts.mkdir(exist_ok=True)
+    for name in ("google_live_deterministic_evidence.py", "google_live_pytest_child.py"):
+        (scripts / name).write_bytes((MODULE_ROOT / "scripts" / name).read_bytes())
 
 
 @pytest.fixture(autouse=True)
@@ -754,13 +760,12 @@ def test_producer_uses_isolated_allowlisted_pytest_process(
     for command, kwargs in calls:
         assert command[:4] == [sys.executable, "-I", "-B", "-X"]
         assert command[4].startswith("pycache_prefix=")
-        assert "pytest.main" in command[6]
-        runtime = json.loads(command[7])
+        assert command[5].endswith("scripts/google_live_pytest_child.py")
+        assert "-c" not in command[:6]
+        runtime = json.loads(command[6])
         assert runtime["repo"] == str(tmp_path.resolve())
         assert len(runtime["trusted"]) == 1
         assert runtime["trusted"][0] not in report.read_text(encoding="utf-8")
-        assert command[6].count("pytest_asyncio.plugin") == 1
-        assert command[6].count("_google_live_pinned_nodeid_plugin") == 1
         assert runtime["plugin"].endswith("/control/pinned_nodeid_plugin.py")
         assert kwargs["cwd"] == tmp_path.resolve()
         assert kwargs["env"]["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
@@ -771,8 +776,8 @@ def test_producer_uses_isolated_allowlisted_pytest_process(
     assert json.loads(report.read_text(encoding="utf-8"))["status"] == "PASS"
     assert sentinel not in report.read_text(encoding="utf-8")
     assert deterministic.parse_passing_junit(junit.read_bytes(), nodes)["tests"] == 1
-    assert len({json.loads(command[7])["trusted"][0] for command, _ in calls}) == 2
-    assert all(not Path(json.loads(command[7])["trusted"][0]).exists() for command, _ in calls)
+    assert len({json.loads(command[6])["trusted"][0] for command, _ in calls}) == 2
+    assert all(not Path(json.loads(command[6])["trusted"][0]).exists() for command, _ in calls)
 
 
 def test_isolated_pytest_process_ignores_environment_injection(tmp_path: Path) -> None:
@@ -834,6 +839,7 @@ def test_isolated_pytest_process_removes_live_repo_from_effective_path(
     live_repo = Path(__file__).parents[1].resolve()
     candidate = tmp_path / "candidate"
     candidate.mkdir()
+    _install_pytest_child(candidate)
     test_file = candidate / "test_no_live_path.py"
     test_file.write_text(
         "import pathlib, sys\n"
@@ -1275,6 +1281,7 @@ def test_private_runtime_uses_pinned_opus_origin_and_nonexistent_pycache(tmp_pat
         " assert 'google-live-pytest-runtime-' in str(Path(opuslib_next.api.libopus._name))\n",
         encoding="utf-8",
     )
+    _install_pytest_child(candidate)
     with deterministic._private_pytest_runtime(
         MODULE_ROOT, "unused", candidate_root=candidate
     ) as runtime:
@@ -1302,6 +1309,7 @@ def test_private_runtime_detects_attempted_pycache_creation(tmp_path: Path) -> N
 
 
 def test_child_rejects_existing_module_cached_artifact(tmp_path: Path) -> None:
+    _install_pytest_child(tmp_path)
     test_file = tmp_path / "test_cached.py"
     test_file.write_text(
         "import sys\n"
@@ -1335,6 +1343,7 @@ def test_private_runtime_rejects_native_platform_mismatch(
 
 
 def test_private_runtime_shadows_injected_live_top_level_py_module(tmp_path: Path) -> None:
+    _install_pytest_child(tmp_path)
     sentinel = "live py.py injection executed"
     injection = tmp_path / "injection"
     injection.mkdir()
@@ -1367,6 +1376,7 @@ def test_private_runtime_shadows_injected_live_top_level_py_module(tmp_path: Pat
 def test_private_runtime_origin_audit_rejects_control_module_outside_snapshot(
     tmp_path: Path,
 ) -> None:
+    _install_pytest_child(tmp_path)
     test_file = tmp_path / "test_origin_escape.py"
     test_file.write_text(
         "import py\n"
@@ -1465,13 +1475,14 @@ def test_nodeid_plugin_loader_fails_closed_on_missing_or_tampered_git_blob(
 def test_private_pytest_runtime_preimports_trusted_packages_before_candidate_repo(
     tmp_path: Path,
 ) -> None:
+    _install_pytest_child(tmp_path)
     sentinel = "candidate pytest shadow executed"
     (tmp_path / "pytest.py").write_text(f"raise RuntimeError({sentinel!r})\n", encoding="utf-8")
     shadow_plugin = tmp_path / "pytest_asyncio" / "plugin.py"
     shadow_plugin.parent.mkdir()
     shadow_plugin.write_text(f"raise RuntimeError({sentinel!r})\n", encoding="utf-8")
     scripts = tmp_path / "scripts"
-    scripts.mkdir()
+    scripts.mkdir(exist_ok=True)
     (scripts / "google_live_deterministic_nodeid_plugin.py").write_text(
         f"raise RuntimeError({sentinel!r})\n",
         encoding="utf-8",
@@ -1512,7 +1523,7 @@ def test_producer_rejects_private_runtime_mutation_even_when_candidate_restores_
         calls.append(command)
         is_collect = "--collect-only" in command
         if (phase == "collect" and is_collect) or (phase == "run" and not is_collect):
-            runtime = json.loads(command[7])
+            runtime = json.loads(command[6])
             target = Path(runtime["trusted"][0]) / "pytest" / "__init__.py"
             original = target.read_bytes()
             target.chmod(0o600)

@@ -1355,6 +1355,52 @@ def test_nested_ctypes_process_escape_fails_closed(
     assert not marker.exists()
 
 
+def test_nested_cffi_process_escape_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / "cffi-process-ran"
+    payload = (
+        "import cffi; ffi=cffi.FFI(); ffi.cdef('int system(const char *);'); "
+        f"ffi.dlopen(None).system({('/usr/bin/touch ' + str(marker))!r}.encode())"
+    )
+    _patch_candidate_resource_archive(
+        monkeypatch, runner, _python_source_archive({"entry.py": payload})
+    )
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
+def test_nested_posix_process_escape_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.google_live_command_runner as runner
+
+    marker = tmp_path / "posix-process-ran"
+    payload = (
+        "import posix; "
+        f"posix.system({('/usr/bin/touch ' + str(marker))!r}.encode())"
+    )
+    _patch_candidate_resource_archive(
+        monkeypatch, runner, _python_source_archive({"entry.py": payload})
+    )
+
+    result = execute_and_record(
+        _spec(tmp_path, "", argv=(sys.executable, "entry.py"), outputs=()),
+        provenance=tmp_path / "commands.jsonl",
+    )
+
+    assert result.classification == "unexpected_exit"
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize(
     "escape_name", ["fork", "forkpty", "setsid", "setpgid", "setpgrp"]
 )

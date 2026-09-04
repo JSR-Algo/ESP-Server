@@ -1683,8 +1683,7 @@ def _pytest_command(runtime: Mapping[str, Any], *arguments: str) -> list[str]:
         "-B",
         "-X",
         f"pycache_prefix={runtime['pycache']}",
-        "-c",
-        _PYTEST_BOOTSTRAP,
+        str(Path(runtime["repo"]) / "scripts/google_live_pytest_child.py"),
         json.dumps(runtime, separators=(",", ":")),
         *arguments,
     ]
