@@ -188,7 +188,58 @@ git add docs/docker/docker-compose.lesson-studio-e2e.yml \
 git commit -m "fix(course-mode): keep web asset mounts stable"
 ```
 
-### Task 3: Verify Runtime Continuity Before Freezing A Candidate
+### Task 3: Restore Base Service Configuration After Rollback
+
+Before runtime verification, add and commit the post-ROLLBACK base-stack
+restore:
+
+- [ ] **Step 1: Write a failing launcher contract**
+
+Extend `Task 4 release commands run candidate-bound NEW and ROLLBACK
+orchestration` in `main/manager-web/scripts/task4-assignment-fixture.test.cjs`.
+Require a separate base Compose argument list and require the following restore
+to occur after the final rollback `verify-rollback` readback:
+
+```javascript
+baseComposeRun('up', '-d', '--wait', '--no-deps', '--force-recreate', 'backend', 'web');
+```
+
+Also assert this command is guarded by `phase === 'rollback'` so NEW retains the
+state needed by the next lane.
+
+- [ ] **Step 2: Run the launcher test and verify RED**
+
+```bash
+cd /Users/manhhodinh/Documents/TBOT/robot/esp32-server/main/manager-web
+node --test scripts/task4-assignment-fixture.test.cjs
+```
+
+Expected: FAIL because no base-Compose restore exists.
+
+- [ ] **Step 3: Implement the minimal restore**
+
+In `main/manager-web/scripts/run-task4-assignment-phase.cjs`, define a base
+Compose argument list containing only the project and
+`docker-compose.lesson-studio-e2e.yml`, plus `baseComposeRun`. After the final
+phase readback, run the exact restore only for ROLLBACK. Reuse the already
+pinned image IDs and current environment; do not run `down`, recreate
+dependencies, or remove volumes.
+
+- [ ] **Step 4: Run focused tests and commit**
+
+```bash
+node --test scripts/task4-assignment-fixture.test.cjs \
+  scripts/lesson-studio-compose.test.cjs \
+  scripts/reset-lesson-studio-e2e-state.test.cjs
+git diff --check
+git add scripts/run-task4-assignment-phase.cjs \
+  scripts/task4-assignment-fixture.test.cjs
+git commit -m "fix(course-mode): restore base stack after rollback"
+```
+
+Expected: all selected Node tests PASS and diff check is clean.
+
+### Task 4: Verify Runtime Continuity Before Freezing A Candidate
 
 **Files:**
 - No source files
@@ -209,7 +260,7 @@ Expected: `git diff --check` produces no output; Python and Node suites PASS.
 
 - [ ] **Step 2: Recreate the isolated stack from canonical roots**
 
-Use project `tbot-task4-course-mode-36`, loopback ports `13136`, `18136`, and `28436`. Load `JWT_PUBLIC_KEY` and `TBOT_DEVICE_MINT_SECRET` from the existing healthy local test backend without printing them. Set both stable mount variables to the clean backend and firmware candidate roots before Compose `up -d --wait`.
+Use project `tbot-task4-course-mode-37`, loopback ports `13137`, `18137`, and `28437`. Load `JWT_PUBLIC_KEY` and `TBOT_DEVICE_MINT_SECRET` from the existing healthy local test backend without printing them. Set both stable mount variables to the clean backend and firmware candidate roots before Compose `up -d --wait`.
 
 ```text
 TBOT_LESSON_STUDIO_BACKEND_MOUNT_ROOT=/Users/manhhodinh/Documents/TBOT-candidate-worktrees/backend-c2a4e342
@@ -223,12 +274,12 @@ Expected: backend and web are healthy, loopback-only, exact-image containers wit
 Invoke `run_gate` programmatically with only the canonical NEW and ROLLBACK lane objects, using:
 
 ```text
-LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME=tbot-task4-course-mode-36
-LESSON_STUDIO_E2E_RESOURCE_PREFIX=tbot-task4-course-mode-36
-LESSON_STUDIO_E2E_BACKEND_HOST_PORT=13136
-LESSON_STUDIO_E2E_WEB_HOST_PORT=18136
-TASK4_ASSIGNMENT_MEDIA_HOST_PORT=28436
-TASK4_ASSIGNMENT_RUNTIME_ROOT=/Users/manhhodinh/Documents/TBOT/robot/esp32-server/main/manager-web/output/task4-course-mode-36
+LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME=tbot-task4-course-mode-37
+LESSON_STUDIO_E2E_RESOURCE_PREFIX=tbot-task4-course-mode-37
+LESSON_STUDIO_E2E_BACKEND_HOST_PORT=13137
+LESSON_STUDIO_E2E_WEB_HOST_PORT=18137
+TASK4_ASSIGNMENT_MEDIA_HOST_PORT=28437
+TASK4_ASSIGNMENT_RUNTIME_ROOT=/Users/manhhodinh/Documents/TBOT/robot/esp32-server/main/manager-web/output/task4-course-mode-37
 COURSE_MODE_ADMIN_E2E_READY=1
 ```
 
@@ -236,15 +287,17 @@ Expected: both lanes exit zero and cleanup reports no retained paths.
 
 - [ ] **Step 4: Prove the stack survives snapshot cleanup**
 
-Inspect `tbot-task4-course-mode-36-web` after gate cleanup. Require every `/usr/share/nginx/html/tvideo-demo/*` mount source to remain under the two canonical roots, exist on disk, use type `bind`, and have `RW=false`. Then run Chromium desktop and WebKit desktop lanes against the same stack.
+Inspect `tbot-task4-course-mode-37-web` after gate cleanup. Require every `/usr/share/nginx/html/tvideo-demo/*` mount source to remain under the two canonical roots, exist on disk, use type `bind`, and have `RW=false`. Confirm the backend asset origin has returned to the caller-provided base URL. Then run Chromium desktop and WebKit desktop lanes against the same stack.
 
 Expected: both browser lanes PASS without recreating the stack manually between assignment and Playwright.
 
-### Task 4: Freeze And Qualify The Next Candidate
+### Task 5: Freeze And Qualify The Next Candidate
 
 **Files:**
-- Create: `task-artifacts/course-mode-production-readiness/candidates/course-mode-2026-09-05.36.json`
-- Create: `task-artifacts/course-mode-production-readiness/course-mode-2026-09-05.36/*`
+- Preserve: `task-artifacts/course-mode-production-readiness/candidates/course-mode-2026-09-05.36.json`
+- Preserve: `task-artifacts/course-mode-production-readiness/course-mode-2026-09-05.36/*`
+- Create: `task-artifacts/course-mode-production-readiness/candidates/course-mode-2026-09-05.37.json`
+- Create: `task-artifacts/course-mode-production-readiness/course-mode-2026-09-05.37/*`
 
 - [ ] **Step 1: Obtain independent source reviews**
 
@@ -260,14 +313,14 @@ local/tbot-server-web:course-mode-physical-tft-<full-admin-sha>
 
 Require OCI revision equal to the full admin SHA, source equal to the ESP Server repository URL, and `com.tbot.course-mode.build-source=reviewed-clean-git-worktree`. Keep the backend image, backend SHA, firmware SHA, firmware binary and PostgreSQL image identity unchanged from `.35`.
 
-- [ ] **Step 3: Create and validate `.36`**
+- [ ] **Step 3: Create and validate `.37`**
 
 Copy `.35`, changing only candidate ID, real UTC timestamps, evidence root, final admin SHA, and exact web image reference/ID. Run:
 
 ```bash
 PY311=/Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-production-readiness/python-test-runtime-standalone-v2/bin/python3.11
-CANDIDATE=/Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-production-readiness/candidates/course-mode-2026-09-05.36.json
-EVIDENCE=/Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-production-readiness/course-mode-2026-09-05.36
+CANDIDATE=/Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-production-readiness/candidates/course-mode-2026-09-05.37.json
+EVIDENCE=/Users/manhhodinh/Documents/TBOT/task-artifacts/course-mode-production-readiness/course-mode-2026-09-05.37
 "$PY311" main/tbot-server/scripts/course_mode_candidate_manifest.py "$CANDIDATE" \
   > "$EVIDENCE/00-candidate-validator.json"
 /usr/bin/jq -e '.status == "pass" and .reasons == []' \
@@ -283,11 +336,11 @@ Expected: validator PASS and all three artifacts are regular, single-link, non-s
 
 - [ ] **Step 4: Run software gates in order**
 
-Run candidate-bound Quick, Full, and live-db through `scripts/course_robot_e2e_gates.sh`, always using fresh report paths and the `.36` operator attestation. Require 4/4 Quick lanes, 20/20 Full lanes, and 21/21 live-db lanes with terminal `live-postgres`, `failedLane: null`, no retained paths, no cleanup failure, and matching attestation hash.
+Run candidate-bound Quick, Full, and live-db through `scripts/course_robot_e2e_gates.sh`, always using fresh report paths and the `.37` operator attestation. Require 4/4 Quick lanes, 20/20 Full lanes, and 21/21 live-db lanes with terminal `live-postgres`, `failedLane: null`, no retained paths, no cleanup failure, and matching attestation hash.
 
 - [ ] **Step 5: Audit and clean isolated test resources**
 
-Lock successful reports to `0444`, validate exact image/repository/firmware/database identities, scan evidence for secrets, and remove only containers, networks, volumes, and runtime output owned by exact `.36` test namespaces. Preserve every `.35` PASS, FAIL, and BLOCKED artifact.
+Lock successful reports to `0444`, validate exact image/repository/firmware/database identities, scan evidence for secrets, and remove only containers, networks, volumes, and runtime output owned by exact `.37` test namespaces. Preserve every `.35` and `.36` PASS, FAIL, and BLOCKED artifact.
 
 - [ ] **Step 6: Stop at the physical boundary**
 

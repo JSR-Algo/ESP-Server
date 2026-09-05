@@ -14,6 +14,13 @@ This makes a successful NEW to ROLLBACK assignment sequence non-repeatable and
 leaves the shared candidate stack unusable for subsequent software or physical
 preflight.
 
+Runtime verification exposed a second retained-state problem after the stable
+mount fix: the ROLLBACK lane leaves `backend` and `web` configured through the
+assignment override. The backend then continues publishing
+`https://task4-media.localhost/...` asset URLs. That temporary CA is trusted by
+the assignment-specific Playwright session only, so the normal Course Mode
+browser suite fails with `ERR_CERT_AUTHORITY_INVALID` after ROLLBACK.
+
 ## Decision
 
 Keep two explicit path roles:
@@ -34,6 +41,14 @@ This is preferred over restoring the stack after every assignment because the
 container remains valid throughout the lifecycle and no cleanup operation has
 to reconstruct state after evidence has already been collected.
 
+After the ROLLBACK assertions and readback complete, the orchestrator will run
+one explicit base-Compose restore for `backend` and `web`. It will use the same
+candidate-pinned images, stable mount roots, ports, database volumes, and
+caller-provided base asset origin, but omit the assignment override. The
+restore uses `--no-deps --force-recreate --wait`, so PostgreSQL, Redis, and
+MySQL state remain intact while the temporary assignment URL/configuration is
+removed. NEW does not restore because ROLLBACK must consume its state.
+
 ## Data Flow
 
 1. The gate validates the canonical backend, admin, and firmware repositories
@@ -45,7 +60,10 @@ to reconstruct state after evidence has already been collected.
    candidate roots supplied through the dedicated mount variables.
 5. The gate deletes the lane snapshot without invalidating the running web
    container.
-6. A following Playwright preflight observes the exact canonical sources,
+6. After ROLLBACK verification, base Compose recreates only `backend` and
+   `web`, retaining database/cache volumes and removing assignment-only service
+   configuration from those services.
+7. A following Playwright preflight observes the exact canonical sources,
    `bind` type, and read-only mode.
 
 ## Safety And Compatibility
@@ -54,6 +72,9 @@ to reconstruct state after evidence has already been collected.
   action is part of this change.
 - Existing local callers that do not set the dedicated mount variables retain
   the current Compose behavior through fallbacks.
+- The post-ROLLBACK restore does not run after NEW and does not remove the
+  derivative-media container; exact test-namespace cleanup remains owned by
+  the release workflow.
 - The stable paths must come from `source_candidate`, never caller-controlled
   free-form values or the staged execution candidate.
 - All four mounts remain read-only.
@@ -71,9 +92,13 @@ Implementation follows red-green-refactor:
 2. Add a Compose/source contract test proving all four web lesson mounts use the
    dedicated stable variables and remain read-only.
 3. Run the focused Python and Node contract suites.
-4. Run a real candidate-bound NEW to ROLLBACK sequence, clean the lane snapshot,
-   then run Chromium and WebKit preflight/E2E against the same stack.
-5. Freeze the next candidate, rebuild the exact-revision web image, and rerun
+4. Add a launcher contract proving ROLLBACK performs its evidence readback
+   before an exact base-Compose `backend`/`web` restore with
+   `--no-deps --force-recreate --wait`, while NEW does not restore.
+5. Run a real candidate-bound NEW to ROLLBACK sequence, clean the lane snapshot,
+   confirm the backend asset origin is restored, then run Chromium and WebKit
+   preflight/E2E against the same stack.
+6. Freeze the next candidate, rebuild the exact-revision web image, and rerun
    validator, Quick, Full, live PostgreSQL, evidence audit, and physical
    preflight gates before requesting fresh authorization for robot interaction.
 
@@ -82,6 +107,8 @@ Implementation follows red-green-refactor:
 - NEW to ROLLBACK completes without replacing stable web asset sources with
   temporary snapshot paths.
 - Removing the lane snapshot does not break any web lesson asset mount.
+- After ROLLBACK, the backend no longer publishes assignment-only HTTPS asset
+  URLs to regular Course Mode browser sessions.
 - Consecutive Course Mode browser gates pass against the same candidate stack.
 - The final software evidence contains no retained staging metadata and all
   expected lanes pass before any physical action is requested.
