@@ -1250,7 +1250,7 @@ def _open_snapshot_directory(path: Path) -> int:
             os.close(descriptor)
             descriptor = child
         return descriptor
-    except Exception:  # Injected clock normalization must fail closed.
+    except Exception:
         os.close(descriptor)
         raise
 
@@ -3725,7 +3725,7 @@ def _operator_attestation_binding(
             validation_now.tzinfo is not None
             and validation_now.utcoffset() == timedelta(0)
         )
-    except Exception:
+    except Exception:  # Injected clock normalization must fail closed.
         return None
     if not valid_validation_time:
         return None
