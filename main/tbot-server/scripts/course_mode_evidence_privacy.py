@@ -28,6 +28,9 @@ MAX_ARCHIVE_MEMBERS = 4096
 MAX_ARCHIVE_MEMBER_BYTES = 4 * 1024 * 1024
 MAX_ARCHIVE_TOTAL_BYTES = 16 * 1024 * 1024
 MAX_ARCHIVE_DEPTH = 2
+MAX_BASE64_DEPTH = 3
+MAX_BASE64_BLOCKS = 64
+MAX_BASE64_DECODED_BYTES = 8 * 1024 * 1024
 SUPPORTED_ZIP_COMPRESSION = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
 ARCHIVE_SUFFIXES = {".zip", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".7z", ".rar"}
 SECRET_KEY = re.compile(r"(?i)(?:authorization|cookie|set-cookie|session|password|secret|token)")
@@ -38,7 +41,12 @@ SECRET_TEXT = re.compile(
 BEARER_VALUE = re.compile(rb"(?i)\bbearer\s+[a-z0-9._~+/=-]{4,}")
 TRANSCRIPT_TEXT = re.compile(rb"(?i)\b(?:child[-_ ]?)?transcript\s*[:=]")
 PRIVATE_PATH = re.compile(r"(?i)(?:^|[-_.\/])(?:audio|transcript|utterance|raw[-_]?speech)(?:[-_.\/]|$)")
-BASE64_BLOCK = re.compile(rb"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{128,}={0,2}(?![A-Za-z0-9+/=])")
+# MIME-wrapped and URL-safe encodings are common in exported evidence payloads.
+BASE64_BLOCK = re.compile(
+    rb"(?<![A-Za-z0-9+/_=])(?:[A-Za-z0-9+/_=]{128,}|"
+    rb"[A-Za-z0-9+/_=]{4,}(?:[ \t]*\r?\n[ \t]*[A-Za-z0-9+/_=]{4,})+)"
+    rb"(?![A-Za-z0-9+/_=])"
+)
 PLAYWRIGHT_MARKERS = (b"playwright html report", b"playwright-report", b"trace.network", b"trace.trace")
 PEM_PRIVATE_KEY = re.compile(
     rb"-----BEGIN (?P<label>(?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY)-----.*?"
@@ -107,7 +115,7 @@ def is_sanitized_manifest(data: bytes) -> bool:
         return False
     if not isinstance(document, dict) or not set(document) <= SANITIZED_CONTAINER_KEYS:
         return False
-    if document.get("schemaVersion") != 1:
+    if type(document.get("schemaVersion")) is not int or document.get("schemaVersion") != 1:
         return False
     groups = [document[key] for key in ("entries", "files") if key in document]
     if len(groups) != 1 or not isinstance(groups[0], list):
@@ -123,7 +131,7 @@ def is_sanitized_manifest(data: bytes) -> bool:
             not isinstance(entry["sha256"], str) or SHA256_RE.fullmatch(entry["sha256"]) is None
         ):
             return False
-        if "bytes" in entry and (not isinstance(entry["bytes"], int) or entry["bytes"] < 0):
+        if "bytes" in entry and (type(entry["bytes"]) is not int or entry["bytes"] < 0):
             return False
         if (
             not isinstance(entry["action"], str)
@@ -174,13 +182,23 @@ def _contains_private_key(data: bytes) -> bool:
     return bool(PEM_PRIVATE_KEY.search(data) or re.search(rb"-----BEGIN [^-\r\n]{0,64}PRIVATE KEY-----", data))
 
 
-def _decoded_base64_blocks(data: bytes):
+def _base64_payloads(data: bytes):
     for match in BASE64_BLOCK.finditer(data):
-        payload = match.group(0)
-        try:
-            yield base64.b64decode(payload, validate=True)
-        except (binascii.Error, ValueError):
+        payload = re.sub(rb"[ \t\r\n]", b"", match.group(0))
+        if len(payload) < 128 or len(payload) % 4 == 1:
             continue
+        if b"=" in payload[:-2] or payload.count(b"=") > 2:
+            continue
+        if len(payload) % 4:
+            payload += b"=" * (-len(payload) % 4)
+        yield payload
+
+
+def _decode_base64_payload(payload: bytes) -> bytes | None:
+    try:
+        return base64.b64decode(payload, altchars=b"-_", validate=True)
+    except (binascii.Error, ValueError):
+        return None
 
 
 def _looks_like_playwright(data: bytes, name: str) -> bool:
@@ -198,11 +216,14 @@ def scan_evidence_payload(
     *,
     archive_depth: int = 0,
     _budget: dict[str, int] | None = None,
+    _base64_state: dict[str, int | bool] | None = None,
+    _base64_depth: int = 0,
     _scan_base64: bool = True,
 ) -> tuple[set[str], int]:
     """Scan one file and bounded nested ZIP members without returning payload bytes."""
     findings: set[str] = set()
     budget = _budget or {"members": 0, "expanded": 0}
+    base64_state = _base64_state or {"blocks": 0, "decoded": 0, "limited": False}
     starting_members = budget["members"]
     lowered_name = name.lower()
     suffix = PurePosixPath(lowered_name).suffix
@@ -219,16 +240,40 @@ def scan_evidence_payload(
     if _looks_like_playwright(data, name):
         findings.add("content.raw_playwright")
     if _scan_base64:
-        for decoded in _decoded_base64_blocks(data):
+        for payload in _base64_payloads(data):
+            if base64_state["limited"]:
+                break
+            if _base64_depth >= MAX_BASE64_DEPTH:
+                findings.add("content.base64_limit")
+                base64_state["limited"] = True
+                break
+            if int(base64_state["blocks"]) >= MAX_BASE64_BLOCKS:
+                findings.add("content.base64_limit")
+                base64_state["limited"] = True
+                break
+            estimated_size = (len(payload) // 4) * 3 - payload.count(b"=")
+            if int(base64_state["decoded"]) + estimated_size > MAX_BASE64_DECODED_BYTES:
+                findings.add("content.base64_limit")
+                base64_state["limited"] = True
+                break
+            decoded = _decode_base64_payload(payload)
+            if decoded is None:
+                continue
+            base64_state["blocks"] = int(base64_state["blocks"]) + 1
+            base64_state["decoded"] = int(base64_state["decoded"]) + len(decoded)
             decoded_findings, _ = scan_evidence_payload(
                 decoded,
                 f"{name}.base64",
                 archive_depth=archive_depth,
                 _budget=budget,
-                _scan_base64=False,
+                _base64_state=base64_state,
+                _base64_depth=_base64_depth + 1,
             )
             findings.update(decoded_findings)
-            if decoded_findings & {"content.raw_playwright", "archive.invalid", "archive.oversize", "archive.unsupported", "archive.encrypted"}:
+            if decoded_findings & {
+                "content.raw_playwright", "archive.invalid", "archive.oversize",
+                "archive.unsupported", "archive.encrypted", "archive.nested_limit",
+            }:
                 findings.add("content.embedded_playwright")
     has_zip_signature = data.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x01\x02"))
     is_zip = zipfile.is_zipfile(io.BytesIO(data))
@@ -289,7 +334,12 @@ def scan_evidence_payload(
                     findings.add("archive.invalid")
                     continue
                 child_findings, child_count = scan_evidence_payload(
-                    member_data, info.filename, archive_depth=archive_depth + 1, _budget=budget
+                    member_data,
+                    info.filename,
+                    archive_depth=archive_depth + 1,
+                    _budget=budget,
+                    _base64_state=base64_state,
+                    _base64_depth=_base64_depth,
                 )
                 findings.update(child_findings)
                 del child_count

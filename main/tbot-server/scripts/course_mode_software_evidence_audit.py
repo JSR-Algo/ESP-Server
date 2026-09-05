@@ -136,9 +136,16 @@ def _absolute(path: Path) -> Path:
     return path if path.is_absolute() else Path.cwd() / path
 
 
+def _lexically_canonical(path: Path) -> bool:
+    absolute = _absolute(path)
+    return absolute.is_absolute() and not any(part in {".", ".."} for part in absolute.parts[1:])
+
+
 def _secure_root(path: Path) -> bool:
     try:
         absolute = _absolute(path)
+        if not _lexically_canonical(absolute):
+            return False
         current = Path(absolute.anchor)
         for component in absolute.parts[1:]:
             current /= component
@@ -295,6 +302,10 @@ def _candidate_identity(candidate: object, evidence_root: Path) -> bool:
 
 
 def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path], output: Path) -> dict[str, object]:
+    candidate_path = _absolute(candidate_path)
+    evidence_root = _absolute(evidence_root)
+    preserved_roots = [_absolute(root) for root in preserved_roots]
+    output = _absolute(output)
     findings: set[str] = set()
     candidate, candidate_bytes = _load_json(candidate_path)
     raw_candidate_id = candidate.get("candidateId") if isinstance(candidate, dict) else None
@@ -305,7 +316,7 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
     checked_archive_members = 0
     raw_playwright_absent = True
     protected_inputs = [candidate_path] + [evidence_root / name for name in REQUIRED_EVIDENCE]
-    if output != evidence_root / OUTPUT_NAME:
+    if output != evidence_root / OUTPUT_NAME or not _lexically_canonical(output):
         findings.add("output.unsafe")
     if not _output_path_secure(output):
         findings.add("output.unsafe")

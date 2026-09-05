@@ -764,6 +764,82 @@ def test_embedded_base64_payloads_reuse_content_scanner(
     assert finding in report["findings"]
 
 
+def test_mime_wrapped_base64_playwright_payload_is_rejected(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    encoded = base64.b64encode(b"Playwright HTML report" + b"x" * 180).decode()
+    wrapped = "\n \t".join(encoded[index : index + 48] for index in range(0, len(encoded), 48))
+    artifact = preserved / "mime.txt"
+    artifact.write_text(wrapped, encoding="ascii")
+    artifact.chmod(0o444)
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert "content.embedded_playwright" in report["findings"]
+
+
+def test_urlsafe_base64_playwright_payload_is_rejected(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    encoded = base64.urlsafe_b64encode(b"Playwright HTML report" + b"\xfb\xef\xff" * 80).decode()
+    assert "-" in encoded or "_" in encoded
+    artifact = preserved / "urlsafe.txt"
+    artifact.write_text(encoded, encoding="ascii")
+    artifact.chmod(0o444)
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert "content.embedded_playwright" in report["findings"]
+
+
+def test_double_encoded_standard_base64_playwright_payload_is_rejected(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    encoded = base64.b64encode(base64.b64encode(b"Playwright HTML report" + b"x" * 180)).decode()
+    artifact = preserved / "double.txt"
+    artifact.write_text(encoded, encoding="ascii")
+    artifact.chmod(0o444)
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert "content.embedded_playwright" in report["findings"]
+
+
+def test_base64_decode_budget_fails_closed_without_unbounded_recursion(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    encoded = b"x"
+    for _ in range(8):
+        encoded = base64.b64encode(encoded)
+    artifact = preserved / "deep.txt"
+    artifact.write_bytes(encoded + b"\n" + b" ".join([base64.b64encode(b"safe-value" + b"x" * 100)] * 80))
+    artifact.chmod(0o444)
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert "content.base64_limit" in report["findings"]
+
+
 def test_embedded_base64_invalid_zip_is_fail_closed(
     evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
 ) -> None:
