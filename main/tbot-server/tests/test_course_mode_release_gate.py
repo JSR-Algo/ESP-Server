@@ -4981,6 +4981,53 @@ def test_playwright_lane_uses_stable_backend_authority_environment(
     assert observed["COURSE_MODE_BACKEND_SNAPSHOT_AUTHORITY_SHA256"]
 
 
+def test_assignment_lane_keeps_stable_web_mount_roots_from_source_candidate(
+    candidate_file: Path,
+) -> None:
+    source_candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    execution_candidate = json.loads(json.dumps(source_candidate))
+    execution_candidate["repositories"]["backend"]["path"] = "/private/tmp/staged-backend"
+    execution_candidate["repositories"]["firmware"]["path"] = "/private/tmp/staged-firmware"
+    lane = next(
+        item for item in gate.FULL_LANES
+        if item.name == "admin-course-mode-assignment-new"
+    )
+    source = {
+        "LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME": "tbot-task4-stable-mounts",
+        "LESSON_STUDIO_E2E_RESOURCE_PREFIX": "tbot-task4-stable-mounts",
+        "TASK4_ASSIGNMENT_RUNTIME_ROOT": str(
+            Path(source_candidate["repositories"]["adminEsp"]["path"])
+            / "main/manager-web/output/task4-stable-mounts"
+        ),
+        "JWT_PUBLIC_KEY": "test-public-key",
+        "TBOT_DEVICE_MINT_SECRET": "test-mint-secret",
+        "LESSON_ASSET_ORIGIN_BASE": "https://task4-media.localhost:28436/tvideo-demo",
+        "ROBOT_ESP_BASE_URL": "http://127.0.0.1:18013",
+        "LESSON_STUDIO_E2E_BACKEND_HOST_PORT": "13136",
+        "LESSON_STUDIO_E2E_WEB_HOST_PORT": "18136",
+        "TASK4_ASSIGNMENT_MEDIA_HOST_PORT": "28436",
+    }
+
+    environment = gate._child_environment(
+        execution_candidate,
+        source,
+        lane,
+        source_candidate=source_candidate,
+        assignment_runtime_capsule_root=Path("/private/tmp/capsule"),
+        assignment_runtime_root=Path("/private/tmp/capsule/runtime"),
+    )
+
+    assert environment is not None
+    assert environment["TBOT_BACKEND_WORKTREE"] == "/private/tmp/staged-backend"
+    assert environment["TBOT_FIRMWARE_WORKTREE"] == "/private/tmp/staged-firmware"
+    assert environment["TBOT_LESSON_STUDIO_BACKEND_MOUNT_ROOT"] == (
+        source_candidate["repositories"]["backend"]["path"]
+    )
+    assert environment["TBOT_LESSON_STUDIO_FIRMWARE_MOUNT_ROOT"] == (
+        source_candidate["repositories"]["firmware"]["path"]
+    )
+
+
 def test_assignment_lane_rejects_missing_staged_backend_compiler_output(
     candidate_file: Path,
 ) -> None:
