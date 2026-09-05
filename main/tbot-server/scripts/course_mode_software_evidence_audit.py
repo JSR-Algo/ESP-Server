@@ -1,0 +1,506 @@
+#!/usr/bin/env python3
+"""Audit bounded software-only Course Mode release evidence."""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import hashlib
+import json
+import math
+import os
+import re
+import stat
+import tempfile
+from pathlib import Path
+
+from course_mode_evidence_privacy import is_sanitized_manifest, scan_evidence_payload
+
+MAX_FILE_BYTES = 8 * 1024 * 1024
+SHA40 = re.compile(r"[0-9a-f]{40}")
+SHA256 = re.compile(r"[0-9a-f]{64}")
+CANDIDATE_ID = re.compile(r"course-mode-[0-9]{4}-[0-9]{2}-[0-9]{2}\.[1-9][0-9]*")
+QUICK_LANES = [
+    "backend-course-mode-focused",
+    "admin-course-mode-logic",
+    "esp-course-mode-focused",
+    "firmware-course-mode-focused",
+]
+FULL_LANES = [
+    "backend-lint",
+    "backend-typecheck",
+    "backend-tests",
+    "backend-build",
+    "backend-curriculum-verifier",
+    "admin-logic",
+    "admin-browser",
+    "admin-build",
+    "admin-course-mode-playwright-chromium-desktop",
+    "admin-course-mode-playwright-webkit-desktop",
+    "admin-course-mode-playwright-chromium-mobile",
+    "admin-course-mode-playwright-webkit-mobile",
+    "admin-course-mode-assignment-fixture",
+    "admin-course-mode-assignment-new",
+    "admin-course-mode-assignment-rollback",
+    "esp-course-mode-full",
+    "firmware-renderer",
+    "firmware-handler",
+    "firmware-backward-compatibility",
+    "cross-contract-parity",
+]
+REQUIRED_EVIDENCE = (
+    "00-candidate-validator.json",
+    "00-operator-attestation.json",
+    "02-runtime-assignment-new-rollback.json",
+    "02-runtime-browser-after-assignment.json",
+    "02-runtime-continuity-inspection.json",
+    "03-quick-gate.json",
+    "04-full-gate.json",
+    "05-live-db-gate.json",
+)
+RAW_PLAYWRIGHT_DIRS = {"playwright-report", "test-results", "blob-report", "playwright-e2e-original"}
+
+
+def _read_secure_file(path: Path) -> bytes:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_uid != os.geteuid()
+            or before.st_mode & 0o022
+            or before.st_size > MAX_FILE_BYTES
+        ):
+            raise OSError("insecure evidence metadata")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, MAX_FILE_BYTES + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_FILE_BYTES:
+                raise OSError("evidence exceeds bound")
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_mode)
+        if identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_mode):
+            raise OSError("evidence changed while reading")
+        if identity != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_mode):
+            raise OSError("evidence path changed while reading")
+        if total != before.st_size:
+            raise OSError("evidence size changed while reading")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _strict_json_loads(data: bytes) -> object:
+    def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    def finite(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError("non-finite JSON value")
+        return parsed
+
+    return json.loads(
+        data,
+        object_pairs_hook=pairs,
+        parse_constant=lambda _value: (_ for _ in ()).throw(ValueError("non-finite JSON value")),
+        parse_float=finite,
+    )
+
+
+def _load_json(path: Path) -> tuple[object | None, bytes | None]:
+    try:
+        data = _read_secure_file(path)
+        return _strict_json_loads(data), data
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        return None, None
+
+
+def _lane_report(document: object, candidate_id: object, lanes: list[str], attestation_sha: str | None) -> bool:
+    if not isinstance(document, dict):
+        return False
+    expected = {"candidateId", "failedLane", "lanes", "verdict"}
+    if attestation_sha is not None:
+        expected.add("operatorAttestationSha256")
+    if set(document) != expected:
+        return False
+    rows = document.get("lanes")
+    return (
+        document.get("candidateId") == candidate_id
+        and document.get("failedLane") is None
+        and document.get("verdict") == "PASS"
+        and isinstance(rows, list)
+        and [row.get("name") for row in rows if isinstance(row, dict)] == lanes
+        and len(rows) == len(lanes)
+        and all(
+            isinstance(row, dict)
+            and row.get("exitCode") == 0
+            and isinstance(row.get("durationMs"), int)
+            and row["durationMs"] >= 0
+            for row in rows
+        )
+        and (attestation_sha is None or document.get("operatorAttestationSha256") == attestation_sha)
+    )
+
+
+def _repository_identity(candidate: object) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    repositories = candidate.get("repositories")
+    if not isinstance(repositories, dict) or set(repositories) != {"backend", "adminEsp", "firmware"}:
+        return False
+    repository_shas = {
+        name: value.get("sha") if isinstance(value, dict) else None
+        for name, value in repositories.items()
+    }
+    return not any(
+        not isinstance(value, str) or SHA40.fullmatch(value) is None for value in repository_shas.values()
+    )
+
+
+def _image_identity(candidate: object) -> bool:
+    if not _repository_identity(candidate) or not isinstance(candidate, dict):
+        return False
+    repositories = candidate["repositories"]
+    shas = {name: descriptor["sha"] for name, descriptor in repositories.items()}
+    images = candidate.get("images")
+    if not isinstance(images, dict) or set(images) != {"lessonStudioBackend", "lessonStudioWeb"}:
+        return False
+    expected = {
+        "lessonStudioBackend": f"local/tbot-backend:course-mode-physical-tft-{shas['backend']}",
+        "lessonStudioWeb": f"local/tbot-server-web:course-mode-physical-tft-{shas['adminEsp']}",
+    }
+    for image_name in expected:
+        descriptor = images.get(image_name)
+        if (
+            not isinstance(descriptor, dict)
+            or descriptor.get("reference") != expected[image_name]
+            or not isinstance(descriptor.get("id"), str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", descriptor["id"]) is None
+        ):
+            return False
+    return True
+
+
+def _firmware_identity(candidate: object) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    firmware = candidate.get("firmware")
+    return (
+        isinstance(firmware, dict)
+        and firmware.get("appOffset") == "0x20000"
+        and isinstance(firmware.get("appBytes"), int)
+        and firmware["appBytes"] > 0
+        and isinstance(firmware.get("appSha256"), str)
+        and SHA256.fullmatch(firmware["appSha256"]) is not None
+        and isinstance(firmware.get("evidenceManifestSha256"), str)
+        and SHA256.fullmatch(firmware["evidenceManifestSha256"]) is not None
+    )
+
+
+def _curriculum_identity(candidate: object) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    curriculum = candidate.get("curriculum")
+    return (
+        candidate.get("course") == {
+            "courseId": "a17792f6-8d86-4ad1-a6f3-77663b4d4674",
+            "courseKey": "english-6month-4-6",
+        }
+        and isinstance(curriculum, dict)
+        and curriculum.get("lessonCount") == 26
+        and curriculum.get("activityCount") == 256
+    )
+
+
+def _candidate_identity(candidate: object, evidence_root: Path) -> bool:
+    return (
+        isinstance(candidate, dict)
+        and isinstance(candidate.get("candidateId"), str)
+        and CANDIDATE_ID.fullmatch(candidate["candidateId"]) is not None
+        and candidate.get("evidenceRoot") == str(evidence_root)
+        and isinstance(candidate.get("tools"), dict)
+        and bool(candidate["tools"])
+        and _repository_identity(candidate)
+        and _image_identity(candidate)
+        and _firmware_identity(candidate)
+        and _curriculum_identity(candidate)
+    )
+
+
+def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path], output: Path) -> dict[str, object]:
+    findings: set[str] = set()
+    candidate, candidate_bytes = _load_json(candidate_path)
+    candidate_id = candidate.get("candidateId") if isinstance(candidate, dict) else None
+    documents: dict[str, object] = {}
+    document_bytes: dict[str, bytes] = {}
+    checked_files = 1
+    checked_archive_members = 0
+    raw_playwright_absent = True
+    if candidate is None:
+        findings.add("candidate.metadata_or_json")
+    candidate_bytes = candidate_bytes or b""
+    candidate_findings, candidate_members = scan_evidence_payload(candidate_bytes, candidate_path.name)
+    findings.update(candidate_findings)
+    checked_archive_members += candidate_members
+    if not _candidate_identity(candidate, evidence_root):
+        findings.add("candidate.identity")
+    for name in REQUIRED_EVIDENCE:
+        document, data = _load_json(evidence_root / name)
+        if document is None:
+            findings.add("evidence.metadata_or_json")
+        elif data is not None:
+            document_bytes[name] = data
+        documents[name] = document
+    validator = documents["00-candidate-validator.json"]
+    validator_ok = validator == {
+        "reasons": [],
+        "schemaVersion": 1,
+        "status": "pass",
+        "validator": "course-mode-candidate.v1",
+    }
+    if not validator_ok:
+        findings.add("evidence.validator")
+    attestation = documents["00-operator-attestation.json"]
+    attestation_bytes = document_bytes.get("00-operator-attestation.json", b"")
+    attestation_sha = hashlib.sha256(attestation_bytes).hexdigest() if attestation_bytes else None
+    admin_sha = None
+    if isinstance(candidate, dict) and isinstance(candidate.get("repositories"), dict):
+        admin = candidate["repositories"].get("adminEsp")
+        admin_sha = admin.get("sha") if isinstance(admin, dict) else None
+    attestation_ok = (
+        isinstance(attestation, dict)
+        and attestation.get("candidateId") == candidate_id
+        and attestation.get("gateSha") == admin_sha
+        and attestation.get("sameUidThreatModel") == "malicious-process-excluded"
+        and attestation.get("trustedOperatorAccountConfirmed") is True
+        and attestation.get("untrustedAutomationStoppedConfirmed") is True
+    )
+    if not attestation_ok:
+        findings.add("evidence.attestation")
+    runtime_ok = (
+        _lane_report(
+            documents["02-runtime-assignment-new-rollback.json"],
+            candidate_id,
+            ["admin-course-mode-assignment-new", "admin-course-mode-assignment-rollback"],
+            None,
+        )
+        and _lane_report(
+            documents["02-runtime-browser-after-assignment.json"],
+            candidate_id,
+            [
+                "admin-course-mode-playwright-chromium-desktop",
+                "admin-course-mode-playwright-webkit-desktop",
+            ],
+            None,
+        )
+    )
+    continuity = documents["02-runtime-continuity-inspection.json"]
+    continuity_ok = (
+        isinstance(continuity, dict)
+        and continuity.get("status") == "pass"
+        and continuity.get("assignmentFlags") == {"new": False, "rollback": False}
+        and continuity.get("mountCount") == 4
+        and continuity.get("allMountsCanonical") is True
+        and continuity.get("allMountsExist") is True
+        and continuity.get("allMountsReadOnly") is True
+        and continuity.get("imagesMatchCandidate") is True
+        and continuity.get("manualRecreateAfterRollback") is False
+    )
+    quick_ok = _lane_report(documents["03-quick-gate.json"], candidate_id, QUICK_LANES, attestation_sha)
+    full_ok = _lane_report(documents["04-full-gate.json"], candidate_id, FULL_LANES, attestation_sha)
+    live_ok = _lane_report(
+        documents["05-live-db-gate.json"], candidate_id, FULL_LANES + ["live-postgres"], attestation_sha
+    )
+    for ok, code in (
+        (runtime_ok, "evidence.runtime"),
+        (continuity_ok, "evidence.continuity"),
+        (quick_ok, "evidence.quick"),
+        (full_ok, "evidence.full"),
+        (live_ok, "evidence.live_db"),
+    ):
+        if not ok:
+            findings.add(code)
+    try:
+        evidence_paths = sorted(evidence_root.rglob("*"), key=lambda item: item.as_posix())
+    except OSError:
+        evidence_paths = []
+        findings.add("evidence.root")
+    for path in evidence_paths:
+        if path == output:
+            continue
+        try:
+            relative_parts = path.relative_to(evidence_root).parts
+            metadata = path.lstat()
+        except (OSError, ValueError):
+            findings.add("evidence.metadata_or_json")
+            continue
+        if stat.S_ISDIR(metadata.st_mode):
+            if any(part.lower() in RAW_PLAYWRIGHT_DIRS for part in relative_parts):
+                raw_playwright_absent = False
+                findings.add("evidence.raw_playwright")
+            continue
+        checked_files += 1
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_mode & 0o022
+            or metadata.st_size > MAX_FILE_BYTES
+        ):
+            findings.add("evidence.metadata_or_json")
+            continue
+        try:
+            data = _read_secure_file(path)
+        except OSError:
+            findings.add("evidence.metadata_or_json")
+            continue
+        content_findings, member_count = scan_evidence_payload(data, path.name)
+        findings.update(content_findings)
+        checked_archive_members += member_count
+        if content_findings & {"content.embedded_playwright", "content.raw_playwright"}:
+            raw_playwright_absent = False
+    for root in preserved_roots:
+        if not root.is_dir():
+            findings.add("preserved.root")
+            continue
+        try:
+            paths = sorted(root.rglob("*"), key=lambda item: item.as_posix())
+        except OSError:
+            findings.add("preserved.root")
+            continue
+        for path in paths:
+            try:
+                relative_parts = path.relative_to(root).parts
+                metadata = path.lstat()
+            except (OSError, ValueError):
+                findings.add("preserved.metadata")
+                continue
+            if stat.S_ISDIR(metadata.st_mode):
+                if any(part.lower() in RAW_PLAYWRIGHT_DIRS for part in relative_parts):
+                    raw_playwright_absent = False
+                    findings.add("preserved.raw_playwright")
+                continue
+            checked_files += 1
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or metadata.st_mode & 0o022
+                or metadata.st_size > MAX_FILE_BYTES
+            ):
+                findings.add("preserved.metadata")
+                continue
+            try:
+                data = _read_secure_file(path)
+            except OSError:
+                findings.add("preserved.metadata")
+                continue
+            if is_sanitized_manifest(data):
+                continue
+            if any(part.lower() in RAW_PLAYWRIGHT_DIRS for part in relative_parts):
+                raw_playwright_absent = False
+                findings.add("preserved.raw_playwright")
+            content_findings, member_count = scan_evidence_payload(data, path.name)
+            findings.update(content_findings)
+            checked_archive_members += member_count
+            if content_findings & {"content.embedded_playwright", "content.raw_playwright"}:
+                raw_playwright_absent = False
+    checks = {
+        "candidateIdentity": _candidate_identity(candidate, evidence_root),
+        "repositoryIdentity": _repository_identity(candidate),
+        "imageIdentityAndProvenance": _image_identity(candidate),
+        "firmwareIdentity": _firmware_identity(candidate),
+        "curriculumIdentity": _curriculum_identity(candidate),
+        "secureFileMetadata": not findings.intersection(
+            {"candidate.metadata_or_json", "evidence.metadata_or_json", "preserved.metadata", "preserved.root"}
+        ),
+        "validator": validator_ok,
+        "attestationBinding": attestation_ok,
+        "runtimeContinuity": runtime_ok and continuity_ok,
+        "quickGate4of4": quick_ok,
+        "fullGate20of20": full_ok,
+        "liveDbGate21of21": live_ok,
+        "terminalLivePostgres": live_ok,
+        "secretScan": "content.secret" not in findings,
+        "archiveSafety": not any(code.startswith("archive.") for code in findings),
+        "binaryMediaAbsent": "content.binary_media" not in findings,
+        "privateContentAbsent": not any(
+            code in findings
+            for code in ("content.audio", "content.binary_media", "content.transcript", "content.private_key")
+        ),
+        "rawPlaywrightAbsent": raw_playwright_absent,
+        "physicalActionsPerformed": False,
+        "productionDatabaseUsed": False,
+    }
+    return {
+        "candidateId": candidate_id,
+        "checkedArchiveMemberCount": checked_archive_members,
+        "checkedFileCount": checked_files,
+        "checks": checks,
+        "findings": sorted(findings),
+        "schemaVersion": 1,
+        "status": "pass" if not findings else "fail",
+    }
+
+
+def _write_output(path: Path, report: dict[str, object]) -> bool:
+    payload = json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(temporary, 0o444)
+            os.replace(temporary, path)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary)
+        return True
+    except OSError:
+        return False
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--candidate", required=True, type=Path)
+    parser.add_argument("--evidence-root", required=True, type=Path)
+    parser.add_argument("--preserved-root", action="append", default=[], type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    args = parser.parse_args(argv)
+    evidence_root = args.evidence_root.resolve()
+    output = args.output.resolve()
+    candidate_path = args.candidate if args.candidate.is_absolute() else Path.cwd() / args.candidate
+    preserved_roots = [path if path.is_absolute() else Path.cwd() / path for path in args.preserved_root]
+    report = audit(candidate_path, evidence_root, preserved_roots, output)
+    try:
+        output.relative_to(evidence_root)
+    except ValueError:
+        report["findings"] = sorted(set(report["findings"]) | {"output.unsafe"})
+        report["status"] = "fail"
+    else:
+        if not _write_output(output, report):
+            report["findings"] = sorted(set(report["findings"]) | {"output.write"})
+            report["status"] = "fail"
+    print(json.dumps(report, sort_keys=True, separators=(",", ":")))
+    return 0 if report["status"] == "pass" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
