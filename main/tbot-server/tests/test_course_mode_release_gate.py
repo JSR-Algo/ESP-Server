@@ -2536,26 +2536,34 @@ def test_assignment_capsule_is_cleaned_after_rollback_failure(
 
 
 @pytest.mark.parametrize(
-    ("lane_name", "stdout", "cleanup_failed"),
+    ("lane_name", "stdout", "verdict", "cleanup_failed"),
     [
-        ("admin-course-mode-assignment-rollback", "ordinary phase failure output\n", False),
+        (
+            "admin-course-mode-assignment-rollback",
+            "ordinary phase failure output\n",
+            "FAIL",
+            False,
+        ),
         (
             "admin-course-mode-assignment-rollback",
             "ordinary phase failure output without trailing newline\n"
             'TBOT_COURSE_MODE_CLEANUP_FAILURE={"schemaVersion":1,'
             '"kind":"assignment-rollback-base-restore"}\n',
+            "BLOCKED",
             True,
         ),
         (
             "admin-course-mode-assignment-rollback",
             'TBOT_COURSE_MODE_CLEANUP_FAILURE={"schemaVersion":1,'
             '"kind":"assignment-rollback-base-restore-near-match"}\n',
+            "FAIL",
             False,
         ),
         (
             "admin-course-mode-assignment-new",
             'TBOT_COURSE_MODE_CLEANUP_FAILURE={"schemaVersion":1,'
             '"kind":"assignment-rollback-base-restore"}\n',
+            "FAIL",
             False,
         ),
     ],
@@ -2563,7 +2571,7 @@ def test_assignment_capsule_is_cleaned_after_rollback_failure(
 )
 def test_assignment_failure_report_distinguishes_rollback_restore_failure(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
-    lane_name: str, stdout: str, cleanup_failed: bool,
+    lane_name: str, stdout: str, verdict: str, cleanup_failed: bool,
 ) -> None:
     _authorize_assignment_test_lane(monkeypatch)
     lane = _stateful_assignment_lane(
@@ -2579,7 +2587,7 @@ def test_assignment_failure_report_distinguishes_rollback_restore_failure(
         source_environment=_assignment_source(candidate_file),
     )
 
-    assert result["verdict"] == "FAIL"
+    assert result["verdict"] == verdict
     assert result["failedLane"] == lane.name
     assert result["lanes"][0]["exitCode"] == 7
     assert result.get("cleanupFailed", False) is cleanup_failed
@@ -2587,7 +2595,7 @@ def test_assignment_failure_report_distinguishes_rollback_restore_failure(
 
 @pytest.mark.parametrize(
     ("termination", "verdict"),
-    [("timeout", "FAIL"), ("output", "FAIL"), ("containment", "BLOCKED")],
+    [("timeout", "FAIL"), ("output", "FAIL")],
 )
 @pytest.mark.parametrize("restore_fails", [False, True], ids=("restore-pass", "restore-fail"))
 def test_assignment_parent_restores_base_stack_after_abnormal_rollback_termination(
@@ -2613,7 +2621,13 @@ def test_assignment_parent_restores_base_stack_after_abnormal_rollback_terminati
     def bounded(command, **kwargs):
         calls.append((command, kwargs))
         if len(calls) == 1:
+            mutable_compose = (
+                kwargs["cwd"] / "docs/docker/docker-compose.lesson-studio-e2e.yml"
+            )
+            mutable_compose.write_text("services:\n  attacker: {}\n", encoding="utf-8")
             return gate._manifest.BoundedCommandResult(None, "unterminated output", termination)
+        restored_compose = Path(command[command.index("-f") + 1])
+        assert restored_compose.read_text(encoding="utf-8") == "services: {}\n"
         return gate._manifest.BoundedCommandResult(9 if restore_fails else 0, "", None)
 
     monkeypatch.setattr(gate, "run_bounded_command", bounded)
@@ -2623,7 +2637,7 @@ def test_assignment_parent_restores_base_stack_after_abnormal_rollback_terminati
         source_environment=_assignment_source(candidate_file),
     )
 
-    assert result["verdict"] == verdict
+    assert result["verdict"] == ("BLOCKED" if restore_fails else verdict)
     assert result["failedLane"] == lane.name
     assert result["lanes"][0]["exitCode"] is None
     assert result.get("cleanupFailed", False) is restore_fails
@@ -2631,20 +2645,146 @@ def test_assignment_parent_restores_base_stack_after_abnormal_rollback_terminati
     _, phase_options = calls[0]
     restore_command, restore_options = calls[1]
     environment = phase_options["env"]
-    admin_root = Path(environment["COURSE_MODE_ADMIN_ESP_ROOT"])
+    trusted_admin_root = restore_options["cwd"]
+    assert trusted_admin_root != phase_options["cwd"]
     assert restore_command == [
         environment["TBOT_DOCKER_COMPOSE_EXECUTABLE"],
         "-p", environment["LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME"],
-        "-f", str(admin_root / "docs/docker/docker-compose.lesson-studio-e2e.yml"),
+        "-f", str(trusted_admin_root / "docs/docker/docker-compose.lesson-studio-e2e.yml"),
         "up", "-d", "--wait", "--no-deps", "--force-recreate", "backend", "web",
     ]
     assert restore_options == {
-        "cwd": admin_root,
+        "cwd": trusted_admin_root,
         "timeout_sec": lane.timeout_sec,
         "max_output_bytes": gate.MAX_LANE_OUTPUT_BYTES,
         "env": environment,
         "contain_process_group": True,
     }
+
+
+def test_assignment_parent_does_not_restore_after_containment_failure(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    admin_root = Path(candidate["repositories"]["adminEsp"]["path"])
+    base_compose = admin_root / "docs/docker/docker-compose.lesson-studio-e2e.yml"
+    base_compose.parent.mkdir(parents=True)
+    base_compose.write_text("services: {}\n", encoding="utf-8")
+    _git(admin_root, "add", str(base_compose.relative_to(admin_root)))
+    _git(admin_root, "commit", "-m", "add base compose fixture")
+    candidate["repositories"]["adminEsp"].update(_repository(admin_root))
+    _refresh_image_reference(candidate, "adminEsp")
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    _authorize_assignment_test_lane(monkeypatch)
+    lane = _stateful_assignment_lane(
+        "admin-course-mode-assignment-rollback", "raise SystemExit(7)",
+    )
+    calls = 0
+
+    def bounded(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return gate._manifest.BoundedCommandResult(None, "", "containment")
+
+    monkeypatch.setattr(gate, "run_bounded_command", bounded)
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=(lane,),
+        source_environment=_assignment_source(candidate_file),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == lane.name
+    assert result.get("cleanupFailed", False) is True
+    assert calls == 1
+
+
+def test_assignment_parent_rejects_restore_after_candidate_identity_changes(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    admin_root = Path(candidate["repositories"]["adminEsp"]["path"])
+    base_compose = admin_root / "docs/docker/docker-compose.lesson-studio-e2e.yml"
+    base_compose.parent.mkdir(parents=True)
+    base_compose.write_text("services: {}\n", encoding="utf-8")
+    _git(admin_root, "add", str(base_compose.relative_to(admin_root)))
+    _git(admin_root, "commit", "-m", "add base compose fixture")
+    candidate["repositories"]["adminEsp"].update(_repository(admin_root))
+    _refresh_image_reference(candidate, "adminEsp")
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    _authorize_assignment_test_lane(monkeypatch)
+    lane = _stateful_assignment_lane(
+        "admin-course-mode-assignment-rollback", "raise SystemExit(7)",
+    )
+    calls = 0
+
+    def bounded(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        changed = json.loads(candidate_file.read_text(encoding="utf-8"))
+        changed["candidateId"] = "course-mode-2099-01-01.changed"
+        candidate_file.write_text(json.dumps(changed), encoding="utf-8")
+        return gate._manifest.BoundedCommandResult(None, "", "timeout")
+
+    monkeypatch.setattr(gate, "run_bounded_command", bounded)
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=(lane,),
+        source_environment=_assignment_source(candidate_file),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == lane.name
+    assert result.get("cleanupFailed", False) is True
+    assert calls == 1
+
+
+def test_assignment_parent_rejects_restore_when_trusted_compose_digest_changes(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    admin_root = Path(candidate["repositories"]["adminEsp"]["path"])
+    base_compose = admin_root / "docs/docker/docker-compose.lesson-studio-e2e.yml"
+    base_compose.parent.mkdir(parents=True)
+    base_compose.write_text("services: {}\n", encoding="utf-8")
+    _git(admin_root, "add", str(base_compose.relative_to(admin_root)))
+    _git(admin_root, "commit", "-m", "add base compose fixture")
+    candidate["repositories"]["adminEsp"].update(_repository(admin_root))
+    _refresh_image_reference(candidate, "adminEsp")
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    _authorize_assignment_test_lane(monkeypatch)
+    lane = _stateful_assignment_lane(
+        "admin-course-mode-assignment-rollback", "raise SystemExit(7)",
+    )
+    original_binding = gate._assignment_rollback_restore_binding
+    binding = None
+    calls = 0
+
+    def capture_binding(*args, **kwargs):
+        nonlocal binding
+        binding = original_binding(*args, **kwargs)
+        return binding
+
+    def bounded(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        assert binding is not None
+        binding.compose_path.chmod(0o644)
+        binding.compose_path.write_text("services:\n  attacker: {}\n", encoding="utf-8")
+        return gate._manifest.BoundedCommandResult(None, "", "timeout")
+
+    monkeypatch.setattr(gate, "_assignment_rollback_restore_binding", capture_binding)
+    monkeypatch.setattr(gate, "run_bounded_command", bounded)
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=(lane,),
+        source_environment=_assignment_source(candidate_file),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == lane.name
+    assert result.get("cleanupFailed", False) is True
+    assert calls == 1
 
 
 def test_abnormal_rollback_reports_cleanup_failure_when_authority_is_lost_after_run(

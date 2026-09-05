@@ -278,6 +278,7 @@ MAX_NODE_INSTALL_BYTES = 2 * 1024 * 1024 * 1024
 MAX_NODE_INSTALL_DEPTH = 128
 MAX_NODE_PROJECT_SCAN_ENTRIES = 500_000
 MAX_PACKAGE_LOCK_BYTES = 32 * 1024 * 1024
+MAX_ASSIGNMENT_BASE_COMPOSE_BYTES = 1024 * 1024
 MAX_SNAPSHOT_ENTRIES = 750_000
 MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024 * 1024
 MAX_SNAPSHOT_FILE_BYTES = 512 * 1024 * 1024
@@ -1100,45 +1101,105 @@ def _assignment_rollback_restore_failed(lane: Lane, stdout: str) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class AssignmentRollbackRestoreBinding:
+    candidate_id: str
+    admin_sha: str
+    admin_root: Path
+    compose_path: Path
+    compose_sha256: str
+    compose_identity: tuple[int, ...]
+
+
+def _assignment_rollback_restore_binding(
+    lane: Lane, source_candidate: dict, trusted_candidate: dict,
+) -> AssignmentRollbackRestoreBinding | None:
+    if lane.name != ASSIGNMENT_ROLLBACK_LANE:
+        return None
+    try:
+        candidate_id = source_candidate["candidateId"]
+        admin_sha = source_candidate["repositories"]["adminEsp"]["sha"]
+        trusted_admin = trusted_candidate["repositories"]["adminEsp"]
+        admin_root = Path(trusted_admin["path"])
+        compose_path = admin_root / "docs/docker/docker-compose.lesson-studio-e2e.yml"
+        metadata = compose_path.lstat()
+        digest = _secure_file_sha256(compose_path, MAX_ASSIGNMENT_BASE_COMPOSE_BYTES)
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+        return None
+    if (
+        not isinstance(candidate_id, str)
+        or not candidate_id
+        or not isinstance(admin_sha, str)
+        or re.fullmatch(r"[0-9a-f]{40}", admin_sha) is None
+        or trusted_candidate.get("candidateId") != candidate_id
+        or trusted_admin.get("sha") != admin_sha
+        or not admin_root.is_absolute()
+        or admin_root.resolve(strict=True) != admin_root
+        or compose_path.resolve(strict=True) != compose_path
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_mode & 0o222
+        or digest is None
+    ):
+        return None
+    return AssignmentRollbackRestoreBinding(
+        candidate_id, admin_sha, admin_root, compose_path, digest,
+        _snapshot_identity(metadata),
+    )
+
+
 def _restore_base_stack_after_abnormal_assignment_rollback(
     lane: Lane,
     result: _manifest.BoundedCommandResult,
-    candidate: dict,
+    candidate_path: Path,
+    source_candidate: dict,
+    trusted_candidate: dict,
+    binding: AssignmentRollbackRestoreBinding | None,
     environment: dict[str, str],
     max_output_bytes: int,
 ) -> bool | None:
-    if (
-        lane.name != ASSIGNMENT_ROLLBACK_LANE
-        or result.error not in {"timeout", "output", "containment"}
-    ):
+    if lane.name != ASSIGNMENT_ROLLBACK_LANE:
         return None
-    if not _container_tools_authorized(candidate):
+    if result.error == "containment":
+        return False
+    if result.error not in {"timeout", "output"}:
+        return None
+    if binding is None or not _candidate_metadata_matches(candidate_path, source_candidate):
         return False
     try:
         project = environment["LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME"]
         prefix = environment["LESSON_STUDIO_E2E_RESOURCE_PREFIX"]
-        compose = candidate["tools"]["dockerCompose"]["path"]
-        admin_root = Path(candidate["repositories"]["adminEsp"]["path"])
-        base_compose = admin_root / "docs/docker/docker-compose.lesson-studio-e2e.yml"
-        metadata = base_compose.lstat()
+        compose = trusted_candidate["tools"]["dockerCompose"]["path"]
+        trusted_admin = trusted_candidate["repositories"]["adminEsp"]
+        metadata = binding.compose_path.lstat()
     except (KeyError, OSError, TypeError, ValueError):
         return False
     if (
         not isinstance(project, str)
         or re.fullmatch(r"tbot-task4-[a-z0-9-]+", project) is None
         or prefix != project
+        or trusted_candidate.get("candidateId") != binding.candidate_id
+        or trusted_admin.get("sha") != binding.admin_sha
+        or Path(trusted_admin.get("path", "")) != binding.admin_root
+        or environment.get("TBOT_DOCKER_COMPOSE_EXECUTABLE") != compose
+        or not _container_tools_authorized(trusted_candidate)
         or not stat.S_ISREG(metadata.st_mode)
-        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_mode & 0o222
+        or _snapshot_identity(metadata) != binding.compose_identity
+        or _secure_file_sha256(
+            binding.compose_path, MAX_ASSIGNMENT_BASE_COMPOSE_BYTES,
+        ) != binding.compose_sha256
     ):
         return False
     restored = run_bounded_command(
         [
             compose,
             "-p", project,
-            "-f", str(base_compose),
+            "-f", str(binding.compose_path),
             "up", "-d", "--wait", "--no-deps", "--force-recreate", "backend", "web",
         ],
-        cwd=admin_root,
+        cwd=binding.admin_root,
         timeout_sec=lane.timeout_sec,
         max_output_bytes=max_output_bytes,
         env=environment,
@@ -4068,6 +4129,7 @@ def _run_gate_impl(
             for lane in selected if report["verdict"] == "PASS" else ():
                 execution_stage = None
                 lane_execution = None
+                rollback_restore_binding = None
                 lane_source = (
                     assignment_source if lane.name in STATEFUL_ASSIGNMENT_LANES else source
                 )
@@ -4154,6 +4216,9 @@ def _run_gate_impl(
                             assignment_guard.release()
                             break
                     execution_stage = stage_execution_candidate(candidate, (lane,))
+                    rollback_restore_binding = _assignment_rollback_restore_binding(
+                        lane, candidate, execution_stage.candidate,
+                    )
                     lane_execution = execution_stage.create_lane_execution()
                     execution_candidate = lane_execution.candidate
                 except RetainedStagingError as error:
@@ -4302,8 +4367,9 @@ def _run_gate_impl(
                         result = _manifest.BoundedCommandResult(None, "", "authority")
                     parent_restore_succeeded = (
                         _restore_base_stack_after_abnormal_assignment_rollback(
-                            lane, bounded_result, execution_candidate, child_environment,
-                            max_output_bytes,
+                            lane, bounded_result, candidate_path, candidate,
+                            execution_stage.candidate, rollback_restore_binding,
+                            child_environment, max_output_bytes,
                         )
                         if bounded_result is not None else None
                     )
@@ -4338,13 +4404,16 @@ def _run_gate_impl(
                 )
                 lane_failed = result.error or result.returncode != 0 or rollback_restore_failed
                 if lane_failed:
+                    cleanup_failed = (
+                        rollback_restore_failed or parent_restore_succeeded is False
+                    )
                     report["verdict"] = (
                         "BLOCKED"
-                        if result.error in {"authority", "containment"}
+                        if cleanup_failed or result.error in {"authority", "containment"}
                         else "FAIL"
                     )
                     report["failedLane"] = lane.name
-                    if rollback_restore_failed or parent_restore_succeeded is False:
+                    if cleanup_failed:
                         report["cleanupFailed"] = True
                 elif skip_state is not False:
                     report["verdict"] = "BLOCKED"
