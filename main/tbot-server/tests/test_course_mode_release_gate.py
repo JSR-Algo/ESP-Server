@@ -2585,6 +2585,134 @@ def test_assignment_failure_report_distinguishes_rollback_restore_failure(
     assert result.get("cleanupFailed", False) is cleanup_failed
 
 
+@pytest.mark.parametrize(
+    ("termination", "verdict"),
+    [("timeout", "FAIL"), ("output", "FAIL"), ("containment", "BLOCKED")],
+)
+@pytest.mark.parametrize("restore_fails", [False, True], ids=("restore-pass", "restore-fail"))
+def test_assignment_parent_restores_base_stack_after_abnormal_rollback_termination(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+    termination: str, verdict: str, restore_fails: bool,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    admin_root = Path(candidate["repositories"]["adminEsp"]["path"])
+    base_compose = admin_root / "docs/docker/docker-compose.lesson-studio-e2e.yml"
+    base_compose.parent.mkdir(parents=True)
+    base_compose.write_text("services: {}\n", encoding="utf-8")
+    _git(admin_root, "add", str(base_compose.relative_to(admin_root)))
+    _git(admin_root, "commit", "-m", "add base compose fixture")
+    candidate["repositories"]["adminEsp"].update(_repository(admin_root))
+    _refresh_image_reference(candidate, "adminEsp")
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    _authorize_assignment_test_lane(monkeypatch)
+    lane = _stateful_assignment_lane(
+        "admin-course-mode-assignment-rollback", "raise SystemExit(7)",
+    )
+    calls: list[tuple[list[str], dict]] = []
+
+    def bounded(command, **kwargs):
+        calls.append((command, kwargs))
+        if len(calls) == 1:
+            return gate._manifest.BoundedCommandResult(None, "unterminated output", termination)
+        return gate._manifest.BoundedCommandResult(9 if restore_fails else 0, "", None)
+
+    monkeypatch.setattr(gate, "run_bounded_command", bounded)
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=(lane,),
+        source_environment=_assignment_source(candidate_file),
+    )
+
+    assert result["verdict"] == verdict
+    assert result["failedLane"] == lane.name
+    assert result["lanes"][0]["exitCode"] is None
+    assert result.get("cleanupFailed", False) is restore_fails
+    assert len(calls) == 2
+    _, phase_options = calls[0]
+    restore_command, restore_options = calls[1]
+    environment = phase_options["env"]
+    admin_root = Path(environment["COURSE_MODE_ADMIN_ESP_ROOT"])
+    assert restore_command == [
+        environment["TBOT_DOCKER_COMPOSE_EXECUTABLE"],
+        "-p", environment["LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME"],
+        "-f", str(admin_root / "docs/docker/docker-compose.lesson-studio-e2e.yml"),
+        "up", "-d", "--wait", "--no-deps", "--force-recreate", "backend", "web",
+    ]
+    assert restore_options == {
+        "cwd": admin_root,
+        "timeout_sec": lane.timeout_sec,
+        "max_output_bytes": gate.MAX_LANE_OUTPUT_BYTES,
+        "env": environment,
+        "contain_process_group": True,
+    }
+
+
+def test_abnormal_rollback_reports_cleanup_failure_when_authority_is_lost_after_run(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _authorize_assignment_test_lane(monkeypatch)
+    lane = _stateful_assignment_lane(
+        "admin-course-mode-assignment-rollback", "raise SystemExit(7)",
+    )
+    authority_checks = 0
+    bounded_calls = 0
+
+    def container_authorized(_candidate: dict) -> bool:
+        nonlocal authority_checks
+        authority_checks += 1
+        return authority_checks == 1
+
+    def bounded(*_args, **_kwargs):
+        nonlocal bounded_calls
+        bounded_calls += 1
+        return gate._manifest.BoundedCommandResult(None, "", "timeout")
+
+    monkeypatch.setattr(gate, "_container_tools_authorized", container_authorized)
+    monkeypatch.setattr(gate, "run_bounded_command", bounded)
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=(lane,),
+        source_environment=_assignment_source(candidate_file),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == lane.name
+    assert result["lanes"][0]["exitCode"] is None
+    assert result.get("cleanupFailed", False) is True
+    assert bounded_calls == 1
+
+
+@pytest.mark.parametrize("lane_kind", ["new", "non-assignment"])
+def test_abnormal_termination_does_not_trigger_parent_restore_outside_rollback(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, lane_kind: str,
+) -> None:
+    _authorize_assignment_test_lane(monkeypatch)
+    lane = (
+        _stateful_assignment_lane("admin-course-mode-assignment-new", "raise SystemExit(7)")
+        if lane_kind == "new" else _lane("ordinary", "raise SystemExit(7)")
+    )
+    calls = 0
+
+    def bounded(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return gate._manifest.BoundedCommandResult(None, "", "timeout")
+
+    monkeypatch.setattr(gate, "run_bounded_command", bounded)
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=(lane,),
+        source_environment=(
+            _assignment_source(candidate_file) if lane_kind == "new" else {}
+        ),
+    )
+
+    assert result["verdict"] == "FAIL"
+    assert result["failedLane"] == lane.name
+    assert result.get("cleanupFailed", False) is False
+    assert calls == 1
+
+
 def test_assignment_capsule_single_selected_lane_does_not_leak(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

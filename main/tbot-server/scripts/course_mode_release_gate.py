@@ -1100,6 +1100,53 @@ def _assignment_rollback_restore_failed(lane: Lane, stdout: str) -> bool:
     )
 
 
+def _restore_base_stack_after_abnormal_assignment_rollback(
+    lane: Lane,
+    result: _manifest.BoundedCommandResult,
+    candidate: dict,
+    environment: dict[str, str],
+    max_output_bytes: int,
+) -> bool | None:
+    if (
+        lane.name != ASSIGNMENT_ROLLBACK_LANE
+        or result.error not in {"timeout", "output", "containment"}
+    ):
+        return None
+    if not _container_tools_authorized(candidate):
+        return False
+    try:
+        project = environment["LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME"]
+        prefix = environment["LESSON_STUDIO_E2E_RESOURCE_PREFIX"]
+        compose = candidate["tools"]["dockerCompose"]["path"]
+        admin_root = Path(candidate["repositories"]["adminEsp"]["path"])
+        base_compose = admin_root / "docs/docker/docker-compose.lesson-studio-e2e.yml"
+        metadata = base_compose.lstat()
+    except (KeyError, OSError, TypeError, ValueError):
+        return False
+    if (
+        not isinstance(project, str)
+        or re.fullmatch(r"tbot-task4-[a-z0-9-]+", project) is None
+        or prefix != project
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+    ):
+        return False
+    restored = run_bounded_command(
+        [
+            compose,
+            "-p", project,
+            "-f", str(base_compose),
+            "up", "-d", "--wait", "--no-deps", "--force-recreate", "backend", "web",
+        ],
+        cwd=admin_root,
+        timeout_sec=lane.timeout_sec,
+        max_output_bytes=max_output_bytes,
+        env=environment,
+        contain_process_group=True,
+    )
+    return restored.error is None and restored.returncode == 0
+
+
 @dataclass
 class AssignmentRuntimeGuard:
     capsule: AssignmentRuntimeCapsule | None = None
@@ -4201,6 +4248,7 @@ def _run_gate_impl(
                 try:
                     child_environment = lane_environment
                     child_environment.update(lane_execution.environment)
+                    bounded_result: _manifest.BoundedCommandResult | None = None
                     container_authority = (
                         not _container_tools_required(lane)
                         or _container_tools_authorized(execution_candidate)
@@ -4226,12 +4274,14 @@ def _run_gate_impl(
                                 max_output_bytes=max_output_bytes, env=child_environment,
                                 contain_process_group=lane.name in STATEFUL_ASSIGNMENT_LANES,
                             )
+                            bounded_result = result
                     else:
                         result = run_bounded_command(
                             list(command), cwd=resolved_cwd, timeout_sec=lane.timeout_sec,
                             max_output_bytes=max_output_bytes, env=child_environment,
                             contain_process_group=lane.name in STATEFUL_ASSIGNMENT_LANES,
                         )
+                        bounded_result = result
                     if (
                         (_python_test_runtime_required(lane) or _backend_compiler_required(lane))
                         and (
@@ -4250,6 +4300,13 @@ def _run_gate_impl(
                         and not playwright_browsers_authorized(execution_candidate)
                     ):
                         result = _manifest.BoundedCommandResult(None, "", "authority")
+                    parent_restore_succeeded = (
+                        _restore_base_stack_after_abnormal_assignment_rollback(
+                            lane, bounded_result, execution_candidate, child_environment,
+                            max_output_bytes,
+                        )
+                        if bounded_result is not None else None
+                    )
                     skip_state = pytest_report_has_skips(junit_path) if junit_path else False
                 except BaseException:
                     try:
@@ -4287,7 +4344,7 @@ def _run_gate_impl(
                         else "FAIL"
                     )
                     report["failedLane"] = lane.name
-                    if rollback_restore_failed:
+                    if rollback_restore_failed or parent_restore_succeeded is False:
                         report["cleanupFailed"] = True
                 elif skip_state is not False:
                     report["verdict"] = "BLOCKED"

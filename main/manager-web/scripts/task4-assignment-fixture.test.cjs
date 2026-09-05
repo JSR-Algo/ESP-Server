@@ -615,11 +615,14 @@ test('Task 4 rollback restore reports cleanup failure without replacing arbitrar
     }
   }
   assert.equal(restoreCalls, 3);
+  const restoreOnlySignals = [];
   assert.throws(() => runWithRollbackRestore(
     () => {},
     () => true,
     () => { throw restoreFailure; },
+    () => restoreOnlySignals.push(ROLLBACK_RESTORE_FAILURE_SIGNAL),
   ), (error) => error === restoreFailure);
+  assert.deepEqual(restoreOnlySignals, [ROLLBACK_RESTORE_FAILURE_SIGNAL]);
 
   const restoredPhaseFailure = new Error('phase failed with successful restore');
   assert.throws(() => runWithRollbackRestore(

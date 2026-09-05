@@ -24,8 +24,8 @@ function runRollbackRestore(restore, phaseFailed, reportRestoreFailure) {
   try {
     restore();
   } catch (restoreFailure) {
-    if (!phaseFailed) throw restoreFailure;
     reportRestoreFailure();
+    if (!phaseFailed) throw restoreFailure;
   }
 }
 
