@@ -11,6 +11,26 @@ const {
 const { validateAssignmentRuntimeCapsule } = require('./task4-assignment-runtime.cjs');
 const { composeExecutableFromEnvironment } = require('./reset-lesson-studio-e2e-state.cjs');
 
+function runRollbackRestore(restore, phaseFailed) {
+  try {
+    restore();
+  } catch (restoreFailure) {
+    if (!phaseFailed) throw restoreFailure;
+  }
+}
+
+function runWithRollbackRestore(work, shouldRestore, restore) {
+  let phaseFailed = false;
+  try {
+    work();
+  } catch (error) {
+    phaseFailed = true;
+    throw error;
+  } finally {
+    if (shouldRestore()) runRollbackRestore(restore, phaseFailed);
+  }
+}
+
 const phase = process.argv[2];
 if (!['new', 'rollback'].includes(phase)) throw new Error('usage: run-task4-assignment-phase.cjs new|rollback');
 
@@ -127,51 +147,54 @@ const pinnedImages = inspectAndPinCandidateImages({
 environment.TBOT_LESSON_STUDIO_BACKEND_IMAGE = pinnedImages.backendImage;
 environment.TBOT_LESSON_STUDIO_WEB_IMAGE = pinnedImages.webImage;
 
-if (phase === 'new') {
-  // NEW owns a fresh isolated stack. ROLLBACK intentionally preserves this PostgreSQL volume.
-  composeRun('down', '--volumes', '--remove-orphans');
-  composeRun('up', '-d', '--wait');
-  composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', 'seed-v8');
-  composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', 'rollout-v9');
-  composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', 'cancel-v9-assignment');
-} else {
-  composeRun('up', '-d', '--wait', '--no-deps', '--force-recreate', 'backend', 'web');
-  composeRun('up', '-d', '--no-deps', 'derivative-media');
-  composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', 'verify-new');
-}
+let rollbackServicesStarted = false;
+runWithRollbackRestore(() => {
+  if (phase === 'new') {
+    // NEW owns a fresh isolated stack. ROLLBACK intentionally preserves this PostgreSQL volume.
+    composeRun('down', '--volumes', '--remove-orphans');
+    composeRun('up', '-d', '--wait');
+    composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', 'seed-v8');
+    composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', 'rollout-v9');
+    composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', 'cancel-v9-assignment');
+  } else {
+    composeRun('up', '-d', '--wait', '--no-deps', '--force-recreate', 'backend', 'web');
+    rollbackServicesStarted = true;
+    composeRun('up', '-d', '--no-deps', 'derivative-media');
+    composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', 'verify-new');
+  }
 
-verifyStartedServiceImages({
-  backend: pinnedImages.backendImage,
-  web: pinnedImages.webImage,
-  'derivative-media': pinnedImages.backendImage,
-}, (service) => {
-  const container = execFileSync(composeExecutable, [...compose, 'ps', '-q', service], {
-    cwd: repoRoot, env: environment, encoding: 'utf8',
-  }).trim();
-  if (!container) return '';
-  return execFileSync(dockerExecutable, ['inspect', '--format={{.Image}}', container], {
-    cwd: repoRoot, env: environment, encoding: 'utf8',
-  }).trim();
-});
-verifyStartedServicePortBindings({
-  backend: { containerPort: '3000/tcp', hostPort: environment.LESSON_STUDIO_E2E_BACKEND_HOST_PORT },
-  web: { containerPort: '8002/tcp', hostPort: environment.LESSON_STUDIO_E2E_WEB_HOST_PORT },
-  'derivative-media': { containerPort: '8443/tcp', hostPort },
-}, (service) => {
-  const container = execFileSync(composeExecutable, [...compose, 'ps', '-q', service], {
-    cwd: repoRoot, env: environment, encoding: 'utf8',
-  }).trim();
-  if (!container) return null;
-  return JSON.parse(execFileSync(dockerExecutable, [
-    'inspect', '--format={{json .NetworkSettings.Ports}}', container,
-  ], { cwd: repoRoot, env: environment, encoding: 'utf8' }));
-});
+  verifyStartedServiceImages({
+    backend: pinnedImages.backendImage,
+    web: pinnedImages.webImage,
+    'derivative-media': pinnedImages.backendImage,
+  }, (service) => {
+    const container = execFileSync(composeExecutable, [...compose, 'ps', '-q', service], {
+      cwd: repoRoot, env: environment, encoding: 'utf8',
+    }).trim();
+    if (!container) return '';
+    return execFileSync(dockerExecutable, ['inspect', '--format={{.Image}}', container], {
+      cwd: repoRoot, env: environment, encoding: 'utf8',
+    }).trim();
+  });
+  verifyStartedServicePortBindings({
+    backend: { containerPort: '3000/tcp', hostPort: environment.LESSON_STUDIO_E2E_BACKEND_HOST_PORT },
+    web: { containerPort: '8002/tcp', hostPort: environment.LESSON_STUDIO_E2E_WEB_HOST_PORT },
+    'derivative-media': { containerPort: '8443/tcp', hostPort },
+  }, (service) => {
+    const container = execFileSync(composeExecutable, [...compose, 'ps', '-q', service], {
+      cwd: repoRoot, env: environment, encoding: 'utf8',
+    }).trim();
+    if (!container) return null;
+    return JSON.parse(execFileSync(dockerExecutable, [
+      'inspect', '--format={{json .NetworkSettings.Ports}}', container,
+    ], { cwd: repoRoot, env: environment, encoding: 'utf8' }));
+  });
 
-run(process.execPath, [
-  resolve(repoRoot, 'main/manager-web/node_modules/@playwright/test/cli.js'),
-  'test', '--config=playwright.assignment-rollback.config.js',
-], { cwd: resolve(repoRoot, 'main/manager-web') });
-composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', phase === 'new' ? 'verify-new' : 'verify-rollback');
-if (phase === 'rollback') {
+  run(process.execPath, [
+    resolve(repoRoot, 'main/manager-web/node_modules/@playwright/test/cli.js'),
+    'test', '--config=playwright.assignment-rollback.config.js',
+  ], { cwd: resolve(repoRoot, 'main/manager-web') });
+  composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', phase === 'new' ? 'verify-new' : 'verify-rollback');
+}, () => rollbackServicesStarted, () => {
   baseComposeRun('up', '-d', '--wait', '--no-deps', '--force-recreate', 'backend', 'web');
-}
+});

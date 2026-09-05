@@ -559,6 +559,37 @@ test('Task 4 assignment browser phase uses WebKit and verifies row-scoped Monito
   assert.ok(spec.indexOf("adminApiResponse(page, 'POST', '/lesson-assignments'") > spec.indexOf('} else {'));
 });
 
+test('Task 4 rollback restore covers failure paths and preserves the primary phase failure', () => {
+  const source = readFileSync(orchestratorPath, 'utf8');
+  const helperStart = source.indexOf('function runRollbackRestore(');
+  const helperEnd = source.indexOf('\n\nconst phase =', helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, 'rollback restore helper must be testable in isolation');
+  const { runWithRollbackRestore } = Function(
+    `${source.slice(helperStart, helperEnd)}; return { runWithRollbackRestore };`,
+  )();
+  const phaseFailure = new Error('phase failed');
+  const restoreFailure = new Error('restore failed');
+  let restoreCalls = 0;
+
+  assert.throws(() => runWithRollbackRestore(
+    () => { throw phaseFailure; },
+    () => true,
+    () => { restoreCalls += 1; throw restoreFailure; },
+  ), (error) => error === phaseFailure);
+  assert.equal(restoreCalls, 1);
+  assert.throws(() => runWithRollbackRestore(
+    () => {},
+    () => true,
+    () => { throw restoreFailure; },
+  ), (error) => error === restoreFailure);
+  assert.throws(() => runWithRollbackRestore(
+    () => { throw phaseFailure; },
+    () => false,
+    () => { restoreCalls += 1; },
+  ), (error) => error === phaseFailure);
+  assert.equal(restoreCalls, 1, 'pre-start failures must not trigger restore');
+});
+
 test('Task 4 release commands run candidate-bound NEW and ROLLBACK orchestration', () => {
   assert.equal(existsSync(orchestratorPath), true, 'assignment phase orchestrator must exist');
   const source = readFileSync(orchestratorPath, 'utf8');
@@ -602,12 +633,15 @@ test('Task 4 release commands run candidate-bound NEW and ROLLBACK orchestration
   );
   const baseRestoreCall = "baseComposeRun('up', '-d', '--wait', '--no-deps', '--force-recreate', 'backend', 'web');";
   const baseRestoreIndex = source.indexOf(baseRestoreCall);
+  const rollbackStartIndex = source.indexOf(
+    "composeRun('up', '-d', '--wait', '--no-deps', '--force-recreate', 'backend', 'web');",
+  );
+  const rollbackStartedIndex = source.indexOf('rollbackServicesStarted = true;');
   assert.ok(finalRollbackVerifyIndex >= 0, 'final bootstrap readback must verify rollback');
   assert.ok(baseRestoreIndex > finalRollbackVerifyIndex, 'base stack restore must follow final rollback verification');
-  assert.ok(
-    source.includes(`if (phase === 'rollback') {\n  ${baseRestoreCall}\n}`),
-    'base stack restore must run only after ROLLBACK',
-  );
+  assert.ok(rollbackStartedIndex > rollbackStartIndex, 'rollback is entered only after override services start');
+  assert.match(source, /finally \{\s*if \(shouldRestore\(\)\) runRollbackRestore\(restore, phaseFailed\);\s*\}/);
+  assert.match(source, /\}, \(\) => rollbackServicesStarted, \(\) => \{\s*baseComposeRun\('up', '-d', '--wait', '--no-deps', '--force-recreate', 'backend', 'web'\);\s*\}\);/);
   assert.match(source, /bootstrap\.cjs/);
   assert.match(source, /playwright\.assignment-rollback\.config\.js/);
   assert.match(source, /const mediaHostname = 'task4-media\.localhost'/);
