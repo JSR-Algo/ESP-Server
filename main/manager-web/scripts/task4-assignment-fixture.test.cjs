@@ -585,10 +585,23 @@ test('Task 4 release commands run candidate-bound NEW and ROLLBACK orchestration
   assert.doesNotMatch(source, /run\('docker', \[\.\.\.compose/);
   assert.match(source, /\['new', 'rollback'\]/);
   assert.match(source, /docker-compose\.\$\{phase\}\.yml/);
+  assert.match(source, /const baseCompose = \[[\s\S]*docker-compose\.lesson-studio-e2e\.yml[\s\S]*\];/);
+  assert.match(source, /const baseComposeRun = \(\.\.\.args\) => run\(composeExecutable, \[\.\.\.baseCompose, \.\.\.args\]\);/);
   assert.match(
     source,
     /composeRun\('up', '-d', '--wait', '--no-deps', '--force-recreate', 'backend', 'web'\)/,
     'ROLLBACK must wait for refreshed candidate-bound services to become healthy',
+  );
+  const finalRollbackVerifyIndex = source.indexOf(
+    "composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', phase === 'new' ? 'verify-new' : 'verify-rollback');",
+  );
+  const baseRestoreCall = "baseComposeRun('up', '-d', '--wait', '--no-deps', '--force-recreate', 'backend', 'web');";
+  const baseRestoreIndex = source.indexOf(baseRestoreCall);
+  assert.ok(finalRollbackVerifyIndex >= 0, 'final bootstrap readback must verify rollback');
+  assert.ok(baseRestoreIndex > finalRollbackVerifyIndex, 'base stack restore must follow final rollback verification');
+  assert.ok(
+    source.includes(`if (phase === 'rollback') {\n  ${baseRestoreCall}\n}`),
+    'base stack restore must run only after ROLLBACK',
   );
   assert.match(source, /bootstrap\.cjs/);
   assert.match(source, /playwright\.assignment-rollback\.config\.js/);

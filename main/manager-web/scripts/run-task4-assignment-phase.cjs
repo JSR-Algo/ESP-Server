@@ -74,14 +74,18 @@ if (!dockerExecutable || !isAbsolute(dockerExecutable)) {
   throw new Error('TBOT_DOCKER_EXECUTABLE must be an absolute candidate-bound executable');
 }
 const composeExecutable = composeExecutableFromEnvironment(environment, { requireExplicit: true });
-const compose = [
+const baseCompose = [
   '-p', environment.LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME,
   '-f', resolve(repoRoot, 'docs/docker/docker-compose.lesson-studio-e2e.yml'),
+];
+const compose = [
+  ...baseCompose,
   '-f', resolve(repoRoot, `docs/docker/task4-admin-assignment/docker-compose.${phase}.yml`),
 ];
 const run = (command, args, options = {}) => execFileSync(command, args, {
   cwd: repoRoot, env: environment, stdio: 'inherit', ...options,
 });
+const baseComposeRun = (...args) => run(composeExecutable, [...baseCompose, ...args]);
 const composeRun = (...args) => run(composeExecutable, [...compose, ...args]);
 
 const tlsKey = resolve(tlsRoot, 'key.pem');
@@ -168,3 +172,6 @@ run(process.execPath, [
   'test', '--config=playwright.assignment-rollback.config.js',
 ], { cwd: resolve(repoRoot, 'main/manager-web') });
 composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', phase === 'new' ? 'verify-new' : 'verify-rollback');
+if (phase === 'rollback') {
+  baseComposeRun('up', '-d', '--wait', '--no-deps', '--force-recreate', 'backend', 'web');
+}
