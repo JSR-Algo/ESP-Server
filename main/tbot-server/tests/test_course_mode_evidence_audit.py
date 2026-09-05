@@ -144,6 +144,25 @@ def _rewrite_report(root: Path, envelope: Path, report_path: Path, report: dict)
     _rewrite(envelope, document)
 
 
+def _reanchor_to_current_expected(root: Path, candidate: dict, paths: list[Path]) -> None:
+    from course_mode_evidence_audit import (
+        ANCHORS,
+        _expected_anchors,
+        _physical_identity,
+    )
+
+    physical = _physical_identity(candidate)
+    expected = _expected_anchors(
+        candidate, physical if isinstance(physical, dict) else {}
+    )
+    for envelope in paths:
+        report_path, report = _report(root, envelope)
+        report["anchors"] = {
+            name: expected[name] for name in ANCHORS[report["gate"]]
+        }
+        _rewrite_report(root, envelope, report_path, report)
+
+
 def test_gate_specific_candidate_bound_evidence_passes(tmp_path: Path, candidate: dict) -> None:
     from course_mode_evidence_audit import audit_evidence
 
@@ -152,6 +171,37 @@ def test_gate_specific_candidate_bound_evidence_passes(tmp_path: Path, candidate
     first = audit_evidence(candidate, root, now=NOW)
     assert first == audit_evidence(candidate, root, now=NOW)
     assert first["verdict"] == "PASS" and first["reasons"] == [], first
+
+
+@pytest.mark.parametrize(
+    "mutate, reason",
+    [
+        (
+            lambda candidate: candidate["tools"]["physicalEvidence"].update(
+                signerFingerprint="f" * 64
+            ),
+            "candidate.physicalEvidence.signature",
+        ),
+        (
+            lambda candidate: candidate["tools"]["physicalEvidence"].update(identity=[]),
+            "candidate.physicalEvidence",
+        ),
+    ],
+)
+def test_auditor_rejects_invalid_physical_identity_even_when_reports_reanchor_nulls(
+    candidate: dict, mutate, reason: str,
+) -> None:
+    from course_mode_evidence_audit import audit_evidence
+
+    root = Path(candidate["evidenceRoot"])
+    paths = _complete(root, candidate)
+    mutate(candidate)
+    _reanchor_to_current_expected(root, candidate, paths)
+
+    result = audit_evidence(candidate, root, now=NOW)
+
+    assert result["verdict"] == "FAIL"
+    assert reason in result["reasons"]
 
 
 def test_common_envelope_without_actual_gate_payload_is_rejected(tmp_path: Path, candidate: dict) -> None:

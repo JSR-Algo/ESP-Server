@@ -68,10 +68,7 @@ ANCHORS = {
 SUPPORT_ARTIFACTS = {gate: {"count": 1, "ids": {f"{gate}.support.1"}, "types": {f"{gate}.log"}} for gate in GATES}
 
 
-def _expected_anchors(candidate: dict) -> dict[str, object]:
-    physical = _physical_identity(candidate)
-    if not isinstance(physical, dict):
-        physical = {}
+def _expected_anchors(candidate: dict, physical: dict) -> dict[str, object]:
     repositories = candidate.get("repositories")
     repositories = repositories if isinstance(repositories, dict) else {}
     return {
@@ -136,11 +133,23 @@ def audit_evidence(
     reasons, documents, journey_counts = set(), [], {}
     candidate_id = candidate.get("candidateId") if isinstance(candidate, dict) else None
     now = now or datetime.now(timezone.utc)
+    expected_anchors: dict[str, object] = {}
     if isinstance(candidate, dict):
         reasons.update(
             f"candidate.{reason}"
             for reason in _validate_physical_candidate(candidate, now=now)
         )
+        try:
+            physical = _physical_identity(candidate)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            physical = None
+        if physical == "signature-invalid":
+            reasons.add("candidate.physicalEvidence.signature")
+            physical = {}
+        elif not isinstance(physical, dict):
+            reasons.add("candidate.physicalEvidence")
+            physical = {}
+        expected_anchors = _expected_anchors(candidate, physical)
     evidence_value = candidate.get("evidenceRoot") if isinstance(candidate, dict) else None
     if not isinstance(evidence_value, str) or Path(evidence_value).resolve() != evidence_root.resolve():
         reasons.add("evidence.root")
@@ -268,7 +277,6 @@ def audit_evidence(
             ):
                 reasons.add(f"evidence.report.timeline.{gate}")
             anchors = report.get("anchors")
-            expected_anchors = _expected_anchors(candidate) if isinstance(candidate, dict) else {}
             if not isinstance(anchors, dict) or set(anchors) != ANCHORS[gate]:
                 reasons.add(f"evidence.anchor.{gate}")
             else:
