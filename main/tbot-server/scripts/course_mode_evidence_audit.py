@@ -15,10 +15,12 @@ from course_mode_candidate_manifest import (
     _parse_rfc3339_utc,
     read_secure_regular,
     strict_json_loads,
-    validate_candidate,
 )
 from course_mode_evidence_privacy import contains_audio
-from course_mode_physical_tft_receipt_verify import _physical_identity
+from course_mode_physical_tft_receipt_verify import (
+    _physical_identity,
+    _validate_physical_candidate,
+)
 
 GATES = [f"G{i}" for i in range(11)]
 PRIVATE = re.compile(
@@ -74,7 +76,7 @@ def _expected_anchors(candidate: dict) -> dict[str, object]:
     repositories = repositories if isinstance(repositories, dict) else {}
     return {
         "repositories": {name: value.get("sha") for name, value in repositories.items() if isinstance(value, dict)},
-        "images": {"backend": physical.get("backendImage")},
+        "images": candidate.get("images"),
         "firmware": physical.get("firmware"),
         "course": candidate.get("course"),
         "lesson": physical.get("lesson"),
@@ -135,7 +137,10 @@ def audit_evidence(
     candidate_id = candidate.get("candidateId") if isinstance(candidate, dict) else None
     now = now or datetime.now(timezone.utc)
     if isinstance(candidate, dict):
-        reasons.update(f"candidate.{reason}" for reason in validate_candidate(candidate, now=now))
+        reasons.update(
+            f"candidate.{reason}"
+            for reason in _validate_physical_candidate(candidate, now=now)
+        )
     evidence_value = candidate.get("evidenceRoot") if isinstance(candidate, dict) else None
     if not isinstance(evidence_value, str) or Path(evidence_value).resolve() != evidence_root.resolve():
         reasons.add("evidence.root")

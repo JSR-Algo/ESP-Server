@@ -24,9 +24,9 @@ def _anchors(candidate: dict, gate: str) -> dict:
         "course": candidate["course"],
         "lesson": expected["lesson"],
         "device": expected["device"],
-        "journey": candidate["database"]["journey"],
-        "database": candidate["database"]["terminalReadback"],
-        "receipts": candidate["database"]["replacement"],
+        "journey": expected["journey"],
+        "database": expected["database"],
+        "receipts": expected["replacement"],
     }
     from course_mode_evidence_audit import ANCHORS
 

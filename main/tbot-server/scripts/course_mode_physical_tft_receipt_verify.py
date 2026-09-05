@@ -13,6 +13,7 @@ from pathlib import Path
 import course_mode_physical_tft_preflight as physical_preflight
 from course_mode_candidate_manifest import (
     MAX_CANDIDATE_BYTES,
+    TOOLS_KEYS,
     _parse_rfc3339_utc,
     _secure_hash_relative,
     read_secure_regular,
@@ -170,11 +171,30 @@ def _physical_identity(candidate: dict) -> object:
     return parsed
 
 
+def _validate_physical_candidate(
+    candidate: object, *, now: datetime | None = None,
+) -> list[str]:
+    if not isinstance(candidate, dict):
+        return ["candidate.type"]
+    tools = candidate.get("tools")
+    if not isinstance(tools, dict):
+        return validate_candidate(candidate, now=now)
+    if set(tools) != TOOLS_KEYS | {"physicalEvidence"}:
+        reasons = set(validate_candidate(candidate, now=now))
+        reasons.add("tools.keys")
+        return sorted(reasons)
+    projected = dict(candidate)
+    projected["tools"] = {
+        key: value for key, value in tools.items() if key != "physicalEvidence"
+    }
+    return validate_candidate(projected, now=now)
+
+
 def validate_receipt(document: object, candidate: object, *, now: datetime | None = None) -> list[str]:
     if not isinstance(document, dict) or not isinstance(candidate, dict):
         return ["receipt.schema"]
     try:
-        candidate_reasons = validate_candidate(candidate, now=now)
+        candidate_reasons = _validate_physical_candidate(candidate, now=now)
     except (AttributeError, KeyError, TypeError, ValueError):
         candidate_reasons = ["type"]
     reasons = [f"candidate.{reason}" for reason in candidate_reasons]
@@ -243,8 +263,6 @@ def validate_receipt(document: object, candidate: object, *, now: datetime | Non
         or replacement.get("sourceLessonId") == replacement.get("replacementLessonId")
         or not _sha(replacement.get("materializationReceiptSha256"))
         or not _sha(replacement.get("cutoverReceiptSha256"))
-        or replacement
-        != (candidate.get("database", {}).get("replacement") if isinstance(candidate.get("database"), dict) else None)
         or replacement != expected_evidence.get("replacement")
     ):
         reasons.append("receipt.replacement")
@@ -258,9 +276,9 @@ def validate_receipt(document: object, candidate: object, *, now: datetime | Non
     ):
         reasons.append("receipt.repositories")
     images = candidate.get("images")
-    if document.get("backendImage") != (images.get("backend") if isinstance(images, dict) else None) or document.get(
-        "backendImage"
-    ) != expected_evidence.get("backendImage"):
+    if document.get("backendImage") != (
+        images.get("lessonStudioBackend") if isinstance(images, dict) else None
+    ) or document.get("backendImage") != expected_evidence.get("backendImage"):
         reasons.append("receipt.image")
     if document.get("firmware") != candidate.get("firmware") or document.get("firmware") != expected_evidence.get(
         "firmware"
@@ -284,8 +302,6 @@ def validate_receipt(document: object, candidate: object, *, now: datetime | Non
         not isinstance(journey, dict)
         or set(journey) != {"assignmentId", "lessonSessionId", "deliveryId"}
         or not all(_nonempty(journey.get(field)) for field in journey)
-        or journey
-        != (candidate.get("database", {}).get("journey") if isinstance(candidate.get("database"), dict) else None)
         or journey != expected_evidence.get("journey")
     ):
         reasons.append("receipt.journey")
@@ -297,12 +313,6 @@ def validate_receipt(document: object, candidate: object, *, now: datetime | Non
         or database.get("completionCount") != 1
         or type(database.get("progressCount")) is not int
         or database["progressCount"] <= 0
-        or database
-        != (
-            candidate.get("database", {}).get("terminalReadback")
-            if isinstance(candidate.get("database"), dict)
-            else None
-        )
         or database != expected_evidence.get("database")
     ):
         reasons.append("receipt.database")
