@@ -6,7 +6,7 @@ import socket
 import stat
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -15,11 +15,20 @@ import scripts.course_mode_operator_attestation as attestation
 import scripts.course_mode_release_gate as gate
 
 
+class _FixtureDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None) -> datetime:
+        value = datetime(2026, 9, 5, tzinfo=timezone.utc)
+        return value if tz is not None else value.replace(tzinfo=None)
+
+
 def _candidate(tmp_path: Path) -> tuple[Path, dict]:
     evidence_root = tmp_path / "evidence"
     evidence_root.mkdir(mode=0o700)
     payload = {
         "candidateId": "course-mode-2026-08-31.12",
+        "createdAt": "2026-08-31T00:00:00Z",
+        "expiresAt": "2026-09-15T00:00:00Z",
         "repositories": {"adminEsp": {"sha": "a" * 40}},
         "evidenceRoot": str(evidence_root),
     }
@@ -49,6 +58,8 @@ def _fd_count() -> int:
 @pytest.fixture(autouse=True)
 def valid_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(attestation, "validate_candidate", lambda _candidate: [])
+    monkeypatch.setattr(attestation, "datetime", _FixtureDateTime)
+    monkeypatch.setattr(gate, "datetime", _FixtureDateTime)
 
 
 def test_writes_exact_candidate_bound_canonical_attestation(tmp_path: Path) -> None:

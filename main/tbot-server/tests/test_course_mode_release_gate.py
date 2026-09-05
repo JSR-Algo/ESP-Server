@@ -10,9 +10,9 @@ import importlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
-import shlex
 import socket
 import stat
 import subprocess
@@ -20,11 +20,26 @@ import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 gate = importlib.import_module("scripts.course_mode_release_gate")
+
+
+class _FixtureDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None) -> datetime:
+        value = datetime(2099, 1, 4, tzinfo=timezone.utc)
+        return value if tz is not None else value.replace(tzinfo=None)
+
+
+class _HostileValidationTime:
+    tzinfo = timezone.utc
+
+    def utcoffset(self) -> timedelta:
+        raise RuntimeError("invalid timezone")
 
 
 def _fixture_host_python() -> Path:
@@ -481,6 +496,7 @@ def _configure_backend_build_fixture(
 
 @pytest.fixture
 def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setattr(gate, "datetime", _FixtureDateTime)
     repositories = {}
     for name in ("backend", "adminEsp", "firmware"):
         root = tmp_path / name
@@ -907,7 +923,7 @@ def _operator_attestation_payload(candidate_file: Path) -> dict:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     return {
         "candidateId": candidate["candidateId"],
-        "createdAt": "2099-01-01T00:00:00Z",
+        "createdAt": candidate["createdAt"],
         "effectiveUid": os.geteuid(),
         "gateSha": candidate["repositories"]["adminEsp"]["sha"],
         "hostName": socket.gethostname(),
@@ -929,6 +945,92 @@ def _write_operator_attestation(
     )
     attestation.chmod(0o444)
     return attestation
+
+
+@pytest.mark.parametrize(
+    "created_at",
+    [
+        "2098-12-31T23:59:59Z",
+        "2099-01-04T00:00:01Z",
+    ],
+)
+def test_operator_attestation_rejects_time_outside_candidate_or_now(
+    candidate_file: Path, created_at: str,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    payload = {**_operator_attestation_payload(candidate_file), "createdAt": created_at}
+    attestation = _write_operator_attestation(candidate_file, payload)
+    source = {"COURSE_MODE_OPERATOR_ATTESTATION": str(attestation)}
+
+    binding = gate._operator_attestation_binding(
+        candidate, source, now=datetime(2099, 1, 4, tzinfo=timezone.utc),
+    )
+
+    assert binding is None
+
+
+@pytest.mark.parametrize(
+    "created_at",
+    [
+        "2099-01-01T00:00:00Z",
+        "2099-01-04T00:00:00Z",
+    ],
+)
+def test_operator_attestation_accepts_candidate_and_current_time_boundaries(
+    candidate_file: Path, created_at: str,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    payload = {**_operator_attestation_payload(candidate_file), "createdAt": created_at}
+    attestation = _write_operator_attestation(candidate_file, payload)
+    source = {"COURSE_MODE_OPERATOR_ATTESTATION": str(attestation)}
+
+    binding = gate._operator_attestation_binding(
+        candidate, source, now=datetime(2099, 1, 4, tzinfo=timezone.utc),
+    )
+
+    assert binding is not None
+
+
+@pytest.mark.parametrize(
+    ("created_at", "validation_now", "accepted"),
+    [
+        ("2099-01-08T00:00:00Z", datetime(2099, 1, 8, tzinfo=timezone.utc), True),
+        ("2099-01-08T00:00:01Z", datetime(2099, 1, 9, tzinfo=timezone.utc), False),
+        ("2099-01-08T00:00:00Z", datetime(2099, 1, 8, 0, 0, 1, tzinfo=timezone.utc), False),
+    ],
+)
+def test_operator_attestation_enforces_candidate_expiry_boundary(
+    candidate_file: Path, created_at: str, validation_now: datetime, accepted: bool,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    payload = {**_operator_attestation_payload(candidate_file), "createdAt": created_at}
+    attestation = _write_operator_attestation(candidate_file, payload)
+    source = {"COURSE_MODE_OPERATOR_ATTESTATION": str(attestation)}
+
+    binding = gate._operator_attestation_binding(
+        candidate, source, now=validation_now,
+    )
+
+    assert (binding is not None) is accepted
+
+
+@pytest.mark.parametrize(
+    "now",
+    [
+        datetime(2099, 1, 4),
+        datetime(2099, 1, 4, tzinfo=timezone(timedelta(hours=1))),
+        "not-a-datetime",
+        _HostileValidationTime(),
+    ],
+)
+def test_operator_attestation_rejects_invalid_validation_time(
+    candidate_file: Path, now: object,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    attestation = _write_operator_attestation(candidate_file)
+    source = {"COURSE_MODE_OPERATOR_ATTESTATION": str(attestation)}
+
+    assert gate._operator_attestation_binding(candidate, source, now=now) is None
 
 
 def test_production_gate_blocks_without_operator_attestation(candidate_file: Path) -> None:

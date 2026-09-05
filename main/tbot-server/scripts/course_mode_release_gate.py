@@ -30,6 +30,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping, Sequence
@@ -1249,7 +1250,7 @@ def _open_snapshot_directory(path: Path) -> int:
             os.close(descriptor)
             descriptor = child
         return descriptor
-    except Exception:
+    except Exception:  # Injected clock normalization must fail closed.
         os.close(descriptor)
         raise
 
@@ -3716,8 +3717,18 @@ def _candidate_metadata_matches(candidate_path: Path, candidate: dict) -> bool:
 
 
 def _operator_attestation_binding(
-    candidate: dict, source: Mapping[str, str],
+    candidate: dict, source: Mapping[str, str], *, now: datetime | None = None,
 ) -> OperatorAttestationBinding | None:
+    validation_now = now if now is not None else datetime.now(timezone.utc)
+    try:
+        valid_validation_time = (
+            validation_now.tzinfo is not None
+            and validation_now.utcoffset() == timedelta(0)
+        )
+    except Exception:
+        return None
+    if not valid_validation_time:
+        return None
     value = source.get(OPERATOR_ATTESTATION_ENV)
     if not isinstance(value, str) or not value:
         return None
@@ -3791,7 +3802,20 @@ def _operator_attestation_binding(
         }
         if not isinstance(payload, dict) or set(payload) != OPERATOR_ATTESTATION_KEYS:
             return None
-        if _manifest._parse_rfc3339_utc(payload.get("createdAt")) is None:
+        candidate_created = _manifest._parse_rfc3339_utc(candidate.get("createdAt"))
+        candidate_expires = _manifest._parse_rfc3339_utc(candidate.get("expiresAt"))
+        attestation_created = _manifest._parse_rfc3339_utc(payload.get("createdAt"))
+        if (
+            candidate_created is None
+            or candidate_expires is None
+            or attestation_created is None
+            or validation_now > candidate_expires
+            or not (
+                candidate_created
+                <= attestation_created
+                <= min(validation_now, candidate_expires)
+            )
+        ):
             return None
         if any(
             not _json_exact_equal(payload.get(key), expected_value)
