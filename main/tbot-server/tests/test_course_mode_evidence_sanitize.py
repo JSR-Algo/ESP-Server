@@ -142,22 +142,21 @@ def test_apply_performs_all_actions_and_writes_auditor_compatible_manifests(tmp_
     assert not deleted.exists()
     assert not tree.exists()
 
-    expected = {
-        "playwright-report/data/trace.txt": nested_before,
-        "raw-audio.bin": deleted_before,
-        "request.log": text_before,
-        "session.yaml": yaml_before,
-    }
+    expected = [text_before, yaml_before, deleted_before, nested_before]
     for output_name in ("SANITIZATION-MANIFEST.json", "SANITIZED-SUMMARY.json"):
         output = artifact_root / output_name
         assert stat.S_IMODE(output.stat().st_mode) == 0o444
         document = json.loads(output.read_text(encoding="utf-8"))
         assert document["schemaVersion"] == 1
-        assert [entry["path"] for entry in document["entries"]] == sorted(expected)
+        assert [entry["path"] for entry in document["entries"]] == [
+            "artifact-0001",
+            "artifact-0002",
+            "artifact-0003",
+            "artifact-0004",
+        ]
+        expected_hashes = {(hashlib.sha256(before).hexdigest(), len(before)) for before in expected}
+        assert {(entry["sha256"], entry["bytes"]) for entry in document["entries"]} == expected_hashes
         for entry in document["entries"]:
-            before = expected[entry["path"]]
-            assert entry["bytes"] == len(before)
-            assert entry["sha256"] == hashlib.sha256(before).hexdigest()
             assert set(entry) == {
                 "action",
                 "bytes",
@@ -478,5 +477,301 @@ def test_final_transaction_cleanup_failure_revokes_success_manifests(
 
     assert result == 4
     assert target.read_text(encoding="utf-8") == "<redacted>"
+    for name in ("SANITIZATION-MANIFEST.json", "SANITIZED-SUMMARY.json"):
+        output = artifact_root / name
+        assert output.exists()
+        document = json.loads(output.read_text(encoding="utf-8"))
+        assert [entry["action"] for entry in document["entries"]] == ["sanitization-failed"]
+        assert _load_privacy_module().is_sanitized_manifest(output.read_bytes())
+
+
+@pytest.mark.parametrize("field", ["action", "classification", "reason"])
+def test_unhashable_enum_fields_fail_with_sanitized_validation_error(tmp_path: Path, field: str) -> None:
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir(mode=0o700)
+    target = artifact_root / "target.txt"
+    target.write_text("private", encoding="utf-8")
+    entry = _entry("target.txt", "delete-file")
+    entry[field] = {"unexpected": "value"}
+    spec = tmp_path / "spec.json"
+    _write_spec(spec, [entry])
+
+    result = _run(artifact_root, spec, apply=True)
+
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert "unexpected" not in result.stderr
+    assert target.read_text(encoding="utf-8") == "private"
+
+
+def test_fifo_is_rejected_by_lstat_without_opening_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_module()
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir(mode=0o700)
+    fifo = artifact_root / "capture.pipe"
+    os.mkfifo(fifo, 0o600)
+    spec = tmp_path / "spec.json"
+    _write_spec(spec, [_entry("capture.pipe", "delete-file")])
+    real_open = module.os.open
+
+    def forbid_fifo_open(path, *args, **kwargs):
+        if path == "capture.pipe":
+            raise AssertionError("FIFO was opened before lstat rejection")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", forbid_fifo_open)
+
+    result = module.run(["--artifact-root", str(artifact_root), "--remediation-spec", str(spec), "--apply"])
+
+    assert result == 2
+    assert stat.S_ISFIFO(fifo.lstat().st_mode)
+
+
+def test_fifo_remediation_spec_is_rejected_without_opening_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_module()
+    fifo = tmp_path / "spec.pipe"
+    os.mkfifo(fifo, 0o600)
+    real_open = module.os.open
+
+    def forbid_fifo_open(path, *args, **kwargs):
+        if Path(path) == fifo:
+            raise AssertionError("FIFO remediation spec was opened")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", forbid_fifo_open)
+
+    with pytest.raises(module.SanitizationError, match="regular file"):
+        module._safe_json(fifo)
+
+
+def test_secret_bearing_filenames_are_never_persisted_or_echoed(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir(mode=0o700)
+    marker = "do-not-persist-path-secret"
+    target = artifact_root / f"token={marker}.txt"
+    target.write_text("private payload", encoding="utf-8")
+    spec = tmp_path / "spec.json"
+    _write_spec(spec, [_entry(target.name, "delete-file")])
+
+    result = _run(artifact_root, spec, apply=True)
+
+    assert result.returncode == 0, result.stderr
+    outputs = [artifact_root / "SANITIZATION-MANIFEST.json", artifact_root / "SANITIZED-SUMMARY.json"]
+    serialized = result.stdout + result.stderr + "".join(path.read_text(encoding="utf-8") for path in outputs)
+    assert marker not in serialized
+    assert "token=" not in serialized
+    for output in outputs:
+        document = json.loads(output.read_text(encoding="utf-8"))
+        assert document["entries"][0]["path"] == "artifact-0001"
+        assert _load_privacy_module().is_sanitized_manifest(output.read_bytes())
+
+
+def test_staged_replacement_swap_after_link_is_detected_and_rolled_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_module()
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir(mode=0o700)
+    target = artifact_root / "target.txt"
+    target.write_text("original-secret", encoding="utf-8")
+    spec = tmp_path / "spec.json"
+    _write_spec(spec, [_entry("target.txt", "replace-text", matches=["original-secret"])])
+    real_link = module.os.link
+    real_unlink = module.os.unlink
+    swapped = False
+
+    def swap_link_source(src, dst, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and src == "replacement-0":
+            swapped = True
+            transaction_fd = kwargs["src_dir_fd"]
+            real_unlink(src, dir_fd=transaction_fd)
+            descriptor = os.open(src, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400, dir_fd=transaction_fd)
+            os.write(descriptor, b"original-secret")
+            os.close(descriptor)
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "link", swap_link_source)
+    result = module.run(["--artifact-root", str(artifact_root), "--remediation-spec", str(spec), "--apply"])
+
+    assert result == 3
+    assert target.read_text(encoding="utf-8") == "original-secret"
+    assert not (artifact_root / "SANITIZATION-MANIFEST.json").exists()
+
+
+def test_staged_output_swap_is_rejected_without_success_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_module()
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir(mode=0o700)
+    target = artifact_root / "target.txt"
+    target.write_text("private-value", encoding="utf-8")
+    spec = tmp_path / "spec.json"
+    _write_spec(spec, [_entry("target.txt", "replace-text", matches=["private-value"])])
+    real_link = module.os.link
+    real_unlink = module.os.unlink
+    swapped = False
+
+    def swap_output_source(src, dst, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and isinstance(src, str) and src.startswith("output-"):
+            swapped = True
+            transaction_fd = kwargs["src_dir_fd"]
+            real_unlink(src, dir_fd=transaction_fd)
+            descriptor = os.open(src, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444, dir_fd=transaction_fd)
+            os.write(descriptor, b'{"schemaVersion":1,"entries":[]}\n')
+            os.close(descriptor)
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "link", swap_output_source)
+    result = module.run(["--artifact-root", str(artifact_root), "--remediation-spec", str(spec), "--apply"])
+
+    assert result == 4
+    assert target.read_text(encoding="utf-8") == "<redacted>"
+    for name in ("SANITIZATION-MANIFEST.json", "SANITIZED-SUMMARY.json"):
+        output = artifact_root / name
+        if output.exists():
+            document = json.loads(output.read_text(encoding="utf-8"))
+            assert all(entry["action"] == "sanitization-failed" for entry in document["entries"])
+
+
+def test_partial_output_failure_converts_every_owned_output_to_failure_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_module()
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir(mode=0o700)
+    target = artifact_root / "target.txt"
+    target.write_text("private-value", encoding="utf-8")
+    spec = tmp_path / "spec.json"
+    _write_spec(spec, [_entry("target.txt", "replace-text", matches=["private-value"])])
+    real_link = module.os.link
+    output_links = 0
+
+    def fail_second_success_output(src, dst, *args, **kwargs):
+        nonlocal output_links
+        if isinstance(src, str) and src.startswith("output-"):
+            output_links += 1
+            if output_links == 2:
+                raise OSError("injected second output failure")
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "link", fail_second_success_output)
+    result = module.run(["--artifact-root", str(artifact_root), "--remediation-spec", str(spec), "--apply"])
+
+    assert result == 4
+    assert target.read_text(encoding="utf-8") == "<redacted>"
+    for name in ("SANITIZATION-MANIFEST.json", "SANITIZED-SUMMARY.json"):
+        output = artifact_root / name
+        assert output.exists()
+        document = json.loads(output.read_text(encoding="utf-8"))
+        assert [entry["action"] for entry in document["entries"]] == ["sanitization-failed"]
+        assert _load_privacy_module().is_sanitized_manifest(output.read_bytes())
+
+
+def test_backup_swap_before_unlink_is_detected_and_never_reports_sanitized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_module()
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir(mode=0o700)
+    target = artifact_root / "target.txt"
+    target.write_text("private-value", encoding="utf-8")
+    spec = tmp_path / "spec.json"
+    _write_spec(spec, [_entry("target.txt", "replace-text", matches=["private-value"])])
+    real_unlink = module.os.unlink
+    real_rename = module.os.rename
+    swapped = False
+
+    def swap_backup(path, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and path == "backup-0":
+            swapped = True
+            transaction_fd = kwargs["dir_fd"]
+            real_rename("backup-0", "stolen-original", src_dir_fd=transaction_fd, dst_dir_fd=transaction_fd)
+            descriptor = os.open("backup-0", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400, dir_fd=transaction_fd)
+            os.write(descriptor, b"replacement")
+            os.close(descriptor)
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "unlink", swap_backup)
+    result = module.run(["--artifact-root", str(artifact_root), "--remediation-spec", str(spec), "--apply"])
+
+    assert result == 4
+    assert target.read_text(encoding="utf-8") == "<redacted>"
     assert not (artifact_root / "SANITIZATION-MANIFEST.json").exists()
     assert not (artifact_root / "SANITIZED-SUMMARY.json").exists()
+
+
+def test_tree_member_swap_before_unlink_is_detected_and_never_reports_sanitized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_module()
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir(mode=0o700)
+    tree = artifact_root / "raw"
+    tree.mkdir()
+    target = tree / "secret.txt"
+    target.write_text("private-value", encoding="utf-8")
+    spec = tmp_path / "spec.json"
+    _write_spec(spec, [_entry("raw", "delete-tree")])
+    real_remove_at = module._remove_at
+    swapped = False
+
+    def swap_tree_member(transaction_fd: int, name: str, action) -> None:
+        nonlocal swapped
+        if not swapped and name == "backup-0":
+            swapped = True
+            backup_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=transaction_fd)
+            try:
+                os.rename("secret.txt", "stolen-original", src_dir_fd=backup_fd, dst_dir_fd=backup_fd)
+                descriptor = os.open("secret.txt", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=backup_fd)
+                os.write(descriptor, b"replacement")
+                os.close(descriptor)
+            finally:
+                os.close(backup_fd)
+        real_remove_at(transaction_fd, name, action)
+
+    monkeypatch.setattr(module, "_remove_at", swap_tree_member)
+    result = module.run(["--artifact-root", str(artifact_root), "--remediation-spec", str(spec), "--apply"])
+
+    assert result == 4
+    assert not tree.exists()
+    assert not (artifact_root / "SANITIZATION-MANIFEST.json").exists()
+    assert not (artifact_root / "SANITIZED-SUMMARY.json").exists()
+    quarantines = list(artifact_root.glob(".course-mode-sanitize-*"))
+    assert len(quarantines) == 1
+    assert (quarantines[0] / "backup-0" / "stolen-original").read_text(encoding="utf-8") == "private-value"
+
+
+def test_output_source_unlink_failure_cannot_leave_lone_success_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_module()
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir(mode=0o700)
+    target = artifact_root / "target.txt"
+    target.write_text("private-value", encoding="utf-8")
+    spec = tmp_path / "spec.json"
+    _write_spec(spec, [_entry("target.txt", "replace-text", matches=["private-value"])])
+    real_unlink = module.os.unlink
+    failed = False
+
+    def fail_success_source_unlink(path, *args, **kwargs):
+        nonlocal failed
+        if not failed and isinstance(path, str) and path.startswith("output-"):
+            failed = True
+            raise OSError("injected output source unlink failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "unlink", fail_success_source_unlink)
+    result = module.run(["--artifact-root", str(artifact_root), "--remediation-spec", str(spec), "--apply"])
+
+    assert result == 4
+    assert target.read_text(encoding="utf-8") == "<redacted>"
+    for name in ("SANITIZATION-MANIFEST.json", "SANITIZED-SUMMARY.json"):
+        output = artifact_root / name
+        assert output.exists()
+        document = json.loads(output.read_text(encoding="utf-8"))
+        assert [entry["action"] for entry in document["entries"]] == ["sanitization-failed"]
