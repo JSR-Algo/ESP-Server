@@ -147,7 +147,7 @@ const pinnedImages = inspectAndPinCandidateImages({
 environment.TBOT_LESSON_STUDIO_BACKEND_IMAGE = pinnedImages.backendImage;
 environment.TBOT_LESSON_STUDIO_WEB_IMAGE = pinnedImages.webImage;
 
-let rollbackServicesStarted = false;
+let rollbackCleanupRequired = false;
 runWithRollbackRestore(() => {
   if (phase === 'new') {
     // NEW owns a fresh isolated stack. ROLLBACK intentionally preserves this PostgreSQL volume.
@@ -157,8 +157,8 @@ runWithRollbackRestore(() => {
     composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', 'rollout-v9');
     composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', 'cancel-v9-assignment');
   } else {
+    rollbackCleanupRequired = true;
     composeRun('up', '-d', '--wait', '--no-deps', '--force-recreate', 'backend', 'web');
-    rollbackServicesStarted = true;
     composeRun('up', '-d', '--no-deps', 'derivative-media');
     composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', 'verify-new');
   }
@@ -195,6 +195,6 @@ runWithRollbackRestore(() => {
     'test', '--config=playwright.assignment-rollback.config.js',
   ], { cwd: resolve(repoRoot, 'main/manager-web') });
   composeRun('exec', '-T', 'backend', '/nodejs/bin/node', '/task4-fixture/bootstrap.cjs', phase === 'new' ? 'verify-new' : 'verify-rollback');
-}, () => rollbackServicesStarted, () => {
+}, () => rollbackCleanupRequired, () => {
   baseComposeRun('up', '-d', '--wait', '--no-deps', '--force-recreate', 'backend', 'web');
 });

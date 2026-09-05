@@ -570,10 +570,11 @@ test('Task 4 rollback restore covers failure paths and preserves the primary pha
   const phaseFailure = new Error('phase failed');
   const restoreFailure = new Error('restore failed');
   let restoreCalls = 0;
+  let rollbackCleanupRequired = false;
 
   assert.throws(() => runWithRollbackRestore(
-    () => { throw phaseFailure; },
-    () => true,
+    () => { rollbackCleanupRequired = true; throw phaseFailure; },
+    () => rollbackCleanupRequired,
     () => { restoreCalls += 1; throw restoreFailure; },
   ), (error) => error === phaseFailure);
   assert.equal(restoreCalls, 1);
@@ -636,12 +637,12 @@ test('Task 4 release commands run candidate-bound NEW and ROLLBACK orchestration
   const rollbackStartIndex = source.indexOf(
     "composeRun('up', '-d', '--wait', '--no-deps', '--force-recreate', 'backend', 'web');",
   );
-  const rollbackStartedIndex = source.indexOf('rollbackServicesStarted = true;');
+  const rollbackCleanupIndex = source.indexOf('rollbackCleanupRequired = true;');
   assert.ok(finalRollbackVerifyIndex >= 0, 'final bootstrap readback must verify rollback');
   assert.ok(baseRestoreIndex > finalRollbackVerifyIndex, 'base stack restore must follow final rollback verification');
-  assert.ok(rollbackStartedIndex > rollbackStartIndex, 'rollback is entered only after override services start');
+  assert.ok(rollbackCleanupIndex < rollbackStartIndex, 'rollback cleanup must be armed before override startup');
   assert.match(source, /finally \{\s*if \(shouldRestore\(\)\) runRollbackRestore\(restore, phaseFailed\);\s*\}/);
-  assert.match(source, /\}, \(\) => rollbackServicesStarted, \(\) => \{\s*baseComposeRun\('up', '-d', '--wait', '--no-deps', '--force-recreate', 'backend', 'web'\);\s*\}\);/);
+  assert.match(source, /\}, \(\) => rollbackCleanupRequired, \(\) => \{\s*baseComposeRun\('up', '-d', '--wait', '--no-deps', '--force-recreate', 'backend', 'web'\);\s*\}\);/);
   assert.match(source, /bootstrap\.cjs/);
   assert.match(source, /playwright\.assignment-rollback\.config\.js/);
   assert.match(source, /const mediaHostname = 'task4-media\.localhost'/);
