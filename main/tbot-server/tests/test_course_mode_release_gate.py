@@ -20,7 +20,7 @@ import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
 import pytest
@@ -40,6 +40,39 @@ class _HostileValidationTime:
 
     def utcoffset(self) -> timedelta:
         raise RuntimeError("invalid timezone")
+
+
+class _ValidationTimeSpoof:
+    tzinfo = timezone.utc
+
+    def utcoffset(self) -> timedelta:
+        return timedelta(0)
+
+    def __gt__(self, _other: object) -> bool:
+        return False
+
+    def __ge__(self, _other: object) -> bool:
+        return True
+
+
+class _StatefulTimezone(tzinfo):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def utcoffset(self, _value: datetime | None) -> timedelta:
+        self.calls += 1
+        if self.calls == 1:
+            return timedelta(0)
+        raise RuntimeError("timezone became hostile")
+
+    def dst(self, _value: datetime | None) -> timedelta:
+        return timedelta(0)
+
+
+class _FailingDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None) -> datetime:
+        raise RuntimeError("clock unavailable")
 
 
 def _fixture_host_python() -> Path:
@@ -1031,6 +1064,46 @@ def test_operator_attestation_rejects_invalid_validation_time(
     source = {"COURSE_MODE_OPERATOR_ATTESTATION": str(attestation)}
 
     assert gate._operator_attestation_binding(candidate, source, now=now) is None
+
+
+def test_operator_attestation_rejects_non_datetime_validation_time_spoof(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    payload = {
+        **_operator_attestation_payload(candidate_file),
+        "createdAt": candidate["expiresAt"],
+    }
+    attestation = _write_operator_attestation(candidate_file, payload)
+    source = {"COURSE_MODE_OPERATOR_ATTESTATION": str(attestation)}
+
+    assert gate._operator_attestation_binding(
+        candidate, source, now=_ValidationTimeSpoof(),
+    ) is None
+
+
+def test_operator_attestation_rejects_stateful_hostile_datetime(
+    candidate_file: Path,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    attestation = _write_operator_attestation(candidate_file)
+    source = {"COURSE_MODE_OPERATOR_ATTESTATION": str(attestation)}
+    stateful_timezone = _StatefulTimezone()
+    validation_now = datetime(2099, 1, 4, tzinfo=stateful_timezone)
+
+    assert gate._operator_attestation_binding(candidate, source, now=validation_now) is not None
+    assert stateful_timezone.calls == 1
+
+
+def test_operator_attestation_rejects_clock_acquisition_failure(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    attestation = _write_operator_attestation(candidate_file)
+    source = {"COURSE_MODE_OPERATOR_ATTESTATION": str(attestation)}
+    monkeypatch.setattr(gate, "datetime", _FailingDateTime)
+
+    assert gate._operator_attestation_binding(candidate, source) is None
 
 
 def test_production_gate_blocks_without_operator_attestation(candidate_file: Path) -> None:

@@ -41,6 +41,8 @@ try:
 except ModuleNotFoundError:
     _manifest = importlib.import_module("course_mode_candidate_manifest")
 
+_DATETIME_TYPE = datetime
+
 MAX_CANDIDATE_BYTES = _manifest.MAX_CANDIDATE_BYTES
 _repository_matches_candidate = _manifest._repository_matches_candidate
 read_secure_regular = _manifest.read_secure_regular
@@ -3719,15 +3721,26 @@ def _candidate_metadata_matches(candidate_path: Path, candidate: dict) -> bool:
 def _operator_attestation_binding(
     candidate: dict, source: Mapping[str, str], *, now: datetime | None = None,
 ) -> OperatorAttestationBinding | None:
-    validation_now = now if now is not None else datetime.now(timezone.utc)
     try:
-        valid_validation_time = (
-            validation_now.tzinfo is not None
-            and validation_now.utcoffset() == timedelta(0)
+        validation_now = now if now is not None else datetime.now(timezone.utc)
+        if (
+            not isinstance(validation_now, _DATETIME_TYPE)
+            or validation_now.tzinfo is None
+            or validation_now.utcoffset() != timedelta(0)
+        ):
+            return None
+        validation_now = _DATETIME_TYPE(
+            validation_now.year,
+            validation_now.month,
+            validation_now.day,
+            validation_now.hour,
+            validation_now.minute,
+            validation_now.second,
+            validation_now.microsecond,
+            tzinfo=timezone.utc,
+            fold=validation_now.fold,
         )
     except Exception:  # Injected clock normalization must fail closed.
-        return None
-    if not valid_validation_time:
         return None
     value = source.get(OPERATOR_ATTESTATION_ENV)
     if not isinstance(value, str) or not value:
@@ -3802,20 +3815,22 @@ def _operator_attestation_binding(
         }
         if not isinstance(payload, dict) or set(payload) != OPERATOR_ATTESTATION_KEYS:
             return None
-        candidate_created = _manifest._parse_rfc3339_utc(candidate.get("createdAt"))
-        candidate_expires = _manifest._parse_rfc3339_utc(candidate.get("expiresAt"))
-        attestation_created = _manifest._parse_rfc3339_utc(payload.get("createdAt"))
-        if (
-            candidate_created is None
-            or candidate_expires is None
-            or attestation_created is None
-            or validation_now > candidate_expires
-            or not (
-                candidate_created
+        try:
+            candidate_created = _manifest._parse_rfc3339_utc(candidate.get("createdAt"))
+            candidate_expires = _manifest._parse_rfc3339_utc(candidate.get("expiresAt"))
+            attestation_created = _manifest._parse_rfc3339_utc(payload.get("createdAt"))
+            valid_attestation_time = (
+                candidate_created is not None
+                and candidate_expires is not None
+                and attestation_created is not None
+                and validation_now <= candidate_expires
+                and candidate_created
                 <= attestation_created
                 <= min(validation_now, candidate_expires)
             )
-        ):
+        except Exception:
+            return None
+        if not valid_attestation_time:
             return None
         if any(
             not _json_exact_equal(payload.get(key), expected_value)
