@@ -11,23 +11,24 @@ const {
 const { validateAssignmentRuntimeCapsule } = require('./task4-assignment-runtime.cjs');
 const { composeExecutableFromEnvironment } = require('./reset-lesson-studio-e2e-state.cjs');
 
-function runRollbackRestore(restore, phaseFailed) {
+function runRollbackRestore(restore, phaseFailure) {
   try {
     restore();
   } catch (restoreFailure) {
-    if (!phaseFailed) throw restoreFailure;
+    if (!phaseFailure) throw restoreFailure;
+    phaseFailure.rollbackRestoreFailure = restoreFailure;
   }
 }
 
 function runWithRollbackRestore(work, shouldRestore, restore) {
-  let phaseFailed = false;
+  let phaseFailure;
   try {
     work();
   } catch (error) {
-    phaseFailed = true;
+    phaseFailure = error;
     throw error;
   } finally {
-    if (shouldRestore()) runRollbackRestore(restore, phaseFailed);
+    if (shouldRestore()) runRollbackRestore(restore, phaseFailure);
   }
 }
 

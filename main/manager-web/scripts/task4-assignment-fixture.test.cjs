@@ -559,7 +559,7 @@ test('Task 4 assignment browser phase uses WebKit and verifies row-scoped Monito
   assert.ok(spec.indexOf("adminApiResponse(page, 'POST', '/lesson-assignments'") > spec.indexOf('} else {'));
 });
 
-test('Task 4 rollback restore covers failure paths and preserves the primary phase failure', () => {
+test('Task 4 rollback restore reports cleanup failure without replacing the primary phase failure', () => {
   const source = readFileSync(orchestratorPath, 'utf8');
   const helperStart = source.indexOf('function runRollbackRestore(');
   const helperEnd = source.indexOf('\n\nconst phase =', helperStart);
@@ -576,19 +576,34 @@ test('Task 4 rollback restore covers failure paths and preserves the primary pha
     () => { rollbackCleanupRequired = true; throw phaseFailure; },
     () => rollbackCleanupRequired,
     () => { restoreCalls += 1; throw restoreFailure; },
-  ), (error) => error === phaseFailure);
+  ), (error) => {
+    assert.equal(error, phaseFailure);
+    assert.equal(error.rollbackRestoreFailure, restoreFailure);
+    return true;
+  });
   assert.equal(restoreCalls, 1);
   assert.throws(() => runWithRollbackRestore(
     () => {},
     () => true,
     () => { throw restoreFailure; },
   ), (error) => error === restoreFailure);
+
+  const restoredPhaseFailure = new Error('phase failed with successful restore');
+  assert.throws(() => runWithRollbackRestore(
+    () => { throw restoredPhaseFailure; },
+    () => true,
+    () => { restoreCalls += 1; },
+  ), (error) => {
+    assert.equal(error, restoredPhaseFailure);
+    assert.equal(Object.hasOwn(error, 'rollbackRestoreFailure'), false);
+    return true;
+  });
   assert.throws(() => runWithRollbackRestore(
     () => { throw phaseFailure; },
     () => false,
     () => { restoreCalls += 1; },
   ), (error) => error === phaseFailure);
-  assert.equal(restoreCalls, 1, 'pre-start failures must not trigger restore');
+  assert.equal(restoreCalls, 2, 'pre-start failures must not trigger restore');
 });
 
 test('Task 4 release commands run candidate-bound NEW and ROLLBACK orchestration', () => {
@@ -641,7 +656,8 @@ test('Task 4 release commands run candidate-bound NEW and ROLLBACK orchestration
   assert.ok(finalRollbackVerifyIndex >= 0, 'final bootstrap readback must verify rollback');
   assert.ok(baseRestoreIndex > finalRollbackVerifyIndex, 'base stack restore must follow final rollback verification');
   assert.ok(rollbackCleanupIndex < rollbackStartIndex, 'rollback cleanup must be armed before override startup');
-  assert.match(source, /finally \{\s*if \(shouldRestore\(\)\) runRollbackRestore\(restore, phaseFailed\);\s*\}/);
+  assert.match(source, /phaseFailure\.rollbackRestoreFailure = restoreFailure/);
+  assert.match(source, /finally \{\s*if \(shouldRestore\(\)\) runRollbackRestore\(restore, phaseFailure\);\s*\}/);
   assert.match(source, /\}, \(\) => rollbackCleanupRequired, \(\) => \{\s*baseComposeRun\('up', '-d', '--wait', '--no-deps', '--force-recreate', 'backend', 'web'\);\s*\}\);/);
   assert.match(source, /bootstrap\.cjs/);
   assert.match(source, /playwright\.assignment-rollback\.config\.js/);
