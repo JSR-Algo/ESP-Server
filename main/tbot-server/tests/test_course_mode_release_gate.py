@@ -2536,25 +2536,38 @@ def test_assignment_capsule_is_cleaned_after_rollback_failure(
 
 
 @pytest.mark.parametrize(
-    ("stdout", "cleanup_failed"),
+    ("lane_name", "stdout", "cleanup_failed"),
     [
-        ("ordinary phase failure output\n", False),
+        ("admin-course-mode-assignment-rollback", "ordinary phase failure output\n", False),
         (
-            "ordinary phase failure output\n"
+            "admin-course-mode-assignment-rollback",
+            "ordinary phase failure output without trailing newline\n"
             'TBOT_COURSE_MODE_CLEANUP_FAILURE={"schemaVersion":1,'
             '"kind":"assignment-rollback-base-restore"}\n',
             True,
         ),
+        (
+            "admin-course-mode-assignment-rollback",
+            'TBOT_COURSE_MODE_CLEANUP_FAILURE={"schemaVersion":1,'
+            '"kind":"assignment-rollback-base-restore-near-match"}\n',
+            False,
+        ),
+        (
+            "admin-course-mode-assignment-new",
+            'TBOT_COURSE_MODE_CLEANUP_FAILURE={"schemaVersion":1,'
+            '"kind":"assignment-rollback-base-restore"}\n',
+            False,
+        ),
     ],
-    ids=("phase-only", "phase-and-restore"),
+    ids=("phase-only", "phase-and-restore-after-unterminated-output", "near-match", "non-rollback"),
 )
 def test_assignment_failure_report_distinguishes_rollback_restore_failure(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
-    stdout: str, cleanup_failed: bool,
+    lane_name: str, stdout: str, cleanup_failed: bool,
 ) -> None:
     _authorize_assignment_test_lane(monkeypatch)
     lane = _stateful_assignment_lane(
-        "admin-course-mode-assignment-rollback", "raise SystemExit(7)",
+        lane_name, "raise SystemExit(7)",
     )
     monkeypatch.setattr(
         gate, "run_bounded_command",

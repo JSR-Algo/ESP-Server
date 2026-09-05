@@ -573,14 +573,17 @@ test('Task 4 rollback restore reports cleanup failure without replacing arbitrar
   )();
   const signalPrefix = 'TBOT_COURSE_MODE_CLEANUP_FAILURE=';
   assert.equal(ROLLBACK_RESTORE_FAILURE_SIGNAL.startsWith(signalPrefix), true);
-  assert.ok(Buffer.byteLength(ROLLBACK_RESTORE_FAILURE_SIGNAL, 'utf8') <= 256);
+  assert.ok(Buffer.byteLength(`\n${ROLLBACK_RESTORE_FAILURE_SIGNAL}\n`, 'utf8') <= 256);
   assert.deepEqual(
     JSON.parse(ROLLBACK_RESTORE_FAILURE_SIGNAL.slice(signalPrefix.length)),
     { schemaVersion: 1, kind: 'assignment-rollback-base-restore' },
   );
-  const writes = [];
-  reportRollbackRestoreFailure((value) => writes.push(value));
-  assert.deepEqual(writes, [`${ROLLBACK_RESTORE_FAILURE_SIGNAL}\n`]);
+  let inheritedStdout = 'prior output without trailing newline';
+  reportRollbackRestoreFailure((value) => { inheritedStdout += value; });
+  assert.equal(
+    inheritedStdout,
+    `prior output without trailing newline\n${ROLLBACK_RESTORE_FAILURE_SIGNAL}\n`,
+  );
 
   const captureThrown = (operation) => {
     let thrown = false;

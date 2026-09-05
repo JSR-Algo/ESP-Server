@@ -16,7 +16,7 @@ const ROLLBACK_RESTORE_FAILURE_SIGNAL =
 
 function reportRollbackRestoreFailure(write = (value) => process.stdout.write(value)) {
   try {
-    write(`${ROLLBACK_RESTORE_FAILURE_SIGNAL}\n`);
+    write(`\n${ROLLBACK_RESTORE_FAILURE_SIGNAL}\n`);
   } catch {}
 }
 
