@@ -36,6 +36,7 @@ SCHEMA_VERSION = 1
 MANIFEST_NAME = "SANITIZATION-MANIFEST.json"
 SUMMARY_NAME = "SANITIZED-SUMMARY.json"
 OUTPUT_NAMES = {MANIFEST_NAME, SUMMARY_NAME}
+RECORD_DIR_NAME = "SANITIZATION-RECORDS"
 ALLOWED_ACTIONS = {"delete-file", "delete-tree", "replace-text", "redact-yaml"}
 ALLOWED_CLASSIFICATIONS = {
     "private-content",
@@ -149,14 +150,14 @@ def _safe_json(path: Path) -> object:
 
 
 def _parse_relative_path(value: object) -> PurePosixPath:
-    if not isinstance(value, str) or not value or "\\" in value:
+    if not isinstance(value, str) or not value or "\\" in value or "\x00" in value:
         raise SanitizationError("entry path must be a safe relative path")
     path = PurePosixPath(value)
     if path.is_absolute() or path in (PurePosixPath("."), PurePosixPath("")):
         raise SanitizationError("entry path must be a safe relative path")
     if any(part in ("", ".", "..") for part in path.parts):
         raise SanitizationError("entry path must be a safe relative path")
-    if path.as_posix() in OUTPUT_NAMES:
+    if path.as_posix() in OUTPUT_NAMES or path.parts[0] == RECORD_DIR_NAME:
         raise SanitizationError("entry path collides with sanitizer output")
     return path
 
@@ -403,7 +404,7 @@ def _scan_tree(
 
 
 def _preflight(root_fd: int, entries: list[dict[str, Any]]) -> list[PlannedAction]:
-    for output_name in OUTPUT_NAMES:
+    for output_name in OUTPUT_NAMES | {RECORD_DIR_NAME}:
         with contextlib.suppress(FileNotFoundError):
             os.stat(output_name, dir_fd=root_fd, follow_symlinks=False)
             raise SanitizationError("sanitizer output already exists")
@@ -480,25 +481,6 @@ def _manifest(actions: list[PlannedAction], timestamp: str) -> bytes:
     return (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 
-def _failure_manifest(timestamp: str) -> bytes:
-    marker = b"sanitization-failed"
-    document = {
-        "entries": [
-            {
-                "action": "sanitization-failed",
-                "bytes": len(marker),
-                "classification": "quarantined-artifact",
-                "path": "artifact-0000",
-                "reason": "quarantined before audit",
-                "sha256": hashlib.sha256(marker).hexdigest(),
-                "timestamp": timestamp,
-            }
-        ],
-        "schemaVersion": SCHEMA_VERSION,
-    }
-    return (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-
-
 def _write_staged(directory_fd: int, name: str, data: bytes, mode: int) -> StagedArtifact:
     descriptor = os.open(
         name,
@@ -560,47 +542,32 @@ def _remove_owned_publication(parent_fd: int, name: str, expected: Identity) -> 
         _validate_file(metadata, "owned publication", links=metadata.st_nlink)
         if _identity(metadata) != _with_links(expected, metadata.st_nlink):
             return False
-        os.unlink(name, dir_fd=parent_fd)
+        _unlink_identity_bound(parent_fd, name, _identity(metadata), label="owned publication")
         return True
     except (OSError, SanitizationError):
         return False
 
 
-def _publish_failure_records(
-    root_fd: int,
-    transaction_fd: int,
-    failure_stages: dict[str, StagedArtifact],
-    owned_outputs: dict[str, Identity],
-) -> bool:
-    safe = True
-    for output_name in sorted(OUTPUT_NAMES):
-        try:
-            current = os.stat(output_name, dir_fd=root_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            current = None
-        if current is not None:
-            expected_owned = owned_outputs.get(output_name)
-            if expected_owned is None or current.st_nlink not in (1, 2):
-                safe = False
-                continue
-            try:
-                _validate_file(current, "owned output", links=current.st_nlink)
-                if _identity(current) != _with_links(expected_owned, current.st_nlink):
-                    raise SanitizationError("owned output identity changed")
-            except SanitizationError:
-                safe = False
-                continue
-        staged_name = f"failure-{output_name}"
-        expected_failure = failure_stages[output_name]
-        try:
-            _verify_staged(transaction_fd, staged_name, expected_failure)
-            os.rename(staged_name, output_name, src_dir_fd=transaction_fd, dst_dir_fd=root_fd)
-            _verify_staged(root_fd, output_name, expected_failure)
-        except (OSError, SanitizationError):
-            safe = False
-    with contextlib.suppress(OSError):
-        os.fsync(root_fd)
-    return safe
+def _unlink_identity_bound(parent_fd: int, name: str, expected: Identity, *, label: str) -> None:
+    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    _validate_file(before, label, links=expected.links)
+    if _identity(before) != expected:
+        raise SanitizationError(f"{label} identity changed before unlink")
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        dir_fd=parent_fd,
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if _identity(opened) != expected:
+            raise SanitizationError(f"{label} identity changed while opening")
+        os.unlink(name, dir_fd=parent_fd)
+        after = os.fstat(descriptor)
+        if _identity(after) != _with_links(expected, expected.links - 1):
+            raise SanitizationError(f"{label} link count did not decrease after unlink")
+    finally:
+        os.close(descriptor)
 
 
 def _remove_tree_at(
@@ -644,7 +611,15 @@ def _remove_tree_at(
                     expected_record = (expected_files or {}).get(child_relative.as_posix())
                     if expected_record is None or _identity(child_metadata) != expected_record.identity:
                         raise SanitizationError("quarantined file identity changed")
-                os.unlink(child_name, dir_fd=descriptor)
+                    expected_identity = expected_record.identity
+                else:
+                    expected_identity = _identity(child_metadata)
+                _unlink_identity_bound(
+                    descriptor,
+                    child_name,
+                    expected_identity,
+                    label="quarantined file",
+                )
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
@@ -665,7 +640,12 @@ def _remove_at(transaction_fd: int, name: str, action: PlannedAction) -> None:
         _validate_file(metadata, "quarantined file")
         if _identity(metadata) != action.records[0].identity:
             raise SanitizationError("quarantined file identity changed")
-        os.unlink(name, dir_fd=transaction_fd)
+        _unlink_identity_bound(
+            transaction_fd,
+            name,
+            action.records[0].identity,
+            label="quarantined file",
+        )
 
 
 def _create_transaction(root_fd: int) -> tuple[str, int]:
@@ -695,16 +675,58 @@ def _create_transaction(root_fd: int) -> tuple[str, int]:
     raise SanitizationError("could not allocate a private transaction directory")
 
 
+def _create_record_directory(transaction_fd: int) -> int:
+    os.mkdir("records-pending", 0o700, dir_fd=transaction_fd)
+    descriptor = os.open(
+        "records-pending",
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=transaction_fd,
+    )
+    try:
+        _validate_directory(os.fstat(descriptor), "record directory")
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _verify_record_directory(
+    parent_fd: int,
+    name: str,
+    expected_directory: Identity,
+    expected_outputs: dict[str, StagedArtifact],
+) -> Identity:
+    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    _validate_directory(before, "record directory")
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=parent_fd,
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if _identity(opened) != _identity(before) or _identity(opened) != expected_directory:
+            raise SanitizationError("record directory identity changed")
+        if set(os.listdir(descriptor)) != set(OUTPUT_NAMES):
+            raise SanitizationError("record directory contents changed")
+        for output_name, expected in expected_outputs.items():
+            _verify_staged(descriptor, output_name, expected)
+        return _identity(opened)
+    finally:
+        os.close(descriptor)
+
+
 def _transaction(root_fd: int, actions: list[PlannedAction]) -> None:
     transaction_name, transaction_fd = _create_transaction(root_fd)
+    record_fd: int | None = None
     moved: list[tuple[int, PlannedAction, int, str]] = []
     replacements: list[tuple[int, str, Identity]] = []
     replacement_stages: dict[int, StagedArtifact] = {}
     output_stages: dict[str, StagedArtifact] = {}
-    failure_stages: dict[str, StagedArtifact] = {}
     retain_transaction = False
-    transaction_removed = False
+    record_published = False
     try:
+        record_fd = _create_record_directory(transaction_fd)
         for index, action in enumerate(actions):
             if action.replacement is not None:
                 replacement_stages[index] = _write_staged(
@@ -712,12 +734,9 @@ def _transaction(root_fd: int, actions: list[PlannedAction]) -> None:
                 )
         timestamp = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
         payload = _manifest(actions, timestamp)
-        failure_payload = _failure_manifest(timestamp)
         for output_name in sorted(OUTPUT_NAMES):
-            output_stages[output_name] = _write_staged(transaction_fd, f"output-{output_name}", payload, 0o444)
-            failure_stages[output_name] = _write_staged(
-                transaction_fd, f"failure-{output_name}", failure_payload, 0o444
-            )
+            output_stages[output_name] = _write_staged(record_fd, output_name, payload, 0o444)
+        os.fsync(record_fd)
         os.fsync(transaction_fd)
 
         try:
@@ -760,7 +779,12 @@ def _transaction(root_fd: int, actions: list[PlannedAction]) -> None:
                     replacements[-1] = (parent_fd, name, _identity_at(parent_fd, name))
                     _verify_staged(transaction_fd, f"replacement-{index}", expected_stage, links=2)
                     _verify_staged(parent_fd, name, expected_stage, links=2)
-                    os.unlink(f"replacement-{index}", dir_fd=transaction_fd)
+                    _unlink_identity_bound(
+                        transaction_fd,
+                        f"replacement-{index}",
+                        _with_links(expected_stage.identity, 2),
+                        label="staged replacement",
+                    )
                     _verify_staged(parent_fd, name, expected_stage)
                 os.fsync(parent_fd)
         except Exception as commit_error:
@@ -799,66 +823,71 @@ def _transaction(root_fd: int, actions: list[PlannedAction]) -> None:
                 cleanup_failed = True
             finally:
                 os.close(parent_fd)
-        expected_staged_names = {
-            *(f"output-{name}" for name in OUTPUT_NAMES),
-            *(f"failure-{name}" for name in OUTPUT_NAMES),
-        }
-        if set(os.listdir(transaction_fd)) != expected_staged_names:
+        if set(os.listdir(transaction_fd)) != {"records-pending"}:
             cleanup_failed = True
         os.fsync(transaction_fd)
         if cleanup_failed:
             retain_transaction = True
             raise SanitizationError("sanitization committed but secure backup cleanup failed")
 
-        output_publications: dict[str, Identity] = {}
+        expected_record_identity = _identity(os.fstat(record_fd))
+        published_identity: Identity | None = None
         try:
-            for output_name in sorted(OUTPUT_NAMES):
-                staged = f"output-{output_name}"
-                expected_output = output_stages[output_name]
-                _verify_staged(transaction_fd, staged, expected_output)
-                os.link(
-                    staged,
-                    output_name,
-                    src_dir_fd=transaction_fd,
-                    dst_dir_fd=root_fd,
-                    follow_symlinks=False,
-                )
-                output_publications[output_name] = _with_links(expected_output.identity, 2)
-                output_publications[output_name] = _identity_at(root_fd, output_name)
-                _verify_staged(transaction_fd, staged, expected_output, links=2)
-                _verify_staged(root_fd, output_name, expected_output, links=2)
-                os.unlink(staged, dir_fd=transaction_fd)
-                _verify_staged(root_fd, output_name, expected_output)
+            _verify_record_directory(
+                transaction_fd,
+                "records-pending",
+                expected_record_identity,
+                output_stages,
+            )
+            os.rename(
+                "records-pending",
+                RECORD_DIR_NAME,
+                src_dir_fd=transaction_fd,
+                dst_dir_fd=root_fd,
+            )
+            record_published = True
+            published_identity = _identity_at(root_fd, RECORD_DIR_NAME)
+            _verify_record_directory(
+                root_fd,
+                RECORD_DIR_NAME,
+                expected_record_identity,
+                output_stages,
+            )
             os.fsync(root_fd)
         except (OSError, SanitizationError) as publish_error:
-            failure_safe = _publish_failure_records(root_fd, transaction_fd, failure_stages, output_publications)
-            retain_transaction = not failure_safe
-            if failure_safe:
-                raise SanitizationError("sanitization committed; failure manifests published") from publish_error
-            raise SanitizationError(
-                "sanitization committed and output failure could not be fully recorded"
-            ) from publish_error
+            if record_published and published_identity is not None:
+                try:
+                    if _identity_at(root_fd, RECORD_DIR_NAME) != published_identity:
+                        raise SanitizationError("published record identity changed")
+                    os.rename(
+                        RECORD_DIR_NAME,
+                        "records-pending",
+                        src_dir_fd=root_fd,
+                        dst_dir_fd=transaction_fd,
+                    )
+                    record_published = False
+                    os.fsync(root_fd)
+                except (OSError, SanitizationError):
+                    retain_transaction = True
+            raise SanitizationError("sanitization committed but record publication failed") from publish_error
 
-        try:
-            _remove_tree_at(root_fd, transaction_name)
-            transaction_removed = True
-            os.fsync(root_fd)
-        except (OSError, SanitizationError) as cleanup_error:
-            failure_safe = _publish_failure_records(root_fd, transaction_fd, failure_stages, output_publications)
+        # Once the directory rename commits, the pair is complete. Failure to
+        # remove an otherwise empty transaction directory cannot split it or
+        # re-expose sanitized payloads.
+        if not os.listdir(transaction_fd):
             with contextlib.suppress(OSError):
-                os.fsync(root_fd)
+                os.rmdir(transaction_name, dir_fd=root_fd)
+        else:
             retain_transaction = True
-            if not failure_safe:
-                raise SanitizationError(
-                    "sanitization committed and cleanup failure could not be fully recorded"
-                ) from cleanup_error
-            raise SanitizationError("sanitization committed but transaction cleanup failed") from cleanup_error
+            raise SanitizationError("sanitization committed with unexpected transaction contents")
     finally:
         for _index, _action, parent_fd, _name in moved:
             with contextlib.suppress(OSError):
                 os.close(parent_fd)
+        if record_fd is not None:
+            os.close(record_fd)
         os.close(transaction_fd)
-        if not retain_transaction and not transaction_removed:
+        if not retain_transaction and not record_published:
             with contextlib.suppress(OSError, SanitizationError):
                 _remove_tree_at(root_fd, transaction_name)
 
