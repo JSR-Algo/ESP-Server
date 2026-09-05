@@ -53,6 +53,7 @@ PRIVATE_PATH = re.compile(r"(?i)(?:^|[-_.\/])(?:audio|transcript|utterance|raw[-
 MIN_BASE64_CHARS = 8
 BASE64_BLOCK = re.compile(
     rb"(?<![A-Za-z0-9+/_=-])(?:[A-Za-z0-9+/_=-]{8,}|"
+    rb"[A-Za-z0-9+/_=-]{4}(?:[ \t]+[A-Za-z0-9+/_=-]{4})+|"
     rb"[A-Za-z0-9+/_=-]{4,}(?:[ \t]*\r?\n[ \t]*[A-Za-z0-9+/_=-]{4,})+)"
     rb"(?![A-Za-z0-9+/_=-])"
 )

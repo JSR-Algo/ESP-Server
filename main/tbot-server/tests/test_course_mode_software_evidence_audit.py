@@ -952,6 +952,25 @@ def test_short_and_whitespace_split_base64_secrets_are_scanned(
     assert "content.secret" in report["findings"]
 
 
+def test_same_line_whitespace_split_base64_secret_is_scanned(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    encoded = base64.b64encode(b"Authorization: Bearer x").decode()
+    split = " ".join(encoded[index : index + 4] for index in range(0, len(encoded), 4))
+    artifact = preserved / "same-line-secret.txt"
+    artifact.write_text(split, encoding="ascii")
+    artifact.chmod(0o444)
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert "content.secret" in report["findings"]
+
+
 def test_secret_json_key_matching_avoids_counter_and_policy_fields(
     evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
 ) -> None:
@@ -1081,6 +1100,22 @@ def test_intermediate_root_metadata_and_output_symlink_are_rejected(
     aliased_output = output_parent / "06-software-evidence-audit.json"
     report = auditor.audit(candidate, evidence, [], aliased_output)
     assert "output.unsafe" in report["findings"]
+
+
+def test_audit_budget_counts_directories_and_does_not_materialize_rglob(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    for index in range(20):
+        (preserved / f"dir-{index}").mkdir()
+    monkeypatch.setattr(auditor, "MAX_AUDIT_FILES", 10)
+    monkeypatch.setattr(Path, "rglob", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("rglob")))
+
+    report = auditor.audit(candidate, evidence, [preserved], output)
+
+    assert "evidence.budget" in report["findings"]
 
 
 def test_zip_member_after_first_64k_is_scanned(
