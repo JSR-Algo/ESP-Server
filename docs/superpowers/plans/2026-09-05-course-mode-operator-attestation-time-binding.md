@@ -97,13 +97,34 @@ At the start of the binding attempt, use one aware UTC value and fail closed on
 invalid injected values:
 
 ```python
-validation_now = now if now is not None else datetime.now(timezone.utc)
-if validation_now.tzinfo is None or validation_now.utcoffset() != timedelta(0):
+_DATETIME_TYPE = datetime
+
+try:
+    validation_now = now if now is not None else datetime.now(timezone.utc)
+    if (
+        not isinstance(validation_now, _DATETIME_TYPE)
+        or validation_now.tzinfo is None
+        or validation_now.utcoffset() != timedelta(0)
+    ):
+        return None
+    validation_now = _DATETIME_TYPE(
+        validation_now.year,
+        validation_now.month,
+        validation_now.day,
+        validation_now.hour,
+        validation_now.minute,
+        validation_now.second,
+        validation_now.microsecond,
+        tzinfo=timezone.utc,
+        fold=validation_now.fold,
+    )
+except Exception:
     return None
 ```
 
-Import only the required datetime symbols and preserve the existing exception
-handling.
+Capture the built-in datetime type before tests replace the module clock. Guard
+clock acquisition and normalization so spoofed types and hostile timezone
+implementations fail closed, then use only the stable UTC copy in comparisons.
 
 - [ ] **Step 3: Enforce the exact temporal contract**
 
