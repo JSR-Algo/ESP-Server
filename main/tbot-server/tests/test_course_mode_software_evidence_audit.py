@@ -590,3 +590,182 @@ def test_cli_does_not_resolve_away_candidate_symlink(
 
     assert completed.returncode == 1
     assert "candidate.metadata_or_json" in report["findings"]
+
+
+def test_invalid_candidate_id_is_not_echoed(
+    evidence_fixture: tuple[Path, Path, Path]
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    payload = json.loads(candidate.read_text(encoding="utf-8"))
+    marker = "attacker-candidate-id-secret"
+    payload["candidateId"] = marker
+    candidate.chmod(0o644)
+    _write_json(candidate, payload)
+
+    completed = _run(candidate, evidence, output)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert report["candidateId"] is None
+    assert marker not in completed.stdout
+    assert marker not in output.read_text(encoding="utf-8")
+
+
+def test_output_cannot_collide_with_required_input_or_alias_it(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    required = evidence / "03-quick-gate.json"
+    collision = _run(candidate, evidence, required)
+    assert collision.returncode == 1
+    assert "output.collision" in json.loads(collision.stdout)["findings"]
+    assert required.read_bytes() != output.read_bytes() if output.exists() else True
+
+    alias = tmp_path / "output-alias.json"
+    alias.symlink_to(required)
+    aliased = _run(candidate, evidence, alias)
+    assert aliased.returncode == 1
+    assert "output.collision" in json.loads(aliased.stdout)["findings"]
+
+    hardlink = tmp_path / "output-hardlink.json"
+    os.link(required, hardlink)
+    linked = _run(candidate, evidence, hardlink)
+    assert linked.returncode == 1
+    assert "output.collision" in json.loads(linked.stdout)["findings"]
+
+
+@pytest.mark.parametrize("payload", [b"not a zip", b"MZ-self-extracting-prefix"])
+def test_zip_extension_requires_valid_zip_and_prefixed_zip_is_supported(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path, payload: bytes
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    artifact = preserved / "capture.zip"
+    if payload.startswith(b"MZ"):
+        payload = b"MZ" + _zip({"result.txt": b"PASS"})
+    artifact.write_bytes(payload)
+    artifact.chmod(0o444)
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    if payload.startswith(b"MZ"):
+        assert completed.returncode == 0
+        assert report["checkedArchiveMemberCount"] == 1
+    else:
+        assert completed.returncode == 1
+        assert "archive.invalid" in report["findings"]
+
+
+def test_tombstone_strings_and_embedded_base64_are_still_scanned(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    marker = "tombstone-secret-value"
+    _write_json(
+        preserved / "sanitized-tombstone.json",
+        {
+            "entries": [
+                {
+                    "action": "deleted",
+                    "bytes": 123,
+                    "classification": "private-playwright-capture",
+                    "path": "results/trace.zip",
+                    "reason": f"Authorization: Bearer {marker}",
+                    "sha256": "d" * 64,
+                    "timestamp": "2026-09-05T00:00:00Z",
+                }
+            ],
+            "schemaVersion": 1,
+        },
+    )
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert "content.secret" in report["findings"]
+    assert marker not in completed.stdout
+
+
+def test_zip_member_after_first_64k_is_scanned(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    artifact = preserved / "report.zip"
+    artifact.write_bytes(_zip({"report.html": b"x" * 70_000 + b"Playwright HTML report"}))
+    artifact.chmod(0o444)
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert "content.raw_playwright" in report["findings"]
+
+
+def test_malformed_pem_private_key_marker_is_rejected(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    key = preserved / "not-a-key.txt"
+    key.write_text("-----BEGIN PRIVATE KEY-----\nmalformed\n", encoding="utf-8")
+    key.chmod(0o444)
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert "content.private_key" in report["findings"]
+
+
+def test_archive_budgets_are_cumulative_across_nested_members(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    inner = _zip({f"member-{index}.txt": b"ok" for index in range(4_100)})
+    artifact = preserved / "nested.zip"
+    artifact.write_bytes(_zip({"inner.zip": inner}))
+    artifact.chmod(0o444)
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert "archive.oversize" in report["findings"]
+
+
+def test_symlinked_evidence_or_preserved_root_is_rejected_before_traversal(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    evidence_alias = tmp_path / "evidence-alias"
+    evidence_alias.symlink_to(evidence, target_is_directory=True)
+    candidate_payload = json.loads(candidate.read_text(encoding="utf-8"))
+    candidate.chmod(0o644)
+    candidate_payload["evidenceRoot"] = str(evidence_alias)
+    _write_json(candidate, candidate_payload)
+
+    completed = _run(candidate, evidence_alias, output)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert "evidence.root" in report["findings"]
+
+    candidate_payload["evidenceRoot"] = str(evidence)
+    candidate.chmod(0o644)
+    _write_json(candidate, candidate_payload)
+    preserved_alias = tmp_path / "preserved-alias"
+    preserved_alias.symlink_to(evidence, target_is_directory=True)
+    completed = _run(candidate, evidence, output, preserved_alias)
+    report = json.loads(completed.stdout)
+    assert completed.returncode == 1
+    assert "preserved.root" in report["findings"]

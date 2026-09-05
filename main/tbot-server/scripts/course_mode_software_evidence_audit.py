@@ -131,6 +131,39 @@ def _load_json(path: Path) -> tuple[object | None, bytes | None]:
         return None, None
 
 
+def _absolute(path: Path) -> Path:
+    return path if path.is_absolute() else Path.cwd() / path
+
+
+def _secure_root(path: Path) -> bool:
+    try:
+        absolute = _absolute(path)
+        current = Path(absolute.anchor)
+        for component in absolute.parts[1:]:
+            current /= component
+            if current.is_symlink():
+                return False
+        metadata = absolute.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and metadata.st_uid == os.geteuid()
+        and not metadata.st_mode & 0o022
+    )
+
+
+def _same_file(left: Path, right: Path) -> bool:
+    try:
+        return left == right or os.path.samefile(left, right)
+    except OSError:
+        return left == right
+
+
+def _output_conflicts(output: Path, protected: list[Path]) -> bool:
+    return any(_same_file(output, path) for path in protected)
+
+
 def _lane_report(document: object, candidate_id: object, lanes: list[str], attestation_sha: str | None) -> bool:
     if not isinstance(document, dict):
         return False
@@ -246,12 +279,18 @@ def _candidate_identity(candidate: object, evidence_root: Path) -> bool:
 def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path], output: Path) -> dict[str, object]:
     findings: set[str] = set()
     candidate, candidate_bytes = _load_json(candidate_path)
-    candidate_id = candidate.get("candidateId") if isinstance(candidate, dict) else None
+    raw_candidate_id = candidate.get("candidateId") if isinstance(candidate, dict) else None
+    candidate_id = None
     documents: dict[str, object] = {}
     document_bytes: dict[str, bytes] = {}
     checked_files = 1
     checked_archive_members = 0
     raw_playwright_absent = True
+    protected_inputs = [candidate_path] + [evidence_root / name for name in REQUIRED_EVIDENCE]
+    if _output_conflicts(output, protected_inputs):
+        findings.add("output.collision")
+    if not _secure_root(evidence_root):
+        findings.add("evidence.root")
     if candidate is None:
         findings.add("candidate.metadata_or_json")
     candidate_bytes = candidate_bytes or b""
@@ -260,6 +299,8 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
     checked_archive_members += candidate_members
     if not _candidate_identity(candidate, evidence_root):
         findings.add("candidate.identity")
+    elif isinstance(raw_candidate_id, str) and CANDIDATE_ID.fullmatch(raw_candidate_id):
+        candidate_id = raw_candidate_id
     for name in REQUIRED_EVIDENCE:
         document, data = _load_json(evidence_root / name)
         if document is None:
@@ -355,6 +396,8 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
                 raw_playwright_absent = False
                 findings.add("evidence.raw_playwright")
             continue
+        if _same_file(output, path):
+            findings.add("output.collision")
         checked_files += 1
         if (
             not stat.S_ISREG(metadata.st_mode)
@@ -375,7 +418,7 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
         if content_findings & {"content.embedded_playwright", "content.raw_playwright"}:
             raw_playwright_absent = False
     for root in preserved_roots:
-        if not root.is_dir():
+        if not _secure_root(root):
             findings.add("preserved.root")
             continue
         try:
@@ -395,6 +438,8 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
                     raw_playwright_absent = False
                     findings.add("preserved.raw_playwright")
                 continue
+            if _same_file(output, path):
+                findings.add("output.collision")
             checked_files += 1
             if (
                 not stat.S_ISREG(metadata.st_mode)
@@ -409,8 +454,8 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
             except OSError:
                 findings.add("preserved.metadata")
                 continue
-            if is_sanitized_manifest(data):
-                continue
+            if ("tombstone" in path.name.lower() or "summary" in path.name.lower()) and not is_sanitized_manifest(data):
+                findings.add("preserved.manifest")
             if any(part.lower() in RAW_PLAYWRIGHT_DIRS for part in relative_parts):
                 raw_playwright_absent = False
                 findings.add("preserved.raw_playwright")
@@ -426,7 +471,7 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
         "firmwareIdentity": _firmware_identity(candidate),
         "curriculumIdentity": _curriculum_identity(candidate),
         "secureFileMetadata": not findings.intersection(
-            {"candidate.metadata_or_json", "evidence.metadata_or_json", "preserved.metadata", "preserved.root"}
+            {"candidate.metadata_or_json", "evidence.metadata_or_json", "evidence.root", "preserved.metadata", "preserved.root"}
         ),
         "validator": validator_ok,
         "attestationBinding": attestation_ok,
@@ -484,10 +529,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--preserved-root", action="append", default=[], type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
-    evidence_root = args.evidence_root.resolve()
-    output = args.output.resolve()
-    candidate_path = args.candidate if args.candidate.is_absolute() else Path.cwd() / args.candidate
-    preserved_roots = [path if path.is_absolute() else Path.cwd() / path for path in args.preserved_root]
+    evidence_root = _absolute(args.evidence_root)
+    output = _absolute(args.output)
+    candidate_path = _absolute(args.candidate)
+    preserved_roots = [_absolute(path) for path in args.preserved_root]
     report = audit(candidate_path, evidence_root, preserved_roots, output)
     try:
         output.relative_to(evidence_root)
@@ -495,7 +540,9 @@ def main(argv: list[str] | None = None) -> int:
         report["findings"] = sorted(set(report["findings"]) | {"output.unsafe"})
         report["status"] = "fail"
     else:
-        if not _write_output(output, report):
+        if "output.collision" in report["findings"]:
+            pass
+        elif not _write_output(output, report):
             report["findings"] = sorted(set(report["findings"]) | {"output.write"})
             report["status"] = "fail"
     print(json.dumps(report, sort_keys=True, separators=(",", ":")))

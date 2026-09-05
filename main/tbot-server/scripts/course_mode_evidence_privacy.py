@@ -18,6 +18,8 @@ ISO_AUDIO_SAMPLE_ENTRIES = (b"mp4a", b"enca", b"alac", b"ac-3", b"ec-3", b"Opus"
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 SANITIZED_CONTAINER_KEYS = {"entries", "files", "schemaVersion"}
 SANITIZED_ENTRY_KEYS = {"path", "sha256", "bytes", "classification", "action", "reason", "timestamp"}
+SAFE_LABEL = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+RFC3339_UTC = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$")
 MAX_ARCHIVE_MEMBERS = 4096
 MAX_ARCHIVE_MEMBER_BYTES = 4 * 1024 * 1024
 MAX_ARCHIVE_TOTAL_BYTES = 16 * 1024 * 1024
@@ -96,8 +98,8 @@ def contains_audio(data: bytes) -> bool:
 def is_sanitized_manifest(data: bytes) -> bool:
     """Recognize path/hash-only summaries without treating labels as private payload."""
     try:
-        document = json.loads(data)
-    except (UnicodeError, json.JSONDecodeError):
+        document = json.loads(data, object_pairs_hook=_reject_duplicate_keys)
+    except (UnicodeError, json.JSONDecodeError, ValueError):
         return False
     if not isinstance(document, dict) or not set(document) <= SANITIZED_CONTAINER_KEYS:
         return False
@@ -119,9 +121,27 @@ def is_sanitized_manifest(data: bytes) -> bool:
             return False
         if "bytes" in entry and (not isinstance(entry["bytes"], int) or entry["bytes"] < 0):
             return False
-        if any(not isinstance(entry[key], str) for key in SANITIZED_ENTRY_KEYS - {"path", "sha256", "bytes"} if key in entry):
+        if (
+            not isinstance(entry["action"], str)
+            or SAFE_LABEL.fullmatch(entry["action"]) is None
+            or not isinstance(entry["classification"], str)
+            or SAFE_LABEL.fullmatch(entry["classification"]) is None
+            or not entry["reason"]
+            or len(entry["reason"]) > 512
+            or "\n" in entry["reason"]
+            or RFC3339_UTC.fullmatch(entry["timestamp"]) is None
+        ):
             return False
     return not (SECRET_TEXT.search(data) or BEARER_VALUE.search(data))
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
 
 
 def _has_secret_json(value: object) -> bool:
@@ -140,26 +160,13 @@ def _contains_secret(data: bytes) -> bool:
     if SECRET_TEXT.search(data) or BEARER_VALUE.search(data):
         return True
     try:
-        return _has_secret_json(json.loads(data))
-    except (UnicodeError, json.JSONDecodeError):
+        return _has_secret_json(json.loads(data, object_pairs_hook=_reject_duplicate_keys))
+    except (UnicodeError, json.JSONDecodeError, ValueError):
         return False
 
 
 def _contains_private_key(data: bytes) -> bool:
-    for match in PEM_PRIVATE_KEY.finditer(data):
-        block = match.group(0)
-        if b"ENCRYPTED PRIVATE KEY" in block:
-            return True
-        try:
-            from cryptography.hazmat.primitives import serialization
-
-            serialization.load_pem_private_key(block, password=None)
-            return True
-        except TypeError:
-            return True
-        except (ImportError, ValueError):
-            continue
-    return False
+    return bool(PEM_PRIVATE_KEY.search(data) or re.search(rb"-----BEGIN [^-\r\n]{0,64}PRIVATE KEY-----", data))
 
 
 def _decoded_base64_blocks(data: bytes):
@@ -195,19 +202,24 @@ def _embedded_playwright(data: bytes) -> bool:
                     return True
                 if info.file_size <= MAX_ARCHIVE_MEMBER_BYTES and info.compress_type in SUPPORTED_ZIP_COMPRESSION:
                     with archive.open(info) as member:
-                        if _looks_like_playwright(member.read(min(info.file_size, 64 * 1024)), info.filename):
+                        if _looks_like_playwright(member.read(), info.filename):
                             return True
     except (OSError, RuntimeError, zipfile.BadZipFile, NotImplementedError):
         return True
     return False
 
 
-def scan_evidence_payload(data: bytes, name: str, *, archive_depth: int = 0) -> tuple[set[str], int]:
+def scan_evidence_payload(
+    data: bytes,
+    name: str,
+    *,
+    archive_depth: int = 0,
+    _budget: dict[str, int] | None = None,
+) -> tuple[set[str], int]:
     """Scan one file and bounded nested ZIP members without returning payload bytes."""
     findings: set[str] = set()
-    members_checked = 0
-    if is_sanitized_manifest(data):
-        return findings, members_checked
+    budget = _budget or {"members": 0, "expanded": 0}
+    starting_members = budget["members"]
     lowered_name = name.lower()
     suffix = PurePosixPath(lowered_name).suffix
     if contains_audio(data):
@@ -226,27 +238,30 @@ def scan_evidence_payload(data: bytes, name: str, *, archive_depth: int = 0) -> 
         if _embedded_playwright(decoded):
             findings.add("content.embedded_playwright")
             break
-    is_zip = data.startswith(b"PK\x03\x04") or data.startswith(b"PK\x05\x06")
+    is_zip = zipfile.is_zipfile(io.BytesIO(data))
+    if suffix == ".zip" and not is_zip:
+        findings.add("archive.invalid")
+        return findings, budget["members"] - starting_members
     if suffix in ARCHIVE_SUFFIXES and suffix != ".zip" and not is_zip:
         findings.add("archive.unsupported")
-        return findings, members_checked
+        return findings, budget["members"] - starting_members
     if not is_zip:
-        return findings, members_checked
+        return findings, budget["members"] - starting_members
     if archive_depth >= MAX_ARCHIVE_DEPTH:
         findings.add("archive.nested_limit")
-        return findings, members_checked
+        return findings, budget["members"] - starting_members
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             infos = archive.infolist()
-            if len(infos) > MAX_ARCHIVE_MEMBERS:
+            if len(infos) > MAX_ARCHIVE_MEMBERS or budget["members"] + len(infos) > MAX_ARCHIVE_MEMBERS:
                 findings.add("archive.oversize")
-                return findings, members_checked
+                return findings, budget["members"] - starting_members
             total = 0
             seen: set[str] = set()
             for info in infos:
                 if info.is_dir():
                     continue
-                members_checked += 1
+                budget["members"] += 1
                 path = PurePosixPath(info.filename)
                 if path.is_absolute() or ".." in path.parts or info.filename in seen:
                     findings.add("archive.invalid")
@@ -264,7 +279,12 @@ def scan_evidence_payload(data: bytes, name: str, *, archive_depth: int = 0) -> 
                     findings.add("archive.unsupported")
                     continue
                 total += info.file_size
-                if info.file_size > MAX_ARCHIVE_MEMBER_BYTES or total > MAX_ARCHIVE_TOTAL_BYTES:
+                budget["expanded"] += info.file_size
+                if (
+                    info.file_size > MAX_ARCHIVE_MEMBER_BYTES
+                    or total > MAX_ARCHIVE_TOTAL_BYTES
+                    or budget["expanded"] > MAX_ARCHIVE_TOTAL_BYTES
+                ):
                     findings.add("archive.oversize")
                     continue
                 try:
@@ -273,10 +293,10 @@ def scan_evidence_payload(data: bytes, name: str, *, archive_depth: int = 0) -> 
                     findings.add("archive.invalid")
                     continue
                 child_findings, child_count = scan_evidence_payload(
-                    member_data, info.filename, archive_depth=archive_depth + 1
+                    member_data, info.filename, archive_depth=archive_depth + 1, _budget=budget
                 )
                 findings.update(child_findings)
-                members_checked += child_count
+                del child_count
     except (OSError, zipfile.BadZipFile, ValueError):
         findings.add("archive.invalid")
-    return findings, members_checked
+    return findings, budget["members"] - starting_members
