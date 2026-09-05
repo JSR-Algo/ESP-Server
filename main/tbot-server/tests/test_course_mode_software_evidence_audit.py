@@ -952,14 +952,15 @@ def test_short_and_whitespace_split_base64_secrets_are_scanned(
     assert "content.secret" in report["findings"]
 
 
+@pytest.mark.parametrize("split_size", [1, 2, 3, 5, 6, 7])
 def test_same_line_whitespace_split_base64_secret_is_scanned(
-    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path, split_size: int
 ) -> None:
     candidate, evidence, output = evidence_fixture
     preserved = tmp_path / "preserved"
     preserved.mkdir()
     encoded = base64.b64encode(b"Authorization: Bearer x").decode()
-    split = " ".join(encoded[index : index + 4] for index in range(0, len(encoded), 4))
+    split = " ".join(encoded[index : index + split_size] for index in range(0, len(encoded), split_size))
     artifact = preserved / "same-line-secret.txt"
     artifact.write_text(split, encoding="ascii")
     artifact.chmod(0o444)
@@ -1116,6 +1117,75 @@ def test_audit_budget_counts_directories_and_does_not_materialize_rglob(
     report = auditor.audit(candidate, evidence, [preserved], output)
 
     assert "evidence.budget" in report["findings"]
+
+
+def test_streaming_wide_iterator_stops_at_remaining_budget(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    for index in range(100):
+        artifact = preserved / f"wide-{index}.txt"
+        artifact.write_bytes(b"safe")
+        artifact.chmod(0o444)
+    original_scandir = auditor.os.scandir
+    consumed = 0
+
+    class CountingIterator:
+        def __init__(self, iterator):
+            self.iterator = iterator
+
+        def __next__(self):
+            nonlocal consumed
+            consumed += 1
+            return next(self.iterator)
+
+        def close(self):
+            self.iterator.close()
+
+    def wrapped_scandir(path):
+        iterator = original_scandir(path)
+        return CountingIterator(iterator) if Path(path) == preserved else iterator
+
+    monkeypatch.setattr(auditor.os, "scandir", wrapped_scandir)
+    monkeypatch.setattr(auditor, "MAX_AUDIT_FILES", 10)
+
+    report = auditor.audit(candidate, evidence, [preserved], output)
+
+    assert "evidence.budget" in report["findings"]
+    assert consumed <= 2
+
+
+def test_valid_sanitized_manifest_with_failed_action_is_rejected(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    _write_json(
+        preserved / "sanitized-tombstone.json",
+        {
+            "entries": [
+                {
+                    "action": "sanitization-failed",
+                    "bytes": 3,
+                    "classification": "private-content",
+                    "path": "capture.bin",
+                    "reason": "private content removed",
+                    "sha256": "d" * 64,
+                    "timestamp": "2026-09-05T00:00:00Z",
+                }
+            ],
+            "schemaVersion": 1,
+        },
+    )
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert "preserved.sanitization_failed" in report["findings"]
 
 
 def test_zip_member_after_first_64k_is_scanned(

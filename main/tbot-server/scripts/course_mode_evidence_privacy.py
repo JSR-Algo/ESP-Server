@@ -51,12 +51,8 @@ TRANSCRIPT_TEXT = re.compile(rb"(?i)\b(?:child[-_ ]?)?transcript\s*[:=]")
 PRIVATE_PATH = re.compile(r"(?i)(?:^|[-_.\/])(?:audio|transcript|utterance|raw[-_]?speech)(?:[-_.\/]|$)")
 # MIME-wrapped and URL-safe encodings are common in exported evidence payloads.
 MIN_BASE64_CHARS = 8
-BASE64_BLOCK = re.compile(
-    rb"(?<![A-Za-z0-9+/_=-])(?:[A-Za-z0-9+/_=-]{8,}|"
-    rb"[A-Za-z0-9+/_=-]{4}(?:[ \t]+[A-Za-z0-9+/_=-]{4})+|"
-    rb"[A-Za-z0-9+/_=-]{4,}(?:[ \t]*\r?\n[ \t]*[A-Za-z0-9+/_=-]{4,})+)"
-    rb"(?![A-Za-z0-9+/_=-])"
-)
+BASE64_ALPHABET = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/_-")
+BASE64_WHITESPACE = frozenset(b" \t\r\n\f\v")
 PLAYWRIGHT_MARKERS = (b"playwright html report", b"playwright-report", b"trace.network", b"trace.trace")
 PEM_PRIVATE_KEY = re.compile(
     rb"-----BEGIN (?P<label>(?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY)-----.*?"
@@ -158,6 +154,17 @@ def is_sanitized_manifest(data: bytes) -> bool:
     return not (SECRET_TEXT.search(data) or BEARER_VALUE.search(data))
 
 
+def has_sanitization_failure(data: bytes) -> bool:
+    try:
+        document = json.loads(data, object_pairs_hook=_reject_duplicate_keys)
+    except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError):
+        return False
+    groups = [document[key] for key in ("entries", "files") if isinstance(document, dict) and key in document]
+    return bool(groups and isinstance(groups[0], list) and any(
+        isinstance(entry, dict) and entry.get("action") == "sanitization-failed" for entry in groups[0]
+    ))
+
+
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -202,8 +209,28 @@ def _contains_private_key(data: bytes) -> bool:
 
 
 def _base64_payloads(data: bytes):
-    for match in BASE64_BLOCK.finditer(data):
-        payload = re.sub(rb"[ \t\r\n]", b"", match.group(0))
+    index = 0
+    while index < len(data):
+        if data[index] not in BASE64_ALPHABET:
+            index += 1
+            continue
+        raw = bytearray()
+        padded = False
+        while index < len(data):
+            byte = data[index]
+            if byte in BASE64_ALPHABET:
+                if padded:
+                    break
+                raw.append(byte)
+            elif byte == ord("="):
+                raw.append(byte)
+                padded = True
+            elif byte in BASE64_WHITESPACE:
+                raw.append(byte)
+            else:
+                break
+            index += 1
+        payload = re.sub(rb"[ \t\r\n\f\v]", b"", bytes(raw))
         if len(payload) < MIN_BASE64_CHARS or len(payload) % 4 == 1:
             continue
         unpadded = payload.rstrip(b"=")

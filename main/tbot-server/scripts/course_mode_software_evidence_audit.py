@@ -14,7 +14,7 @@ import stat
 import tempfile
 from pathlib import Path
 
-from course_mode_evidence_privacy import is_sanitized_manifest, scan_evidence_payload
+from course_mode_evidence_privacy import has_sanitization_failure, is_sanitized_manifest, scan_evidence_payload
 
 MAX_FILE_BYTES = 8 * 1024 * 1024
 MAX_AUDIT_FILES = 4096
@@ -204,21 +204,28 @@ def _output_path_secure(output: Path) -> bool:
 
 def _iter_root_entries(root: Path):
     """Walk one root without following links or materializing the whole tree."""
-    pending = [root]
-    while pending:
-        current = pending.pop()
-        children = sorted(current.iterdir(), key=lambda item: item.as_posix())
-        directories: list[Path] = []
-        for path in children:
+    iterators: list[os.ScandirIterator[str]] = [os.scandir(root)]
+    try:
+        while iterators:
+            iterator = iterators[-1]
             try:
-                metadata = path.lstat()
+                entry = next(iterator)
+            except StopIteration:
+                iterator.close()
+                iterators.pop()
+                continue
+            path = Path(entry.path)
+            try:
+                metadata = entry.stat(follow_symlinks=False)
             except OSError:
                 yield path, None
                 continue
             yield path, metadata
             if stat.S_ISDIR(metadata.st_mode):
-                directories.append(path)
-        pending.extend(reversed(directories))
+                iterators.append(os.scandir(path))
+    finally:
+        for iterator in iterators:
+            iterator.close()
 
 
 def _lane_report(document: object, candidate_id: object, lanes: list[str], attestation_sha: str | None) -> bool:
@@ -452,87 +459,30 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
         if not ok:
             findings.add(code)
     try:
-        evidence_paths = _iter_root_entries(evidence_root)
-        for path, metadata in evidence_paths:
-            if audit_budget["entries"] >= MAX_AUDIT_FILES:
-                findings.add("evidence.budget")
-                break
-            audit_budget["entries"] += 1
-            if path == output:
-                if path.name != OUTPUT_NAME:
-                    findings.add("output.collision")
-                continue
-            try:
-                relative_parts = path.relative_to(evidence_root).parts
-            except ValueError:
-                findings.add("evidence.metadata_or_json")
-                continue
-            if metadata is None:
-                findings.add("evidence.metadata_or_json")
-                continue
-            if stat.S_ISDIR(metadata.st_mode):
-                if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o022:
-                    findings.add("evidence.metadata_or_json")
-                if any(part.lower() in RAW_PLAYWRIGHT_DIRS for part in relative_parts):
-                    raw_playwright_absent = False
-                    findings.add("evidence.raw_playwright")
-                continue
-            if _same_file(output, path):
-                findings.add("output.collision")
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_nlink != 1
-                or metadata.st_mode & 0o022
-                or metadata.st_size > MAX_FILE_BYTES
-            ):
-                findings.add("evidence.metadata_or_json")
-                continue
-            if (
-                audit_budget["bytes"] + metadata.st_size > MAX_AUDIT_TOTAL_BYTES
-            ):
-                findings.add("evidence.budget")
-                break
-            audit_budget["bytes"] += metadata.st_size
-            checked_files += 1
-            try:
-                data = _read_secure_file(path)
-            except OSError:
-                findings.add("evidence.metadata_or_json")
-                continue
-            content_findings, member_count = scan_evidence_payload(
-                data, path.name, _budget=archive_budget, _base64_state=base64_state
-            )
-            findings.update(content_findings)
-            checked_archive_members += member_count
-            if content_findings & {"content.embedded_playwright", "content.raw_playwright"}:
-                raw_playwright_absent = False
-    except OSError:
-        findings.add("evidence.root")
-    for root in preserved_roots:
-        if not _secure_root(root):
-            findings.add("preserved.root")
-            continue
-        try:
-            paths = _iter_root_entries(root)
-            for path, metadata in paths:
+        with contextlib.closing(_iter_root_entries(evidence_root)) as evidence_paths:
+            for path, metadata in evidence_paths:
                 if audit_budget["entries"] >= MAX_AUDIT_FILES:
                     findings.add("evidence.budget")
                     break
                 audit_budget["entries"] += 1
+                if path == output:
+                    if path.name != OUTPUT_NAME:
+                        findings.add("output.collision")
+                    continue
                 try:
-                    relative_parts = path.relative_to(root).parts
+                    relative_parts = path.relative_to(evidence_root).parts
                 except ValueError:
-                    findings.add("preserved.metadata")
+                    findings.add("evidence.metadata_or_json")
                     continue
                 if metadata is None:
-                    findings.add("preserved.metadata")
+                    findings.add("evidence.metadata_or_json")
                     continue
                 if stat.S_ISDIR(metadata.st_mode):
                     if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o022:
-                        findings.add("preserved.metadata")
+                        findings.add("evidence.metadata_or_json")
                     if any(part.lower() in RAW_PLAYWRIGHT_DIRS for part in relative_parts):
                         raw_playwright_absent = False
-                        findings.add("preserved.raw_playwright")
+                        findings.add("evidence.raw_playwright")
                     continue
                 if _same_file(output, path):
                     findings.add("output.collision")
@@ -542,7 +492,7 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
                     or metadata.st_mode & 0o022
                     or metadata.st_size > MAX_FILE_BYTES
                 ):
-                    findings.add("preserved.metadata")
+                    findings.add("evidence.metadata_or_json")
                     continue
                 if audit_budget["bytes"] + metadata.st_size > MAX_AUDIT_TOTAL_BYTES:
                     findings.add("evidence.budget")
@@ -552,13 +502,8 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
                 try:
                     data = _read_secure_file(path)
                 except OSError:
-                    findings.add("preserved.metadata")
+                    findings.add("evidence.metadata_or_json")
                     continue
-                if ("tombstone" in path.name.lower() or "summary" in path.name.lower()) and not is_sanitized_manifest(data):
-                    findings.add("preserved.manifest")
-                if any(part.lower() in RAW_PLAYWRIGHT_DIRS for part in relative_parts):
-                    raw_playwright_absent = False
-                    findings.add("preserved.raw_playwright")
                 content_findings, member_count = scan_evidence_payload(
                     data, path.name, _budget=archive_budget, _base64_state=base64_state
                 )
@@ -566,6 +511,68 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
                 checked_archive_members += member_count
                 if content_findings & {"content.embedded_playwright", "content.raw_playwright"}:
                     raw_playwright_absent = False
+    except OSError:
+        findings.add("evidence.root")
+    for root in preserved_roots:
+        if not _secure_root(root):
+            findings.add("preserved.root")
+            continue
+        try:
+            with contextlib.closing(_iter_root_entries(root)) as paths:
+                for path, metadata in paths:
+                    if audit_budget["entries"] >= MAX_AUDIT_FILES:
+                        findings.add("evidence.budget")
+                        break
+                    audit_budget["entries"] += 1
+                    try:
+                        relative_parts = path.relative_to(root).parts
+                    except ValueError:
+                        findings.add("preserved.metadata")
+                        continue
+                    if metadata is None:
+                        findings.add("preserved.metadata")
+                        continue
+                    if stat.S_ISDIR(metadata.st_mode):
+                        if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o022:
+                            findings.add("preserved.metadata")
+                        if any(part.lower() in RAW_PLAYWRIGHT_DIRS for part in relative_parts):
+                            raw_playwright_absent = False
+                            findings.add("preserved.raw_playwright")
+                        continue
+                    if _same_file(output, path):
+                        findings.add("output.collision")
+                    if (
+                        not stat.S_ISREG(metadata.st_mode)
+                        or metadata.st_nlink != 1
+                        or metadata.st_mode & 0o022
+                        or metadata.st_size > MAX_FILE_BYTES
+                    ):
+                        findings.add("preserved.metadata")
+                        continue
+                    if audit_budget["bytes"] + metadata.st_size > MAX_AUDIT_TOTAL_BYTES:
+                        findings.add("evidence.budget")
+                        break
+                    audit_budget["bytes"] += metadata.st_size
+                    checked_files += 1
+                    try:
+                        data = _read_secure_file(path)
+                    except OSError:
+                        findings.add("preserved.metadata")
+                        continue
+                    if ("tombstone" in path.name.lower() or "summary" in path.name.lower()) and not is_sanitized_manifest(data):
+                        findings.add("preserved.manifest")
+                    elif has_sanitization_failure(data):
+                        findings.add("preserved.sanitization_failed")
+                    if any(part.lower() in RAW_PLAYWRIGHT_DIRS for part in relative_parts):
+                        raw_playwright_absent = False
+                        findings.add("preserved.raw_playwright")
+                    content_findings, member_count = scan_evidence_payload(
+                        data, path.name, _budget=archive_budget, _base64_state=base64_state
+                    )
+                    findings.update(content_findings)
+                    checked_archive_members += member_count
+                    if content_findings & {"content.embedded_playwright", "content.raw_playwright"}:
+                        raw_playwright_absent = False
         except OSError:
             findings.add("preserved.root")
     checks = {
