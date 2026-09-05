@@ -142,10 +142,10 @@ services:
     ports:
       - "127.0.0.1:${LESSON_STUDIO_E2E_WEB_HOST_PORT:-8102}:8002"
     volumes:
-      - ${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}/src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json:/usr/share/nginx/html/tvideo-demo/asset-manifest.json:ro
-      - ${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}/src/lessons/fixtures/tvideo-raw-code/assets/admin:/usr/share/nginx/html/tvideo-demo/admin:ro
-      - ${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}/src/lessons/fixtures/tvideo-raw-code/assets/esp-tft:/usr/share/nginx/html/tvideo-demo/esp-tft:ro
-      - ${TBOT_FIRMWARE_WORKTREE:-../../../TBOT-Firmware}/lesson/assets:/usr/share/nginx/html/tvideo-demo/assets:ro
+      - ${TBOT_LESSON_STUDIO_BACKEND_MOUNT_ROOT:-${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}}/src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json:/usr/share/nginx/html/tvideo-demo/asset-manifest.json:ro
+      - ${TBOT_LESSON_STUDIO_BACKEND_MOUNT_ROOT:-${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}}/src/lessons/fixtures/tvideo-raw-code/assets/admin:/usr/share/nginx/html/tvideo-demo/admin:ro
+      - ${TBOT_LESSON_STUDIO_BACKEND_MOUNT_ROOT:-${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}}/src/lessons/fixtures/tvideo-raw-code/assets/esp-tft:/usr/share/nginx/html/tvideo-demo/esp-tft:ro
+      - ${TBOT_LESSON_STUDIO_FIRMWARE_MOUNT_ROOT:-${TBOT_FIRMWARE_WORKTREE:-../../../TBOT-Firmware}}/lesson/assets:/usr/share/nginx/html/tvideo-demo/assets:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null 'http://127.0.0.1:8002/login'"]
       interval: 3s

@@ -59,10 +59,26 @@ test('the browser-and-robot origin serves canonical derivatives and seeded asset
   const web = serviceBlock(compose, 'web');
 
   assert.doesNotMatch(web, /tvideo-raw-code\/assets:\/usr\/share\/nginx\/html\/tvideo-demo:ro/);
-  assert.match(web, /tvideo-raw-code\/assets\/asset-manifest\.json:\/usr\/share\/nginx\/html\/tvideo-demo\/asset-manifest\.json:ro/);
-  assert.match(web, /tvideo-raw-code\/assets\/admin:\/usr\/share\/nginx\/html\/tvideo-demo\/admin:ro/);
-  assert.match(web, /tvideo-raw-code\/assets\/esp-tft:\/usr\/share\/nginx\/html\/tvideo-demo\/esp-tft:ro/);
-  assert.match(web, /lesson\/assets:\/usr\/share\/nginx\/html\/tvideo-demo\/assets:ro/);
+  assert.ok(
+    web.includes(
+      '${TBOT_LESSON_STUDIO_BACKEND_MOUNT_ROOT:-${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}}/src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json:/usr/share/nginx/html/tvideo-demo/asset-manifest.json:ro',
+    ),
+  );
+  assert.ok(
+    web.includes(
+      '${TBOT_LESSON_STUDIO_BACKEND_MOUNT_ROOT:-${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}}/src/lessons/fixtures/tvideo-raw-code/assets/admin:/usr/share/nginx/html/tvideo-demo/admin:ro',
+    ),
+  );
+  assert.ok(
+    web.includes(
+      '${TBOT_LESSON_STUDIO_BACKEND_MOUNT_ROOT:-${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}}/src/lessons/fixtures/tvideo-raw-code/assets/esp-tft:/usr/share/nginx/html/tvideo-demo/esp-tft:ro',
+    ),
+  );
+  assert.ok(
+    web.includes(
+      '${TBOT_LESSON_STUDIO_FIRMWARE_MOUNT_ROOT:-${TBOT_FIRMWARE_WORKTREE:-../../../TBOT-Firmware}}/lesson/assets:/usr/share/nginx/html/tvideo-demo/assets:ro',
+    ),
+  );
 });
 
 test('lesson studio compose isolates every named Docker resource through one prefix', () => {
