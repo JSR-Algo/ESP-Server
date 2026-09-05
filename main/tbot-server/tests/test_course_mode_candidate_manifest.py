@@ -1187,7 +1187,7 @@ def test_candidate_requires_exact_top_level_and_repository_keys(candidate: dict)
     candidate["unexpected"] = True
     candidate["repositories"]["other"] = candidate["repositories"]["backend"]
 
-    assert validate_candidate(candidate) == ["repositories.keys", "topLevel.keys"]
+    assert validate_candidate(candidate, now=NOW) == ["repositories.keys", "topLevel.keys"]
     assert set(candidate) != REQUIRED_KEYS
 
 
@@ -1195,7 +1195,7 @@ def test_candidate_rejects_unlisted_dirty_file(candidate: dict, repositories: di
     (repositories["adminEsp"] / "tracked.txt").write_text("dirty", encoding="utf-8")
     candidate["repositories"]["adminEsp"]["dirtyExceptions"] = []
 
-    assert validate_candidate(candidate) == ["repositories.adminEsp.dirty"]
+    assert validate_candidate(candidate, now=NOW) == ["repositories.adminEsp.dirty"]
 
 
 def test_candidate_accepts_only_exact_hash_bound_dirty_exception(
@@ -1208,10 +1208,10 @@ def test_candidate_accepts_only_exact_hash_bound_dirty_exception(
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
     }]
 
-    assert validate_candidate(candidate) == []
+    assert validate_candidate(candidate, now=NOW) == []
 
     candidate["repositories"]["adminEsp"]["dirtyExceptions"][0]["sha256"] = "0" * 64
-    assert validate_candidate(candidate) == ["repositories.adminEsp.dirtyExceptions.hash"]
+    assert validate_candidate(candidate, now=NOW) == ["repositories.adminEsp.dirtyExceptions.hash"]
 
 
 @pytest.mark.parametrize("field", ["path", "sha", "branch", "remoteUrl"])
@@ -1223,7 +1223,7 @@ def test_candidate_rejects_repository_identity_drift(candidate: dict, field: str
         "remoteUrl": "https://example.invalid/wrong.git",
     }[field]
 
-    assert validate_candidate(candidate) == [f"repositories.backend.{field}"]
+    assert validate_candidate(candidate, now=NOW) == [f"repositories.backend.{field}"]
 
 
 def test_candidate_reasons_are_sorted_stable_json(candidate: dict) -> None:
@@ -1231,8 +1231,8 @@ def test_candidate_reasons_are_sorted_stable_json(candidate: dict) -> None:
     candidate["curriculum"]["lessonCount"] = 25
     candidate["course"]["courseKey"] = "wrong"
 
-    first = validate_candidate(candidate)
-    second = validate_candidate(json.loads(json.dumps(candidate)))
+    first = validate_candidate(candidate, now=NOW)
+    second = validate_candidate(json.loads(json.dumps(candidate)), now=NOW)
 
     assert first == second == sorted(first)
     assert first == [
@@ -1246,7 +1246,7 @@ def test_candidate_reasons_are_sorted_stable_json(candidate: dict) -> None:
 def test_candidate_binds_curriculum_checksum_to_backend_source(candidate: dict) -> None:
     candidate["curriculum"]["sourceChecksum"] = "f" * 64
 
-    assert validate_candidate(candidate) == ["curriculum.sourceChecksum"]
+    assert validate_candidate(candidate, now=NOW) == ["curriculum.sourceChecksum"]
 
 
 @pytest.mark.parametrize("field, value", [
@@ -1260,14 +1260,14 @@ def test_candidate_requires_exact_curriculum_class_counts(
 ) -> None:
     candidate["curriculum"][field] = value
 
-    assert validate_candidate(candidate) == [f"curriculum.{field}"]
+    assert validate_candidate(candidate, now=NOW) == [f"curriculum.{field}"]
 
 
 @pytest.mark.parametrize("field", ["pedagogyCount", "responseClassCount"])
 def test_candidate_reports_missing_curriculum_class_count(candidate: dict, field: str) -> None:
     candidate["curriculum"].pop(field)
 
-    assert validate_candidate(candidate) == ["curriculum.keys", f"curriculum.{field}"]
+    assert validate_candidate(candidate, now=NOW) == ["curriculum.keys", f"curriculum.{field}"]
 
 
 def test_candidate_freeze_report_records_exact_tdd_and_simulator_evidence() -> None:
