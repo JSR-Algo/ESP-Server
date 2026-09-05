@@ -585,7 +585,12 @@ test('Task 4 release commands run candidate-bound NEW and ROLLBACK orchestration
   assert.doesNotMatch(source, /run\('docker', \[\.\.\.compose/);
   assert.match(source, /\['new', 'rollback'\]/);
   assert.match(source, /docker-compose\.\$\{phase\}\.yml/);
-  assert.match(source, /const baseCompose = \[[\s\S]*docker-compose\.lesson-studio-e2e\.yml[\s\S]*\];/);
+  assert.ok(source.includes([
+    'const baseCompose = [',
+    "  '-p', environment.LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME,",
+    "  '-f', resolve(repoRoot, 'docs/docker/docker-compose.lesson-studio-e2e.yml'),",
+    '];',
+  ].join('\n')), 'base Compose args must contain only the project and base compose file');
   assert.match(source, /const baseComposeRun = \(\.\.\.args\) => run\(composeExecutable, \[\.\.\.baseCompose, \.\.\.args\]\);/);
   assert.match(
     source,
