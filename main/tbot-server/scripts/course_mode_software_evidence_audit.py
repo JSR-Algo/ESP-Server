@@ -59,6 +59,7 @@ REQUIRED_EVIDENCE = (
     "05-live-db-gate.json",
 )
 RAW_PLAYWRIGHT_DIRS = {"playwright-report", "test-results", "blob-report", "playwright-e2e-original"}
+OUTPUT_NAME = "06-software-evidence-audit.json"
 
 
 def _read_secure_file(path: Path) -> bytes:
@@ -384,6 +385,8 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
         findings.add("evidence.root")
     for path in evidence_paths:
         if path == output:
+            if path.name != OUTPUT_NAME:
+                findings.add("output.collision")
             continue
         try:
             relative_parts = path.relative_to(evidence_root).parts

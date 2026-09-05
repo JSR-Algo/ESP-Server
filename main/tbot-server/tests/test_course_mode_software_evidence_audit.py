@@ -633,6 +633,13 @@ def test_output_cannot_collide_with_required_input_or_alias_it(
     assert linked.returncode == 1
     assert "output.collision" in json.loads(linked.stdout)["findings"]
 
+    extra = evidence / "extra.json"
+    extra.write_bytes(b"{}\n")
+    extra.chmod(0o444)
+    collision = _run(candidate, evidence, extra)
+    assert collision.returncode == 1
+    assert "output.collision" in json.loads(collision.stdout)["findings"]
+
 
 @pytest.mark.parametrize("payload", [b"not a zip", b"MZ-self-extracting-prefix"])
 def test_zip_extension_requires_valid_zip_and_prefixed_zip_is_supported(
