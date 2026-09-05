@@ -392,6 +392,11 @@ STATEFUL_ASSIGNMENT_LANES = frozenset({
     "admin-course-mode-assignment-new",
     "admin-course-mode-assignment-rollback",
 })
+ASSIGNMENT_ROLLBACK_LANE = "admin-course-mode-assignment-rollback"
+ASSIGNMENT_ROLLBACK_RESTORE_FAILURE_SIGNAL = (
+    'TBOT_COURSE_MODE_CLEANUP_FAILURE={"schemaVersion":1,'
+    '"kind":"assignment-rollback-base-restore"}'
+)
 TASK4_ASSIGNMENT_PORT_ENV = (
     "LESSON_STUDIO_E2E_BACKEND_HOST_PORT", "LESSON_STUDIO_E2E_WEB_HOST_PORT",
     "TASK4_ASSIGNMENT_MEDIA_HOST_PORT",
@@ -1086,6 +1091,13 @@ def _cleanup_gate_owned(
         report["retainedPaths"] = list(retained)
         return False
     return True
+
+
+def _assignment_rollback_restore_failed(lane: Lane, stdout: str) -> bool:
+    return (
+        lane.name == ASSIGNMENT_ROLLBACK_LANE
+        and ASSIGNMENT_ROLLBACK_RESTORE_FAILURE_SIGNAL in stdout.splitlines()
+    )
 
 
 @dataclass
@@ -4264,7 +4276,10 @@ def _run_gate_impl(
                 report["lanes"].append({
                     "name": lane.name, "exitCode": exit_code, "durationMs": duration_ms,
                 })
-                lane_failed = result.error or result.returncode != 0
+                rollback_restore_failed = _assignment_rollback_restore_failed(
+                    lane, result.stdout,
+                )
+                lane_failed = result.error or result.returncode != 0 or rollback_restore_failed
                 if lane_failed:
                     report["verdict"] = (
                         "BLOCKED"
@@ -4272,6 +4287,8 @@ def _run_gate_impl(
                         else "FAIL"
                     )
                     report["failedLane"] = lane.name
+                    if rollback_restore_failed:
+                        report["cleanupFailed"] = True
                 elif skip_state is not False:
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name

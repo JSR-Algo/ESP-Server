@@ -559,29 +559,59 @@ test('Task 4 assignment browser phase uses WebKit and verifies row-scoped Monito
   assert.ok(spec.indexOf("adminApiResponse(page, 'POST', '/lesson-assignments'") > spec.indexOf('} else {'));
 });
 
-test('Task 4 rollback restore reports cleanup failure without replacing the primary phase failure', () => {
+test('Task 4 rollback restore reports cleanup failure without replacing arbitrary phase failures', () => {
   const source = readFileSync(orchestratorPath, 'utf8');
-  const helperStart = source.indexOf('function runRollbackRestore(');
+  const helperStart = source.indexOf('const ROLLBACK_RESTORE_FAILURE_SIGNAL');
   const helperEnd = source.indexOf('\n\nconst phase =', helperStart);
   assert.ok(helperStart >= 0 && helperEnd > helperStart, 'rollback restore helper must be testable in isolation');
-  const { runWithRollbackRestore } = Function(
-    `${source.slice(helperStart, helperEnd)}; return { runWithRollbackRestore };`,
+  const {
+    ROLLBACK_RESTORE_FAILURE_SIGNAL,
+    reportRollbackRestoreFailure,
+    runWithRollbackRestore,
+  } = Function(
+    `${source.slice(helperStart, helperEnd)}; return { ROLLBACK_RESTORE_FAILURE_SIGNAL, reportRollbackRestoreFailure, runWithRollbackRestore };`,
   )();
-  const phaseFailure = new Error('phase failed');
+  const signalPrefix = 'TBOT_COURSE_MODE_CLEANUP_FAILURE=';
+  assert.equal(ROLLBACK_RESTORE_FAILURE_SIGNAL.startsWith(signalPrefix), true);
+  assert.ok(Buffer.byteLength(ROLLBACK_RESTORE_FAILURE_SIGNAL, 'utf8') <= 256);
+  assert.deepEqual(
+    JSON.parse(ROLLBACK_RESTORE_FAILURE_SIGNAL.slice(signalPrefix.length)),
+    { schemaVersion: 1, kind: 'assignment-rollback-base-restore' },
+  );
+  const writes = [];
+  reportRollbackRestoreFailure((value) => writes.push(value));
+  assert.deepEqual(writes, [`${ROLLBACK_RESTORE_FAILURE_SIGNAL}\n`]);
+
+  const captureThrown = (operation) => {
+    let thrown = false;
+    let value;
+    try {
+      operation();
+    } catch (error) {
+      thrown = true;
+      value = error;
+    }
+    assert.equal(thrown, true);
+    return value;
+  };
   const restoreFailure = new Error('restore failed');
   let restoreCalls = 0;
-  let rollbackCleanupRequired = false;
-
-  assert.throws(() => runWithRollbackRestore(
-    () => { rollbackCleanupRequired = true; throw phaseFailure; },
-    () => rollbackCleanupRequired,
-    () => { restoreCalls += 1; throw restoreFailure; },
-  ), (error) => {
-    assert.equal(error, phaseFailure);
-    assert.equal(error.rollbackRestoreFailure, restoreFailure);
-    return true;
-  });
-  assert.equal(restoreCalls, 1);
+  for (const phaseFailure of [false, 'phase failed', Object.freeze(new Error('frozen phase failure'))]) {
+    const signals = [];
+    let rollbackCleanupRequired = false;
+    const returned = captureThrown(() => runWithRollbackRestore(
+      () => { rollbackCleanupRequired = true; throw phaseFailure; },
+      () => rollbackCleanupRequired,
+      () => { restoreCalls += 1; throw restoreFailure; },
+      () => signals.push(ROLLBACK_RESTORE_FAILURE_SIGNAL),
+    ));
+    assert.equal(Object.is(returned, phaseFailure), true);
+    assert.deepEqual(signals, [ROLLBACK_RESTORE_FAILURE_SIGNAL]);
+    if (phaseFailure instanceof Error) {
+      assert.equal(Object.hasOwn(phaseFailure, 'rollbackRestoreFailure'), false);
+    }
+  }
+  assert.equal(restoreCalls, 3);
   assert.throws(() => runWithRollbackRestore(
     () => {},
     () => true,
@@ -593,17 +623,18 @@ test('Task 4 rollback restore reports cleanup failure without replacing the prim
     () => { throw restoredPhaseFailure; },
     () => true,
     () => { restoreCalls += 1; },
+    () => assert.fail('successful restore must not report cleanup failure'),
   ), (error) => {
     assert.equal(error, restoredPhaseFailure);
-    assert.equal(Object.hasOwn(error, 'rollbackRestoreFailure'), false);
     return true;
   });
+  const preStartFailure = new Error('pre-start failure');
   assert.throws(() => runWithRollbackRestore(
-    () => { throw phaseFailure; },
+    () => { throw preStartFailure; },
     () => false,
     () => { restoreCalls += 1; },
-  ), (error) => error === phaseFailure);
-  assert.equal(restoreCalls, 2, 'pre-start failures must not trigger restore');
+  ), (error) => error === preStartFailure);
+  assert.equal(restoreCalls, 4, 'pre-start failures must not trigger restore');
 });
 
 test('Task 4 release commands run candidate-bound NEW and ROLLBACK orchestration', () => {
@@ -656,8 +687,8 @@ test('Task 4 release commands run candidate-bound NEW and ROLLBACK orchestration
   assert.ok(finalRollbackVerifyIndex >= 0, 'final bootstrap readback must verify rollback');
   assert.ok(baseRestoreIndex > finalRollbackVerifyIndex, 'base stack restore must follow final rollback verification');
   assert.ok(rollbackCleanupIndex < rollbackStartIndex, 'rollback cleanup must be armed before override startup');
-  assert.match(source, /phaseFailure\.rollbackRestoreFailure = restoreFailure/);
-  assert.match(source, /finally \{\s*if \(shouldRestore\(\)\) runRollbackRestore\(restore, phaseFailure\);\s*\}/);
+  assert.match(source, /TBOT_COURSE_MODE_CLEANUP_FAILURE=/);
+  assert.match(source, /finally \{\s*if \(shouldRestore\(\)\) runRollbackRestore\(restore, phaseFailed, reportRestoreFailure\);\s*\}/);
   assert.match(source, /\}, \(\) => rollbackCleanupRequired, \(\) => \{\s*baseComposeRun\('up', '-d', '--wait', '--no-deps', '--force-recreate', 'backend', 'web'\);\s*\}\);/);
   assert.match(source, /bootstrap\.cjs/);
   assert.match(source, /playwright\.assignment-rollback\.config\.js/);

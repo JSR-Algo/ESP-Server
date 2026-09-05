@@ -11,24 +11,35 @@ const {
 const { validateAssignmentRuntimeCapsule } = require('./task4-assignment-runtime.cjs');
 const { composeExecutableFromEnvironment } = require('./reset-lesson-studio-e2e-state.cjs');
 
-function runRollbackRestore(restore, phaseFailure) {
+const ROLLBACK_RESTORE_FAILURE_SIGNAL =
+  'TBOT_COURSE_MODE_CLEANUP_FAILURE={"schemaVersion":1,"kind":"assignment-rollback-base-restore"}';
+
+function reportRollbackRestoreFailure(write = (value) => process.stdout.write(value)) {
+  try {
+    write(`${ROLLBACK_RESTORE_FAILURE_SIGNAL}\n`);
+  } catch {}
+}
+
+function runRollbackRestore(restore, phaseFailed, reportRestoreFailure) {
   try {
     restore();
   } catch (restoreFailure) {
-    if (!phaseFailure) throw restoreFailure;
-    phaseFailure.rollbackRestoreFailure = restoreFailure;
+    if (!phaseFailed) throw restoreFailure;
+    reportRestoreFailure();
   }
 }
 
-function runWithRollbackRestore(work, shouldRestore, restore) {
-  let phaseFailure;
+function runWithRollbackRestore(
+  work, shouldRestore, restore, reportRestoreFailure = reportRollbackRestoreFailure,
+) {
+  let phaseFailed = false;
   try {
     work();
   } catch (error) {
-    phaseFailure = error;
+    phaseFailed = true;
     throw error;
   } finally {
-    if (shouldRestore()) runRollbackRestore(restore, phaseFailure);
+    if (shouldRestore()) runRollbackRestore(restore, phaseFailed, reportRestoreFailure);
   }
 }
 

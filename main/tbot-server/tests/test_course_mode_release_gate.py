@@ -2535,6 +2535,43 @@ def test_assignment_capsule_is_cleaned_after_rollback_failure(
     assert roots and not roots[0].exists()
 
 
+@pytest.mark.parametrize(
+    ("stdout", "cleanup_failed"),
+    [
+        ("ordinary phase failure output\n", False),
+        (
+            "ordinary phase failure output\n"
+            'TBOT_COURSE_MODE_CLEANUP_FAILURE={"schemaVersion":1,'
+            '"kind":"assignment-rollback-base-restore"}\n',
+            True,
+        ),
+    ],
+    ids=("phase-only", "phase-and-restore"),
+)
+def test_assignment_failure_report_distinguishes_rollback_restore_failure(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+    stdout: str, cleanup_failed: bool,
+) -> None:
+    _authorize_assignment_test_lane(monkeypatch)
+    lane = _stateful_assignment_lane(
+        "admin-course-mode-assignment-rollback", "raise SystemExit(7)",
+    )
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *_args, **_kwargs: gate._manifest.BoundedCommandResult(7, stdout, None),
+    )
+
+    result = gate.run_gate(
+        candidate_file, "full", lanes=(lane,),
+        source_environment=_assignment_source(candidate_file),
+    )
+
+    assert result["verdict"] == "FAIL"
+    assert result["failedLane"] == lane.name
+    assert result["lanes"][0]["exitCode"] == 7
+    assert result.get("cleanupFailed", False) is cleanup_failed
+
+
 def test_assignment_capsule_single_selected_lane_does_not_leak(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
