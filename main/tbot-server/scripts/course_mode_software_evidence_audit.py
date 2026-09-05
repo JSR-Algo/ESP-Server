@@ -165,6 +165,23 @@ def _output_conflicts(output: Path, protected: list[Path]) -> bool:
     return any(_same_file(output, path) for path in protected)
 
 
+def _output_path_secure(output: Path) -> bool:
+    if not _secure_root(output.parent):
+        return False
+    try:
+        metadata = output.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_nlink == 1
+        and metadata.st_uid == os.geteuid()
+        and not metadata.st_mode & 0o022
+    )
+
+
 def _lane_report(document: object, candidate_id: object, lanes: list[str], attestation_sha: str | None) -> bool:
     if not isinstance(document, dict):
         return False
@@ -288,6 +305,10 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
     checked_archive_members = 0
     raw_playwright_absent = True
     protected_inputs = [candidate_path] + [evidence_root / name for name in REQUIRED_EVIDENCE]
+    if output != evidence_root / OUTPUT_NAME:
+        findings.add("output.unsafe")
+    if not _output_path_secure(output):
+        findings.add("output.unsafe")
     if _output_conflicts(output, protected_inputs):
         findings.add("output.collision")
     if not _secure_root(evidence_root):
@@ -395,6 +416,8 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
             findings.add("evidence.metadata_or_json")
             continue
         if stat.S_ISDIR(metadata.st_mode):
+            if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o022:
+                findings.add("evidence.metadata_or_json")
             if any(part.lower() in RAW_PLAYWRIGHT_DIRS for part in relative_parts):
                 raw_playwright_absent = False
                 findings.add("evidence.raw_playwright")
@@ -437,6 +460,8 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
                 findings.add("preserved.metadata")
                 continue
             if stat.S_ISDIR(metadata.st_mode):
+                if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o022:
+                    findings.add("preserved.metadata")
                 if any(part.lower() in RAW_PLAYWRIGHT_DIRS for part in relative_parts):
                     raw_playwright_absent = False
                     findings.add("preserved.raw_playwright")
@@ -537,15 +562,20 @@ def main(argv: list[str] | None = None) -> int:
     candidate_path = _absolute(args.candidate)
     preserved_roots = [_absolute(path) for path in args.preserved_root]
     report = audit(candidate_path, evidence_root, preserved_roots, output)
+    if output != evidence_root / OUTPUT_NAME:
+        report["findings"] = sorted(set(report["findings"]) | {"output.unsafe"})
+        report["status"] = "fail"
     try:
         output.relative_to(evidence_root)
     except ValueError:
         report["findings"] = sorted(set(report["findings"]) | {"output.unsafe"})
         report["status"] = "fail"
     else:
-        if "output.collision" in report["findings"]:
-            pass
-        elif not _write_output(output, report):
+        if (
+            (not report["findings"] or "output.unsafe" not in report["findings"])
+            and "output.collision" not in report["findings"]
+            and not _write_output(output, report)
+        ):
             report["findings"] = sorted(set(report["findings"]) | {"output.write"})
             report["status"] = "fail"
     print(json.dumps(report, sort_keys=True, separators=(",", ":")))

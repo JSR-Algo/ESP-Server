@@ -19,6 +19,10 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}")
 SANITIZED_CONTAINER_KEYS = {"entries", "files", "schemaVersion"}
 SANITIZED_ENTRY_KEYS = {"path", "sha256", "bytes", "classification", "action", "reason", "timestamp"}
 SAFE_LABEL = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+SANITIZED_REASONS = {
+    "raw capture excluded", "private content removed", "unsupported artifact",
+    "superseded artifact", "quarantined before audit",
+}
 RFC3339_UTC = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$")
 MAX_ARCHIVE_MEMBERS = 4096
 MAX_ARCHIVE_MEMBER_BYTES = 4 * 1024 * 1024
@@ -126,9 +130,10 @@ def is_sanitized_manifest(data: bytes) -> bool:
             or SAFE_LABEL.fullmatch(entry["action"]) is None
             or not isinstance(entry["classification"], str)
             or SAFE_LABEL.fullmatch(entry["classification"]) is None
-            or not entry["reason"]
-            or len(entry["reason"]) > 512
+            or not isinstance(entry["reason"], str)
+            or entry["reason"] not in SANITIZED_REASONS
             or "\n" in entry["reason"]
+            or not isinstance(entry["timestamp"], str)
             or RFC3339_UTC.fullmatch(entry["timestamp"]) is None
         ):
             return False
@@ -187,34 +192,13 @@ def _looks_like_playwright(data: bytes, name: str) -> bool:
     )
 
 
-def _embedded_playwright(data: bytes) -> bool:
-    if _looks_like_playwright(data, ""):
-        return True
-    if not data.startswith((b"PK\x03\x04", b"PK\x05\x06")):
-        return False
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            infos = archive.infolist()
-            if len(infos) > MAX_ARCHIVE_MEMBERS:
-                return True
-            for info in infos:
-                if _looks_like_playwright(b"", info.filename):
-                    return True
-                if info.file_size <= MAX_ARCHIVE_MEMBER_BYTES and info.compress_type in SUPPORTED_ZIP_COMPRESSION:
-                    with archive.open(info) as member:
-                        if _looks_like_playwright(member.read(), info.filename):
-                            return True
-    except (OSError, RuntimeError, zipfile.BadZipFile, NotImplementedError):
-        return True
-    return False
-
-
 def scan_evidence_payload(
     data: bytes,
     name: str,
     *,
     archive_depth: int = 0,
     _budget: dict[str, int] | None = None,
+    _scan_base64: bool = True,
 ) -> tuple[set[str], int]:
     """Scan one file and bounded nested ZIP members without returning payload bytes."""
     findings: set[str] = set()
@@ -234,16 +218,28 @@ def scan_evidence_payload(
         findings.add("content.private_key")
     if _looks_like_playwright(data, name):
         findings.add("content.raw_playwright")
-    for decoded in _decoded_base64_blocks(data):
-        if _embedded_playwright(decoded):
-            findings.add("content.embedded_playwright")
-            break
+    if _scan_base64:
+        for decoded in _decoded_base64_blocks(data):
+            decoded_findings, _ = scan_evidence_payload(
+                decoded,
+                f"{name}.base64",
+                archive_depth=archive_depth,
+                _budget=budget,
+                _scan_base64=False,
+            )
+            findings.update(decoded_findings)
+            if decoded_findings & {"content.raw_playwright", "archive.invalid", "archive.oversize", "archive.unsupported", "archive.encrypted"}:
+                findings.add("content.embedded_playwright")
+    has_zip_signature = data.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x01\x02"))
     is_zip = zipfile.is_zipfile(io.BytesIO(data))
     if suffix == ".zip" and not is_zip:
         findings.add("archive.invalid")
         return findings, budget["members"] - starting_members
     if suffix in ARCHIVE_SUFFIXES and suffix != ".zip" and not is_zip:
         findings.add("archive.unsupported")
+        return findings, budget["members"] - starting_members
+    if has_zip_signature and not is_zip:
+        findings.add("archive.invalid")
         return findings, budget["members"] - starting_members
     if not is_zip:
         return findings, budget["members"] - starting_members

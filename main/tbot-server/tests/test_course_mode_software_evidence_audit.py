@@ -577,6 +577,12 @@ def test_output_must_be_inside_evidence_root(
     assert "output.unsafe" in report["findings"]
     assert not unsafe_output.exists()
 
+    wrong_name = evidence / "audit.json"
+    completed = _run(candidate, evidence, wrong_name)
+    assert completed.returncode == 1
+    assert "output.unsafe" in json.loads(completed.stdout)["findings"]
+    assert not wrong_name.exists()
+
 
 def test_cli_does_not_resolve_away_candidate_symlink(
     evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
@@ -698,6 +704,84 @@ def test_tombstone_strings_and_embedded_base64_are_still_scanned(
     assert marker not in completed.stdout
 
 
+def test_tombstone_wrong_field_types_fail_closed_without_crashing(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    _write_json(
+        preserved / "sanitized-tombstone.json",
+        {
+            "entries": [
+                {
+                    "action": "deleted",
+                    "bytes": "123",
+                    "classification": "private",
+                    "path": "trace.zip",
+                    "reason": ["raw capture excluded"],
+                    "sha256": "d" * 64,
+                    "timestamp": "2026-09-05T00:00:00Z",
+                }
+            ],
+            "schemaVersion": 1,
+        },
+    )
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert "preserved.manifest" in report["findings"]
+
+
+@pytest.mark.parametrize(
+    ("name", "decoded", "finding"),
+    [
+        ("encoded.txt", b"Authorization: Bearer " + b"z" * 120, "content.secret"),
+        ("encoded.txt", b"RIFF" + b"z" * 120, "content.audio"),
+        ("encoded.txt", b"-----BEGIN PRIVATE KEY-----\nmalformed\n" + b"z" * 120, "content.private_key"),
+    ],
+)
+def test_embedded_base64_payloads_reuse_content_scanner(
+    evidence_fixture: tuple[Path, Path, Path],
+    tmp_path: Path,
+    name: str,
+    decoded: bytes,
+    finding: str,
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    artifact = preserved / name
+    artifact.write_text(base64.b64encode(decoded).decode(), encoding="ascii")
+    artifact.chmod(0o444)
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert finding in report["findings"]
+
+
+def test_embedded_base64_invalid_zip_is_fail_closed(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    artifact = preserved / "encoded.txt"
+    artifact.write_text(base64.b64encode(b"PK\x03\x04opaque-invalid-zip" + b"x" * 128).decode(), encoding="ascii")
+    artifact.chmod(0o444)
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert "archive.invalid" in report["findings"]
+    assert "content.embedded_playwright" in report["findings"]
+
+
 def test_zip_member_after_first_64k_is_scanned(
     evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
 ) -> None:
@@ -776,3 +860,22 @@ def test_symlinked_evidence_or_preserved_root_is_rejected_before_traversal(
     report = json.loads(completed.stdout)
     assert completed.returncode == 1
     assert "preserved.root" in report["findings"]
+
+
+def test_nested_evidence_directory_metadata_is_checked(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    nested = preserved / "nested"
+    nested.mkdir(parents=True)
+    nested.chmod(0o775)
+    marker = nested / "summary.json"
+    marker.write_bytes(b"{}\n")
+    marker.chmod(0o444)
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert "preserved.metadata" in report["findings"]
