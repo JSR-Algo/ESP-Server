@@ -3823,7 +3823,7 @@ def _operator_attestation_binding(
                 candidate_created is not None
                 and candidate_expires is not None
                 and attestation_created is not None
-                and validation_now <= candidate_expires
+                and validation_now < candidate_expires
                 and candidate_created
                 <= attestation_created
                 <= min(validation_now, candidate_expires)

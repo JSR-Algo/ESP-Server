@@ -1027,7 +1027,8 @@ def test_operator_attestation_accepts_candidate_and_current_time_boundaries(
 @pytest.mark.parametrize(
     ("created_at", "validation_now", "accepted"),
     [
-        ("2099-01-08T00:00:00Z", datetime(2099, 1, 8, tzinfo=timezone.utc), True),
+        ("2099-01-07T23:59:59Z", datetime(2099, 1, 7, 23, 59, 59, tzinfo=timezone.utc), True),
+        ("2099-01-08T00:00:00Z", datetime(2099, 1, 8, tzinfo=timezone.utc), False),
         ("2099-01-08T00:00:01Z", datetime(2099, 1, 9, tzinfo=timezone.utc), False),
         ("2099-01-08T00:00:00Z", datetime(2099, 1, 8, 0, 0, 1, tzinfo=timezone.utc), False),
     ],

@@ -19,13 +19,13 @@ operator precondition.
 The canonical release gate accepts an operator attestation only when:
 
 ```text
-candidate.createdAt <= attestation.createdAt <= min(now, candidate.expiresAt)
+candidate.createdAt <= attestation.createdAt <= now < candidate.expiresAt
 ```
 
 All timestamps are canonical RFC 3339 UTC values parsed by the existing
-candidate-manifest helper. Equality is accepted at each boundary. Candidate
-expiry remains enforced independently by candidate validation, where
-`now == candidate.expiresAt` is expired.
+candidate-manifest helper. Equality is accepted at candidate creation and the
+snapped validation time. Candidate expiry is exclusive: a binding attempt at
+or after `candidate.expiresAt` is rejected, matching candidate validation.
 
 The gate snapshots `now` once for each operator-attestation binding attempt.
 Callers may provide a fixed aware UTC time for deterministic tests; production
@@ -39,8 +39,8 @@ release gate's attestation binding check:
 1. Parse candidate `createdAt`, candidate `expiresAt`, and attestation
    `createdAt` with the existing strict parser.
 2. Reject a missing or malformed timestamp.
-3. Reject attestations before candidate creation, after candidate expiry, or
-   after the snapped validation time.
+3. Reject attestations before candidate creation or after the snapped
+   validation time, and reject binding attempts at or after candidate expiry.
 4. Preserve all existing file identity, ownership, permissions, exact-key,
    host, UID, candidate ID, gate SHA, and confirmation checks.
 
@@ -51,8 +51,8 @@ claim a future operator confirmation.
 ## Verification
 
 Test-first coverage must prove rejection immediately before candidate creation,
-immediately after candidate expiry, and immediately after the current validation
-time. It must prove acceptance at candidate creation and at the current time
-while the candidate remains valid. Existing production-gate and operator-
+at candidate expiry, immediately after candidate expiry, and immediately after
+the current validation time. It must prove acceptance at candidate creation,
+at the current time, and immediately before expiry. Existing production-gate and operator-
 attestation suites must remain green, followed by the complete Course Mode
 source gate and independent spec and quality reviews.

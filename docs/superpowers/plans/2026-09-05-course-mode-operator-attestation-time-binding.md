@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Reject operator attestations that predate the candidate, postdate its expiry, or claim a future confirmation time.
+**Goal:** Reject operator attestations that predate the candidate, claim a future confirmation time, or are bound at or after candidate expiry.
 
 **Architecture:** Preserve the existing attestation schema and generator. Extend the canonical release gate binding with strict UTC comparisons using the manifest parser, while allowing a fixed aware UTC `now` only for deterministic tests.
 
@@ -53,6 +53,10 @@ def test_operator_attestation_accepts_candidate_and_current_time_boundaries(...)
 
 Use the candidate fixture's actual `createdAt` and `expiresAt`; do not weaken
 the fixture or mock the timestamp parser.
+
+Add an isolated expiry-boundary test proving an attestation at the current time
+is accepted one second before candidate expiry, while a binding attempt exactly
+at candidate expiry is rejected.
 
 - [ ] **Step 3: Verify RED**
 
@@ -106,11 +110,11 @@ handling.
 Parse all three values with `_manifest._parse_rfc3339_utc` and reject unless:
 
 ```python
-candidate_created <= attestation_created <= min(validation_now, candidate_expires)
+candidate_created <= attestation_created <= validation_now < candidate_expires
 ```
 
-Do not add a TTL, alter candidate expiry semantics, or change the attestation
-schema/generator.
+Candidate expiry remains exclusive, consistent with candidate validation. Do
+not add a TTL or change the attestation schema/generator.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -150,8 +154,8 @@ git commit -m "fix(course-mode): bind operator attestation time"
 
 - [ ] **Step 1: Run independent reviews**
 
-Require spec review for exact inclusive boundaries, strict UTC, schema
-preservation, and no TTL. Require quality review for deterministic time use,
+Require spec review for inclusive creation/current boundaries, exclusive
+candidate expiry, strict UTC, schema preservation, and no TTL. Require quality review for deterministic time use,
 fail-closed malformed inputs, repeated binding checks, and regression coverage.
 Fix every finding and repeat until both approve.
 
