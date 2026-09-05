@@ -802,6 +802,52 @@ def test_urlsafe_base64_playwright_payload_is_rejected(
     assert "content.embedded_playwright" in report["findings"]
 
 
+@pytest.mark.parametrize(
+    "decoded",
+    [
+        b"Playwright HTML report",
+        b"Authorization: Bearer short-secret",
+    ],
+)
+def test_short_embedded_base64_payloads_are_not_skipped(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path, decoded: bytes
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    encoded = base64.urlsafe_b64encode(decoded)
+    assert len(encoded) < 128
+    artifact = preserved / "short.txt"
+    artifact.write_bytes(encoded)
+    artifact.chmod(0o444)
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    expected = "content.embedded_playwright" if b"Playwright" in decoded else "content.secret"
+    assert expected in report["findings"]
+
+
+def test_repeated_short_base64_blocks_hit_cumulative_budget(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    block = base64.b64encode(b"safe-short-block")
+    assert len(block) < 128
+    artifact = preserved / "repeated-short.txt"
+    artifact.write_bytes(b" ".join([block] * 80))
+    artifact.chmod(0o444)
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert "content.base64_limit" in report["findings"]
+
+
 def test_double_encoded_standard_base64_playwright_payload_is_rejected(
     evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
 ) -> None:

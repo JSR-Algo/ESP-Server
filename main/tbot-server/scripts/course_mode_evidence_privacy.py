@@ -42,10 +42,11 @@ BEARER_VALUE = re.compile(rb"(?i)\bbearer\s+[a-z0-9._~+/=-]{4,}")
 TRANSCRIPT_TEXT = re.compile(rb"(?i)\b(?:child[-_ ]?)?transcript\s*[:=]")
 PRIVATE_PATH = re.compile(r"(?i)(?:^|[-_.\/])(?:audio|transcript|utterance|raw[-_]?speech)(?:[-_.\/]|$)")
 # MIME-wrapped and URL-safe encodings are common in exported evidence payloads.
+MIN_BASE64_CHARS = 16
 BASE64_BLOCK = re.compile(
-    rb"(?<![A-Za-z0-9+/_=])(?:[A-Za-z0-9+/_=]{128,}|"
-    rb"[A-Za-z0-9+/_=]{4,}(?:[ \t]*\r?\n[ \t]*[A-Za-z0-9+/_=]{4,})+)"
-    rb"(?![A-Za-z0-9+/_=])"
+    rb"(?<![A-Za-z0-9+/_=-])(?:[A-Za-z0-9+/_=-]{16,}|"
+    rb"[A-Za-z0-9+/_=-]{4,}(?:[ \t]*\r?\n[ \t]*[A-Za-z0-9+/_=-]{4,})+)"
+    rb"(?![A-Za-z0-9+/_=-])"
 )
 PLAYWRIGHT_MARKERS = (b"playwright html report", b"playwright-report", b"trace.network", b"trace.trace")
 PEM_PRIVATE_KEY = re.compile(
@@ -185,9 +186,10 @@ def _contains_private_key(data: bytes) -> bool:
 def _base64_payloads(data: bytes):
     for match in BASE64_BLOCK.finditer(data):
         payload = re.sub(rb"[ \t\r\n]", b"", match.group(0))
-        if len(payload) < 128 or len(payload) % 4 == 1:
+        if len(payload) < MIN_BASE64_CHARS or len(payload) % 4 == 1:
             continue
-        if b"=" in payload[:-2] or payload.count(b"=") > 2:
+        unpadded = payload.rstrip(b"=")
+        if b"=" in unpadded or payload.count(b"=") > 2:
             continue
         if len(payload) % 4:
             payload += b"=" * (-len(payload) % 4)
@@ -199,6 +201,25 @@ def _decode_base64_payload(payload: bytes) -> bytes | None:
         return base64.b64decode(payload, altchars=b"-_", validate=True)
     except (binascii.Error, ValueError):
         return None
+
+
+def _is_plausible_decoded_payload(data: bytes) -> bool:
+    """Ignore hash/path-like tokens that decode to opaque binary noise."""
+    if not data:
+        return False
+    if (
+        contains_audio(data)
+        or data.startswith(PRIVATE_MEDIA_MAGIC)
+        or data.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x01\x02"))
+        or TRANSCRIPT_TEXT.search(data)
+        or _contains_secret(data)
+        or _contains_private_key(data)
+        or _looks_like_playwright(data, "")
+        or any(_base64_payloads(data))
+    ):
+        return True
+    printable = sum(byte in b"\t\r\n" or 32 <= byte <= 126 for byte in data)
+    return printable / len(data) >= 0.75
 
 
 def _looks_like_playwright(data: bytes, name: str) -> bool:
@@ -257,7 +278,7 @@ def scan_evidence_payload(
                 base64_state["limited"] = True
                 break
             decoded = _decode_base64_payload(payload)
-            if decoded is None:
+            if decoded is None or not _is_plausible_decoded_payload(decoded):
                 continue
             base64_state["blocks"] = int(base64_state["blocks"]) + 1
             base64_state["decoded"] = int(base64_state["decoded"]) + len(decoded)
