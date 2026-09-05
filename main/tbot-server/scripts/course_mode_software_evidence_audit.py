@@ -17,6 +17,8 @@ from pathlib import Path
 from course_mode_evidence_privacy import is_sanitized_manifest, scan_evidence_payload
 
 MAX_FILE_BYTES = 8 * 1024 * 1024
+MAX_AUDIT_FILES = 4096
+MAX_AUDIT_TOTAL_BYTES = 64 * 1024 * 1024
 SHA40 = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 CANDIDATE_ID = re.compile(r"course-mode-[0-9]{4}-[0-9]{2}-[0-9]{2}\.[1-9][0-9]*")
@@ -60,6 +62,7 @@ REQUIRED_EVIDENCE = (
 )
 RAW_PLAYWRIGHT_DIRS = {"playwright-report", "test-results", "blob-report", "playwright-e2e-original"}
 OUTPUT_NAME = "06-software-evidence-audit.json"
+TRUSTED_SYSTEM_SYMLINKS = {Path("/var"): Path("/private/var"), Path("/tmp"): Path("/private/tmp")}
 
 
 def _read_secure_file(path: Path) -> bytes:
@@ -128,7 +131,7 @@ def _load_json(path: Path) -> tuple[object | None, bytes | None]:
     try:
         data = _read_secure_file(path)
         return _strict_json_loads(data), data
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, RecursionError):
         return None, None
 
 
@@ -150,6 +153,16 @@ def _secure_root(path: Path) -> bool:
         for component in absolute.parts[1:]:
             current /= component
             if current.is_symlink():
+                target = TRUSTED_SYSTEM_SYMLINKS.get(current)
+                if target is None or current.resolve() != target:
+                    return False
+                current = target
+            metadata = current.lstat()
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid not in {0, os.geteuid()}
+                or metadata.st_mode & 0o022
+            ):
                 return False
         metadata = absolute.lstat()
     except OSError:
@@ -207,8 +220,9 @@ def _lane_report(document: object, candidate_id: object, lanes: list[str], attes
         and len(rows) == len(lanes)
         and all(
             isinstance(row, dict)
+            and type(row.get("exitCode")) is int
             and row.get("exitCode") == 0
-            and isinstance(row.get("durationMs"), int)
+            and type(row.get("durationMs")) is int
             and row["durationMs"] >= 0
             for row in rows
         )
@@ -315,6 +329,9 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
     checked_files = 1
     checked_archive_members = 0
     raw_playwright_absent = True
+    audit_budget = {"files": 1, "bytes": 0}
+    archive_budget = {"members": 0, "expanded": 0}
+    base64_state = {"blocks": 0, "decoded": 0, "limited": False}
     protected_inputs = [candidate_path] + [evidence_root / name for name in REQUIRED_EVIDENCE]
     if output != evidence_root / OUTPUT_NAME or not _lexically_canonical(output):
         findings.add("output.unsafe")
@@ -327,7 +344,12 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
     if candidate is None:
         findings.add("candidate.metadata_or_json")
     candidate_bytes = candidate_bytes or b""
-    candidate_findings, candidate_members = scan_evidence_payload(candidate_bytes, candidate_path.name)
+    audit_budget["bytes"] = len(candidate_bytes)
+    if audit_budget["bytes"] > MAX_AUDIT_TOTAL_BYTES:
+        findings.add("evidence.budget")
+    candidate_findings, candidate_members = scan_evidence_payload(
+        candidate_bytes, candidate_path.name, _budget=archive_budget, _base64_state=base64_state
+    )
     findings.update(candidate_findings)
     checked_archive_members += candidate_members
     if not _candidate_identity(candidate, evidence_root):
@@ -435,7 +457,6 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
             continue
         if _same_file(output, path):
             findings.add("output.collision")
-        checked_files += 1
         if (
             not stat.S_ISREG(metadata.st_mode)
             or metadata.st_nlink != 1
@@ -444,12 +465,23 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
         ):
             findings.add("evidence.metadata_or_json")
             continue
+        if (
+            audit_budget["files"] >= MAX_AUDIT_FILES
+            or audit_budget["bytes"] + metadata.st_size > MAX_AUDIT_TOTAL_BYTES
+        ):
+            findings.add("evidence.budget")
+            continue
+        audit_budget["files"] += 1
+        audit_budget["bytes"] += metadata.st_size
+        checked_files += 1
         try:
             data = _read_secure_file(path)
         except OSError:
             findings.add("evidence.metadata_or_json")
             continue
-        content_findings, member_count = scan_evidence_payload(data, path.name)
+        content_findings, member_count = scan_evidence_payload(
+            data, path.name, _budget=archive_budget, _base64_state=base64_state
+        )
         findings.update(content_findings)
         checked_archive_members += member_count
         if content_findings & {"content.embedded_playwright", "content.raw_playwright"}:
@@ -479,7 +511,6 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
                 continue
             if _same_file(output, path):
                 findings.add("output.collision")
-            checked_files += 1
             if (
                 not stat.S_ISREG(metadata.st_mode)
                 or metadata.st_nlink != 1
@@ -488,6 +519,15 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
             ):
                 findings.add("preserved.metadata")
                 continue
+            if (
+                audit_budget["files"] >= MAX_AUDIT_FILES
+                or audit_budget["bytes"] + metadata.st_size > MAX_AUDIT_TOTAL_BYTES
+            ):
+                findings.add("evidence.budget")
+                continue
+            audit_budget["files"] += 1
+            audit_budget["bytes"] += metadata.st_size
+            checked_files += 1
             try:
                 data = _read_secure_file(path)
             except OSError:
@@ -498,7 +538,9 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
             if any(part.lower() in RAW_PLAYWRIGHT_DIRS for part in relative_parts):
                 raw_playwright_absent = False
                 findings.add("preserved.raw_playwright")
-            content_findings, member_count = scan_evidence_payload(data, path.name)
+            content_findings, member_count = scan_evidence_payload(
+                data, path.name, _budget=archive_budget, _base64_state=base64_state
+            )
             findings.update(content_findings)
             checked_archive_members += member_count
             if content_findings & {"content.embedded_playwright", "content.raw_playwright"}:

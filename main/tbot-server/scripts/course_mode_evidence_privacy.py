@@ -10,6 +10,7 @@ import json
 import re
 import stat
 import zipfile
+import zlib
 from pathlib import PurePosixPath
 
 AUDIO_MAGIC = (b"RIFF", b"ID3", b"OggS", b"fLaC", b"ADIF")
@@ -31,9 +32,16 @@ MAX_ARCHIVE_DEPTH = 2
 MAX_BASE64_DEPTH = 3
 MAX_BASE64_BLOCKS = 64
 MAX_BASE64_DECODED_BYTES = 8 * 1024 * 1024
+MAX_SECRET_JSON_DEPTH = 64
+MAX_SECRET_JSON_NODES = 10_000
 SUPPORTED_ZIP_COMPRESSION = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
 ARCHIVE_SUFFIXES = {".zip", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".7z", ".rar"}
-SECRET_KEY = re.compile(r"(?i)(?:authorization|cookie|set-cookie|session|password|secret|token)")
+SECRET_KEY_TOKENS = frozenset(
+    {
+        "authorization", "cookie", "setcookie", "session", "sessionid", "password", "secret",
+        "token", "authtoken", "accesstoken", "refreshtoken", "apikey",
+    }
+)
 SECRET_TEXT = re.compile(
     rb"(?i)(?:authorization|cookie|set-cookie|session(?:id)?|password|secret|token)"
     rb"\s*[:=]\s*[\"']?(?!\s*(?:null|none|redacted|<redacted>)(?:[\"']|\s|$))[^\s\"',;}]{3,}"
@@ -42,9 +50,9 @@ BEARER_VALUE = re.compile(rb"(?i)\bbearer\s+[a-z0-9._~+/=-]{4,}")
 TRANSCRIPT_TEXT = re.compile(rb"(?i)\b(?:child[-_ ]?)?transcript\s*[:=]")
 PRIVATE_PATH = re.compile(r"(?i)(?:^|[-_.\/])(?:audio|transcript|utterance|raw[-_]?speech)(?:[-_.\/]|$)")
 # MIME-wrapped and URL-safe encodings are common in exported evidence payloads.
-MIN_BASE64_CHARS = 16
+MIN_BASE64_CHARS = 8
 BASE64_BLOCK = re.compile(
-    rb"(?<![A-Za-z0-9+/_=-])(?:[A-Za-z0-9+/_=-]{16,}|"
+    rb"(?<![A-Za-z0-9+/_=-])(?:[A-Za-z0-9+/_=-]{8,}|"
     rb"[A-Za-z0-9+/_=-]{4,}(?:[ \t]*\r?\n[ \t]*[A-Za-z0-9+/_=-]{4,})+)"
     rb"(?![A-Za-z0-9+/_=-])"
 )
@@ -112,7 +120,7 @@ def is_sanitized_manifest(data: bytes) -> bool:
     """Recognize path/hash-only summaries without treating labels as private payload."""
     try:
         document = json.loads(data, object_pairs_hook=_reject_duplicate_keys)
-    except (UnicodeError, json.JSONDecodeError, ValueError):
+    except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError):
         return False
     if not isinstance(document, dict) or not set(document) <= SANITIZED_CONTAINER_KEYS:
         return False
@@ -159,14 +167,21 @@ def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]
 
 
 def _has_secret_json(value: object) -> bool:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if SECRET_KEY.search(str(key)) and child not in (None, "", "redacted", "<redacted>", False):
-                return True
-            if _has_secret_json(child):
-                return True
-    elif isinstance(value, list):
-        return any(_has_secret_json(child) for child in value)
+    pending: list[tuple[object, int]] = [(value, 0)]
+    nodes = 0
+    while pending:
+        current, depth = pending.pop()
+        nodes += 1
+        if depth > MAX_SECRET_JSON_DEPTH or nodes > MAX_SECRET_JSON_NODES:
+            return True
+        if isinstance(current, dict):
+            for key, child in current.items():
+                normalized_key = re.sub(r"[^a-z0-9]", "", key.casefold()) if isinstance(key, str) else ""
+                if normalized_key in SECRET_KEY_TOKENS and child not in (None, "", "redacted", "<redacted>", False):
+                    return True
+                pending.append((child, depth + 1))
+        elif isinstance(current, list):
+            pending.extend((child, depth + 1) for child in current)
     return False
 
 
@@ -175,6 +190,8 @@ def _contains_secret(data: bytes) -> bool:
         return True
     try:
         return _has_secret_json(json.loads(data, object_pairs_hook=_reject_duplicate_keys))
+    except RecursionError:
+        return True
     except (UnicodeError, json.JSONDecodeError, ValueError):
         return False
 
@@ -208,7 +225,7 @@ def _is_plausible_decoded_payload(data: bytes) -> bool:
     if not data:
         return False
     if (
-        contains_audio(data)
+        (contains_audio(data) and len(data) >= 32)
         or data.startswith(PRIVATE_MEDIA_MAGIC)
         or data.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x01\x02"))
         or TRANSCRIPT_TEXT.search(data)
@@ -351,7 +368,7 @@ def scan_evidence_payload(
                     continue
                 try:
                     member_data = archive.read(info)
-                except (OSError, RuntimeError, zipfile.BadZipFile, NotImplementedError):
+                except (OSError, RuntimeError, EOFError, zlib.error, zipfile.BadZipFile, NotImplementedError):
                     findings.add("archive.invalid")
                     continue
                 child_findings, child_count = scan_evidence_payload(

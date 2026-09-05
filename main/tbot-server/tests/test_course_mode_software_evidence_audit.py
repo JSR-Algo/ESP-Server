@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import zipfile
+import zlib
 from io import BytesIO
 from pathlib import Path
 
@@ -14,6 +15,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/course_mode_software_evidence_audit.py"
+sys.path.insert(0, str(ROOT / "scripts"))
+import course_mode_evidence_privacy as privacy  # noqa: E402
+import course_mode_software_evidence_audit as auditor  # noqa: E402
 
 QUICK_LANES = [
     "backend-course-mode-focused",
@@ -902,6 +906,181 @@ def test_embedded_base64_invalid_zip_is_fail_closed(
     assert completed.returncode == 1
     assert "archive.invalid" in report["findings"]
     assert "content.embedded_playwright" in report["findings"]
+
+
+def test_zip_member_zlib_error_is_converted_to_archive_finding() -> None:
+    payload = _zip({"report.txt": b"safe"})
+
+    def broken_read(_archive, _info):
+        raise zlib.error("corrupt deflate stream")
+
+    original_read = privacy.zipfile.ZipFile.read
+    privacy.zipfile.ZipFile.read = broken_read
+    try:
+        findings, _ = privacy.scan_evidence_payload(payload, "report.zip")
+    finally:
+        privacy.zipfile.ZipFile.read = original_read
+
+    assert "archive.invalid" in findings
+
+
+@pytest.mark.parametrize(
+    "encoded",
+    [
+        base64.b64encode(b"token=abc"),
+        base64.b64encode(b"Authorization: Bearer x")[:4]
+        + b" \n "
+        + base64.b64encode(b"Authorization: Bearer x")[4:8]
+        + b"\n"
+        + base64.b64encode(b"Authorization: Bearer x")[8:],
+    ],
+)
+def test_short_and_whitespace_split_base64_secrets_are_scanned(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path, encoded: bytes
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    artifact = preserved / "short-secret.txt"
+    artifact.write_bytes(encoded)
+    artifact.chmod(0o444)
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert "content.secret" in report["findings"]
+
+
+def test_secret_json_key_matching_avoids_counter_and_policy_fields(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    artifact = preserved / "metadata.json"
+    artifact.write_bytes(
+        b'{"tokenCount":"0","sessionDurationMs":12,"cookiePolicy":"strict"}\n'
+    )
+    artifact.chmod(0o444)
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 0
+    assert "content.secret" not in report["findings"]
+
+
+def test_secret_json_traversal_is_bounded_and_fails_closed(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    value: object = "safe"
+    for _ in range(80):
+        value = {"nested": value}
+    artifact = preserved / "deep.json"
+    artifact.write_text(json.dumps(value), encoding="utf-8")
+    artifact.chmod(0o444)
+
+    completed = _run(candidate, evidence, output, preserved)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert "content.secret" in report["findings"]
+
+
+def test_lane_numeric_fields_reject_bool(
+    evidence_fixture: tuple[Path, Path, Path]
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    quick = evidence / "03-quick-gate.json"
+    payload = json.loads(quick.read_text(encoding="utf-8"))
+    payload["lanes"][0]["durationMs"] = True
+    quick.chmod(0o644)
+    _write_json(quick, payload)
+
+    completed = _run(candidate, evidence, output)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 1
+    assert "evidence.quick" in report["findings"]
+
+
+def test_whole_audit_file_budget_is_cumulative(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    for index in range(2):
+        artifact = preserved / f"extra-{index}.txt"
+        artifact.write_bytes(b"safe")
+        artifact.chmod(0o444)
+    monkeypatch.setattr(auditor, "MAX_AUDIT_FILES", 10)
+
+    report = auditor.audit(candidate, evidence, [preserved], output)
+
+    assert "evidence.budget" in report["findings"]
+
+
+def test_whole_audit_byte_budget_is_cumulative(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    monkeypatch.setattr(auditor, "MAX_AUDIT_TOTAL_BYTES", 1)
+
+    report = auditor.audit(candidate, evidence, [], output)
+
+    assert "evidence.budget" in report["findings"]
+
+
+def test_base64_and_archive_budgets_are_cumulative_across_top_level_files(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    preserved = tmp_path / "preserved"
+    preserved.mkdir()
+    for index in range(3):
+        encoded = base64.b64encode(b"safe-short-block")
+        artifact = preserved / f"encoded-{index}.txt"
+        artifact.write_bytes(encoded)
+        artifact.chmod(0o444)
+    monkeypatch.setattr(privacy, "MAX_BASE64_BLOCKS", 2)
+
+    report = auditor.audit(candidate, evidence, [preserved], output)
+
+    assert "content.base64_limit" in report["findings"]
+
+    for index in range(2):
+        artifact = preserved / f"archive-{index}.zip"
+        artifact.write_bytes(_zip({"one.txt": b"ok", "two.txt": b"ok"}))
+        artifact.chmod(0o444)
+    monkeypatch.setattr(privacy, "MAX_ARCHIVE_MEMBERS", 2)
+
+    report = auditor.audit(candidate, evidence, [preserved], output)
+
+    assert "archive.oversize" in report["findings"]
+
+
+def test_intermediate_root_metadata_and_output_symlink_are_rejected(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    insecure_parent = tmp_path / "insecure-parent"
+    insecure_parent.mkdir(mode=0o700)
+    insecure_parent.chmod(0o777)
+    preserved = insecure_parent / "preserved"
+    preserved.mkdir()
+    report = auditor.audit(candidate, evidence, [preserved], output)
+    assert "preserved.root" in report["findings"]
+
+    output_parent = tmp_path / "output-parent"
+    output_parent.symlink_to(evidence, target_is_directory=True)
+    aliased_output = output_parent / "06-software-evidence-audit.json"
+    report = auditor.audit(candidate, evidence, [], aliased_output)
+    assert "output.unsafe" in report["findings"]
 
 
 def test_zip_member_after_first_64k_is_scanned(
