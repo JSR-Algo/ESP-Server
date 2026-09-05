@@ -1049,6 +1049,29 @@ def test_operator_attestation_enforces_candidate_expiry_boundary(
 
 
 @pytest.mark.parametrize(
+    "validation_now",
+    [
+        datetime(2099, 1, 8, tzinfo=timezone.utc),
+        datetime(2099, 1, 8, 0, 0, 1, tzinfo=timezone.utc),
+    ],
+)
+def test_operator_attestation_rejects_expired_candidate_with_preexpiry_attestation(
+    candidate_file: Path, validation_now: datetime,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    payload = {
+        **_operator_attestation_payload(candidate_file),
+        "createdAt": "2099-01-07T23:59:59Z",
+    }
+    attestation = _write_operator_attestation(candidate_file, payload)
+    source = {"COURSE_MODE_OPERATOR_ATTESTATION": str(attestation)}
+
+    assert gate._operator_attestation_binding(
+        candidate, source, now=validation_now,
+    ) is None
+
+
+@pytest.mark.parametrize(
     "now",
     [
         datetime(2099, 1, 4),
@@ -1083,7 +1106,7 @@ def test_operator_attestation_rejects_non_datetime_validation_time_spoof(
     ) is None
 
 
-def test_operator_attestation_rejects_stateful_hostile_datetime(
+def test_operator_attestation_normalizes_stateful_datetime_once(
     candidate_file: Path,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
@@ -1094,6 +1117,34 @@ def test_operator_attestation_rejects_stateful_hostile_datetime(
 
     assert gate._operator_attestation_binding(candidate, source, now=validation_now) is not None
     assert stateful_timezone.calls == 1
+
+
+def test_production_gate_revalidation_blocks_when_candidate_reaches_expiry(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CrossingExpiryDateTime(datetime):
+        calls = 0
+
+        @classmethod
+        def now(cls, tz=None) -> datetime:
+            cls.calls += 1
+            value = datetime(2099, 1, 7, 23, 59, 59, tzinfo=timezone.utc)
+            if cls.calls > 1:
+                value = datetime(2099, 1, 8, tzinfo=timezone.utc)
+            return value if tz is not None else value.replace(tzinfo=None)
+
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(gate, "datetime", CrossingExpiryDateTime)
+    monkeypatch.setattr(gate, "lanes_for_mode", lambda _mode: ())
+
+    result = gate.run_gate(
+        candidate_file, "quick", runtime_root=_runtime_root(candidate_file),
+    )
+
+    assert CrossingExpiryDateTime.calls > 1
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "operator-precondition"
 
 
 def test_operator_attestation_rejects_clock_acquisition_failure(
