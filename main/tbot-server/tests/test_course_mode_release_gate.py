@@ -8545,39 +8545,27 @@ def test_physical_preflight_requires_candidate_bound_signed_evidence(
 
 
 def test_physical_preflight_command_uses_only_candidate_evidence_paths(
-    candidate_file: Path, tmp_path: Path,
+    candidate_file: Path,
 ) -> None:
-    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
-    evidence = tmp_path / "evidence"
-    evidence.mkdir(exist_ok=True)
-    paths = {}
-    for key, name in (
-        ("input", "preflight-input.json"),
-        ("expectedIdentity", "expected-identity.json"),
-        ("expectedIdentitySignature", "expected-identity.sig"),
-    ):
-        path = evidence / name
-        path.write_bytes(b"x" * 64 if key == "expectedIdentitySignature" else b"{}")
-        paths[key] = str(path)
-    paths["output"] = str(evidence / "preflight-output.json")
-    candidate["evidenceRoot"] = str(evidence)
-    candidate["images"] = {"backend": "sha256:" + "1" * 64}
-    candidate["firmware"] = {"appSha256": "2" * 64}
-    candidate["database"] = {"materializationReceipt": "3" * 64}
-    candidate["tools"] = {"physicalAdmission": paths}
+    candidate, path_objects = _install_physical_admission_fixture(candidate_file)
+    paths = {key: str(path) for key, path in path_objects.items()}
 
     command = gate.physical_preflight_command(candidate)
 
+    runtime = candidate["tools"]["pythonTestRuntime"]
     assert command == (
-        "python3", "scripts/course_mode_physical_flash_admission.py",
+        str(Path(runtime["root"]) / runtime["executable"]), "-I", "-s", "-c",
+        gate.PHYSICAL_ADMISSION_BOOTSTRAP,
+        "scripts/course_mode_physical_flash_admission.py",
         "--input", paths["input"], "--output", paths["output"],
         "--expected-identity", paths["expectedIdentity"],
         "--expected-identity-signature", paths["expectedIdentitySignature"],
     )
-    forbidden_actions = ("esptool", "write_flash", "erase", "build", "deploy", "monitor")
+    descriptive_filename = "scripts/course_mode_physical_flash_admission.py"
+    forbidden_actions = ("flash", "esptool", "erase", "build", "deploy", "monitor")
     assert all(
         action not in token.lower()
-        for token in command
+        for token in command if token != descriptive_filename
         for action in forbidden_actions
     )
 
@@ -8592,16 +8580,67 @@ def _install_physical_admission_fixture(candidate_file: Path) -> tuple[dict, dic
         "expectedIdentity": evidence / "expected-admission-identity.json",
         "expectedIdentitySignature": evidence / "expected-admission-identity.sig",
     }
-    paths["input"].write_text("{}", encoding="utf-8")
-    paths["expectedIdentity"].write_text("{}", encoding="utf-8")
-    paths["expectedIdentitySignature"].write_bytes(b"s" * 64)
-    for key in ("input", "expectedIdentity", "expectedIdentitySignature"):
-        paths[key].chmod(0o444)
     candidate["tools"]["physicalAdmission"] = {
         key: str(path) for key, path in paths.items()
     }
     candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    candidate_sha = hashlib.sha256(candidate_file.read_bytes()).hexdigest()
+    session_id = "cab43f0d-62dc-49c4-9d30-e9630d195a44"
+    signed_candidate = {
+        "candidateId": candidate["candidateId"],
+        "path": str(candidate_file),
+        "sha256": candidate_sha,
+    }
+    paths["input"].write_text(json.dumps({
+        "schemaVersion": 1,
+        "sessionId": session_id,
+        "candidate": signed_candidate,
+    }), encoding="utf-8")
+    paths["expectedIdentity"].write_text(json.dumps({
+        "schemaVersion": 1,
+        "sessionId": session_id,
+        "candidate": signed_candidate,
+        "signer": {
+            "algorithm": "ed25519",
+            "fingerprint": gate._admission.PINNED_APPROVAL_KEY_FINGERPRINT,
+        },
+    }), encoding="utf-8")
+    paths["expectedIdentitySignature"].write_bytes(b"s" * 64)
+    for key in ("input", "expectedIdentity", "expectedIdentitySignature"):
+        paths[key].chmod(0o444)
     return candidate, paths
+
+
+def _valid_physical_admission_result(candidate: dict, paths: dict[str, Path]) -> dict:
+    input_document = json.loads(paths["input"].read_text(encoding="utf-8"))
+    return {
+        "schemaVersion": 1,
+        "validator": gate._admission.VALIDATOR,
+        "status": "pass",
+        "reasons": [],
+        "candidateId": candidate["candidateId"],
+        "sessionId": input_document["sessionId"],
+        "signerFingerprint": gate._admission.PINNED_APPROVAL_KEY_FINGERPRINT,
+        "physicalActionsPerformed": False,
+        "serialOpened": False,
+        "inputSha256": hashlib.sha256(paths["input"].read_bytes()).hexdigest(),
+        "expectedIdentitySha256": hashlib.sha256(
+            paths["expectedIdentity"].read_bytes(),
+        ).hexdigest(),
+        "candidateSha256": input_document["candidate"]["sha256"],
+        "robotMac": gate._admission.ROBOT_MAC,
+        "serialPath": gate._admission.SERIAL_PATH,
+        "firmwareSha": gate._admission.FIRMWARE_SHA,
+        "appSha256": gate._admission.APP_SHA256,
+        "manifestSha256": gate._admission.MANIFEST_SHA256,
+    }
+
+
+def _publish_physical_admission_result(candidate: dict, paths: dict[str, Path]) -> None:
+    paths["output"].write_text(
+        json.dumps(_valid_physical_admission_result(candidate, paths)), encoding="utf-8",
+    )
+    paths["output"].chmod(0o444)
 
 
 @pytest.mark.parametrize(
@@ -8765,7 +8804,7 @@ def test_physical_preflight_accepts_only_its_new_regular_output(
     def publish_output(*_args, **_kwargs):
         nonlocal calls
         calls += 1
-        paths["output"].write_text('{"status":"pass"}\n', encoding="utf-8")
+        _publish_physical_admission_result(candidate, paths)
         return gate._manifest.BoundedCommandResult(0, "", None)
 
     monkeypatch.setattr(gate, "run_bounded_command", publish_output)
@@ -8781,6 +8820,292 @@ def test_physical_preflight_accepts_only_its_new_regular_output(
     ) == binding
     assert result["verdict"] == "PASS", result
     assert result["failedLane"] is None
+
+
+def test_physical_preflight_blocks_success_without_new_output(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate, _paths = _install_physical_admission_fixture(candidate_file)
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(gate, "validate_candidate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(gate, "_runtime_matches_candidate", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *_args, **_kwargs: gate._manifest.BoundedCommandResult(0, "", None),
+    )
+
+    result = gate.run_gate(
+        candidate_file, "physical-preflight",
+        runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "physical-flash-admission"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("schemaVersion", 2),
+        ("validator", "other-validator"),
+        ("status", "fail"),
+        ("reasons", ["forged"]),
+        ("candidateId", "other"),
+        ("sessionId", "00000000-0000-4000-8000-000000000000"),
+        ("signerFingerprint", "0" * 64),
+        ("physicalActionsPerformed", True),
+        ("serialOpened", True),
+        ("inputSha256", "0" * 64),
+        ("expectedIdentitySha256", "0" * 64),
+        ("candidateSha256", "0" * 64),
+        ("robotMac", "00:00:00:00:00:00"),
+        ("serialPath", "/dev/other"),
+        ("firmwareSha", "0" * 40),
+        ("appSha256", "0" * 64),
+        ("manifestSha256", "0" * 64),
+        ("unexpected", True),
+    ],
+)
+def test_physical_preflight_rejects_unbound_admission_result(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: object,
+) -> None:
+    candidate, paths = _install_physical_admission_fixture(candidate_file)
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(gate, "validate_candidate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(gate, "_runtime_matches_candidate", lambda *_args, **_kwargs: True)
+
+    def publish_hostile(*_args, **_kwargs):
+        payload = _valid_physical_admission_result(candidate, paths)
+        payload[field] = value
+        paths["output"].write_text(json.dumps(payload), encoding="utf-8")
+        paths["output"].chmod(0o444)
+        return gate._manifest.BoundedCommandResult(0, "", None)
+
+    monkeypatch.setattr(gate, "run_bounded_command", publish_hostile)
+
+    result = gate.run_gate(
+        candidate_file, "physical-preflight",
+        runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "physical-flash-admission"
+
+
+def test_physical_preflight_rejects_writable_admission_result(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate, paths = _install_physical_admission_fixture(candidate_file)
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(gate, "validate_candidate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(gate, "_runtime_matches_candidate", lambda *_args, **_kwargs: True)
+
+    def publish_writable(*_args, **_kwargs):
+        paths["output"].write_text(
+            json.dumps(_valid_physical_admission_result(candidate, paths)), encoding="utf-8",
+        )
+        return gate._manifest.BoundedCommandResult(0, "", None)
+
+    monkeypatch.setattr(gate, "run_bounded_command", publish_writable)
+
+    result = gate.run_gate(
+        candidate_file, "physical-preflight",
+        runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "physical-flash-admission"
+
+
+@pytest.mark.parametrize("attack", ["hardlink", "duplicate-key"])
+def test_physical_preflight_rejects_unsafe_result_file(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, attack: str,
+) -> None:
+    candidate, paths = _install_physical_admission_fixture(candidate_file)
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(gate, "validate_candidate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(gate, "_runtime_matches_candidate", lambda *_args, **_kwargs: True)
+
+    def publish_unsafe(*_args, **_kwargs):
+        if attack == "hardlink":
+            source = paths["output"].with_name("linked-admission-result.json")
+            source.write_text(
+                json.dumps(_valid_physical_admission_result(candidate, paths)),
+                encoding="utf-8",
+            )
+            source.chmod(0o444)
+            os.link(source, paths["output"])
+        else:
+            payload = json.dumps(_valid_physical_admission_result(candidate, paths))
+            paths["output"].write_text(
+                payload[:-1] + ',"status":"pass"}', encoding="utf-8",
+            )
+            paths["output"].chmod(0o444)
+        return gate._manifest.BoundedCommandResult(0, "", None)
+
+    monkeypatch.setattr(gate, "run_bounded_command", publish_unsafe)
+
+    result = gate.run_gate(
+        candidate_file, "physical-preflight",
+        runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "physical-flash-admission"
+
+
+def test_physical_preflight_rejects_stale_result_renamed_into_place(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate, paths = _install_physical_admission_fixture(candidate_file)
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(gate, "validate_candidate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(gate, "_runtime_matches_candidate", lambda *_args, **_kwargs: True)
+    stale = paths["output"].with_name("stale-admission-result.json")
+    stale.write_text(
+        json.dumps(_valid_physical_admission_result(candidate, paths)), encoding="utf-8",
+    )
+    stale.chmod(0o444)
+
+    def install_stale(*_args, **_kwargs):
+        stale.replace(paths["output"])
+        return gate._manifest.BoundedCommandResult(0, "", None)
+
+    monkeypatch.setattr(gate, "run_bounded_command", install_stale)
+
+    result = gate.run_gate(
+        candidate_file, "physical-preflight",
+        runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "physical-flash-admission"
+
+
+def test_physical_preflight_rejects_result_path_swap_during_recheck(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate, paths = _install_physical_admission_fixture(candidate_file)
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(gate, "validate_candidate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(gate, "_runtime_matches_candidate", lambda *_args, **_kwargs: True)
+    original_still_bound = gate._admission._still_bound
+    swapped = False
+
+    def swap_result(record):
+        nonlocal swapped
+        if Path(record[2]) == paths["output"] and not swapped:
+            swapped = True
+            replacement = paths["output"].with_name("replacement-result.json")
+            replacement.write_bytes(paths["output"].read_bytes())
+            replacement.chmod(0o444)
+            replacement.replace(paths["output"])
+        return original_still_bound(record)
+
+    monkeypatch.setattr(gate._admission, "_still_bound", swap_result)
+
+    def publish(*_args, **_kwargs):
+        _publish_physical_admission_result(candidate, paths)
+        return gate._manifest.BoundedCommandResult(0, "", None)
+
+    monkeypatch.setattr(gate, "run_bounded_command", publish)
+
+    result = gate.run_gate(
+        candidate_file, "physical-preflight",
+        runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+    )
+
+    assert swapped is True
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "physical-flash-admission"
+
+
+def test_physical_preflight_blocks_staged_python_replacement_before_lane(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate, _paths = _install_physical_admission_fixture(candidate_file)
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(gate, "validate_candidate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(gate, "_runtime_matches_candidate", lambda *_args, **_kwargs: True)
+    original_binding = gate._physical_python_runtime_binding
+    staged_calls = 0
+
+    def replace_runtime_after_binding(candidate_value, **kwargs):
+        nonlocal staged_calls
+        binding = original_binding(candidate_value, **kwargs)
+        descriptor = candidate_value["tools"]["pythonTestRuntime"]
+        if not str(descriptor["root"]).startswith("/private/tmp/course-mode-stage-"):
+            return binding
+        staged_calls += 1
+        if staged_calls != 2:
+            return binding
+        executable = Path(descriptor["root"]) / descriptor["executable"]
+        executable.parent.chmod(0o755)
+        replacement = executable.with_name("replacement-python")
+        replacement.write_bytes(executable.read_bytes())
+        replacement.chmod(0o555)
+        replacement.replace(executable)
+        executable.parent.chmod(0o555)
+        return binding
+
+    monkeypatch.setattr(gate, "_physical_python_runtime_binding", replace_runtime_after_binding)
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *_args, **_kwargs: pytest.fail("lane must not use a replaced Python runtime"),
+    )
+
+    result = gate.run_gate(
+        candidate_file, "physical-preflight",
+        runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "physical-flash-admission"
+
+
+def test_physical_preflight_blocks_python_runtime_replacement_after_lane(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate, paths = _install_physical_admission_fixture(candidate_file)
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(gate, "validate_candidate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(gate, "_runtime_matches_candidate", lambda *_args, **_kwargs: True)
+    def replace_runtime(command, **_kwargs):
+        _publish_physical_admission_result(candidate, paths)
+        executable = Path(command[0])
+        replacement = executable.with_name("replacement-python")
+        executable.parent.chmod(0o755)
+        replacement.write_bytes(executable.read_bytes())
+        replacement.chmod(0o555)
+        replacement.replace(executable)
+        executable.parent.chmod(0o555)
+        return gate._manifest.BoundedCommandResult(0, "", None)
+
+    monkeypatch.setattr(gate, "run_bounded_command", replace_runtime)
+
+    result = gate.run_gate(
+        candidate_file, "physical-preflight",
+        runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "physical-flash-admission"
 
 
 def test_physical_preflight_rejects_malformed_json_and_signature_prerequisites(

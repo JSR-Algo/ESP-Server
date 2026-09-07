@@ -41,6 +41,13 @@ try:
 except ModuleNotFoundError:
     _manifest = importlib.import_module("course_mode_candidate_manifest")
 
+_scripts_directory = str(Path(__file__).resolve().parent)
+sys.path.insert(0, _scripts_directory)
+try:
+    _admission = importlib.import_module("course_mode_physical_flash_admission")
+finally:
+    sys.path.remove(_scripts_directory)
+
 _DATETIME_TYPE = datetime
 
 MAX_CANDIDATE_BYTES = _manifest.MAX_CANDIDATE_BYTES
@@ -514,6 +521,15 @@ class PhysicalAdmissionBinding:
     evidence_root_identity: tuple[int, ...]
     input_identities: tuple[tuple[str, tuple[int, ...], str], ...]
     output_parent_identity: tuple[int, ...]
+    expected_result: bytes
+
+
+@dataclass(frozen=True)
+class PhysicalPythonRuntimeBinding:
+    descriptor: tuple[tuple[str, object], ...]
+    executable: Path
+    executable_identity: tuple[int, ...]
+    tree_digest: str
 
 
 @dataclass
@@ -1890,7 +1906,7 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
                 if error or observed is None or observed["sha256"] != descriptor["sha256"]:
                     raise ValueError(f"staged {name} executable mismatch")
                 staged["tools"][name]["path"] = str(target)
-        if any(_python_test_runtime_required(lane) for lane in lanes):
+        if any(_python_runtime_stage_required(lane) for lane in lanes):
             descriptor = candidate["tools"]["pythonTestRuntime"]
             python_target = tools_root / "python-test-runtime"
             tools_root.mkdir(exist_ok=True)
@@ -2229,6 +2245,11 @@ PHYSICAL_PREFLIGHT_LANE = _lane(
     "physical-flash-admission", "adminEsp", "main/tbot-server",
     ("python3", "scripts/course_mode_physical_flash_admission.py"),
     900.0,
+)
+
+PHYSICAL_ADMISSION_BOOTSTRAP = (
+    "import runpy,sys;sys.path.insert(0,'scripts');"
+    "sys.argv=sys.argv[1:];runpy.run_path(sys.argv[0],run_name='__main__')"
 )
 
 
@@ -2798,6 +2819,10 @@ def _python_test_runtime_required(lane: Lane) -> bool:
     )
 
 
+def _python_runtime_stage_required(lane: Lane) -> bool:
+    return lane.name == "physical-flash-admission" or _python_test_runtime_required(lane)
+
+
 def _container_tools_required(lane: Lane) -> bool:
     return (
         lane.name.startswith("admin-course-mode-playwright-")
@@ -3175,6 +3200,9 @@ def physical_preflight_command(candidate: dict) -> tuple[str, ...] | None:
         return None
     if _physical_admission_binding(candidate, require_output_absent=True) is None:
         return None
+    runtime = _physical_python_runtime_binding(candidate, verify_authority=True)
+    if runtime is None:
+        return None
     tools = candidate.get("tools")
     metadata = tools.get("physicalAdmission") if isinstance(tools, dict) else None
     required = {"input", "output", "expectedIdentity", "expectedIdentitySignature"}
@@ -3203,7 +3231,8 @@ def physical_preflight_command(candidate: dict) -> tuple[str, ...] | None:
     except (KeyError, OSError, ValueError):
         return None
     return (
-        "python3", "scripts/course_mode_physical_flash_admission.py",
+        str(runtime.executable), "-I", "-s", "-c", PHYSICAL_ADMISSION_BOOTSTRAP,
+        "scripts/course_mode_physical_flash_admission.py",
         "--input", str(resolved["input"]), "--output", str(resolved["output"]),
         "--expected-identity", str(resolved["expectedIdentity"]),
         "--expected-identity-signature", str(resolved["expectedIdentitySignature"]),
@@ -3212,6 +3241,7 @@ def physical_preflight_command(candidate: dict) -> tuple[str, ...] | None:
 
 def _physical_admission_binding(
     candidate: dict, *, require_output_absent: bool,
+    expected_candidate_path: Path | None = None,
 ) -> PhysicalAdmissionBinding | None:
     required = ("input", "output", "expectedIdentity", "expectedIdentitySignature")
     try:
@@ -3234,6 +3264,8 @@ def _physical_admission_binding(
         if not stat.S_ISDIR(evidence_root_metadata.st_mode):
             return None
         input_identities = []
+        documents = {}
+        raw_inputs = {}
         for key in ("input", "expectedIdentity", "expectedIdentitySignature"):
             path = paths[key]
             if path != path.resolve(strict=True):
@@ -3253,6 +3285,8 @@ def _physical_admission_binding(
                 document = strict_json_loads(raw)
                 if not isinstance(document, dict):
                     return None
+                documents[key] = document
+            raw_inputs[key] = raw
             input_identities.append((
                 key, _stat_identity(after), hashlib.sha256(raw).hexdigest(),
             ))
@@ -3270,14 +3304,139 @@ def _physical_admission_binding(
             output_metadata = os.stat(output, follow_symlinks=False)
             if not stat.S_ISREG(output_metadata.st_mode):
                 return None
+        input_document = documents["input"]
+        identity_document = documents["expectedIdentity"]
+        signed_candidate = input_document.get("candidate")
+        if (
+            not isinstance(signed_candidate, dict)
+            or signed_candidate.get("candidateId") != candidate.get("candidateId")
+            or identity_document.get("sessionId") != input_document.get("sessionId")
+            or identity_document.get("candidate") != signed_candidate
+            or identity_document.get("signer") != {
+                "algorithm": "ed25519",
+                "fingerprint": _admission.PINNED_APPROVAL_KEY_FINGERPRINT,
+            }
+        ):
+            return None
+        candidate_path = Path(signed_candidate.get("path", ""))
+        if (
+            not candidate_path.is_absolute()
+            or expected_candidate_path is not None
+            and candidate_path != expected_candidate_path
+        ):
+            return None
+        candidate_raw = read_secure_regular(candidate_path, MAX_CANDIDATE_BYTES)
+        if (
+            hashlib.sha256(candidate_raw).hexdigest() != signed_candidate.get("sha256")
+            or strict_json_loads(candidate_raw) != candidate
+        ):
+            return None
+        expected_result = {
+            "schemaVersion": 1,
+            "validator": _admission.VALIDATOR,
+            "status": "pass",
+            "reasons": [],
+            "candidateId": candidate["candidateId"],
+            "sessionId": input_document["sessionId"],
+            "signerFingerprint": _admission.PINNED_APPROVAL_KEY_FINGERPRINT,
+            "physicalActionsPerformed": False,
+            "serialOpened": False,
+            "inputSha256": hashlib.sha256(raw_inputs["input"]).hexdigest(),
+            "expectedIdentitySha256": hashlib.sha256(
+                raw_inputs["expectedIdentity"],
+            ).hexdigest(),
+            "candidateSha256": hashlib.sha256(candidate_raw).hexdigest(),
+            "robotMac": _admission.ROBOT_MAC,
+            "serialPath": _admission.SERIAL_PATH,
+            "firmwareSha": _admission.FIRMWARE_SHA,
+            "appSha256": _admission.APP_SHA256,
+            "manifestSha256": _admission.MANIFEST_SHA256,
+        }
         return PhysicalAdmissionBinding(
             descriptor=descriptor,
             evidence_root_identity=_directory_identity(evidence_root_metadata),
             input_identities=tuple(input_identities),
             output_parent_identity=_directory_identity(output_parent_metadata),
+            expected_result=json.dumps(
+                expected_result, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=True, allow_nan=False,
+            ).encode("utf-8"),
         )
     except (KeyError, OSError, TypeError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
         return None
+
+
+def _physical_python_runtime_binding(
+    candidate: dict, *, verify_authority: bool,
+) -> PhysicalPythonRuntimeBinding | None:
+    try:
+        descriptor = candidate["tools"]["pythonTestRuntime"]
+        if not isinstance(descriptor, dict):
+            return None
+        frozen_descriptor = tuple(sorted(descriptor.items()))
+        root = Path(descriptor["root"])
+        executable = root / descriptor["executable"]
+        if (
+            not root.is_absolute()
+            or not executable.is_absolute()
+            or executable != executable.resolve(strict=True)
+            or verify_authority
+            and not _manifest.python_test_runtime_authorized(descriptor)
+        ):
+            return None
+        observed, error = _manifest.secure_python_test_runtime_tree_descriptor(root)
+        executable_metadata = os.stat(executable, follow_symlinks=False)
+        if (
+            error or observed != descriptor["treeDigest"]
+            or not stat.S_ISREG(executable_metadata.st_mode)
+            or executable_metadata.st_mode & 0o222
+            or not executable_metadata.st_mode & 0o111
+        ):
+            return None
+        return PhysicalPythonRuntimeBinding(
+            frozen_descriptor, executable, _stat_identity(executable_metadata), observed,
+        )
+    except (KeyError, OSError, TypeError, ValueError):
+        return None
+
+
+def _physical_admission_result_valid(
+    candidate: dict, binding: PhysicalAdmissionBinding, *, started_at: float,
+) -> bool:
+    try:
+        output = Path(dict(binding.descriptor)["output"])
+        record, error = _admission._secure_read(output, _admission.MAX_JSON_BYTES)
+        if error or record is None:
+            return False
+        raw, identity, _, _, _ = record
+        output_metadata = os.stat(output, follow_symlinks=False)
+        birthtime = getattr(output_metadata, "st_birthtime", None)
+        document, json_error = _admission._load_json(raw)
+        expected = strict_json_loads(binding.expected_result)
+        if (
+            json_error
+            or not _admission._exact_equal(document, expected)
+            or identity[4] != _admission.OPERATOR_UID
+            or identity[3] != 1
+            or identity[2] & 0o222
+            or _admission._file_identity(output_metadata) != identity
+            or not isinstance(birthtime, (int, float))
+            or not math.isfinite(birthtime)
+            or birthtime < started_at
+            or not _admission._still_bound(record)
+            or _physical_admission_binding(
+                candidate, require_output_absent=False,
+            ) != binding
+        ):
+            return False
+        final, final_error = _admission._secure_read(output, _admission.MAX_JSON_BYTES)
+        return (
+            final_error is None and final is not None
+            and final[0] == raw and final[1] == identity
+            and _admission._still_bound(final)
+        )
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
 
 
 def _valid_lane(lane: Lane, repositories: Mapping[str, object]) -> bool:
@@ -3303,6 +3462,9 @@ def _resolve_command(command: tuple[str, ...]) -> tuple[str, ...] | None:
 def _resolve_candidate_command(
     command: tuple[str, ...], candidate: dict, lane: Lane,
 ) -> tuple[str, ...] | None:
+    if lane.name == "physical-flash-admission":
+        runtime = _physical_python_runtime_binding(candidate, verify_authority=False)
+        return (str(runtime.executable), *command[1:]) if runtime is not None else None
     if command[:3] == ("python3", "-m", "pytest"):
         try:
             descriptor = candidate["tools"]["pythonTestRuntime"]
@@ -4314,14 +4476,23 @@ def _run_gate_impl(
                     report["failedLane"] = lane.name
                     break
                 physical_admission_binding = (
-                    _physical_admission_binding(candidate, require_output_absent=True)
+                    _physical_admission_binding(
+                        candidate, require_output_absent=True,
+                        expected_candidate_path=candidate_path,
+                    )
+                    if lane.name == "physical-flash-admission" else None
+                )
+                physical_source_runtime_binding = (
+                    _physical_python_runtime_binding(candidate, verify_authority=True)
                     if lane.name == "physical-flash-admission" else None
                 )
                 lane_command = _command_for_lane(lane, candidate)
                 if lane.name == "physical-flash-admission" and (
                     physical_admission_binding is None
+                    or physical_source_runtime_binding is None
                     or _physical_admission_binding(
                         candidate, require_output_absent=True,
+                        expected_candidate_path=candidate_path,
                     ) != physical_admission_binding
                 ):
                     report["lanes"].append({
@@ -4397,6 +4568,12 @@ def _run_gate_impl(
                     _cleanup_gate_owned(report, lane_execution, execution_stage)
                     break
                 command = _resolve_candidate_command(lane_command, execution_candidate, lane) if lane_command else None
+                physical_runtime_binding = (
+                    _physical_python_runtime_binding(
+                        execution_candidate, verify_authority=False,
+                    )
+                    if lane.name == "physical-flash-admission" else None
+                )
                 if command is None:
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
@@ -4415,6 +4592,7 @@ def _run_gate_impl(
                     _cleanup_gate_owned(report, lane_execution, execution_stage)
                     break
                 started = time.monotonic_ns()
+                started_at = time.time()
                 junit_path: Path | None = None
                 if lane.reject_pytest_skips:
                     report_root = Path(lane_execution.environment["COURSE_MODE_LANE_REPORT_ROOT"])
@@ -4487,7 +4665,12 @@ def _run_gate_impl(
                         if lane.name == "physical-flash-admission" and (
                             _physical_admission_binding(
                                 candidate, require_output_absent=True,
+                                expected_candidate_path=candidate_path,
                             ) != physical_admission_binding
+                            or physical_runtime_binding is None
+                            or _physical_python_runtime_binding(
+                                execution_candidate, verify_authority=False,
+                            ) != physical_runtime_binding
                         ):
                             result = _manifest.BoundedCommandResult(None, "", "authority")
                         else:
@@ -4554,9 +4737,14 @@ def _run_gate_impl(
                 )
                 lane_failed = result.error or result.returncode != 0 or rollback_restore_failed
                 if lane.name == "physical-flash-admission" and (
-                    _physical_admission_binding(
-                        candidate, require_output_absent=False,
-                    ) != physical_admission_binding
+                    physical_runtime_binding is None
+                    or _physical_python_runtime_binding(
+                        execution_candidate, verify_authority=False,
+                    ) != physical_runtime_binding
+                    or not _physical_admission_result_valid(
+                        candidate, physical_admission_binding,
+                        started_at=started_at,
+                    )
                 ):
                     lane_failed = True
                     result = _manifest.BoundedCommandResult(None, result.stdout, "authority")
