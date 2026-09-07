@@ -228,9 +228,9 @@ record the digest. Never pull and trust a mutable tag without digest comparison.
 - [ ] **Step 4: Build and inspect the web image**
 
 Build from a clean Git-produced context at the merged admin SHA with `--pull=false`,
-the approved base digests, revision/source/build-source labels, and tag
-`local/tbot-server-web:course-mode-physical-tft-<admin-sha>`. Require smoke PASS,
-static assets present, platform `linux/arm64`, and exact labels/image ID.
+the approved base digests, revision/source/build-source labels, and an image tag
+whose suffix is the exact full merged admin SHA. Require smoke PASS, static assets
+present, platform `linux/arm64`, and exact labels/image ID.
 
 ### Task 5: Create and Qualify Candidate `.41`
 
