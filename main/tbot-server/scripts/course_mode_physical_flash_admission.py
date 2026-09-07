@@ -2,7 +2,7 @@
 """Signed, non-opening admission gate for Course Mode physical firmware flashing."""
 from __future__ import annotations
 
-import argparse, contextlib, glob, hashlib, json, math, os, re, stat, uuid
+import argparse, contextlib, glob, hashlib, json, math, os, re, selectors, signal, stat, subprocess, time, uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -43,6 +43,11 @@ EXPECTED_PARTITIONS = [
 class DuplicateKeyError(ValueError): pass
 def utc_now(): return datetime.now(timezone.utc)
 def _canonical_bytes(value): return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+def _exact_equal(left,right):
+    if type(left) is not type(right): return False
+    if isinstance(left,dict): return set(left)==set(right) and all(_exact_equal(left[key],right[key]) for key in left)
+    if isinstance(left,list): return len(left)==len(right) and all(_exact_equal(a,b) for a,b in zip(left,right))
+    return left==right
 def _strict_pairs(pairs):
     result = {}
     for key, value in pairs:
@@ -155,17 +160,45 @@ def _enumerate_devices():
         identity=lambda value:(value.st_dev,value.st_ino,value.st_rdev,value.st_mode)
         if stat.S_ISCHR(metadata.st_mode) and stat.S_ISCHR(resolved.st_mode) and identity(metadata)==identity(resolved): identities[name]=identity(metadata)
     return identities
+def _run_lsof(command):
+    try: process=subprocess.Popen(command,cwd="/",env={"PATH":"/usr/bin:/bin","LANG":"C","LC_ALL":"C","HOME":"/nonexistent"},stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+    except OSError: return None,b"",b"","not_found"
+    assert process.stdout is not None and process.stderr is not None
+    selector=selectors.DefaultSelector(); buffers={process.stdout:bytearray(),process.stderr:bytearray()}; deadline=time.monotonic()+LSOF_TIMEOUT_SECONDS; error=None
+    try:
+        for stream in buffers: os.set_blocking(stream.fileno(),False); selector.register(stream,selectors.EVENT_READ)
+        while selector.get_map():
+            if time.monotonic()>=deadline: error="timeout"; break
+            for key,_ in selector.select(min(0.05,max(0.0,deadline-time.monotonic()))):
+                chunk=os.read(key.fileobj.fileno(),65536)
+                if not chunk: selector.unregister(key.fileobj); continue
+                buffers[key.fileobj].extend(chunk)
+                if sum(map(len,buffers.values()))>MAX_LSOF_OUTPUT_BYTES: error="output"; break
+            if error: break
+        if error:
+            with contextlib.suppress(ProcessLookupError): os.killpg(process.pid,signal.SIGKILL)
+        returncode=process.wait(timeout=1)
+    except (OSError,subprocess.TimeoutExpired):
+        with contextlib.suppress(ProcessLookupError): os.killpg(process.pid,signal.SIGKILL)
+        with contextlib.suppress(Exception): process.wait(timeout=1)
+        returncode=process.returncode; error=error or "run"
+    finally:
+        selector.close(); process.stdout.close(); process.stderr.close()
+    return returncode,bytes(buffers[process.stdout]),bytes(buffers[process.stderr]),error
 
 def collect_serial_inventory():
     before=_enumerate_devices(); devices=sorted(before)
     if not _trusted_lsof(): return devices,[],"untrusted"
-    result=candidate_manifest.run_bounded_command([str(TRUSTED_LSOF_EXECUTABLE),"-nP","-t","--",SERIAL_PATH],cwd=Path("/"),timeout_sec=LSOF_TIMEOUT_SECONDS,max_output_bytes=MAX_LSOF_OUTPUT_BYTES,env={"PATH":"/usr/bin:/bin","LANG":"C","LC_ALL":"C","HOME":"/nonexistent"})
+    returncode,stdout,stderr,error=_run_lsof([str(TRUSTED_LSOF_EXECUTABLE),"-nP","-t","--",SERIAL_PATH])
     after=_enumerate_devices()
     if after!=before: return sorted(after),[],"inventory_changed"
-    if result.error: return devices,[],result.error
-    if result.returncode not in (0,1): return devices,[],"exit"
+    if error: return devices,[],error
+    if returncode not in (0,1): return devices,[],"exit"
+    if stderr.strip(): return devices,[],"visibility"
     holders=[]
-    for line in result.stdout.splitlines():
+    try: lines=stdout.decode("ascii",errors="strict").splitlines()
+    except UnicodeError: return devices,[],"output"
+    for line in lines:
         token=line.strip().removeprefix("p")
         if token.isdigit(): holders.append(int(token))
         elif token: return devices,[],"output"
@@ -216,26 +249,26 @@ def validate_documents(doc,identity,actual,now,devices,holders,inventory_error):
     elif checked>now: reasons.add("checkedAt.future")
     elif (now-checked).total_seconds()>CHECK_FRESHNESS_SECONDS: reasons.add("checkedAt.stale")
     binding=doc.get("candidate"); _validate_candidate_shape(binding,reasons)
-    if binding!=identity.get("candidate"): reasons.add("candidate.identity")
+    if not _exact_equal(binding,identity.get("candidate")): reasons.add("candidate.identity")
     created=_parse_utc(binding.get("createdAt")) if isinstance(binding,dict) else None; expires=_parse_utc(binding.get("expiresAt")) if isinstance(binding,dict) else None
     if created is None or expires is None or not(created<=now<expires): reasons.add("candidate.time")
     if checked is not None and (created is None or expires is None or not(created<=checked<expires)): reasons.add("checkedAt.candidateInterval")
     if isinstance(binding,dict) and not _candidate_matches(binding,actual): reasons.add("candidate.reference")
-    if identity.get("partitionTable")!=EXPECTED_PARTITIONS: reasons.add("expectedIdentity.partitionTable")
-    if identity.get("signer")!={"algorithm":"ed25519","fingerprint":PINNED_APPROVAL_KEY_FINGERPRINT}: reasons.add("expectedIdentity.signer")
+    if not _exact_equal(identity.get("partitionTable"),EXPECTED_PARTITIONS): reasons.add("expectedIdentity.partitionTable")
+    if not _exact_equal(identity.get("signer"),{"algorithm":"ed25519","fingerprint":PINNED_APPROVAL_KEY_FINGERPRINT}): reasons.add("expectedIdentity.signer")
     expected_robot={"mac":ROBOT_MAC,"board":BOARD,"target":TARGET,"serialPath":SERIAL_PATH,"exactlyOneRobot":True}
-    if doc.get("robot")!=identity.get("robot") or doc.get("robot")!=expected_robot: reasons.add("robot.identity")
+    if not _exact_equal(doc.get("robot"),identity.get("robot")) or not _exact_equal(doc.get("robot"),expected_robot): reasons.add("robot.identity")
     expected_lease={"soleLeaseConfirmed":True,"competingProcessesStopped":True,"devicePath":SERIAL_PATH,"discoveredDevices":[SERIAL_PATH],"holderPids":[],"inventoryMethod":"lstat-glob-lsof-v1"}
     lease=doc.get("serialLease")
-    if not isinstance(lease,dict) or set(lease)!=SERIAL_KEYS or lease!=expected_lease: reasons.add("serialLease")
+    if not isinstance(lease,dict) or set(lease)!=SERIAL_KEYS or not _exact_equal(lease,expected_lease): reasons.add("serialLease")
     if inventory_error: reasons.add(f"serial.lsof.{inventory_error}")
     if devices!=[SERIAL_PATH]: reasons.add("serial.inventory")
     if holders: reasons.add("serial.occupied")
     plan=doc.get("flashPlan"); operation={"operation":"write_flash","offset":APP_OFFSET,"imageSha256":APP_SHA256,"imageBytes":APP_BYTES,"after":"no-reset","eraseChip":False,"mergedImage":False}; protected=[p for p in EXPECTED_PARTITIONS if p["protected"]]
     if not isinstance(plan,dict) or set(plan)!=FLASH_KEYS: reasons.add("flashPlan.keys")
     else:
-        if not isinstance(plan.get("operation"),dict) or set(plan["operation"])!=OPERATION_KEYS or plan["operation"]!=operation: reasons.add("flashPlan.operation")
-        if plan.get("protectedPartitions")!=protected: reasons.add("flashPlan.protectedPartitions")
+        if not isinstance(plan.get("operation"),dict) or set(plan["operation"])!=OPERATION_KEYS or not _exact_equal(plan["operation"],operation): reasons.add("flashPlan.operation")
+        if not _exact_equal(plan.get("protectedPartitions"),protected): reasons.add("flashPlan.protectedPartitions")
         if plan.get("preserveProtectedPartitions") is not True: reasons.add("flashPlan.preserveProtectedPartitions")
     safety=doc.get("safety")
     if not isinstance(safety,dict) or set(safety)!=SAFETY_KEYS: reasons.add("safety.keys")
@@ -278,6 +311,9 @@ def _publish(path,payload,output_binding,sources,commit_safe):
         created_identity=_file_identity(os.fstat(fd))
         current=os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
         if _file_identity(current)!=created_identity or not _output_parent_still_bound(path.parent,parent_fd,parent_metadata,ancestry): raise OSError("output changed")
+        closing_fd=fd
+        fd=None
+        os.close(closing_fd)
         os.fsync(parent_fd)
         if not commit_safe(): raise OSError("commit time changed")
         current=os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
@@ -292,8 +328,10 @@ def _publish(path,payload,output_binding,sources,commit_safe):
                     os.fsync(parent_fd)
         return False
     finally:
-        if fd is not None: os.close(fd)
-        if parent_fd is not None: os.close(parent_fd)
+        if fd is not None:
+            with contextlib.suppress(OSError): os.close(fd)
+        if parent_fd is not None:
+            with contextlib.suppress(OSError): os.close(parent_fd)
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     for flag in ("input","output","expected-identity","expected-identity-signature"): parser.add_argument("--"+flag,required=True,type=Path)

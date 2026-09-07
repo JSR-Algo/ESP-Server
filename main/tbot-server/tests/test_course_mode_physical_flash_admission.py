@@ -232,9 +232,9 @@ def test_collect_inventory_is_bounded_and_nonopening(monkeypatch):
     monkeypatch.setattr(admission, "_device_stat", lambda path: device)
     monkeypatch.setattr(admission, "TRUSTED_LSOF_EXECUTABLE", Path("/usr/sbin/lsof"))
     monkeypatch.setattr(admission, "_trusted_lsof", lambda: True)
-    monkeypatch.setattr(admission.candidate_manifest, "run_bounded_command", lambda command, **kwargs: calls.append((command, kwargs)) or admission.candidate_manifest.BoundedCommandResult(0, "p321\n", None))
+    monkeypatch.setattr(admission, "_run_lsof", lambda command: calls.append(command) or (0, b"p321\n", b"", None))
     assert admission.collect_serial_inventory() == (["/dev/cu.usbmodem1101"], [321], None)
-    assert calls[0][0] == ["/usr/sbin/lsof", "-nP", "-t", "--", "/dev/cu.usbmodem1101"] and calls[0][1]["max_output_bytes"] == admission.MAX_LSOF_OUTPUT_BYTES
+    assert calls[0] == ["/usr/sbin/lsof", "-nP", "-t", "--", "/dev/cu.usbmodem1101"]
 
 
 def test_failure_is_deterministic_redacted(valid_files, capsys):
@@ -384,7 +384,7 @@ def test_device_identity_change_across_lsof_is_rejected(monkeypatch):
     monkeypatch.setattr(admission, "_device_lstat", device)
     monkeypatch.setattr(admission, "_device_stat", device)
     monkeypatch.setattr(admission, "_trusted_lsof", lambda: True)
-    monkeypatch.setattr(admission.candidate_manifest, "run_bounded_command", lambda *args, **kwargs: admission.candidate_manifest.BoundedCommandResult(1, "", None))
+    monkeypatch.setattr(admission, "_run_lsof", lambda _command: (1, b"", b"", None))
     assert admission.collect_serial_inventory()[2] == "inventory_changed"
 
 
@@ -527,7 +527,7 @@ def test_second_device_appearing_after_lsof_is_rejected(monkeypatch):
     monkeypatch.setattr(admission, "_device_lstat", metadata)
     monkeypatch.setattr(admission, "_device_stat", metadata)
     monkeypatch.setattr(admission, "_trusted_lsof", lambda: True)
-    monkeypatch.setattr(admission.candidate_manifest, "run_bounded_command", lambda *args, **kwargs: admission.candidate_manifest.BoundedCommandResult(1, "", None))
+    monkeypatch.setattr(admission, "_run_lsof", lambda _command: (1, b"", b"", None))
     assert admission.collect_serial_inventory()[2] == "inventory_changed"
 
 
@@ -542,3 +542,68 @@ def test_inventory_repeated_immediately_before_publish(valid_files, monkeypatch,
     assert run_main(paths) == 1
     assert not paths["output"].exists()
     assert "serial.inventory" in json.loads(capsys.readouterr().out)["reasons"]
+
+
+@pytest.mark.parametrize("returncode,stderr,reason", [
+    (1, "lsof: WARNING: can't stat() fuse file system", "visibility"),
+    (1, "lsof: status error on /dev/cu.usbmodem1101: Permission denied", "visibility"),
+    (2, "lsof: illegal status", "exit"),
+])
+def test_lsof_diagnostics_and_visibility_errors_fail_closed(monkeypatch, returncode, stderr, reason):
+    device = type("S", (), {"st_mode": stat.S_IFCHR, "st_dev": 1, "st_ino": 2, "st_rdev": 3})()
+    monkeypatch.setattr(admission, "_enumerate_devices", lambda: {admission.SERIAL_PATH: (1, 2, 3, stat.S_IFCHR)})
+    monkeypatch.setattr(admission, "_trusted_lsof", lambda: True)
+    monkeypatch.setattr(admission, "_run_lsof", lambda _command: (returncode, b"", stderr.encode(), None))
+    assert admission.collect_serial_inventory()[2] == reason
+
+
+@pytest.mark.parametrize("mutation,reason", [
+    (lambda d: d["robot"].__setitem__("exactlyOneRobot", 1), "robot.identity"),
+    (lambda d: d["flashPlan"]["operation"].__setitem__("eraseChip", 0), "flashPlan.operation"),
+    (lambda d: d["flashPlan"]["operation"].__setitem__("mergedImage", 0), "flashPlan.operation"),
+    (lambda d: d["flashPlan"]["operation"].__setitem__("imageBytes", True), "flashPlan.operation"),
+    (lambda d: d["flashPlan"]["protectedPartitions"][0].__setitem__("protected", 1), "flashPlan.protectedPartitions"),
+    (lambda d: d["safety"].__setitem__("stablePower", 1), "safety.stablePower"),
+])
+def test_bool_int_type_confusion_is_rejected(valid_files, mutation, reason, capsys):
+    input_doc, _, paths, _ = valid_files
+    mutation(input_doc)
+    rewrite(paths["input"], input_doc)
+    assert run_main(paths) == 1
+    assert reason in json.loads(capsys.readouterr().out)["reasons"]
+
+
+def test_output_close_failure_unlinks_only_created_result(valid_files, monkeypatch, capsys):
+    _, _, paths, _ = valid_files
+    real_close = admission.os.close
+    output_fd = None
+    real_open = admission.os.open
+    def track_open(*args, **kwargs):
+        nonlocal output_fd
+        fd = real_open(*args, **kwargs)
+        if args and args[0] == paths["output"].name and kwargs.get("dir_fd") is not None:
+            output_fd = fd
+        return fd
+    def fail_close(fd):
+        if fd == output_fd:
+            real_close(fd)
+            raise OSError("injected close failure")
+        return real_close(fd)
+    monkeypatch.setattr(admission.os, "open", track_open)
+    monkeypatch.setattr(admission.os, "close", fail_close)
+    assert run_main(paths) == 1
+    assert not paths["output"].exists()
+    assert json.loads(capsys.readouterr().out)["reasons"] == ["output.path"]
+
+
+@pytest.mark.parametrize("program,expected_error,stderr", [
+    ("import time;time.sleep(1)", "timeout", b""),
+    ("print('x'*100000)", "output", b""),
+    ("import sys;sys.stderr.write('permission denied')", None, b"permission denied"),
+])
+def test_lsof_runner_bounds_both_streams(monkeypatch, program, expected_error, stderr):
+    monkeypatch.setattr(admission, "LSOF_TIMEOUT_SECONDS", 0.05)
+    returncode, _stdout, observed_stderr, error = admission._run_lsof([sys.executable, "-c", program])
+    assert error == expected_error
+    if stderr:
+        assert returncode == 0 and observed_stderr == stderr
