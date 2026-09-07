@@ -508,6 +508,14 @@ class OperatorAttestationBinding:
     sha256: str
 
 
+@dataclass(frozen=True)
+class PhysicalAdmissionBinding:
+    descriptor: tuple[tuple[str, str], ...]
+    evidence_root_identity: tuple[int, ...]
+    input_identities: tuple[tuple[str, tuple[int, ...], str], ...]
+    output_parent_identity: tuple[int, ...]
+
+
 @dataclass
 class ReportDestination:
     parent_fd: int
@@ -2490,6 +2498,10 @@ def _stat_identity(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def _directory_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid
+
+
 def _secure_file_sha256(path: Path, max_bytes: int) -> str | None:
     descriptor = None
     try:
@@ -3161,6 +3173,8 @@ def pytest_report_has_skips(path: Path) -> bool | None:
 def physical_preflight_command(candidate: dict) -> tuple[str, ...] | None:
     if any(not isinstance(candidate.get(key), dict) or not candidate[key] for key in ("images", "firmware", "database")):
         return None
+    if _physical_admission_binding(candidate, require_output_absent=True) is None:
+        return None
     tools = candidate.get("tools")
     metadata = tools.get("physicalAdmission") if isinstance(tools, dict) else None
     required = {"input", "output", "expectedIdentity", "expectedIdentitySignature"}
@@ -3194,6 +3208,76 @@ def physical_preflight_command(candidate: dict) -> tuple[str, ...] | None:
         "--expected-identity", str(resolved["expectedIdentity"]),
         "--expected-identity-signature", str(resolved["expectedIdentitySignature"]),
     )
+
+
+def _physical_admission_binding(
+    candidate: dict, *, require_output_absent: bool,
+) -> PhysicalAdmissionBinding | None:
+    required = ("input", "output", "expectedIdentity", "expectedIdentitySignature")
+    try:
+        metadata = candidate["tools"]["physicalAdmission"]
+        if not isinstance(metadata, dict) or set(metadata) != set(required):
+            return None
+        descriptor = tuple((key, metadata[key]) for key in required)
+        if any(not isinstance(value, str) or not value for _, value in descriptor):
+            return None
+        paths = {key: Path(value) for key, value in descriptor}
+        if any(not path.is_absolute() or str(path) != value for (key, value), path in zip(descriptor, paths.values())):
+            return None
+        evidence_root = Path(candidate["evidenceRoot"])
+        if (
+            not evidence_root.is_absolute()
+            or evidence_root != evidence_root.resolve(strict=True)
+        ):
+            return None
+        evidence_root_metadata = os.stat(evidence_root, follow_symlinks=False)
+        if not stat.S_ISDIR(evidence_root_metadata.st_mode):
+            return None
+        input_identities = []
+        for key in ("input", "expectedIdentity", "expectedIdentitySignature"):
+            path = paths[key]
+            if path != path.resolve(strict=True):
+                return None
+            path.relative_to(evidence_root)
+            before = os.stat(path, follow_symlinks=False)
+            raw = read_secure_regular(
+                path, 256 if key == "expectedIdentitySignature" else MAX_CANDIDATE_BYTES,
+            )
+            after = os.stat(path, follow_symlinks=False)
+            if _stat_identity(before) != _stat_identity(after):
+                return None
+            if key == "expectedIdentitySignature":
+                if len(raw) != 64:
+                    return None
+            else:
+                document = strict_json_loads(raw)
+                if not isinstance(document, dict):
+                    return None
+            input_identities.append((
+                key, _stat_identity(after), hashlib.sha256(raw).hexdigest(),
+            ))
+        output = paths["output"]
+        output.parent.relative_to(evidence_root)
+        if output.parent != output.parent.resolve(strict=True):
+            return None
+        output_parent_metadata = os.stat(output.parent, follow_symlinks=False)
+        if not stat.S_ISDIR(output_parent_metadata.st_mode):
+            return None
+        if require_output_absent:
+            if os.path.lexists(output):
+                return None
+        elif os.path.lexists(output):
+            output_metadata = os.stat(output, follow_symlinks=False)
+            if not stat.S_ISREG(output_metadata.st_mode):
+                return None
+        return PhysicalAdmissionBinding(
+            descriptor=descriptor,
+            evidence_root_identity=_directory_identity(evidence_root_metadata),
+            input_identities=tuple(input_identities),
+            output_parent_identity=_directory_identity(output_parent_metadata),
+        )
+    except (KeyError, OSError, TypeError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        return None
 
 
 def _valid_lane(lane: Lane, repositories: Mapping[str, object]) -> bool:
@@ -4229,7 +4313,23 @@ def _run_gate_impl(
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
                     break
+                physical_admission_binding = (
+                    _physical_admission_binding(candidate, require_output_absent=True)
+                    if lane.name == "physical-flash-admission" else None
+                )
                 lane_command = _command_for_lane(lane, candidate)
+                if lane.name == "physical-flash-admission" and (
+                    physical_admission_binding is None
+                    or _physical_admission_binding(
+                        candidate, require_output_absent=True,
+                    ) != physical_admission_binding
+                ):
+                    report["lanes"].append({
+                        "name": lane.name, "exitCode": None, "durationMs": 0,
+                    })
+                    report["verdict"] = "BLOCKED"
+                    report["failedLane"] = lane.name
+                    break
                 try:
                     if lane.name in STATEFUL_ASSIGNMENT_LANES:
                         if assignment_runtime is None:
@@ -4361,7 +4461,11 @@ def _run_gate_impl(
                         not _playwright_browsers_required(lane)
                         or playwright_browsers_authorized(execution_candidate)
                     )
-                    if not container_authority or not browser_authority:
+                    operator_authority = (
+                        operator_binding is None
+                        or _operator_attestation_binding(candidate, source) == operator_binding
+                    )
+                    if not container_authority or not browser_authority or not operator_authority:
                         result = _manifest.BoundedCommandResult(None, "", "authority")
                     elif _python_test_runtime_required(lane) or _backend_compiler_required(lane):
                         backend_binding = _backend_snapshot_environment(execution_stage)
@@ -4380,11 +4484,18 @@ def _run_gate_impl(
                             )
                             bounded_result = result
                     else:
-                        result = run_bounded_command(
-                            list(command), cwd=resolved_cwd, timeout_sec=lane.timeout_sec,
-                            max_output_bytes=max_output_bytes, env=child_environment,
-                            contain_process_group=lane.name in STATEFUL_ASSIGNMENT_LANES,
-                        )
+                        if lane.name == "physical-flash-admission" and (
+                            _physical_admission_binding(
+                                candidate, require_output_absent=True,
+                            ) != physical_admission_binding
+                        ):
+                            result = _manifest.BoundedCommandResult(None, "", "authority")
+                        else:
+                            result = run_bounded_command(
+                                list(command), cwd=resolved_cwd, timeout_sec=lane.timeout_sec,
+                                max_output_bytes=max_output_bytes, env=child_environment,
+                                contain_process_group=lane.name in STATEFUL_ASSIGNMENT_LANES,
+                            )
                         bounded_result = result
                     if (
                         (_python_test_runtime_required(lane) or _backend_compiler_required(lane))
@@ -4442,6 +4553,15 @@ def _run_gate_impl(
                     lane, result.stdout,
                 )
                 lane_failed = result.error or result.returncode != 0 or rollback_restore_failed
+                if lane.name == "physical-flash-admission" and (
+                    _physical_admission_binding(
+                        candidate, require_output_absent=False,
+                    ) != physical_admission_binding
+                ):
+                    lane_failed = True
+                    result = _manifest.BoundedCommandResult(None, result.stdout, "authority")
+                    exit_code = None
+                    report["lanes"][-1]["exitCode"] = None
                 if lane_failed:
                     cleanup_failed = (
                         rollback_restore_failed or parent_restore_succeeded is False
