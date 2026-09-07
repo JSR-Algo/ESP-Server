@@ -2,7 +2,7 @@
 """Signed, non-opening admission gate for Course Mode physical firmware flashing."""
 from __future__ import annotations
 
-import argparse, glob, hashlib, json, os, re, stat, uuid
+import argparse, contextlib, glob, hashlib, json, os, re, stat, uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,6 +17,7 @@ FIRMWARE_SHA = "b54c6ca33e9beb3747b44feceb7c64fea33fe1d6"
 APP_SHA256, APP_BYTES, APP_OFFSET, PARTITION_BYTES = "782020e2f8ac44bd197f57e9e126c196286a8223005de1e425f8290f12b28dff", 3637200, "0x20000", 4128768
 MANIFEST_SHA256 = "23b70849b6b65901b01b38e91279455a2e5e8d13989438e2e0bbfa707602aa65"
 MAX_JSON_BYTES, MAX_LSOF_OUTPUT_BYTES, LSOF_TIMEOUT_SECONDS, CHECK_FRESHNESS_SECONDS = 1024 * 1024, 64 * 1024, 3.0, 300
+OPERATOR_UID = 501
 TRUSTED_LSOF_EXECUTABLE = next((p for p in (Path("/usr/sbin/lsof"), Path("/usr/bin/lsof")) if p.is_file()), Path("/usr/sbin/lsof"))
 TOP_KEYS = {"schemaVersion", "sessionId", "checkedAt", "candidate", "robot", "serialLease", "flashPlan", "safety"}
 CANDIDATE_KEYS = {"candidateId", "courseId", "courseKey", "createdAt", "expiresAt", "path", "sha256", "repositories", "images", "firmware"}
@@ -52,30 +53,65 @@ def _load_json(raw):
     try: return json.loads(raw.decode("utf-8"), object_pairs_hook=_strict_pairs, parse_constant=lambda x: (_ for _ in ()).throw(ValueError(x))), None
     except DuplicateKeyError: return None, "duplicate_key"
     except (UnicodeError, ValueError, json.JSONDecodeError): return None, "invalid_json"
-def _path_has_symlink(path):
-    current = path
-    while current != current.parent:
-        if current.is_symlink(): return True
-        current = current.parent
-    return False
-def _secure_read(path, limit):
-    if not path.is_absolute() or _path_has_symlink(path): return None, "path"
-    try: fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    except OSError: return None, "open"
+def _file_identity(value):
+    return (value.st_dev,value.st_ino,value.st_mode,value.st_nlink,value.st_uid,value.st_gid,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+def _secure_parent(path):
+    if os.geteuid()!=OPERATOR_UID: raise OSError("operator uid")
+    return candidate_manifest._open_trusted_source_directory(path)
+def _parent_still_bound(path,fd,metadata,ancestry):
+    return candidate_manifest._trusted_source_directory_still_named(path,fd,metadata,ancestry)
+def _output_parent_still_bound(path,fd,metadata):
+    other=None
     try:
-        before = os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_uid != os.getuid() or before.st_mode & 0o222 or before.st_size > limit: return None, "metadata"
+        other,observed,_=_secure_parent(path)
+        fields=lambda value:(value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_gid)
+        return fields(os.fstat(fd))==fields(metadata)==fields(observed)
+    except OSError: return False
+    finally:
+        if other is not None: os.close(other)
+def _secure_read(path, limit):
+    if not path.is_absolute() or ".." in path.parts: return None, "path"
+    parent_fd=file_fd=None
+    try:
+        parent_fd,parent_metadata,ancestry=_secure_parent(path.parent)
+        named_before=os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
+        file_fd=os.open(path.name,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0),dir_fd=parent_fd)
+        before = os.fstat(file_fd)
+        if _file_identity(named_before)!=_file_identity(before) or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_uid != OPERATOR_UID or before.st_mode & 0o222 or before.st_size > limit: return None, "metadata"
         data = bytearray()
         while True:
-            chunk = os.read(fd, 65536)
+            chunk = os.read(file_fd, min(65536,limit+1-len(data)))
             if not chunk: break
             data.extend(chunk)
             if len(data) > limit: return None, "size"
-        after = os.fstat(fd)
-        if (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns): return None, "changed"
-        return bytes(data), None
+        after=os.fstat(file_fd); named_after=os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
+        if _file_identity(before)!=_file_identity(after) or _file_identity(before)!=_file_identity(named_after) or len(data)!=before.st_size or not _parent_still_bound(path.parent,parent_fd,parent_metadata,ancestry): return None,"changed"
+        return (bytes(data),_file_identity(before),path,parent_metadata,ancestry), None
     except OSError: return None, "read"
-    finally: os.close(fd)
+    finally:
+        if file_fd is not None: os.close(file_fd)
+        if parent_fd is not None: os.close(parent_fd)
+def _still_bound(descriptor):
+    _,identity,path,_,_=descriptor
+    parent_fd=None
+    try:
+        parent_fd,parent_metadata,ancestry=_secure_parent(path.parent)
+        current=os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
+        return _file_identity(current)==identity and _parent_still_bound(path.parent,parent_fd,parent_metadata,ancestry)
+    except OSError: return False
+    finally:
+        if parent_fd is not None: os.close(parent_fd)
+def _output_absent(path):
+    parent_fd=None
+    try:
+        parent_fd,metadata,ancestry=_secure_parent(path.parent)
+        if metadata.st_uid!=OPERATOR_UID or not _parent_still_bound(path.parent,parent_fd,metadata,ancestry): return False
+        try: os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
+        except FileNotFoundError: return True
+        return False
+    except OSError: return False
+    finally:
+        if parent_fd is not None: os.close(parent_fd)
 def _parse_utc(value):
     if not isinstance(value,str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z",value) is None: return None
     try: parsed=datetime.fromisoformat(value[:-1]+"+00:00")
@@ -91,13 +127,37 @@ def _verify_signature(data, signature):
         return True, fingerprint
     except Exception: return False, fingerprint
 
+def _trusted_lsof():
+    try:
+        executable=TRUSTED_LSOF_EXECUTABLE
+        if executable not in (Path("/usr/sbin/lsof"),Path("/usr/bin/lsof")) or executable.is_symlink(): return False
+        tool=os.stat(executable,follow_symlinks=False)
+        if not stat.S_ISREG(tool.st_mode) or tool.st_uid!=0 or tool.st_mode&0o022 or not tool.st_mode&0o111: return False
+        for parent in (executable.parent,*executable.parent.parents):
+            meta=os.stat(parent,follow_symlinks=False)
+            if not stat.S_ISDIR(meta.st_mode) or meta.st_uid!=0 or meta.st_mode&0o022: return False
+        return True
+    except OSError: return False
+def _device_lstat(path): return os.lstat(path)
+def _device_stat(path): return os.stat(path)
+
 def collect_serial_inventory():
     devices=[]
+    device_identity=None
     for name in sorted(glob.glob("/dev/cu.usb*")):
-        try: metadata=os.lstat(name); resolved=os.stat(name)
+        try: metadata=_device_lstat(name); resolved=_device_stat(name)
         except OSError: continue
-        if stat.S_ISCHR(metadata.st_mode) and stat.S_ISCHR(resolved.st_mode): devices.append(name)
+        identity=lambda value:(value.st_dev,value.st_ino,value.st_rdev,value.st_mode)
+        if stat.S_ISCHR(metadata.st_mode) and stat.S_ISCHR(resolved.st_mode) and identity(metadata)==identity(resolved):
+            devices.append(name)
+            if name==SERIAL_PATH: device_identity=identity(metadata)
+    if not _trusted_lsof(): return devices,[],"untrusted"
     result=candidate_manifest.run_bounded_command([str(TRUSTED_LSOF_EXECUTABLE),"-nP","-t","--",SERIAL_PATH],cwd=Path("/"),timeout_sec=LSOF_TIMEOUT_SECONDS,max_output_bytes=MAX_LSOF_OUTPUT_BYTES,env={"PATH":"/usr/bin:/bin","LANG":"C","LC_ALL":"C","HOME":"/nonexistent"})
+    if device_identity is not None:
+        try:
+            current=_device_lstat(SERIAL_PATH); followed=_device_stat(SERIAL_PATH)
+            if (current.st_dev,current.st_ino,current.st_rdev,current.st_mode)!=device_identity or (followed.st_dev,followed.st_ino,followed.st_rdev,followed.st_mode)!=device_identity: return devices,[],"device_changed"
+        except OSError: return devices,[],"device_changed"
     if result.error: return devices,[],result.error
     if result.returncode not in (0,1): return devices,[],"exit"
     holders=[]
@@ -149,11 +209,13 @@ def validate_documents(doc,identity,actual,now,devices,holders,inventory_error):
     if not valid_uuid or doc.get("sessionId")!=identity.get("sessionId"): reasons.add("sessionId")
     checked=_parse_utc(doc.get("checkedAt"))
     if checked is None: reasons.add("checkedAt")
-    elif abs((now-checked).total_seconds())>CHECK_FRESHNESS_SECONDS: reasons.add("checkedAt.stale")
+    elif checked>now: reasons.add("checkedAt.future")
+    elif (now-checked).total_seconds()>CHECK_FRESHNESS_SECONDS: reasons.add("checkedAt.stale")
     binding=doc.get("candidate"); _validate_candidate_shape(binding,reasons)
     if binding!=identity.get("candidate"): reasons.add("candidate.identity")
     created=_parse_utc(binding.get("createdAt")) if isinstance(binding,dict) else None; expires=_parse_utc(binding.get("expiresAt")) if isinstance(binding,dict) else None
     if created is None or expires is None or not(created<=now<expires): reasons.add("candidate.time")
+    if checked is not None and (created is None or expires is None or not(created<=checked<expires)): reasons.add("checkedAt.candidateInterval")
     if isinstance(binding,dict) and not _candidate_matches(binding,actual): reasons.add("candidate.reference")
     if identity.get("partitionTable")!=EXPECTED_PARTITIONS: reasons.add("expectedIdentity.partitionTable")
     if identity.get("signer")!={"algorithm":"ed25519","fingerprint":PINNED_APPROVAL_KEY_FINGERPRINT}: reasons.add("expectedIdentity.signer")
@@ -180,44 +242,81 @@ def validate_documents(doc,identity,actual,now,devices,holders,inventory_error):
 
 def _failure(reasons): print(json.dumps({"schemaVersion":1,"validator":VALIDATOR,"status":"fail","reasons":sorted(set(reasons)),"physicalActionsPerformed":False,"serialOpened":False},sort_keys=True,separators=(",",":")))
 def _publish(path,payload):
-    if not path.is_absolute() or path.exists() or path.is_symlink() or _path_has_symlink(path.parent): return False
+    if not path.is_absolute() or ".." in path.parts: return False
     data=(json.dumps(payload,sort_keys=True,separators=(",",":"),allow_nan=False)+"\n").encode()
-    try: fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
-    except OSError: return False
+    parent_fd=fd=None; created_identity=None; created_inode=None
     try:
+        parent_fd,parent_metadata,ancestry=_secure_parent(path.parent)
+        if os.fstat(parent_fd).st_uid!=OPERATOR_UID: return False
+        try: os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
+        except FileNotFoundError: pass
+        else: return False
+        fd=os.open(path.name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600,dir_fd=parent_fd)
+        created_identity=_file_identity(os.fstat(fd))
+        created_inode=created_identity[:2]
         view=memoryview(data)
-        while view: view=view[os.write(fd,view):]
+        while view:
+            written=os.write(fd,view)
+            if written<=0: raise OSError("short write")
+            view=view[written:]
         os.fsync(fd)
-    finally: os.close(fd)
-    return True
+        created_identity=_file_identity(os.fstat(fd))
+        current=os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
+        if _file_identity(current)!=created_identity or not _output_parent_still_bound(path.parent,parent_fd,parent_metadata): raise OSError("output changed")
+        os.fsync(parent_fd)
+        return True
+    except OSError:
+        if parent_fd is not None and created_inode is not None:
+            with contextlib.suppress(OSError):
+                current=os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
+                if (current.st_dev,current.st_ino)==created_inode: os.unlink(path.name,dir_fd=parent_fd)
+        return False
+    finally:
+        if fd is not None: os.close(fd)
+        if parent_fd is not None: os.close(parent_fd)
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     for flag in ("input","output","expected-identity","expected-identity-signature"): parser.add_argument("--"+flag,required=True,type=Path)
     args=parser.parse_args(argv)
-    if args.output.exists() or args.output.is_symlink() or not args.output.is_absolute(): _failure(["output.path"]); return 1
-    raw,error=_secure_read(args.input,MAX_JSON_BYTES)
-    if error or raw is None: _failure(["input.unreadable"]); return 1
+    if not args.output.is_absolute() or not _output_absent(args.output): _failure(["output.path"]); return 1
+    input_record,error=_secure_read(args.input,MAX_JSON_BYTES)
+    if error or input_record is None: _failure(["input.unreadable"]); return 1
+    raw=input_record[0]
     doc,error=_load_json(raw)
     if error: _failure([f"input.{error}"]); return 1
     if not isinstance(doc,dict) or set(doc)!=TOP_KEYS or type(doc.get("schemaVersion")) is not int or doc.get("schemaVersion")!=1:
         _failure(["input.schema"]); return 1
-    identity_raw,error=_secure_read(args.expected_identity,MAX_JSON_BYTES)
-    if error or identity_raw is None: _failure(["expectedIdentity.unreadable"]); return 1
+    identity_record,error=_secure_read(args.expected_identity,MAX_JSON_BYTES)
+    if error or identity_record is None: _failure(["expectedIdentity.unreadable"]); return 1
+    identity_raw=identity_record[0]
     identity,error=_load_json(identity_raw)
     if error: _failure([f"expectedIdentity.{error}"]); return 1
-    signature,error=_secure_read(args.expected_identity_signature,256)
-    if error or signature is None or len(signature)!=64: _failure(["expectedIdentity.signature"]); return 1
+    signature_record,error=_secure_read(args.expected_identity_signature,256)
+    if error or signature_record is None or len(signature_record[0])!=64: _failure(["expectedIdentity.signature"]); return 1
+    signature=signature_record[0]
     valid,fingerprint=_verify_signature(_canonical_bytes(identity),signature)
     if not valid: _failure(["expectedIdentity.signature"]); return 1
     binding=doc.get("candidate") if isinstance(doc,dict) else None
-    candidate_raw,error=_secure_read(Path(binding.get("path","")),MAX_JSON_BYTES) if isinstance(binding,dict) else (None,"path")
-    if error or candidate_raw is None or hashlib.sha256(candidate_raw).hexdigest()!=binding.get("sha256"): _failure(["candidate.input"]); return 1
+    candidate_record,error=_secure_read(Path(binding.get("path","")),MAX_JSON_BYTES) if isinstance(binding,dict) else (None,"path")
+    if error or candidate_record is None or hashlib.sha256(candidate_record[0]).hexdigest()!=binding.get("sha256"): _failure(["candidate.input"]); return 1
+    candidate_raw=candidate_record[0]
     actual,error=_load_json(candidate_raw)
     if error: _failure(["candidate.input"]); return 1
+    descriptor=actual.get("tools",{}).get("physicalAdmission") if isinstance(actual,dict) else None
+    expected_paths={"input":args.input,"output":args.output,"expectedIdentity":args.expected_identity,"expectedIdentitySignature":args.expected_identity_signature}
+    evidence_root=Path(actual.get("evidenceRoot","")) if isinstance(actual,dict) else Path("")
+    if not isinstance(descriptor,dict) or set(descriptor)!=set(expected_paths) or any(Path(descriptor.get(k,""))!=v for k,v in expected_paths.items()) or not evidence_root.is_absolute() or any(not path.is_relative_to(evidence_root) for path in expected_paths.values()): _failure(["candidate.physicalAdmission"]); return 1
     now=utc_now(); reasons=[f"candidate.{r}" for r in candidate_manifest.validate_candidate(actual,now=now)]
     devices,holders,inventory_error=collect_serial_inventory(); reasons.extend(validate_documents(doc,identity,actual,now,devices,holders,inventory_error))
     if reasons: _failure(reasons); return 1
+    if not all(_still_bound(record) for record in (input_record,identity_record,signature_record,candidate_record)):
+        _failure(["input.changed"]); return 1
     payload={"schemaVersion":1,"validator":VALIDATOR,"status":"pass","reasons":[],"candidateId":binding["candidateId"],"sessionId":doc["sessionId"],"signerFingerprint":fingerprint,"physicalActionsPerformed":False,"serialOpened":False,"inputSha256":hashlib.sha256(raw).hexdigest(),"expectedIdentitySha256":hashlib.sha256(identity_raw).hexdigest(),"candidateSha256":hashlib.sha256(candidate_raw).hexdigest(),"robotMac":ROBOT_MAC,"serialPath":SERIAL_PATH,"firmwareSha":FIRMWARE_SHA,"appSha256":APP_SHA256,"manifestSha256":MANIFEST_SHA256}
     if not _publish(args.output,payload): _failure(["output.path"]); return 1
     return 0
-if __name__=="__main__": raise SystemExit(main())
+def _entrypoint():
+    try: return main()
+    except Exception:
+        _failure(["internal"])
+        return 1
+if __name__=="__main__": raise SystemExit(_entrypoint())
