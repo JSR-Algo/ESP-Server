@@ -522,12 +522,19 @@ def secure_executable_descriptor(path: Path) -> tuple[dict[str, Any] | None, str
 
 def secure_regular_descriptor(
     path: Path, max_bytes: int, *, include_content: bool = False,
-    secure_metadata: bool = False,
+    secure_metadata: bool = False, bind_parent: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
+    parent_metadata: os.stat_result | None = None
+    parent_ancestry: tuple[tuple[int, ...], ...] | None = None
     try:
         if not path.is_absolute() or str(path) != str(path.resolve(strict=True)):
             return None, "path"
-        parent_fd = _open_directory_secure(path.parent)
+        if bind_parent:
+            parent_fd, parent_metadata, parent_ancestry = _open_trusted_source_directory(
+                path.parent,
+            )
+        else:
+            parent_fd = _open_directory_secure(path.parent)
     except OSError:
         return None, "path"
     file_fd: int | None = None
@@ -538,7 +545,7 @@ def secure_regular_descriptor(
             not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
             or before.st_size < 0 or before.st_size > max_bytes
             or secure_metadata and (
-                before.st_uid not in {0, os.geteuid()} or before.st_mode & 0o022
+                before.st_uid not in {0, os.geteuid()} or before.st_mode & 0o222
             )
         ):
             return None, "path"
@@ -567,6 +574,16 @@ def secure_regular_descriptor(
         ) or identity != (
             current.st_dev, current.st_ino, current.st_mode, current.st_nlink,
             current.st_size, current.st_mtime_ns, current.st_ctime_ns,
+        ):
+            return None, "changed"
+        if (
+            bind_parent
+            and (
+                parent_metadata is None or parent_ancestry is None
+                or not _trusted_source_directory_still_named(
+                    path.parent, parent_fd, parent_metadata, parent_ancestry,
+                )
+            )
         ):
             return None, "changed"
         descriptor: dict[str, Any] = {"sha256": digest.hexdigest(), "bytes": before.st_size}
@@ -2138,6 +2155,7 @@ def _validate_physical_preflight(
                 256 if key == "expectedIdentitySignature" else MAX_CANDIDATE_BYTES,
                 include_content=True,
                 secure_metadata=True,
+                bind_parent=True,
             )
             if error or observed is None:
                 raise OSError("invalid secure input")

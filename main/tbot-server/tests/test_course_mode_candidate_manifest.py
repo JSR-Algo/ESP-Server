@@ -311,7 +311,7 @@ def _candidate_with_physical_preflight(candidate: dict) -> tuple[dict, dict[str,
     paths["expectedIdentity"].write_text('{"device":"fixture"}\n', encoding="utf-8")
     paths["expectedIdentitySignature"].write_bytes(b"s" * 64)
     for key in ("input", "expectedIdentity", "expectedIdentitySignature"):
-        paths[key].chmod(0o600)
+        paths[key].chmod(0o400)
     bound["tools"]["physicalPreflight"] = {
         key: str(path) for key, path in paths.items()
     }
@@ -388,34 +388,40 @@ def test_candidate_rejects_writable_physical_preflight_inputs(
     candidate: dict, field: str,
 ) -> None:
     bound, paths = _candidate_with_physical_preflight(candidate)
-    paths[field].chmod(0o666)
+    paths[field].chmod(0o600)
 
     assert f"tools.physicalPreflight.{field}" in validate_candidate(bound, now=NOW)
 
 
 @pytest.mark.parametrize("field", ["input", "expectedIdentity"])
-@pytest.mark.parametrize("payload", [b'{"duplicate":1,"duplicate":2}', b"[]"])
+@pytest.mark.parametrize(
+    "payload", [b'{"duplicate":1,"duplicate":2}', b"[]", b'{"unterminated":'],
+)
 def test_candidate_rejects_invalid_physical_preflight_json_documents(
     candidate: dict, field: str, payload: bytes,
 ) -> None:
     bound, paths = _candidate_with_physical_preflight(candidate)
-    paths[field].write_bytes(payload)
     paths[field].chmod(0o600)
+    paths[field].write_bytes(payload)
+    paths[field].chmod(0o400)
 
     assert f"tools.physicalPreflight.{field}" in validate_candidate(bound, now=NOW)
 
 
 def test_candidate_rejects_oversized_physical_preflight_json(candidate: dict) -> None:
     bound, paths = _candidate_with_physical_preflight(candidate)
-    paths["input"].write_bytes(b" " * (manifest.MAX_CANDIDATE_BYTES + 1))
     paths["input"].chmod(0o600)
+    paths["input"].write_bytes(b" " * (manifest.MAX_CANDIDATE_BYTES + 1))
+    paths["input"].chmod(0o400)
 
     assert "tools.physicalPreflight.input" in validate_candidate(bound, now=NOW)
 
 
 def test_candidate_rejects_wrong_physical_preflight_signature_size(candidate: dict) -> None:
     bound, paths = _candidate_with_physical_preflight(candidate)
+    paths["expectedIdentitySignature"].chmod(0o600)
     paths["expectedIdentitySignature"].write_bytes(b"s" * 63)
+    paths["expectedIdentitySignature"].chmod(0o400)
 
     assert "tools.physicalPreflight.expectedIdentitySignature" in validate_candidate(bound, now=NOW)
 
@@ -441,7 +447,7 @@ def test_candidate_physical_preflight_secure_read_detects_path_replacement(
     target = paths["input"]
     replacement = target.with_name("replacement-input.json")
     replacement.write_bytes(target.read_bytes())
-    replacement.chmod(0o600)
+    replacement.chmod(0o400)
     original_read = os.read
     target_inode = target.stat().st_ino
     replaced = False
@@ -457,6 +463,59 @@ def test_candidate_physical_preflight_secure_read_detects_path_replacement(
     monkeypatch.setattr(os, "read", replace_after_first_read)
 
     assert "tools.physicalPreflight.input" in validate_candidate(bound, now=NOW)
+
+
+def test_candidate_physical_preflight_secure_read_detects_parent_replacement(
+    candidate: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bound, paths = _candidate_with_physical_preflight(candidate)
+    parent = paths["input"].parent
+    moved = parent.with_name("moved-G7-preflight")
+    replacement = parent.with_name("replacement-G7-preflight")
+    shutil.copytree(parent, replacement)
+    original_read = os.read
+    target_inode = paths["input"].stat().st_ino
+    replaced = False
+
+    def replace_parent_after_input_read(fd: int, size: int) -> bytes:
+        nonlocal replaced
+        data = original_read(fd, size)
+        if data and not replaced and os.fstat(fd).st_ino == target_inode:
+            replaced = True
+            parent.rename(moved)
+            replacement.rename(parent)
+        return data
+
+    monkeypatch.setattr(os, "read", replace_parent_after_input_read)
+
+    assert "tools.physicalPreflight.input" in validate_candidate(bound, now=NOW)
+
+
+def test_candidate_physical_preflight_output_detects_parent_replacement(
+    candidate: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bound, paths = _candidate_with_physical_preflight(candidate)
+    parent = paths["output"].parent
+    moved = parent.with_name("moved-G7-preflight")
+    replacement = parent.with_name("replacement-G7-preflight")
+    shutil.copytree(parent, replacement)
+    original_stat = os.stat
+    replaced = False
+
+    def replace_parent_after_output_check(path, *args, **kwargs):
+        nonlocal replaced
+        try:
+            return original_stat(path, *args, **kwargs)
+        except FileNotFoundError:
+            if path == paths["output"].name and kwargs.get("dir_fd") is not None and not replaced:
+                replaced = True
+                parent.rename(moved)
+                replacement.rename(parent)
+            raise
+
+    monkeypatch.setattr(os, "stat", replace_parent_after_output_check)
+
+    assert "tools.physicalPreflight.output" in validate_candidate(bound, now=NOW)
 
 
 def test_candidate_accepts_exact_committed_repository_identity(candidate: dict) -> None:
