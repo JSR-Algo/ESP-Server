@@ -607,3 +607,20 @@ def test_lsof_runner_bounds_both_streams(monkeypatch, program, expected_error, s
     assert error == expected_error
     if stderr:
         assert returncode == 0 and observed_stderr == stderr
+
+
+@pytest.mark.parametrize("field,value", [("bytes", 3637200.0), ("partitionBytes", 4128768.0)])
+def test_signed_firmware_integer_fields_reject_equal_floats(valid_files, field, value, capsys):
+    input_doc, identity, paths, actual = valid_files
+    input_doc["candidate"]["firmware"]["app"][field] = value
+    identity["candidate"]["firmware"]["app"][field] = value
+    actual_field = "appBytes" if field == "bytes" else field
+    actual["firmware"][actual_field] = value
+    candidate_path = Path(input_doc["candidate"]["path"])
+    rewrite(candidate_path, actual)
+    digest = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+    input_doc["candidate"]["sha256"] = digest
+    identity["candidate"]["sha256"] = digest
+    resign(paths, input_doc, identity)
+    assert run_main(paths) == 1
+    assert "candidate.firmware.app" in json.loads(capsys.readouterr().out)["reasons"]

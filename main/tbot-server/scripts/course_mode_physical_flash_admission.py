@@ -206,36 +206,36 @@ def collect_serial_inventory():
 
 def _candidate_matches(binding, actual):
     if not isinstance(actual,dict): return False
-    if any(actual.get(k)!=binding.get(k) for k in ("candidateId","createdAt","expiresAt")): return False
-    if actual.get("course")!={"courseId":binding.get("courseId"),"courseKey":binding.get("courseKey")}: return False
+    if any(not _exact_equal(actual.get(k),binding.get(k)) for k in ("candidateId","createdAt","expiresAt")): return False
+    if not _exact_equal(actual.get("course"),{"courseId":binding.get("courseId"),"courseKey":binding.get("courseKey")}): return False
     repos=binding.get("repositories",{})
-    if actual.get("repositories",{}).get("adminEsp")!=repos.get("admin") or actual.get("repositories",{}).get("backend")!=repos.get("backend") or actual.get("repositories",{}).get("firmware")!=repos.get("firmware"): return False
+    if not _exact_equal(actual.get("repositories",{}).get("adminEsp"),repos.get("admin")) or not _exact_equal(actual.get("repositories",{}).get("backend"),repos.get("backend")) or not _exact_equal(actual.get("repositories",{}).get("firmware"),repos.get("firmware")): return False
     images=binding.get("images",{}); actual_images=actual.get("images",{})
     for signed_name,actual_name in (("backend","lessonStudioBackend"),("web","lessonStudioWeb")):
-        if not isinstance(actual_images.get(actual_name),dict) or any(actual_images[actual_name].get(k)!=images.get(signed_name,{}).get(k) for k in ("reference","id")): return False
+        if not isinstance(actual_images.get(actual_name),dict) or any(not _exact_equal(actual_images[actual_name].get(k),images.get(signed_name,{}).get(k)) for k in ("reference","id")): return False
     firmware=binding.get("firmware",{}); app=firmware.get("app",{}); manifest=firmware.get("manifest",{}); actual_firmware=actual.get("firmware",{})
     expected_fields={"appPath":app.get("path"),"appOffset":app.get("offset"),"appBytes":app.get("bytes"),"appSha256":app.get("sha256"),"partitionBytes":app.get("partitionBytes"),"evidenceManifestPath":manifest.get("path"),"evidenceManifestSha256":manifest.get("sha256")}
-    return isinstance(actual_firmware,dict) and all(actual_firmware.get(k)==v for k,v in expected_fields.items())
+    return isinstance(actual_firmware,dict) and all(_exact_equal(actual_firmware.get(k),v) for k,v in expected_fields.items())
 def _validate_candidate_shape(value,reasons):
     if not isinstance(value,dict) or set(value)!=CANDIDATE_KEYS: reasons.add("candidate.schema"); return
-    if value.get("courseId")!=COURSE_ID or value.get("courseKey")!=COURSE_KEY: reasons.add("candidate.course")
+    if not _exact_equal(value.get("courseId"),COURSE_ID) or not _exact_equal(value.get("courseKey"),COURSE_KEY): reasons.add("candidate.course")
     repos=value.get("repositories")
     if not isinstance(repos,dict) or set(repos)!={"admin","backend","firmware"}: reasons.add("candidate.repositories"); repos={}
     for name,repo in repos.items():
-        if not isinstance(repo,dict) or set(repo)!=REPOSITORY_KEYS or repo.get("dirtyExceptions")!=[]: reasons.add(f"candidate.repositories.{name}")
-    if isinstance(repos.get("firmware"),dict) and repos["firmware"].get("sha")!=FIRMWARE_SHA: reasons.add("candidate.repositories.firmware")
+        if not isinstance(repo,dict) or set(repo)!=REPOSITORY_KEYS or not _exact_equal(repo.get("dirtyExceptions"),[]): reasons.add(f"candidate.repositories.{name}")
+    if isinstance(repos.get("firmware"),dict) and not _exact_equal(repos["firmware"].get("sha"),FIRMWARE_SHA): reasons.add("candidate.repositories.firmware")
     images=value.get("images")
     if not isinstance(images,dict) or set(images)!={"backend","web"}: reasons.add("candidate.images"); images={}
     for name,image in images.items():
         repo=repos.get("backend" if name=="backend" else "admin",{})
         labels={"org.opencontainers.image.revision":repo.get("sha"),"org.opencontainers.image.source":repo.get("remoteUrl")}
-        if not isinstance(image,dict) or set(image)!=IMAGE_KEYS or image.get("platform")!="linux/arm64" or image.get("provenanceLabels")!=labels: reasons.add(f"candidate.images.{name}")
+        if not isinstance(image,dict) or set(image)!=IMAGE_KEYS or not _exact_equal(image.get("platform"),"linux/arm64") or not _exact_equal(image.get("provenanceLabels"),labels): reasons.add(f"candidate.images.{name}")
     fw=value.get("firmware"); expected_app={"sha256":APP_SHA256,"bytes":APP_BYTES,"offset":APP_OFFSET,"partitionBytes":PARTITION_BYTES}
     if not isinstance(fw,dict) or set(fw)!={"board","target","gitSha","app","manifest"}: reasons.add("candidate.firmware"); return
-    if (fw.get("board"),fw.get("target"),fw.get("gitSha"))!=(BOARD,TARGET,FIRMWARE_SHA): reasons.add("candidate.firmware")
+    if not _exact_equal((fw.get("board"),fw.get("target"),fw.get("gitSha")),(BOARD,TARGET,FIRMWARE_SHA)): reasons.add("candidate.firmware")
     app=fw.get("app"); manifest=fw.get("manifest")
-    if not isinstance(app,dict) or set(app)!={"path",*expected_app} or not Path(str(app.get("path",""))).is_absolute() or any(app.get(k)!=v for k,v in expected_app.items()): reasons.add("candidate.firmware.app")
-    if not isinstance(manifest,dict) or set(manifest)!={"path","sha256"} or not Path(str(manifest.get("path",""))).is_absolute() or manifest.get("sha256")!=MANIFEST_SHA256: reasons.add("candidate.firmware.manifest")
+    if not isinstance(app,dict) or set(app)!={"path",*expected_app} or not Path(str(app.get("path",""))).is_absolute() or any(not _exact_equal(app.get(k),v) for k,v in expected_app.items()): reasons.add("candidate.firmware.app")
+    if not isinstance(manifest,dict) or set(manifest)!={"path","sha256"} or not Path(str(manifest.get("path",""))).is_absolute() or not _exact_equal(manifest.get("sha256"),MANIFEST_SHA256): reasons.add("candidate.firmware.manifest")
 
 def validate_documents(doc,identity,actual,now,devices,holders,inventory_error):
     reasons=set()
