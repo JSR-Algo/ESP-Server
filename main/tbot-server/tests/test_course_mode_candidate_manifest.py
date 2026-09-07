@@ -299,11 +299,19 @@ NOW = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
 def test_candidate_tool_schema_exports_are_immutable() -> None:
     assert isinstance(manifest.REQUIRED_TOOLS_KEYS, frozenset)
     assert isinstance(manifest.TOOLS_KEYS, frozenset)
-    assert isinstance(manifest.PHYSICAL_PREFLIGHT_KEYS, frozenset)
+    assert isinstance(manifest.PHYSICAL_ADMISSION_KEYS, frozenset)
+    assert manifest.PHYSICAL_ADMISSION_KEYS == frozenset({
+        "input", "output", "expectedIdentity", "expectedIdentitySignature",
+    })
     assert manifest.TOOLS_KEYS == manifest.REQUIRED_TOOLS_KEYS
+    assert manifest.TOOLS_KEYS == frozenset({
+        "docker", "dockerCompose", "nodeInstalls", "playwrightBrowsers",
+        "robotPreviewBrowser", "node", "pythonTestRuntime", "espIdf",
+    })
+    assert "physicalAdmission" not in manifest.TOOLS_KEYS
 
 
-def _candidate_with_physical_preflight(candidate: dict) -> tuple[dict, dict[str, Path]]:
+def _candidate_with_physical_admission(candidate: dict) -> tuple[dict, dict[str, Path]]:
     bound = copy.deepcopy(candidate)
     evidence_root = Path(bound["evidenceRoot"])
     preflight_root = evidence_root / "G7-preflight"
@@ -319,77 +327,91 @@ def _candidate_with_physical_preflight(candidate: dict) -> tuple[dict, dict[str,
     paths["expectedIdentitySignature"].write_bytes(b"s" * 64)
     for key in ("input", "expectedIdentity", "expectedIdentitySignature"):
         paths[key].chmod(0o400)
-    bound["tools"]["physicalPreflight"] = {
+    bound["tools"]["physicalAdmission"] = {
         key: str(path) for key, path in paths.items()
     }
     return bound, paths
 
 
-def test_candidate_accepts_bound_physical_preflight(candidate: dict) -> None:
-    bound, _paths = _candidate_with_physical_preflight(candidate)
+def test_candidate_accepts_bound_physical_admission(candidate: dict) -> None:
+    bound, _paths = _candidate_with_physical_admission(candidate)
 
     assert validate_candidate(bound, now=NOW) == []
 
 
-def test_candidate_rejects_nul_in_physical_preflight_evidence_root(candidate: dict) -> None:
-    bound, _paths = _candidate_with_physical_preflight(candidate)
+def test_candidate_rejects_nul_in_physical_admission_evidence_root(candidate: dict) -> None:
+    bound, _paths = _candidate_with_physical_admission(candidate)
     bound["evidenceRoot"] += "\0malformed"
 
     assert validate_candidate(bound, now=NOW) == ["evidenceRoot"]
 
 
 @pytest.mark.parametrize("mutation", ["missing", "extra"])
-def test_candidate_rejects_physical_preflight_descriptor_keys(
+def test_candidate_rejects_physical_admission_descriptor_keys(
     candidate: dict, mutation: str,
 ) -> None:
-    bound, _paths = _candidate_with_physical_preflight(candidate)
-    descriptor = bound["tools"]["physicalPreflight"]
+    bound, _paths = _candidate_with_physical_admission(candidate)
+    descriptor = bound["tools"]["physicalAdmission"]
     if mutation == "missing":
         descriptor.pop("input")
     else:
         descriptor["unexpected"] = descriptor["input"]
 
-    assert "tools.physicalPreflight.keys" in validate_candidate(bound, now=NOW)
+    assert "tools.physicalAdmission.keys" in validate_candidate(bound, now=NOW)
+
+
+def test_candidate_rejects_old_physical_preflight_descriptor_name(candidate: dict) -> None:
+    bound, _paths = _candidate_with_physical_admission(candidate)
+    bound["tools"]["physicalPreflight"] = bound["tools"].pop("physicalAdmission")
+
+    assert "tools.keys" in validate_candidate(bound, now=NOW)
+
+
+def test_candidate_rejects_both_physical_descriptor_names(candidate: dict) -> None:
+    bound, _paths = _candidate_with_physical_admission(candidate)
+    bound["tools"]["physicalPreflight"] = copy.deepcopy(bound["tools"]["physicalAdmission"])
+
+    assert "tools.keys" in validate_candidate(bound, now=NOW)
 
 
 @pytest.mark.parametrize(
     "field", ["input", "output", "expectedIdentity", "expectedIdentitySignature"],
 )
-def test_candidate_rejects_relative_physical_preflight_paths(
+def test_candidate_rejects_relative_physical_admission_paths(
     candidate: dict, field: str,
 ) -> None:
-    bound, paths = _candidate_with_physical_preflight(candidate)
-    bound["tools"]["physicalPreflight"][field] = paths[field].name
+    bound, paths = _candidate_with_physical_admission(candidate)
+    bound["tools"]["physicalAdmission"][field] = paths[field].name
 
-    assert f"tools.physicalPreflight.{field}" in validate_candidate(bound, now=NOW)
+    assert f"tools.physicalAdmission.{field}" in validate_candidate(bound, now=NOW)
 
 
 @pytest.mark.parametrize(
     "field", ["input", "output", "expectedIdentity", "expectedIdentitySignature"],
 )
-def test_candidate_rejects_nul_in_physical_preflight_paths(
+def test_candidate_rejects_nul_in_physical_admission_paths(
     candidate: dict, field: str,
 ) -> None:
-    bound, _paths = _candidate_with_physical_preflight(candidate)
-    bound["tools"]["physicalPreflight"][field] += "\0malformed"
+    bound, _paths = _candidate_with_physical_admission(candidate)
+    bound["tools"]["physicalAdmission"][field] += "\0malformed"
 
-    assert f"tools.physicalPreflight.{field}" in validate_candidate(bound, now=NOW)
+    assert f"tools.physicalAdmission.{field}" in validate_candidate(bound, now=NOW)
 
 
 @pytest.mark.parametrize(
     "field", ["input", "output", "expectedIdentity", "expectedIdentitySignature"],
 )
-def test_candidate_rejects_physical_preflight_paths_outside_evidence_root(
+def test_candidate_rejects_physical_admission_paths_outside_evidence_root(
     candidate: dict, tmp_path: Path, field: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bound, paths = _candidate_with_physical_preflight(candidate)
+    bound, paths = _candidate_with_physical_admission(candidate)
     outside = tmp_path / f"outside-{paths[field].name}"
     if field != "output":
         outside.write_bytes(paths[field].read_bytes())
         outside.chmod(0o400)
-    bound["tools"]["physicalPreflight"][field] = str(outside)
+    bound["tools"]["physicalAdmission"][field] = str(outside)
 
-    assert f"tools.physicalPreflight.{field}" in validate_candidate(bound, now=NOW)
+    assert f"tools.physicalAdmission.{field}" in validate_candidate(bound, now=NOW)
 
     monkeypatch.setattr(manifest, "_path_is_within", lambda *_args: True)
     assert validate_candidate(bound, now=NOW) == []
@@ -397,82 +419,82 @@ def test_candidate_rejects_physical_preflight_paths_outside_evidence_root(
 
 @pytest.mark.parametrize("field", ["input", "expectedIdentity", "expectedIdentitySignature"])
 @pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
-def test_candidate_rejects_linked_physical_preflight_inputs(
+def test_candidate_rejects_linked_physical_admission_inputs(
     candidate: dict, field: str, link_kind: str,
 ) -> None:
-    bound, paths = _candidate_with_physical_preflight(candidate)
+    bound, paths = _candidate_with_physical_admission(candidate)
     original = paths[field]
     linked = original.with_name(f"linked-{original.name}")
     if link_kind == "symlink":
         linked.symlink_to(original)
     else:
         os.link(original, linked)
-    bound["tools"]["physicalPreflight"][field] = str(linked)
+    bound["tools"]["physicalAdmission"][field] = str(linked)
 
-    assert f"tools.physicalPreflight.{field}" in validate_candidate(bound, now=NOW)
+    assert f"tools.physicalAdmission.{field}" in validate_candidate(bound, now=NOW)
 
 
 @pytest.mark.parametrize("field", ["input", "expectedIdentity", "expectedIdentitySignature"])
-def test_candidate_rejects_writable_physical_preflight_inputs(
+def test_candidate_rejects_writable_physical_admission_inputs(
     candidate: dict, field: str,
 ) -> None:
-    bound, paths = _candidate_with_physical_preflight(candidate)
+    bound, paths = _candidate_with_physical_admission(candidate)
     paths[field].chmod(0o600)
 
-    assert f"tools.physicalPreflight.{field}" in validate_candidate(bound, now=NOW)
+    assert f"tools.physicalAdmission.{field}" in validate_candidate(bound, now=NOW)
 
 
 @pytest.mark.parametrize("field", ["input", "expectedIdentity"])
 @pytest.mark.parametrize(
     "payload", [b'{"duplicate":1,"duplicate":2}', b"[]", b'{"unterminated":'],
 )
-def test_candidate_rejects_invalid_physical_preflight_json_documents(
+def test_candidate_rejects_invalid_physical_admission_json_documents(
     candidate: dict, field: str, payload: bytes,
 ) -> None:
-    bound, paths = _candidate_with_physical_preflight(candidate)
+    bound, paths = _candidate_with_physical_admission(candidate)
     paths[field].chmod(0o600)
     paths[field].write_bytes(payload)
     paths[field].chmod(0o400)
 
-    assert f"tools.physicalPreflight.{field}" in validate_candidate(bound, now=NOW)
+    assert f"tools.physicalAdmission.{field}" in validate_candidate(bound, now=NOW)
 
 
-def test_candidate_rejects_oversized_physical_preflight_json(candidate: dict) -> None:
-    bound, paths = _candidate_with_physical_preflight(candidate)
+def test_candidate_rejects_oversized_physical_admission_json(candidate: dict) -> None:
+    bound, paths = _candidate_with_physical_admission(candidate)
     paths["input"].chmod(0o600)
     paths["input"].write_bytes(b" " * (manifest.MAX_CANDIDATE_BYTES + 1))
     paths["input"].chmod(0o400)
 
-    assert "tools.physicalPreflight.input" in validate_candidate(bound, now=NOW)
+    assert "tools.physicalAdmission.input" in validate_candidate(bound, now=NOW)
 
 
-def test_candidate_rejects_wrong_physical_preflight_signature_size(candidate: dict) -> None:
-    bound, paths = _candidate_with_physical_preflight(candidate)
+def test_candidate_rejects_wrong_physical_admission_signature_size(candidate: dict) -> None:
+    bound, paths = _candidate_with_physical_admission(candidate)
     paths["expectedIdentitySignature"].chmod(0o600)
     paths["expectedIdentitySignature"].write_bytes(b"s" * 63)
     paths["expectedIdentitySignature"].chmod(0o400)
 
-    assert "tools.physicalPreflight.expectedIdentitySignature" in validate_candidate(bound, now=NOW)
+    assert "tools.physicalAdmission.expectedIdentitySignature" in validate_candidate(bound, now=NOW)
 
 
-def test_candidate_rejects_preexisting_physical_preflight_output(candidate: dict) -> None:
-    bound, paths = _candidate_with_physical_preflight(candidate)
+def test_candidate_rejects_preexisting_physical_admission_output(candidate: dict) -> None:
+    bound, paths = _candidate_with_physical_admission(candidate)
     paths["output"].write_text("stale\n", encoding="utf-8")
 
-    assert "tools.physicalPreflight.output" in validate_candidate(bound, now=NOW)
+    assert "tools.physicalAdmission.output" in validate_candidate(bound, now=NOW)
 
 
-def test_candidate_rejects_writable_physical_preflight_output_parent(candidate: dict) -> None:
-    bound, paths = _candidate_with_physical_preflight(candidate)
+def test_candidate_rejects_writable_physical_admission_output_parent(candidate: dict) -> None:
+    bound, paths = _candidate_with_physical_admission(candidate)
     paths["output"].parent.chmod(0o777)
 
-    assert "tools.physicalPreflight.output" in validate_candidate(bound, now=NOW)
+    assert "tools.physicalAdmission.output" in validate_candidate(bound, now=NOW)
 
 
-def test_candidate_physical_preflight_secure_read_detects_path_replacement(
+def test_candidate_physical_admission_secure_read_detects_path_replacement(
     candidate: dict, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bound, paths = _candidate_with_physical_preflight(candidate)
+    bound, paths = _candidate_with_physical_admission(candidate)
     target = paths["input"]
     replacement = target.with_name("replacement-input.json")
     replacement.write_bytes(target.read_bytes())
@@ -491,13 +513,13 @@ def test_candidate_physical_preflight_secure_read_detects_path_replacement(
 
     monkeypatch.setattr(os, "read", replace_after_first_read)
 
-    assert "tools.physicalPreflight.input" in validate_candidate(bound, now=NOW)
+    assert "tools.physicalAdmission.input" in validate_candidate(bound, now=NOW)
 
 
-def test_candidate_physical_preflight_secure_read_detects_parent_replacement(
+def test_candidate_physical_admission_secure_read_detects_parent_replacement(
     candidate: dict, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bound, paths = _candidate_with_physical_preflight(candidate)
+    bound, paths = _candidate_with_physical_admission(candidate)
     parent = paths["input"].parent
     moved = parent.with_name("moved-G7-preflight")
     replacement = parent.with_name("replacement-G7-preflight")
@@ -517,13 +539,13 @@ def test_candidate_physical_preflight_secure_read_detects_parent_replacement(
 
     monkeypatch.setattr(os, "read", replace_parent_after_input_read)
 
-    assert "tools.physicalPreflight.input" in validate_candidate(bound, now=NOW)
+    assert "tools.physicalAdmission.input" in validate_candidate(bound, now=NOW)
 
 
-def test_candidate_physical_preflight_output_detects_parent_replacement(
+def test_candidate_physical_admission_output_detects_parent_replacement(
     candidate: dict, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bound, paths = _candidate_with_physical_preflight(candidate)
+    bound, paths = _candidate_with_physical_admission(candidate)
     parent = paths["output"].parent
     moved = parent.with_name("moved-G7-preflight")
     replacement = parent.with_name("replacement-G7-preflight")
@@ -544,7 +566,7 @@ def test_candidate_physical_preflight_output_detects_parent_replacement(
 
     monkeypatch.setattr(os, "stat", replace_parent_after_output_check)
 
-    assert "tools.physicalPreflight.output" in validate_candidate(bound, now=NOW)
+    assert "tools.physicalAdmission.output" in validate_candidate(bound, now=NOW)
 
 
 def test_candidate_accepts_exact_committed_repository_identity(candidate: dict) -> None:

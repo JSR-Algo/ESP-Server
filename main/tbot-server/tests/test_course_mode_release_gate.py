@@ -7175,7 +7175,7 @@ def test_esp_python_lane_stages_attested_backend_node_runtime(candidate_file: Pa
             ),
         ),
         (
-            "adminEsp", "main/tbot-server/scripts/course_mode_physical_tft_helper.py",
+            "adminEsp", "main/tbot-server/scripts/course_mode_physical_flash_admission.py",
             gate.PHYSICAL_PREFLIGHT_LANE,
         ),
         (
@@ -7515,7 +7515,7 @@ def test_physical_preflight_rejects_dirty_cross_repository_authority_before_comm
     )
 
     assert result["verdict"] == "BLOCKED"
-    assert result["failedLane"] == "physical-tft-preflight"
+    assert result["failedLane"] == "physical-flash-admission"
     assert not marker.exists()
 
 
@@ -7546,7 +7546,7 @@ def test_physical_preflight_rejects_dirty_admin_paths_outside_unselected_tests(
     )
 
     assert result["verdict"] == "BLOCKED"
-    assert result["failedLane"] == "physical-tft-preflight"
+    assert result["failedLane"] == "physical-flash-admission"
     assert not marker.exists()
 
 
@@ -8507,16 +8507,22 @@ def test_playwright_transitive_harness_files_are_candidate_bound(
     assert gate.source_contract_ready(tmp_path, "course-mode-playwright", sha) is False
 
 
-def test_live_db_adds_to_full_and_physical_mode_is_read_only_preflight() -> None:
+def test_live_db_adds_to_full_and_physical_preflight_mode_is_flash_admission() -> None:
     live = gate.lanes_for_mode("live-db")
     physical = gate.lanes_for_mode("physical-preflight")
 
     assert live[:-1] == gate.lanes_for_mode("full")
     assert live[-1].name == "live-postgres" and live[-1].required_environment
-    assert len(physical) == 1 and physical[0].name == "physical-tft-preflight"
-    assert "course_mode_physical_tft_preflight.py" in " ".join(physical[0].command)
-    assert all("flash" not in token.lower() for token in physical[0].command)
-    assert all("build" not in token.lower() for token in physical[0].command)
+    assert len(physical) == 1 and physical[0].name == "physical-flash-admission"
+    assert physical[0].command == (
+        "python3", "scripts/course_mode_physical_flash_admission.py",
+    )
+    forbidden_actions = ("esptool", "write_flash", "erase", "build", "deploy", "monitor")
+    assert all(
+        action not in token.lower()
+        for token in physical[0].command
+        for action in forbidden_actions
+    )
 
 
 def test_physical_preflight_requires_candidate_bound_signed_evidence(
@@ -8534,8 +8540,8 @@ def test_physical_preflight_requires_candidate_bound_signed_evidence(
     )
 
     assert result["verdict"] == "BLOCKED"
-    assert result["failedLane"] == "physical-tft-preflight"
-    assert result["lanes"] == [{"name": "physical-tft-preflight", "exitCode": None, "durationMs": 0}]
+    assert result["failedLane"] == "physical-flash-admission"
+    assert result["lanes"] == [{"name": "physical-flash-admission", "exitCode": None, "durationMs": 0}]
 
 
 def test_physical_preflight_command_uses_only_candidate_evidence_paths(
@@ -8558,17 +8564,22 @@ def test_physical_preflight_command_uses_only_candidate_evidence_paths(
     candidate["images"] = {"backend": "sha256:" + "1" * 64}
     candidate["firmware"] = {"appSha256": "2" * 64}
     candidate["database"] = {"materializationReceipt": "3" * 64}
-    candidate["tools"] = {"physicalPreflight": paths}
+    candidate["tools"] = {"physicalAdmission": paths}
 
     command = gate.physical_preflight_command(candidate)
 
     assert command == (
-        "python3", "scripts/course_mode_physical_tft_preflight.py",
+        "python3", "scripts/course_mode_physical_flash_admission.py",
         "--input", paths["input"], "--output", paths["output"],
         "--expected-identity", paths["expectedIdentity"],
         "--expected-identity-signature", paths["expectedIdentitySignature"],
     )
-    assert all("flash" not in token.lower() and "build" not in token.lower() for token in command)
+    forbidden_actions = ("esptool", "write_flash", "erase", "build", "deploy", "monitor")
+    assert all(
+        action not in token.lower()
+        for token in command
+        for action in forbidden_actions
+    )
 
 
 def test_physical_preflight_rejects_malformed_json_and_signature_prerequisites(
@@ -8587,7 +8598,7 @@ def test_physical_preflight_rejects_malformed_json_and_signature_prerequisites(
     candidate["images"] = {"backend": "frozen"}
     candidate["firmware"] = {"app": "frozen"}
     candidate["database"] = {"receipt": "frozen"}
-    candidate["tools"] = {"physicalPreflight": {
+    candidate["tools"] = {"physicalAdmission": {
         "input": str(input_path), "output": str(evidence / "output.json"),
         "expectedIdentity": str(identity_path),
         "expectedIdentitySignature": str(signature_path),

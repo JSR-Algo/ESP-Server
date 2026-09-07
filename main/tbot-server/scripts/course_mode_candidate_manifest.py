@@ -93,7 +93,7 @@ REQUIRED_TOOLS_KEYS = frozenset({
     "robotPreviewBrowser", "node", "pythonTestRuntime", "espIdf",
 })
 TOOLS_KEYS = REQUIRED_TOOLS_KEYS
-PHYSICAL_PREFLIGHT_KEYS = frozenset({
+PHYSICAL_ADMISSION_KEYS = frozenset({
     "input", "output", "expectedIdentity", "expectedIdentitySignature",
 })
 PLAYWRIGHT_BROWSER_REVISIONS = {
@@ -2107,11 +2107,11 @@ def upgrade_candidate_schema(
     return upgraded
 
 
-def _validate_physical_preflight(
+def _validate_physical_admission(
     value: Any, evidence_root: Path, reasons: set[str],
 ) -> None:
-    prefix = "tools.physicalPreflight"
-    if not isinstance(value, dict) or set(value) != PHYSICAL_PREFLIGHT_KEYS:
+    prefix = "tools.physicalAdmission"
+    if not isinstance(value, dict) or set(value) != PHYSICAL_ADMISSION_KEYS:
         reasons.add(f"{prefix}.keys")
         return
     try:
@@ -2120,7 +2120,7 @@ def _validate_physical_preflight(
         reasons.add("evidenceRoot")
         return
 
-    for key in sorted(PHYSICAL_PREFLIGHT_KEYS):
+    for key in sorted(PHYSICAL_ADMISSION_KEYS):
         raw = value.get(key)
         path = Path(raw) if isinstance(raw, str) else None
         if path is None or not path.is_absolute():
@@ -2200,7 +2200,7 @@ def validate_candidate(
     if isinstance(tools, dict):
         if set(tools) not in (
             REQUIRED_TOOLS_KEYS,
-            REQUIRED_TOOLS_KEYS | {"physicalPreflight"},
+            REQUIRED_TOOLS_KEYS | {"physicalAdmission"},
         ):
             reasons.add("tools.keys")
         docker_executable = _validate_container_tool(
@@ -2239,8 +2239,8 @@ def validate_candidate(
     evidence_root = candidate.get("evidenceRoot")
     if not isinstance(evidence_root, str) or not Path(evidence_root).is_absolute():
         reasons.add("evidenceRoot")
-    elif isinstance(tools, dict) and "physicalPreflight" in tools:
-        _validate_physical_preflight(tools["physicalPreflight"], Path(evidence_root), reasons)
+    elif isinstance(tools, dict) and "physicalAdmission" in tools:
+        _validate_physical_admission(tools["physicalAdmission"], Path(evidence_root), reasons)
 
     course = candidate.get("course")
     if not isinstance(course, dict) or set(course) != COURSE_KEYS:

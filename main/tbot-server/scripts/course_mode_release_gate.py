@@ -2218,8 +2218,8 @@ POSTGRES_IDENTITY_QUERY_KEYS = {
 
 
 PHYSICAL_PREFLIGHT_LANE = _lane(
-    "physical-tft-preflight", "adminEsp", "main/tbot-server",
-    ("python3", "scripts/course_mode_physical_tft_preflight.py"),
+    "physical-flash-admission", "adminEsp", "main/tbot-server",
+    ("python3", "scripts/course_mode_physical_flash_admission.py"),
     900.0,
 )
 
@@ -2462,7 +2462,7 @@ def lane_candidate_paths(lane: Lane, candidate: dict) -> tuple[str, ...]:
 
 def lane_dirty_exceptions_authorized(lane: Lane, candidate: dict) -> bool:
     try:
-        if lane.name == "physical-tft-preflight" and any(
+        if lane.name == "physical-flash-admission" and any(
             candidate["repositories"][name]["dirtyExceptions"]
             for name in ("backend", "firmware")
         ):
@@ -3162,7 +3162,7 @@ def physical_preflight_command(candidate: dict) -> tuple[str, ...] | None:
     if any(not isinstance(candidate.get(key), dict) or not candidate[key] for key in ("images", "firmware", "database")):
         return None
     tools = candidate.get("tools")
-    metadata = tools.get("physicalPreflight") if isinstance(tools, dict) else None
+    metadata = tools.get("physicalAdmission") if isinstance(tools, dict) else None
     required = {"input", "output", "expectedIdentity", "expectedIdentitySignature"}
     if not isinstance(metadata, dict) or set(metadata) != required:
         return None
@@ -3189,7 +3189,7 @@ def physical_preflight_command(candidate: dict) -> tuple[str, ...] | None:
     except (KeyError, OSError, ValueError):
         return None
     return (
-        "python3", "scripts/course_mode_physical_tft_preflight.py",
+        "python3", "scripts/course_mode_physical_flash_admission.py",
         "--input", str(resolved["input"]), "--output", str(resolved["output"]),
         "--expected-identity", str(resolved["expectedIdentity"]),
         "--expected-identity-signature", str(resolved["expectedIdentitySignature"]),
@@ -3863,7 +3863,7 @@ def _command_for_lane(lane: Lane, candidate: dict) -> tuple[str, ...] | None:
         repository = candidate["repositories"]["adminEsp"]
         tests = select_esp_software_tests(Path(repository["path"]), repository["sha"])
         return ("python3", "-m", "pytest", "-q", *tests) if tests else None
-    if lane.name == "physical-tft-preflight":
+    if lane.name == "physical-flash-admission":
         return physical_preflight_command(candidate)
     return lane.command
 
