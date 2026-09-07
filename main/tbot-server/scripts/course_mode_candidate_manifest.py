@@ -92,6 +92,7 @@ REQUIRED_TOOLS_KEYS = {
     "docker", "dockerCompose", "nodeInstalls", "playwrightBrowsers",
     "robotPreviewBrowser", "node", "pythonTestRuntime", "espIdf",
 }
+TOOLS_KEYS = REQUIRED_TOOLS_KEYS
 PHYSICAL_PREFLIGHT_KEYS = {
     "input", "output", "expectedIdentity", "expectedIdentitySignature",
 }
