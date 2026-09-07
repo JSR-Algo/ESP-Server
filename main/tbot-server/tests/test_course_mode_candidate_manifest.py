@@ -296,6 +296,13 @@ def candidate(repositories: dict[str, Path], tmp_path: Path, monkeypatch: pytest
 NOW = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
 
 
+def test_candidate_tool_schema_exports_are_immutable() -> None:
+    assert isinstance(manifest.REQUIRED_TOOLS_KEYS, frozenset)
+    assert isinstance(manifest.TOOLS_KEYS, frozenset)
+    assert isinstance(manifest.PHYSICAL_PREFLIGHT_KEYS, frozenset)
+    assert manifest.TOOLS_KEYS == manifest.REQUIRED_TOOLS_KEYS
+
+
 def _candidate_with_physical_preflight(candidate: dict) -> tuple[dict, dict[str, Path]]:
     bound = copy.deepcopy(candidate)
     evidence_root = Path(bound["evidenceRoot"])

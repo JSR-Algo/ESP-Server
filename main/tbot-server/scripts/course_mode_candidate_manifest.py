@@ -88,14 +88,14 @@ FIRMWARE_KEYS = {
     "partitionBytes", "freeBytes", "evidenceManifestPath", "evidenceManifestSha256",
 }
 DATABASE_KEYS = {"engineImage", "engineImageId", "migrationHead", "migrationHeadSha256"}
-REQUIRED_TOOLS_KEYS = {
+REQUIRED_TOOLS_KEYS = frozenset({
     "docker", "dockerCompose", "nodeInstalls", "playwrightBrowsers",
     "robotPreviewBrowser", "node", "pythonTestRuntime", "espIdf",
-}
+})
 TOOLS_KEYS = REQUIRED_TOOLS_KEYS
-PHYSICAL_PREFLIGHT_KEYS = {
+PHYSICAL_PREFLIGHT_KEYS = frozenset({
     "input", "output", "expectedIdentity", "expectedIdentitySignature",
-}
+})
 PLAYWRIGHT_BROWSER_REVISIONS = {
     "chromium-headless-shell": "1223", "webkit": "2287", "ffmpeg": "1011",
 }
