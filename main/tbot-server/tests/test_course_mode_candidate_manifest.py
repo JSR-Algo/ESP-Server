@@ -324,6 +324,13 @@ def test_candidate_accepts_bound_physical_preflight(candidate: dict) -> None:
     assert validate_candidate(bound, now=NOW) == []
 
 
+def test_candidate_rejects_nul_in_physical_preflight_evidence_root(candidate: dict) -> None:
+    bound, _paths = _candidate_with_physical_preflight(candidate)
+    bound["evidenceRoot"] += "\0malformed"
+
+    assert validate_candidate(bound, now=NOW) == ["evidenceRoot"]
+
+
 @pytest.mark.parametrize("mutation", ["missing", "extra"])
 def test_candidate_rejects_physical_preflight_descriptor_keys(
     candidate: dict, mutation: str,
@@ -346,6 +353,18 @@ def test_candidate_rejects_relative_physical_preflight_paths(
 ) -> None:
     bound, paths = _candidate_with_physical_preflight(candidate)
     bound["tools"]["physicalPreflight"][field] = paths[field].name
+
+    assert f"tools.physicalPreflight.{field}" in validate_candidate(bound, now=NOW)
+
+
+@pytest.mark.parametrize(
+    "field", ["input", "output", "expectedIdentity", "expectedIdentitySignature"],
+)
+def test_candidate_rejects_nul_in_physical_preflight_paths(
+    candidate: dict, field: str,
+) -> None:
+    bound, _paths = _candidate_with_physical_preflight(candidate)
+    bound["tools"]["physicalPreflight"][field] += "\0malformed"
 
     assert f"tools.physicalPreflight.{field}" in validate_candidate(bound, now=NOW)
 

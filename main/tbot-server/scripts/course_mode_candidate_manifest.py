@@ -2115,7 +2115,7 @@ def _validate_physical_preflight(
         return
     try:
         resolved_root = evidence_root.resolve(strict=True)
-    except OSError:
+    except (OSError, ValueError):
         reasons.add("evidenceRoot")
         return
 
