@@ -88,9 +88,12 @@ FIRMWARE_KEYS = {
     "partitionBytes", "freeBytes", "evidenceManifestPath", "evidenceManifestSha256",
 }
 DATABASE_KEYS = {"engineImage", "engineImageId", "migrationHead", "migrationHeadSha256"}
-TOOLS_KEYS = {
+REQUIRED_TOOLS_KEYS = {
     "docker", "dockerCompose", "nodeInstalls", "playwrightBrowsers",
     "robotPreviewBrowser", "node", "pythonTestRuntime", "espIdf",
+}
+PHYSICAL_PREFLIGHT_KEYS = {
+    "input", "output", "expectedIdentity", "expectedIdentitySignature",
 }
 PLAYWRIGHT_BROWSER_REVISIONS = {
     "chromium-headless-shell": "1223", "webkit": "2287", "ffmpeg": "1011",
@@ -519,6 +522,7 @@ def secure_executable_descriptor(path: Path) -> tuple[dict[str, Any] | None, str
 
 def secure_regular_descriptor(
     path: Path, max_bytes: int, *, include_content: bool = False,
+    secure_metadata: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     try:
         if not path.is_absolute() or str(path) != str(path.resolve(strict=True)):
@@ -533,6 +537,9 @@ def secure_regular_descriptor(
         if (
             not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
             or before.st_size < 0 or before.st_size > max_bytes
+            or secure_metadata and (
+                before.st_uid not in {0, os.geteuid()} or before.st_mode & 0o022
+            )
         ):
             return None, "path"
         digest = hashlib.sha256()
@@ -2082,6 +2089,70 @@ def upgrade_candidate_schema(
     return upgraded
 
 
+def _validate_physical_preflight(
+    value: Any, evidence_root: Path, reasons: set[str],
+) -> None:
+    prefix = "tools.physicalPreflight"
+    if not isinstance(value, dict) or set(value) != PHYSICAL_PREFLIGHT_KEYS:
+        reasons.add(f"{prefix}.keys")
+        return
+    try:
+        resolved_root = evidence_root.resolve(strict=True)
+    except OSError:
+        reasons.add("evidenceRoot")
+        return
+
+    for key in sorted(PHYSICAL_PREFLIGHT_KEYS):
+        raw = value.get(key)
+        path = Path(raw) if isinstance(raw, str) else None
+        if path is None or not path.is_absolute():
+            reasons.add(f"{prefix}.{key}")
+            continue
+        try:
+            if key == "output":
+                parent = path.parent.resolve(strict=True)
+                candidate_path = parent / path.name
+                if candidate_path != path or not _path_is_within(resolved_root, candidate_path):
+                    raise OSError("output outside evidence root")
+                parent_fd, parent_metadata, ancestry = _open_trusted_source_directory(parent)
+                try:
+                    try:
+                        os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        raise OSError("output already exists")
+                    if not _trusted_source_directory_still_named(
+                        parent, parent_fd, parent_metadata, ancestry,
+                    ):
+                        raise OSError("output parent changed")
+                finally:
+                    os.close(parent_fd)
+                continue
+
+            canonical = path.resolve(strict=True)
+            if canonical != path or not _path_is_within(resolved_root, canonical):
+                raise OSError("input outside evidence root")
+            observed, error = secure_regular_descriptor(
+                canonical,
+                256 if key == "expectedIdentitySignature" else MAX_CANDIDATE_BYTES,
+                include_content=True,
+                secure_metadata=True,
+            )
+            if error or observed is None:
+                raise OSError("invalid secure input")
+            content = observed["content"]
+            if key == "expectedIdentitySignature":
+                if len(content) != 64:
+                    raise ValueError("invalid signature size")
+            else:
+                document = strict_json_loads(content)
+                if not isinstance(document, dict):
+                    raise ValueError("JSON object required")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            reasons.add(f"{prefix}.{key}")
+
+
 def validate_candidate(
     candidate: Any, *, now: datetime | None = None, verify_external_tools: bool = True,
 ) -> list[str]:
@@ -2108,7 +2179,10 @@ def validate_candidate(
     tools = candidate.get("tools")
     docker_executable: Path | None = None
     if isinstance(tools, dict):
-        if set(tools) != TOOLS_KEYS:
+        if set(tools) not in (
+            REQUIRED_TOOLS_KEYS,
+            REQUIRED_TOOLS_KEYS | {"physicalPreflight"},
+        ):
             reasons.add("tools.keys")
         docker_executable = _validate_container_tool(
             "docker", tools.get("docker"), reasons, verify_identity=verify_external_tools,
@@ -2146,6 +2220,8 @@ def validate_candidate(
     evidence_root = candidate.get("evidenceRoot")
     if not isinstance(evidence_root, str) or not Path(evidence_root).is_absolute():
         reasons.add("evidenceRoot")
+    elif isinstance(tools, dict) and "physicalPreflight" in tools:
+        _validate_physical_preflight(tools["physicalPreflight"], Path(evidence_root), reasons)
 
     course = candidate.get("course")
     if not isinstance(course, dict) or set(course) != COURSE_KEYS:
