@@ -354,16 +354,19 @@ def test_candidate_rejects_relative_physical_preflight_paths(
     "field", ["input", "output", "expectedIdentity", "expectedIdentitySignature"],
 )
 def test_candidate_rejects_physical_preflight_paths_outside_evidence_root(
-    candidate: dict, tmp_path: Path, field: str,
+    candidate: dict, tmp_path: Path, field: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bound, paths = _candidate_with_physical_preflight(candidate)
     outside = tmp_path / f"outside-{paths[field].name}"
     if field != "output":
         outside.write_bytes(paths[field].read_bytes())
-        outside.chmod(0o600)
+        outside.chmod(0o400)
     bound["tools"]["physicalPreflight"][field] = str(outside)
 
     assert f"tools.physicalPreflight.{field}" in validate_candidate(bound, now=NOW)
+
+    monkeypatch.setattr(manifest, "_path_is_within", lambda *_args: True)
+    assert validate_candidate(bound, now=NOW) == []
 
 
 @pytest.mark.parametrize("field", ["input", "expectedIdentity", "expectedIdentitySignature"])
