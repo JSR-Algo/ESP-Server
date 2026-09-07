@@ -147,24 +147,21 @@ def _trusted_lsof():
     except OSError: return False
 def _device_lstat(path): return os.lstat(path)
 def _device_stat(path): return os.stat(path)
-
-def collect_serial_inventory():
-    devices=[]
-    device_identity=None
+def _enumerate_devices():
+    identities={}
     for name in sorted(glob.glob("/dev/cu.usb*")):
         try: metadata=_device_lstat(name); resolved=_device_stat(name)
         except OSError: continue
         identity=lambda value:(value.st_dev,value.st_ino,value.st_rdev,value.st_mode)
-        if stat.S_ISCHR(metadata.st_mode) and stat.S_ISCHR(resolved.st_mode) and identity(metadata)==identity(resolved):
-            devices.append(name)
-            if name==SERIAL_PATH: device_identity=identity(metadata)
+        if stat.S_ISCHR(metadata.st_mode) and stat.S_ISCHR(resolved.st_mode) and identity(metadata)==identity(resolved): identities[name]=identity(metadata)
+    return identities
+
+def collect_serial_inventory():
+    before=_enumerate_devices(); devices=sorted(before)
     if not _trusted_lsof(): return devices,[],"untrusted"
     result=candidate_manifest.run_bounded_command([str(TRUSTED_LSOF_EXECUTABLE),"-nP","-t","--",SERIAL_PATH],cwd=Path("/"),timeout_sec=LSOF_TIMEOUT_SECONDS,max_output_bytes=MAX_LSOF_OUTPUT_BYTES,env={"PATH":"/usr/bin:/bin","LANG":"C","LC_ALL":"C","HOME":"/nonexistent"})
-    if device_identity is not None:
-        try:
-            current=_device_lstat(SERIAL_PATH); followed=_device_stat(SERIAL_PATH)
-            if (current.st_dev,current.st_ino,current.st_rdev,current.st_mode)!=device_identity or (followed.st_dev,followed.st_ino,followed.st_rdev,followed.st_mode)!=device_identity: return devices,[],"device_changed"
-        except OSError: return devices,[],"device_changed"
+    after=_enumerate_devices()
+    if after!=before: return sorted(after),[],"inventory_changed"
     if result.error: return devices,[],result.error
     if result.returncode not in (0,1): return devices,[],"exit"
     holders=[]
@@ -247,8 +244,16 @@ def validate_documents(doc,identity,actual,now,devices,holders,inventory_error):
             if safety.get(key) is not True: reasons.add(f"safety.{key}")
     return sorted(reasons)
 
+def _commit_time_reasons(doc,now):
+    checked=_parse_utc(doc.get("checkedAt")); binding=doc.get("candidate",{})
+    created=_parse_utc(binding.get("createdAt")); expires=_parse_utc(binding.get("expiresAt"))
+    reasons=[]
+    if checked is None or created is None or expires is None or not(created<=checked<=now<expires): reasons.append("candidate.time")
+    if checked is None or checked>now or (now-checked).total_seconds()>CHECK_FRESHNESS_SECONDS: reasons.append("checkedAt.stale")
+    return sorted(set(reasons))
+
 def _failure(reasons): print(json.dumps({"schemaVersion":1,"validator":VALIDATOR,"status":"fail","reasons":sorted(set(reasons)),"physicalActionsPerformed":False,"serialOpened":False},sort_keys=True,separators=(",",":")))
-def _publish(path,payload,output_binding,sources):
+def _publish(path,payload,output_binding,sources,commit_safe):
     if not path.is_absolute() or ".." in path.parts: return False
     data=(json.dumps(payload,sort_keys=True,separators=(",",":"),allow_nan=False)+"\n").encode()
     parent_fd=fd=None; created_identity=None; created_inode=None
@@ -269,10 +274,12 @@ def _publish(path,payload,output_binding,sources):
             if written<=0: raise OSError("short write")
             view=view[written:]
         os.fsync(fd)
+        if not commit_safe(): raise OSError("commit time changed")
         created_identity=_file_identity(os.fstat(fd))
         current=os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
         if _file_identity(current)!=created_identity or not _output_parent_still_bound(path.parent,parent_fd,parent_metadata,ancestry): raise OSError("output changed")
         os.fsync(parent_fd)
+        if not commit_safe(): raise OSError("commit time changed")
         current=os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
         if (_file_identity(current)!=created_identity or not _output_parent_still_bound(path.parent,parent_fd,parent_metadata,ancestry) or not all(_still_bound(record) for record in sources)): raise OSError("final binding changed")
         return True
@@ -325,8 +332,17 @@ def main(argv=None):
     if reasons: _failure(reasons); return 1
     if not all(_still_bound(record) for record in (input_record,identity_record,signature_record,candidate_record)):
         _failure(["input.changed"]); return 1
+    commit_reasons=_commit_time_reasons(doc,utc_now())
+    if commit_reasons: _failure(commit_reasons); return 1
+    final_devices,final_holders,final_inventory_error=collect_serial_inventory()
+    final_inventory_reasons=[]
+    if final_inventory_error: final_inventory_reasons.append(f"serial.lsof.{final_inventory_error}")
+    if final_devices!=[SERIAL_PATH]: final_inventory_reasons.append("serial.inventory")
+    if final_holders: final_inventory_reasons.append("serial.occupied")
+    if final_inventory_reasons: _failure(final_inventory_reasons); return 1
     payload={"schemaVersion":1,"validator":VALIDATOR,"status":"pass","reasons":[],"candidateId":binding["candidateId"],"sessionId":doc["sessionId"],"signerFingerprint":fingerprint,"physicalActionsPerformed":False,"serialOpened":False,"inputSha256":hashlib.sha256(raw).hexdigest(),"expectedIdentitySha256":hashlib.sha256(identity_raw).hexdigest(),"candidateSha256":hashlib.sha256(candidate_raw).hexdigest(),"robotMac":ROBOT_MAC,"serialPath":SERIAL_PATH,"firmwareSha":FIRMWARE_SHA,"appSha256":APP_SHA256,"manifestSha256":MANIFEST_SHA256}
-    if not _publish(args.output,payload,output_binding,(input_record,identity_record,signature_record,candidate_record)): _failure(["output.path"]); return 1
+    commit_safe=lambda: not _commit_time_reasons(doc,utc_now())
+    if not _publish(args.output,payload,output_binding,(input_record,identity_record,signature_record,candidate_record),commit_safe): _failure(["output.path"]); return 1
     return 0
 def _entrypoint():
     try: return main()

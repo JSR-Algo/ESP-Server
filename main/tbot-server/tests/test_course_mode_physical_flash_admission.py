@@ -385,7 +385,7 @@ def test_device_identity_change_across_lsof_is_rejected(monkeypatch):
     monkeypatch.setattr(admission, "_device_stat", device)
     monkeypatch.setattr(admission, "_trusted_lsof", lambda: True)
     monkeypatch.setattr(admission.candidate_manifest, "run_bounded_command", lambda *args, **kwargs: admission.candidate_manifest.BoundedCommandResult(1, "", None))
-    assert admission.collect_serial_inventory()[2] == "device_changed"
+    assert admission.collect_serial_inventory()[2] == "inventory_changed"
 
 
 @pytest.mark.parametrize("program,expected", [
@@ -493,3 +493,52 @@ def test_resigned_candidate_drift_is_checked_against_external_identity(valid_fil
     resign(paths, input_doc, identity)
     assert run_main(paths) == 1
     assert reason in json.loads(capsys.readouterr().out)["reasons"]
+
+
+def test_expiry_reached_immediately_before_publish_leaves_no_result(valid_files, monkeypatch, capsys):
+    _, _, paths, _ = valid_files
+    moments = iter((NOW, datetime(2026, 9, 8, 9, 0, 0, tzinfo=timezone.utc)))
+    monkeypatch.setattr(admission, "utc_now", lambda: next(moments))
+    assert run_main(paths) == 1
+    assert not paths["output"].exists()
+    assert "candidate.time" in json.loads(capsys.readouterr().out)["reasons"]
+
+
+def test_freshness_expires_during_output_fsync_removes_result(valid_files, monkeypatch, capsys):
+    _, _, paths, _ = valid_files
+    stale = NOW.replace(minute=6)
+    moments = iter((NOW, NOW, stale, stale))
+    monkeypatch.setattr(admission, "utc_now", lambda: next(moments))
+    assert run_main(paths) == 1
+    assert not paths["output"].exists()
+    assert json.loads(capsys.readouterr().out)["reasons"] == ["output.path"]
+
+
+def test_second_device_appearing_after_lsof_is_rejected(monkeypatch):
+    calls = 0
+    def devices(_pattern):
+        nonlocal calls
+        calls += 1
+        return [admission.SERIAL_PATH] if calls == 1 else [admission.SERIAL_PATH, "/dev/cu.usbserial2"]
+    def metadata(path):
+        inode = 2 if path == admission.SERIAL_PATH else 4
+        return type("S", (), {"st_mode": stat.S_IFCHR, "st_dev": 1, "st_ino": inode, "st_rdev": inode + 1})()
+    monkeypatch.setattr(admission.glob, "glob", devices)
+    monkeypatch.setattr(admission, "_device_lstat", metadata)
+    monkeypatch.setattr(admission, "_device_stat", metadata)
+    monkeypatch.setattr(admission, "_trusted_lsof", lambda: True)
+    monkeypatch.setattr(admission.candidate_manifest, "run_bounded_command", lambda *args, **kwargs: admission.candidate_manifest.BoundedCommandResult(1, "", None))
+    assert admission.collect_serial_inventory()[2] == "inventory_changed"
+
+
+def test_inventory_repeated_immediately_before_publish(valid_files, monkeypatch, capsys):
+    _, _, paths, _ = valid_files
+    calls = 0
+    def inventory():
+        nonlocal calls
+        calls += 1
+        return ([admission.SERIAL_PATH], [], None) if calls == 1 else ([admission.SERIAL_PATH, "/dev/cu.usbserial2"], [], None)
+    monkeypatch.setattr(admission, "collect_serial_inventory", inventory)
+    assert run_main(paths) == 1
+    assert not paths["output"].exists()
+    assert "serial.inventory" in json.loads(capsys.readouterr().out)["reasons"]
