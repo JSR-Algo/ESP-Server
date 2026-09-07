@@ -276,6 +276,24 @@ def test_identity_and_signature_inputs_are_strict_and_bounded(valid_files, field
     assert reason in json.loads(capsys.readouterr().out)["reasons"]
 
 
+@pytest.mark.parametrize("field,reason", [("input", "input.invalid_json"), ("identity", "expectedIdentity.invalid_json")])
+def test_overflowing_float_is_rejected(valid_files, field, reason, capsys):
+    _, _, paths, _ = valid_files
+    paths[field].chmod(0o644); paths[field].write_bytes(b'{"overflow":1e999}'); paths[field].chmod(0o444)
+    assert run_main(paths) == 1
+    assert reason in json.loads(capsys.readouterr().out)["reasons"]
+
+
+def test_ed25519_s_plus_l_malleation_is_rejected(valid_files, capsys):
+    _, _, paths, _ = valid_files
+    signature = paths["signature"].read_bytes()
+    order = 2**252 + 27742317777372353535851937790883648493
+    malleated = signature[:32] + (int.from_bytes(signature[32:], "little") + order).to_bytes(32, "little")
+    paths["signature"].chmod(0o644); paths["signature"].write_bytes(malleated); paths["signature"].chmod(0o444)
+    assert run_main(paths) == 1
+    assert json.loads(capsys.readouterr().out)["reasons"] == ["expectedIdentity.signature"]
+
+
 def test_publish_short_write_is_redacted_and_removes_only_partial_file(valid_files, monkeypatch, capsys):
     _, _, paths, _ = valid_files
     real_write = admission.os.write
@@ -380,3 +398,98 @@ def test_real_bounded_command_enforces_timeout_and_output(program, expected):
         max_output_bytes=128, env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"},
     )
     assert result.error == expected
+
+
+def test_real_parent_rename_during_read_is_rejected(tmp_path, monkeypatch):
+    parent = tmp_path / "bound"
+    parent.mkdir()
+    source = parent / "input.json"
+    source.write_text("{}")
+    source.chmod(0o444)
+    moved = tmp_path / "moved"
+    real_check = admission.candidate_manifest._trusted_source_directory_still_named
+    def replace(path, fd, metadata, ancestry):
+        parent.rename(moved)
+        parent.mkdir()
+        try:
+            return real_check(path, fd, metadata, ancestry)
+        finally:
+            parent.rmdir()
+            moved.rename(parent)
+    monkeypatch.setattr(admission.candidate_manifest, "_trusted_source_directory_still_named", replace)
+    assert admission._secure_read(source, 1024)[1] == "changed"
+
+
+def test_real_source_replacement_after_output_fsync_removes_result(valid_files, monkeypatch, capsys):
+    input_doc, _, paths, _ = valid_files
+    candidate_path = Path(input_doc["candidate"]["path"])
+    original = candidate_path.read_bytes()
+    backup = candidate_path.with_suffix(".old")
+    real_fsync = admission.os.fsync
+    replaced = False
+    def replace_after_fsync(fd):
+        nonlocal replaced
+        result = real_fsync(fd)
+        if not replaced and stat.S_ISREG(os.fstat(fd).st_mode):
+            replaced = True
+            candidate_path.rename(backup)
+            candidate_path.write_bytes(original)
+            candidate_path.chmod(0o444)
+        return result
+    monkeypatch.setattr(admission.os, "fsync", replace_after_fsync)
+    assert run_main(paths) == 1
+    assert not paths["output"].exists()
+    assert json.loads(capsys.readouterr().out)["reasons"] == ["output.path"]
+
+
+@pytest.mark.parametrize("field,value", [("mac", "00:11:22:33:44:55"), ("board", "wrong"), ("target", "esp32"), ("serialPath", "/dev/cu.wrong")])
+def test_resigned_wrong_robot_identity_is_rejected(valid_files, field, value, capsys):
+    input_doc, identity, paths, _ = valid_files
+    input_doc["robot"][field] = value
+    identity["robot"][field] = value
+    resign(paths, input_doc, identity)
+    assert run_main(paths) == 1
+    assert "robot.identity" in json.loads(capsys.readouterr().out)["reasons"]
+
+
+def test_actual_candidate_expiry_is_reported_by_real_validator(valid_files, capsys):
+    input_doc, identity, paths, actual = valid_files
+    actual["expiresAt"] = "2026-09-08T07:59:59Z"
+    candidate_path = Path(input_doc["candidate"]["path"])
+    rewrite(candidate_path, actual)
+    digest = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+    input_doc["candidate"]["sha256"] = digest
+    identity["candidate"]["sha256"] = digest
+    resign(paths, input_doc, identity)
+    assert run_main(paths) == 1
+    assert "candidate.expiresAt.expired" in json.loads(capsys.readouterr().out)["reasons"]
+
+
+@pytest.mark.parametrize("kind,reason", [("image-id", "candidate.images.lessonStudioWeb.id"), ("repository-sha", "candidate.repositories.backend.sha"), ("app-size", "candidate.firmware.app")])
+def test_resigned_candidate_drift_is_checked_against_external_identity(valid_files, kind, reason, capsys):
+    input_doc, identity, paths, actual = valid_files
+    if kind == "image-id":
+        value = "sha256:" + "9" * 64
+        input_doc["candidate"]["images"]["web"]["id"] = value
+        identity["candidate"]["images"]["web"]["id"] = value
+        actual["images"]["lessonStudioWeb"]["id"] = value
+    elif kind == "repository-sha":
+        value = "9" * 40
+        input_doc["candidate"]["repositories"]["backend"]["sha"] = value
+        identity["candidate"]["repositories"]["backend"]["sha"] = value
+        input_doc["candidate"]["images"]["backend"]["provenanceLabels"]["org.opencontainers.image.revision"] = value
+        identity["candidate"]["images"]["backend"]["provenanceLabels"]["org.opencontainers.image.revision"] = value
+        actual["repositories"]["backend"]["sha"] = value
+    else:
+        input_doc["candidate"]["firmware"]["app"]["bytes"] = 1
+        identity["candidate"]["firmware"]["app"]["bytes"] = 1
+        actual["firmware"]["appBytes"] = 1
+        actual["firmware"]["freeBytes"] = actual["firmware"]["partitionBytes"] - 1
+    candidate_path = Path(input_doc["candidate"]["path"])
+    rewrite(candidate_path, actual)
+    digest = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+    input_doc["candidate"]["sha256"] = digest
+    identity["candidate"]["sha256"] = digest
+    resign(paths, input_doc, identity)
+    assert run_main(paths) == 1
+    assert reason in json.loads(capsys.readouterr().out)["reasons"]

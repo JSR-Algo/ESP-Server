@@ -2,7 +2,7 @@
 """Signed, non-opening admission gate for Course Mode physical firmware flashing."""
 from __future__ import annotations
 
-import argparse, contextlib, glob, hashlib, json, os, re, stat, uuid
+import argparse, contextlib, glob, hashlib, json, math, os, re, stat, uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -50,7 +50,11 @@ def _strict_pairs(pairs):
         result[key] = value
     return result
 def _load_json(raw):
-    try: return json.loads(raw.decode("utf-8"), object_pairs_hook=_strict_pairs, parse_constant=lambda x: (_ for _ in ()).throw(ValueError(x))), None
+    def finite(value):
+        parsed=float(value)
+        if not math.isfinite(parsed): raise ValueError(value)
+        return parsed
+    try: return json.loads(raw.decode("utf-8"), object_pairs_hook=_strict_pairs, parse_constant=lambda x: (_ for _ in ()).throw(ValueError(x)), parse_float=finite), None
     except DuplicateKeyError: return None, "duplicate_key"
     except (UnicodeError, ValueError, json.JSONDecodeError): return None, "invalid_json"
 def _file_identity(value):
@@ -60,12 +64,12 @@ def _secure_parent(path):
     return candidate_manifest._open_trusted_source_directory(path)
 def _parent_still_bound(path,fd,metadata,ancestry):
     return candidate_manifest._trusted_source_directory_still_named(path,fd,metadata,ancestry)
-def _output_parent_still_bound(path,fd,metadata):
+def _output_parent_still_bound(path,fd,metadata,saved_ancestry):
     other=None
     try:
-        other,observed,_=_secure_parent(path)
+        other,observed,new_ancestry=_secure_parent(path)
         fields=lambda value:(value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_gid)
-        return fields(os.fstat(fd))==fields(metadata)==fields(observed)
+        return fields(os.fstat(fd))==fields(metadata)==fields(observed) and new_ancestry==saved_ancestry
     except OSError: return False
     finally:
         if other is not None: os.close(other)
@@ -92,24 +96,27 @@ def _secure_read(path, limit):
         if file_fd is not None: os.close(file_fd)
         if parent_fd is not None: os.close(parent_fd)
 def _still_bound(descriptor):
-    _,identity,path,_,_=descriptor
-    parent_fd=None
+    _,identity,path,saved_metadata,saved_ancestry=descriptor
+    parent_fd=verification_fd=None
     try:
-        parent_fd,parent_metadata,ancestry=_secure_parent(path.parent)
+        parent_fd,_,_=_secure_parent(path.parent)
         current=os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
-        return _file_identity(current)==identity and _parent_still_bound(path.parent,parent_fd,parent_metadata,ancestry)
+        verification_fd,observed,new_ancestry=_secure_parent(path.parent)
+        authority=lambda value:(value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_gid)
+        return (_file_identity(current)==identity and authority(os.fstat(parent_fd))==authority(saved_metadata)==authority(observed) and new_ancestry==saved_ancestry)
     except OSError: return False
     finally:
+        if verification_fd is not None: os.close(verification_fd)
         if parent_fd is not None: os.close(parent_fd)
 def _output_absent(path):
     parent_fd=None
     try:
         parent_fd,metadata,ancestry=_secure_parent(path.parent)
-        if metadata.st_uid!=OPERATOR_UID or not _parent_still_bound(path.parent,parent_fd,metadata,ancestry): return False
+        if metadata.st_uid!=OPERATOR_UID or not _parent_still_bound(path.parent,parent_fd,metadata,ancestry): return None
         try: os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
-        except FileNotFoundError: return True
-        return False
-    except OSError: return False
+        except FileNotFoundError: return (path,metadata,ancestry)
+        return None
+    except OSError: return None
     finally:
         if parent_fd is not None: os.close(parent_fd)
 def _parse_utc(value):
@@ -241,13 +248,15 @@ def validate_documents(doc,identity,actual,now,devices,holders,inventory_error):
     return sorted(reasons)
 
 def _failure(reasons): print(json.dumps({"schemaVersion":1,"validator":VALIDATOR,"status":"fail","reasons":sorted(set(reasons)),"physicalActionsPerformed":False,"serialOpened":False},sort_keys=True,separators=(",",":")))
-def _publish(path,payload):
+def _publish(path,payload,output_binding,sources):
     if not path.is_absolute() or ".." in path.parts: return False
     data=(json.dumps(payload,sort_keys=True,separators=(",",":"),allow_nan=False)+"\n").encode()
     parent_fd=fd=None; created_identity=None; created_inode=None
     try:
-        parent_fd,parent_metadata,ancestry=_secure_parent(path.parent)
+        parent_fd,_,_=_secure_parent(path.parent)
+        _,parent_metadata,ancestry=output_binding
         if os.fstat(parent_fd).st_uid!=OPERATOR_UID: return False
+        if not _parent_still_bound(path.parent,parent_fd,parent_metadata,ancestry): return False
         try: os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
         except FileNotFoundError: pass
         else: return False
@@ -262,14 +271,18 @@ def _publish(path,payload):
         os.fsync(fd)
         created_identity=_file_identity(os.fstat(fd))
         current=os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
-        if _file_identity(current)!=created_identity or not _output_parent_still_bound(path.parent,parent_fd,parent_metadata): raise OSError("output changed")
+        if _file_identity(current)!=created_identity or not _output_parent_still_bound(path.parent,parent_fd,parent_metadata,ancestry): raise OSError("output changed")
         os.fsync(parent_fd)
+        current=os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
+        if (_file_identity(current)!=created_identity or not _output_parent_still_bound(path.parent,parent_fd,parent_metadata,ancestry) or not all(_still_bound(record) for record in sources)): raise OSError("final binding changed")
         return True
     except OSError:
         if parent_fd is not None and created_inode is not None:
             with contextlib.suppress(OSError):
                 current=os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
-                if (current.st_dev,current.st_ino)==created_inode: os.unlink(path.name,dir_fd=parent_fd)
+                if (current.st_dev,current.st_ino)==created_inode:
+                    os.unlink(path.name,dir_fd=parent_fd)
+                    os.fsync(parent_fd)
         return False
     finally:
         if fd is not None: os.close(fd)
@@ -278,7 +291,8 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     for flag in ("input","output","expected-identity","expected-identity-signature"): parser.add_argument("--"+flag,required=True,type=Path)
     args=parser.parse_args(argv)
-    if not args.output.is_absolute() or not _output_absent(args.output): _failure(["output.path"]); return 1
+    output_binding=_output_absent(args.output) if args.output.is_absolute() else None
+    if output_binding is None: _failure(["output.path"]); return 1
     input_record,error=_secure_read(args.input,MAX_JSON_BYTES)
     if error or input_record is None: _failure(["input.unreadable"]); return 1
     raw=input_record[0]
@@ -312,7 +326,7 @@ def main(argv=None):
     if not all(_still_bound(record) for record in (input_record,identity_record,signature_record,candidate_record)):
         _failure(["input.changed"]); return 1
     payload={"schemaVersion":1,"validator":VALIDATOR,"status":"pass","reasons":[],"candidateId":binding["candidateId"],"sessionId":doc["sessionId"],"signerFingerprint":fingerprint,"physicalActionsPerformed":False,"serialOpened":False,"inputSha256":hashlib.sha256(raw).hexdigest(),"expectedIdentitySha256":hashlib.sha256(identity_raw).hexdigest(),"candidateSha256":hashlib.sha256(candidate_raw).hexdigest(),"robotMac":ROBOT_MAC,"serialPath":SERIAL_PATH,"firmwareSha":FIRMWARE_SHA,"appSha256":APP_SHA256,"manifestSha256":MANIFEST_SHA256}
-    if not _publish(args.output,payload): _failure(["output.path"]); return 1
+    if not _publish(args.output,payload,output_binding,(input_record,identity_record,signature_record,candidate_record)): _failure(["output.path"]); return 1
     return 0
 def _entrypoint():
     try: return main()
