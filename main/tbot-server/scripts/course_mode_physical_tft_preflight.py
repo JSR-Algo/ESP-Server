@@ -110,8 +110,10 @@ DARWIN_GIT_IMPLEMENTATIONS = {
     Path("/Applications/Xcode.app/Contents/Developer/usr/bin/git"),
 }
 DARWIN_PREFLIGHT_TOOL_ROOT = Path("/usr/local/libexec/tbot-preflight")
-PINNED_APPROVAL_PUBLIC_KEY_RAW: bytes | None = None
-PINNED_APPROVAL_KEY_FINGERPRINT = "unprovisioned"
+PINNED_APPROVAL_PUBLIC_KEY_RAW: bytes | None = bytes.fromhex(
+    "a89c73f13cec31e1cf5af744268bbcb1dff43fdf8cccc55ad0fd52c98400621d"
+)
+PINNED_APPROVAL_KEY_FINGERPRINT = "66a0eba4c735cbd0af5444b59bc89cc4d180bb80e7e0176bd0097630a3746346"
 
 
 class DuplicateKeyError(ValueError):

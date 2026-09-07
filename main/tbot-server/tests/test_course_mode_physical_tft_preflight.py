@@ -707,7 +707,7 @@ def test_cli_requires_provisioned_signer_and_rejects_coherent_rewrite(tmp_path, 
         str(EXPECTED_SIGNATURES[str(session_dir)]),
     ]
     missing = subprocess.run(command, env={"PATH": str(fake_bin)}, capture_output=True, text=True)
-    assert json.loads(missing.stdout)["reasons"] == ["expected_identity.signing_prerequisite"]
+    assert json.loads(missing.stdout)["reasons"] == ["expected_identity.signature"]
 
     identity = json.loads(Path(expected_ref["path"]).read_text())
     identity["replacementId"] = "97b892e1-0f1e-42d5-bbc4-50465042e111"
@@ -1133,6 +1133,17 @@ def test_real_host_compose_binary_outside_hash_addressed_root_is_rejected(tmp_pa
         expected_executable_sha256=digest,
     )
     assert (stdout, ok, reason) == ("", False, "executable")
+
+
+def test_production_operator_public_key_is_provisioned():
+    sys.path.insert(0, str(SERVER / "scripts"))
+    import course_mode_physical_tft_preflight as preflight
+
+    raw = preflight.PINNED_APPROVAL_PUBLIC_KEY_RAW
+    assert raw is not None
+    assert len(raw) == 32
+    assert hashlib.sha256(raw).hexdigest() == preflight.PINNED_APPROVAL_KEY_FINGERPRINT
+    assert preflight.PINNED_APPROVAL_KEY_FINGERPRINT != "unprovisioned"
 
 
 def test_pinned_signer_fingerprint_is_derived_and_policy_checked(tmp_path, session_dir, monkeypatch):
