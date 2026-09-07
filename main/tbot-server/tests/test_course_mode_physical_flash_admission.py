@@ -158,6 +158,9 @@ def test_valid_signed_admission(valid_files):
     assert result["status"] == "pass" and result["reasons"] == []
     assert result["physicalActionsPerformed"] is False and result["serialOpened"] is False
     assert result["candidateId"] == input_doc["candidate"]["candidateId"] and result["sessionId"] == identity["sessionId"]
+    metadata = paths["output"].stat()
+    assert stat.S_IMODE(metadata.st_mode) == 0o444
+    assert metadata.st_nlink == 1 and metadata.st_uid == admission.OPERATOR_UID
 
 
 @pytest.mark.parametrize("mutation,reason", [
@@ -309,6 +312,29 @@ def test_publish_fsync_failure_does_not_remove_replacement(valid_files, monkeypa
     assert run_main(paths) == 1
     assert not paths["output"].exists()
     assert "secret" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("attack", ["failure", "no-effect"])
+def test_publish_chmod_failure_removes_exact_created_output(
+    valid_files, monkeypatch, capsys, attack,
+):
+    _, _, paths, _ = valid_files
+    real_fchmod = admission.os.fchmod
+
+    def hostile_fchmod(fd, mode):
+        if attack == "failure":
+            raise OSError("secret chmod failure")
+        if attack == "no-effect":
+            return None
+        return real_fchmod(fd, mode)
+
+    monkeypatch.setattr(admission.os, "fchmod", hostile_fchmod)
+
+    assert run_main(paths) == 1
+    assert not paths["output"].exists()
+    output = capsys.readouterr().out
+    assert json.loads(output)["reasons"] == ["output.path"]
+    assert "secret" not in output
 
 
 def test_wrong_operator_owner_is_rejected(valid_files, monkeypatch, capsys):

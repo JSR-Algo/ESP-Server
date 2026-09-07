@@ -8584,6 +8584,7 @@ def _install_physical_admission_fixture(candidate_file: Path) -> tuple[dict, dic
         key: str(path) for key, path in paths.items()
     }
     candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    candidate_file.chmod(0o444)
     candidate_sha = hashlib.sha256(candidate_file.read_bytes()).hexdigest()
     session_id = "cab43f0d-62dc-49c4-9d30-e9630d195a44"
     signed_candidate = {
@@ -8637,10 +8638,21 @@ def _valid_physical_admission_result(candidate: dict, paths: dict[str, Path]) ->
 
 
 def _publish_physical_admission_result(candidate: dict, paths: dict[str, Path]) -> None:
-    paths["output"].write_text(
-        json.dumps(_valid_physical_admission_result(candidate, paths)), encoding="utf-8",
+    output_binding = gate._admission._output_absent(paths["output"])
+    assert output_binding is not None
+    sources = tuple(
+        gate._admission._secure_read(path, gate._admission.MAX_JSON_BYTES)[0]
+        for path in (
+            paths["input"], paths["expectedIdentity"],
+            paths["expectedIdentitySignature"],
+            Path(json.loads(paths["input"].read_text(encoding="utf-8"))["candidate"]["path"]),
+        )
     )
-    paths["output"].chmod(0o444)
+    assert all(record is not None for record in sources)
+    assert gate._admission._publish(
+        paths["output"], _valid_physical_admission_result(candidate, paths),
+        output_binding, sources, lambda: True,
+    ) is True
 
 
 @pytest.mark.parametrize(

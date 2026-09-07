@@ -306,14 +306,18 @@ def _publish(path,payload,output_binding,sources,commit_safe):
             written=os.write(fd,view)
             if written<=0: raise OSError("short write")
             view=view[written:]
+        os.fchmod(fd,0o444)
+        finalized=os.fstat(fd)
+        if ((finalized.st_dev,finalized.st_ino)!=created_inode or not stat.S_ISREG(finalized.st_mode) or stat.S_IMODE(finalized.st_mode)!=0o444 or finalized.st_nlink!=1 or finalized.st_uid!=OPERATOR_UID or finalized.st_size!=len(data)): raise OSError("output finalize failed")
+        created_identity=_file_identity(finalized)
         os.fsync(fd)
         if not commit_safe(): raise OSError("commit time changed")
-        created_identity=_file_identity(os.fstat(fd))
+        if _file_identity(os.fstat(fd))!=created_identity: raise OSError("output changed")
         current=os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
         if _file_identity(current)!=created_identity or not _output_parent_still_bound(path.parent,parent_fd,parent_metadata,ancestry): raise OSError("output changed")
         closing_fd=fd
-        fd=None
         os.close(closing_fd)
+        fd=None
         os.fsync(parent_fd)
         if not commit_safe(): raise OSError("commit time changed")
         current=os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
