@@ -5041,6 +5041,8 @@ def _run_gate_impl(
         assert report_destination is not None
         report_parent_identity = None
         report_finalization_failed = False
+        pending_interrupt = None
+        pending_traceback = None
         try:
             report_parent = os.fstat(report_destination.parent_fd)
             report_parent_identity = (report_parent.st_dev, report_parent.st_ino)
@@ -5079,15 +5081,21 @@ def _run_gate_impl(
                             report["cleanupFailed"] = True
                     if not _write_report_atomic(report_path, report, report_destination):
                         report_finalization_failed = True
-        except Exception:
+        except BaseException as error:
             report_finalization_failed = True
+            if not isinstance(error, Exception):
+                pending_interrupt = error
+                pending_traceback = error.__traceback__
         finally:
             if report_finalization_failed:
                 _invalidate_report(report_path, report_destination)
             try:
                 _close_report_destination(report_destination)
-            except Exception:
+            except BaseException as error:
                 report_finalization_failed = True
+                if pending_interrupt is None and not isinstance(error, Exception):
+                    pending_interrupt = error
+                    pending_traceback = error.__traceback__
             if report_finalization_failed:
                 report_removed = (
                     report_parent_identity is not None
@@ -5100,11 +5108,13 @@ def _run_gate_impl(
                     report["cleanupFailed"] = True
                 else:
                     report = _blocked(candidate_id, "report")
-            if report["verdict"] != "PASS" and published_physical_result is not None:
+            if report_finalization_failed and published_physical_result is not None:
                 if _remove_bound_physical_admission_result(published_physical_result):
                     published_physical_result = None
                 else:
                     report["cleanupFailed"] = True
+        if pending_interrupt is not None:
+            raise pending_interrupt.with_traceback(pending_traceback)
     if (
         report["verdict"] != "PASS" and published_physical_result is not None
         and not _remove_bound_physical_admission_result(published_physical_result)
