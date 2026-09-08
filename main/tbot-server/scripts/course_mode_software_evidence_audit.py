@@ -97,6 +97,20 @@ def _directory_identity(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def _file_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
 def _open_bound_directory(path: Path) -> tuple[int, tuple[tuple[int, ...], ...]]:
     if not path.is_absolute() or any(part in {".", ".."} for part in path.parts[1:]):
         raise OSError("non-canonical path")
@@ -995,10 +1009,131 @@ def _mark_candidate_changed(report: dict[str, object]) -> None:
     report["status"] = "fail"
 
 
-def _invalidate_published_output(descriptor: int) -> None:
-    with contextlib.suppress(OSError):
+def _write_all(descriptor: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("short output write")
+        view = view[written:]
+
+
+def _invalidate_published_output(descriptor: int) -> bool:
+    try:
         os.ftruncate(descriptor, 0)
         os.fsync(descriptor)
+        return True
+    except OSError:
+        try:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            _write_all(descriptor, b"\x00")
+            os.fsync(descriptor)
+            return True
+        except OSError:
+            return False
+
+
+class _OutputBinding:
+    def __init__(
+        self,
+        path: Path,
+        parent_descriptor: int,
+        parent_snapshot: tuple[tuple[int, ...], ...],
+        output_descriptor: int | None,
+        output_identity: tuple[int, ...] | None,
+    ) -> None:
+        self.path = path
+        self.parent_descriptor = parent_descriptor
+        self.parent_snapshot = parent_snapshot
+        self.output_descriptor = output_descriptor
+        self.output_identity = output_identity
+
+    def close(self) -> None:
+        if self.output_descriptor is not None:
+            os.close(self.output_descriptor)
+            self.output_descriptor = None
+        os.close(self.parent_descriptor)
+
+    def publish_failure(self, report: dict[str, object]) -> bool:
+        if self.output_descriptor is None or self.output_identity is None:
+            return False
+        writable: int | None = None
+        original_mode = self.output_identity[2]
+        try:
+            if _directory_identity(os.fstat(self.parent_descriptor)) != self.parent_snapshot[-1]:
+                return False
+            bound = os.fstat(self.output_descriptor)
+            if (
+                _file_identity(bound)[:2] != self.output_identity[:2]
+                or not stat.S_ISREG(bound.st_mode)
+                or bound.st_nlink != 1
+                or bound.st_uid != os.geteuid()
+                or bound.st_mode & 0o022
+            ):
+                return False
+            os.fchmod(self.output_descriptor, 0o600)
+            writable = os.open(
+                self.path.name,
+                os.O_WRONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=self.parent_descriptor,
+            )
+            if _file_identity(os.fstat(writable))[:2] != self.output_identity[:2]:
+                return False
+            os.lseek(writable, 0, os.SEEK_SET)
+            _write_all(writable, b"\x00")
+            os.fsync(writable)
+            payload = (json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+            os.ftruncate(writable, 0)
+            os.lseek(writable, 0, os.SEEK_SET)
+            _write_all(writable, payload)
+            os.ftruncate(writable, len(payload))
+            os.fchmod(writable, 0o444)
+            os.fsync(writable)
+            os.fsync(self.parent_descriptor)
+            current = os.stat(self.path.name, dir_fd=self.parent_descriptor, follow_symlinks=False)
+            return _file_identity(current)[:2] == self.output_identity[:2]
+        except OSError:
+            if writable is not None:
+                _invalidate_published_output(writable)
+            return False
+        finally:
+            with contextlib.suppress(OSError):
+                os.fchmod(self.output_descriptor, original_mode & 0o7777)
+            if writable is not None:
+                os.close(writable)
+
+
+def _capture_output_binding(path: Path) -> _OutputBinding | None:
+    parent_descriptor: int | None = None
+    output_descriptor: int | None = None
+    try:
+        parent_descriptor, parent_snapshot = _open_bound_directory(path.parent)
+        try:
+            named = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return _OutputBinding(path, parent_descriptor, parent_snapshot, None, None)
+        identity = _file_identity(named)
+        if (
+            not stat.S_ISREG(named.st_mode)
+            or named.st_nlink != 1
+            or named.st_uid != os.geteuid()
+            or named.st_mode & 0o022
+        ):
+            raise OSError("insecure output metadata")
+        output_descriptor = os.open(
+            path.name,
+            os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_descriptor,
+        )
+        if _file_identity(os.fstat(output_descriptor)) != identity:
+            raise OSError("output changed while binding")
+        return _OutputBinding(path, parent_descriptor, parent_snapshot, output_descriptor, identity)
+    except OSError:
+        if output_descriptor is not None:
+            os.close(output_descriptor)
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
+        return None
 
 
 def _write_output(
@@ -1037,12 +1172,7 @@ def _write_output(
         if descriptor is None or temporary_name is None:
             return False
         data = payload.encode("utf-8")
-        view = memoryview(data)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError("short output write")
-            view = view[written:]
+        _write_all(descriptor, data)
         os.fchmod(descriptor, 0o444)
         os.fsync(descriptor)
         temporary_identity = os.fstat(descriptor)
@@ -1065,14 +1195,14 @@ def _write_output(
         temporary_name = None
         publication_complete = True
         os.fsync(parent_descriptor)
-        published_metadata = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
-        if (published_metadata.st_dev, published_metadata.st_ino) != published_identity:
-            _invalidate_published_output(descriptor)
-            return False
         if (
             not _directory_still_bound(path.parent, parent_descriptor, expected_parent)
             or (commit_safe is not None and not commit_safe())
         ):
+            _invalidate_published_output(descriptor)
+            return False
+        published_metadata = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if (published_metadata.st_dev, published_metadata.st_ino) != published_identity:
             _invalidate_published_output(descriptor)
             return False
         return True
@@ -1106,43 +1236,59 @@ def main(argv: list[str] | None = None) -> int:
     output = _absolute(args.output)
     candidate_path = _absolute(args.candidate)
     preserved_roots = [_absolute(path) for path in args.preserved_root]
-    report = audit(candidate_path, evidence_root, preserved_roots, output)
-    if isinstance(report, _AuditReport) and not report.candidate_still_bound():
-        _mark_candidate_changed(report)
-    if output != evidence_root / OUTPUT_NAME:
-        report["findings"] = sorted(set(report["findings"]) | {"output.unsafe"})
-        report["status"] = "fail"
+    output_binding = _capture_output_binding(output)
     try:
-        output.relative_to(evidence_root)
-    except ValueError:
-        report["findings"] = sorted(set(report["findings"]) | {"output.unsafe"})
-        report["status"] = "fail"
-    else:
-        output_parent_bound = (
-            not isinstance(report, _AuditReport) or report.output_parent_snapshot is not None
-        )
-        if (
-            (not report["findings"] or "output.unsafe" not in report["findings"])
-            and "output.collision" not in report["findings"]
-            and (
-                not output_parent_bound
-                or not _write_output(
-                    output,
-                    report,
-                    report.candidate_still_bound
-                    if isinstance(report, _AuditReport) and report["status"] == "pass"
-                    else None,
-                    report.output_parent_snapshot if isinstance(report, _AuditReport) else None,
-                )
+        report = audit(candidate_path, evidence_root, preserved_roots, output)
+        if isinstance(report, _AuditReport) and not report.candidate_still_bound():
+            _mark_candidate_changed(report)
+        if output != evidence_root / OUTPUT_NAME:
+            report["findings"] = sorted(set(report["findings"]) | {"output.unsafe"})
+            report["status"] = "fail"
+        output_within_evidence = True
+        try:
+            output.relative_to(evidence_root)
+        except ValueError:
+            output_within_evidence = False
+            report["findings"] = sorted(set(report["findings"]) | {"output.unsafe"})
+            report["status"] = "fail"
+        else:
+            output_parent_bound = (
+                not isinstance(report, _AuditReport) or report.output_parent_snapshot is not None
             )
-        ):
-            if isinstance(report, _AuditReport) and not report.candidate_still_bound():
-                _mark_candidate_changed(report)
-            else:
-                report["findings"] = sorted(set(report["findings"]) | {"output.write"})
-                report["status"] = "fail"
-    print(json.dumps(report, sort_keys=True, separators=(",", ":")))
-    return 0 if report["status"] == "pass" else 1
+            output_written = False
+            if (
+                (not report["findings"] or "output.unsafe" not in report["findings"])
+                and "output.collision" not in report["findings"]
+            ):
+                if output_parent_bound:
+                    output_written = _write_output(
+                        output,
+                        report,
+                        report.candidate_still_bound
+                        if isinstance(report, _AuditReport) and report["status"] == "pass"
+                        else None,
+                        report.output_parent_snapshot if isinstance(report, _AuditReport) else None,
+                    )
+                if not output_written:
+                    if isinstance(report, _AuditReport) and not report.candidate_still_bound():
+                        _mark_candidate_changed(report)
+                    else:
+                        report["findings"] = sorted(set(report["findings"]) | {"output.write"})
+                        report["status"] = "fail"
+            if (
+                report["status"] == "fail"
+                and not output_written
+                and output == evidence_root / OUTPUT_NAME
+                and output_within_evidence
+                and "output.collision" not in report["findings"]
+                and output_binding is not None
+            ):
+                output_binding.publish_failure(report)
+        print(json.dumps(report, sort_keys=True, separators=(",", ":")))
+        return 0 if report["status"] == "pass" else 1
+    finally:
+        if output_binding is not None:
+            output_binding.close()
 
 
 if __name__ == "__main__":

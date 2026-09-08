@@ -619,6 +619,264 @@ def test_pass_report_rejects_missing_output_parent_snapshot(
     assert not output.exists()
 
 
+@pytest.mark.parametrize("safe_calls", [1, 2])
+def test_candidate_binding_failure_replaces_existing_pass_with_fail_report(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    safe_calls: int,
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    _write_json(output, {"status": "pass"})
+    calls = 0
+
+    def candidate_still_bound(_report) -> bool:
+        nonlocal calls
+        calls += 1
+        return calls <= safe_calls
+
+    monkeypatch.setattr(auditor._AuditReport, "candidate_still_bound", candidate_still_bound)
+
+    result = auditor.main(
+        [
+            "--candidate",
+            str(candidate),
+            "--evidence-root",
+            str(evidence),
+            "--output",
+            str(output),
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert report["status"] == "fail"
+    assert "candidate.metadata_or_json" in report["findings"]
+    assert json.loads(output.read_text(encoding="utf-8"))["status"] == "fail"
+
+
+def test_temp_fsync_failure_replaces_existing_pass_with_fail_report(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    _write_json(output, {"status": "pass"})
+    fsync = auditor.os.fsync
+    failed = False
+
+    def fail_first_regular_fsync(descriptor: int) -> None:
+        nonlocal failed
+        if stat.S_ISREG(auditor.os.fstat(descriptor).st_mode) and not failed:
+            failed = True
+            raise OSError("temporary fsync failure")
+        fsync(descriptor)
+
+    monkeypatch.setattr(auditor.os, "fsync", fail_first_regular_fsync)
+
+    result = auditor.main(
+        [
+            "--candidate",
+            str(candidate),
+            "--evidence-root",
+            str(evidence),
+            "--output",
+            str(output),
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert failed is True
+    assert report["status"] == "fail"
+    assert "output.write" in report["findings"]
+    assert json.loads(output.read_text(encoding="utf-8"))["status"] == "fail"
+
+
+def test_temp_write_failure_replaces_existing_pass_with_fail_report(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    _write_json(output, {"status": "pass"})
+    write = auditor.os.write
+    failed = False
+
+    def fail_first_write(descriptor: int, data) -> int:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("temporary write failure")
+        return write(descriptor, data)
+
+    monkeypatch.setattr(auditor.os, "write", fail_first_write)
+
+    result = auditor.main(
+        [
+            "--candidate",
+            str(candidate),
+            "--evidence-root",
+            str(evidence),
+            "--output",
+            str(output),
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert failed is True
+    assert report["status"] == "fail"
+    assert "output.write" in report["findings"]
+    assert json.loads(output.read_text(encoding="utf-8"))["status"] == "fail"
+
+
+def test_output_parent_redirection_invalidates_existing_bound_pass(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    _write_json(output, {"status": "pass"})
+    evidence_real = evidence.with_name("evidence-real")
+    foreign = evidence.with_name("foreign")
+    foreign.mkdir()
+    audit = auditor.audit
+
+    def redirect_output_parent(*args, **kwargs):
+        report = audit(*args, **kwargs)
+        evidence.rename(evidence_real)
+        evidence.symlink_to(foreign, target_is_directory=True)
+        return report
+
+    monkeypatch.setattr(auditor, "audit", redirect_output_parent)
+
+    result = auditor.main(
+        [
+            "--candidate",
+            str(candidate),
+            "--evidence-root",
+            str(evidence),
+            "--output",
+            str(output),
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+    bound_output = evidence_real / output.name
+
+    assert result == 1
+    assert report["status"] == "fail"
+    assert "output.write" in report["findings"]
+    assert json.loads(bound_output.read_text(encoding="utf-8"))["status"] == "fail"
+    assert not (foreign / output.name).exists()
+
+
+def test_failure_report_publication_preserves_output_replacement(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    _write_json(output, {"status": "pass"})
+    replacement = b"unrelated-output"
+    publish_failure = auditor._OutputBinding.publish_failure
+    calls = 0
+
+    def candidate_still_bound(_report) -> bool:
+        nonlocal calls
+        calls += 1
+        return calls == 1
+
+    def replace_before_failure_publication(self, report) -> bool:
+        output.unlink()
+        output.write_bytes(replacement)
+        output.chmod(0o444)
+        return publish_failure(self, report)
+
+    monkeypatch.setattr(auditor._AuditReport, "candidate_still_bound", candidate_still_bound)
+    monkeypatch.setattr(auditor._OutputBinding, "publish_failure", replace_before_failure_publication)
+
+    result = auditor.main(
+        [
+            "--candidate",
+            str(candidate),
+            "--evidence-root",
+            str(evidence),
+            "--output",
+            str(output),
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert report["status"] == "fail"
+    assert output.read_bytes() == replacement
+
+
+def test_skipped_unsafe_output_invalidates_captured_existing_pass(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    _write_json(output, {"status": "pass"})
+    monkeypatch.setattr(auditor, "_output_path_secure", lambda _path: False)
+
+    result = auditor.main(
+        [
+            "--candidate",
+            str(candidate),
+            "--evidence-root",
+            str(evidence),
+            "--output",
+            str(output),
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert report["status"] == "fail"
+    assert "output.unsafe" in report["findings"]
+    assert json.loads(output.read_text(encoding="utf-8"))["status"] == "fail"
+
+
+def test_same_inode_output_metadata_drift_does_not_preserve_stale_pass(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    _write_json(output, {"status": "pass"})
+    calls = 0
+
+    def drift_then_fail(_report) -> bool:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            output.chmod(0o644)
+            return False
+        return calls == 1
+
+    monkeypatch.setattr(auditor._AuditReport, "candidate_still_bound", drift_then_fail)
+
+    result = auditor.main(
+        [
+            "--candidate",
+            str(candidate),
+            "--evidence-root",
+            str(evidence),
+            "--output",
+            str(output),
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert report["status"] == "fail"
+    assert json.loads(output.read_text(encoding="utf-8"))["status"] == "fail"
+    assert output.stat().st_mode & 0o777 == 0o444
+
+
 def test_late_output_binding_failure_does_not_unlink_replacement(
     evidence_fixture: tuple[Path, Path, Path]
 ) -> None:
@@ -683,6 +941,54 @@ def test_output_replaced_during_publication_is_rejected_without_unlinking_replac
 
     assert auditor._write_output(output, {"status": "pass"}) is False
     assert output.read_bytes() == replacement
+
+
+def test_final_parent_check_output_swap_is_rejected_without_touching_replacement(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, output = evidence_fixture
+    replacement = b"unrelated-output"
+    directory_still_bound = auditor._directory_still_bound
+    checks = 0
+
+    def swap_during_final_parent_check(*args, **kwargs) -> bool:
+        nonlocal checks
+        checks += 1
+        result = directory_still_bound(*args, **kwargs)
+        if checks == 3:
+            output.unlink()
+            output.write_bytes(replacement)
+            output.chmod(0o444)
+        return result
+
+    monkeypatch.setattr(auditor, "_directory_still_bound", swap_during_final_parent_check)
+
+    assert auditor._write_output(output, {"status": "pass"}) is False
+    assert checks == 3
+    assert output.read_bytes() == replacement
+
+
+def test_ftruncate_failure_still_invalidates_published_pass(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, output = evidence_fixture
+    calls = 0
+
+    def fail_after_publish() -> bool:
+        nonlocal calls
+        calls += 1
+        return calls < 3
+
+    monkeypatch.setattr(
+        auditor.os,
+        "ftruncate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("truncate failure")),
+    )
+
+    assert auditor._write_output(output, {"status": "pass"}, fail_after_publish) is False
+    assert calls == 3
+    with pytest.raises((json.JSONDecodeError, UnicodeDecodeError)):
+        json.loads(output.read_text(encoding="utf-8"))
 
 
 def test_parent_fsync_failure_after_publication_invalidates_published_output(
