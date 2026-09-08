@@ -9262,6 +9262,62 @@ def test_physical_preflight_blocks_source_replacement_after_result_validation(
     assert result["failedLane"] == "physical-flash-admission"
 
 
+def test_physical_admission_command_executes_bound_bytes_after_path_restore_attack(
+    tmp_path: Path,
+) -> None:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    output = tmp_path / "result.txt"
+    sources = (
+        (
+            b"import sys\nimport course_mode_candidate_manifest as manifest\n"
+            b"from course_mode_physical_tft_preflight import TOKEN\n"
+            b"from pathlib import Path\nPath(sys.argv[1]).write_text(manifest.TOKEN + TOKEN)\n",
+            scripts / "course_mode_physical_flash_admission.py",
+        ),
+        (b"TOKEN = 'verified-'\n", scripts / "course_mode_candidate_manifest.py"),
+        (b"TOKEN = 'source'\n", scripts / "course_mode_physical_tft_preflight.py"),
+    )
+    records = []
+    for raw, path in sources:
+        path.write_bytes(raw)
+        records.append((raw, (), path, None, ()))
+    binding = gate.PhysicalAdmissionSourceBinding(tuple(records))
+    command = (
+        sys.executable, "-I", "-s", "-c", gate.PHYSICAL_ADMISSION_BOOTSTRAP,
+        "scripts/course_mode_physical_flash_admission.py", str(output),
+    )
+
+    bound, environment = gate._physical_admission_bound_execution(command, binding)
+    for _raw, path in sources:
+        path.write_text("raise SystemExit('forged')\n", encoding="utf-8")
+    completed = subprocess.run(
+        bound, cwd=tmp_path, env={**os.environ, **environment},
+        check=False, capture_output=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert output.read_text(encoding="utf-8") == "verified-source"
+
+
+def test_physical_admission_command_rejects_oversized_source_environment() -> None:
+    records = tuple(
+        (
+            b"x" * (512 * 1024),
+            (), Path(relative), None, (),
+        )
+        for relative in gate.PHYSICAL_ADMISSION_SOURCE_PATHS
+    )
+    command = (
+        sys.executable, "-I", "-s", "-c", gate.PHYSICAL_ADMISSION_BOOTSTRAP,
+        "scripts/course_mode_physical_flash_admission.py",
+    )
+
+    assert gate._physical_admission_bound_execution(
+        command, gate.PhysicalAdmissionSourceBinding(records),
+    ) is None
+
+
 def test_physical_preflight_rejects_malformed_json_and_signature_prerequisites(
     candidate_file: Path, tmp_path: Path,
 ) -> None:

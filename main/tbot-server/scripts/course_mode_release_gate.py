@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import errno
 import fcntl
@@ -324,6 +325,7 @@ OPERATOR_ATTESTATION_KEYS = {
     "untrustedAutomationStoppedConfirmed",
 }
 MAX_OPERATOR_ATTESTATION_BYTES = 64 * 1024
+MAX_PHYSICAL_ADMISSION_SOURCE_ENV_BYTES = 512 * 1024
 COURSE_MODE_SOFTWARE_TESTS = "@course-mode-software-tests"
 PLAYWRIGHT_CONTRACT_PATH = "main/manager-web/course-mode.playwright.contract.json"
 PLAYWRIGHT_SOURCE_PATHS = (
@@ -2259,8 +2261,18 @@ PHYSICAL_PREFLIGHT_LANE = _lane(
 )
 
 PHYSICAL_ADMISSION_BOOTSTRAP = (
-    "import runpy,sys;sys.path.insert(0,'scripts');"
-    "sys.argv=sys.argv[1:];runpy.run_path(sys.argv[0],run_name='__main__')"
+    "import base64,os,sys,types;"
+    "m=types.ModuleType('course_mode_candidate_manifest');"
+    "m.__file__=sys.argv[1];sys.modules[m.__name__]=m;"
+    "exec(compile(base64.b64decode(os.environ.pop('TBOT_ADMISSION_MANIFEST_B64')),"
+    "m.__file__,'exec'),m.__dict__);"
+    "t=types.ModuleType('course_mode_physical_tft_preflight');"
+    "t.__file__=sys.argv[2];sys.modules[t.__name__]=t;"
+    "exec(compile(base64.b64decode(os.environ.pop('TBOT_ADMISSION_PREFLIGHT_B64')),"
+    "t.__file__,'exec'),t.__dict__);"
+    "sys.argv=sys.argv[3:];p=sys.argv[0];"
+    "exec(compile(base64.b64decode(os.environ.pop('TBOT_ADMISSION_MAIN_B64')),"
+    "p,'exec'),{'__name__':'__main__','__file__':p,'__builtins__':__builtins__})"
 )
 
 PHYSICAL_ADMISSION_SOURCE_PATHS = (
@@ -3450,6 +3462,37 @@ def _physical_admission_sources_still_bound(
     )
 
 
+def _physical_admission_bound_execution(
+    command: tuple[str, ...], binding: PhysicalAdmissionSourceBinding,
+) -> tuple[tuple[str, ...], dict[str, str]] | None:
+    try:
+        records = binding.records
+        if (
+            len(records) != 3 or len(command) < 6
+            or command[1:5] != ("-I", "-s", "-c", PHYSICAL_ADMISSION_BOOTSTRAP)
+            or Path(command[5]).name != Path(records[0][2]).name
+            or tuple(Path(record[2]).name for record in records)
+            != tuple(Path(path).name for path in PHYSICAL_ADMISSION_SOURCE_PATHS)
+        ):
+            return None
+        environment = {
+            "TBOT_ADMISSION_MAIN_B64": base64.b64encode(records[0][0]).decode("ascii"),
+            "TBOT_ADMISSION_MANIFEST_B64": base64.b64encode(records[1][0]).decode("ascii"),
+            "TBOT_ADMISSION_PREFLIGHT_B64": base64.b64encode(records[2][0]).decode("ascii"),
+        }
+        if sum(len(key) + len(value) + 2 for key, value in environment.items()) > (
+            MAX_PHYSICAL_ADMISSION_SOURCE_ENV_BYTES
+        ):
+            return None
+        bound_command = (
+            *command[:5], str(records[1][2]), str(records[2][2]),
+            command[5], *command[6:],
+        )
+        return bound_command, environment
+    except (IndexError, TypeError, UnicodeDecodeError, ValueError):
+        return None
+
+
 def _physical_admission_result_valid(
     candidate: dict, binding: PhysicalAdmissionBinding, *, started_at: float,
 ) -> bool:
@@ -4632,6 +4675,17 @@ def _run_gate_impl(
                     _physical_admission_source_binding(execution_candidate, candidate)
                     if lane.name == "physical-flash-admission" else None
                 )
+                physical_bound_execution = (
+                    _physical_admission_bound_execution(command, physical_source_binding)
+                    if command is not None and physical_source_binding is not None
+                    and lane.name == "physical-flash-admission" else None
+                )
+                if lane.name == "physical-flash-admission" and physical_bound_execution is None:
+                    command = None
+                elif physical_bound_execution is not None:
+                    command, physical_source_environment = physical_bound_execution
+                else:
+                    physical_source_environment = {}
                 if command is None:
                     report["lanes"].append({"name": lane.name, "exitCode": None, "durationMs": 0})
                     report["verdict"] = "BLOCKED"
@@ -4688,6 +4742,7 @@ def _run_gate_impl(
                 try:
                     child_environment = lane_environment
                     child_environment.update(lane_execution.environment)
+                    child_environment.update(physical_source_environment)
                     bounded_result: _manifest.BoundedCommandResult | None = None
                     container_authority = (
                         not _container_tools_required(lane)
