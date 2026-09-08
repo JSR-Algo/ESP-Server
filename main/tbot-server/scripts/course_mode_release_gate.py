@@ -532,6 +532,11 @@ class PhysicalPythonRuntimeBinding:
     tree_digest: str
 
 
+@dataclass(frozen=True)
+class PhysicalAdmissionSourceBinding:
+    records: tuple[tuple, ...]
+
+
 @dataclass
 class ReportDestination:
     parent_fd: int
@@ -582,51 +587,58 @@ class ExecutionStage:
         with contextlib.suppress(Exception):
             self.cleanup()
 
-    def create_lane_execution(self) -> LaneExecution:
+    def create_lane_execution(self, *, use_read_only_candidate: bool = False) -> LaneExecution:
         lane_root = Path(tempfile.mkdtemp(prefix="course-mode-lane-", dir=self.root.parent))
         lane_identity: tuple[int, int] | None = None
         lane_descriptor: int | None = None
         try:
             lane_identity = _owned_tree_identity(lane_root)
             lane_descriptor = _open_snapshot_directory(lane_root)
-            execution_root = lane_root / "candidate"
             python_runtime = self.root / "tools/python-test-runtime"
-            stable_tool_paths = tuple(
-                path for path in (
-                    python_runtime,
-                    self.root / "tools/docker",
-                    self.root / "tools/docker-compose",
-                    self.root / "tools/playwright-browsers",
-                ) if path.exists()
-            )
+            if use_read_only_candidate:
+                rebased_candidate = self.candidate
+            else:
+                execution_root = lane_root / "candidate"
+                stable_tool_paths = tuple(
+                    path for path in (
+                        python_runtime,
+                        self.root / "tools/docker",
+                        self.root / "tools/docker-compose",
+                        self.root / "tools/playwright-browsers",
+                    ) if path.exists()
+                )
 
-            def ignore_stable_tools(directory: str, _names: list[str]) -> set[str]:
-                if Path(directory) != self.root / "tools":
-                    return set()
-                return {path.name for path in stable_tool_paths}
+                def ignore_stable_tools(directory: str, _names: list[str]) -> set[str]:
+                    if Path(directory) != self.root / "tools":
+                        return set()
+                    return {path.name for path in stable_tool_paths}
 
-            shutil.copytree(
-                self.root, execution_root, symlinks=True,
-                ignore=ignore_stable_tools if stable_tool_paths else None,
-            )
-            _make_tree_owner_writable(execution_root)
-            source_prefix = str(self.root) + os.sep
-            target_prefix = str(execution_root) + os.sep
-            stable_prefixes = tuple((str(path), str(path) + os.sep) for path in stable_tool_paths)
+                shutil.copytree(
+                    self.root, execution_root, symlinks=True,
+                    ignore=ignore_stable_tools if stable_tool_paths else None,
+                )
+                _make_tree_owner_writable(execution_root)
+                source_prefix = str(self.root) + os.sep
+                target_prefix = str(execution_root) + os.sep
+                stable_prefixes = tuple(
+                    (str(path), str(path) + os.sep) for path in stable_tool_paths
+                )
 
-            def rebase(value: object) -> object:
-                if isinstance(value, dict):
-                    return {key: rebase(item) for key, item in value.items()}
-                if isinstance(value, list):
-                    return [rebase(item) for item in value]
-                if isinstance(value, str) and any(
-                    value == stable or value.startswith(prefix)
-                    for stable, prefix in stable_prefixes
-                ):
+                def rebase(value: object) -> object:
+                    if isinstance(value, dict):
+                        return {key: rebase(item) for key, item in value.items()}
+                    if isinstance(value, list):
+                        return [rebase(item) for item in value]
+                    if isinstance(value, str) and any(
+                        value == stable or value.startswith(prefix)
+                        for stable, prefix in stable_prefixes
+                    ):
+                        return value
+                    if isinstance(value, str) and value.startswith(source_prefix):
+                        return target_prefix + value[len(source_prefix):]
                     return value
-                if isinstance(value, str) and value.startswith(source_prefix):
-                    return target_prefix + value[len(source_prefix):]
-                return value
+
+                rebased_candidate = rebase(self.candidate)
 
             runtime = lane_root / "runtime"
             environment = {}
@@ -638,7 +650,6 @@ class ExecutionStage:
                 "XDG_CACHE_HOME": str(runtime / "cache"),
                 "COURSE_MODE_LANE_REPORT_ROOT": str(runtime / "reports"),
             })
-            rebased_candidate = rebase(self.candidate)
             if python_runtime.is_dir():
                 descriptor = rebased_candidate["tools"]["pythonTestRuntime"]
                 if not _manifest.python_test_runtime_authorized(descriptor):
@@ -2252,6 +2263,12 @@ PHYSICAL_ADMISSION_BOOTSTRAP = (
     "sys.argv=sys.argv[1:];runpy.run_path(sys.argv[0],run_name='__main__')"
 )
 
+PHYSICAL_ADMISSION_SOURCE_PATHS = (
+    "main/tbot-server/scripts/course_mode_physical_flash_admission.py",
+    "main/tbot-server/scripts/course_mode_candidate_manifest.py",
+    "main/tbot-server/scripts/course_mode_physical_tft_preflight.py",
+)
+
 
 def lanes_for_mode(mode: str) -> tuple[Lane, ...]:
     if mode == "quick":
@@ -3400,6 +3417,39 @@ def _physical_python_runtime_binding(
         return None
 
 
+def _physical_admission_source_binding(
+    execution_candidate: dict, source_candidate: dict,
+) -> PhysicalAdmissionSourceBinding | None:
+    try:
+        execution_root = Path(execution_candidate["repositories"]["adminEsp"]["path"])
+        source_repository = source_candidate["repositories"]["adminEsp"]
+        source_root = Path(source_repository["path"])
+        sha = source_repository["sha"]
+        records = []
+        for relative in PHYSICAL_ADMISSION_SOURCE_PATHS:
+            committed = _committed_text(source_root, sha, relative)
+            if committed is None:
+                return None
+            record, error = _admission._secure_read(
+                execution_root / relative, _admission.MAX_JSON_BYTES,
+            )
+            if error or record is None or record[0] != committed.encode("utf-8"):
+                return None
+            records.append(record)
+        binding = PhysicalAdmissionSourceBinding(tuple(records))
+        return binding if _physical_admission_sources_still_bound(binding) else None
+    except (KeyError, OSError, RuntimeError, TypeError, UnicodeEncodeError, ValueError):
+        return None
+
+
+def _physical_admission_sources_still_bound(
+    binding: PhysicalAdmissionSourceBinding | None,
+) -> bool:
+    return binding is not None and all(
+        _admission._still_bound(record) for record in binding.records
+    )
+
+
 def _physical_admission_result_valid(
     candidate: dict, binding: PhysicalAdmissionBinding, *, started_at: float,
 ) -> bool:
@@ -4529,7 +4579,11 @@ def _run_gate_impl(
                     rollback_restore_binding = _assignment_rollback_restore_binding(
                         lane, candidate, execution_stage.candidate,
                     )
-                    lane_execution = execution_stage.create_lane_execution()
+                    lane_execution = (
+                        execution_stage.create_lane_execution(use_read_only_candidate=True)
+                        if lane.name == "physical-flash-admission"
+                        else execution_stage.create_lane_execution()
+                    )
                     execution_candidate = lane_execution.candidate
                 except RetainedStagingError as error:
                     retained_paths = set(error.paths)
@@ -4572,6 +4626,10 @@ def _run_gate_impl(
                     _physical_python_runtime_binding(
                         execution_candidate, verify_authority=False,
                     )
+                    if lane.name == "physical-flash-admission" else None
+                )
+                physical_source_binding = (
+                    _physical_admission_source_binding(execution_candidate, candidate)
                     if lane.name == "physical-flash-admission" else None
                 )
                 if command is None:
@@ -4671,6 +4729,9 @@ def _run_gate_impl(
                             or _physical_python_runtime_binding(
                                 execution_candidate, verify_authority=False,
                             ) != physical_runtime_binding
+                            or not _physical_admission_sources_still_bound(
+                                physical_source_binding,
+                            )
                         ):
                             result = _manifest.BoundedCommandResult(None, "", "authority")
                         else:
@@ -4736,15 +4797,30 @@ def _run_gate_impl(
                     lane, result.stdout,
                 )
                 lane_failed = result.error or result.returncode != 0 or rollback_restore_failed
+                physical_post_run_sources_valid = (
+                    _physical_admission_sources_still_bound(physical_source_binding)
+                    if lane.name == "physical-flash-admission" else True
+                )
+                physical_result_valid = (
+                    physical_post_run_sources_valid
+                    and _physical_admission_result_valid(
+                        candidate, physical_admission_binding,
+                        started_at=started_at,
+                    )
+                    if lane.name == "physical-flash-admission" else True
+                )
+                physical_final_sources_valid = (
+                    _physical_admission_sources_still_bound(physical_source_binding)
+                    if lane.name == "physical-flash-admission" else True
+                )
                 if lane.name == "physical-flash-admission" and (
                     physical_runtime_binding is None
                     or _physical_python_runtime_binding(
                         execution_candidate, verify_authority=False,
                     ) != physical_runtime_binding
-                    or not _physical_admission_result_valid(
-                        candidate, physical_admission_binding,
-                        started_at=started_at,
-                    )
+                    or not physical_post_run_sources_valid
+                    or not physical_result_valid
+                    or not physical_final_sources_valid
                 ):
                     lane_failed = True
                     result = _manifest.BoundedCommandResult(None, result.stdout, "authority")

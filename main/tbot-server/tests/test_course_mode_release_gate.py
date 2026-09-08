@@ -558,11 +558,15 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         if name == "adminEsp":
             python_gate = root / "main/tbot-server/scripts/course_mode_release_gate.py"
             manifest_helper = root / "main/tbot-server/scripts/course_mode_candidate_manifest.py"
+            admission_gate = root / "main/tbot-server/scripts/course_mode_physical_flash_admission.py"
+            receipt_helper = root / "main/tbot-server/scripts/course_mode_physical_tft_preflight.py"
             shell_gate = root / "scripts/course_robot_e2e_gates.sh"
             python_gate.parent.mkdir(parents=True)
             shell_gate.parent.mkdir(parents=True)
             python_gate.write_text("# candidate gate\n", encoding="utf-8")
             manifest_helper.write_text("# candidate helper\n", encoding="utf-8")
+            admission_gate.write_text("# candidate admission gate\n", encoding="utf-8")
+            receipt_helper.write_text("# candidate receipt helper\n", encoding="utf-8")
             shell_gate.write_text("#!/bin/sh\n", encoding="utf-8")
         _git(root, "add", ".")
         _git(root, "commit", "-m", "fixture")
@@ -9110,6 +9114,144 @@ def test_physical_preflight_blocks_python_runtime_replacement_after_lane(
         return gate._manifest.BoundedCommandResult(0, "", None)
 
     monkeypatch.setattr(gate, "run_bounded_command", replace_runtime)
+
+    result = gate.run_gate(
+        candidate_file, "physical-preflight",
+        runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "physical-flash-admission"
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "scripts/course_mode_physical_flash_admission.py",
+        "scripts/course_mode_candidate_manifest.py",
+        "scripts/course_mode_physical_tft_preflight.py",
+    ],
+)
+def test_physical_preflight_blocks_source_replacement_before_lane(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, relative: str,
+) -> None:
+    candidate, _paths = _install_physical_admission_fixture(candidate_file)
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(gate, "validate_candidate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(gate, "_runtime_matches_candidate", lambda *_args, **_kwargs: True)
+    original_stage = gate.stage_execution_candidate
+
+    def replace_source_after_staging(*args, **kwargs):
+        stage = original_stage(*args, **kwargs)
+        source = Path(stage.candidate["repositories"]["adminEsp"]["path"]) / "main/tbot-server" / relative
+        source.parent.chmod(0o755)
+        source.chmod(0o644)
+        replacement = source.with_name("replacement-source.py")
+        replacement.write_text("raise SystemExit('forged')\n", encoding="utf-8")
+        replacement.chmod(0o444)
+        replacement.replace(source)
+        source.parent.chmod(0o555)
+        return stage
+
+    monkeypatch.setattr(gate, "stage_execution_candidate", replace_source_after_staging)
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *_args, **_kwargs: pytest.fail("replaced admission source must not run"),
+    )
+
+    result = gate.run_gate(
+        candidate_file, "physical-preflight",
+        runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "physical-flash-admission"
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "scripts/course_mode_physical_flash_admission.py",
+        "scripts/course_mode_candidate_manifest.py",
+        "scripts/course_mode_physical_tft_preflight.py",
+    ],
+)
+def test_physical_preflight_blocks_source_replacement_during_lane(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, relative: str,
+) -> None:
+    candidate, paths = _install_physical_admission_fixture(candidate_file)
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(gate, "validate_candidate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(gate, "_runtime_matches_candidate", lambda *_args, **_kwargs: True)
+
+    def replace_source(_command, *, cwd, **_kwargs):
+        _publish_physical_admission_result(candidate, paths)
+        source = Path(cwd) / relative
+        source.parent.chmod(0o755)
+        source.chmod(0o644)
+        replacement = source.with_name("replacement-source.py")
+        replacement.write_text("raise SystemExit('forged')\n", encoding="utf-8")
+        replacement.chmod(0o444)
+        replacement.replace(source)
+        source.parent.chmod(0o555)
+        return gate._manifest.BoundedCommandResult(0, "", None)
+
+    monkeypatch.setattr(gate, "run_bounded_command", replace_source)
+
+    result = gate.run_gate(
+        candidate_file, "physical-preflight",
+        runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "physical-flash-admission"
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "scripts/course_mode_physical_flash_admission.py",
+        "scripts/course_mode_candidate_manifest.py",
+        "scripts/course_mode_physical_tft_preflight.py",
+    ],
+)
+def test_physical_preflight_blocks_source_replacement_after_result_validation(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, relative: str,
+) -> None:
+    candidate, paths = _install_physical_admission_fixture(candidate_file)
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(gate, "validate_candidate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(gate, "_runtime_matches_candidate", lambda *_args, **_kwargs: True)
+    original_result_valid = gate._physical_admission_result_valid
+    execution_cwd: Path | None = None
+
+    def publish(_command, *, cwd, **_kwargs):
+        nonlocal execution_cwd
+        execution_cwd = Path(cwd)
+        _publish_physical_admission_result(candidate, paths)
+        return gate._manifest.BoundedCommandResult(0, "", None)
+
+    def replace_source_after_validation(*args, **kwargs):
+        valid = original_result_valid(*args, **kwargs)
+        assert execution_cwd is not None
+        source = execution_cwd / relative
+        source.parent.chmod(0o755)
+        source.chmod(0o644)
+        replacement = source.with_name("replacement-source.py")
+        replacement.write_text("raise SystemExit('forged')\n", encoding="utf-8")
+        replacement.chmod(0o444)
+        replacement.replace(source)
+        source.parent.chmod(0o555)
+        return valid
+
+    monkeypatch.setattr(gate, "run_bounded_command", publish)
+    monkeypatch.setattr(gate, "_physical_admission_result_valid", replace_source_after_validation)
 
     result = gate.run_gate(
         candidate_file, "physical-preflight",
