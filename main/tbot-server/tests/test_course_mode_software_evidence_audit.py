@@ -1,22 +1,28 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import os
 import subprocess
 import sys
+import uuid
 import zipfile
 import zlib
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/course_mode_software_evidence_audit.py"
 sys.path.insert(0, str(ROOT / "scripts"))
 import course_mode_evidence_privacy as privacy  # noqa: E402
+import course_mode_physical_flash_admission as admission  # noqa: E402
 import course_mode_software_evidence_audit as auditor  # noqa: E402
 
 QUICK_LANES = [
@@ -173,18 +179,360 @@ def evidence_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 
 def _run(candidate: Path, evidence: Path, output: Path, *preserved: Path) -> subprocess.CompletedProcess[str]:
-    command = [
-        sys.executable,
-        str(SCRIPT),
-        "--candidate",
-        str(candidate),
-        "--evidence-root",
-        str(evidence),
-    ]
+    arguments = ["--candidate", str(candidate), "--evidence-root", str(evidence)]
     for root in preserved:
-        command.extend(["--preserved-root", str(root)])
-    command.extend(["--output", str(output)])
+        arguments.extend(["--preserved-root", str(root)])
+    arguments.extend(["--output", str(output)])
+    public_key = os.environ.get("_TBOT_TEST_ADMISSION_PUBLIC_KEY_HEX")
+    fingerprint = os.environ.get("_TBOT_TEST_ADMISSION_KEY_FINGERPRINT")
+    if public_key is None or fingerprint is None:
+        command = [sys.executable, str(SCRIPT), *arguments]
+    else:
+        bootstrap = (
+            "import runpy,sys;"
+            "sys.path.insert(0,sys.argv[1]);"
+            "import course_mode_physical_flash_admission as admission;"
+            "admission.PINNED_APPROVAL_PUBLIC_KEY_RAW=bytes.fromhex(sys.argv[2]);"
+            "admission.PINNED_APPROVAL_KEY_FINGERPRINT=sys.argv[3];"
+            "script=sys.argv[4];sys.argv=[script,*sys.argv[5:]];"
+            "runpy.run_path(script,run_name='__main__')"
+        )
+        command = [
+            sys.executable,
+            "-c",
+            bootstrap,
+            str(SCRIPT.parent),
+            public_key,
+            fingerprint,
+            str(SCRIPT),
+            *arguments,
+        ]
     return subprocess.run(command, check=False, capture_output=True, text=True)
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _rewrite_json(path: Path, value: object) -> None:
+    path.chmod(0o644)
+    path.write_bytes(_canonical_json_bytes(value) + b"\n")
+    path.chmod(0o444)
+
+
+def _write_exact_admission_documents(
+    *,
+    candidate_path: Path,
+    evidence: Path,
+    private_key: Ed25519PrivateKey,
+    signer_fingerprint: str,
+) -> dict[str, object]:
+    admission_root = evidence / "G7-admission"
+    admission_root.mkdir()
+    paths = {
+        "input": admission_root / "admission-input.json",
+        "output": admission_root / "admission-result.json",
+        "expectedIdentity": admission_root / "expected-identity.json",
+        "expectedIdentitySignature": admission_root / "expected-identity.sig",
+    }
+    candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    candidate.update(
+        createdAt="2026-09-05T07:00:00Z",
+        expiresAt="2026-09-05T09:00:00Z",
+    )
+    candidate["repositories"] = {
+        "adminEsp": {
+            "path": "/src/admin",
+            "sha": candidate["repositories"]["adminEsp"]["sha"],
+            "branch": "main",
+            "remoteUrl": "git@example/admin.git",
+            "dirtyExceptions": [],
+        },
+        "backend": {
+            "path": "/src/backend",
+            "sha": candidate["repositories"]["backend"]["sha"],
+            "branch": "main",
+            "remoteUrl": "git@example/backend.git",
+            "dirtyExceptions": [],
+        },
+        "firmware": {
+            "path": "/src/firmware",
+            "sha": admission.FIRMWARE_SHA,
+            "branch": "main",
+            "remoteUrl": "git@example/firmware.git",
+            "dirtyExceptions": [],
+        },
+    }
+    candidate["firmware"].update(
+        appPath="/opt/tbot/course-mode/app.bin",
+        appOffset=admission.APP_OFFSET,
+        appBytes=admission.APP_BYTES,
+        appSha256=admission.APP_SHA256,
+        partitionBytes=admission.PARTITION_BYTES,
+        evidenceManifestPath="/opt/tbot/course-mode/manifest.json",
+        evidenceManifestSha256=admission.MANIFEST_SHA256,
+    )
+    candidate["tools"]["physicalAdmission"] = {name: str(path) for name, path in paths.items()}
+    _rewrite_json(candidate_path, candidate)
+
+    repository_binding = {
+        "admin": copy.deepcopy(candidate["repositories"]["adminEsp"]),
+        "backend": copy.deepcopy(candidate["repositories"]["backend"]),
+        "firmware": copy.deepcopy(candidate["repositories"]["firmware"]),
+    }
+    image_binding = {
+        "backend": {
+            **candidate["images"]["lessonStudioBackend"],
+            "platform": "linux/arm64",
+            "provenanceLabels": {
+                "org.opencontainers.image.revision": repository_binding["backend"]["sha"],
+                "org.opencontainers.image.source": repository_binding["backend"]["remoteUrl"],
+            },
+        },
+        "web": {
+            **candidate["images"]["lessonStudioWeb"],
+            "platform": "linux/arm64",
+            "provenanceLabels": {
+                "org.opencontainers.image.revision": repository_binding["admin"]["sha"],
+                "org.opencontainers.image.source": repository_binding["admin"]["remoteUrl"],
+            },
+        },
+    }
+    candidate_binding = {
+        "candidateId": candidate["candidateId"],
+        "courseId": candidate["course"]["courseId"],
+        "courseKey": candidate["course"]["courseKey"],
+        "createdAt": candidate["createdAt"],
+        "expiresAt": candidate["expiresAt"],
+        "path": str(candidate_path),
+        "sha256": hashlib.sha256(candidate_path.read_bytes()).hexdigest(),
+        "repositories": repository_binding,
+        "images": image_binding,
+        "firmware": {
+            "board": admission.BOARD,
+            "target": admission.TARGET,
+            "gitSha": admission.FIRMWARE_SHA,
+            "app": {
+                "path": candidate["firmware"]["appPath"],
+                "sha256": admission.APP_SHA256,
+                "bytes": admission.APP_BYTES,
+                "offset": admission.APP_OFFSET,
+                "partitionBytes": admission.PARTITION_BYTES,
+            },
+            "manifest": {
+                "path": candidate["firmware"]["evidenceManifestPath"],
+                "sha256": admission.MANIFEST_SHA256,
+            },
+        },
+    }
+    session_id = "cab43f0d-62dc-49c4-9d30-e9630d195a44"
+    robot = {
+        "mac": admission.ROBOT_MAC,
+        "board": admission.BOARD,
+        "target": admission.TARGET,
+        "serialPath": admission.SERIAL_PATH,
+        "exactlyOneRobot": True,
+    }
+    identity = {
+        "schemaVersion": 1,
+        "sessionId": session_id,
+        "candidate": copy.deepcopy(candidate_binding),
+        "partitionTable": copy.deepcopy(admission.EXPECTED_PARTITIONS),
+        "robot": copy.deepcopy(robot),
+        "signer": {"algorithm": "ed25519", "fingerprint": signer_fingerprint},
+    }
+    input_document = {
+        "schemaVersion": 1,
+        "sessionId": session_id,
+        "checkedAt": "2026-09-05T08:00:00Z",
+        "candidate": copy.deepcopy(candidate_binding),
+        "robot": copy.deepcopy(robot),
+        "serialLease": {
+            "soleLeaseConfirmed": True,
+            "competingProcessesStopped": True,
+            "devicePath": admission.SERIAL_PATH,
+            "discoveredDevices": [admission.SERIAL_PATH],
+            "holderPids": [],
+            "inventoryMethod": "lstat-glob-lsof-v1",
+        },
+        "flashPlan": {
+            "operation": {
+                "operation": "write_flash",
+                "offset": admission.APP_OFFSET,
+                "imageSha256": admission.APP_SHA256,
+                "imageBytes": admission.APP_BYTES,
+                "after": "no-reset",
+                "eraseChip": False,
+                "mergedImage": False,
+            },
+            "protectedPartitions": [
+                copy.deepcopy(partition)
+                for partition in admission.EXPECTED_PARTITIONS
+                if partition["protected"]
+            ],
+            "preserveProtectedPartitions": True,
+        },
+        "safety": {name: True for name in admission.SAFETY_KEYS},
+    }
+    assert set(input_document) == admission.TOP_KEYS
+    assert set(identity) == admission.IDENTITY_KEYS
+    checked_at = datetime.fromisoformat(input_document["checkedAt"].replace("Z", "+00:00"))
+    assert checked_at.tzinfo == timezone.utc
+    assert admission.validate_documents(
+        input_document,
+        identity,
+        candidate,
+        checked_at,
+        [admission.SERIAL_PATH],
+        [],
+        None,
+    ) == []
+    _write_json(paths["input"], input_document)
+    _write_json(paths["expectedIdentity"], identity)
+    signature = private_key.sign(_canonical_json_bytes(identity))
+    assert len(signature) == 64
+    paths["expectedIdentitySignature"].write_bytes(signature)
+    paths["expectedIdentitySignature"].chmod(0o444)
+    return {
+        "input": input_document,
+        "identity": identity,
+        "paths": paths,
+        "privateKey": private_key,
+    }
+
+
+def _install_signed_admission(
+    candidate_path: Path,
+    evidence: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, object]:
+    key = Ed25519PrivateKey.generate()
+    public = key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    fingerprint = hashlib.sha256(public).hexdigest()
+    monkeypatch.setattr(admission, "PINNED_APPROVAL_PUBLIC_KEY_RAW", public)
+    monkeypatch.setattr(admission, "PINNED_APPROVAL_KEY_FINGERPRINT", fingerprint)
+    monkeypatch.setenv("_TBOT_TEST_ADMISSION_PUBLIC_KEY_HEX", public.hex())
+    monkeypatch.setenv("_TBOT_TEST_ADMISSION_KEY_FINGERPRINT", fingerprint)
+    return _write_exact_admission_documents(
+        candidate_path=candidate_path,
+        evidence=evidence,
+        private_key=key,
+        signer_fingerprint=fingerprint,
+    )
+
+
+def _rewrite_and_resign_admission(candidate_path: Path, bundle: dict[str, object]) -> None:
+    assert candidate_path.is_file()
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    input_document = bundle["input"]
+    identity = bundle["identity"]
+    private_key = bundle["privateKey"]
+    assert isinstance(private_key, Ed25519PrivateKey)
+    _rewrite_json(paths["input"], input_document)
+    _rewrite_json(paths["expectedIdentity"], identity)
+    signature_path = paths["expectedIdentitySignature"]
+    signature_path.chmod(0o644)
+    signature_path.write_bytes(private_key.sign(_canonical_json_bytes(identity)))
+    signature_path.chmod(0o444)
+
+
+def test_candidate_bound_signed_admission_session_id_is_public_evidence(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    _install_signed_admission(candidate, evidence, monkeypatch)
+
+    result = _run(candidate, evidence, output)
+    report = json.loads(result.stdout)
+
+    assert result.returncode == 0
+    assert report["status"] == "pass"
+    assert report["checks"]["secretScan"] is True
+    assert "content.secret" not in report["findings"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda bundle: bundle["input"].update(password="not-public"),
+        lambda bundle: bundle["identity"].update(token="not-public"),
+        lambda bundle: bundle["input"].__setitem__("sessionId", str(uuid.uuid4())),
+        lambda bundle: bundle["identity"].__setitem__("sessionId", "not-a-uuid"),
+        lambda bundle: bundle["identity"].update(extraSession="not-public"),
+    ],
+    ids=[
+        "input-real-secret",
+        "identity-real-secret",
+        "mismatched-session",
+        "malformed-session",
+        "extra-session-field",
+    ],
+)
+def test_public_admission_exemption_fails_closed(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    mutation,
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    mutation(bundle)
+    _rewrite_and_resign_admission(candidate, bundle)
+
+    result = _run(candidate, evidence, output)
+    report = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert report["checks"]["secretScan"] is False
+    assert "content.secret" in report["findings"]
+
+
+def test_public_admission_exemption_does_not_cover_unrelated_session_id_evidence(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    _install_signed_admission(candidate, evidence, monkeypatch)
+    _write_json(
+        evidence / "unrelated-session.json",
+        {"sessionId": "cab43f0d-62dc-49c4-9d30-e9630d195a44"},
+    )
+
+    result = _run(candidate, evidence, output)
+    report = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert report["checks"]["secretScan"] is False
+    assert "content.secret" in report["findings"]
+
+
+def test_public_admission_exemption_rejects_filename_only_impersonation(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    candidate_document = json.loads(candidate.read_text(encoding="utf-8"))
+    candidate_document["tools"].pop("physicalAdmission")
+    _rewrite_json(candidate, candidate_document)
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    paths["expectedIdentity"].unlink()
+    paths["expectedIdentitySignature"].unlink()
+
+    result = _run(candidate, evidence, output)
+    report = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert report["checks"]["secretScan"] is False
+    assert "content.secret" in report["findings"]
 
 
 def _zip(entries: dict[str, bytes], compression: int = zipfile.ZIP_DEFLATED) -> bytes:
