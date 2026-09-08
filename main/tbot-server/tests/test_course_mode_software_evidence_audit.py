@@ -518,6 +518,71 @@ def test_public_admission_exemption_rejects_secret_in_signed_candidate_binding(
     assert "content.secret" in report["findings"]
 
 
+@pytest.mark.parametrize(
+    ("semantic_value", "expected_finding"),
+    [
+        (
+            "\n".join(
+                encoded[index : index + 8]
+                for index in range(0, len(encoded), 8)
+            ),
+            "content.secret",
+        )
+        for encoded in [
+            base64.b64encode(b"Authorization: Bearer admission-secret-token").decode("ascii")
+        ]
+    ]
+    + [
+        (
+            "-----BEGIN PRIVATE KEY-----\n"
+            "YWRtaXNzaW9uLXByaXZhdGUta2V5\n"
+            "-----END PRIVATE KEY-----",
+            "content.private_key",
+        )
+    ],
+    ids=["newline-split-base64-bearer", "multiline-private-key"],
+)
+def test_public_admission_semantic_strings_are_scanned(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    semantic_value: str,
+    expected_finding: str,
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    candidate_document = json.loads(candidate.read_text(encoding="utf-8"))
+    candidate_document["repositories"]["adminEsp"]["remoteUrl"] = semantic_value
+    _rewrite_json(candidate, candidate_document)
+    candidate_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    for document in (bundle["input"], bundle["identity"]):
+        binding = document["candidate"]
+        binding["repositories"]["admin"]["remoteUrl"] = semantic_value
+        binding["images"]["web"]["provenanceLabels"][
+            "org.opencontainers.image.source"
+        ] = semantic_value
+        binding["sha256"] = candidate_sha
+    checked_at = datetime.fromisoformat(
+        bundle["input"]["checkedAt"].replace("Z", "+00:00")
+    )
+    assert admission.validate_documents(
+        bundle["input"],
+        bundle["identity"],
+        candidate_document,
+        checked_at,
+        [admission.SERIAL_PATH],
+        [],
+        None,
+    ) == []
+    _rewrite_and_resign_admission(candidate, bundle)
+
+    result = _run(candidate, evidence, output)
+    report = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert report["status"] == "fail"
+    assert expected_finding in report["findings"]
+
+
 def test_public_admission_exemption_is_bound_to_scanned_bytes(
     evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:

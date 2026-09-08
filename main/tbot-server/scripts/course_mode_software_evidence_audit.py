@@ -138,6 +138,26 @@ def _canonical_json_bytes(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def _semantic_string_payloads(value: object) -> tuple[bytes, ...]:
+    payloads: list[bytes] = []
+    pending: list[tuple[object, str, bool]] = [(value, "value", True)]
+    while pending:
+        current, field, top_level = pending.pop()
+        if isinstance(current, dict):
+            for key, child in current.items():
+                if top_level and key == "sessionId":
+                    continue
+                pending.append((child, key, False))
+        elif isinstance(current, list):
+            pending.extend((child, field, False) for child in current)
+        elif isinstance(current, str):
+            raw = current.encode("utf-8")
+            payloads.append(raw)
+            if re.sub(r"[^a-z0-9]", "", field.casefold()) in {"session", "sessionid"}:
+                payloads.append(f"{field}: ".encode("utf-8") + raw)
+    return tuple(payloads)
+
+
 def _candidate_admission_paths(candidate: object, evidence_root: Path) -> dict[str, Path] | None:
     if not isinstance(candidate, dict):
         return None
@@ -190,7 +210,7 @@ def _candidate_admission_paths(candidate: object, evidence_root: Path) -> dict[s
 
 def _public_admission_scan_payloads(
     candidate: object, candidate_path: Path, candidate_raw: bytes, evidence_root: Path
-) -> dict[Path, tuple[bytes, bytes]]:
+) -> dict[Path, tuple[bytes, bytes, tuple[bytes, ...]]]:
     paths = _candidate_admission_paths(candidate, evidence_root)
     if paths is None:
         return {}
@@ -241,12 +261,14 @@ def _public_admission_scan_payloads(
             paths["input"]: (
                 input_raw,
                 _canonical_json_bytes({**input_document, "sessionId": "redacted"}),
+                _semantic_string_payloads(input_document),
             ),
             paths["expectedIdentity"]: (
                 identity_raw,
                 _canonical_json_bytes({**identity, "sessionId": "redacted"}),
+                _semantic_string_payloads(identity),
             ),
-            paths["expectedIdentitySignature"]: (signature, signature),
+            paths["expectedIdentitySignature"]: (signature, signature, ()),
         }
     except (
         AttributeError,
@@ -670,14 +692,16 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
     if public_admission_payloads and not public_snapshot_matches:
         findings.add("content.secret")
     for path, data in observed_public_admission_payloads.items():
-        scan_data = public_admission_payloads[path][1] if public_snapshot_matches else data
-        content_findings, member_count = scan_evidence_payload(
-            scan_data, path.name, _budget=archive_budget, _base64_state=base64_state
-        )
-        findings.update(content_findings)
-        checked_archive_members += member_count
-        if content_findings & {"content.embedded_playwright", "content.raw_playwright"}:
-            raw_playwright_absent = False
+        expected = public_admission_payloads[path]
+        scan_payloads = (expected[1], *expected[2]) if public_snapshot_matches else (data,)
+        for scan_data in scan_payloads:
+            content_findings, member_count = scan_evidence_payload(
+                scan_data, path.name, _budget=archive_budget, _base64_state=base64_state
+            )
+            findings.update(content_findings)
+            checked_archive_members += member_count
+            if content_findings & {"content.embedded_playwright", "content.raw_playwright"}:
+                raw_playwright_absent = False
     for root in preserved_roots:
         if not _secure_root(root):
             findings.add("preserved.root")
