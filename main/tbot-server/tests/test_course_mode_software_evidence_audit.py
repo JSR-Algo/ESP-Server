@@ -461,6 +461,63 @@ def test_candidate_bound_signed_admission_session_id_is_public_evidence(
     assert "content.secret" not in report["findings"]
 
 
+def test_public_admission_exemption_requires_exact_candidate_bytes(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    _install_signed_admission(candidate, evidence, monkeypatch)
+    candidate_document = json.loads(candidate.read_text(encoding="utf-8"))
+    candidate_document["tools"]["pythonTestRuntime"]["version"] = 2
+    _rewrite_json(candidate, candidate_document)
+
+    result = _run(candidate, evidence, output)
+    report = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert report["checks"]["secretScan"] is False
+    assert "content.secret" in report["findings"]
+
+
+def test_public_admission_exemption_rejects_relocated_input_descriptor(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    relocated_input = paths["input"].with_name("relocated-admission-input.json")
+    paths["input"].rename(relocated_input)
+    candidate_document = json.loads(candidate.read_text(encoding="utf-8"))
+    candidate_document["tools"]["physicalAdmission"]["input"] = str(relocated_input)
+    _rewrite_json(candidate, candidate_document)
+
+    result = _run(candidate, evidence, output)
+    report = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert report["checks"]["secretScan"] is False
+    assert "content.secret" in report["findings"]
+
+
+def test_public_admission_exemption_rejects_secret_in_signed_candidate_binding(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    encoded = base64.b64encode(b"Authorization: Bearer admission-secret-token").decode("ascii")
+    split_encoded = "\n".join(encoded[index : index + 8] for index in range(0, len(encoded), 8))
+    bundle["input"]["candidate"]["sha256"] = split_encoded
+    bundle["identity"]["candidate"]["sha256"] = split_encoded
+    _rewrite_and_resign_admission(candidate, bundle)
+
+    result = _run(candidate, evidence, output)
+    report = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert report["checks"]["secretScan"] is False
+    assert "content.secret" in report["findings"]
+
+
 def test_public_admission_exemption_is_bound_to_scanned_bytes(
     evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:

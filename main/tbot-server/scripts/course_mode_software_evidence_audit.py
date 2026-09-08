@@ -189,7 +189,7 @@ def _candidate_admission_paths(candidate: object, evidence_root: Path) -> dict[s
 
 
 def _public_admission_scan_payloads(
-    candidate: object, evidence_root: Path
+    candidate: object, candidate_path: Path, candidate_raw: bytes, evidence_root: Path
 ) -> dict[Path, tuple[bytes, bytes]]:
     paths = _candidate_admission_paths(candidate, evidence_root)
     if paths is None:
@@ -205,6 +205,14 @@ def _public_admission_scan_payloads(
         input_document = _strict_json_loads(input_raw)
         identity = _strict_json_loads(identity_raw)
         if not isinstance(input_document, dict) or not isinstance(identity, dict):
+            return {}
+        candidate_binding = input_document.get("candidate")
+        if (
+            not isinstance(candidate_binding, dict)
+            or candidate_path.resolve(strict=True) != candidate_path
+            or candidate_binding.get("path") != str(candidate_path)
+            or candidate_binding.get("sha256") != hashlib.sha256(candidate_raw).hexdigest()
+        ):
             return {}
         input_session = input_document.get("sessionId")
         if (
@@ -587,7 +595,9 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
             findings.add(code)
     tools = candidate.get("tools") if isinstance(candidate, dict) else None
     public_admission_declared = isinstance(tools, dict) and "physicalAdmission" in tools
-    public_admission_payloads = _public_admission_scan_payloads(candidate, evidence_root)
+    public_admission_payloads = _public_admission_scan_payloads(
+        candidate, candidate_path, candidate_bytes, evidence_root
+    )
     if public_admission_declared and not public_admission_payloads:
         findings.add("content.secret")
     observed_public_admission_payloads: dict[Path, bytes] = {}
