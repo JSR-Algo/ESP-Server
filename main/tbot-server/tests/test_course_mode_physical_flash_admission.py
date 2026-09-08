@@ -2,6 +2,7 @@ import hashlib
 import importlib
 import json
 import os
+import shutil
 import stat
 import sys
 from copy import deepcopy
@@ -466,6 +467,107 @@ def test_real_source_replacement_after_output_fsync_removes_result(valid_files, 
     assert run_main(paths) == 1
     assert not paths["output"].exists()
     assert json.loads(capsys.readouterr().out)["reasons"] == ["output.path"]
+
+
+def _replace_same_uid(path):
+    original = path.read_bytes()
+    mode = stat.S_IMODE(path.stat().st_mode)
+    backup = path.with_name(path.name + ".replaced")
+    path.rename(backup)
+    path.write_bytes(original)
+    path.chmod(mode)
+
+
+@pytest.mark.parametrize("field", ["appPath", "evidenceManifestPath"])
+def test_external_firmware_replacement_before_publish_leaves_no_result(
+    valid_files, monkeypatch, capsys, field,
+):
+    _, _, paths, actual = valid_files
+    target = Path(actual["firmware"][field])
+    calls = 0
+
+    def inventory():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            _replace_same_uid(target)
+        return [admission.SERIAL_PATH], [], None
+
+    monkeypatch.setattr(admission, "collect_serial_inventory", inventory)
+    assert run_main(paths) == 1
+    assert not paths["output"].exists()
+    assert json.loads(capsys.readouterr().out)["reasons"] == ["candidate.external.changed"]
+
+
+@pytest.mark.parametrize("field", ["appPath", "evidenceManifestPath"])
+def test_external_firmware_replacement_after_output_fsync_removes_result(
+    valid_files, monkeypatch, capsys, field,
+):
+    _, _, paths, actual = valid_files
+    target = Path(actual["firmware"][field])
+    real_fsync = admission.os.fsync
+    replaced = False
+
+    def replace_after_fsync(fd):
+        nonlocal replaced
+        result = real_fsync(fd)
+        if not replaced and stat.S_ISREG(os.fstat(fd).st_mode):
+            replaced = True
+            _replace_same_uid(target)
+        return result
+
+    monkeypatch.setattr(admission.os, "fsync", replace_after_fsync)
+    assert run_main(paths) == 1
+    assert not paths["output"].exists()
+    assert json.loads(capsys.readouterr().out)["reasons"] == ["output.path"]
+
+
+def test_external_repository_root_replacement_before_publish_leaves_no_result(
+    valid_files, monkeypatch, capsys,
+):
+    _, _, paths, actual = valid_files
+    target = Path(actual["repositories"]["backend"]["path"])
+    calls = 0
+
+    def inventory():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            moved = target.with_name(target.name + ".replaced")
+            target.rename(moved)
+            shutil.copytree(moved, target)
+        return [admission.SERIAL_PATH], [], None
+
+    monkeypatch.setattr(admission, "collect_serial_inventory", inventory)
+    assert run_main(paths) == 1
+    assert not paths["output"].exists()
+    assert json.loads(capsys.readouterr().out)["reasons"] == ["candidate.external.changed"]
+
+
+def test_external_image_observation_change_before_publish_leaves_no_result(
+    valid_files, monkeypatch, capsys,
+):
+    _, _, paths, actual = valid_files
+    target = actual["images"]["lessonStudioWeb"]["reference"]
+    original = admission.candidate_manifest._docker_image_descriptor
+    changed = False
+
+    def descriptor(reference, executable):
+        observed = original(reference, executable)
+        if changed and reference == target:
+            return {**observed, "Id": "sha256:" + "9" * 64}
+        return observed
+
+    def inventory():
+        nonlocal changed
+        changed = True
+        return [admission.SERIAL_PATH], [], None
+
+    monkeypatch.setattr(admission.candidate_manifest, "_docker_image_descriptor", descriptor)
+    monkeypatch.setattr(admission, "collect_serial_inventory", inventory)
+    assert run_main(paths) == 1
+    assert not paths["output"].exists()
+    assert json.loads(capsys.readouterr().out)["reasons"] == ["candidate.external.changed"]
 
 
 @pytest.mark.parametrize("field,value", [("mac", "00:11:22:33:44:55"), ("board", "wrong"), ("target", "esp32"), ("serialPath", "/dev/cu.wrong")])

@@ -2,7 +2,7 @@
 """Signed, non-opening admission gate for Course Mode physical firmware flashing."""
 from __future__ import annotations
 
-import argparse, contextlib, glob, hashlib, json, math, os, re, selectors, signal, stat, subprocess, time, uuid
+import argparse, contextlib, copy, glob, hashlib, json, math, os, re, selectors, signal, stat, subprocess, time, uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -64,6 +64,7 @@ def _load_json(raw):
     except (UnicodeError, ValueError, json.JSONDecodeError): return None, "invalid_json"
 def _file_identity(value):
     return (value.st_dev,value.st_ino,value.st_mode,value.st_nlink,value.st_uid,value.st_gid,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+def _authority_identity(value): return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_gid)
 def _secure_parent(path):
     if os.geteuid()!=OPERATOR_UID: raise OSError("operator uid")
     return candidate_manifest._open_trusted_source_directory(path)
@@ -113,6 +114,67 @@ def _still_bound(descriptor):
     finally:
         if verification_fd is not None: os.close(verification_fd)
         if parent_fd is not None: os.close(parent_fd)
+def _external_regular_binding(path,limit):
+    if not path.is_absolute() or ".." in path.parts: return None
+    try:
+        descriptor,error=candidate_manifest.secure_regular_descriptor(path,limit,secure_metadata=True,bind_parent=True)
+        if error or descriptor is None: return None
+        identity=_file_identity(os.stat(path,follow_symlinks=False))
+        parent=_external_directory_binding(path.parent)
+        repeated,repeated_error=candidate_manifest.secure_regular_descriptor(path,limit,secure_metadata=True,bind_parent=True)
+        if repeated_error or not _exact_equal(repeated,descriptor) or _file_identity(os.stat(path,follow_symlinks=False))!=identity or parent is None: return None
+        _,parent_identity,ancestry=parent
+        return (descriptor["sha256"],identity,path,parent_identity,ancestry)
+    except OSError: return None
+def _external_regular_still_bound(record):
+    digest,identity,path,parent_metadata,ancestry=record
+    current=_external_regular_binding(path,max(identity[6],1))
+    return current is not None and current[0]==digest and current[1]==identity and current[3:]==(parent_metadata,ancestry)
+def _external_directory_binding(path):
+    fd=None
+    try:
+        fd,metadata,ancestry=_secure_parent(path)
+        return (path,_authority_identity(metadata),ancestry)
+    except OSError: return None
+    finally:
+        if fd is not None: os.close(fd)
+def _external_directory_still_bound(record):
+    path,identity,ancestry=record; current=_external_directory_binding(path)
+    return current is not None and current==(path,identity,ancestry)
+def _candidate_external_binding(candidate,*,observe_images):
+    try:
+        firmware=candidate["firmware"]
+        files=[]
+        for path,limit in ((Path(firmware["appPath"]),candidate_manifest.MAX_FIRMWARE_ARTIFACT_BYTES),(Path(firmware["evidenceManifestPath"]),candidate_manifest.MAX_FIRMWARE_MANIFEST_BYTES)):
+            record=_external_regular_binding(path,limit)
+            if record is None: return None
+            files.append(record)
+        directories=[]
+        for repository in candidate["repositories"].values():
+            record=_external_directory_binding(Path(repository["path"]))
+            if record is None: return None
+            directories.append(record)
+        docker=Path(candidate["tools"]["docker"]["path"])
+        images={}
+        if observe_images:
+            for reference in (candidate["images"]["lessonStudioBackend"]["reference"],candidate["images"]["lessonStudioWeb"]["reference"],candidate["database"]["engineImage"]):
+                observed=candidate_manifest._docker_image_descriptor(reference,docker)
+                if observed is None: return None
+                images[reference]=observed
+        return (tuple(files),tuple(directories),docker,images)
+    except (KeyError,TypeError,ValueError): return None
+def _candidate_external_still_bound(candidate,binding,validation_now):
+    if binding is None: return False
+    files,directories,docker,images=binding
+    if not all(_external_regular_still_bound(record) for record in files): return False
+    if not all(_external_directory_still_bound(record) for record in directories): return False
+    try:
+        if any(not candidate_manifest._repository_matches_candidate(Path(value["path"]),value) for value in candidate["repositories"].values()): return False
+        if any(not _exact_equal(candidate_manifest._docker_image_descriptor(reference,docker),observed) for reference,observed in images.items()): return False
+        validation_candidate=copy.deepcopy(candidate)
+        validation_candidate.get("tools",{}).pop("physicalAdmission",None)
+        return not candidate_manifest.validate_candidate(validation_candidate,now=validation_now)
+    except (KeyError,OSError,RuntimeError,TypeError,ValueError): return False
 def _output_absent(path):
     parent_fd=None
     try:
@@ -321,7 +383,7 @@ def _publish(path,payload,output_binding,sources,commit_safe):
         os.fsync(parent_fd)
         if not commit_safe(): raise OSError("commit time changed")
         current=os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
-        if (_file_identity(current)!=created_identity or not _output_parent_still_bound(path.parent,parent_fd,parent_metadata,ancestry) or not all(_still_bound(record) for record in sources)): raise OSError("final binding changed")
+        if (_file_identity(current)!=created_identity or not _output_parent_still_bound(path.parent,parent_fd,parent_metadata,ancestry) or not all(_still_bound(record) for record in sources) or not commit_safe()): raise OSError("final binding changed")
         return True
     except OSError:
         if parent_fd is not None and created_inode is not None:
@@ -369,9 +431,15 @@ def main(argv=None):
     expected_paths={"input":args.input,"output":args.output,"expectedIdentity":args.expected_identity,"expectedIdentitySignature":args.expected_identity_signature}
     evidence_root=Path(actual.get("evidenceRoot","")) if isinstance(actual,dict) else Path("")
     if not isinstance(descriptor,dict) or set(descriptor)!=set(expected_paths) or any(Path(descriptor.get(k,""))!=v for k,v in expected_paths.items()) or not evidence_root.is_absolute() or any(not path.is_relative_to(evidence_root) for path in expected_paths.values()): _failure(["candidate.physicalAdmission"]); return 1
+    external_binding=_candidate_external_binding(actual,observe_images=False)
+    if external_binding is None: _failure(["candidate.external"]); return 1
     now=utc_now(); reasons=[f"candidate.{r}" for r in candidate_manifest.validate_candidate(actual,now=now)]
     devices,holders,inventory_error=collect_serial_inventory(); reasons.extend(validate_documents(doc,identity,actual,now,devices,holders,inventory_error))
     if reasons: _failure(reasons); return 1
+    if not _candidate_external_still_bound(actual,external_binding,now): _failure(["candidate.external.changed"]); return 1
+    observed_binding=_candidate_external_binding(actual,observe_images=True)
+    if observed_binding is None: _failure(["candidate.external.changed"]); return 1
+    external_binding=(external_binding[0],external_binding[1],observed_binding[2],observed_binding[3])
     if not all(_still_bound(record) for record in (input_record,identity_record,signature_record,candidate_record)):
         _failure(["input.changed"]); return 1
     commit_reasons=_commit_time_reasons(doc,utc_now())
@@ -382,8 +450,9 @@ def main(argv=None):
     if final_devices!=[SERIAL_PATH]: final_inventory_reasons.append("serial.inventory")
     if final_holders: final_inventory_reasons.append("serial.occupied")
     if final_inventory_reasons: _failure(final_inventory_reasons); return 1
+    if not _candidate_external_still_bound(actual,external_binding,now): _failure(["candidate.external.changed"]); return 1
     payload={"schemaVersion":1,"validator":VALIDATOR,"status":"pass","reasons":[],"candidateId":binding["candidateId"],"sessionId":doc["sessionId"],"signerFingerprint":fingerprint,"physicalActionsPerformed":False,"serialOpened":False,"inputSha256":hashlib.sha256(raw).hexdigest(),"expectedIdentitySha256":hashlib.sha256(identity_raw).hexdigest(),"candidateSha256":hashlib.sha256(candidate_raw).hexdigest(),"robotMac":ROBOT_MAC,"serialPath":SERIAL_PATH,"firmwareSha":FIRMWARE_SHA,"appSha256":APP_SHA256,"manifestSha256":MANIFEST_SHA256}
-    commit_safe=lambda: not _commit_time_reasons(doc,utc_now())
+    commit_safe=lambda: not _commit_time_reasons(doc,utc_now()) and _candidate_external_still_bound(actual,external_binding,now)
     if not _publish(args.output,payload,output_binding,(input_record,identity_record,signature_record,candidate_record),commit_safe): _failure(["output.path"]); return 1
     return 0
 def _entrypoint():
