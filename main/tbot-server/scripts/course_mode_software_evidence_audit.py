@@ -66,7 +66,26 @@ OUTPUT_NAME = "06-software-evidence-audit.json"
 TRUSTED_SYSTEM_SYMLINKS = {Path("/var"): Path("/private/var"), Path("/tmp"): Path("/private/tmp")}
 
 
-def _read_secure_file(path: Path) -> bytes:
+class _AuditReport(dict[str, object]):
+    def __init__(
+        self,
+        value: dict[str, object],
+        candidate_path: Path,
+        candidate_snapshot: tuple[bytes, tuple[int, ...]] | None,
+        public_admission_declared: bool,
+    ) -> None:
+        super().__init__(value)
+        self.candidate_path = candidate_path
+        self.candidate_snapshot = candidate_snapshot
+        self.public_admission_declared = public_admission_declared
+
+    def candidate_still_bound(self) -> bool:
+        return self.candidate_snapshot is not None and _secure_file_snapshot_matches(
+            self.candidate_path, self.candidate_snapshot
+        )
+
+
+def _read_secure_file_snapshot(path: Path) -> tuple[bytes, tuple[int, ...]]:
     descriptor = os.open(
         path,
         os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
@@ -93,16 +112,59 @@ def _read_secure_file(path: Path) -> bytes:
             chunks.append(chunk)
         after = os.fstat(descriptor)
         current = path.lstat()
-        identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_mode)
-        if identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_mode):
+        identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_nlink,
+            before.st_uid,
+            before.st_gid,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        observed_after = (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+            after.st_uid,
+            after.st_gid,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        observed_current = (
+            current.st_dev,
+            current.st_ino,
+            current.st_mode,
+            current.st_nlink,
+            current.st_uid,
+            current.st_gid,
+            current.st_size,
+            current.st_mtime_ns,
+            current.st_ctime_ns,
+        )
+        if identity != observed_after:
             raise OSError("evidence changed while reading")
-        if identity != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_mode):
+        if identity != observed_current:
             raise OSError("evidence path changed while reading")
         if total != before.st_size:
             raise OSError("evidence size changed while reading")
-        return b"".join(chunks)
+        return b"".join(chunks), identity
     finally:
         os.close(descriptor)
+
+
+def _read_secure_file(path: Path) -> bytes:
+    return _read_secure_file_snapshot(path)[0]
+
+
+def _secure_file_snapshot_matches(path: Path, snapshot: tuple[bytes, tuple[int, ...]]) -> bool:
+    try:
+        return _read_secure_file_snapshot(path) == snapshot
+    except OSError:
+        return False
 
 
 def _strict_json_loads(data: bytes) -> object:
@@ -504,7 +566,14 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
     preserved_roots = [_absolute(root) for root in preserved_roots]
     output = _absolute(output)
     findings: set[str] = set()
-    candidate, candidate_bytes = _load_json(candidate_path)
+    candidate_snapshot: tuple[bytes, tuple[int, ...]] | None = None
+    try:
+        candidate_snapshot = _read_secure_file_snapshot(candidate_path)
+        candidate_bytes = candidate_snapshot[0]
+        candidate = _strict_json_loads(candidate_bytes)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, RecursionError):
+        candidate = None
+        candidate_bytes = b""
     raw_candidate_id = candidate.get("candidateId") if isinstance(candidate, dict) else None
     candidate_id = None
     documents: dict[str, object] = {}
@@ -526,7 +595,6 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
         findings.add("evidence.root")
     if candidate is None:
         findings.add("candidate.metadata_or_json")
-    candidate_bytes = candidate_bytes or b""
     audit_budget["bytes"] = len(candidate_bytes)
     if audit_budget["bytes"] > MAX_AUDIT_TOTAL_BYTES:
         findings.add("evidence.budget")
@@ -682,8 +750,13 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
                     raw_playwright_absent = False
     except OSError:
         findings.add("evidence.root")
+    candidate_snapshot_matches = (
+        candidate_snapshot is not None
+        and _secure_file_snapshot_matches(candidate_path, candidate_snapshot)
+    )
     public_snapshot_matches = (
-        set(observed_public_admission_payloads) == set(public_admission_payloads)
+        candidate_snapshot_matches
+        and set(observed_public_admission_payloads) == set(public_admission_payloads)
         and all(
             observed_public_admission_payloads[path] == expected[0]
             for path, expected in public_admission_payloads.items()
@@ -764,6 +837,10 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
                         raw_playwright_absent = False
         except OSError:
             findings.add("preserved.root")
+    if candidate_snapshot is not None and not _secure_file_snapshot_matches(candidate_path, candidate_snapshot):
+        findings.add("candidate.metadata_or_json")
+        if public_admission_declared:
+            findings.add("content.secret")
     checks = {
         "candidateIdentity": _candidate_identity(candidate, evidence_root),
         "repositoryIdentity": _repository_identity(candidate),
@@ -791,20 +868,44 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
         "physicalActionsPerformed": False,
         "productionDatabaseUsed": False,
     }
-    return {
-        "candidateId": candidate_id,
-        "checkedArchiveMemberCount": checked_archive_members,
-        "checkedFileCount": checked_files,
-        "checks": checks,
-        "findings": sorted(findings),
-        "schemaVersion": 1,
-        "status": "pass" if not findings else "fail",
-    }
+    return _AuditReport(
+        {
+            "candidateId": candidate_id,
+            "checkedArchiveMemberCount": checked_archive_members,
+            "checkedFileCount": checked_files,
+            "checks": checks,
+            "findings": sorted(findings),
+            "schemaVersion": 1,
+            "status": "pass" if not findings else "fail",
+        },
+        candidate_path,
+        candidate_snapshot,
+        public_admission_declared,
+    )
 
 
-def _write_output(path: Path, report: dict[str, object]) -> bool:
+def _mark_candidate_changed(report: dict[str, object]) -> None:
+    findings = set(report.get("findings", []))
+    findings.add("candidate.metadata_or_json")
+    if isinstance(report, _AuditReport) and report.public_admission_declared:
+        findings.add("content.secret")
+    report["findings"] = sorted(findings)
+    checks = report.get("checks")
+    if isinstance(checks, dict):
+        checks["secureFileMetadata"] = False
+        checks["secretScan"] = "content.secret" not in findings
+    report["status"] = "fail"
+
+
+def _write_output(
+    path: Path,
+    report: dict[str, object],
+    commit_safe=None,
+) -> bool:
     payload = json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n"
     try:
+        if commit_safe is not None and not commit_safe():
+            return False
         path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
         try:
@@ -813,7 +914,13 @@ def _write_output(path: Path, report: dict[str, object]) -> bool:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.chmod(temporary, 0o444)
+            if commit_safe is not None and not commit_safe():
+                return False
             os.replace(temporary, path)
+            if commit_safe is not None and not commit_safe():
+                with contextlib.suppress(OSError):
+                    path.unlink()
+                return False
         finally:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temporary)
@@ -834,6 +941,8 @@ def main(argv: list[str] | None = None) -> int:
     candidate_path = _absolute(args.candidate)
     preserved_roots = [_absolute(path) for path in args.preserved_root]
     report = audit(candidate_path, evidence_root, preserved_roots, output)
+    if isinstance(report, _AuditReport) and not report.candidate_still_bound():
+        _mark_candidate_changed(report)
     if output != evidence_root / OUTPUT_NAME:
         report["findings"] = sorted(set(report["findings"]) | {"output.unsafe"})
         report["status"] = "fail"
@@ -846,10 +955,19 @@ def main(argv: list[str] | None = None) -> int:
         if (
             (not report["findings"] or "output.unsafe" not in report["findings"])
             and "output.collision" not in report["findings"]
-            and not _write_output(output, report)
+            and not _write_output(
+                output,
+                report,
+                report.candidate_still_bound
+                if isinstance(report, _AuditReport) and report["status"] == "pass"
+                else None,
+            )
         ):
-            report["findings"] = sorted(set(report["findings"]) | {"output.write"})
-            report["status"] = "fail"
+            if isinstance(report, _AuditReport) and not report.candidate_still_bound():
+                _mark_candidate_changed(report)
+            else:
+                report["findings"] = sorted(set(report["findings"]) | {"output.write"})
+                report["status"] = "fail"
     print(json.dumps(report, sort_keys=True, separators=(",", ":")))
     return 0 if report["status"] == "pass" else 1
 

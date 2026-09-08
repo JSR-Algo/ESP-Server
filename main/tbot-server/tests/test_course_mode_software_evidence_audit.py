@@ -478,6 +478,39 @@ def test_public_admission_exemption_requires_exact_candidate_bytes(
     assert "content.secret" in report["findings"]
 
 
+def test_public_admission_exemption_rejects_candidate_replaced_during_audit(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    input_path = paths["input"]
+    secure_read = auditor._read_secure_file
+    candidate_replaced = False
+
+    def replace_candidate_on_admission_read(path: Path) -> bytes:
+        nonlocal candidate_replaced
+        if path == input_path and not candidate_replaced:
+            candidate_document = json.loads(candidate.read_text(encoding="utf-8"))
+            candidate_document["tools"]["pythonTestRuntime"]["token"] = "replacement-secret"
+            _rewrite_json(candidate, candidate_document)
+            candidate_replaced = True
+        return secure_read(path)
+
+    monkeypatch.setattr(auditor, "_read_secure_file", replace_candidate_on_admission_read)
+
+    report = auditor.audit(candidate, evidence, [], output)
+
+    assert candidate_replaced is True
+    assert report["status"] == "fail"
+    assert report["checks"]["secretScan"] is False
+    assert {
+        "candidate.metadata_or_json",
+        "content.secret",
+    }.intersection(report["findings"])
+
+
 def test_public_admission_exemption_rejects_relocated_input_descriptor(
     evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
