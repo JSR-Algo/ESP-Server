@@ -8659,6 +8659,113 @@ def _publish_physical_admission_result(candidate: dict, paths: dict[str, Path]) 
     ) is True
 
 
+@pytest.mark.parametrize("encoding", ["whitespace", "key-order", "extra-newline"])
+def test_physical_preflight_requires_canonical_result_bytes(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, encoding: str,
+) -> None:
+    candidate, paths = _install_physical_admission_fixture(candidate_file)
+    attestation = _write_operator_attestation(candidate_file)
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(gate, "validate_candidate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(gate, "_runtime_matches_candidate", lambda *_args, **_kwargs: True)
+
+    def publish_noncanonical(*_args, **_kwargs):
+        _publish_physical_admission_result(candidate, paths)
+        value = _valid_physical_admission_result(candidate, paths)
+        if encoding == "whitespace":
+            raw = json.dumps(value, sort_keys=True).encode() + b"\n"
+        elif encoding == "key-order":
+            raw = json.dumps(value, separators=(",", ":")).encode() + b"\n"
+        else:
+            raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n\n"
+        paths["output"].chmod(0o644)
+        paths["output"].write_bytes(raw)
+        paths["output"].chmod(0o444)
+        return gate._manifest.BoundedCommandResult(0, "", None)
+
+    monkeypatch.setattr(gate, "run_bounded_command", publish_noncanonical)
+
+    result = gate.run_gate(
+        candidate_file, "physical-preflight",
+        runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "physical-flash-admission"
+
+
+@pytest.mark.parametrize("failure_site", ["write", "close"])
+def test_physical_preflight_report_finalization_error_cleans_result_and_reruns(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, failure_site: str,
+) -> None:
+    candidate, paths = _install_physical_admission_fixture(candidate_file)
+    attestation = _write_operator_attestation(candidate_file)
+    report_path = Path(candidate["evidenceRoot"]) / f"physical-{failure_site}.json"
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(gate, "validate_candidate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(gate, "_runtime_matches_candidate", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *_args, **_kwargs: (
+            _publish_physical_admission_result(candidate, paths)
+            or gate._manifest.BoundedCommandResult(0, "", None)
+        ),
+    )
+    original_write = gate._write_report_atomic
+    original_close = gate._close_report_destination
+    if failure_site == "write":
+        monkeypatch.setattr(
+            gate, "_write_report_atomic",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("report fsync")),
+        )
+    else:
+        def close_then_fail(destination):
+            original_close(destination)
+            raise OSError("report close")
+        monkeypatch.setattr(gate, "_close_report_destination", close_then_fail)
+
+    result = gate.run_gate(
+        candidate_file, "physical-preflight", report_path=report_path,
+        runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+    )
+
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "report"
+    assert not paths["output"].exists()
+
+    monkeypatch.setattr(gate, "_write_report_atomic", original_write)
+    monkeypatch.setattr(gate, "_close_report_destination", original_close)
+    rerun = gate.run_gate(
+        candidate_file, "physical-preflight",
+        report_path=report_path.with_name(f"physical-{failure_site}-rerun.json"),
+        runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+    )
+    assert rerun["verdict"] == "PASS"
+    assert paths["output"].exists()
+
+
+def test_report_cleanup_preserves_unrelated_replacement(tmp_path: Path) -> None:
+    report_path = tmp_path / "report.json"
+    destination = gate.ReportDestination(
+        os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW),
+    )
+    parent = os.fstat(destination.parent_fd)
+    parent_identity = (parent.st_dev, parent.st_ino)
+    assert gate._write_report_atomic(report_path, {"verdict": "PASS"}, destination)
+    original_identity = destination.identity
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text('{"owner":"unrelated"}\n', encoding="utf-8")
+    replacement.replace(report_path)
+
+    assert gate._remove_bound_report(
+        report_path, original_identity, parent_identity,
+    ) is False
+    assert json.loads(report_path.read_text(encoding="utf-8"))["owner"] == "unrelated"
+    gate._close_report_destination(destination)
+
+
 @pytest.mark.parametrize(
     "key", ["input", "expectedIdentity", "expectedIdentitySignature"],
 )

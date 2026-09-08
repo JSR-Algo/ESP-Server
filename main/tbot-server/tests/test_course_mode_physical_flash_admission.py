@@ -570,6 +570,55 @@ def test_external_image_observation_change_before_publish_leaves_no_result(
     assert json.loads(capsys.readouterr().out)["reasons"] == ["candidate.external.changed"]
 
 
+def test_serial_holder_appearing_during_external_commit_validation_removes_result(
+    valid_files, monkeypatch, capsys,
+):
+    _, _, paths, _ = valid_files
+    occupied = False
+    original = admission._candidate_external_still_bound
+
+    def validate_external(*args, **kwargs):
+        nonlocal occupied
+        if paths["output"].exists():
+            occupied = True
+        return True
+
+    monkeypatch.setattr(admission, "_candidate_external_still_bound", validate_external)
+    monkeypatch.setattr(
+        admission, "collect_serial_inventory",
+        lambda: ([admission.SERIAL_PATH], [321] if occupied else [], None),
+    )
+
+    assert run_main(paths) == 1
+    assert not paths["output"].exists()
+    assert json.loads(capsys.readouterr().out)["reasons"] == ["output.path"]
+
+
+def test_serial_device_change_after_output_fsync_removes_result(
+    valid_files, monkeypatch, capsys,
+):
+    _, _, paths, _ = valid_files
+    changed = False
+    real_fsync = admission.os.fsync
+
+    def change_after_fsync(fd):
+        nonlocal changed
+        result = real_fsync(fd)
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            changed = True
+        return result
+
+    monkeypatch.setattr(admission.os, "fsync", change_after_fsync)
+    monkeypatch.setattr(
+        admission, "collect_serial_inventory",
+        lambda: ([] if changed else [admission.SERIAL_PATH], [], None),
+    )
+
+    assert run_main(paths) == 1
+    assert not paths["output"].exists()
+    assert json.loads(capsys.readouterr().out)["reasons"] == ["output.path"]
+
+
 @pytest.mark.parametrize("field,value", [("mac", "00:11:22:33:44:55"), ("board", "wrong"), ("target", "esp32"), ("serialPath", "/dev/cu.wrong")])
 def test_resigned_wrong_robot_identity_is_rejected(valid_files, field, value, capsys):
     input_doc, identity, paths, _ = valid_files

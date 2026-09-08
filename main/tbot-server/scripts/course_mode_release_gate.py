@@ -3509,6 +3509,7 @@ def _physical_admission_result_valid(
         expected = strict_json_loads(binding.expected_result)
         if (
             json_error
+            or raw != binding.expected_result + b"\n"
             or expected_record is not None and (
                 raw != expected_record[0] or identity != expected_record[1]
             )
@@ -4470,6 +4471,37 @@ def _close_report_destination(destination: ReportDestination) -> None:
     os.close(destination.parent_fd)
 
 
+def _remove_bound_report(
+    path: Path, identity: tuple[int, int] | None, parent_identity: tuple[int, int],
+) -> bool:
+    if identity is None:
+        return True
+    parent_fd = None
+    try:
+        parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        opened = os.fstat(parent_fd)
+        named = os.stat(path.parent, follow_symlinks=False)
+        if (
+            (opened.st_dev, opened.st_ino) != parent_identity
+            or (named.st_dev, named.st_ino) != parent_identity
+        ):
+            return False
+        current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != identity:
+            return False
+        os.unlink(path.name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    finally:
+        if parent_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(parent_fd)
+
+
 def _run_gate_impl(
     candidate_path: Path,
     mode: str,
@@ -5007,45 +5039,72 @@ def _run_gate_impl(
             report["cleanupFailed"] = True
     if report_path is not None:
         assert report_destination is not None
-        if operator_binding is not None and (
-            _operator_attestation_binding(candidate, source) != operator_binding
-        ):
-            if report.get("failedLane") == "cleanup":
-                report["cleanupFailed"] = True
-            report["verdict"] = "BLOCKED"
-            report["failedLane"] = "operator-precondition"
-            report.pop("operatorAttestationSha256", None)
-        if not _write_report_atomic(report_path, report, report_destination):
-            _invalidate_report(report_path, report_destination)
-            _close_report_destination(report_destination)
-            report = _blocked(report.get("candidateId"), "report")
-        else:
-            post_publish_report = None
-            if report["verdict"] == "PASS" and operator_binding is not None and (
+        report_parent_identity = None
+        report_finalization_failed = False
+        try:
+            report_parent = os.fstat(report_destination.parent_fd)
+            report_parent_identity = (report_parent.st_dev, report_parent.st_ino)
+            if operator_binding is not None and (
                 _operator_attestation_binding(candidate, source) != operator_binding
             ):
-                post_publish_report = _blocked(candidate_id, "operator-precondition")
-            elif report["verdict"] == "PASS" and published_physical_result is not None and (
-                not _admission._still_bound(published_physical_result)
-            ):
-                post_publish_report = _blocked(candidate_id, "physical-flash-admission")
-            elif report["verdict"] == "PASS" and not _candidate_metadata_matches(
-                candidate_path, candidate,
-            ):
-                post_publish_report = _blocked(
-                    candidate_id, selected[-1].name if selected else "candidate-runtime",
+                if report.get("failedLane") == "cleanup":
+                    report["cleanupFailed"] = True
+                report["verdict"] = "BLOCKED"
+                report["failedLane"] = "operator-precondition"
+                report.pop("operatorAttestationSha256", None)
+            if not _write_report_atomic(report_path, report, report_destination):
+                report_finalization_failed = True
+            else:
+                post_publish_report = None
+                if report["verdict"] == "PASS" and operator_binding is not None and (
+                    _operator_attestation_binding(candidate, source) != operator_binding
+                ):
+                    post_publish_report = _blocked(candidate_id, "operator-precondition")
+                elif report["verdict"] == "PASS" and published_physical_result is not None and (
+                    not _admission._still_bound(published_physical_result)
+                ):
+                    post_publish_report = _blocked(candidate_id, "physical-flash-admission")
+                elif report["verdict"] == "PASS" and not _candidate_metadata_matches(
+                    candidate_path, candidate,
+                ):
+                    post_publish_report = _blocked(
+                        candidate_id, selected[-1].name if selected else "candidate-runtime",
+                    )
+                if post_publish_report is not None:
+                    report = post_publish_report
+                    if published_physical_result is not None:
+                        if _remove_bound_physical_admission_result(published_physical_result):
+                            published_physical_result = None
+                        else:
+                            report["cleanupFailed"] = True
+                    if not _write_report_atomic(report_path, report, report_destination):
+                        report_finalization_failed = True
+        except Exception:
+            report_finalization_failed = True
+        finally:
+            if report_finalization_failed:
+                _invalidate_report(report_path, report_destination)
+            try:
+                _close_report_destination(report_destination)
+            except Exception:
+                report_finalization_failed = True
+            if report_finalization_failed:
+                report_removed = (
+                    report_parent_identity is not None
+                    and _remove_bound_report(
+                        report_path, report_destination.identity, report_parent_identity,
+                    )
                 )
-            if post_publish_report is not None:
-                report = post_publish_report
-                if published_physical_result is not None:
-                    if _remove_bound_physical_admission_result(published_physical_result):
-                        published_physical_result = None
-                    else:
-                        report["cleanupFailed"] = True
-                if not _write_report_atomic(report_path, report, report_destination):
-                    _invalidate_report(report_path, report_destination)
+                if not report_removed:
                     report = _blocked(candidate_id, "report")
-            _close_report_destination(report_destination)
+                    report["cleanupFailed"] = True
+                else:
+                    report = _blocked(candidate_id, "report")
+            if report["verdict"] != "PASS" and published_physical_result is not None:
+                if _remove_bound_physical_admission_result(published_physical_result):
+                    published_physical_result = None
+                else:
+                    report["cleanupFailed"] = True
     if (
         report["verdict"] != "PASS" and published_physical_result is not None
         and not _remove_bound_physical_admission_result(published_physical_result)

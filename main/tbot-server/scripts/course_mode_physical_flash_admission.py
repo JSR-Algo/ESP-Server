@@ -266,6 +266,10 @@ def collect_serial_inventory():
         elif token: return devices,[],"output"
     return devices,sorted(set(holders)),None
 
+def _serial_inventory_safe():
+    devices,holders,error=collect_serial_inventory()
+    return error is None and devices==[SERIAL_PATH] and not holders
+
 def _candidate_matches(binding, actual):
     if not isinstance(actual,dict): return False
     if any(not _exact_equal(actual.get(k),binding.get(k)) for k in ("candidateId","createdAt","expiresAt")): return False
@@ -360,6 +364,7 @@ def _publish(path,payload,output_binding,sources,commit_safe):
         try: os.stat(path.name,dir_fd=parent_fd,follow_symlinks=False)
         except FileNotFoundError: pass
         else: return False
+        if not commit_safe(): raise OSError("commit authority changed")
         fd=os.open(path.name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600,dir_fd=parent_fd)
         created_identity=_file_identity(os.fstat(fd))
         created_inode=created_identity[:2]
@@ -452,7 +457,11 @@ def main(argv=None):
     if final_inventory_reasons: _failure(final_inventory_reasons); return 1
     if not _candidate_external_still_bound(actual,external_binding,now): _failure(["candidate.external.changed"]); return 1
     payload={"schemaVersion":1,"validator":VALIDATOR,"status":"pass","reasons":[],"candidateId":binding["candidateId"],"sessionId":doc["sessionId"],"signerFingerprint":fingerprint,"physicalActionsPerformed":False,"serialOpened":False,"inputSha256":hashlib.sha256(raw).hexdigest(),"expectedIdentitySha256":hashlib.sha256(identity_raw).hexdigest(),"candidateSha256":hashlib.sha256(candidate_raw).hexdigest(),"robotMac":ROBOT_MAC,"serialPath":SERIAL_PATH,"firmwareSha":FIRMWARE_SHA,"appSha256":APP_SHA256,"manifestSha256":MANIFEST_SHA256}
-    commit_safe=lambda: not _commit_time_reasons(doc,utc_now()) and _candidate_external_still_bound(actual,external_binding,now)
+    commit_safe=lambda: (
+        not _commit_time_reasons(doc,utc_now())
+        and _candidate_external_still_bound(actual,external_binding,now)
+        and _serial_inventory_safe()
+    )
     if not _publish(args.output,payload,output_binding,(input_record,identity_record,signature_record,candidate_record),commit_safe): _failure(["output.path"]); return 1
     return 0
 def _entrypoint():
