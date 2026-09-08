@@ -12,6 +12,7 @@ import os
 import re
 import stat
 import tempfile
+import uuid
 from pathlib import Path
 
 from course_mode_evidence_privacy import has_sanitization_failure, is_sanitized_manifest, scan_evidence_payload
@@ -125,6 +126,123 @@ def _strict_json_loads(data: bytes) -> object:
         parse_constant=lambda _value: (_ for _ in ()).throw(ValueError("non-finite JSON value")),
         parse_float=finite,
     )
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _candidate_admission_paths(candidate: object, evidence_root: Path) -> dict[str, Path] | None:
+    if not isinstance(candidate, dict):
+        return None
+    tools = candidate.get("tools")
+    descriptor = tools.get("physicalAdmission") if isinstance(tools, dict) else None
+    expected_keys = {"input", "output", "expectedIdentity", "expectedIdentitySignature"}
+    if not isinstance(descriptor, dict) or set(descriptor) != expected_keys:
+        return None
+    try:
+        canonical_root = evidence_root.resolve(strict=True)
+        if canonical_root != evidence_root:
+            return None
+        paths = {
+            key: Path(value) if isinstance(value, str) else Path()
+            for key, value in descriptor.items()
+        }
+        if any(
+            not isinstance(descriptor[key], str)
+            or not path.is_absolute()
+            or not _lexically_canonical(path)
+            for key, path in paths.items()
+        ):
+            return None
+        if len(set(paths.values())) != len(expected_keys):
+            return None
+        for key, path in paths.items():
+            if key == "output":
+                canonical_parent = path.parent.resolve(strict=True)
+                if canonical_parent != path.parent or not path.is_relative_to(canonical_root):
+                    return None
+                try:
+                    metadata = path.lstat()
+                except FileNotFoundError:
+                    continue
+                if (
+                    path.resolve(strict=True) != path
+                    or not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_nlink != 1
+                    or metadata.st_uid != os.geteuid()
+                    or metadata.st_mode & 0o022
+                ):
+                    return None
+                continue
+            if path.resolve(strict=True) != path or not path.is_relative_to(canonical_root):
+                return None
+        return paths
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _public_admission_scan_payloads(candidate: object, evidence_root: Path) -> dict[Path, bytes]:
+    paths = _candidate_admission_paths(candidate, evidence_root)
+    if paths is None:
+        return {}
+    try:
+        import course_mode_physical_flash_admission as admission
+
+        input_raw = _read_secure_file(paths["input"])
+        identity_raw = _read_secure_file(paths["expectedIdentity"])
+        signature = _read_secure_file(paths["expectedIdentitySignature"])
+        if len(signature) != 64:
+            return {}
+        input_document = _strict_json_loads(input_raw)
+        identity = _strict_json_loads(identity_raw)
+        if not isinstance(input_document, dict) or not isinstance(identity, dict):
+            return {}
+        input_session = input_document.get("sessionId")
+        if (
+            not isinstance(input_session, str)
+            or str(uuid.UUID(input_session)) != input_session
+            or identity.get("sessionId") != input_session
+        ):
+            return {}
+        signature_valid, _fingerprint = admission._verify_signature(
+            admission._canonical_bytes(identity), signature
+        )
+        if not signature_valid:
+            return {}
+        checked_at = admission._parse_utc(input_document.get("checkedAt"))
+        if checked_at is None or admission.validate_documents(
+            input_document,
+            identity,
+            candidate,
+            checked_at,
+            [admission.SERIAL_PATH],
+            [],
+            None,
+        ):
+            return {}
+        return {
+            paths["input"]: _canonical_json_bytes({**input_document, "sessionId": "redacted"}),
+            paths["expectedIdentity"]: _canonical_json_bytes({**identity, "sessionId": "redacted"}),
+        }
+    except (
+        AttributeError,
+        ImportError,
+        KeyError,
+        OSError,
+        RecursionError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
+        return {}
 
 
 def _load_json(path: Path) -> tuple[object | None, bytes | None]:
@@ -458,6 +576,7 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
     ):
         if not ok:
             findings.add(code)
+    public_admission_payloads = _public_admission_scan_payloads(candidate, evidence_root)
     try:
         with contextlib.closing(_iter_root_entries(evidence_root)) as evidence_paths:
             for path, metadata in evidence_paths:
@@ -504,8 +623,9 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
                 except OSError:
                     findings.add("evidence.metadata_or_json")
                     continue
+                scan_data = public_admission_payloads.get(path, data)
                 content_findings, member_count = scan_evidence_payload(
-                    data, path.name, _budget=archive_budget, _base64_state=base64_state
+                    scan_data, path.name, _budget=archive_budget, _base64_state=base64_state
                 )
                 findings.update(content_findings)
                 checked_archive_members += member_count
