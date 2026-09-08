@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import ctypes
 import errno
 import fcntl
 import hashlib
@@ -4334,13 +4335,13 @@ def _write_report_atomic(
         temporary_stat = os.stat(temporary, dir_fd=parent_fd, follow_symlinks=False)
         if not stat.S_ISREG(temporary_stat.st_mode) or temporary_stat.st_nlink != 1:
             return False
+        destination.identity = (temporary_stat.st_dev, temporary_stat.st_ino)
+        destination.report_fd = descriptor
+        descriptor = None
         os.link(
             temporary, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
             follow_symlinks=False,
         )
-        destination.identity = (temporary_stat.st_dev, temporary_stat.st_ino)
-        destination.report_fd = descriptor
-        descriptor = None
         os.unlink(temporary, dir_fd=parent_fd)
         temporary = None
         published = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
@@ -4477,6 +4478,7 @@ def _remove_bound_report(
     if identity is None:
         return True
     parent_fd = None
+    quarantine = None
     try:
         parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         opened = os.fstat(parent_fd)
@@ -4486,12 +4488,32 @@ def _remove_bound_report(
             or (named.st_dev, named.st_ino) != parent_identity
         ):
             return False
-        current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
-        if (current.st_dev, current.st_ino) != identity:
+        for _ in range(32):
+            quarantine = f".{path.name}.invalidate-{secrets.token_hex(16)}"
+            try:
+                _rename_no_replace(parent_fd, path.name, quarantine)
+                break
+            except FileExistsError:
+                continue
+        else:
             return False
-        os.unlink(path.name, dir_fd=parent_fd)
+        moved = os.stat(quarantine, dir_fd=parent_fd, follow_symlinks=False)
+        if (moved.st_dev, moved.st_ino) != identity:
+            try:
+                _rename_no_replace(parent_fd, quarantine, path.name)
+                quarantine = None
+            except OSError:
+                pass
+            os.fsync(parent_fd)
+            return False
+        os.unlink(quarantine, dir_fd=parent_fd)
+        quarantine = None
         os.fsync(parent_fd)
-        return True
+        try:
+            os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return True
+        return False
     except FileNotFoundError:
         return True
     except OSError:
@@ -4500,6 +4522,27 @@ def _remove_bound_report(
         if parent_fd is not None:
             with contextlib.suppress(OSError):
                 os.close(parent_fd)
+
+
+def _rename_no_replace(parent_fd: int, source: str, destination: str) -> None:
+    library = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    if sys.platform == "darwin":
+        operation = library.renameatx_np
+        flags = 0x00000004  # RENAME_EXCL
+    elif sys.platform.startswith("linux"):
+        operation = library.renameat2
+        flags = 0x1  # RENAME_NOREPLACE
+    else:
+        raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable")
+    operation.argtypes = (
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint,
+    )
+    operation.restype = ctypes.c_int
+    if operation(parent_fd, source_bytes, parent_fd, destination_bytes, flags) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
 
 
 def _run_gate_impl(

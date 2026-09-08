@@ -8813,6 +8813,80 @@ def test_physical_report_operator_interrupt_cleans_bound_outputs_and_reraises(
     assert unrelated.read_text(encoding="utf-8") == "preserve me"
 
 
+@pytest.mark.parametrize("exception_type", [KeyboardInterrupt, SystemExit])
+def test_physical_report_link_interrupt_cleans_bound_outputs_and_reraises(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+    exception_type: type[BaseException],
+) -> None:
+    candidate, paths = _install_physical_admission_fixture(candidate_file)
+    attestation = _write_operator_attestation(candidate_file)
+    evidence = Path(candidate["evidenceRoot"])
+    report_path = evidence / "link-interrupt.json"
+    unrelated = evidence / "unrelated.txt"
+    unrelated.write_text("preserve me", encoding="utf-8")
+    monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
+    monkeypatch.setattr(gate, "validate_candidate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(gate, "release_state_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(gate, "_runtime_matches_candidate", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        gate, "run_bounded_command",
+        lambda *_args, **_kwargs: (
+            _publish_physical_admission_result(candidate, paths)
+            or gate._manifest.BoundedCommandResult(0, "", None)
+        ),
+    )
+    real_link = gate.os.link
+
+    def link_then_interrupt(source, destination, *args, **kwargs):
+        result = real_link(source, destination, *args, **kwargs)
+        if destination == report_path.name:
+            raise exception_type()
+        return result
+
+    monkeypatch.setattr(gate.os, "link", link_then_interrupt)
+
+    with pytest.raises(exception_type):
+        gate.run_gate(
+            candidate_file, "physical-preflight", report_path=report_path,
+            runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+        )
+
+    assert not paths["output"].exists()
+    assert not report_path.exists()
+    assert unrelated.read_text(encoding="utf-8") == "preserve me"
+
+
+def test_report_cleanup_quarantines_raced_foreign_inode_without_deleting_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report_path = tmp_path / "report.json"
+    report_path.write_text('{"owner":"gate"}\n', encoding="utf-8")
+    original = report_path.stat()
+    identity = (original.st_dev, original.st_ino)
+    parent = tmp_path.stat()
+    parent_identity = (parent.st_dev, parent.st_ino)
+    foreign = tmp_path / "foreign.json"
+    foreign.write_text('{"owner":"foreign"}\n', encoding="utf-8")
+    displaced = tmp_path / "displaced-gate-report.json"
+    real_rename = gate.os.rename
+    real_no_replace = gate._rename_no_replace
+    raced = False
+
+    def swap_before_quarantine(parent_fd, source, destination):
+        nonlocal raced
+        if not raced and source == report_path.name:
+            raced = True
+            real_rename(report_path, displaced)
+            real_rename(foreign, report_path)
+        return real_no_replace(parent_fd, source, destination)
+
+    monkeypatch.setattr(gate, "_rename_no_replace", swap_before_quarantine)
+
+    assert gate._remove_bound_report(report_path, identity, parent_identity) is False
+    assert json.loads(report_path.read_text(encoding="utf-8"))["owner"] == "foreign"
+    assert displaced.exists()
+
+
 @pytest.mark.parametrize(
     "key", ["input", "expectedIdentity", "expectedIdentitySignature"],
 )
