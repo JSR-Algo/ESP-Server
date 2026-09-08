@@ -461,6 +461,37 @@ def test_candidate_bound_signed_admission_session_id_is_public_evidence(
     assert "content.secret" not in report["findings"]
 
 
+def test_public_admission_exemption_is_bound_to_scanned_bytes(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    input_path = paths["input"]
+    replacement = copy.deepcopy(bundle["input"])
+    replacement["sessionId"] = "3fc6471b-4e35-4ce7-8b20-b741c3e8e9e0"
+    secure_read = auditor._read_secure_file
+    input_reads = 0
+
+    def replace_before_scan(path: Path) -> bytes:
+        nonlocal input_reads
+        if path == input_path:
+            input_reads += 1
+            if input_reads == 2:
+                _rewrite_json(input_path, replacement)
+        return secure_read(path)
+
+    monkeypatch.setattr(auditor, "_read_secure_file", replace_before_scan)
+
+    report = auditor.audit(candidate, evidence, [], output)
+
+    assert input_reads == 2
+    assert report["status"] == "fail"
+    assert report["checks"]["secretScan"] is False
+    assert "content.secret" in report["findings"]
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
