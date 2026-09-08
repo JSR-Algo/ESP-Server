@@ -3550,23 +3550,7 @@ def _remove_bound_physical_admission_result(record: tuple | None) -> bool:
             path.parent, parent_fd, saved_metadata, saved_ancestry,
         ):
             return False
-        quarantine = f".{path.name}.invalidate-{secrets.token_hex(16)}"
-        os.rename(
-            path.name, quarantine, src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
-        )
-        quarantined = os.stat(quarantine, dir_fd=parent_fd, follow_symlinks=False)
-        if _admission._file_identity(quarantined)[:8] != identity[:8]:
-            with contextlib.suppress(OSError):
-                os.link(
-                    quarantine, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
-                    follow_symlinks=False,
-                )
-                os.unlink(quarantine, dir_fd=parent_fd)
-                os.fsync(parent_fd)
-            return False
-        os.unlink(quarantine, dir_fd=parent_fd)
-        os.fsync(parent_fd)
-        return True
+        return _quarantine_invalidate_remove(parent_fd, path.name, identity[:2])
     except OSError:
         return False
     finally:
@@ -4478,7 +4462,6 @@ def _remove_bound_report(
     if identity is None:
         return True
     parent_fd = None
-    quarantine = None
     try:
         parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         opened = os.fstat(parent_fd)
@@ -4488,32 +4471,7 @@ def _remove_bound_report(
             or (named.st_dev, named.st_ino) != parent_identity
         ):
             return False
-        for _ in range(32):
-            quarantine = f".{path.name}.invalidate-{secrets.token_hex(16)}"
-            try:
-                _rename_no_replace(parent_fd, path.name, quarantine)
-                break
-            except FileExistsError:
-                continue
-        else:
-            return False
-        moved = os.stat(quarantine, dir_fd=parent_fd, follow_symlinks=False)
-        if (moved.st_dev, moved.st_ino) != identity:
-            try:
-                _rename_no_replace(parent_fd, quarantine, path.name)
-                quarantine = None
-            except OSError:
-                pass
-            os.fsync(parent_fd)
-            return False
-        os.unlink(quarantine, dir_fd=parent_fd)
-        quarantine = None
-        os.fsync(parent_fd)
-        try:
-            os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            return True
-        return False
+        return _quarantine_invalidate_remove(parent_fd, path.name, identity)
     except FileNotFoundError:
         return True
     except OSError:
@@ -4543,6 +4501,78 @@ def _rename_no_replace(parent_fd: int, source: str, destination: str) -> None:
     if operation(parent_fd, source_bytes, parent_fd, destination_bytes, flags) != 0:
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error), destination)
+
+
+def _quarantine_invalidate_remove(
+    parent_fd: int, source: str, identity: tuple[int, int],
+) -> bool:
+    quarantine = None
+    descriptor = None
+    write_descriptor = None
+    try:
+        for _ in range(32):
+            quarantine = f".{source}.invalidate-{secrets.token_hex(16)}"
+            try:
+                _rename_no_replace(parent_fd, source, quarantine)
+                break
+            except FileExistsError:
+                continue
+        else:
+            return False
+        descriptor = os.open(
+            quarantine, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd,
+        )
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != identity:
+            _rename_no_replace(parent_fd, quarantine, source)
+            quarantine = None
+            os.fsync(parent_fd)
+            return False
+        os.fchmod(descriptor, 0o600)
+        os.fsync(descriptor)
+        write_descriptor = os.open(
+            quarantine, os.O_WRONLY | os.O_NOFOLLOW, dir_fd=parent_fd,
+        )
+        writable = os.fstat(write_descriptor)
+        if (writable.st_dev, writable.st_ino) != identity:
+            return False
+        os.ftruncate(write_descriptor, 0)
+        os.fchmod(write_descriptor, 0)
+        os.fsync(write_descriptor)
+        invalidated = os.fstat(write_descriptor)
+        if (
+            (invalidated.st_dev, invalidated.st_ino) != identity
+            or stat.S_IMODE(invalidated.st_mode) != 0
+            or invalidated.st_size != 0
+        ):
+            return False
+        os.stat(quarantine, dir_fd=parent_fd, follow_symlinks=False)
+        named_fd = os.open(
+            quarantine, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd,
+        )
+        try:
+            named = os.fstat(named_fd)
+        finally:
+            os.close(named_fd)
+        if (named.st_dev, named.st_ino) != identity:
+            try:
+                _rename_no_replace(parent_fd, quarantine, source)
+                quarantine = None
+            except OSError:
+                pass
+            os.fsync(parent_fd)
+            return False
+        os.fsync(parent_fd)
+        return False
+    except OSError:
+        return False
+    finally:
+        if descriptor is not None:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        if write_descriptor is not None:
+            with contextlib.suppress(OSError):
+                os.close(write_descriptor)
 
 
 def _run_gate_impl(

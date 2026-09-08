@@ -8887,6 +8887,87 @@ def test_report_cleanup_quarantines_raced_foreign_inode_without_deleting_it(
     assert displaced.exists()
 
 
+@pytest.mark.parametrize("artifact", ["report", "receipt"])
+def test_bound_cleanup_invalidates_original_before_post_verify_unlink_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, artifact: str,
+) -> None:
+    path = tmp_path / f"{artifact}.json"
+    path.write_text('{"status":"pass"}\n', encoding="utf-8")
+    path.chmod(0o444)
+    foreign = tmp_path / f"foreign-{artifact}.json"
+    foreign.write_text('{"owner":"foreign"}\n', encoding="utf-8")
+    foreign.chmod(0o444)
+    displaced = tmp_path / f"displaced-{artifact}.json"
+    real_stat = gate.os.stat
+    real_rename = gate.os.rename
+    raced = False
+
+    def swap_after_verification(target, *args, **kwargs):
+        nonlocal raced
+        current = real_stat(target, *args, **kwargs)
+        if (
+            not raced and isinstance(target, str)
+            and target.startswith(f".{path.name}.invalidate-")
+        ):
+            raced = True
+            parent_fd = kwargs["dir_fd"]
+            real_rename(
+                target, displaced.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
+            )
+            real_rename(
+                foreign.name, target, src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
+            )
+        return current
+
+    monkeypatch.setattr(gate.os, "stat", swap_after_verification)
+    if artifact == "report":
+        metadata = path.stat()
+        parent = tmp_path.stat()
+        removed = gate._remove_bound_report(
+            path, (metadata.st_dev, metadata.st_ino),
+            (parent.st_dev, parent.st_ino),
+        )
+    else:
+        record, error = gate._admission._secure_read(path, 1024)
+        assert error is None and record is not None
+        removed = gate._remove_bound_physical_admission_result(record)
+
+    assert removed is False
+    assert json.loads(path.read_text(encoding="utf-8"))["owner"] == "foreign"
+    assert displaced.exists()
+    assert stat.S_IMODE(displaced.stat().st_mode) != 0o444
+    assert displaced.stat().st_size == 0
+    assert gate._admission._secure_read(displaced, 1024)[1] is not None
+
+
+@pytest.mark.parametrize("artifact", ["report", "receipt"])
+def test_bound_cleanup_does_not_claim_exact_removal_for_retained_invalidated_inode(
+    tmp_path: Path, artifact: str,
+) -> None:
+    path = tmp_path / f"{artifact}.json"
+    path.write_text('{"status":"pass"}\n', encoding="utf-8")
+    path.chmod(0o444)
+    if artifact == "report":
+        metadata = path.stat()
+        parent = tmp_path.stat()
+        removed = gate._remove_bound_report(
+            path, (metadata.st_dev, metadata.st_ino),
+            (parent.st_dev, parent.st_ino),
+        )
+    else:
+        record, error = gate._admission._secure_read(path, 1024)
+        assert error is None and record is not None
+        removed = gate._remove_bound_physical_admission_result(record)
+
+    retained = list(tmp_path.glob(f".{path.name}.invalidate-*"))
+    assert removed is False
+    assert not path.exists()
+    assert len(retained) == 1
+    assert stat.S_IMODE(retained[0].stat().st_mode) == 0
+    assert retained[0].stat().st_size == 0
+    assert gate._admission._secure_read(retained[0], 1024)[1] is not None
+
+
 @pytest.mark.parametrize(
     "key", ["input", "expectedIdentity", "expectedIdentitySignature"],
 )
