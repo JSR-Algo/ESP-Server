@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import uuid
@@ -509,6 +510,221 @@ def test_public_admission_exemption_rejects_candidate_replaced_during_audit(
         "candidate.metadata_or_json",
         "content.secret",
     }.intersection(report["findings"])
+
+
+def test_pass_report_rejects_candidate_parent_symlink_alias_before_publication(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    original_candidate, evidence, output = evidence_fixture
+    candidate_dir = original_candidate.parent / "candidate-dir"
+    candidate_dir.mkdir()
+    candidate = candidate_dir / original_candidate.name
+    original_candidate.rename(candidate)
+    _install_signed_admission(candidate, evidence, monkeypatch)
+    candidate_real = candidate_dir.with_name("candidate-real")
+    audit = auditor.audit
+
+    def alias_candidate_parent(*args, **kwargs):
+        report = audit(*args, **kwargs)
+        candidate_dir.rename(candidate_real)
+        candidate_dir.symlink_to(candidate_real, target_is_directory=True)
+        return report
+
+    monkeypatch.setattr(auditor, "audit", alias_candidate_parent)
+
+    result = auditor.main(
+        [
+            "--candidate",
+            str(candidate),
+            "--evidence-root",
+            str(evidence),
+            "--output",
+            str(output),
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert report["status"] == "fail"
+    assert "candidate.metadata_or_json" in report["findings"]
+    assert json.loads(output.read_text(encoding="utf-8"))["status"] == "fail"
+
+
+def test_pass_report_rejects_output_parent_symlink_redirection(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    evidence_real = evidence.with_name("evidence-real")
+    foreign = evidence.with_name("foreign")
+    foreign.mkdir()
+    audit = auditor.audit
+
+    def redirect_output_parent(*args, **kwargs):
+        report = audit(*args, **kwargs)
+        evidence.rename(evidence_real)
+        evidence.symlink_to(foreign, target_is_directory=True)
+        return report
+
+    monkeypatch.setattr(auditor, "audit", redirect_output_parent)
+
+    result = auditor.main(
+        [
+            "--candidate",
+            str(candidate),
+            "--evidence-root",
+            str(evidence),
+            "--output",
+            str(output),
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert report["status"] == "fail"
+    assert "output.write" in report["findings"]
+    assert not (foreign / output.name).exists()
+
+
+def test_pass_report_rejects_missing_output_parent_snapshot(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    monkeypatch.setattr(
+        auditor,
+        "_directory_snapshot",
+        lambda _path: (_ for _ in ()).throw(OSError("transient snapshot failure")),
+    )
+
+    result = auditor.main(
+        [
+            "--candidate",
+            str(candidate),
+            "--evidence-root",
+            str(evidence),
+            "--output",
+            str(output),
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert report["status"] == "fail"
+    assert "output.write" in report["findings"]
+    assert not output.exists()
+
+
+def test_late_output_binding_failure_does_not_unlink_replacement(
+    evidence_fixture: tuple[Path, Path, Path]
+) -> None:
+    _, _, output = evidence_fixture
+    calls = 0
+    replacement = b"unrelated-output"
+
+    def replace_after_publish() -> bool:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            output.unlink()
+            output.write_bytes(replacement)
+            output.chmod(0o444)
+            return False
+        return True
+
+    assert auditor._write_output(output, {"status": "pass"}, replace_after_publish) is False
+    assert calls == 3
+    assert output.read_bytes() == replacement
+
+
+def test_late_output_binding_failure_never_unlinks_by_path(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, output = evidence_fixture
+    calls = 0
+    unlinked: list[str] = []
+    unlink = auditor.os.unlink
+
+    def fail_after_publish() -> bool:
+        nonlocal calls
+        calls += 1
+        return calls < 3
+
+    def record_unlink(path, *args, **kwargs) -> None:
+        unlinked.append(str(path))
+        unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(auditor.os, "unlink", record_unlink)
+
+    assert auditor._write_output(output, {"status": "pass"}, fail_after_publish) is False
+    assert calls == 3
+    assert unlinked == []
+    assert output.read_bytes() == b""
+
+
+def test_output_replaced_during_publication_is_rejected_without_unlinking_replacement(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, output = evidence_fixture
+    replacement = b"unrelated-output"
+    replace = auditor.os.replace
+
+    def replace_then_swap(*args, **kwargs) -> None:
+        replace(*args, **kwargs)
+        output.unlink()
+        output.write_bytes(replacement)
+        output.chmod(0o444)
+
+    monkeypatch.setattr(auditor.os, "replace", replace_then_swap)
+
+    assert auditor._write_output(output, {"status": "pass"}) is False
+    assert output.read_bytes() == replacement
+
+
+def test_parent_fsync_failure_after_publication_invalidates_published_output(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, output = evidence_fixture
+    fsync = auditor.os.fsync
+    failed = False
+
+    def fail_first_directory_fsync(descriptor: int) -> None:
+        nonlocal failed
+        if stat.S_ISDIR(auditor.os.fstat(descriptor).st_mode) and not failed:
+            failed = True
+            raise OSError("directory fsync failure")
+        fsync(descriptor)
+
+    monkeypatch.setattr(auditor.os, "fsync", fail_first_directory_fsync)
+
+    assert auditor._write_output(output, {"status": "pass"}) is False
+    assert failed is True
+    assert output.read_bytes() == b""
+
+
+def test_post_publication_stat_failure_invalidates_published_output(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, output = evidence_fixture
+    os_stat = auditor.os.stat
+    failed = False
+
+    def fail_first_output_stat(path, *args, **kwargs):
+        nonlocal failed
+        if path == output.name and kwargs.get("dir_fd") is not None and not failed:
+            failed = True
+            raise OSError("post-publication stat failure")
+        return os_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(auditor.os, "stat", fail_first_output_stat)
+
+    assert auditor._write_output(output, {"status": "pass"}) is False
+    assert failed is True
+    assert output.read_bytes() == b""
 
 
 def test_public_admission_exemption_rejects_relocated_input_descriptor(

@@ -10,8 +10,8 @@ import json
 import math
 import os
 import re
+import secrets
 import stat
-import tempfile
 import uuid
 from pathlib import Path
 
@@ -71,13 +71,15 @@ class _AuditReport(dict[str, object]):
         self,
         value: dict[str, object],
         candidate_path: Path,
-        candidate_snapshot: tuple[bytes, tuple[int, ...]] | None,
+        candidate_snapshot: tuple[bytes, tuple[int, ...], tuple[tuple[int, ...], ...]] | None,
         public_admission_declared: bool,
+        output_parent_snapshot: tuple[tuple[int, ...], ...] | None,
     ) -> None:
         super().__init__(value)
         self.candidate_path = candidate_path
         self.candidate_snapshot = candidate_snapshot
         self.public_admission_declared = public_admission_declared
+        self.output_parent_snapshot = output_parent_snapshot
 
     def candidate_still_bound(self) -> bool:
         return self.candidate_snapshot is not None and _secure_file_snapshot_matches(
@@ -85,13 +87,84 @@ class _AuditReport(dict[str, object]):
         )
 
 
-def _read_secure_file_snapshot(path: Path) -> tuple[bytes, tuple[int, ...]]:
-    descriptor = os.open(
-        path,
-        os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+def _directory_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
     )
+
+
+def _open_bound_directory(path: Path) -> tuple[int, tuple[tuple[int, ...], ...]]:
+    if not path.is_absolute() or any(part in {".", ".."} for part in path.parts[1:]):
+        raise OSError("non-canonical path")
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    current = os.open(path.anchor, flags)
+    ancestry = [_directory_identity(os.fstat(current))]
     try:
+        for component in path.parts[1:]:
+            named = os.stat(component, dir_fd=current, follow_symlinks=False)
+            if not stat.S_ISDIR(named.st_mode):
+                raise OSError("invalid path ancestry")
+            next_descriptor = os.open(component, flags, dir_fd=current)
+            try:
+                opened = os.fstat(next_descriptor)
+                current_named = os.stat(component, dir_fd=current, follow_symlinks=False)
+                if _directory_identity(named) != _directory_identity(opened) or _directory_identity(
+                    current_named
+                ) != _directory_identity(opened):
+                    raise OSError("path ancestry changed")
+            except Exception:
+                os.close(next_descriptor)
+                raise
+            os.close(current)
+            current = next_descriptor
+            ancestry.append(_directory_identity(opened))
+        return current, tuple(ancestry)
+    except Exception:
+        os.close(current)
+        raise
+
+
+def _directory_snapshot(path: Path) -> tuple[tuple[int, ...], ...]:
+    descriptor, ancestry = _open_bound_directory(path)
+    os.close(descriptor)
+    return ancestry
+
+
+def _directory_still_bound(
+    path: Path, descriptor: int, ancestry: tuple[tuple[int, ...], ...]
+) -> bool:
+    verification: int | None = None
+    try:
+        verification, observed = _open_bound_directory(path)
+        return (
+            _directory_identity(os.fstat(descriptor)) == ancestry[-1]
+            and _directory_identity(os.fstat(verification)) == ancestry[-1]
+            and observed == ancestry
+        )
+    except OSError:
+        return False
+    finally:
+        if verification is not None:
+            os.close(verification)
+
+
+def _read_secure_file_snapshot(
+    path: Path,
+) -> tuple[bytes, tuple[int, ...], tuple[tuple[int, ...], ...]]:
+    parent_descriptor, ancestry = _open_bound_directory(path.parent)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_descriptor,
+        )
         before = os.fstat(descriptor)
+        named_before = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
         if (
             not stat.S_ISREG(before.st_mode)
             or before.st_nlink != 1
@@ -111,7 +184,7 @@ def _read_secure_file_snapshot(path: Path) -> tuple[bytes, tuple[int, ...]]:
                 raise OSError("evidence exceeds bound")
             chunks.append(chunk)
         after = os.fstat(descriptor)
-        current = path.lstat()
+        current = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
         identity = (
             before.st_dev,
             before.st_ino,
@@ -145,22 +218,40 @@ def _read_secure_file_snapshot(path: Path) -> tuple[bytes, tuple[int, ...]]:
             current.st_mtime_ns,
             current.st_ctime_ns,
         )
-        if identity != observed_after:
+        named_identity = (
+            named_before.st_dev,
+            named_before.st_ino,
+            named_before.st_mode,
+            named_before.st_nlink,
+            named_before.st_uid,
+            named_before.st_gid,
+            named_before.st_size,
+            named_before.st_mtime_ns,
+            named_before.st_ctime_ns,
+        )
+        if identity != named_identity or identity != observed_after:
             raise OSError("evidence changed while reading")
         if identity != observed_current:
             raise OSError("evidence path changed while reading")
         if total != before.st_size:
             raise OSError("evidence size changed while reading")
-        return b"".join(chunks), identity
+        if not _directory_still_bound(path.parent, parent_descriptor, ancestry):
+            raise OSError("evidence ancestry changed while reading")
+        return b"".join(chunks), identity, ancestry
     finally:
-        os.close(descriptor)
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent_descriptor)
 
 
 def _read_secure_file(path: Path) -> bytes:
     return _read_secure_file_snapshot(path)[0]
 
 
-def _secure_file_snapshot_matches(path: Path, snapshot: tuple[bytes, tuple[int, ...]]) -> bool:
+def _secure_file_snapshot_matches(
+    path: Path,
+    snapshot: tuple[bytes, tuple[int, ...], tuple[tuple[int, ...], ...]],
+) -> bool:
     try:
         return _read_secure_file_snapshot(path) == snapshot
     except OSError:
@@ -565,8 +656,14 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
     evidence_root = _absolute(evidence_root)
     preserved_roots = [_absolute(root) for root in preserved_roots]
     output = _absolute(output)
+    try:
+        output_parent_snapshot = _directory_snapshot(output.parent)
+    except OSError:
+        output_parent_snapshot = None
     findings: set[str] = set()
-    candidate_snapshot: tuple[bytes, tuple[int, ...]] | None = None
+    if output_parent_snapshot is None:
+        findings.add("output.write")
+    candidate_snapshot: tuple[bytes, tuple[int, ...], tuple[tuple[int, ...], ...]] | None = None
     try:
         candidate_snapshot = _read_secure_file_snapshot(candidate_path)
         candidate_bytes = candidate_snapshot[0]
@@ -881,6 +978,7 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
         candidate_path,
         candidate_snapshot,
         public_admission_declared,
+        output_parent_snapshot,
     )
 
 
@@ -897,36 +995,104 @@ def _mark_candidate_changed(report: dict[str, object]) -> None:
     report["status"] = "fail"
 
 
+def _invalidate_published_output(descriptor: int) -> None:
+    with contextlib.suppress(OSError):
+        os.ftruncate(descriptor, 0)
+        os.fsync(descriptor)
+
+
 def _write_output(
     path: Path,
     report: dict[str, object],
     commit_safe=None,
+    parent_snapshot: tuple[tuple[int, ...], ...] | None = None,
 ) -> bool:
     payload = json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n"
+    parent_descriptor: int | None = None
+    descriptor: int | None = None
+    temporary_name: str | None = None
+    published_identity: tuple[int, int] | None = None
+    publication_complete = False
     try:
         if commit_safe is not None and not commit_safe():
             return False
-        path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.chmod(temporary, 0o444)
-            if commit_safe is not None and not commit_safe():
-                return False
-            os.replace(temporary, path)
-            if commit_safe is not None and not commit_safe():
-                with contextlib.suppress(OSError):
-                    path.unlink()
-                return False
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(temporary)
+        parent_descriptor, observed_parent = _open_bound_directory(path.parent)
+        expected_parent = parent_snapshot or observed_parent
+        if observed_parent != expected_parent or not _directory_still_bound(
+            path.parent, parent_descriptor, expected_parent
+        ):
+            return False
+        for _attempt in range(16):
+            temporary_name = f".{path.name}.{secrets.token_hex(8)}"
+            try:
+                descriptor = os.open(
+                    temporary_name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=parent_descriptor,
+                )
+                break
+            except FileExistsError:
+                temporary_name = None
+        if descriptor is None or temporary_name is None:
+            return False
+        data = payload.encode("utf-8")
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short output write")
+            view = view[written:]
+        os.fchmod(descriptor, 0o444)
+        os.fsync(descriptor)
+        temporary_identity = os.fstat(descriptor)
+        published_identity = (temporary_identity.st_dev, temporary_identity.st_ino)
+        if (
+            not stat.S_ISREG(temporary_identity.st_mode)
+            or temporary_identity.st_nlink != 1
+            or temporary_identity.st_uid != os.geteuid()
+            or temporary_identity.st_size != len(data)
+            or not _directory_still_bound(path.parent, parent_descriptor, expected_parent)
+            or (commit_safe is not None and not commit_safe())
+        ):
+            return False
+        os.replace(
+            temporary_name,
+            path.name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        temporary_name = None
+        publication_complete = True
+        os.fsync(parent_descriptor)
+        published_metadata = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if (published_metadata.st_dev, published_metadata.st_ino) != published_identity:
+            _invalidate_published_output(descriptor)
+            return False
+        if (
+            not _directory_still_bound(path.parent, parent_descriptor, expected_parent)
+            or (commit_safe is not None and not commit_safe())
+        ):
+            _invalidate_published_output(descriptor)
+            return False
         return True
     except OSError:
+        if (
+            publication_complete
+            and parent_descriptor is not None
+            and descriptor is not None
+            and published_identity is not None
+        ):
+            _invalidate_published_output(descriptor)
         return False
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if parent_descriptor is not None:
+            if temporary_name is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(temporary_name, dir_fd=parent_descriptor)
+            os.close(parent_descriptor)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -952,15 +1118,22 @@ def main(argv: list[str] | None = None) -> int:
         report["findings"] = sorted(set(report["findings"]) | {"output.unsafe"})
         report["status"] = "fail"
     else:
+        output_parent_bound = (
+            not isinstance(report, _AuditReport) or report.output_parent_snapshot is not None
+        )
         if (
             (not report["findings"] or "output.unsafe" not in report["findings"])
             and "output.collision" not in report["findings"]
-            and not _write_output(
-                output,
-                report,
-                report.candidate_still_bound
-                if isinstance(report, _AuditReport) and report["status"] == "pass"
-                else None,
+            and (
+                not output_parent_bound
+                or not _write_output(
+                    output,
+                    report,
+                    report.candidate_still_bound
+                    if isinstance(report, _AuditReport) and report["status"] == "pass"
+                    else None,
+                    report.output_parent_snapshot if isinstance(report, _AuditReport) else None,
+                )
             )
         ):
             if isinstance(report, _AuditReport) and not report.candidate_still_bound():
