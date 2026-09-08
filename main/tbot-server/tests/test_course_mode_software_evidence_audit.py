@@ -523,6 +523,54 @@ def test_public_admission_exemption_is_bound_to_scanned_signature(
     assert "content.secret" in report["findings"]
 
 
+def test_public_admission_exemption_rejects_signature_changed_on_evidence_walk(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    input_path = paths["input"]
+    identity_path = paths["expectedIdentity"]
+    signature_path = paths["expectedIdentitySignature"]
+    secure_read = auditor._read_secure_file
+    iter_root_entries = auditor._iter_root_entries
+    walked_paths: set[Path] = set()
+    reading_walk_signature = False
+    signature_replaced = False
+
+    def track_evidence_walk(root: Path):
+        nonlocal reading_walk_signature
+        entries = list(iter_root_entries(root))
+        entries.sort(key=lambda entry: entry[0] == signature_path)
+        for path, metadata in entries:
+            walked_paths.add(path)
+            reading_walk_signature = path == signature_path
+            yield path, metadata
+        reading_walk_signature = False
+
+    def replace_on_evidence_walk(path: Path) -> bytes:
+        nonlocal signature_replaced
+        if path == signature_path and reading_walk_signature:
+            signature_path.chmod(0o644)
+            signature_path.write_bytes(b"0" * 64)
+            signature_path.chmod(0o444)
+            signature_replaced = True
+        return secure_read(path)
+
+    monkeypatch.setattr(auditor, "_iter_root_entries", track_evidence_walk)
+    monkeypatch.setattr(auditor, "_read_secure_file", replace_on_evidence_walk)
+
+    report = auditor.audit(candidate, evidence, [], output)
+
+    assert input_path in walked_paths
+    assert identity_path in walked_paths
+    assert signature_replaced is True
+    assert report["status"] == "fail"
+    assert report["checks"]["secretScan"] is False
+    assert "content.secret" in report["findings"]
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
