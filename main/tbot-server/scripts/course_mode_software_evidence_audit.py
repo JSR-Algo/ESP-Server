@@ -188,7 +188,9 @@ def _candidate_admission_paths(candidate: object, evidence_root: Path) -> dict[s
         return None
 
 
-def _public_admission_scan_payloads(candidate: object, evidence_root: Path) -> dict[Path, tuple[bytes, bytes]]:
+def _public_admission_scan_payloads(
+    candidate: object, evidence_root: Path
+) -> dict[Path, tuple[bytes, bytes, Path, bytes]]:
     paths = _candidate_admission_paths(candidate, evidence_root)
     if paths is None:
         return {}
@@ -231,10 +233,14 @@ def _public_admission_scan_payloads(candidate: object, evidence_root: Path) -> d
             paths["input"]: (
                 input_raw,
                 _canonical_json_bytes({**input_document, "sessionId": "redacted"}),
+                paths["expectedIdentitySignature"],
+                signature,
             ),
             paths["expectedIdentity"]: (
                 identity_raw,
                 _canonical_json_bytes({**identity, "sessionId": "redacted"}),
+                paths["expectedIdentitySignature"],
+                signature,
             ),
         }
     except (
@@ -630,11 +636,14 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
                     findings.add("evidence.metadata_or_json")
                     continue
                 public_payload = public_admission_payloads.get(path)
-                scan_data = (
-                    public_payload[1]
-                    if public_payload is not None and data == public_payload[0]
-                    else data
-                )
+                scan_data = data
+                if public_payload is not None and data == public_payload[0]:
+                    try:
+                        current_signature = _read_secure_file(public_payload[2])
+                    except OSError:
+                        current_signature = b""
+                    if current_signature == public_payload[3]:
+                        scan_data = public_payload[1]
                 content_findings, member_count = scan_evidence_payload(
                     scan_data, path.name, _budget=archive_budget, _base64_state=base64_state
                 )

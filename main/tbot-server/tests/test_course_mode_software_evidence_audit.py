@@ -492,6 +492,37 @@ def test_public_admission_exemption_is_bound_to_scanned_bytes(
     assert "content.secret" in report["findings"]
 
 
+def test_public_admission_exemption_is_bound_to_scanned_signature(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    signature_path = paths["expectedIdentitySignature"]
+    secure_read = auditor._read_secure_file
+    signature_reads = 0
+
+    def replace_before_scan(path: Path) -> bytes:
+        nonlocal signature_reads
+        if path == signature_path:
+            signature_reads += 1
+            if signature_reads == 2:
+                signature_path.chmod(0o644)
+                signature_path.write_bytes(b"0" * 64)
+                signature_path.chmod(0o444)
+        return secure_read(path)
+
+    monkeypatch.setattr(auditor, "_read_secure_file", replace_before_scan)
+
+    report = auditor.audit(candidate, evidence, [], output)
+
+    assert signature_reads >= 2
+    assert report["status"] == "fail"
+    assert report["checks"]["secretScan"] is False
+    assert "content.secret" in report["findings"]
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
