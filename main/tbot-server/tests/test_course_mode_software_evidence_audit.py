@@ -572,6 +572,61 @@ def test_public_admission_exemption_rejects_signature_changed_on_evidence_walk(
 
 
 @pytest.mark.parametrize(
+    "removed_fields",
+    [
+        ("input", "expectedIdentity"),
+        ("input", "expectedIdentity", "expectedIdentitySignature"),
+    ],
+    ids=["session-documents", "complete-bundle"],
+)
+def test_public_admission_exemption_rejects_bundle_removed_before_evidence_walk(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    removed_fields: tuple[str, ...],
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    iter_root_entries = auditor._iter_root_entries
+    removed = False
+
+    def remove_before_walk(root: Path):
+        nonlocal removed
+        if root == evidence and not removed:
+            for field in removed_fields:
+                paths[field].unlink()
+            removed = True
+        yield from iter_root_entries(root)
+
+    monkeypatch.setattr(auditor, "_iter_root_entries", remove_before_walk)
+
+    report = auditor.audit(candidate, evidence, [], output)
+
+    assert removed is True
+    assert report["status"] == "fail"
+    assert report["checks"]["secretScan"] is False
+    assert "content.secret" in report["findings"]
+
+
+def test_declared_public_admission_missing_before_audit_fails_closed(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    for field in ("input", "expectedIdentity", "expectedIdentitySignature"):
+        paths[field].unlink()
+
+    report = auditor.audit(candidate, evidence, [], output)
+
+    assert report["status"] == "fail"
+    assert report["checks"]["secretScan"] is False
+    assert "content.secret" in report["findings"]
+
+
+@pytest.mark.parametrize(
     "mutation",
     [
         lambda bundle: bundle["input"].update(password="not-public"),

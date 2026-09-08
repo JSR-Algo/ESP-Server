@@ -585,7 +585,11 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
     ):
         if not ok:
             findings.add(code)
+    tools = candidate.get("tools") if isinstance(candidate, dict) else None
+    public_admission_declared = isinstance(tools, dict) and "physicalAdmission" in tools
     public_admission_payloads = _public_admission_scan_payloads(candidate, evidence_root)
+    if public_admission_declared and not public_admission_payloads:
+        findings.add("content.secret")
     observed_public_admission_payloads: dict[Path, bytes] = {}
     try:
         with contextlib.closing(_iter_root_entries(evidence_root)) as evidence_paths:
@@ -653,6 +657,8 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
             for path, expected in public_admission_payloads.items()
         )
     )
+    if public_admission_payloads and not public_snapshot_matches:
+        findings.add("content.secret")
     for path, data in observed_public_admission_payloads.items():
         scan_data = public_admission_payloads[path][1] if public_snapshot_matches else data
         content_findings, member_count = scan_evidence_payload(
