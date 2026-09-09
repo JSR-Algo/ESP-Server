@@ -13,13 +13,12 @@ import re
 import stat
 import tempfile
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 from course_mode_evidence_privacy import has_sanitization_failure, is_sanitized_manifest, scan_evidence_payload
+import course_mode_software_evidence_snapshot as snapshot
 
-MAX_FILE_BYTES = 8 * 1024 * 1024
-MAX_AUDIT_FILES = 4096
-MAX_AUDIT_TOTAL_BYTES = 64 * 1024 * 1024
 SHA40 = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 CANDIDATE_ID = re.compile(r"course-mode-[0-9]{4}-[0-9]{2}-[0-9]{2}\.[1-9][0-9]*")
@@ -64,45 +63,6 @@ REQUIRED_EVIDENCE = (
 RAW_PLAYWRIGHT_DIRS = {"playwright-report", "test-results", "blob-report", "playwright-e2e-original"}
 OUTPUT_NAME = "06-software-evidence-audit.json"
 TRUSTED_SYSTEM_SYMLINKS = {Path("/var"): Path("/private/var"), Path("/tmp"): Path("/private/tmp")}
-
-
-def _read_secure_file(path: Path) -> bytes:
-    descriptor = os.open(
-        path,
-        os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
-    )
-    try:
-        before = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or before.st_nlink != 1
-            or before.st_uid != os.geteuid()
-            or before.st_mode & 0o022
-            or before.st_size > MAX_FILE_BYTES
-        ):
-            raise OSError("insecure evidence metadata")
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            chunk = os.read(descriptor, min(1024 * 1024, MAX_FILE_BYTES + 1 - total))
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > MAX_FILE_BYTES:
-                raise OSError("evidence exceeds bound")
-            chunks.append(chunk)
-        after = os.fstat(descriptor)
-        current = path.lstat()
-        identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_mode)
-        if identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_mode):
-            raise OSError("evidence changed while reading")
-        if identity != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_mode):
-            raise OSError("evidence path changed while reading")
-        if total != before.st_size:
-            raise OSError("evidence size changed while reading")
-        return b"".join(chunks)
-    finally:
-        os.close(descriptor)
 
 
 def _strict_json_loads(data: bytes) -> object:
@@ -208,44 +168,49 @@ def _candidate_admission_paths(candidate: object, evidence_root: Path) -> dict[s
         return None
 
 
+@dataclass(frozen=True)
+class PublicAdmissionScan:
+    input_payloads: tuple[bytes, ...]
+    identity_payloads: tuple[bytes, ...]
+    binding: dict[str, str]
+
+
 def _public_admission_scan_payloads(
-    candidate: object, candidate_path: Path, candidate_raw: bytes, evidence_root: Path
-) -> dict[Path, tuple[bytes, bytes, tuple[bytes, ...]]]:
-    paths = _candidate_admission_paths(candidate, evidence_root)
-    if paths is None:
-        return {}
+    candidate: object,
+    candidate_path: Path,
+    candidate_raw: bytes,
+    input_raw: bytes,
+    identity_raw: bytes,
+    signature: bytes,
+) -> PublicAdmissionScan | None:
     try:
         import course_mode_physical_flash_admission as admission
 
-        input_raw = _read_secure_file(paths["input"])
-        identity_raw = _read_secure_file(paths["expectedIdentity"])
-        signature = _read_secure_file(paths["expectedIdentitySignature"])
         if len(signature) != 64:
-            return {}
+            return None
         input_document = _strict_json_loads(input_raw)
         identity = _strict_json_loads(identity_raw)
         if not isinstance(input_document, dict) or not isinstance(identity, dict):
-            return {}
+            return None
         candidate_binding = input_document.get("candidate")
         if (
             not isinstance(candidate_binding, dict)
-            or candidate_path.resolve(strict=True) != candidate_path
             or candidate_binding.get("path") != str(candidate_path)
             or candidate_binding.get("sha256") != hashlib.sha256(candidate_raw).hexdigest()
         ):
-            return {}
+            return None
         input_session = input_document.get("sessionId")
         if (
             not isinstance(input_session, str)
             or str(uuid.UUID(input_session)) != input_session
             or identity.get("sessionId") != input_session
         ):
-            return {}
+            return None
         signature_valid, _fingerprint = admission._verify_signature(
             admission._canonical_bytes(identity), signature
         )
         if not signature_valid:
-            return {}
+            return None
         checked_at = admission._parse_utc(input_document.get("checkedAt"))
         if checked_at is None or admission.validate_documents(
             input_document,
@@ -256,20 +221,27 @@ def _public_admission_scan_payloads(
             [],
             None,
         ):
-            return {}
-        return {
-            paths["input"]: (
-                input_raw,
+            return None
+        return PublicAdmissionScan(
+            input_payloads=(
                 _canonical_json_bytes({**input_document, "sessionId": "redacted"}),
-                _semantic_string_payloads(input_document),
+                *_semantic_string_payloads(input_document),
             ),
-            paths["expectedIdentity"]: (
-                identity_raw,
+            identity_payloads=(
                 _canonical_json_bytes({**identity, "sessionId": "redacted"}),
-                _semantic_string_payloads(identity),
+                *_semantic_string_payloads(identity),
             ),
-            paths["expectedIdentitySignature"]: (signature, signature, ()),
-        }
+            binding={
+                "candidateSha256": hashlib.sha256(candidate_raw).hexdigest(),
+                "inputSha256": hashlib.sha256(input_raw).hexdigest(),
+                "expectedIdentitySha256": hashlib.sha256(identity_raw).hexdigest(),
+                "signatureSha256": hashlib.sha256(signature).hexdigest(),
+                "signedCanonicalIdentitySha256": hashlib.sha256(
+                    _canonical_json_bytes(identity)
+                ).hexdigest(),
+                "sessionPolicy": "top-level-canonical-uuid.v1",
+            },
+        )
     except (
         AttributeError,
         ImportError,
@@ -281,15 +253,7 @@ def _public_admission_scan_payloads(
         ValueError,
         json.JSONDecodeError,
     ):
-        return {}
-
-
-def _load_json(path: Path) -> tuple[object | None, bytes | None]:
-    try:
-        data = _read_secure_file(path)
-        return _strict_json_loads(data), data
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, RecursionError):
-        return None, None
+        return None
 
 
 def _absolute(path: Path) -> Path:
@@ -357,32 +321,6 @@ def _output_path_secure(output: Path) -> bool:
         and metadata.st_uid == os.geteuid()
         and not metadata.st_mode & 0o022
     )
-
-
-def _iter_root_entries(root: Path):
-    """Walk one root without following links or materializing the whole tree."""
-    iterators: list[os.ScandirIterator[str]] = [os.scandir(root)]
-    try:
-        while iterators:
-            iterator = iterators[-1]
-            try:
-                entry = next(iterator)
-            except StopIteration:
-                iterator.close()
-                iterators.pop()
-                continue
-            path = Path(entry.path)
-            try:
-                metadata = entry.stat(follow_symlinks=False)
-            except OSError:
-                yield path, None
-                continue
-            yield path, metadata
-            if stat.S_ISDIR(metadata.st_mode):
-                iterators.append(os.scandir(path))
-    finally:
-        for iterator in iterators:
-            iterator.close()
 
 
 def _lane_report(document: object, candidate_id: object, lanes: list[str], attestation_sha: str | None) -> bool:
@@ -504,15 +442,26 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
     preserved_roots = [_absolute(root) for root in preserved_roots]
     output = _absolute(output)
     findings: set[str] = set()
-    candidate, candidate_bytes = _load_json(candidate_path)
+    candidate_subject, candidate_capture_findings = snapshot.capture_candidate(candidate_path)
+    findings.update(
+        "candidate.metadata_or_json" if code == "candidate.metadata" else code
+        for code in candidate_capture_findings
+    )
+    retained_candidate = candidate_subject or snapshot.CapturedSubject(
+        "candidate", candidate_path.name, b"", "candidate-json.v1"
+    )
+    candidate_bytes = retained_candidate.data
+    try:
+        candidate = _strict_json_loads(candidate_bytes)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, RecursionError):
+        candidate = None
+        findings.add("candidate.metadata_or_json")
     raw_candidate_id = candidate.get("candidateId") if isinstance(candidate, dict) else None
     candidate_id = None
     documents: dict[str, object] = {}
     document_bytes: dict[str, bytes] = {}
-    checked_files = 1
     checked_archive_members = 0
     raw_playwright_absent = True
-    audit_budget = {"entries": 1, "bytes": 0}
     archive_budget = {"members": 0, "expanded": 0}
     base64_state = {"blocks": 0, "decoded": 0, "limited": False}
     protected_inputs = [candidate_path] + [evidence_root / name for name in REQUIRED_EVIDENCE]
@@ -522,14 +471,40 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
         findings.add("output.unsafe")
     if _output_conflicts(output, protected_inputs):
         findings.add("output.collision")
-    if not _secure_root(evidence_root):
-        findings.add("evidence.root")
-    if candidate is None:
-        findings.add("candidate.metadata_or_json")
-    candidate_bytes = candidate_bytes or b""
-    audit_budget["bytes"] = len(candidate_bytes)
-    if audit_budget["bytes"] > MAX_AUDIT_TOTAL_BYTES:
-        findings.add("evidence.budget")
+
+    admission_paths = _candidate_admission_paths(candidate, evidence_root)
+    tools = candidate.get("tools") if isinstance(candidate, dict) else None
+    public_admission_declared = isinstance(tools, dict) and "physicalAdmission" in tools
+    admission_scan_policies: dict[Path, str] = {}
+    excluded_paths: tuple[Path, ...] = ()
+    if admission_paths is not None:
+        admission_scan_policies = {
+            admission_paths["input"]: "physical-admission-top-level-session-id.v1",
+            admission_paths["expectedIdentity"]: "physical-admission-top-level-session-id.v1",
+        }
+        excluded_paths = (admission_paths["output"],)
+    capture = snapshot.capture_snapshot(
+        retained_candidate,
+        evidence_root,
+        preserved_roots=preserved_roots,
+        excluded_evidence_paths=excluded_paths,
+        evidence_scan_policies=admission_scan_policies,
+    )
+    for code in capture.findings:
+        findings.add(
+            {
+                "candidate.metadata": "candidate.metadata_or_json",
+                "evidence.metadata": "evidence.metadata_or_json",
+            }.get(code, code)
+        )
+    captured = {(subject.scope, subject.path): subject for subject in capture.subjects}
+    if any(
+        subject.scope == "evidence"
+        and _same_file(output, evidence_root / subject.path)
+        for subject in capture.subjects
+    ):
+        findings.add("output.collision")
+
     candidate_findings, candidate_members = scan_evidence_payload(
         candidate_bytes, candidate_path.name, _budget=archive_budget, _base64_state=base64_state
     )
@@ -540,10 +515,15 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
     elif isinstance(raw_candidate_id, str) and CANDIDATE_ID.fullmatch(raw_candidate_id):
         candidate_id = raw_candidate_id
     for name in REQUIRED_EVIDENCE:
-        document, data = _load_json(evidence_root / name)
-        if document is None:
+        subject = captured.get(("evidence", name))
+        data = subject.data if subject is not None else None
+        try:
+            document = _strict_json_loads(data) if data is not None else None
+        except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError):
+            document = None
+        if document is None or data is None:
             findings.add("evidence.metadata_or_json")
-        elif data is not None:
+        else:
             document_bytes[name] = data
         documents[name] = document
     validator = documents["00-candidate-validator.json"]
@@ -615,155 +595,61 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
     ):
         if not ok:
             findings.add(code)
-    tools = candidate.get("tools") if isinstance(candidate, dict) else None
-    public_admission_declared = isinstance(tools, dict) and "physicalAdmission" in tools
-    public_admission_payloads = _public_admission_scan_payloads(
-        candidate, candidate_path, candidate_bytes, evidence_root
-    )
-    if public_admission_declared and not public_admission_payloads:
-        findings.add("content.secret")
-    observed_public_admission_payloads: dict[Path, bytes] = {}
-    try:
-        with contextlib.closing(_iter_root_entries(evidence_root)) as evidence_paths:
-            for path, metadata in evidence_paths:
-                if audit_budget["entries"] >= MAX_AUDIT_FILES:
-                    findings.add("evidence.budget")
-                    break
-                audit_budget["entries"] += 1
-                if path == output:
-                    if path.name != OUTPUT_NAME:
-                        findings.add("output.collision")
-                    continue
-                try:
-                    relative_parts = path.relative_to(evidence_root).parts
-                except ValueError:
-                    findings.add("evidence.metadata_or_json")
-                    continue
-                if metadata is None:
-                    findings.add("evidence.metadata_or_json")
-                    continue
-                if stat.S_ISDIR(metadata.st_mode):
-                    if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o022:
-                        findings.add("evidence.metadata_or_json")
-                    if any(part.lower() in RAW_PLAYWRIGHT_DIRS for part in relative_parts):
-                        raw_playwright_absent = False
-                        findings.add("evidence.raw_playwright")
-                    continue
-                if _same_file(output, path):
-                    findings.add("output.collision")
-                if (
-                    not stat.S_ISREG(metadata.st_mode)
-                    or metadata.st_nlink != 1
-                    or metadata.st_mode & 0o022
-                    or metadata.st_size > MAX_FILE_BYTES
-                ):
-                    findings.add("evidence.metadata_or_json")
-                    continue
-                if audit_budget["bytes"] + metadata.st_size > MAX_AUDIT_TOTAL_BYTES:
-                    findings.add("evidence.budget")
-                    break
-                audit_budget["bytes"] += metadata.st_size
-                checked_files += 1
-                try:
-                    data = _read_secure_file(path)
-                except OSError:
-                    findings.add("evidence.metadata_or_json")
-                    continue
-                public_payload = public_admission_payloads.get(path)
-                if public_payload is not None:
-                    observed_public_admission_payloads[path] = data
-                    continue
-                content_findings, member_count = scan_evidence_payload(
-                    data, path.name, _budget=archive_budget, _base64_state=base64_state
+    admission_scan = None
+    special_payloads: dict[tuple[str, str], tuple[bytes, ...]] = {}
+    if admission_paths is not None:
+        relative_paths = {
+            key: path.relative_to(evidence_root).as_posix()
+            for key, path in admission_paths.items()
+            if key != "output"
+        }
+        input_subject = captured.get(("evidence", relative_paths["input"]))
+        identity_subject = captured.get(("evidence", relative_paths["expectedIdentity"]))
+        signature_subject = captured.get(("evidence", relative_paths["expectedIdentitySignature"]))
+        if input_subject is not None and identity_subject is not None and signature_subject is not None:
+            admission_scan = _public_admission_scan_payloads(
+                candidate,
+                candidate_path,
+                candidate_bytes,
+                input_subject.data,
+                identity_subject.data,
+                signature_subject.data,
+            )
+            if admission_scan is not None:
+                special_payloads[("evidence", relative_paths["input"])] = admission_scan.input_payloads
+                special_payloads[("evidence", relative_paths["expectedIdentity"])] = (
+                    admission_scan.identity_payloads
                 )
-                findings.update(content_findings)
-                checked_archive_members += member_count
-                if content_findings & {"content.embedded_playwright", "content.raw_playwright"}:
-                    raw_playwright_absent = False
-    except OSError:
-        findings.add("evidence.root")
-    public_snapshot_matches = (
-        set(observed_public_admission_payloads) == set(public_admission_payloads)
-        and all(
-            observed_public_admission_payloads[path] == expected[0]
-            for path, expected in public_admission_payloads.items()
-        )
-    )
-    if public_admission_payloads and not public_snapshot_matches:
+    if public_admission_declared and admission_scan is None:
         findings.add("content.secret")
-    for path, data in observed_public_admission_payloads.items():
-        expected = public_admission_payloads[path]
-        scan_payloads = (expected[1], *expected[2]) if public_snapshot_matches else (data,)
-        for scan_data in scan_payloads:
+
+    for subject in capture.subjects:
+        if subject.scope == "candidate":
+            continue
+        parts = Path(subject.path).parts
+        if any(part.lower() in RAW_PLAYWRIGHT_DIRS for part in parts):
+            raw_playwright_absent = False
+            findings.add(f"{subject.scope}.raw_playwright")
+        if subject.scope == "preserved":
+            name = Path(subject.path).name
+            if ("tombstone" in name.lower() or "summary" in name.lower()) and not is_sanitized_manifest(
+                subject.data
+            ):
+                findings.add("preserved.manifest")
+            elif has_sanitization_failure(subject.data):
+                findings.add("preserved.sanitization_failed")
+        payloads = special_payloads.get((subject.scope, subject.path), (subject.data,))
+        for payload in payloads:
             content_findings, member_count = scan_evidence_payload(
-                scan_data, path.name, _budget=archive_budget, _base64_state=base64_state
+                payload,
+                Path(subject.path).name,
+                _budget=archive_budget,
+                _base64_state=base64_state,
             )
             findings.update(content_findings)
             checked_archive_members += member_count
             if content_findings & {"content.embedded_playwright", "content.raw_playwright"}:
                 raw_playwright_absent = False
-    for root in preserved_roots:
-        if not _secure_root(root):
-            findings.add("preserved.root")
-            continue
-        try:
-            with contextlib.closing(_iter_root_entries(root)) as paths:
-                for path, metadata in paths:
-                    if audit_budget["entries"] >= MAX_AUDIT_FILES:
-                        findings.add("evidence.budget")
-                        break
-                    audit_budget["entries"] += 1
-                    try:
-                        relative_parts = path.relative_to(root).parts
-                    except ValueError:
-                        findings.add("preserved.metadata")
-                        continue
-                    if metadata is None:
-                        findings.add("preserved.metadata")
-                        continue
-                    if stat.S_ISDIR(metadata.st_mode):
-                        if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o022:
-                            findings.add("preserved.metadata")
-                        if any(part.lower() in RAW_PLAYWRIGHT_DIRS for part in relative_parts):
-                            raw_playwright_absent = False
-                            findings.add("preserved.raw_playwright")
-                        continue
-                    if _same_file(output, path):
-                        findings.add("output.collision")
-                    if (
-                        not stat.S_ISREG(metadata.st_mode)
-                        or metadata.st_nlink != 1
-                        or metadata.st_mode & 0o022
-                        or metadata.st_size > MAX_FILE_BYTES
-                    ):
-                        findings.add("preserved.metadata")
-                        continue
-                    if audit_budget["bytes"] + metadata.st_size > MAX_AUDIT_TOTAL_BYTES:
-                        findings.add("evidence.budget")
-                        break
-                    audit_budget["bytes"] += metadata.st_size
-                    checked_files += 1
-                    try:
-                        data = _read_secure_file(path)
-                    except OSError:
-                        findings.add("preserved.metadata")
-                        continue
-                    if ("tombstone" in path.name.lower() or "summary" in path.name.lower()) and not is_sanitized_manifest(data):
-                        findings.add("preserved.manifest")
-                    elif has_sanitization_failure(data):
-                        findings.add("preserved.sanitization_failed")
-                    if any(part.lower() in RAW_PLAYWRIGHT_DIRS for part in relative_parts):
-                        raw_playwright_absent = False
-                        findings.add("preserved.raw_playwright")
-                    content_findings, member_count = scan_evidence_payload(
-                        data, path.name, _budget=archive_budget, _base64_state=base64_state
-                    )
-                    findings.update(content_findings)
-                    checked_archive_members += member_count
-                    if content_findings & {"content.embedded_playwright", "content.raw_playwright"}:
-                        raw_playwright_absent = False
-        except OSError:
-            findings.add("preserved.root")
     checks = {
         "candidateIdentity": _candidate_identity(candidate, evidence_root),
         "repositoryIdentity": _repository_identity(candidate),
@@ -771,7 +657,13 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
         "firmwareIdentity": _firmware_identity(candidate),
         "curriculumIdentity": _curriculum_identity(candidate),
         "secureFileMetadata": not findings.intersection(
-            {"candidate.metadata_or_json", "evidence.metadata_or_json", "evidence.root", "preserved.metadata", "preserved.root"}
+            {
+                "candidate.metadata_or_json",
+                "evidence.metadata_or_json",
+                "evidence.root",
+                "preserved.metadata",
+                "preserved.root",
+            }
         ),
         "validator": validator_ok,
         "attestationBinding": attestation_ok,
@@ -791,15 +683,25 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
         "physicalActionsPerformed": False,
         "productionDatabaseUsed": False,
     }
-    return {
+    subjects = snapshot.subject_manifest(capture.subjects)
+    report = {
+        "schemaVersion": snapshot.SCHEMA_VERSION,
+        "validator": snapshot.VALIDATOR,
         "candidateId": candidate_id,
+        "snapshot": {
+            "algorithm": "sha256",
+            "id": snapshot.snapshot_id(subjects),
+            "subjects": subjects,
+        },
         "checkedArchiveMemberCount": checked_archive_members,
-        "checkedFileCount": checked_files,
+        "checkedFileCount": len(subjects),
         "checks": checks,
         "findings": sorted(findings),
-        "schemaVersion": 1,
         "status": "pass" if not findings else "fail",
     }
+    if admission_scan is not None:
+        report["admissionBinding"] = admission_scan.binding
+    return report
 
 
 def _write_output(path: Path, report: dict[str, object]) -> bool:

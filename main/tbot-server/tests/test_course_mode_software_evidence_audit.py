@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import course_mode_evidence_privacy as privacy  # noqa: E402
 import course_mode_physical_flash_admission as admission  # noqa: E402
 import course_mode_software_evidence_audit as auditor  # noqa: E402
+import course_mode_software_evidence_snapshot as snapshot  # noqa: E402
 
 QUICK_LANES = [
     "backend-course-mode-focused",
@@ -459,6 +460,15 @@ def test_candidate_bound_signed_admission_session_id_is_public_evidence(
     assert report["status"] == "pass"
     assert report["checks"]["secretScan"] is True
     assert "content.secret" not in report["findings"]
+    assert set(report["admissionBinding"]) == {
+        "candidateSha256",
+        "inputSha256",
+        "expectedIdentitySha256",
+        "signatureSha256",
+        "signedCanonicalIdentitySha256",
+        "sessionPolicy",
+    }
+    assert report["admissionBinding"]["sessionPolicy"] == "top-level-canonical-uuid.v1"
 
 
 def test_public_admission_exemption_requires_exact_candidate_bytes(
@@ -583,154 +593,6 @@ def test_public_admission_semantic_strings_are_scanned(
     assert expected_finding in report["findings"]
 
 
-def test_public_admission_exemption_is_bound_to_scanned_bytes(
-    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    candidate, evidence, output = evidence_fixture
-    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
-    paths = bundle["paths"]
-    assert isinstance(paths, dict)
-    input_path = paths["input"]
-    replacement = copy.deepcopy(bundle["input"])
-    replacement["sessionId"] = "3fc6471b-4e35-4ce7-8b20-b741c3e8e9e0"
-    secure_read = auditor._read_secure_file
-    input_reads = 0
-
-    def replace_before_scan(path: Path) -> bytes:
-        nonlocal input_reads
-        if path == input_path:
-            input_reads += 1
-            if input_reads == 2:
-                _rewrite_json(input_path, replacement)
-        return secure_read(path)
-
-    monkeypatch.setattr(auditor, "_read_secure_file", replace_before_scan)
-
-    report = auditor.audit(candidate, evidence, [], output)
-
-    assert input_reads == 2
-    assert report["status"] == "fail"
-    assert report["checks"]["secretScan"] is False
-    assert "content.secret" in report["findings"]
-
-
-def test_public_admission_exemption_is_bound_to_scanned_signature(
-    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    candidate, evidence, output = evidence_fixture
-    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
-    paths = bundle["paths"]
-    assert isinstance(paths, dict)
-    signature_path = paths["expectedIdentitySignature"]
-    secure_read = auditor._read_secure_file
-    signature_reads = 0
-
-    def replace_before_scan(path: Path) -> bytes:
-        nonlocal signature_reads
-        if path == signature_path:
-            signature_reads += 1
-            if signature_reads == 2:
-                signature_path.chmod(0o644)
-                signature_path.write_bytes(b"0" * 64)
-                signature_path.chmod(0o444)
-        return secure_read(path)
-
-    monkeypatch.setattr(auditor, "_read_secure_file", replace_before_scan)
-
-    report = auditor.audit(candidate, evidence, [], output)
-
-    assert signature_reads >= 2
-    assert report["status"] == "fail"
-    assert report["checks"]["secretScan"] is False
-    assert "content.secret" in report["findings"]
-
-
-def test_public_admission_exemption_rejects_signature_changed_on_evidence_walk(
-    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    candidate, evidence, output = evidence_fixture
-    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
-    paths = bundle["paths"]
-    assert isinstance(paths, dict)
-    input_path = paths["input"]
-    identity_path = paths["expectedIdentity"]
-    signature_path = paths["expectedIdentitySignature"]
-    secure_read = auditor._read_secure_file
-    iter_root_entries = auditor._iter_root_entries
-    walked_paths: set[Path] = set()
-    reading_walk_signature = False
-    signature_replaced = False
-
-    def track_evidence_walk(root: Path):
-        nonlocal reading_walk_signature
-        entries = list(iter_root_entries(root))
-        entries.sort(key=lambda entry: entry[0] == signature_path)
-        for path, metadata in entries:
-            walked_paths.add(path)
-            reading_walk_signature = path == signature_path
-            yield path, metadata
-        reading_walk_signature = False
-
-    def replace_on_evidence_walk(path: Path) -> bytes:
-        nonlocal signature_replaced
-        if path == signature_path and reading_walk_signature:
-            signature_path.chmod(0o644)
-            signature_path.write_bytes(b"0" * 64)
-            signature_path.chmod(0o444)
-            signature_replaced = True
-        return secure_read(path)
-
-    monkeypatch.setattr(auditor, "_iter_root_entries", track_evidence_walk)
-    monkeypatch.setattr(auditor, "_read_secure_file", replace_on_evidence_walk)
-
-    report = auditor.audit(candidate, evidence, [], output)
-
-    assert input_path in walked_paths
-    assert identity_path in walked_paths
-    assert signature_replaced is True
-    assert report["status"] == "fail"
-    assert report["checks"]["secretScan"] is False
-    assert "content.secret" in report["findings"]
-
-
-@pytest.mark.parametrize(
-    "removed_fields",
-    [
-        ("input", "expectedIdentity"),
-        ("input", "expectedIdentity", "expectedIdentitySignature"),
-    ],
-    ids=["session-documents", "complete-bundle"],
-)
-def test_public_admission_exemption_rejects_bundle_removed_before_evidence_walk(
-    evidence_fixture: tuple[Path, Path, Path],
-    monkeypatch: pytest.MonkeyPatch,
-    removed_fields: tuple[str, ...],
-) -> None:
-    candidate, evidence, output = evidence_fixture
-    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
-    paths = bundle["paths"]
-    assert isinstance(paths, dict)
-    iter_root_entries = auditor._iter_root_entries
-    removed = False
-
-    def remove_before_walk(root: Path):
-        nonlocal removed
-        if root == evidence and not removed:
-            for field in removed_fields:
-                paths[field].unlink()
-            removed = True
-        yield from iter_root_entries(root)
-
-    monkeypatch.setattr(auditor, "_iter_root_entries", remove_before_walk)
-
-    report = auditor.audit(candidate, evidence, [], output)
-
-    assert removed is True
-    assert report["status"] == "fail"
-    assert report["checks"]["secretScan"] is False
-    assert "content.secret" in report["findings"]
-
-
 def test_declared_public_admission_missing_before_audit_fails_closed(
     evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -853,11 +715,17 @@ def test_cli_accepts_clean_bound_software_evidence_deterministically(
     assert output.read_bytes() == first_bytes
     report = json.loads(first.stdout)
     assert report == json.loads(first_bytes)
-    assert report["schemaVersion"] == 1
+    assert report["schemaVersion"] == 2
+    assert report["validator"] == snapshot.VALIDATOR
     assert report["candidateId"] == "course-mode-2026-09-05.99"
     assert report["status"] == "pass"
     assert report["findings"] == []
-    assert report["checkedFileCount"] == 9
+    assert report["checkedFileCount"] == len(report["snapshot"]["subjects"]) == 9
+    assert report["snapshot"]["algorithm"] == "sha256"
+    assert report["snapshot"]["id"] == snapshot.snapshot_id(report["snapshot"]["subjects"])
+    assert report["snapshot"]["subjects"] == sorted(
+        report["snapshot"]["subjects"], key=lambda item: (item["scope"], item["path"])
+    )
     assert report["checkedArchiveMemberCount"] == 0
     assert report["checks"]["physicalActionsPerformed"] is False
     assert report["checks"]["productionDatabaseUsed"] is False
@@ -1110,6 +978,103 @@ def test_every_primary_evidence_file_is_scanned_and_output_is_excluded(
     assert "content.secret" in first_report["findings"]
     assert marker not in completed.stdout
     assert marker not in output.read_text(encoding="utf-8")
+
+
+def test_schema_v2_subjects_bind_exact_captured_bytes_and_exclude_report(
+    evidence_fixture: tuple[Path, Path, Path]
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    included = evidence / "extra.json"
+    _write_json(included, {"safe": True})
+
+    completed = _run(candidate, evidence, output)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 0
+    subjects = {(item["scope"], item["path"]): item for item in report["snapshot"]["subjects"]}
+    expected = {("candidate", candidate.name): candidate.read_bytes()}
+    expected.update(
+        {
+            ("evidence", path.relative_to(evidence).as_posix()): path.read_bytes()
+            for path in evidence.rglob("*")
+            if path.is_file() and path != output
+        }
+    )
+    assert set(subjects) == set(expected)
+    for key, raw in expected.items():
+        assert subjects[key]["bytes"] == len(raw)
+        assert subjects[key]["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert ("evidence", output.name) not in subjects
+    assert report["checkedFileCount"] == len(expected)
+
+
+def test_audit_captures_candidate_and_admission_bundle_once(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    watched = {candidate, paths["input"], paths["expectedIdentity"], paths["expectedIdentitySignature"]}
+    counts = {path: 0 for path in watched}
+    original_read = snapshot._read_secure_file
+
+    def counted_read(path: Path):
+        absolute = Path(path)
+        if absolute in counts:
+            counts[absolute] += 1
+        return original_read(path)
+
+    monkeypatch.setattr(snapshot, "_read_secure_file", counted_read)
+
+    report = auditor.audit(candidate, evidence, [], output)
+
+    assert report["status"] == "pass"
+    assert counts == {path: 1 for path in watched}
+
+
+def test_historical_snapshot_uses_captured_admission_bytes_and_verifier_detects_later_drift(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    input_path = paths["input"]
+    original_input = input_path.read_bytes()
+    changed = False
+    original_read = snapshot._read_secure_file
+
+    def mutate_after_capture(path: Path):
+        nonlocal changed
+        captured = original_read(path)
+        if Path(path) == input_path and not changed:
+            changed = True
+            input_document = json.loads(original_input)
+            input_document["checkedAt"] = "2026-09-05T08:00:01Z"
+            _rewrite_json(input_path, input_document)
+        return captured
+
+    monkeypatch.setattr(snapshot, "_read_secure_file", mutate_after_capture)
+
+    report = auditor.audit(candidate, evidence, [], output)
+
+    assert report["status"] == "pass"
+    input_subject = next(
+        item
+        for item in report["snapshot"]["subjects"]
+        if item["scope"] == "evidence"
+        and item["path"] == input_path.relative_to(evidence).as_posix()
+    )
+    original_digest = hashlib.sha256(original_input).hexdigest()
+    assert input_subject["sha256"] == original_digest
+    assert report["admissionBinding"]["inputSha256"] == original_digest
+    _write_json(output, report)
+
+    verified, reasons = snapshot.verify_current_software_audit(candidate, evidence)
+
+    assert verified is None
+    assert reasons == ("softwareAudit.stale",)
 
 
 def test_sanitized_manifest_requires_complete_hash_only_rows_and_no_secret_values(
@@ -1673,7 +1638,7 @@ def test_whole_audit_file_budget_is_cumulative(
         artifact = preserved / f"extra-{index}.txt"
         artifact.write_bytes(b"safe")
         artifact.chmod(0o444)
-    monkeypatch.setattr(auditor, "MAX_AUDIT_FILES", 10)
+    monkeypatch.setattr(snapshot, "MAX_ENTRIES", 10)
 
     report = auditor.audit(candidate, evidence, [preserved], output)
 
@@ -1684,7 +1649,7 @@ def test_whole_audit_byte_budget_is_cumulative(
     evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     candidate, evidence, output = evidence_fixture
-    monkeypatch.setattr(auditor, "MAX_AUDIT_TOTAL_BYTES", 1)
+    monkeypatch.setattr(snapshot, "MAX_TOTAL_BYTES", 1)
 
     report = auditor.audit(candidate, evidence, [], output)
 
@@ -1738,7 +1703,7 @@ def test_intermediate_root_metadata_and_output_symlink_are_rejected(
     assert "output.unsafe" in report["findings"]
 
 
-def test_audit_budget_counts_directories_and_does_not_materialize_rglob(
+def test_audit_budget_is_owned_by_shared_capture_and_does_not_use_rglob(
     evidence_fixture: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     candidate, evidence, output = evidence_fixture
@@ -1746,7 +1711,7 @@ def test_audit_budget_counts_directories_and_does_not_materialize_rglob(
     preserved.mkdir()
     for index in range(20):
         (preserved / f"dir-{index}").mkdir()
-    monkeypatch.setattr(auditor, "MAX_AUDIT_FILES", 10)
+    monkeypatch.setattr(snapshot, "MAX_ENTRIES", 10)
     monkeypatch.setattr(Path, "rglob", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("rglob")))
 
     report = auditor.audit(candidate, evidence, [preserved], output)
@@ -1754,7 +1719,7 @@ def test_audit_budget_counts_directories_and_does_not_materialize_rglob(
     assert "evidence.budget" in report["findings"]
 
 
-def test_streaming_wide_iterator_stops_at_remaining_budget(
+def test_wide_tree_hits_shared_capture_budget(
     evidence_fixture: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     candidate, evidence, output = evidence_fixture
@@ -1764,32 +1729,11 @@ def test_streaming_wide_iterator_stops_at_remaining_budget(
         artifact = preserved / f"wide-{index}.txt"
         artifact.write_bytes(b"safe")
         artifact.chmod(0o444)
-    original_scandir = auditor.os.scandir
-    consumed = 0
-
-    class CountingIterator:
-        def __init__(self, iterator):
-            self.iterator = iterator
-
-        def __next__(self):
-            nonlocal consumed
-            consumed += 1
-            return next(self.iterator)
-
-        def close(self):
-            self.iterator.close()
-
-    def wrapped_scandir(path):
-        iterator = original_scandir(path)
-        return CountingIterator(iterator) if Path(path) == preserved else iterator
-
-    monkeypatch.setattr(auditor.os, "scandir", wrapped_scandir)
-    monkeypatch.setattr(auditor, "MAX_AUDIT_FILES", 10)
+    monkeypatch.setattr(snapshot, "MAX_ENTRIES", 10)
 
     report = auditor.audit(candidate, evidence, [preserved], output)
 
     assert "evidence.budget" in report["findings"]
-    assert consumed <= 2
 
 
 def test_valid_sanitized_manifest_with_failed_action_is_rejected(
