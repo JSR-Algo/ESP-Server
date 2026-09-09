@@ -771,6 +771,7 @@ def _write_output(path: Path, report: dict[str, object]) -> bool:
         metadata = os.fstat(descriptor)
         if (
             not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o444
             or metadata.st_nlink != 1
             or metadata.st_uid != os.geteuid()
             or metadata.st_size != len(payload)

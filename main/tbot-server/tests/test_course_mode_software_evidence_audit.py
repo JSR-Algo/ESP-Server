@@ -1305,6 +1305,19 @@ def test_temp_entry_substitution_after_descriptor_validation_is_not_renamed(
     assert not list(output.parent.glob(f".{output.name}.*"))
 
 
+def test_output_rejects_ineffective_immutable_mode_change(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, output = evidence_fixture
+    prior_report = {"schemaVersion": 2, "snapshot": {"id": "prior"}, "status": "pass"}
+    _write_json(output, prior_report)
+    monkeypatch.setattr(auditor.os, "fchmod", lambda _descriptor, _mode: None)
+
+    assert auditor._write_output(output, {"status": "pass"}) is False
+    assert json.loads(output.read_bytes()) == prior_report
+    assert not list(output.parent.glob(f".{output.name}.*"))
+
+
 def test_atomic_output_orders_permissions_and_durability_before_and_after_rename(
     evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
