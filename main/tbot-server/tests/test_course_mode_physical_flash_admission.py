@@ -394,7 +394,38 @@ def test_software_audit_identity_is_rechecked_before_result_commit(
     assert run_main(valid_files[2]) == 1
     assert calls >= 2
     assert not valid_files[2]["output"].exists()
-    assert json.loads(capsys.readouterr().out)["reasons"] == ["output.path"]
+    failure = json.loads(capsys.readouterr().out)
+    assert failure["reasons"] == ["softwareAudit.metadata"]
+    assert failure["physicalActionsPerformed"] is False
+    assert failure["serialOpened"] is False
+
+
+def test_software_audit_evidence_is_rechecked_before_result_commit(
+    valid_files, monkeypatch, capsys,
+):
+    _, _, other_evidence, _, _ = _enable_real_software_audit(valid_files, monkeypatch)
+    calls = 0
+
+    def change_evidence_before_commit_recheck(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            _write_secure(other_evidence, b'{"status":"changed"}\n')
+        return REAL_VERIFY_SOFTWARE_AUDIT(*args, **kwargs)
+
+    monkeypatch.setattr(
+        admission.software_snapshot,
+        "verify_current_software_audit",
+        change_evidence_before_commit_recheck,
+    )
+
+    assert run_main(valid_files[2]) == 1
+    assert calls >= 2
+    assert not valid_files[2]["output"].exists()
+    failure = json.loads(capsys.readouterr().out)
+    assert failure["reasons"] == ["softwareAudit.stale"]
+    assert failure["physicalActionsPerformed"] is False
+    assert failure["serialOpened"] is False
 
 
 def test_software_audit_binding_is_published_in_pass_result(valid_files, monkeypatch):

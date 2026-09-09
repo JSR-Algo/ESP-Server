@@ -460,18 +460,25 @@ def main(argv=None):
     if final_inventory_reasons: _failure(final_inventory_reasons); return 1
     if not _candidate_external_still_bound(actual,external_binding,now): _failure(["candidate.external.changed"]); return 1
     payload={"schemaVersion":1,"validator":VALIDATOR,"status":"pass","reasons":[],"candidateId":binding["candidateId"],"sessionId":doc["sessionId"],"signerFingerprint":fingerprint,"physicalActionsPerformed":False,"serialOpened":False,"inputSha256":hashlib.sha256(raw).hexdigest(),"expectedIdentitySha256":hashlib.sha256(identity_raw).hexdigest(),"candidateSha256":hashlib.sha256(candidate_raw).hexdigest(),"softwareAuditSha256":verified_audit.audit_sha256,"softwareSnapshotId":verified_audit.snapshot_id,"robotMac":ROBOT_MAC,"serialPath":SERIAL_PATH,"firmwareSha":FIRMWARE_SHA,"appSha256":APP_SHA256,"manifestSha256":MANIFEST_SHA256}
+    commit_failure_reasons=[]
     def commit_safe():
-        current_audit,_audit_reasons=software_snapshot.verify_current_software_audit(Path(binding["path"]),evidence_root,preserved_roots=())
+        current_audit,current_audit_reasons=software_snapshot.verify_current_software_audit(Path(binding["path"]),evidence_root,preserved_roots=())
+        if current_audit is None:
+            if not commit_failure_reasons: commit_failure_reasons.extend(current_audit_reasons)
+            return False
+        if (
+            current_audit.audit_identity!=verified_audit.audit_identity
+            or current_audit.audit_sha256!=verified_audit.audit_sha256
+            or current_audit.snapshot_id!=verified_audit.snapshot_id
+        ):
+            if not commit_failure_reasons: commit_failure_reasons.append("softwareAudit.metadata")
+            return False
         return (
-            current_audit is not None
-            and current_audit.audit_identity==verified_audit.audit_identity
-            and current_audit.audit_sha256==verified_audit.audit_sha256
-            and current_audit.snapshot_id==verified_audit.snapshot_id
-            and not _commit_time_reasons(doc,utc_now())
+            not _commit_time_reasons(doc,utc_now())
             and _candidate_external_still_bound(actual,external_binding,now)
             and _serial_inventory_safe()
         )
-    if not _publish(args.output,payload,output_binding,(input_record,identity_record,signature_record,candidate_record),commit_safe): _failure(["output.path"]); return 1
+    if not _publish(args.output,payload,output_binding,(input_record,identity_record,signature_record,candidate_record),commit_safe): _failure(commit_failure_reasons or ["output.path"]); return 1
     return 0
 def _entrypoint():
     try: return main()
