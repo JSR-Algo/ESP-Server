@@ -475,20 +475,14 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
     admission_paths = _candidate_admission_paths(candidate, evidence_root)
     tools = candidate.get("tools") if isinstance(candidate, dict) else None
     public_admission_declared = isinstance(tools, dict) and "physicalAdmission" in tools
-    admission_scan_policies: dict[Path, str] = {}
     excluded_paths: tuple[Path, ...] = ()
     if admission_paths is not None:
-        admission_scan_policies = {
-            admission_paths["input"]: "physical-admission-top-level-session-id.v1",
-            admission_paths["expectedIdentity"]: "physical-admission-top-level-session-id.v1",
-        }
         excluded_paths = (admission_paths["output"],)
     capture = snapshot.capture_snapshot(
         retained_candidate,
         evidence_root,
         preserved_roots=preserved_roots,
         excluded_evidence_paths=excluded_paths,
-        evidence_scan_policies=admission_scan_policies,
     )
     for code in capture.findings:
         findings.add(
@@ -596,6 +590,7 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
         if not ok:
             findings.add(code)
     admission_scan = None
+    report_subjects = capture.subjects
     special_payloads: dict[tuple[str, str], tuple[bytes, ...]] = {}
     if admission_paths is not None:
         relative_paths = {
@@ -619,6 +614,21 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
                 special_payloads[("evidence", relative_paths["input"])] = admission_scan.input_payloads
                 special_payloads[("evidence", relative_paths["expectedIdentity"])] = (
                     admission_scan.identity_payloads
+                )
+                exempt_keys = {
+                    ("evidence", relative_paths["input"]),
+                    ("evidence", relative_paths["expectedIdentity"]),
+                }
+                report_subjects = tuple(
+                    snapshot.CapturedSubject(
+                        subject.scope,
+                        subject.path,
+                        subject.data,
+                        "physical-admission-top-level-session-id.v1",
+                    )
+                    if (subject.scope, subject.path) in exempt_keys
+                    else subject
+                    for subject in capture.subjects
                 )
     if public_admission_declared and admission_scan is None:
         findings.add("content.secret")
@@ -683,7 +693,7 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
         "physicalActionsPerformed": False,
         "productionDatabaseUsed": False,
     }
-    subjects = snapshot.subject_manifest(capture.subjects)
+    subjects = snapshot.subject_manifest(report_subjects)
     report = {
         "schemaVersion": snapshot.SCHEMA_VERSION,
         "validator": snapshot.VALIDATOR,

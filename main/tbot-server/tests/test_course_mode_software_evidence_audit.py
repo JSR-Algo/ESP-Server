@@ -469,6 +469,10 @@ def test_candidate_bound_signed_admission_session_id_is_public_evidence(
         "sessionPolicy",
     }
     assert report["admissionBinding"]["sessionPolicy"] == "top-level-canonical-uuid.v1"
+    verified, reasons = snapshot.verify_current_software_audit(candidate, evidence)
+    assert reasons == ()
+    assert verified is not None
+    assert verified.snapshot_id == report["snapshot"]["id"]
 
 
 def test_public_admission_exemption_requires_exact_candidate_bytes(
@@ -608,6 +612,32 @@ def test_declared_public_admission_missing_before_audit_fails_closed(
     assert report["status"] == "fail"
     assert report["checks"]["secretScan"] is False
     assert "content.secret" in report["findings"]
+
+
+def test_invalid_declared_admission_does_not_claim_session_id_scan_policy(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    signature = paths["expectedIdentitySignature"]
+    signature.chmod(0o644)
+    signature.write_bytes(b"0" * 64)
+    signature.chmod(0o444)
+
+    report = auditor.audit(candidate, evidence, [], output)
+
+    policies = {
+        item["path"]: item["scanPolicy"]
+        for item in report["snapshot"]["subjects"]
+        if item["scope"] == "evidence"
+    }
+    assert report["status"] == "fail"
+    assert "content.secret" in report["findings"]
+    assert "admissionBinding" not in report
+    assert policies[paths["input"].relative_to(evidence).as_posix()] == "evidence-privacy.v1"
+    assert policies[paths["expectedIdentity"].relative_to(evidence).as_posix()] == "evidence-privacy.v1"
 
 
 @pytest.mark.parametrize(
