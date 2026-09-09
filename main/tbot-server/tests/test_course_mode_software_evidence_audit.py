@@ -693,6 +693,44 @@ def test_temp_fsync_failure_replaces_existing_pass_with_fail_report(
     assert json.loads(output.read_text(encoding="utf-8"))["status"] == "fail"
 
 
+def test_claimed_new_output_fsync_failure_does_not_leave_pass(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    fsync = auditor.os.fsync
+    failed = False
+
+    def fail_first_regular_fsync(descriptor: int) -> None:
+        nonlocal failed
+        if stat.S_ISREG(auditor.os.fstat(descriptor).st_mode) and not failed:
+            failed = True
+            raise OSError("claimed output fsync failure")
+        fsync(descriptor)
+
+    monkeypatch.setattr(auditor.os, "fsync", fail_first_regular_fsync)
+
+    result = auditor.main(
+        [
+            "--candidate",
+            str(candidate),
+            "--evidence-root",
+            str(evidence),
+            "--output",
+            str(output),
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert failed is True
+    assert report["status"] == "fail"
+    assert "output.write" in report["findings"]
+    with pytest.raises((json.JSONDecodeError, UnicodeDecodeError)):
+        json.loads(output.read_text(encoding="utf-8"))
+
+
 def test_temp_write_failure_replaces_existing_pass_with_fail_report(
     evidence_fixture: tuple[Path, Path, Path],
     monkeypatch: pytest.MonkeyPatch,
@@ -813,6 +851,124 @@ def test_failure_report_publication_preserves_output_replacement(
     assert output.read_bytes() == replacement
 
 
+def test_pass_publication_preserves_foreign_output_created_during_audit(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    replacement = b"unrelated-output"
+    audit = auditor.audit
+
+    def create_output_after_binding(*args, **kwargs):
+        report = audit(*args, **kwargs)
+        output.write_bytes(replacement)
+        output.chmod(0o444)
+        return report
+
+    monkeypatch.setattr(auditor, "audit", create_output_after_binding)
+
+    result = auditor.main(
+        [
+            "--candidate",
+            str(candidate),
+            "--evidence-root",
+            str(evidence),
+            "--output",
+            str(output),
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert report["status"] == "fail"
+    assert "output.write" in report["findings"]
+    assert output.read_bytes() == replacement
+
+
+def test_pass_publication_preserves_replacement_of_bound_output(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    _write_json(output, {"status": "pass"})
+    replacement = b"unrelated-output"
+    audit = auditor.audit
+
+    def replace_output_after_binding(*args, **kwargs):
+        report = audit(*args, **kwargs)
+        output.unlink()
+        output.write_bytes(replacement)
+        output.chmod(0o444)
+        return report
+
+    monkeypatch.setattr(auditor, "audit", replace_output_after_binding)
+
+    result = auditor.main(
+        [
+            "--candidate",
+            str(candidate),
+            "--evidence-root",
+            str(evidence),
+            "--output",
+            str(output),
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert report["status"] == "fail"
+    assert "output.write" in report["findings"]
+    assert output.read_bytes() == replacement
+
+
+@pytest.mark.parametrize("initially_present", [False, True])
+def test_pass_publication_preserves_destination_swapped_after_precheck(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    initially_present: bool,
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    if initially_present:
+        _write_json(output, {"status": "pass"})
+    replacement = b"unrelated-output"
+    destination_matches = auditor._OutputBinding.destination_matches
+    swapped = False
+
+    def swap_after_match(self, parent_descriptor: int) -> bool:
+        nonlocal swapped
+        matched = destination_matches(self, parent_descriptor)
+        if matched and not swapped:
+            swapped = True
+            if output.exists():
+                output.unlink()
+            output.write_bytes(replacement)
+            output.chmod(0o444)
+        return matched
+
+    monkeypatch.setattr(auditor._OutputBinding, "destination_matches", swap_after_match)
+
+    result = auditor.main(
+        [
+            "--candidate",
+            str(candidate),
+            "--evidence-root",
+            str(evidence),
+            "--output",
+            str(output),
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert swapped is True
+    assert result == 1
+    assert report["status"] == "fail"
+    assert "output.write" in report["findings"]
+    assert output.read_bytes() == replacement
+
+
 def test_skipped_unsafe_output_invalidates_captured_existing_pass(
     evidence_fixture: tuple[Path, Path, Path],
     monkeypatch: pytest.MonkeyPatch,
@@ -929,17 +1085,22 @@ def test_output_replaced_during_publication_is_rejected_without_unlinking_replac
 ) -> None:
     _, _, output = evidence_fixture
     replacement = b"unrelated-output"
-    replace = auditor.os.replace
+    write_all = auditor._write_all
+    swapped = False
 
-    def replace_then_swap(*args, **kwargs) -> None:
-        replace(*args, **kwargs)
-        output.unlink()
-        output.write_bytes(replacement)
-        output.chmod(0o444)
+    def write_then_swap(descriptor: int, data: bytes) -> None:
+        nonlocal swapped
+        write_all(descriptor, data)
+        if not swapped:
+            swapped = True
+            output.unlink()
+            output.write_bytes(replacement)
+            output.chmod(0o444)
 
-    monkeypatch.setattr(auditor.os, "replace", replace_then_swap)
+    monkeypatch.setattr(auditor, "_write_all", write_then_swap)
 
     assert auditor._write_output(output, {"status": "pass"}) is False
+    assert swapped is True
     assert output.read_bytes() == replacement
 
 

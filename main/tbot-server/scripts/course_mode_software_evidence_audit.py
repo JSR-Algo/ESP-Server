@@ -10,7 +10,6 @@ import json
 import math
 import os
 import re
-import secrets
 import stat
 import uuid
 from pathlib import Path
@@ -1054,14 +1053,24 @@ class _OutputBinding:
             self.output_descriptor = None
         os.close(self.parent_descriptor)
 
-    def publish_failure(self, report: dict[str, object]) -> bool:
-        if self.output_descriptor is None or self.output_identity is None:
+    def destination_matches(self, parent_descriptor: int) -> bool:
+        if _directory_identity(os.fstat(parent_descriptor)) != self.parent_snapshot[-1]:
             return False
+        try:
+            current = os.stat(self.path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return self.output_identity is None
+        except OSError:
+            return False
+        return self.output_identity is not None and _file_identity(current)[:2] == self.output_identity[:2]
+
+    def _open_writable(self) -> int | None:
+        if self.output_descriptor is None or self.output_identity is None:
+            return None
         writable: int | None = None
-        original_mode = self.output_identity[2]
         try:
             if _directory_identity(os.fstat(self.parent_descriptor)) != self.parent_snapshot[-1]:
-                return False
+                return None
             bound = os.fstat(self.output_descriptor)
             if (
                 _file_identity(bound)[:2] != self.output_identity[:2]
@@ -1070,15 +1079,46 @@ class _OutputBinding:
                 or bound.st_uid != os.geteuid()
                 or bound.st_mode & 0o022
             ):
-                return False
+                return None
             os.fchmod(self.output_descriptor, 0o600)
             writable = os.open(
                 self.path.name,
-                os.O_WRONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+                os.O_RDWR | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
                 dir_fd=self.parent_descriptor,
             )
             if _file_identity(os.fstat(writable))[:2] != self.output_identity[:2]:
-                return False
+                os.close(writable)
+                return None
+            return writable
+        except OSError:
+            if writable is not None:
+                os.close(writable)
+            return None
+        finally:
+            with contextlib.suppress(OSError):
+                os.fchmod(self.output_descriptor, 0o444)
+
+    def publish_failure(self, report: dict[str, object]) -> bool:
+        return self._publish_bound(report, None, None)
+
+    def publish_bound(
+        self,
+        report: dict[str, object],
+        commit_safe,
+        expected_parent: tuple[tuple[int, ...], ...],
+    ) -> bool:
+        return self._publish_bound(report, commit_safe, expected_parent)
+
+    def _publish_bound(
+        self,
+        report: dict[str, object],
+        commit_safe,
+        expected_parent: tuple[tuple[int, ...], ...] | None,
+    ) -> bool:
+        writable = self._open_writable()
+        if writable is None or self.output_identity is None:
+            return False
+        try:
             os.lseek(writable, 0, os.SEEK_SET)
             _write_all(writable, b"\x00")
             os.fsync(writable)
@@ -1090,17 +1130,24 @@ class _OutputBinding:
             os.fchmod(writable, 0o444)
             os.fsync(writable)
             os.fsync(self.parent_descriptor)
-            current = os.stat(self.path.name, dir_fd=self.parent_descriptor, follow_symlinks=False)
-            return _file_identity(current)[:2] == self.output_identity[:2]
-        except OSError:
-            if writable is not None:
+            if expected_parent is not None and (
+                not _directory_still_bound(self.path.parent, self.parent_descriptor, expected_parent)
+                or (commit_safe is not None and not commit_safe())
+            ):
                 _invalidate_published_output(writable)
+                return False
+            current = os.stat(self.path.name, dir_fd=self.parent_descriptor, follow_symlinks=False)
+            if _file_identity(current)[:2] != self.output_identity[:2]:
+                _invalidate_published_output(writable)
+                return False
+            return True
+        except OSError:
+            _invalidate_published_output(writable)
             return False
         finally:
             with contextlib.suppress(OSError):
-                os.fchmod(self.output_descriptor, original_mode & 0o7777)
-            if writable is not None:
-                os.close(writable)
+                os.fchmod(writable, 0o444)
+            os.close(writable)
 
 
 def _capture_output_binding(path: Path) -> _OutputBinding | None:
@@ -1141,11 +1188,11 @@ def _write_output(
     report: dict[str, object],
     commit_safe=None,
     parent_snapshot: tuple[tuple[int, ...], ...] | None = None,
+    destination_binding: _OutputBinding | None = None,
 ) -> bool:
     payload = json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n"
     parent_descriptor: int | None = None
     descriptor: int | None = None
-    temporary_name: str | None = None
     published_identity: tuple[int, int] | None = None
     publication_complete = False
     try:
@@ -1157,20 +1204,21 @@ def _write_output(
             path.parent, parent_descriptor, expected_parent
         ):
             return False
-        for _attempt in range(16):
-            temporary_name = f".{path.name}.{secrets.token_hex(8)}"
-            try:
-                descriptor = os.open(
-                    temporary_name,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-                    0o600,
-                    dir_fd=parent_descriptor,
-                )
-                break
-            except FileExistsError:
-                temporary_name = None
-        if descriptor is None or temporary_name is None:
+        if (
+            not _directory_still_bound(path.parent, parent_descriptor, expected_parent)
+            or (commit_safe is not None and not commit_safe())
+            or (destination_binding is not None and not destination_binding.destination_matches(parent_descriptor))
+        ):
             return False
+        if destination_binding is not None and destination_binding.output_identity is not None:
+            return destination_binding.publish_bound(report, commit_safe, expected_parent)
+        descriptor = os.open(
+            path.name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+        publication_complete = True
         data = payload.encode("utf-8")
         _write_all(descriptor, data)
         os.fchmod(descriptor, 0o444)
@@ -1182,18 +1230,9 @@ def _write_output(
             or temporary_identity.st_nlink != 1
             or temporary_identity.st_uid != os.geteuid()
             or temporary_identity.st_size != len(data)
-            or not _directory_still_bound(path.parent, parent_descriptor, expected_parent)
-            or (commit_safe is not None and not commit_safe())
         ):
+            _invalidate_published_output(descriptor)
             return False
-        os.replace(
-            temporary_name,
-            path.name,
-            src_dir_fd=parent_descriptor,
-            dst_dir_fd=parent_descriptor,
-        )
-        temporary_name = None
-        publication_complete = True
         os.fsync(parent_descriptor)
         if (
             not _directory_still_bound(path.parent, parent_descriptor, expected_parent)
@@ -1211,7 +1250,6 @@ def _write_output(
             publication_complete
             and parent_descriptor is not None
             and descriptor is not None
-            and published_identity is not None
         ):
             _invalidate_published_output(descriptor)
         return False
@@ -1219,9 +1257,6 @@ def _write_output(
         if descriptor is not None:
             os.close(descriptor)
         if parent_descriptor is not None:
-            if temporary_name is not None:
-                with contextlib.suppress(OSError):
-                    os.unlink(temporary_name, dir_fd=parent_descriptor)
             os.close(parent_descriptor)
 
 
@@ -1253,7 +1288,8 @@ def main(argv: list[str] | None = None) -> int:
             report["status"] = "fail"
         else:
             output_parent_bound = (
-                not isinstance(report, _AuditReport) or report.output_parent_snapshot is not None
+                (not isinstance(report, _AuditReport) or report.output_parent_snapshot is not None)
+                and output_binding is not None
             )
             output_written = False
             if (
@@ -1268,6 +1304,7 @@ def main(argv: list[str] | None = None) -> int:
                         if isinstance(report, _AuditReport) and report["status"] == "pass"
                         else None,
                         report.output_parent_snapshot if isinstance(report, _AuditReport) else None,
+                        output_binding,
                     )
                 if not output_written:
                     if isinstance(report, _AuditReport) and not report.candidate_still_bound():
