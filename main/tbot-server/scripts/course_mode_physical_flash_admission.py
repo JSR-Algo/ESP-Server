@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import course_mode_candidate_manifest as candidate_manifest
+import course_mode_software_evidence_snapshot as software_snapshot
 from course_mode_physical_tft_preflight import PINNED_APPROVAL_KEY_FINGERPRINT, PINNED_APPROVAL_PUBLIC_KEY_RAW
 
 VALIDATOR = "course-mode-physical-flash-admission.v1"
@@ -436,6 +437,8 @@ def main(argv=None):
     expected_paths={"input":args.input,"output":args.output,"expectedIdentity":args.expected_identity,"expectedIdentitySignature":args.expected_identity_signature}
     evidence_root=Path(actual.get("evidenceRoot","")) if isinstance(actual,dict) else Path("")
     if not isinstance(descriptor,dict) or set(descriptor)!=set(expected_paths) or any(Path(descriptor.get(k,""))!=v for k,v in expected_paths.items()) or not evidence_root.is_absolute() or any(not path.is_relative_to(evidence_root) for path in expected_paths.values()): _failure(["candidate.physicalAdmission"]); return 1
+    verified_audit,audit_reasons=software_snapshot.verify_current_software_audit(Path(binding["path"]),evidence_root,preserved_roots=())
+    if verified_audit is None: _failure(audit_reasons); return 1
     external_binding=_candidate_external_binding(actual,observe_images=False)
     if external_binding is None: _failure(["candidate.external"]); return 1
     now=utc_now(); reasons=[f"candidate.{r}" for r in candidate_manifest.validate_candidate(actual,now=now)]
@@ -456,13 +459,26 @@ def main(argv=None):
     if final_holders: final_inventory_reasons.append("serial.occupied")
     if final_inventory_reasons: _failure(final_inventory_reasons); return 1
     if not _candidate_external_still_bound(actual,external_binding,now): _failure(["candidate.external.changed"]); return 1
-    payload={"schemaVersion":1,"validator":VALIDATOR,"status":"pass","reasons":[],"candidateId":binding["candidateId"],"sessionId":doc["sessionId"],"signerFingerprint":fingerprint,"physicalActionsPerformed":False,"serialOpened":False,"inputSha256":hashlib.sha256(raw).hexdigest(),"expectedIdentitySha256":hashlib.sha256(identity_raw).hexdigest(),"candidateSha256":hashlib.sha256(candidate_raw).hexdigest(),"robotMac":ROBOT_MAC,"serialPath":SERIAL_PATH,"firmwareSha":FIRMWARE_SHA,"appSha256":APP_SHA256,"manifestSha256":MANIFEST_SHA256}
-    commit_safe=lambda: (
-        not _commit_time_reasons(doc,utc_now())
-        and _candidate_external_still_bound(actual,external_binding,now)
-        and _serial_inventory_safe()
-    )
-    if not _publish(args.output,payload,output_binding,(input_record,identity_record,signature_record,candidate_record),commit_safe): _failure(["output.path"]); return 1
+    payload={"schemaVersion":1,"validator":VALIDATOR,"status":"pass","reasons":[],"candidateId":binding["candidateId"],"sessionId":doc["sessionId"],"signerFingerprint":fingerprint,"physicalActionsPerformed":False,"serialOpened":False,"inputSha256":hashlib.sha256(raw).hexdigest(),"expectedIdentitySha256":hashlib.sha256(identity_raw).hexdigest(),"candidateSha256":hashlib.sha256(candidate_raw).hexdigest(),"softwareAuditSha256":verified_audit.audit_sha256,"softwareSnapshotId":verified_audit.snapshot_id,"robotMac":ROBOT_MAC,"serialPath":SERIAL_PATH,"firmwareSha":FIRMWARE_SHA,"appSha256":APP_SHA256,"manifestSha256":MANIFEST_SHA256}
+    commit_failure_reasons=[]
+    def commit_safe():
+        current_audit,current_audit_reasons=software_snapshot.verify_current_software_audit(Path(binding["path"]),evidence_root,preserved_roots=())
+        if current_audit is None:
+            if not commit_failure_reasons: commit_failure_reasons.extend(current_audit_reasons)
+            return False
+        if (
+            current_audit.audit_identity!=verified_audit.audit_identity
+            or current_audit.audit_sha256!=verified_audit.audit_sha256
+            or current_audit.snapshot_id!=verified_audit.snapshot_id
+        ):
+            if not commit_failure_reasons: commit_failure_reasons.append("softwareAudit.metadata")
+            return False
+        return (
+            not _commit_time_reasons(doc,utc_now())
+            and _candidate_external_still_bound(actual,external_binding,now)
+            and _serial_inventory_safe()
+        )
+    if not _publish(args.output,payload,output_binding,(input_record,identity_record,signature_record,candidate_record),commit_safe): _failure(commit_failure_reasons or ["output.path"]); return 1
     return 0
 def _entrypoint():
     try: return main()

@@ -1,23 +1,31 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
+import uuid
 import zipfile
 import zlib
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/course_mode_software_evidence_audit.py"
 sys.path.insert(0, str(ROOT / "scripts"))
 import course_mode_evidence_privacy as privacy  # noqa: E402
+import course_mode_physical_flash_admission as admission  # noqa: E402
 import course_mode_software_evidence_audit as auditor  # noqa: E402
+import course_mode_software_evidence_snapshot as snapshot  # noqa: E402
 
 QUICK_LANES = [
     "backend-course-mode-focused",
@@ -173,18 +181,538 @@ def evidence_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 
 def _run(candidate: Path, evidence: Path, output: Path, *preserved: Path) -> subprocess.CompletedProcess[str]:
-    command = [
-        sys.executable,
-        str(SCRIPT),
-        "--candidate",
-        str(candidate),
-        "--evidence-root",
-        str(evidence),
-    ]
+    arguments = ["--candidate", str(candidate), "--evidence-root", str(evidence)]
     for root in preserved:
-        command.extend(["--preserved-root", str(root)])
-    command.extend(["--output", str(output)])
+        arguments.extend(["--preserved-root", str(root)])
+    arguments.extend(["--output", str(output)])
+    public_key = os.environ.get("_TBOT_TEST_ADMISSION_PUBLIC_KEY_HEX")
+    fingerprint = os.environ.get("_TBOT_TEST_ADMISSION_KEY_FINGERPRINT")
+    if public_key is None or fingerprint is None:
+        command = [sys.executable, str(SCRIPT), *arguments]
+    else:
+        bootstrap = (
+            "import runpy,sys;"
+            "sys.path.insert(0,sys.argv[1]);"
+            "import course_mode_physical_flash_admission as admission;"
+            "admission.PINNED_APPROVAL_PUBLIC_KEY_RAW=bytes.fromhex(sys.argv[2]);"
+            "admission.PINNED_APPROVAL_KEY_FINGERPRINT=sys.argv[3];"
+            "script=sys.argv[4];sys.argv=[script,*sys.argv[5:]];"
+            "runpy.run_path(script,run_name='__main__')"
+        )
+        command = [
+            sys.executable,
+            "-c",
+            bootstrap,
+            str(SCRIPT.parent),
+            public_key,
+            fingerprint,
+            str(SCRIPT),
+            *arguments,
+        ]
     return subprocess.run(command, check=False, capture_output=True, text=True)
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _rewrite_json(path: Path, value: object) -> None:
+    path.chmod(0o644)
+    path.write_bytes(_canonical_json_bytes(value) + b"\n")
+    path.chmod(0o444)
+
+
+def _write_exact_admission_documents(
+    *,
+    candidate_path: Path,
+    evidence: Path,
+    private_key: Ed25519PrivateKey,
+    signer_fingerprint: str,
+) -> dict[str, object]:
+    admission_root = evidence / "G7-admission"
+    admission_root.mkdir()
+    paths = {
+        "input": admission_root / "admission-input.json",
+        "output": admission_root / "admission-result.json",
+        "expectedIdentity": admission_root / "expected-identity.json",
+        "expectedIdentitySignature": admission_root / "expected-identity.sig",
+    }
+    candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    candidate.update(
+        createdAt="2026-09-05T07:00:00Z",
+        expiresAt="2026-09-05T09:00:00Z",
+    )
+    candidate["repositories"] = {
+        "adminEsp": {
+            "path": "/src/admin",
+            "sha": candidate["repositories"]["adminEsp"]["sha"],
+            "branch": "main",
+            "remoteUrl": "git@example/admin.git",
+            "dirtyExceptions": [],
+        },
+        "backend": {
+            "path": "/src/backend",
+            "sha": candidate["repositories"]["backend"]["sha"],
+            "branch": "main",
+            "remoteUrl": "git@example/backend.git",
+            "dirtyExceptions": [],
+        },
+        "firmware": {
+            "path": "/src/firmware",
+            "sha": admission.FIRMWARE_SHA,
+            "branch": "main",
+            "remoteUrl": "git@example/firmware.git",
+            "dirtyExceptions": [],
+        },
+    }
+    candidate["firmware"].update(
+        appPath="/opt/tbot/course-mode/app.bin",
+        appOffset=admission.APP_OFFSET,
+        appBytes=admission.APP_BYTES,
+        appSha256=admission.APP_SHA256,
+        partitionBytes=admission.PARTITION_BYTES,
+        evidenceManifestPath="/opt/tbot/course-mode/manifest.json",
+        evidenceManifestSha256=admission.MANIFEST_SHA256,
+    )
+    candidate["tools"]["physicalAdmission"] = {name: str(path) for name, path in paths.items()}
+    _rewrite_json(candidate_path, candidate)
+
+    repository_binding = {
+        "admin": copy.deepcopy(candidate["repositories"]["adminEsp"]),
+        "backend": copy.deepcopy(candidate["repositories"]["backend"]),
+        "firmware": copy.deepcopy(candidate["repositories"]["firmware"]),
+    }
+    image_binding = {
+        "backend": {
+            **candidate["images"]["lessonStudioBackend"],
+            "platform": "linux/arm64",
+            "provenanceLabels": {
+                "org.opencontainers.image.revision": repository_binding["backend"]["sha"],
+                "org.opencontainers.image.source": repository_binding["backend"]["remoteUrl"],
+            },
+        },
+        "web": {
+            **candidate["images"]["lessonStudioWeb"],
+            "platform": "linux/arm64",
+            "provenanceLabels": {
+                "org.opencontainers.image.revision": repository_binding["admin"]["sha"],
+                "org.opencontainers.image.source": repository_binding["admin"]["remoteUrl"],
+            },
+        },
+    }
+    candidate_binding = {
+        "candidateId": candidate["candidateId"],
+        "courseId": candidate["course"]["courseId"],
+        "courseKey": candidate["course"]["courseKey"],
+        "createdAt": candidate["createdAt"],
+        "expiresAt": candidate["expiresAt"],
+        "path": str(candidate_path),
+        "sha256": hashlib.sha256(candidate_path.read_bytes()).hexdigest(),
+        "repositories": repository_binding,
+        "images": image_binding,
+        "firmware": {
+            "board": admission.BOARD,
+            "target": admission.TARGET,
+            "gitSha": admission.FIRMWARE_SHA,
+            "app": {
+                "path": candidate["firmware"]["appPath"],
+                "sha256": admission.APP_SHA256,
+                "bytes": admission.APP_BYTES,
+                "offset": admission.APP_OFFSET,
+                "partitionBytes": admission.PARTITION_BYTES,
+            },
+            "manifest": {
+                "path": candidate["firmware"]["evidenceManifestPath"],
+                "sha256": admission.MANIFEST_SHA256,
+            },
+        },
+    }
+    session_id = "cab43f0d-62dc-49c4-9d30-e9630d195a44"
+    robot = {
+        "mac": admission.ROBOT_MAC,
+        "board": admission.BOARD,
+        "target": admission.TARGET,
+        "serialPath": admission.SERIAL_PATH,
+        "exactlyOneRobot": True,
+    }
+    identity = {
+        "schemaVersion": 1,
+        "sessionId": session_id,
+        "candidate": copy.deepcopy(candidate_binding),
+        "partitionTable": copy.deepcopy(admission.EXPECTED_PARTITIONS),
+        "robot": copy.deepcopy(robot),
+        "signer": {"algorithm": "ed25519", "fingerprint": signer_fingerprint},
+    }
+    input_document = {
+        "schemaVersion": 1,
+        "sessionId": session_id,
+        "checkedAt": "2026-09-05T08:00:00Z",
+        "candidate": copy.deepcopy(candidate_binding),
+        "robot": copy.deepcopy(robot),
+        "serialLease": {
+            "soleLeaseConfirmed": True,
+            "competingProcessesStopped": True,
+            "devicePath": admission.SERIAL_PATH,
+            "discoveredDevices": [admission.SERIAL_PATH],
+            "holderPids": [],
+            "inventoryMethod": "lstat-glob-lsof-v1",
+        },
+        "flashPlan": {
+            "operation": {
+                "operation": "write_flash",
+                "offset": admission.APP_OFFSET,
+                "imageSha256": admission.APP_SHA256,
+                "imageBytes": admission.APP_BYTES,
+                "after": "no-reset",
+                "eraseChip": False,
+                "mergedImage": False,
+            },
+            "protectedPartitions": [
+                copy.deepcopy(partition)
+                for partition in admission.EXPECTED_PARTITIONS
+                if partition["protected"]
+            ],
+            "preserveProtectedPartitions": True,
+        },
+        "safety": {name: True for name in admission.SAFETY_KEYS},
+    }
+    assert set(input_document) == admission.TOP_KEYS
+    assert set(identity) == admission.IDENTITY_KEYS
+    checked_at = datetime.fromisoformat(input_document["checkedAt"].replace("Z", "+00:00"))
+    assert checked_at.tzinfo == timezone.utc
+    assert admission.validate_documents(
+        input_document,
+        identity,
+        candidate,
+        checked_at,
+        [admission.SERIAL_PATH],
+        [],
+        None,
+    ) == []
+    _write_json(paths["input"], input_document)
+    _write_json(paths["expectedIdentity"], identity)
+    signature = private_key.sign(_canonical_json_bytes(identity))
+    assert len(signature) == 64
+    paths["expectedIdentitySignature"].write_bytes(signature)
+    paths["expectedIdentitySignature"].chmod(0o444)
+    return {
+        "input": input_document,
+        "identity": identity,
+        "paths": paths,
+        "privateKey": private_key,
+    }
+
+
+def _install_signed_admission(
+    candidate_path: Path,
+    evidence: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, object]:
+    key = Ed25519PrivateKey.generate()
+    public = key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    fingerprint = hashlib.sha256(public).hexdigest()
+    monkeypatch.setattr(admission, "PINNED_APPROVAL_PUBLIC_KEY_RAW", public)
+    monkeypatch.setattr(admission, "PINNED_APPROVAL_KEY_FINGERPRINT", fingerprint)
+    monkeypatch.setenv("_TBOT_TEST_ADMISSION_PUBLIC_KEY_HEX", public.hex())
+    monkeypatch.setenv("_TBOT_TEST_ADMISSION_KEY_FINGERPRINT", fingerprint)
+    return _write_exact_admission_documents(
+        candidate_path=candidate_path,
+        evidence=evidence,
+        private_key=key,
+        signer_fingerprint=fingerprint,
+    )
+
+
+def _rewrite_and_resign_admission(candidate_path: Path, bundle: dict[str, object]) -> None:
+    assert candidate_path.is_file()
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    input_document = bundle["input"]
+    identity = bundle["identity"]
+    private_key = bundle["privateKey"]
+    assert isinstance(private_key, Ed25519PrivateKey)
+    _rewrite_json(paths["input"], input_document)
+    _rewrite_json(paths["expectedIdentity"], identity)
+    signature_path = paths["expectedIdentitySignature"]
+    signature_path.chmod(0o644)
+    signature_path.write_bytes(private_key.sign(_canonical_json_bytes(identity)))
+    signature_path.chmod(0o444)
+
+
+def test_candidate_bound_signed_admission_session_id_is_public_evidence(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    _install_signed_admission(candidate, evidence, monkeypatch)
+
+    result = _run(candidate, evidence, output)
+    report = json.loads(result.stdout)
+
+    assert result.returncode == 0
+    assert report["status"] == "pass"
+    assert report["checks"]["secretScan"] is True
+    assert "content.secret" not in report["findings"]
+    assert set(report["admissionBinding"]) == {
+        "candidateSha256",
+        "inputSha256",
+        "expectedIdentitySha256",
+        "signatureSha256",
+        "signedCanonicalIdentitySha256",
+        "sessionPolicy",
+    }
+    assert report["admissionBinding"]["sessionPolicy"] == "top-level-canonical-uuid.v1"
+    verified, reasons = snapshot.verify_current_software_audit(candidate, evidence)
+    assert reasons == ()
+    assert verified is not None
+    assert verified.snapshot_id == report["snapshot"]["id"]
+
+
+def test_public_admission_exemption_requires_exact_candidate_bytes(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    _install_signed_admission(candidate, evidence, monkeypatch)
+    candidate_document = json.loads(candidate.read_text(encoding="utf-8"))
+    candidate_document["tools"]["pythonTestRuntime"]["version"] = 2
+    _rewrite_json(candidate, candidate_document)
+
+    result = _run(candidate, evidence, output)
+    report = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert report["checks"]["secretScan"] is False
+    assert "content.secret" in report["findings"]
+
+
+def test_public_admission_exemption_rejects_relocated_input_descriptor(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    relocated_input = paths["input"].with_name("relocated-admission-input.json")
+    paths["input"].rename(relocated_input)
+    candidate_document = json.loads(candidate.read_text(encoding="utf-8"))
+    candidate_document["tools"]["physicalAdmission"]["input"] = str(relocated_input)
+    _rewrite_json(candidate, candidate_document)
+
+    result = _run(candidate, evidence, output)
+    report = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert report["checks"]["secretScan"] is False
+    assert "content.secret" in report["findings"]
+
+
+def test_public_admission_exemption_rejects_secret_in_signed_candidate_binding(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    encoded = base64.b64encode(b"Authorization: Bearer admission-secret-token").decode("ascii")
+    split_encoded = "\n".join(encoded[index : index + 8] for index in range(0, len(encoded), 8))
+    bundle["input"]["candidate"]["sha256"] = split_encoded
+    bundle["identity"]["candidate"]["sha256"] = split_encoded
+    _rewrite_and_resign_admission(candidate, bundle)
+
+    result = _run(candidate, evidence, output)
+    report = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert report["checks"]["secretScan"] is False
+    assert "content.secret" in report["findings"]
+
+
+@pytest.mark.parametrize(
+    ("semantic_value", "expected_finding"),
+    [
+        (
+            "\n".join(
+                encoded[index : index + 8]
+                for index in range(0, len(encoded), 8)
+            ),
+            "content.secret",
+        )
+        for encoded in [
+            base64.b64encode(b"Authorization: Bearer admission-secret-token").decode("ascii")
+        ]
+    ]
+    + [
+        (
+            "-----BEGIN PRIVATE KEY-----\n"
+            "YWRtaXNzaW9uLXByaXZhdGUta2V5\n"
+            "-----END PRIVATE KEY-----",
+            "content.private_key",
+        )
+    ],
+    ids=["newline-split-base64-bearer", "multiline-private-key"],
+)
+def test_public_admission_semantic_strings_are_scanned(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    semantic_value: str,
+    expected_finding: str,
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    candidate_document = json.loads(candidate.read_text(encoding="utf-8"))
+    candidate_document["repositories"]["adminEsp"]["remoteUrl"] = semantic_value
+    _rewrite_json(candidate, candidate_document)
+    candidate_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    for document in (bundle["input"], bundle["identity"]):
+        binding = document["candidate"]
+        binding["repositories"]["admin"]["remoteUrl"] = semantic_value
+        binding["images"]["web"]["provenanceLabels"][
+            "org.opencontainers.image.source"
+        ] = semantic_value
+        binding["sha256"] = candidate_sha
+    checked_at = datetime.fromisoformat(
+        bundle["input"]["checkedAt"].replace("Z", "+00:00")
+    )
+    assert admission.validate_documents(
+        bundle["input"],
+        bundle["identity"],
+        candidate_document,
+        checked_at,
+        [admission.SERIAL_PATH],
+        [],
+        None,
+    ) == []
+    _rewrite_and_resign_admission(candidate, bundle)
+
+    result = _run(candidate, evidence, output)
+    report = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert report["status"] == "fail"
+    assert expected_finding in report["findings"]
+
+
+def test_declared_public_admission_missing_before_audit_fails_closed(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    for field in ("input", "expectedIdentity", "expectedIdentitySignature"):
+        paths[field].unlink()
+
+    report = auditor.audit(candidate, evidence, [], output)
+
+    assert report["status"] == "fail"
+    assert report["checks"]["secretScan"] is False
+    assert "content.secret" in report["findings"]
+
+
+def test_invalid_declared_admission_does_not_claim_session_id_scan_policy(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    signature = paths["expectedIdentitySignature"]
+    signature.chmod(0o644)
+    signature.write_bytes(b"0" * 64)
+    signature.chmod(0o444)
+
+    report = auditor.audit(candidate, evidence, [], output)
+
+    policies = {
+        item["path"]: item["scanPolicy"]
+        for item in report["snapshot"]["subjects"]
+        if item["scope"] == "evidence"
+    }
+    assert report["status"] == "fail"
+    assert "content.secret" in report["findings"]
+    assert "admissionBinding" not in report
+    assert policies[paths["input"].relative_to(evidence).as_posix()] == "evidence-privacy.v1"
+    assert policies[paths["expectedIdentity"].relative_to(evidence).as_posix()] == "evidence-privacy.v1"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda bundle: bundle["input"].update(password="not-public"),
+        lambda bundle: bundle["identity"].update(token="not-public"),
+        lambda bundle: bundle["input"].__setitem__("sessionId", str(uuid.uuid4())),
+        lambda bundle: bundle["identity"].__setitem__("sessionId", "not-a-uuid"),
+        lambda bundle: bundle["identity"].update(extraSession="not-public"),
+    ],
+    ids=[
+        "input-real-secret",
+        "identity-real-secret",
+        "mismatched-session",
+        "malformed-session",
+        "extra-session-field",
+    ],
+)
+def test_public_admission_exemption_fails_closed(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    mutation,
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    mutation(bundle)
+    _rewrite_and_resign_admission(candidate, bundle)
+
+    result = _run(candidate, evidence, output)
+    report = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert report["checks"]["secretScan"] is False
+    assert "content.secret" in report["findings"]
+
+
+def test_public_admission_exemption_does_not_cover_unrelated_session_id_evidence(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    _install_signed_admission(candidate, evidence, monkeypatch)
+    _write_json(
+        evidence / "unrelated-session.json",
+        {"sessionId": "cab43f0d-62dc-49c4-9d30-e9630d195a44"},
+    )
+
+    result = _run(candidate, evidence, output)
+    report = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert report["checks"]["secretScan"] is False
+    assert "content.secret" in report["findings"]
+
+
+def test_public_admission_exemption_rejects_filename_only_impersonation(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    candidate_document = json.loads(candidate.read_text(encoding="utf-8"))
+    candidate_document["tools"].pop("physicalAdmission")
+    _rewrite_json(candidate, candidate_document)
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    paths["expectedIdentity"].unlink()
+    paths["expectedIdentitySignature"].unlink()
+
+    result = _run(candidate, evidence, output)
+    report = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert report["checks"]["secretScan"] is False
+    assert "content.secret" in report["findings"]
 
 
 def _zip(entries: dict[str, bytes], compression: int = zipfile.ZIP_DEFLATED) -> bytes:
@@ -218,11 +746,17 @@ def test_cli_accepts_clean_bound_software_evidence_deterministically(
     assert output.read_bytes() == first_bytes
     report = json.loads(first.stdout)
     assert report == json.loads(first_bytes)
-    assert report["schemaVersion"] == 1
+    assert report["schemaVersion"] == 2
+    assert report["validator"] == snapshot.VALIDATOR
     assert report["candidateId"] == "course-mode-2026-09-05.99"
     assert report["status"] == "pass"
     assert report["findings"] == []
-    assert report["checkedFileCount"] == 9
+    assert report["checkedFileCount"] == len(report["snapshot"]["subjects"]) == 9
+    assert report["snapshot"]["algorithm"] == "sha256"
+    assert report["snapshot"]["id"] == snapshot.snapshot_id(report["snapshot"]["subjects"])
+    assert report["snapshot"]["subjects"] == sorted(
+        report["snapshot"]["subjects"], key=lambda item: (item["scope"], item["path"])
+    )
     assert report["checkedArchiveMemberCount"] == 0
     assert report["checks"]["physicalActionsPerformed"] is False
     assert report["checks"]["productionDatabaseUsed"] is False
@@ -477,6 +1011,103 @@ def test_every_primary_evidence_file_is_scanned_and_output_is_excluded(
     assert marker not in output.read_text(encoding="utf-8")
 
 
+def test_schema_v2_subjects_bind_exact_captured_bytes_and_exclude_report(
+    evidence_fixture: tuple[Path, Path, Path]
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    included = evidence / "extra.json"
+    _write_json(included, {"safe": True})
+
+    completed = _run(candidate, evidence, output)
+    report = json.loads(completed.stdout)
+
+    assert completed.returncode == 0
+    subjects = {(item["scope"], item["path"]): item for item in report["snapshot"]["subjects"]}
+    expected = {("candidate", candidate.name): candidate.read_bytes()}
+    expected.update(
+        {
+            ("evidence", path.relative_to(evidence).as_posix()): path.read_bytes()
+            for path in evidence.rglob("*")
+            if path.is_file() and path != output
+        }
+    )
+    assert set(subjects) == set(expected)
+    for key, raw in expected.items():
+        assert subjects[key]["bytes"] == len(raw)
+        assert subjects[key]["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert ("evidence", output.name) not in subjects
+    assert report["checkedFileCount"] == len(expected)
+
+
+def test_audit_captures_candidate_and_admission_bundle_once(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    watched = {candidate, paths["input"], paths["expectedIdentity"], paths["expectedIdentitySignature"]}
+    counts = {path: 0 for path in watched}
+    original_read = snapshot._read_secure_file
+
+    def counted_read(path: Path):
+        absolute = Path(path)
+        if absolute in counts:
+            counts[absolute] += 1
+        return original_read(path)
+
+    monkeypatch.setattr(snapshot, "_read_secure_file", counted_read)
+
+    report = auditor.audit(candidate, evidence, [], output)
+
+    assert report["status"] == "pass"
+    assert counts == {path: 1 for path in watched}
+
+
+def test_historical_snapshot_uses_captured_admission_bytes_and_verifier_detects_later_drift(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    input_path = paths["input"]
+    original_input = input_path.read_bytes()
+    changed = False
+    original_read = snapshot._read_secure_file
+
+    def mutate_after_capture(path: Path):
+        nonlocal changed
+        captured = original_read(path)
+        if Path(path) == input_path and not changed:
+            changed = True
+            input_document = json.loads(original_input)
+            input_document["checkedAt"] = "2026-09-05T08:00:01Z"
+            _rewrite_json(input_path, input_document)
+        return captured
+
+    monkeypatch.setattr(snapshot, "_read_secure_file", mutate_after_capture)
+
+    report = auditor.audit(candidate, evidence, [], output)
+
+    assert report["status"] == "pass"
+    input_subject = next(
+        item
+        for item in report["snapshot"]["subjects"]
+        if item["scope"] == "evidence"
+        and item["path"] == input_path.relative_to(evidence).as_posix()
+    )
+    original_digest = hashlib.sha256(original_input).hexdigest()
+    assert input_subject["sha256"] == original_digest
+    assert report["admissionBinding"]["inputSha256"] == original_digest
+    _write_json(output, report)
+
+    verified, reasons = snapshot.verify_current_software_audit(candidate, evidence)
+
+    assert verified is None
+    assert reasons == ("softwareAudit.stale",)
+
+
 def test_sanitized_manifest_requires_complete_hash_only_rows_and_no_secret_values(
     evidence_fixture: tuple[Path, Path, Path], tmp_path: Path
 ) -> None:
@@ -586,6 +1217,177 @@ def test_output_must_be_inside_evidence_root(
     assert completed.returncode == 1
     assert "output.unsafe" in json.loads(completed.stdout)["findings"]
     assert not wrong_name.exists()
+
+
+def test_interrupted_output_write_preserves_prior_report_and_cleans_temp(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, output = evidence_fixture
+    prior_report = {"schemaVersion": 2, "snapshot": {"id": "prior"}, "status": "pass"}
+    replacement_report = {"schemaVersion": 2, "snapshot": {"id": "replacement"}, "status": "pass"}
+    _write_json(output, prior_report)
+
+    def interrupt(descriptor: int, payload: bytes) -> None:
+        os.write(descriptor, payload[:7])
+        raise OSError("interrupted write")
+
+    monkeypatch.setattr(auditor, "_write_all", interrupt, raising=False)
+
+    assert auditor._write_output(output, replacement_report) is False
+    assert json.loads(output.read_bytes()) == prior_report
+    assert not list(output.parent.glob(f".{output.name}.*"))
+
+
+def test_failed_output_rename_preserves_prior_report_and_cleans_temp(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, output = evidence_fixture
+    prior_report = {"schemaVersion": 2, "snapshot": {"id": "prior"}, "status": "pass"}
+    _write_json(output, prior_report)
+
+    monkeypatch.setattr(auditor.os, "rename", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("rename")))
+
+    assert auditor._write_output(output, {"status": "fail"}) is False
+    assert json.loads(output.read_bytes()) == prior_report
+    assert not list(output.parent.glob(f".{output.name}.*"))
+
+
+def test_output_parent_swap_after_open_fails_without_publishing_at_requested_path(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, evidence, output = evidence_fixture
+    displaced = tmp_path / "displaced-evidence"
+    real_open = auditor.os.open
+    swapped = False
+
+    def open_file(path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        nonlocal swapped
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if Path(path) == evidence and dir_fd is None and not swapped:
+            evidence.rename(displaced)
+            evidence.mkdir()
+            swapped = True
+        return descriptor
+
+    monkeypatch.setattr(auditor.os, "open", open_file)
+
+    assert auditor._write_output(output, {"status": "pass"}) is False
+    assert not output.exists()
+    assert not list(displaced.glob(f".{output.name}.*"))
+
+
+def test_temp_entry_substitution_after_descriptor_validation_is_not_renamed(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, output = evidence_fixture
+    prior_report = {"schemaVersion": 2, "snapshot": {"id": "prior"}, "status": "pass"}
+    _write_json(output, prior_report)
+    replacement = b'{"snapshot":{"id":"attacker"},"status":"pass"}\n'
+    real_fstat = auditor.os.fstat
+    substituted = False
+
+    def fstat(descriptor: int) -> os.stat_result:
+        nonlocal substituted
+        metadata = real_fstat(descriptor)
+        temporary = list(output.parent.glob(f".{output.name}.*"))
+        if stat.S_ISREG(metadata.st_mode) and temporary and not substituted:
+            temporary[0].unlink()
+            temporary[0].write_bytes(replacement)
+            temporary[0].chmod(0o444)
+            substituted = True
+        return metadata
+
+    monkeypatch.setattr(auditor.os, "fstat", fstat)
+
+    assert auditor._write_output(output, {"status": "pass"}) is False
+    assert substituted is True
+    assert json.loads(output.read_bytes()) == prior_report
+    assert not list(output.parent.glob(f".{output.name}.*"))
+
+
+def test_output_rejects_ineffective_immutable_mode_change(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, output = evidence_fixture
+    prior_report = {"schemaVersion": 2, "snapshot": {"id": "prior"}, "status": "pass"}
+    _write_json(output, prior_report)
+    monkeypatch.setattr(auditor.os, "fchmod", lambda _descriptor, _mode: None)
+
+    assert auditor._write_output(output, {"status": "pass"}) is False
+    assert json.loads(output.read_bytes()) == prior_report
+    assert not list(output.parent.glob(f".{output.name}.*"))
+
+
+def test_atomic_output_orders_permissions_and_durability_before_and_after_rename(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, output = evidence_fixture
+    report = {"schemaVersion": 2, "snapshot": {"id": "current"}, "status": "pass"}
+    events: list[tuple[str, int | str]] = []
+    descriptors: dict[str, int] = {}
+    real_write = auditor.os.write
+    real_fchmod = auditor.os.fchmod
+    real_fsync = auditor.os.fsync
+    real_rename = auditor.os.rename
+
+    def write_all(descriptor: int, payload: bytes) -> None:
+        events.append(("write", descriptor))
+        offset = 0
+        while offset < len(payload):
+            offset += real_write(descriptor, payload[offset:])
+
+    def fchmod(descriptor: int, mode: int) -> None:
+        descriptors["file"] = descriptor
+        events.append(("chmod", mode))
+        real_fchmod(descriptor, mode)
+
+    def fsync(descriptor: int) -> None:
+        events.append(("fsync", descriptor))
+        real_fsync(descriptor)
+
+    def rename(source: str, destination: str, **kwargs: int) -> None:
+        events.append(("rename", destination))
+        assert stat.S_IMODE(os.fstat(descriptors["file"]).st_mode) == 0o444
+        real_rename(source, destination, **kwargs)
+
+    monkeypatch.setattr(auditor, "_write_all", write_all, raising=False)
+    monkeypatch.setattr(auditor.os, "fchmod", fchmod)
+    monkeypatch.setattr(auditor.os, "fsync", fsync)
+    monkeypatch.setattr(auditor.os, "rename", rename)
+
+    assert auditor._write_output(output, report) is True
+
+    replace_index = next(index for index, event in enumerate(events) if event[0] == "rename")
+    file_fsync_index = events.index(("fsync", descriptors["file"]))
+    assert events.index(("write", descriptors["file"])) < events.index(("chmod", 0o444))
+    assert events.index(("chmod", 0o444)) < file_fsync_index < replace_index
+    assert events[replace_index + 1][0] == "fsync"
+    assert events[replace_index + 1][1] != descriptors["file"]
+    with pytest.raises(OSError):
+        os.fstat(descriptors["file"])
+    assert stat.S_IMODE(output.stat().st_mode) == 0o444
+    assert json.loads(output.read_bytes()) == report
+    assert not list(output.parent.glob(f".{output.name}.*"))
+
+
+def test_output_publication_uses_supplied_snapshot_without_revalidating_sources(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, output = evidence_fixture
+    report = {"schemaVersion": 2, "snapshot": {"id": "historical"}, "status": "pass"}
+    monkeypatch.setattr(
+        snapshot,
+        "verify_current_software_audit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("publication revalidation")),
+    )
+    monkeypatch.setattr(
+        snapshot,
+        "capture_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("source reread")),
+    )
+
+    assert auditor._write_output(output, report) is True
+    assert json.loads(output.read_bytes()) == report
 
 
 def test_cli_does_not_resolve_away_candidate_symlink(
@@ -1038,7 +1840,7 @@ def test_whole_audit_file_budget_is_cumulative(
         artifact = preserved / f"extra-{index}.txt"
         artifact.write_bytes(b"safe")
         artifact.chmod(0o444)
-    monkeypatch.setattr(auditor, "MAX_AUDIT_FILES", 10)
+    monkeypatch.setattr(snapshot, "MAX_ENTRIES", 10)
 
     report = auditor.audit(candidate, evidence, [preserved], output)
 
@@ -1049,7 +1851,7 @@ def test_whole_audit_byte_budget_is_cumulative(
     evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     candidate, evidence, output = evidence_fixture
-    monkeypatch.setattr(auditor, "MAX_AUDIT_TOTAL_BYTES", 1)
+    monkeypatch.setattr(snapshot, "MAX_TOTAL_BYTES", 1)
 
     report = auditor.audit(candidate, evidence, [], output)
 
@@ -1103,7 +1905,7 @@ def test_intermediate_root_metadata_and_output_symlink_are_rejected(
     assert "output.unsafe" in report["findings"]
 
 
-def test_audit_budget_counts_directories_and_does_not_materialize_rglob(
+def test_audit_budget_is_owned_by_shared_capture_and_does_not_use_rglob(
     evidence_fixture: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     candidate, evidence, output = evidence_fixture
@@ -1111,7 +1913,7 @@ def test_audit_budget_counts_directories_and_does_not_materialize_rglob(
     preserved.mkdir()
     for index in range(20):
         (preserved / f"dir-{index}").mkdir()
-    monkeypatch.setattr(auditor, "MAX_AUDIT_FILES", 10)
+    monkeypatch.setattr(snapshot, "MAX_ENTRIES", 10)
     monkeypatch.setattr(Path, "rglob", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("rglob")))
 
     report = auditor.audit(candidate, evidence, [preserved], output)
@@ -1119,7 +1921,7 @@ def test_audit_budget_counts_directories_and_does_not_materialize_rglob(
     assert "evidence.budget" in report["findings"]
 
 
-def test_streaming_wide_iterator_stops_at_remaining_budget(
+def test_wide_tree_hits_shared_capture_budget(
     evidence_fixture: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     candidate, evidence, output = evidence_fixture
@@ -1129,32 +1931,11 @@ def test_streaming_wide_iterator_stops_at_remaining_budget(
         artifact = preserved / f"wide-{index}.txt"
         artifact.write_bytes(b"safe")
         artifact.chmod(0o444)
-    original_scandir = auditor.os.scandir
-    consumed = 0
-
-    class CountingIterator:
-        def __init__(self, iterator):
-            self.iterator = iterator
-
-        def __next__(self):
-            nonlocal consumed
-            consumed += 1
-            return next(self.iterator)
-
-        def close(self):
-            self.iterator.close()
-
-    def wrapped_scandir(path):
-        iterator = original_scandir(path)
-        return CountingIterator(iterator) if Path(path) == preserved else iterator
-
-    monkeypatch.setattr(auditor.os, "scandir", wrapped_scandir)
-    monkeypatch.setattr(auditor, "MAX_AUDIT_FILES", 10)
+    monkeypatch.setattr(snapshot, "MAX_ENTRIES", 10)
 
     report = auditor.audit(candidate, evidence, [preserved], output)
 
     assert "evidence.budget" in report["findings"]
-    assert consumed <= 2
 
 
 def test_valid_sanitized_manifest_with_failed_action_is_rejected(
