@@ -454,7 +454,7 @@ def capture_snapshot(
                     visited_directories.append((path, _identity(metadata)))
                     stack.append(path)
                     continue
-                if scope == "evidence" and path in exclusions:
+                if path in exclusions:
                     if (
                         not stat.S_ISREG(metadata.st_mode)
                         or metadata.st_nlink != 1
@@ -462,7 +462,7 @@ def capture_snapshot(
                         or metadata.st_mode & 0o022
                         or entry.is_symlink()
                     ):
-                        findings.add("evidence.metadata")
+                        findings.add(f"{scope}.metadata")
                     continue
                 if not stat.S_ISREG(metadata.st_mode) or entry.is_symlink():
                     findings.add(f"{scope}.metadata")
@@ -573,6 +573,8 @@ def verify_current_software_audit(
     except FileNotFoundError:
         return None, ("softwareAudit.missing",)
     except OSError:
+        return None, ("softwareAudit.metadata",)
+    if stat.S_IMODE(report_identity[2]) != 0o444:
         return None, ("softwareAudit.metadata",)
     try:
         report = _strict_json_loads(report_bytes)

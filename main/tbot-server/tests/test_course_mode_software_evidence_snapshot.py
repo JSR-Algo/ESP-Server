@@ -97,8 +97,14 @@ def _capture(candidate_path: Path, evidence_root: Path, paths: dict[str, Path], 
     return capture
 
 
-def _valid_report(candidate_path: Path, evidence_root: Path, paths: dict[str, Path]) -> dict[str, object]:
-    capture = _capture(candidate_path, evidence_root, paths)
+def _valid_report(
+    candidate_path: Path,
+    evidence_root: Path,
+    paths: dict[str, Path],
+    *,
+    preserved_roots: tuple[Path, ...] = (),
+) -> dict[str, object]:
+    capture = _capture(candidate_path, evidence_root, paths, *preserved_roots)
     subjects = snapshot.subject_manifest(capture.subjects)
     report: dict[str, object] = {
         "schemaVersion": snapshot.SCHEMA_VERSION,
@@ -209,6 +215,44 @@ def test_capture_snapshot_uses_retained_candidate_exclusions_overrides_and_prese
     ].scan_policy == "evidence-privacy.v1"
     assert capture.entry_count == 14
     assert capture.total_bytes == sum(len(item.data) for item in capture.subjects)
+
+
+@pytest.mark.parametrize("preserved_kind", ["evidence-root", "evidence-ancestor"])
+def test_global_output_exclusions_apply_to_overlapping_preserved_roots_and_remain_current(
+    tmp_path: Path, preserved_kind: str
+) -> None:
+    candidate_path, evidence_root, paths = _create_tree(tmp_path)
+    _write_json(paths["output"], {"old": True})
+    _write_json(evidence_root / snapshot.FUTURE_PHYSICAL_OUTPUT_NAME, {"old": True})
+    preserved_root = evidence_root if preserved_kind == "evidence-root" else tmp_path
+    preserved_roots = (preserved_root,)
+    report = _valid_report(
+        candidate_path,
+        evidence_root,
+        paths,
+        preserved_roots=preserved_roots,
+    )
+    _publish_report(evidence_root, report)
+
+    excluded = {
+        evidence_root / snapshot.OUTPUT_NAME,
+        paths["output"],
+        evidence_root / snapshot.FUTURE_PHYSICAL_OUTPUT_NAME,
+    }
+    preserved_subject_paths = {
+        preserved_root / item["path"].split("/", 1)[1]
+        for item in report["snapshot"]["subjects"]
+        if item["scope"] == "preserved"
+    }
+    verified, reasons = snapshot.verify_current_software_audit(
+        candidate_path,
+        evidence_root,
+        preserved_roots=preserved_roots,
+    )
+
+    assert excluded.isdisjoint(preserved_subject_paths)
+    assert reasons == ()
+    assert verified is not None
 
 
 @pytest.mark.parametrize("kind", ["outside", "missing", "excluded"])
@@ -677,6 +721,18 @@ def test_verify_current_software_audit_returns_hash_snapshot_and_stable_audit_id
     assert reasons == () and second is not None
     assert second.audit_sha256 == first.audit_sha256
     assert second.audit_identity != first.audit_identity
+
+
+def test_verify_current_software_audit_rejects_owner_writable_report(tmp_path: Path) -> None:
+    candidate_path, evidence_root, paths = _create_tree(tmp_path)
+    report = _valid_report(candidate_path, evidence_root, paths)
+    report_path = _publish_report(evidence_root, report)
+    report_path.chmod(0o644)
+
+    verified, reasons = snapshot.verify_current_software_audit(candidate_path, evidence_root)
+
+    assert verified is None
+    assert reasons == ("softwareAudit.metadata",)
 
 
 def test_verify_current_software_audit_accepts_no_admission_candidate(tmp_path: Path) -> None:
