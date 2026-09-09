@@ -8,6 +8,7 @@ import sys
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -16,6 +17,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 SERVER = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVER / "scripts"))
 admission = importlib.import_module("course_mode_physical_flash_admission")
+software_snapshot = importlib.import_module("course_mode_software_evidence_snapshot")
+REAL_VERIFY_SOFTWARE_AUDIT = software_snapshot.verify_current_software_audit
 NOW = datetime(2026, 9, 8, 8, 0, 0, tzinfo=timezone.utc)
 SESSION_ID = "cab43f0d-62dc-49c4-9d30-e9630d195a44"
 COURSE_ID = "a17792f6-8d86-4ad1-a6f3-77663b4d4674"
@@ -33,6 +36,77 @@ SAFETY_KEYS = (
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+
+
+def _write_secure(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() or path.is_symlink():
+        path.chmod(0o644)
+    path.write_bytes(data)
+    path.chmod(0o444)
+
+
+def _software_audit_report(candidate_path, evidence_root, paths, candidate_id):
+    candidate_subject, findings = software_snapshot.capture_candidate(candidate_path)
+    assert findings == () and candidate_subject is not None
+    capture = software_snapshot.capture_snapshot(
+        candidate_subject,
+        evidence_root,
+        excluded_evidence_paths=(paths["output"],),
+        evidence_scan_policies={
+            paths["input"]: "physical-admission-top-level-session-id.v1",
+            paths["identity"]: "physical-admission-top-level-session-id.v1",
+        },
+    )
+    assert capture.findings == ()
+    subjects = software_snapshot.subject_manifest(capture.subjects)
+    by_key = {(subject["scope"], subject["path"]): subject for subject in subjects}
+    identity = json.loads(paths["identity"].read_bytes())
+    relative = {
+        key: path.relative_to(evidence_root).as_posix()
+        for key, path in paths.items()
+        if key in {"input", "identity", "signature"}
+    }
+    return {
+        "schemaVersion": software_snapshot.SCHEMA_VERSION,
+        "validator": software_snapshot.VALIDATOR,
+        "candidateId": candidate_id,
+        "snapshot": {
+            "algorithm": "sha256",
+            "id": software_snapshot.snapshot_id(subjects),
+            "subjects": subjects,
+        },
+        "checkedArchiveMemberCount": 0,
+        "checkedFileCount": len(subjects),
+        "checks": dict(software_snapshot.EXPECTED_CHECKS),
+        "findings": [],
+        "status": "pass",
+        "admissionBinding": {
+            "candidateSha256": by_key[("candidate", candidate_path.name)]["sha256"],
+            "inputSha256": by_key[("evidence", relative["input"])]["sha256"],
+            "expectedIdentitySha256": by_key[("evidence", relative["identity"])]["sha256"],
+            "signatureSha256": by_key[("evidence", relative["signature"])]["sha256"],
+            "signedCanonicalIdentitySha256": hashlib.sha256(
+                software_snapshot.canonical_json_bytes(identity)
+            ).hexdigest(),
+            "sessionPolicy": "top-level-canonical-uuid.v1",
+        },
+    }
+
+
+def _install_software_audit(candidate_path, evidence_root, paths, candidate_id):
+    report = _software_audit_report(candidate_path, evidence_root, paths, candidate_id)
+    audit_path = evidence_root / software_snapshot.OUTPUT_NAME
+    _write_secure(audit_path, software_snapshot.canonical_json_bytes(report) + b"\n")
+    return audit_path, report
+
+
+def _use_real_software_audit(monkeypatch):
+    monkeypatch.setattr(
+        admission.software_snapshot,
+        "verify_current_software_audit",
+        REAL_VERIFY_SOFTWARE_AUDIT,
+    )
 
 
 def partitions():
@@ -78,7 +152,9 @@ def valid_files(tmp_path, monkeypatch):
     monkeypatch.setattr(admission, "PINNED_APPROVAL_KEY_FINGERPRINT", hashlib.sha256(public).hexdigest())
     input_doc, identity, _, _ = documents(tmp_path, key)
     identity["signer"]["fingerprint"] = hashlib.sha256(public).hexdigest()
-    paths = {"input": tmp_path / "input.json", "identity": tmp_path / "identity.json", "signature": tmp_path / "identity.sig", "output": tmp_path / "result.json"}
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    paths = {"input": evidence_root / "input.json", "identity": evidence_root / "identity.json", "signature": evidence_root / "identity.sig", "output": evidence_root / "result.json"}
     paths["key"] = key
     sys.path.insert(0, str(SERVER / "tests"))
     candidate_tests = importlib.import_module("test_course_mode_candidate_manifest")
@@ -91,7 +167,7 @@ def valid_files(tmp_path, monkeypatch):
     actual["curriculum"]["courseId"] = COURSE_ID
     actual["repositories"]["firmware"]["sha"] = FIRMWARE_SHA
     actual["tools"]["physicalAdmission"] = {"input": str(paths["input"]), "output": str(paths["output"]), "expectedIdentity": str(paths["identity"]), "expectedIdentitySignature": str(paths["signature"])}
-    actual["evidenceRoot"] = str(tmp_path)
+    actual["evidenceRoot"] = str(evidence_root)
     firmware = actual["firmware"]
     firmware.update(appBytes=3637200, appSha256=APP_SHA, partitionBytes=4128768, freeBytes=4128768-3637200, evidenceManifestSha256=MANIFEST_SHA)
     repository_binding = {"admin": actual["repositories"]["adminEsp"], "backend": actual["repositories"]["backend"], "firmware": actual["repositories"]["firmware"]}
@@ -133,6 +209,17 @@ def valid_files(tmp_path, monkeypatch):
     for path in (Path(input_doc["candidate"]["path"]), paths["input"], paths["identity"], paths["signature"]): path.chmod(0o444)
     monkeypatch.setattr(admission, "utc_now", lambda: NOW)
     monkeypatch.setattr(admission, "collect_serial_inventory", lambda: (["/dev/cu.usbmodem1101"], [], None))
+    monkeypatch.setattr(
+        admission,
+        "software_snapshot",
+        SimpleNamespace(
+            verify_current_software_audit=lambda *_args, **_kwargs: (
+                software_snapshot.VerifiedSoftwareAudit("a" * 64, "b" * 64, (1,), {}),
+                (),
+            )
+        ),
+        raising=False,
+    )
     return input_doc, identity, paths, actual
 
 
@@ -150,6 +237,173 @@ def resign(paths, input_doc, identity):
     paths["signature"].chmod(0o644)
     paths["signature"].write_bytes(paths["key"].sign(canonical(identity)))
     paths["signature"].chmod(0o444)
+
+
+def _enable_real_software_audit(valid_files, monkeypatch):
+    input_doc, _, paths, actual = valid_files
+    evidence_root = Path(actual["evidenceRoot"])
+    other_evidence = evidence_root / "other-evidence.json"
+    _write_secure(other_evidence, canonical({"status": "pass"}) + b"\n")
+    candidate_path = Path(input_doc["candidate"]["path"])
+    audit_path, audit = _install_software_audit(
+        candidate_path,
+        evidence_root,
+        paths,
+        actual["candidateId"],
+    )
+    _use_real_software_audit(monkeypatch)
+    return candidate_path, evidence_root, other_evidence, audit_path, audit
+
+
+def _inventory_must_not_run(monkeypatch):
+    def fail_inventory():
+        raise AssertionError("serial inventory ran before software audit verification")
+
+    monkeypatch.setattr(admission, "collect_serial_inventory", fail_inventory)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_reason"),
+    [
+        ("missing", "softwareAudit.missing"),
+        ("schema-v1", "softwareAudit.schema"),
+        ("malformed", "softwareAudit.json"),
+        ("snapshot-id", "softwareAudit.snapshot"),
+        ("candidate-id", "softwareAudit.candidate"),
+        ("candidate-hash", "softwareAudit.admissionBinding"),
+        ("input-hash", "softwareAudit.admissionBinding"),
+        ("identity-hash", "softwareAudit.admissionBinding"),
+        ("signature-hash", "softwareAudit.admissionBinding"),
+    ],
+)
+def test_software_audit_report_failures_block_before_serial_inventory(
+    valid_files, monkeypatch, capsys, mutation, expected_reason,
+):
+    _, _, _, audit_path, audit = _enable_real_software_audit(valid_files, monkeypatch)
+    if mutation == "missing":
+        audit_path.unlink()
+    elif mutation == "malformed":
+        _write_secure(audit_path, b"{")
+    else:
+        changed = deepcopy(audit)
+        if mutation == "schema-v1":
+            changed["schemaVersion"] = 1
+        elif mutation == "snapshot-id":
+            changed["snapshot"]["id"] = "0" * 64
+        elif mutation == "candidate-id":
+            changed["candidateId"] = "course-mode-wrong"
+        else:
+            field = {
+                "candidate-hash": "candidateSha256",
+                "input-hash": "inputSha256",
+                "identity-hash": "expectedIdentitySha256",
+                "signature-hash": "signatureSha256",
+            }[mutation]
+            changed["admissionBinding"][field] = "0" * 64
+        _write_secure(audit_path, software_snapshot.canonical_json_bytes(changed) + b"\n")
+    _inventory_must_not_run(monkeypatch)
+
+    assert run_main(valid_files[2]) == 1
+    failure = json.loads(capsys.readouterr().out)
+    assert expected_reason in failure["reasons"]
+    assert failure["physicalActionsPerformed"] is False
+    assert failure["serialOpened"] is False
+    assert not valid_files[2]["output"].exists()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "candidate-change",
+        "input-change",
+        "identity-change",
+        "evidence-change",
+        "evidence-add",
+        "evidence-remove",
+        "evidence-rename",
+        "evidence-writable",
+        "evidence-hardlink",
+        "evidence-symlink",
+    ],
+)
+def test_software_audit_tree_drift_blocks_before_serial_inventory(
+    valid_files, monkeypatch, capsys, mutation,
+):
+    candidate_path, evidence_root, other_evidence, _, _ = _enable_real_software_audit(
+        valid_files, monkeypatch
+    )
+    _, _, paths, actual = valid_files
+    if mutation == "candidate-change":
+        changed = deepcopy(actual)
+        changed["unexpected"] = True
+        rewrite(candidate_path, changed)
+        digest = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+        input_doc, identity, _, _ = valid_files
+        input_doc["candidate"]["sha256"] = digest
+        identity["candidate"]["sha256"] = digest
+        resign(paths, input_doc, identity)
+    elif mutation == "input-change":
+        _write_secure(paths["input"], paths["input"].read_bytes() + b" ")
+    elif mutation == "identity-change":
+        _write_secure(paths["identity"], paths["identity"].read_bytes() + b" ")
+    elif mutation == "evidence-change":
+        _write_secure(other_evidence, b'{"status":"changed"}\n')
+    elif mutation == "evidence-add":
+        _write_secure(evidence_root / "added.json", b"{}\n")
+    elif mutation == "evidence-remove":
+        other_evidence.unlink()
+    elif mutation == "evidence-rename":
+        other_evidence.rename(evidence_root / "renamed.json")
+    elif mutation == "evidence-writable":
+        other_evidence.chmod(0o664)
+    elif mutation == "evidence-hardlink":
+        os.link(other_evidence, evidence_root / "hardlink.json")
+    elif mutation == "evidence-symlink":
+        (evidence_root / "symlink.json").symlink_to(other_evidence)
+    _inventory_must_not_run(monkeypatch)
+
+    assert run_main(paths) == 1
+    failure = json.loads(capsys.readouterr().out)
+    assert any(reason.startswith("softwareAudit.") for reason in failure["reasons"])
+    assert failure["physicalActionsPerformed"] is False
+    assert failure["serialOpened"] is False
+    assert not paths["output"].exists()
+
+
+def test_software_audit_identity_is_rechecked_before_result_commit(
+    valid_files, monkeypatch, capsys, tmp_path,
+):
+    _, _, _, audit_path, _ = _enable_real_software_audit(valid_files, monkeypatch)
+    original = audit_path.read_bytes()
+    calls = 0
+
+    def replace_after_initial_verify(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            audit_path.rename(tmp_path / "old-software-audit.json")
+            _write_secure(audit_path, original)
+        return REAL_VERIFY_SOFTWARE_AUDIT(*args, **kwargs)
+
+    monkeypatch.setattr(
+        admission.software_snapshot,
+        "verify_current_software_audit",
+        replace_after_initial_verify,
+    )
+
+    assert run_main(valid_files[2]) == 1
+    assert calls >= 2
+    assert not valid_files[2]["output"].exists()
+    assert json.loads(capsys.readouterr().out)["reasons"] == ["output.path"]
+
+
+def test_software_audit_binding_is_published_in_pass_result(valid_files, monkeypatch):
+    _, _, _, audit_path, audit = _enable_real_software_audit(valid_files, monkeypatch)
+
+    assert run_main(valid_files[2]) == 0
+    result = json.loads(valid_files[2]["output"].read_text())
+    assert result["softwareAuditSha256"] == hashlib.sha256(audit_path.read_bytes()).hexdigest()
+    assert result["softwareSnapshotId"] == audit["snapshot"]["id"]
 
 
 def test_valid_signed_admission(valid_files):
