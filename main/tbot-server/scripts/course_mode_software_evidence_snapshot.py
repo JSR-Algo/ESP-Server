@@ -350,18 +350,23 @@ def capture_snapshot(
     except OSError:
         return SnapshotCapture(tuple(subjects), ("evidence.root",), entry_count, total_bytes)
 
-    exclusions = {evidence / OUTPUT_NAME, evidence / FUTURE_PHYSICAL_OUTPUT_NAME}
+    declared_paths: dict[str, Path] | None = None
     try:
-        requested_exclusions = tuple(_canonical_member(evidence, path) for path in excluded_evidence_paths)
         candidate_document = _strict_json_loads(candidate_subject.data)
         declared_paths = (
             _admission_paths(candidate_document, evidence) if isinstance(candidate_document, dict) else None
         )
+    except (UnicodeError, ValueError, RecursionError, json.JSONDecodeError):
+        pass
+
+    exclusions = {evidence / OUTPUT_NAME, evidence / FUTURE_PHYSICAL_OUTPUT_NAME}
+    try:
+        requested_exclusions = tuple(_canonical_member(evidence, path) for path in excluded_evidence_paths)
         declared_output = declared_paths["output"] if declared_paths is not None else None
         if len(requested_exclusions) > 1 or any(path != declared_output for path in requested_exclusions):
             raise ValueError("unsupported exclusion")
         exclusions.update(requested_exclusions)
-    except (UnicodeError, ValueError, RecursionError, json.JSONDecodeError):
+    except ValueError:
         findings.add("evidence.exclusion")
 
     policies: dict[Path, str] = {}
@@ -371,6 +376,13 @@ def capture_snapshot(
             if policy != "physical-admission-top-level-session-id.v1":
                 raise ValueError("unsupported override")
             policies[canonical] = policy
+        expected_policy_paths = (
+            {declared_paths["input"], declared_paths["expectedIdentity"]}
+            if declared_paths is not None
+            else set()
+        )
+        if policies and set(policies) != expected_policy_paths:
+            raise ValueError("incomplete or unrelated override set")
     except ValueError:
         findings.add("evidence.scan_policy")
 

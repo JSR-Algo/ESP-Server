@@ -232,6 +232,63 @@ def test_capture_snapshot_rejects_unknown_scan_policy_override(tmp_path: Path, k
     assert "evidence.scan_policy" in capture.findings
 
 
+def test_capture_snapshot_rejects_session_policy_for_unrelated_existing_evidence(tmp_path: Path) -> None:
+    candidate_path, evidence_root, paths = _create_tree(tmp_path)
+    candidate_subject, findings = snapshot.capture_candidate(candidate_path)
+    assert findings == () and candidate_subject is not None
+
+    capture = snapshot.capture_snapshot(
+        candidate_subject,
+        evidence_root,
+        excluded_evidence_paths=(paths["output"],),
+        evidence_scan_policies={
+            evidence_root / "nested/report.json": "physical-admission-top-level-session-id.v1"
+        },
+    )
+
+    assert "evidence.scan_policy" in capture.findings
+
+
+@pytest.mark.parametrize("descriptor", ["missing", "invalid"])
+def test_capture_snapshot_rejects_nonempty_overrides_without_valid_admission_descriptor(
+    tmp_path: Path, descriptor: str
+) -> None:
+    candidate_path, evidence_root, _paths = _create_tree(tmp_path, admission=False)
+    if descriptor == "invalid":
+        candidate = json.loads(candidate_path.read_bytes())
+        candidate["tools"]["physicalAdmission"] = None
+        _write_json(candidate_path, candidate)
+    candidate_subject, findings = snapshot.capture_candidate(candidate_path)
+    assert findings == () and candidate_subject is not None
+
+    capture = snapshot.capture_snapshot(
+        candidate_subject,
+        evidence_root,
+        evidence_scan_policies={
+            evidence_root / "nested/report.json": "physical-admission-top-level-session-id.v1"
+        },
+    )
+
+    assert "evidence.scan_policy" in capture.findings
+
+
+def test_capture_snapshot_rejects_incomplete_admission_override_set(tmp_path: Path) -> None:
+    candidate_path, evidence_root, paths = _create_tree(tmp_path)
+    candidate_subject, findings = snapshot.capture_candidate(candidate_path)
+    assert findings == () and candidate_subject is not None
+
+    capture = snapshot.capture_snapshot(
+        candidate_subject,
+        evidence_root,
+        excluded_evidence_paths=(paths["output"],),
+        evidence_scan_policies={
+            paths["input"]: "physical-admission-top-level-session-id.v1"
+        },
+    )
+
+    assert "evidence.scan_policy" in capture.findings
+
+
 def test_capture_snapshot_rejects_more_than_one_caller_exclusion(tmp_path: Path) -> None:
     candidate_path, evidence_root, paths = _create_tree(tmp_path)
     candidate_subject, findings = snapshot.capture_candidate(candidate_path)
