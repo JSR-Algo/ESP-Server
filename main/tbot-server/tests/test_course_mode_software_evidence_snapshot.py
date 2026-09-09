@@ -353,6 +353,53 @@ def test_capture_candidate_rejects_file_over_eight_mib(tmp_path: Path) -> None:
     assert "candidate.metadata" in findings
 
 
+def test_capture_snapshot_bounds_and_closes_wide_scandir_iterator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate_path, evidence_root, _paths = _create_tree(tmp_path, admission=False)
+    candidate_subject, findings = snapshot.capture_candidate(candidate_path)
+    assert findings == () and candidate_subject is not None
+
+    class Entry:
+        def __init__(self, index: int) -> None:
+            self.name = f"entry-{index:05d}"
+            self.path = str(evidence_root / self.name)
+
+        def stat(self, *, follow_symlinks: bool):
+            assert follow_symlinks is False
+            raise OSError("synthetic missing entry")
+
+        def is_symlink(self) -> bool:
+            return False
+
+    class WideIterator:
+        def __init__(self) -> None:
+            self.consumed = 0
+            self.closed = False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if self.consumed >= 5000:
+                raise StopIteration
+            entry = Entry(self.consumed)
+            self.consumed += 1
+            return entry
+
+        def close(self) -> None:
+            self.closed = True
+
+    iterator = WideIterator()
+    monkeypatch.setattr(snapshot.os, "scandir", lambda _path: iterator)
+
+    capture = snapshot.capture_snapshot(candidate_subject, evidence_root)
+
+    assert "evidence.budget" in capture.findings
+    assert iterator.consumed == snapshot.MAX_ENTRIES
+    assert iterator.closed is True
+
+
 def test_capture_snapshot_rejects_more_than_4096_entries(tmp_path: Path) -> None:
     candidate_path, evidence_root, _paths = _create_tree(tmp_path, admission=False)
     for index in range(4095):

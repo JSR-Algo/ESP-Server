@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -401,18 +402,27 @@ def capture_snapshot(
         while stack:
             directory = stack.pop()
             try:
-                entries = list(os.scandir(directory))
+                iterator = os.scandir(directory)
             except OSError:
                 findings.add(f"{scope}.root" if scope == "evidence" else "preserved.root")
                 continue
+            remaining_entries = MAX_ENTRIES - entry_count
+            entries = []
+            overflow = False
+            with contextlib.closing(iterator):
+                for entry in iterator:
+                    if len(entries) >= remaining_entries:
+                        overflow = True
+                        break
+                    entries.append(entry)
+            entry_count += len(entries) + int(overflow)
             entries.sort(key=lambda entry: entry.name, reverse=True)
+            if overflow:
+                findings.add("evidence.budget")
+                entry_limit_hit = True
+                return
             for entry in entries:
                 path = Path(entry.path)
-                entry_count += 1
-                if entry_count > MAX_ENTRIES:
-                    findings.add("evidence.budget")
-                    entry_limit_hit = True
-                    return
                 try:
                     metadata = entry.stat(follow_symlinks=False)
                 except OSError:
