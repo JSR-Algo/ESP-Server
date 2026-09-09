@@ -46,6 +46,7 @@ except ModuleNotFoundError:
 _scripts_directory = str(Path(__file__).resolve().parent)
 sys.path.insert(0, _scripts_directory)
 try:
+    _software_snapshot = importlib.import_module("course_mode_software_evidence_snapshot")
     _admission = importlib.import_module("course_mode_physical_flash_admission")
 finally:
     sys.path.remove(_scripts_directory)
@@ -524,6 +525,9 @@ class PhysicalAdmissionBinding:
     evidence_root_identity: tuple[int, ...]
     input_identities: tuple[tuple[str, tuple[int, ...], str], ...]
     output_parent_identity: tuple[int, ...]
+    software_audit_identity: tuple[int, ...]
+    software_audit_sha256: str
+    software_snapshot_id: str
     expected_result: bytes
 
 
@@ -2269,9 +2273,13 @@ PHYSICAL_ADMISSION_BOOTSTRAP = (
     "m.__file__,'exec'),m.__dict__);"
     "t=types.ModuleType('course_mode_physical_tft_preflight');"
     "t.__file__=sys.argv[2];sys.modules[t.__name__]=t;"
-    "exec(compile(base64.b64decode(os.environ.pop('TBOT_ADMISSION_PREFLIGHT_B64')),"
+    "exec(compile(base64.b64decode(os.environ.pop('TBOT_ADMISSION_PREFLIGHT_B64'))," 
     "t.__file__,'exec'),t.__dict__);"
-    "sys.argv=sys.argv[3:];p=sys.argv[0];"
+    "s=types.ModuleType('course_mode_software_evidence_snapshot');"
+    "s.__file__=sys.argv[3];sys.modules[s.__name__]=s;"
+    "exec(compile(base64.b64decode(os.environ.pop('TBOT_ADMISSION_SNAPSHOT_B64'))," 
+    "s.__file__,'exec'),s.__dict__);"
+    "sys.argv=sys.argv[4:];p=sys.argv[0];"
     "exec(compile(base64.b64decode(os.environ.pop('TBOT_ADMISSION_MAIN_B64')),"
     "p,'exec'),{'__name__':'__main__','__file__':p,'__builtins__':__builtins__})"
 )
@@ -2280,6 +2288,7 @@ PHYSICAL_ADMISSION_SOURCE_PATHS = (
     "main/tbot-server/scripts/course_mode_physical_flash_admission.py",
     "main/tbot-server/scripts/course_mode_candidate_manifest.py",
     "main/tbot-server/scripts/course_mode_physical_tft_preflight.py",
+    "main/tbot-server/scripts/course_mode_software_evidence_snapshot.py",
 )
 
 
@@ -3361,6 +3370,11 @@ def _physical_admission_binding(
             or strict_json_loads(candidate_raw) != candidate
         ):
             return None
+        verified_audit, audit_reasons = _software_snapshot.verify_current_software_audit(
+            candidate_path, evidence_root, preserved_roots=(),
+        )
+        if verified_audit is None or audit_reasons:
+            return None
         expected_result = {
             "schemaVersion": 1,
             "validator": _admission.VALIDATOR,
@@ -3376,6 +3390,8 @@ def _physical_admission_binding(
                 raw_inputs["expectedIdentity"],
             ).hexdigest(),
             "candidateSha256": hashlib.sha256(candidate_raw).hexdigest(),
+            "softwareAuditSha256": verified_audit.audit_sha256,
+            "softwareSnapshotId": verified_audit.snapshot_id,
             "robotMac": _admission.ROBOT_MAC,
             "serialPath": _admission.SERIAL_PATH,
             "firmwareSha": _admission.FIRMWARE_SHA,
@@ -3387,6 +3403,9 @@ def _physical_admission_binding(
             evidence_root_identity=_directory_identity(evidence_root_metadata),
             input_identities=tuple(input_identities),
             output_parent_identity=_directory_identity(output_parent_metadata),
+            software_audit_identity=verified_audit.audit_identity,
+            software_audit_sha256=verified_audit.audit_sha256,
+            software_snapshot_id=verified_audit.snapshot_id,
             expected_result=json.dumps(
                 expected_result, sort_keys=True, separators=(",", ":"),
                 ensure_ascii=True, allow_nan=False,
@@ -3469,7 +3488,7 @@ def _physical_admission_bound_execution(
     try:
         records = binding.records
         if (
-            len(records) != 3 or len(command) < 6
+            len(records) != 4 or len(command) < 6
             or command[1:5] != ("-I", "-s", "-c", PHYSICAL_ADMISSION_BOOTSTRAP)
             or Path(command[5]).name != Path(records[0][2]).name
             or tuple(Path(record[2]).name for record in records)
@@ -3480,13 +3499,14 @@ def _physical_admission_bound_execution(
             "TBOT_ADMISSION_MAIN_B64": base64.b64encode(records[0][0]).decode("ascii"),
             "TBOT_ADMISSION_MANIFEST_B64": base64.b64encode(records[1][0]).decode("ascii"),
             "TBOT_ADMISSION_PREFLIGHT_B64": base64.b64encode(records[2][0]).decode("ascii"),
+            "TBOT_ADMISSION_SNAPSHOT_B64": base64.b64encode(records[3][0]).decode("ascii"),
         }
         if sum(len(key) + len(value) + 2 for key, value in environment.items()) > (
             MAX_PHYSICAL_ADMISSION_SOURCE_ENV_BYTES
         ):
             return None
         bound_command = (
-            *command[:5], str(records[1][2]), str(records[2][2]),
+            *command[:5], str(records[1][2]), str(records[2][2]), str(records[3][2]),
             command[5], *command[6:],
         )
         return bound_command, environment
@@ -4591,6 +4611,7 @@ def _run_gate_impl(
     selected: tuple[Lane, ...] = ()
     require_runtime = False
     operator_binding: OperatorAttestationBinding | None = None
+    physical_admission_binding: PhysicalAdmissionBinding | None = None
     published_physical_result: tuple | None = None
     source = source_environment if source_environment is not None else os.environ
     report_destination = None
@@ -4941,6 +4962,13 @@ def _run_gate_impl(
                                 max_output_bytes=max_output_bytes, env=child_environment,
                                 contain_process_group=lane.name in STATEFUL_ASSIGNMENT_LANES,
                             )
+                            if _physical_admission_binding(
+                                candidate, require_output_absent=False,
+                                expected_candidate_path=candidate_path,
+                            ) != physical_admission_binding:
+                                result = _manifest.BoundedCommandResult(
+                                    None, result.stdout, "authority",
+                                )
                         bounded_result = result
                     if (
                         (_python_test_runtime_required(lane) or _backend_compiler_required(lane))
@@ -5105,6 +5133,13 @@ def _run_gate_impl(
         and not _admission._still_bound(published_physical_result)
     ):
         report = _blocked(candidate_id, "physical-flash-admission")
+    if report["verdict"] == "PASS" and physical_admission_binding is not None and (
+        _physical_admission_binding(
+            candidate, require_output_absent=False,
+            expected_candidate_path=candidate_path,
+        ) != physical_admission_binding
+    ):
+        report = _blocked(candidate_id, "physical-flash-admission")
     if report["verdict"] != "PASS" and published_physical_result is not None:
         if _remove_bound_physical_admission_result(published_physical_result):
             published_physical_result = None
@@ -5127,6 +5162,13 @@ def _run_gate_impl(
                 report["verdict"] = "BLOCKED"
                 report["failedLane"] = "operator-precondition"
                 report.pop("operatorAttestationSha256", None)
+            if report["verdict"] == "PASS" and physical_admission_binding is not None and (
+                _physical_admission_binding(
+                    candidate, require_output_absent=False,
+                    expected_candidate_path=candidate_path,
+                ) != physical_admission_binding
+            ):
+                report = _blocked(candidate_id, "physical-flash-admission")
             if not _write_report_atomic(report_path, report, report_destination):
                 report_finalization_failed = True
             else:
