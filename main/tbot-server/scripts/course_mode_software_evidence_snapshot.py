@@ -228,6 +228,16 @@ def _identity(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def _directory_authority_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+    )
+
+
 def _secure_directory_chain(path: Path) -> tuple[tuple[Path, tuple[int, ...]], ...]:
     absolute = _absolute(path)
     if not _lexically_canonical(absolute):
@@ -248,7 +258,7 @@ def _secure_directory_chain(path: Path) -> tuple[tuple[Path, tuple[int, ...]], .
             or metadata.st_mode & 0o022
         ):
             raise OSError("insecure directory")
-        checked.append((current, _identity(metadata)))
+        checked.append((current, _directory_authority_identity(metadata)))
     final = absolute.lstat()
     if final.st_uid != os.geteuid():
         raise OSError("unowned root")
@@ -256,6 +266,13 @@ def _secure_directory_chain(path: Path) -> tuple[tuple[Path, tuple[int, ...]], .
 
 
 def _directories_stable(checked: Sequence[tuple[Path, tuple[int, ...]]]) -> bool:
+    try:
+        return all(_directory_authority_identity(path.lstat()) == identity for path, identity in checked)
+    except OSError:
+        return False
+
+
+def _content_directories_stable(checked: Sequence[tuple[Path, tuple[int, ...]]]) -> bool:
     try:
         return all(_identity(path.lstat()) == identity for path, identity in checked)
     except OSError:
@@ -315,12 +332,14 @@ def capture_candidate(candidate_path: Path) -> tuple[CapturedSubject | None, tup
         return None, ("candidate.metadata",)
 
 
-def _canonical_root(path: Path) -> tuple[Path, tuple[tuple[Path, tuple[int, ...]], ...]]:
+def _canonical_root(
+    path: Path,
+) -> tuple[Path, tuple[tuple[Path, tuple[int, ...]], ...], tuple[int, ...]]:
     absolute = _absolute(path)
     checked = _secure_directory_chain(absolute)
     if absolute.resolve(strict=True) != absolute:
         raise OSError("noncanonical root")
-    return absolute, checked
+    return absolute, checked, _identity(absolute.lstat())
 
 
 def _canonical_member(root: Path, path: Path) -> Path:
@@ -347,7 +366,7 @@ def capture_snapshot(
         findings.add("candidate.metadata")
 
     try:
-        evidence, evidence_directories = _canonical_root(evidence_root)
+        evidence, evidence_ancestors, evidence_identity = _canonical_root(evidence_root)
     except OSError:
         return SnapshotCapture(tuple(subjects), ("evidence.root",), entry_count, total_bytes)
 
@@ -464,21 +483,27 @@ def capture_snapshot(
                 if path in policies:
                     observed_policy_paths.add(path)
                 subjects.append(CapturedSubject(scope, logical_path, data, policy))
-        if not _directories_stable(visited_directories):
+        if not _content_directories_stable(visited_directories):
             findings.add(f"{scope}.metadata")
 
     walk(evidence, "evidence", "", "evidence-privacy.v1")
-    if not _directories_stable(evidence_directories):
+    if (
+        not _directories_stable(evidence_ancestors)
+        or not _content_directories_stable(((evidence, evidence_identity),))
+    ):
         findings.add("evidence.metadata")
 
     for index, root in enumerate(preserved_roots):
         try:
-            preserved, preserved_directories = _canonical_root(root)
+            preserved, preserved_ancestors, preserved_identity = _canonical_root(root)
         except OSError:
             findings.add("preserved.root")
             continue
         walk(preserved, "preserved", str(index), "preserved-evidence-privacy.v1")
-        if not _directories_stable(preserved_directories):
+        if (
+            not _directories_stable(preserved_ancestors)
+            or not _content_directories_stable(((preserved, preserved_identity),))
+        ):
             findings.add("preserved.metadata")
 
     if observed_policy_paths != set(policies) or set(policies) & exclusions:

@@ -344,6 +344,58 @@ def test_capture_snapshot_rejects_writable_directory_and_symlink_entry(tmp_path:
     assert "evidence.metadata" in capture.findings
 
 
+def test_capture_snapshot_ignores_sibling_churn_in_nonaudited_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate_path, evidence_root, _paths = _create_tree(tmp_path, admission=False)
+    candidate_subject, findings = snapshot.capture_candidate(candidate_path)
+    assert findings == () and candidate_subject is not None
+    original_read = os.read
+    sibling = tmp_path / "unrelated-sibling.txt"
+    churned = False
+
+    def read_with_sibling_churn(descriptor: int, size: int) -> bytes:
+        nonlocal churned
+        data = original_read(descriptor, size)
+        if not churned:
+            churned = True
+            _write(sibling, b"unrelated\n")
+        return data
+
+    monkeypatch.setattr(snapshot.os, "read", read_with_sibling_churn)
+
+    capture = snapshot.capture_snapshot(candidate_subject, evidence_root)
+
+    assert churned is True
+    assert capture.findings == ()
+
+
+def test_capture_snapshot_rejects_entry_churn_inside_audited_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate_path, evidence_root, _paths = _create_tree(tmp_path, admission=False)
+    candidate_subject, findings = snapshot.capture_candidate(candidate_path)
+    assert findings == () and candidate_subject is not None
+    original_read = os.read
+    added = evidence_root / "added-during-capture.json"
+    churned = False
+
+    def read_with_in_tree_churn(descriptor: int, size: int) -> bytes:
+        nonlocal churned
+        data = original_read(descriptor, size)
+        if not churned:
+            churned = True
+            _write(added, b'{}\n')
+        return data
+
+    monkeypatch.setattr(snapshot.os, "read", read_with_in_tree_churn)
+
+    capture = snapshot.capture_snapshot(candidate_subject, evidence_root)
+
+    assert churned is True
+    assert "evidence.metadata" in capture.findings
+
+
 def test_capture_candidate_rejects_file_over_eight_mib(tmp_path: Path) -> None:
     candidate_path = tmp_path / "candidate.json"
     candidate_path.write_bytes(b"x" * (8 * 1024 * 1024 + 1))
