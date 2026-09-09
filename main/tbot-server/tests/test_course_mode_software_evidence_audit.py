@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import uuid
@@ -1216,6 +1217,117 @@ def test_output_must_be_inside_evidence_root(
     assert completed.returncode == 1
     assert "output.unsafe" in json.loads(completed.stdout)["findings"]
     assert not wrong_name.exists()
+
+
+def test_interrupted_output_write_preserves_prior_report_and_cleans_temp(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, output = evidence_fixture
+    prior_report = {"schemaVersion": 2, "snapshot": {"id": "prior"}, "status": "pass"}
+    replacement_report = {"schemaVersion": 2, "snapshot": {"id": "replacement"}, "status": "pass"}
+    _write_json(output, prior_report)
+
+    def interrupt(descriptor: int, payload: bytes) -> None:
+        os.write(descriptor, payload[:7])
+        raise OSError("interrupted write")
+
+    monkeypatch.setattr(auditor, "_write_all", interrupt, raising=False)
+
+    assert auditor._write_output(output, replacement_report) is False
+    assert json.loads(output.read_bytes()) == prior_report
+    assert not list(output.parent.glob(f".{output.name}.*"))
+
+
+def test_failed_output_replace_preserves_prior_report_and_cleans_temp(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, output = evidence_fixture
+    prior_report = {"schemaVersion": 2, "snapshot": {"id": "prior"}, "status": "pass"}
+    _write_json(output, prior_report)
+
+    monkeypatch.setattr(auditor.os, "replace", lambda *_args: (_ for _ in ()).throw(OSError("replace")))
+
+    assert auditor._write_output(output, {"status": "fail"}) is False
+    assert json.loads(output.read_bytes()) == prior_report
+    assert not list(output.parent.glob(f".{output.name}.*"))
+
+
+def test_atomic_output_orders_permissions_and_durability_before_and_after_rename(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, output = evidence_fixture
+    report = {"schemaVersion": 2, "snapshot": {"id": "current"}, "status": "pass"}
+    events: list[tuple[str, int | str]] = []
+    descriptors: dict[str, int] = {}
+    real_mkstemp = auditor.tempfile.mkstemp
+    real_write = auditor.os.write
+    real_fchmod = auditor.os.fchmod
+    real_fsync = auditor.os.fsync
+    real_replace = auditor.os.replace
+
+    def mkstemp(*args: object, **kwargs: object) -> tuple[int, str]:
+        descriptor, name = real_mkstemp(*args, **kwargs)
+        descriptors["file"] = descriptor
+        return descriptor, name
+
+    def write_all(descriptor: int, payload: bytes) -> None:
+        events.append(("write", descriptor))
+        offset = 0
+        while offset < len(payload):
+            offset += real_write(descriptor, payload[offset:])
+
+    def fchmod(descriptor: int, mode: int) -> None:
+        events.append(("chmod", mode))
+        real_fchmod(descriptor, mode)
+
+    def fsync(descriptor: int) -> None:
+        events.append(("fsync", descriptor))
+        real_fsync(descriptor)
+
+    def replace(source: Path, destination: Path) -> None:
+        events.append(("replace", str(destination)))
+        assert stat.S_IMODE(os.fstat(descriptors["file"]).st_mode) == 0o444
+        real_replace(source, destination)
+
+    monkeypatch.setattr(auditor.tempfile, "mkstemp", mkstemp)
+    monkeypatch.setattr(auditor, "_write_all", write_all, raising=False)
+    monkeypatch.setattr(auditor.os, "fchmod", fchmod)
+    monkeypatch.setattr(auditor.os, "fsync", fsync)
+    monkeypatch.setattr(auditor.os, "replace", replace)
+
+    assert auditor._write_output(output, report) is True
+
+    replace_index = next(index for index, event in enumerate(events) if event[0] == "replace")
+    file_fsync_index = events.index(("fsync", descriptors["file"]))
+    assert events.index(("write", descriptors["file"])) < events.index(("chmod", 0o444))
+    assert events.index(("chmod", 0o444)) < file_fsync_index < replace_index
+    assert events[replace_index + 1][0] == "fsync"
+    assert events[replace_index + 1][1] != descriptors["file"]
+    with pytest.raises(OSError):
+        os.fstat(descriptors["file"])
+    assert stat.S_IMODE(output.stat().st_mode) == 0o444
+    assert json.loads(output.read_bytes()) == report
+    assert not list(output.parent.glob(f".{output.name}.*"))
+
+
+def test_output_publication_uses_supplied_snapshot_without_revalidating_sources(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, output = evidence_fixture
+    report = {"schemaVersion": 2, "snapshot": {"id": "historical"}, "status": "pass"}
+    monkeypatch.setattr(
+        snapshot,
+        "verify_current_software_audit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("publication revalidation")),
+    )
+    monkeypatch.setattr(
+        snapshot,
+        "capture_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("source reread")),
+    )
+
+    assert auditor._write_output(output, report) is True
+    assert json.loads(output.read_bytes()) == report
 
 
 def test_cli_does_not_resolve_away_candidate_symlink(

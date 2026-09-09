@@ -714,24 +714,57 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
     return report
 
 
-def _write_output(path: Path, report: dict[str, object]) -> bool:
-    payload = json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n"
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+def _write_all(descriptor: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
         try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.chmod(temporary, 0o444)
-            os.replace(temporary, path)
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(temporary)
+            written = os.write(descriptor, payload[offset:])
+        except InterruptedError:
+            continue
+        if written <= 0:
+            raise OSError("short write")
+        offset += written
+
+
+def _write_output(path: Path, report: dict[str, object]) -> bool:
+    payload = json.dumps(
+        report,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8") + b"\n"
+    parent_fd = descriptor = None
+    temporary_name = None
+    try:
+        parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        temporary_name = Path(temporary)
+        _write_all(descriptor, payload)
+        os.fchmod(descriptor, 0o444)
+        os.fsync(descriptor)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_size != len(payload)
+        ):
+            return False
+        os.replace(temporary_name, path)
+        temporary_name = None
+        os.fsync(parent_fd)
         return True
-    except OSError:
+    except (OSError, TypeError, ValueError):
         return False
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary_name is not None:
+            with contextlib.suppress(FileNotFoundError):
+                temporary_name.unlink()
+        if parent_fd is not None:
+            os.close(parent_fd)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -749,19 +782,14 @@ def main(argv: list[str] | None = None) -> int:
     if output != evidence_root / OUTPUT_NAME:
         report["findings"] = sorted(set(report["findings"]) | {"output.unsafe"})
         report["status"] = "fail"
-    try:
-        output.relative_to(evidence_root)
-    except ValueError:
-        report["findings"] = sorted(set(report["findings"]) | {"output.unsafe"})
+    if (
+        output == evidence_root / OUTPUT_NAME
+        and "output.unsafe" not in report["findings"]
+        and "output.collision" not in report["findings"]
+        and not _write_output(output, report)
+    ):
+        report["findings"] = sorted(set(report["findings"]) | {"output.write"})
         report["status"] = "fail"
-    else:
-        if (
-            (not report["findings"] or "output.unsafe" not in report["findings"])
-            and "output.collision" not in report["findings"]
-            and not _write_output(output, report)
-        ):
-            report["findings"] = sorted(set(report["findings"]) | {"output.write"})
-            report["status"] = "fail"
     print(json.dumps(report, sort_keys=True, separators=(",", ":")))
     return 0 if report["status"] == "pass" else 1
 
