@@ -8968,6 +8968,46 @@ def test_physical_flash_admission_rejects_audit_replacement_after_result_validat
     assert result["failedLane"] == "physical-flash-admission"
 
 
+def test_physical_flash_admission_corrects_pass_report_after_audit_publish_race(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate, paths = _authorize_physical_fixture(candidate_file, monkeypatch)
+    evidence = Path(candidate["evidenceRoot"])
+    audit = evidence / snapshot.OUTPUT_NAME
+    report_path = evidence / snapshot.FUTURE_PHYSICAL_OUTPUT_NAME
+    original_write = gate._write_report_atomic
+    writes = 0
+
+    def publish(*_args, **_kwargs):
+        _publish_physical_admission_result(candidate, paths)
+        return gate._manifest.BoundedCommandResult(0, "", None)
+
+    def write_then_replace(*args, **kwargs):
+        nonlocal writes
+        written = original_write(*args, **kwargs)
+        writes += 1
+        if writes == 1:
+            replacement = audit.with_name("post-publish-audit.json")
+            replacement.write_bytes(audit.read_bytes())
+            replacement.chmod(0o444)
+            replacement.replace(audit)
+        return written
+
+    monkeypatch.setattr(gate, "run_bounded_command", publish)
+    monkeypatch.setattr(gate, "_write_report_atomic", write_then_replace)
+
+    result = gate.run_gate(
+        candidate_file, "physical-preflight", report_path=report_path,
+        runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
+    )
+
+    assert writes == 2
+    assert result["verdict"] == "BLOCKED"
+    assert result["failedLane"] == "physical-flash-admission"
+    assert json.loads(report_path.read_text(encoding="utf-8")) == result
+    assert not paths["output"].exists()
+
+
 @pytest.mark.parametrize("encoding", ["whitespace", "key-order", "extra-newline"])
 def test_physical_preflight_requires_canonical_result_bytes(
     candidate_file: Path, monkeypatch: pytest.MonkeyPatch, encoding: str,
@@ -9010,7 +9050,9 @@ def test_physical_preflight_report_finalization_error_cleans_result_and_reruns(
 ) -> None:
     candidate, paths = _install_physical_admission_fixture(candidate_file)
     attestation = _write_operator_attestation(candidate_file)
-    report_path = Path(candidate["evidenceRoot"]) / f"physical-{failure_site}.json"
+    report_path = (
+        Path(candidate["evidenceRoot"]) / snapshot.FUTURE_PHYSICAL_OUTPUT_NAME
+    )
     monkeypatch.setenv("COURSE_MODE_OPERATOR_ATTESTATION", str(attestation))
     monkeypatch.setattr(gate, "validate_candidate", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(gate, "release_state_matches", lambda *_args, **_kwargs: True)
@@ -9050,7 +9092,7 @@ def test_physical_preflight_report_finalization_error_cleans_result_and_reruns(
     _write_valid_software_audit(candidate_file)
     rerun = gate.run_gate(
         candidate_file, "physical-preflight",
-        report_path=report_path.with_name(f"physical-{failure_site}-rerun.json"),
+        report_path=report_path,
         runtime_root=Path(candidate["repositories"]["adminEsp"]["path"]),
     )
     assert rerun["verdict"] == "PASS"

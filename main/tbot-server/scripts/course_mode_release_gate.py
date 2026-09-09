@@ -5177,6 +5177,13 @@ def _run_gate_impl(
                     _operator_attestation_binding(candidate, source) != operator_binding
                 ):
                     post_publish_report = _blocked(candidate_id, "operator-precondition")
+                elif report["verdict"] == "PASS" and physical_admission_binding is not None and (
+                    _physical_admission_binding(
+                        candidate, require_output_absent=False,
+                        expected_candidate_path=candidate_path,
+                    ) != physical_admission_binding
+                ):
+                    post_publish_report = _blocked(candidate_id, "physical-flash-admission")
                 elif report["verdict"] == "PASS" and published_physical_result is not None and (
                     not _admission._still_bound(published_physical_result)
                 ):
