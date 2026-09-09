@@ -63,6 +63,7 @@ REQUIRED_EVIDENCE = (
 RAW_PLAYWRIGHT_DIRS = {"playwright-report", "test-results", "blob-report", "playwright-e2e-original"}
 OUTPUT_NAME = "06-software-evidence-audit.json"
 TRUSTED_SYSTEM_SYMLINKS = {Path("/var"): Path("/private/var"), Path("/tmp"): Path("/private/tmp")}
+_FileSnapshot = tuple[bytes, tuple[int, ...], tuple[tuple[int, ...], ...]]
 
 
 class _AuditReport(dict[str, object]):
@@ -70,13 +71,15 @@ class _AuditReport(dict[str, object]):
         self,
         value: dict[str, object],
         candidate_path: Path,
-        candidate_snapshot: tuple[bytes, tuple[int, ...], tuple[tuple[int, ...], ...]] | None,
+        candidate_snapshot: _FileSnapshot | None,
+        admission_snapshots: tuple[tuple[Path, _FileSnapshot], ...],
         public_admission_declared: bool,
         output_parent_snapshot: tuple[tuple[int, ...], ...] | None,
     ) -> None:
         super().__init__(value)
         self.candidate_path = candidate_path
         self.candidate_snapshot = candidate_snapshot
+        self.admission_snapshots = admission_snapshots
         self.public_admission_declared = public_admission_declared
         self.output_parent_snapshot = output_parent_snapshot
 
@@ -84,6 +87,18 @@ class _AuditReport(dict[str, object]):
         return self.candidate_snapshot is not None and _secure_file_snapshot_matches(
             self.candidate_path, self.candidate_snapshot
         )
+
+    def admission_still_bound(self) -> bool:
+        matches = tuple(
+            _secure_file_snapshot_matches(path, snapshot)
+            for path, snapshot in self.admission_snapshots
+        )
+        return all(matches)
+
+    def publication_inputs_still_bound(self) -> bool:
+        candidate_matches = self.candidate_still_bound()
+        admission_matches = self.admission_still_bound()
+        return candidate_matches and admission_matches
 
 
 def _directory_identity(metadata: os.stat_result) -> tuple[int, ...]:
@@ -167,7 +182,7 @@ def _directory_still_bound(
 
 def _read_secure_file_snapshot(
     path: Path,
-) -> tuple[bytes, tuple[int, ...], tuple[tuple[int, ...], ...]]:
+) -> _FileSnapshot:
     parent_descriptor, ancestry = _open_bound_directory(path.parent)
     descriptor: int | None = None
     try:
@@ -263,7 +278,7 @@ def _read_secure_file(path: Path) -> bytes:
 
 def _secure_file_snapshot_matches(
     path: Path,
-    snapshot: tuple[bytes, tuple[int, ...], tuple[tuple[int, ...], ...]],
+    snapshot: _FileSnapshot,
 ) -> bool:
     try:
         return _read_secure_file_snapshot(path) == snapshot
@@ -376,16 +391,19 @@ def _candidate_admission_paths(candidate: object, evidence_root: Path) -> dict[s
 
 def _public_admission_scan_payloads(
     candidate: object, candidate_path: Path, candidate_raw: bytes, evidence_root: Path
-) -> dict[Path, tuple[bytes, bytes, tuple[bytes, ...]]]:
+) -> dict[Path, tuple[bytes, bytes, tuple[bytes, ...], _FileSnapshot]]:
     paths = _candidate_admission_paths(candidate, evidence_root)
     if paths is None:
         return {}
     try:
         import course_mode_physical_flash_admission as admission
 
-        input_raw = _read_secure_file(paths["input"])
-        identity_raw = _read_secure_file(paths["expectedIdentity"])
-        signature = _read_secure_file(paths["expectedIdentitySignature"])
+        input_snapshot = _read_secure_file_snapshot(paths["input"])
+        identity_snapshot = _read_secure_file_snapshot(paths["expectedIdentity"])
+        signature_snapshot = _read_secure_file_snapshot(paths["expectedIdentitySignature"])
+        input_raw = input_snapshot[0]
+        identity_raw = identity_snapshot[0]
+        signature = signature_snapshot[0]
         if len(signature) != 64:
             return {}
         input_document = _strict_json_loads(input_raw)
@@ -428,13 +446,15 @@ def _public_admission_scan_payloads(
                 input_raw,
                 _canonical_json_bytes({**input_document, "sessionId": "redacted"}),
                 _semantic_string_payloads(input_document),
+                input_snapshot,
             ),
             paths["expectedIdentity"]: (
                 identity_raw,
                 _canonical_json_bytes({**identity, "sessionId": "redacted"}),
                 _semantic_string_payloads(identity),
+                identity_snapshot,
             ),
-            paths["expectedIdentitySignature"]: (signature, signature, ()),
+            paths["expectedIdentitySignature"]: (signature, signature, (), signature_snapshot),
         }
     except (
         AttributeError,
@@ -676,7 +696,7 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
     findings: set[str] = set()
     if output_parent_snapshot is None:
         findings.add("output.write")
-    candidate_snapshot: tuple[bytes, tuple[int, ...], tuple[tuple[int, ...], ...]] | None = None
+    candidate_snapshot: _FileSnapshot | None = None
     try:
         candidate_snapshot = _read_secure_file_snapshot(candidate_path)
         candidate_bytes = candidate_snapshot[0]
@@ -869,11 +889,17 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
         and set(observed_public_admission_payloads) == set(public_admission_payloads)
         and all(
             observed_public_admission_payloads[path] == expected[0]
+            and _secure_file_snapshot_matches(path, expected[3])
             for path, expected in public_admission_payloads.items()
         )
     )
     if public_admission_payloads and not public_snapshot_matches:
         findings.add("content.secret")
+    admission_snapshots = (
+        tuple((path, expected[3]) for path, expected in public_admission_payloads.items())
+        if public_snapshot_matches
+        else ()
+    )
     for path, data in observed_public_admission_payloads.items():
         expected = public_admission_payloads[path]
         scan_payloads = (expected[1], *expected[2]) if public_snapshot_matches else (data,)
@@ -990,6 +1016,7 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
         },
         candidate_path,
         candidate_snapshot,
+        admission_snapshots,
         public_admission_declared,
         output_parent_snapshot,
     )
@@ -1006,6 +1033,19 @@ def _mark_candidate_changed(report: dict[str, object]) -> None:
         checks["secureFileMetadata"] = False
         checks["secretScan"] = "content.secret" not in findings
     report["status"] = "fail"
+
+
+def _mark_publication_inputs_changed(report: _AuditReport) -> None:
+    if not report.candidate_still_bound():
+        _mark_candidate_changed(report)
+    if not report.admission_still_bound():
+        findings = set(report.get("findings", []))
+        findings.add("content.secret")
+        report["findings"] = sorted(findings)
+        checks = report.get("checks")
+        if isinstance(checks, dict):
+            checks["secretScan"] = False
+        report["status"] = "fail"
 
 
 def _write_all(descriptor: int, data: bytes) -> None:
@@ -1046,12 +1086,15 @@ class _OutputBinding:
         self.parent_snapshot = parent_snapshot
         self.output_descriptor = output_descriptor
         self.output_identity = output_identity
+        self.claimed_output = False
 
     def close(self) -> None:
         if self.output_descriptor is not None:
-            os.close(self.output_descriptor)
+            with contextlib.suppress(OSError):
+                os.close(self.output_descriptor)
             self.output_descriptor = None
-        os.close(self.parent_descriptor)
+        with contextlib.suppress(OSError):
+            os.close(self.parent_descriptor)
 
     def destination_matches(self, parent_descriptor: int) -> bool:
         if _directory_identity(os.fstat(parent_descriptor)) != self.parent_snapshot[-1]:
@@ -1063,6 +1106,57 @@ class _OutputBinding:
         except OSError:
             return False
         return self.output_identity is not None and _file_identity(current)[:2] == self.output_identity[:2]
+
+    def adopt_claimed(self, parent_descriptor: int, descriptor: int) -> bool:
+        try:
+            if self.output_descriptor is not None or self.output_identity is not None:
+                return False
+            if _directory_identity(os.fstat(parent_descriptor)) != self.parent_snapshot[-1]:
+                return False
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or metadata.st_uid != os.geteuid()
+            ):
+                return False
+            self.output_descriptor = os.dup(descriptor)
+            self.output_identity = _file_identity(metadata)
+            self.claimed_output = True
+            return True
+        except OSError:
+            return False
+
+    def _publish_claimed_failure(self, report: dict[str, object]) -> bool:
+        if not self.claimed_output or self.output_descriptor is None or self.output_identity is None:
+            return False
+        descriptor = self.output_descriptor
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                _file_identity(metadata)[:2] != self.output_identity[:2]
+                or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink not in (0, 1)
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_mode & 0o022
+            ):
+                return False
+            payload = (json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+            os.fchmod(descriptor, 0o600)
+            os.ftruncate(descriptor, 0)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            _write_all(descriptor, payload)
+            os.ftruncate(descriptor, len(payload))
+            os.fchmod(descriptor, 0o444)
+            os.fsync(descriptor)
+            os.fsync(self.parent_descriptor)
+            return True
+        except OSError:
+            _invalidate_published_output(descriptor)
+            return False
+        finally:
+            with contextlib.suppress(OSError):
+                os.fchmod(descriptor, 0o444)
 
     def _open_writable(self) -> int | None:
         if self.output_descriptor is None or self.output_identity is None:
@@ -1083,7 +1177,10 @@ class _OutputBinding:
             os.fchmod(self.output_descriptor, 0o600)
             writable = os.open(
                 self.path.name,
-                os.O_RDWR | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+                os.O_RDWR
+                | os.O_NONBLOCK
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_DSYNC", getattr(os, "O_SYNC", 0)),
                 dir_fd=self.parent_descriptor,
             )
             if _file_identity(os.fstat(writable))[:2] != self.output_identity[:2]:
@@ -1099,6 +1196,8 @@ class _OutputBinding:
                 os.fchmod(self.output_descriptor, 0o444)
 
     def publish_failure(self, report: dict[str, object]) -> bool:
+        if self.claimed_output:
+            return self._publish_claimed_failure(report)
         return self._publish_bound(report, None, None)
 
     def publish_bound(
@@ -1125,7 +1224,7 @@ class _OutputBinding:
             payload = (json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
             os.ftruncate(writable, 0)
             os.lseek(writable, 0, os.SEEK_SET)
-            _write_all(writable, payload)
+            _write_all(writable, payload if commit_safe is None else b"\x00" + payload[1:])
             os.ftruncate(writable, len(payload))
             os.fchmod(writable, 0o444)
             os.fsync(writable)
@@ -1140,6 +1239,9 @@ class _OutputBinding:
             if _file_identity(current)[:2] != self.output_identity[:2]:
                 _invalidate_published_output(writable)
                 return False
+            if commit_safe is not None:
+                os.lseek(writable, 0, os.SEEK_SET)
+                _write_all(writable, payload[:1])
             return True
         except OSError:
             _invalidate_published_output(writable)
@@ -1147,7 +1249,8 @@ class _OutputBinding:
         finally:
             with contextlib.suppress(OSError):
                 os.fchmod(writable, 0o444)
-            os.close(writable)
+            with contextlib.suppress(OSError):
+                os.close(writable)
 
 
 def _capture_output_binding(path: Path) -> _OutputBinding | None:
@@ -1214,13 +1317,29 @@ def _write_output(
             return destination_binding.publish_bound(report, commit_safe, expected_parent)
         descriptor = os.open(
             path.name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_DSYNC", getattr(os, "O_SYNC", 0)),
             0o600,
             dir_fd=parent_descriptor,
         )
         publication_complete = True
+        if destination_binding is not None and not destination_binding.adopt_claimed(parent_descriptor, descriptor):
+            report["findings"] = sorted(set(report.get("findings", [])) | {"output.write"})
+            report["status"] = "fail"
+            payload = (json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+            os.ftruncate(descriptor, 0)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            _write_all(descriptor, payload)
+            os.ftruncate(descriptor, len(payload))
+            os.fchmod(descriptor, 0o444)
+            os.fsync(descriptor)
+            os.fsync(parent_descriptor)
+            return False
         data = payload.encode("utf-8")
-        _write_all(descriptor, data)
+        _write_all(descriptor, data if commit_safe is None else b"\x00" + data[1:])
         os.fchmod(descriptor, 0o444)
         os.fsync(descriptor)
         temporary_identity = os.fstat(descriptor)
@@ -1244,6 +1363,9 @@ def _write_output(
         if (published_metadata.st_dev, published_metadata.st_ino) != published_identity:
             _invalidate_published_output(descriptor)
             return False
+        if commit_safe is not None:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            _write_all(descriptor, data[:1])
         return True
     except OSError:
         if (
@@ -1255,9 +1377,11 @@ def _write_output(
         return False
     finally:
         if descriptor is not None:
-            os.close(descriptor)
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
         if parent_descriptor is not None:
-            os.close(parent_descriptor)
+            with contextlib.suppress(OSError):
+                os.close(parent_descriptor)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1274,8 +1398,8 @@ def main(argv: list[str] | None = None) -> int:
     output_binding = _capture_output_binding(output)
     try:
         report = audit(candidate_path, evidence_root, preserved_roots, output)
-        if isinstance(report, _AuditReport) and not report.candidate_still_bound():
-            _mark_candidate_changed(report)
+        if isinstance(report, _AuditReport) and not report.publication_inputs_still_bound():
+            _mark_publication_inputs_changed(report)
         if output != evidence_root / OUTPUT_NAME:
             report["findings"] = sorted(set(report["findings"]) | {"output.unsafe"})
             report["status"] = "fail"
@@ -1300,15 +1424,15 @@ def main(argv: list[str] | None = None) -> int:
                     output_written = _write_output(
                         output,
                         report,
-                        report.candidate_still_bound
+                        report.publication_inputs_still_bound
                         if isinstance(report, _AuditReport) and report["status"] == "pass"
                         else None,
                         report.output_parent_snapshot if isinstance(report, _AuditReport) else None,
                         output_binding,
                     )
                 if not output_written:
-                    if isinstance(report, _AuditReport) and not report.candidate_still_bound():
-                        _mark_candidate_changed(report)
+                    if isinstance(report, _AuditReport) and not report.publication_inputs_still_bound():
+                        _mark_publication_inputs_changed(report)
                     else:
                         report["findings"] = sorted(set(report["findings"]) | {"output.write"})
                         report["status"] = "fail"

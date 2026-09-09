@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import copy
 import hashlib
 import json
@@ -512,6 +513,49 @@ def test_public_admission_exemption_rejects_candidate_replaced_during_audit(
     }.intersection(report["findings"])
 
 
+@pytest.mark.parametrize(
+    "bundle_key", ["input", "expectedIdentity", "expectedIdentitySignature"]
+)
+def test_pass_report_rejects_admission_bundle_replaced_after_audit(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    bundle_key: str,
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    bundle = _install_signed_admission(candidate, evidence, monkeypatch)
+    paths = bundle["paths"]
+    assert isinstance(paths, dict)
+    target = paths[bundle_key]
+    audit = auditor.audit
+
+    def replace_admission_after_audit(*args, **kwargs):
+        report = audit(*args, **kwargs)
+        target.chmod(0o644)
+        target.write_bytes(b"replacement")
+        target.chmod(0o444)
+        return report
+
+    monkeypatch.setattr(auditor, "audit", replace_admission_after_audit)
+
+    result = auditor.main(
+        [
+            "--candidate",
+            str(candidate),
+            "--evidence-root",
+            str(evidence),
+            "--output",
+            str(output),
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert report["status"] == "fail"
+    assert "content.secret" in report["findings"]
+    assert json.loads(output.read_text(encoding="utf-8"))["status"] == "fail"
+
+
 def test_pass_report_rejects_candidate_parent_symlink_alias_before_publication(
     evidence_fixture: tuple[Path, Path, Path],
     monkeypatch: pytest.MonkeyPatch,
@@ -727,6 +771,116 @@ def test_claimed_new_output_fsync_failure_does_not_leave_pass(
     assert failed is True
     assert report["status"] == "fail"
     assert "output.write" in report["findings"]
+    assert json.loads(output.read_text(encoding="utf-8"))["status"] == "fail"
+
+
+def test_claimed_output_replacement_rewrites_retained_inode_with_fail(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    write_all = auditor._write_all
+    replacement = b"unrelated-output"
+    claimed_descriptor: int | None = None
+
+    def replace_claimed_path(descriptor: int, data: bytes) -> None:
+        nonlocal claimed_descriptor
+        write_all(descriptor, data)
+        if claimed_descriptor is None and output.exists():
+            claimed_descriptor = os.dup(descriptor)
+            output.unlink()
+            output.write_bytes(replacement)
+            output.chmod(0o444)
+
+    monkeypatch.setattr(auditor, "_write_all", replace_claimed_path)
+
+    try:
+        result = auditor.main(
+            [
+                "--candidate",
+                str(candidate),
+                "--evidence-root",
+                str(evidence),
+                "--output",
+                str(output),
+            ]
+        )
+        report = json.loads(capsys.readouterr().out)
+
+        assert result == 1
+        assert report["status"] == "fail"
+        assert "output.write" in report["findings"]
+        assert output.read_bytes() == replacement
+        assert claimed_descriptor is not None
+        os.lseek(claimed_descriptor, 0, os.SEEK_SET)
+        claimed_report = json.loads(os.read(claimed_descriptor, 1 << 20))
+        assert claimed_report["status"] == "fail"
+    finally:
+        if claimed_descriptor is not None:
+            os.close(claimed_descriptor)
+
+
+def test_claimed_output_adoption_failure_writes_fail_to_claimed_inode(
+    evidence_fixture: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate, evidence, output = evidence_fixture
+    monkeypatch.setattr(auditor._OutputBinding, "adopt_claimed", lambda *_args: False)
+
+    result = auditor.main(
+        [
+            "--candidate",
+            str(candidate),
+            "--evidence-root",
+            str(evidence),
+            "--output",
+            str(output),
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert report["status"] == "fail"
+    assert "output.write" in report["findings"]
+    assert json.loads(output.read_text(encoding="utf-8"))["status"] == "fail"
+
+
+def test_new_output_does_not_expose_pass_before_final_commit(
+    evidence_fixture: tuple[Path, Path, Path]
+) -> None:
+    _, _, output = evidence_fixture
+    binding = auditor._capture_output_binding(output)
+    assert binding is not None
+    calls = 0
+    observed_valid_pass = False
+
+    def reject_at_final_check() -> bool:
+        nonlocal calls, observed_valid_pass
+        calls += 1
+        if output.exists():
+            with contextlib.suppress(json.JSONDecodeError, UnicodeDecodeError):
+                observed_valid_pass = json.loads(output.read_text(encoding="utf-8")).get("status") == "pass"
+        return calls < 3
+
+    try:
+        assert (
+            auditor._write_output(
+                output,
+                {"status": "pass"},
+                reject_at_final_check,
+                binding.parent_snapshot,
+                binding,
+            )
+            is False
+        )
+    finally:
+        binding.close()
+
+    assert calls == 3
+    assert observed_valid_pass is False
+    assert output.exists()
     with pytest.raises((json.JSONDecodeError, UnicodeDecodeError)):
         json.loads(output.read_text(encoding="utf-8"))
 
@@ -1309,18 +1463,18 @@ def test_public_admission_exemption_is_bound_to_scanned_bytes(
     input_path = paths["input"]
     replacement = copy.deepcopy(bundle["input"])
     replacement["sessionId"] = "3fc6471b-4e35-4ce7-8b20-b741c3e8e9e0"
-    secure_read = auditor._read_secure_file
+    secure_read_snapshot = auditor._read_secure_file_snapshot
     input_reads = 0
 
-    def replace_before_scan(path: Path) -> bytes:
+    def replace_before_scan(path: Path):
         nonlocal input_reads
         if path == input_path:
             input_reads += 1
             if input_reads == 2:
                 _rewrite_json(input_path, replacement)
-        return secure_read(path)
+        return secure_read_snapshot(path)
 
-    monkeypatch.setattr(auditor, "_read_secure_file", replace_before_scan)
+    monkeypatch.setattr(auditor, "_read_secure_file_snapshot", replace_before_scan)
 
     report = auditor.audit(candidate, evidence, [], output)
 
@@ -1338,10 +1492,10 @@ def test_public_admission_exemption_is_bound_to_scanned_signature(
     paths = bundle["paths"]
     assert isinstance(paths, dict)
     signature_path = paths["expectedIdentitySignature"]
-    secure_read = auditor._read_secure_file
+    secure_read_snapshot = auditor._read_secure_file_snapshot
     signature_reads = 0
 
-    def replace_before_scan(path: Path) -> bytes:
+    def replace_before_scan(path: Path):
         nonlocal signature_reads
         if path == signature_path:
             signature_reads += 1
@@ -1349,9 +1503,9 @@ def test_public_admission_exemption_is_bound_to_scanned_signature(
                 signature_path.chmod(0o644)
                 signature_path.write_bytes(b"0" * 64)
                 signature_path.chmod(0o444)
-        return secure_read(path)
+        return secure_read_snapshot(path)
 
-    monkeypatch.setattr(auditor, "_read_secure_file", replace_before_scan)
+    monkeypatch.setattr(auditor, "_read_secure_file_snapshot", replace_before_scan)
 
     report = auditor.audit(candidate, evidence, [], output)
 
