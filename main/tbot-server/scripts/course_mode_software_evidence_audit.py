@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import hashlib
 import json
 import math
 import os
 import re
+import secrets
 import stat
-import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -726,6 +727,30 @@ def _write_all(descriptor: int, payload: bytes) -> None:
         offset += written
 
 
+def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _parent_still_named(path: Path, expected: os.stat_result) -> bool:
+    try:
+        current = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    return stat.S_ISDIR(current.st_mode) and _same_identity(current, expected)
+
+
+def _create_temporary(parent_fd: int, prefix: str) -> tuple[int, str]:
+    flags = os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW
+    for _ in range(32):
+        name = f"{prefix}{secrets.token_hex(16)}"
+        try:
+            return os.open(name, flags, 0o600, dir_fd=parent_fd), name
+        except OSError as error:
+            if error.errno != errno.EEXIST:
+                raise
+    raise OSError(errno.EEXIST, "unable to allocate unique output temporary")
+
+
 def _write_output(path: Path, report: dict[str, object]) -> bool:
     payload = json.dumps(
         report,
@@ -735,11 +760,11 @@ def _write_output(path: Path, report: dict[str, object]) -> bool:
         allow_nan=False,
     ).encode("utf-8") + b"\n"
     parent_fd = descriptor = None
-    temporary_name = None
+    temporary_name: str | None = None
     try:
         parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        temporary_name = Path(temporary)
+        parent_metadata = os.fstat(parent_fd)
+        descriptor, temporary_name = _create_temporary(parent_fd, f".{path.name}.")
         _write_all(descriptor, payload)
         os.fchmod(descriptor, 0o444)
         os.fsync(descriptor)
@@ -751,8 +776,23 @@ def _write_output(path: Path, report: dict[str, object]) -> bool:
             or metadata.st_size != len(payload)
         ):
             return False
-        os.replace(temporary_name, path)
+        named_metadata = os.stat(temporary_name, dir_fd=parent_fd, follow_symlinks=False)
+        if not _same_identity(metadata, named_metadata) or not _parent_still_named(
+            path.parent, parent_metadata
+        ):
+            return False
+        os.rename(
+            temporary_name,
+            path.name,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+        )
         temporary_name = None
+        destination_metadata = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if not _same_identity(metadata, destination_metadata) or not _parent_still_named(
+            path.parent, parent_metadata
+        ):
+            return False
         os.fsync(parent_fd)
         return True
     except (OSError, TypeError, ValueError):
@@ -762,7 +802,7 @@ def _write_output(path: Path, report: dict[str, object]) -> bool:
             os.close(descriptor)
         if temporary_name is not None:
             with contextlib.suppress(FileNotFoundError):
-                temporary_name.unlink()
+                os.unlink(temporary_name, dir_fd=parent_fd)
         if parent_fd is not None:
             os.close(parent_fd)
 

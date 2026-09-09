@@ -1238,16 +1238,69 @@ def test_interrupted_output_write_preserves_prior_report_and_cleans_temp(
     assert not list(output.parent.glob(f".{output.name}.*"))
 
 
-def test_failed_output_replace_preserves_prior_report_and_cleans_temp(
+def test_failed_output_rename_preserves_prior_report_and_cleans_temp(
     evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, _, output = evidence_fixture
     prior_report = {"schemaVersion": 2, "snapshot": {"id": "prior"}, "status": "pass"}
     _write_json(output, prior_report)
 
-    monkeypatch.setattr(auditor.os, "replace", lambda *_args: (_ for _ in ()).throw(OSError("replace")))
+    monkeypatch.setattr(auditor.os, "rename", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("rename")))
 
     assert auditor._write_output(output, {"status": "fail"}) is False
+    assert json.loads(output.read_bytes()) == prior_report
+    assert not list(output.parent.glob(f".{output.name}.*"))
+
+
+def test_output_parent_swap_after_open_fails_without_publishing_at_requested_path(
+    evidence_fixture: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, evidence, output = evidence_fixture
+    displaced = tmp_path / "displaced-evidence"
+    real_open = auditor.os.open
+    swapped = False
+
+    def open_file(path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        nonlocal swapped
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if Path(path) == evidence and dir_fd is None and not swapped:
+            evidence.rename(displaced)
+            evidence.mkdir()
+            swapped = True
+        return descriptor
+
+    monkeypatch.setattr(auditor.os, "open", open_file)
+
+    assert auditor._write_output(output, {"status": "pass"}) is False
+    assert not output.exists()
+    assert not list(displaced.glob(f".{output.name}.*"))
+
+
+def test_temp_entry_substitution_after_descriptor_validation_is_not_renamed(
+    evidence_fixture: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, output = evidence_fixture
+    prior_report = {"schemaVersion": 2, "snapshot": {"id": "prior"}, "status": "pass"}
+    _write_json(output, prior_report)
+    replacement = b'{"snapshot":{"id":"attacker"},"status":"pass"}\n'
+    real_fstat = auditor.os.fstat
+    substituted = False
+
+    def fstat(descriptor: int) -> os.stat_result:
+        nonlocal substituted
+        metadata = real_fstat(descriptor)
+        temporary = list(output.parent.glob(f".{output.name}.*"))
+        if stat.S_ISREG(metadata.st_mode) and temporary and not substituted:
+            temporary[0].unlink()
+            temporary[0].write_bytes(replacement)
+            temporary[0].chmod(0o444)
+            substituted = True
+        return metadata
+
+    monkeypatch.setattr(auditor.os, "fstat", fstat)
+
+    assert auditor._write_output(output, {"status": "pass"}) is False
+    assert substituted is True
     assert json.loads(output.read_bytes()) == prior_report
     assert not list(output.parent.glob(f".{output.name}.*"))
 
@@ -1259,16 +1312,10 @@ def test_atomic_output_orders_permissions_and_durability_before_and_after_rename
     report = {"schemaVersion": 2, "snapshot": {"id": "current"}, "status": "pass"}
     events: list[tuple[str, int | str]] = []
     descriptors: dict[str, int] = {}
-    real_mkstemp = auditor.tempfile.mkstemp
     real_write = auditor.os.write
     real_fchmod = auditor.os.fchmod
     real_fsync = auditor.os.fsync
-    real_replace = auditor.os.replace
-
-    def mkstemp(*args: object, **kwargs: object) -> tuple[int, str]:
-        descriptor, name = real_mkstemp(*args, **kwargs)
-        descriptors["file"] = descriptor
-        return descriptor, name
+    real_rename = auditor.os.rename
 
     def write_all(descriptor: int, payload: bytes) -> None:
         events.append(("write", descriptor))
@@ -1277,6 +1324,7 @@ def test_atomic_output_orders_permissions_and_durability_before_and_after_rename
             offset += real_write(descriptor, payload[offset:])
 
     def fchmod(descriptor: int, mode: int) -> None:
+        descriptors["file"] = descriptor
         events.append(("chmod", mode))
         real_fchmod(descriptor, mode)
 
@@ -1284,20 +1332,19 @@ def test_atomic_output_orders_permissions_and_durability_before_and_after_rename
         events.append(("fsync", descriptor))
         real_fsync(descriptor)
 
-    def replace(source: Path, destination: Path) -> None:
-        events.append(("replace", str(destination)))
+    def rename(source: str, destination: str, **kwargs: int) -> None:
+        events.append(("rename", destination))
         assert stat.S_IMODE(os.fstat(descriptors["file"]).st_mode) == 0o444
-        real_replace(source, destination)
+        real_rename(source, destination, **kwargs)
 
-    monkeypatch.setattr(auditor.tempfile, "mkstemp", mkstemp)
     monkeypatch.setattr(auditor, "_write_all", write_all, raising=False)
     monkeypatch.setattr(auditor.os, "fchmod", fchmod)
     monkeypatch.setattr(auditor.os, "fsync", fsync)
-    monkeypatch.setattr(auditor.os, "replace", replace)
+    monkeypatch.setattr(auditor.os, "rename", rename)
 
     assert auditor._write_output(output, report) is True
 
-    replace_index = next(index for index, event in enumerate(events) if event[0] == "replace")
+    replace_index = next(index for index, event in enumerate(events) if event[0] == "rename")
     file_fsync_index = events.index(("fsync", descriptors["file"]))
     assert events.index(("write", descriptors["file"])) < events.index(("chmod", 0o444))
     assert events.index(("chmod", 0o444)) < file_fsync_index < replace_index
