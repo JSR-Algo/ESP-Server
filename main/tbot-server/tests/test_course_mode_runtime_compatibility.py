@@ -273,17 +273,19 @@ def test_renderer_v5_phase_index_preserves_canonical_variants_and_resolves_by_ac
     )
 
     assert canonical["teach"] is teach_cat
+    # T10: an activity binds one clip per phaseId (several phases per activity are
+    # allowed); the canonical variant stays the first phase seen per phaseId.
     assert by_activity == {
-        "cat-discover": teach_cat,
-        "ball-discover": teach_ball,
-        "cat-recall": listen,
+        "cat-discover": {"teach": teach_cat},
+        "ball-discover": {"teach": teach_ball},
+        "cat-recall": {"listen": listen},
     }
 
 
 def test_renderer_v5_runtime_resolves_full_manifest_activity_identity() -> None:
     phase = {"phaseId": "listen", "activityIds": ["cat-recall-visual-02"], "layers": []}
     runtime = object.__new__(LessonRuntime)
-    runtime._layered_cinematic_activity_phases = {"cat-recall-visual-02": phase}
+    runtime._layered_cinematic_activity_phases = {"cat-recall-visual-02": {"listen": phase}}
     runtime._layered_cinematic_step_phases = {}
     runtime._layered_cinematic_phases = {}
 
@@ -301,9 +303,12 @@ def test_renderer_v5_canonical_manifest_resolves_every_step_by_activity_identity
     runtime._layered_cinematic_step_phases = {}
     runtime._layered_cinematic_phases = {}
 
+    # The pilot identity manifest binds exactly one phase per activity; step entry
+    # resolves that phase through the activity identity.
+    assert all(len(by_activity[step["activityId"]]) == 1 for step in manifest["steps"])
     assert all(
         runtime._layered_cinematic_phase_for_step(step)
-        is by_activity[step["activityId"]]
+        is next(iter(by_activity[step["activityId"]].values()))
         for step in manifest["steps"]
     )
 
@@ -332,7 +337,8 @@ def test_renderer_v5_phase_index_finds_robot_overlay_by_role_for_two_layer_fallb
     canonical, by_activity = _index_layered_cinematic_phases([phase])
 
     assert canonical["listen"] is phase
-    assert by_activity["w19-weather-recall"] is phase
+    assert by_activity["w19-weather-recall"] == {"listen": phase}
+    assert by_activity["w19-weather-recall"]["listen"] is phase
 
 
 def test_exact_frozen_course_mode_mp4_cues_project_with_fail_closed_marker() -> None:
