@@ -88,24 +88,62 @@ from core.lesson.course_orchestrator import (
 )
 
 
+# Phases the runtime never cuts short once started: the entrance flight and the
+# walk to the stage pose (T02 spec 5.2 / 6.1 option (a): duration gate from the
+# start ack, plus one frame period of tolerance).
+ENTRANCE_CINEMATIC_PHASE_IDS = frozenset({"flyIn", "walk"})
+# Course activity visual states -> the clip that must actually play (T02 spec 5.2).
+COURSE_VISUAL_STATE_CINEMATIC_PHASES = {
+    "teach": "teach",
+    "listen": "listen",
+    "thinking": "thinking",
+    "nearMiss": "teach",
+    "incorrect": "teach",
+    "retry": "teach",
+    "correct": "celebrate",
+    "celebrate": "celebrate",
+    "completion": "teach",
+}
+
+
 def _index_layered_cinematic_phases(
     phases: list[dict[str, Any]],
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    """Keep a canonical default while preserving every activity-specific variant."""
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, dict[str, Any]]]]:
+    """Keep a canonical default while indexing every activity by its bound phases.
+
+    An activity may carry several phases (entrance, teach, listen, thinking,
+    celebrate, exit) but never the same ``phaseId`` twice.
+    """
     canonical: dict[str, dict[str, Any]] = {}
-    by_activity: dict[str, dict[str, Any]] = {}
+    by_activity: dict[str, dict[str, dict[str, Any]]] = {}
     for phase in phases:
         phase_id = phase.get("phaseId")
         if isinstance(phase_id, str):
             canonical.setdefault(phase_id, phase)
         for activity_id in phase.get("activityIds", []) or []:
-            if not isinstance(activity_id, str) or activity_id in by_activity:
+            if not isinstance(activity_id, str) or not isinstance(phase_id, str):
+                raise LayeredCinematicContractError(
+                    "CINEMATIC_METADATA_MISMATCH",
+                    "layered cinematic activity mapping is invalid",
+                )
+            bound = by_activity.setdefault(activity_id, {})
+            if phase_id in bound:
                 raise LayeredCinematicContractError(
                     "CINEMATIC_METADATA_MISMATCH",
                     "layered cinematic activity mapping is duplicated",
                 )
-            by_activity[activity_id] = phase
+            bound[phase_id] = phase
     return canonical, by_activity
+
+
+def _activity_entry_phase(phases: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    """The clip a step shows once it is entered: talking, else its only bound phase."""
+    if not phases:
+        return None
+    teach = phases.get("teach")
+    if isinstance(teach, dict):
+        return teach
+    return next(iter(phases.values()))
 
 
 def _course_mode_v5_activity_authority(
@@ -2425,8 +2463,15 @@ class LessonRuntime:
         self._conversation_cues: dict[str, dict[str, Any]] = {}
         self._cinematic_cues_by_key: dict[tuple[str, str], dict[str, Any]] = {}
         self._layered_cinematic_phases: dict[str, dict[str, Any]] = {}
-        self._layered_cinematic_activity_phases: dict[str, dict[str, Any]] = {}
+        self._layered_cinematic_activity_phases: dict[str, dict[str, dict[str, Any]]] = {}
         self._layered_cinematic_step_phases: dict[str, dict[str, Any]] = {}
+        # Monotonic time of the last accepted ``start`` of ``_cinematic_phase``;
+        # drives the flyIn/walk completion gate. ``None`` until a start is acked.
+        self._cinematic_phase_started_at: float | None = None
+        # The entrance (flyIn -> walk) runs once per runtime session; activity
+        # changes, retries and resume never replay it.
+        self._entrance_completed = False
+        self._course_phase_task: Optional[asyncio.Task[None]] = None
         self._authored_cinematic_pending: dict[str, Any] | None = None
         self._conversation_contract_valid = False
         self._conversation_attempt_serial = 0
@@ -2516,6 +2561,10 @@ class LessonRuntime:
             return {"accepted": False, "code": "COURSE_SNAPSHOT_PERSIST_FAILED"}
         await self._deliver_pending_course_activity_frames()
         await self._flush_course_evidence_outbox()
+        if name == "course_observe_child":
+            # The child's turn is being assessed: show ``thinking`` only while the
+            # runtime is actually processing (until the response plan is dispatched).
+            self._queue_course_cinematic_phase("thinking")
         if name == "course_apply_response_plan" and self.course_mode.response_plan_requires_commit(arguments):
             decision = self.course_mode._decisions.get(arguments.get("decisionId"))
             if decision is not None:
@@ -2592,6 +2641,12 @@ class LessonRuntime:
         *,
         retry_transport_interrupted: bool = False,
     ) -> None:
+        # The decision is being delivered (speech + motion): bind the talking clip,
+        # or the one-shot celebrate clip for celebratory outcomes (T02 spec 5.2).
+        self._queue_course_cinematic_phase(
+            COURSE_VISUAL_STATE_CINEMATIC_PHASES.get(decision.visual_state, "teach"),
+            activity_id=decision.activity_id,
+        )
         dispatcher = self.course_embodied_dispatcher
         if dispatcher is None:
             return
@@ -2659,6 +2714,8 @@ class LessonRuntime:
                 return False
             self._course_assessment_window_open = True
             self._child_response_window_open = True
+            # The child-response window is open: listening clip, no talking animation.
+            self._queue_course_cinematic_phase("listen")
             return True
         except Exception as exc:
             self._course_assessment_window_open = False
@@ -2814,7 +2871,14 @@ class LessonRuntime:
                 self.course_mode._completion_stop_dispatched = False
                 return False
             try:
-                await self._emit("lesson_stop", body={"reason": "COMPLETED"})
+                stop_body: Dict[str, Any] = {"reason": "COMPLETED"}
+                if await self._play_exit_phase_before_stop():
+                    stop_body["cinematicPhase"] = {
+                        "command": "stop",
+                        **self._cinematic_identity_payload(),
+                    }
+                    self._cinematic_stop_sent = True
+                await self._emit("lesson_stop", body=stop_body)
                 self._completion_stop_sent = True
             except Exception:
                 self.course_mode._completion_stop_dispatched = False
@@ -5114,6 +5178,9 @@ class LessonRuntime:
                 "retry-level-3": "thinking",
                 "correct": "celebrate",
             }.get(effect, effect)
+            bound = self._course_cinematic_cue(phase_id)
+            if isinstance(bound, dict):
+                return bound
             return self._layered_cinematic_phases.get(phase_id)
         key = step_key if isinstance(step_key, str) and step_key else self._step_id
         if not isinstance(key, str):
@@ -5131,11 +5198,15 @@ class LessonRuntime:
         step_id = step.get("id")
         activity_id = step.get("activityId")
         if isinstance(activity_id, str):
-            activity_phase = self._layered_cinematic_activity_phases.get(activity_id)
+            activity_phase = _activity_entry_phase(
+                self._layered_cinematic_activity_phases.get(activity_id) or {}
+            )
             if isinstance(activity_phase, dict):
                 return activity_phase
         if isinstance(step_id, str):
-            activity_phase = self._layered_cinematic_activity_phases.get(step_id)
+            activity_phase = _activity_entry_phase(
+                self._layered_cinematic_activity_phases.get(step_id) or {}
+            )
             if isinstance(activity_phase, dict):
                 return activity_phase
             authored = self._layered_cinematic_step_phases.get(step_id)
@@ -5162,6 +5233,149 @@ class LessonRuntime:
                 ):
                     return phase
         return None
+
+    def _current_cinematic_activity_id(self) -> str | None:
+        step = self._step
+        activity_id = step.get("activityId") if isinstance(step, dict) else None
+        if isinstance(activity_id, str) and activity_id:
+            return activity_id
+        step_id = step.get("id") if isinstance(step, dict) else None
+        if isinstance(step_id, str) and step_id in self._layered_cinematic_activity_phases:
+            return step_id
+        return None
+
+    def _course_cinematic_cue(
+        self, phase_id: str, *, activity_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """The clip bound to ``phase_id`` for the current (or given) activity only."""
+        target = activity_id if isinstance(activity_id, str) and activity_id else None
+        if target is None:
+            target = self._current_cinematic_activity_id()
+        if target is None:
+            return None
+        bound = self._layered_cinematic_activity_phases.get(target)
+        if not isinstance(bound, dict):
+            return None
+        phase = bound.get(phase_id)
+        return phase if isinstance(phase, dict) else None
+
+    def _activity_is_phase_bound(self, activity_id: str | None) -> bool:
+        """Phase-bound manifests bind several clips per activity; legacy ones bind one."""
+        target = activity_id if isinstance(activity_id, str) and activity_id else None
+        if target is None:
+            target = self._current_cinematic_activity_id()
+        bound = self._layered_cinematic_activity_phases.get(target) if target else None
+        return isinstance(bound, dict) and len(bound) > 1
+
+    def _note_cinematic_phase_started(self) -> None:
+        self._cinematic_phase_started_at = asyncio.get_running_loop().time()
+
+    def _running_once_phase_remaining_sec(self) -> float:
+        """Seconds until the running once-only entrance phase has shown its last frame."""
+        phase = self._cinematic_phase
+        started = self._cinematic_phase_started_at
+        if not isinstance(phase, dict) or started is None:
+            return 0.0
+        if phase.get("playbackMode") != "once" or phase.get("phaseId") not in ENTRANCE_CINEMATIC_PHASE_IDS:
+            return 0.0
+        duration_ms = phase.get("durationMs")
+        fps = phase.get("fps")
+        if type(duration_ms) is not int or duration_ms <= 0:
+            return 0.0
+        frame_period = 1.0 / fps if type(fps) is int and fps > 0 else 0.0
+        remaining = started + duration_ms / 1000.0 + frame_period - asyncio.get_running_loop().time()
+        return remaining if remaining > 0 else 0.0
+
+    async def _await_running_entrance_phase(self) -> None:
+        remaining = self._running_once_phase_remaining_sec()
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+
+    def _step_entry_cinematic_effects(self, phase: dict[str, Any]) -> list[str]:
+        """Which clips a step entry must play, in order, before its first prompt."""
+        phase_id = phase.get("phaseId")
+        if not isinstance(phase_id, str):
+            return []
+        current_id = (
+            self._cinematic_phase.get("phaseId")
+            if isinstance(self._cinematic_phase, dict)
+            else None
+        )
+        activity_id = self._current_cinematic_activity_id()
+        bound = self._layered_cinematic_activity_phases.get(activity_id) if activity_id else None
+        if isinstance(bound, dict) and len(bound) > 1:
+            if self._step_index == 0 and not self._entrance_completed and "walk" in bound:
+                # flyIn has been started by lesson_start; walk settles the character
+                # at the stage pose, then the talking clip is armed for the prompt.
+                return ["walk", phase_id] if phase_id != "walk" else ["walk"]
+            if phase_id in ENTRANCE_CINEMATIC_PHASE_IDS:
+                return []
+            return [phase_id]
+        if self._step_index == 0 and phase_id == current_id:
+            return []
+        return [phase_id]
+
+    def _queue_course_cinematic_phase(
+        self, phase_id: str, *, activity_id: str | None = None
+    ) -> bool:
+        """Switch the character clip for a course visual transition without blocking the tool call."""
+        if not self._renderer_v5_enabled():
+            return False
+        if not self._activity_is_phase_bound(activity_id):
+            return False
+        cue = self._course_cinematic_cue(phase_id, activity_id=activity_id)
+        if not isinstance(cue, dict):
+            return False
+        current = self._cinematic_phase
+        if (
+            isinstance(current, dict)
+            and current is cue
+            and self._authored_cinematic_pending is None
+            and (self._course_phase_task is None or self._course_phase_task.done())
+        ):
+            return True
+        previous = self._course_phase_task
+        if previous is not None and not previous.done():
+            previous.cancel()
+        step_id = self._step_id
+
+        async def run() -> None:
+            deadline = asyncio.get_running_loop().time() + 10.0
+            while self._authored_cinematic_pending is not None:
+                if asyncio.get_running_loop().time() >= deadline or self.state in (S_FAILED, S_COMPLETED):
+                    return
+                await asyncio.sleep(0.05)
+            await self._await_running_entrance_phase()
+            if self._step_id != step_id or self.state in (S_FAILED, S_COMPLETED):
+                return
+            await self._apply_authored_cinematic_effect(phase_id, activity_id=activity_id)
+
+        self._course_phase_task = asyncio.create_task(run())
+        return True
+
+    async def _play_exit_phase_before_stop(self) -> bool:
+        """Play the bound ``exit`` clip to its last frame; the display returns to chat only after it."""
+        if not self._renderer_v5_enabled():
+            return False
+        cue = self._course_cinematic_cue("exit")
+        if not isinstance(cue, dict) or not self._activity_is_phase_bound(None):
+            return False
+        task = self._course_phase_task
+        if task is not None and not task.done():
+            task.cancel()
+        deadline = asyncio.get_running_loop().time() + 10.0
+        while self._authored_cinematic_pending is not None:
+            if asyncio.get_running_loop().time() >= deadline:
+                return False
+            await asyncio.sleep(0.05)
+        if not await self._apply_authored_cinematic_effect("exit"):
+            return False
+        duration_ms = cue.get("durationMs")
+        fps = cue.get("fps")
+        if type(duration_ms) is int and duration_ms > 0:
+            frame_period = 1.0 / fps if type(fps) is int and fps > 0 else 0.0
+            await asyncio.sleep(duration_ms / 1000.0 + frame_period)
+        return True
 
     def _validate_safe_speaking_cinematic_routes(self) -> None:
         safe_steps = [
@@ -5198,8 +5412,16 @@ class LessonRuntime:
             )
             raise self.last_error
 
-    async def _apply_authored_cinematic_effect(self, effect: str) -> bool:
-        cue = self._cinematic_cue(effect)
+    async def _apply_authored_cinematic_effect(
+        self, effect: str, *, activity_id: str | None = None
+    ) -> bool:
+        cue = (
+            self._course_cinematic_cue(effect, activity_id=activity_id)
+            if activity_id is not None
+            else None
+        )
+        if not isinstance(cue, dict):
+            cue = self._cinematic_cue(effect)
         if not isinstance(cue, dict) or self._authored_cinematic_pending is not None:
             return False
         future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
@@ -5253,9 +5475,19 @@ class LessonRuntime:
         step_seq = self._step_seq
 
         async def run() -> None:
+            entrance = False
             for effect in effects:
+                # Never cut a running once-only entrance clip short (flyIn before
+                # walk, walk before the first talking clip / prompt).
+                await self._await_running_entrance_phase()
+                if effect in ENTRANCE_CINEMATIC_PHASE_IDS:
+                    entrance = True
                 if not await self._apply_authored_cinematic_effect(effect):
                     return
+            if entrance or effects:
+                await self._await_running_entrance_phase()
+            if entrance:
+                self._entrance_completed = True
             await self._continue_after_step_visuals(step_id, step_seq)
 
         self._visual_transition_task = asyncio.create_task(run())
@@ -5561,8 +5793,11 @@ class LessonRuntime:
                 == frame_command.get(authored_identity_field)
                 and authored_pending.get("stepId") == self._step_id
             ):
+                self._note_cinematic_phase_started()
                 self._retire_authored_cinematic_pending(result=True)
                 return
+            if self._renderer_v5_enabled() and self._cinematic_phase is not None:
+                self._note_cinematic_phase_started()
             self.state = S_RUNNING
             self._forward({"type": "lesson_started", "startedAt": _wire_timestamp()})
             await self._emit_step()
@@ -5999,17 +6234,10 @@ class LessonRuntime:
             await self._publish_conversation_tool_context()
             phase = self._layered_cinematic_phase_for_step(step)
             if isinstance(phase, dict):
-                phase_id = phase.get("phaseId")
-                current_id = (
-                    self._cinematic_phase.get("phaseId")
-                    if isinstance(self._cinematic_phase, dict)
-                    else None
-                )
-                if isinstance(phase_id, str) and not (
-                    self._step_index == 0 and phase_id == current_id
-                ):
+                effects = self._step_entry_cinematic_effects(phase)
+                if effects:
                     self._step_visuals_ready = False
-                    self._queue_authored_cinematic_sequence([phase_id])
+                    self._queue_authored_cinematic_sequence(effects)
                     return
             elif (
                 isinstance(self._step_id, str)
@@ -6152,6 +6380,8 @@ class LessonRuntime:
                 self._queue_completion_visual_then_stop()
                 return
             body: Dict[str, Any] = {"reason": "COMPLETED"}
+            if self._renderer_v5_enabled():
+                await self._play_exit_phase_before_stop()
             if self._renderer_v5_enabled() and self._cinematic_phase is not None:
                 body["cinematicPhase"] = {
                     "command": "stop",
@@ -7186,6 +7416,11 @@ class LessonRuntime:
         self._layered_cinematic_phases.clear()
         self._layered_cinematic_activity_phases.clear()
         self._layered_cinematic_step_phases.clear()
+        self._cinematic_phase_started_at = None
+        course_phase_task = self._course_phase_task
+        if course_phase_task is not None and not course_phase_task.done():
+            course_phase_task.cancel()
+        self._course_phase_task = None
         for sequence, frame in list(self._outstanding.items()):
             if self._cinematic_frame_command(frame) is not None:
                 self._outstanding.pop(sequence, None)

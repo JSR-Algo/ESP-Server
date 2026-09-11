@@ -143,6 +143,21 @@ def _local_sd_path(asset: dict[str, Any], local_root: str) -> str:
     return path
 
 
+def _layer_slot_root(slot: str, phase: str) -> str:
+    """Resolve a stored ref slot to its layer slot.
+
+    Phase-bound robot clips are pinned as ``robotOverlay.<phaseId>`` (one clip per
+    canonical phase); the suffix must name the ref's own phase. Bare layer slots
+    stay valid for lesson-wide pins.
+    """
+    root, separator, suffix = slot.partition(".")
+    if not separator:
+        return slot
+    if root != "robotOverlay" or suffix not in KNOWN_PHASE_IDS or suffix != phase:
+        _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic phase slot is invalid")
+    return root
+
+
 def validate_layered_cinematic_generation_asset(asset: Any) -> dict[str, Any]:
     """Validate one shared renderer-v5 asset before generation materialization."""
     if not isinstance(asset, dict):
@@ -165,7 +180,7 @@ def validate_layered_cinematic_generation_asset(asset: Any) -> dict[str, Any]:
             _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic visual ref is invalid")
         if not all(isinstance(ref.get(key), str) and ref[key] for key in ref):
             _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic visual ref is invalid")
-        slots.add(ref["slot"])
+        slots.add(_layer_slot_root(ref["slot"], ref["phase"]))
     if len(slots) != 1:
         _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic asset must use one layer slot")
     slot = next(iter(slots))

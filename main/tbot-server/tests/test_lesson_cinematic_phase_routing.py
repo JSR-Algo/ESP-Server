@@ -13,7 +13,16 @@ sys.path.insert(0, os.path.dirname(__file__))
 import test_lesson_conversation_integration as conversation_fixtures
 import test_lesson_runtime as legacy
 
-from core.lesson.runtime import RENDERER_V4, RENDERER_V5, S_RUNNING, LessonRuntime
+from core.lesson.course_orchestrator import CourseDecision, SessionState
+from core.lesson.embodied_intent import EmbodiedIntent
+from core.lesson.runtime import (
+    RENDERER_V4,
+    RENDERER_V5,
+    S_PAUSED,
+    S_RUNNING,
+    LessonRuntime,
+    _index_layered_cinematic_phases,
+)
 from core.voice.session_provider.google_live import GoogleLiveProvider
 
 
@@ -655,3 +664,295 @@ async def test_safe_speaking_correct_routes_thinking_correct_and_celebrate(
         "correct",
         "celebrate",
     ]
+
+
+# ---------------------------------------------------------------------------
+# T10: phase-bound choreography (one clip per phase per activity, entrance once,
+# loops for talking/listening/thinking, exit at completion).
+# ---------------------------------------------------------------------------
+
+PHASE_PLAYBACK = {
+    "flyIn": "once", "walk": "once", "teach": "loop", "listen": "loop",
+    "thinking": "loop", "celebrate": "once", "exit": "once",
+}
+
+
+def _bound_phase(activity: str, phase_id: str, duration_ms: int) -> dict:
+    return {
+        "templateId": "layeredCinematic",
+        "templateVersion": 1,
+        "phaseId": phase_id,
+        "durationMs": duration_ms,
+        "fps": 10,
+        "frameCount": max(1, duration_ms // 100),
+        "playbackMode": PHASE_PLAYBACK[phase_id],
+        "activityIds": [activity],
+        "layers": [
+            {"slot": "backgroundScene", "sdPath": "sd://tbot/lesson-assets/test/scene.farm%40v1"},
+            {
+                "slot": "robotOverlay",
+                "sdPath": f"sd://tbot/lesson-assets/test/{activity}.robot.{phase_id}%40v1",
+                "sha256": f"{activity}:{phase_id}",
+            },
+        ],
+    }
+
+
+def _phase_bound_runtime(*, fly_ms: int = 100, walk_ms: int = 200) -> LessonRuntime:
+    runtime = _v5_runtime()
+    first, last = runtime._steps[0]["id"], runtime._steps[1]["id"]
+    for step in runtime._steps:
+        step["activityId"] = step["id"]
+    phases = [
+        _bound_phase(first, "flyIn", fly_ms),
+        _bound_phase(first, "walk", walk_ms),
+        *(_bound_phase(first, phase_id, 300) for phase_id in ("teach", "listen", "thinking", "celebrate")),
+        *(_bound_phase(last, phase_id, 300) for phase_id in ("teach", "listen", "thinking", "celebrate")),
+        _bound_phase(last, "exit", 100),
+    ]
+    canonical, by_activity = _index_layered_cinematic_phases(phases)
+    runtime._layered_cinematic_phases = canonical
+    runtime._layered_cinematic_activity_phases = by_activity
+    runtime._cinematic_phase = canonical["flyIn"]
+    return runtime
+
+
+def _activate_v5(runtime: LessonRuntime, step_index: int) -> None:
+    """Enter a step on a v5 fixture without re-projecting the v4-shaped manifest."""
+    runtime.state = S_RUNNING
+    runtime._step_index = step_index
+    runtime._step = runtime._steps[step_index]
+    runtime._step_id = runtime._step["id"]
+    runtime._step_seq = 20 + step_index
+    runtime._step_acked = True
+    runtime._step_visuals_ready = True
+    runtime._step_completed = False
+    runtime._child_response_window_open = True
+
+
+def _frames(runtime: LessonRuntime) -> list[dict]:
+    return [json.loads(payload) for payload in runtime.conn.websocket.sent]
+
+
+def _cinematic_frames(runtime: LessonRuntime) -> list[tuple[str, str, str | None, str | None]]:
+    out = []
+    for frame in _frames(runtime):
+        cinematic = frame.get("body", {}).get("cinematicPhase")
+        if not isinstance(cinematic, dict):
+            continue
+        robot = next((layer for layer in cinematic.get("layers", []) if layer.get("slot") == "robotOverlay"), None)
+        out.append((frame["type"], cinematic.get("command"), cinematic.get("phaseId"),
+                    robot.get("sdPath") if robot else None))
+    return out
+
+
+async def _ack_prepare_and_start(runtime: LessonRuntime, inbound: int) -> tuple[dict, dict]:
+    prepare = _frames(runtime)[-1]
+    assert prepare["type"] == "lesson_prepare"
+    await runtime.on_lesson_ack(_v5_ack(runtime, prepare, inbound))
+    start = _frames(runtime)[-1]
+    assert start["type"] == "lesson_start"
+    await runtime.on_lesson_ack(_v5_ack(runtime, start, inbound + 1))
+    return prepare, start
+
+
+def test_index_binds_one_phase_per_activity_and_phase_and_rejects_duplicates() -> None:
+    phases = [_bound_phase("a1", "flyIn", 100), _bound_phase("a1", "teach", 300), _bound_phase("a2", "teach", 300)]
+    canonical, by_activity = _index_layered_cinematic_phases(phases)
+    assert set(canonical) == {"flyIn", "teach"}
+    assert canonical["teach"] is phases[1]
+    assert set(by_activity["a1"]) == {"flyIn", "teach"}
+    assert by_activity["a2"]["teach"] is phases[2]
+    # Legacy single-phase authority still indexes to one bound phase per activity.
+    _, legacy = _index_layered_cinematic_phases([_bound_phase("a1", "teach", 300)])
+    assert list(legacy["a1"]) == ["teach"]
+    with pytest.raises(Exception, match="duplicated"):
+        _index_layered_cinematic_phases([_bound_phase("a1", "teach", 300), _bound_phase("a1", "teach", 300)])
+    with pytest.raises(Exception, match="invalid"):
+        _index_layered_cinematic_phases([{**_bound_phase("a1", "teach", 300), "phaseId": None}])
+
+
+@pytest.mark.asyncio
+async def test_v5_cue_resolves_the_current_activity_clip_before_the_canonical_phase() -> None:
+    runtime = _phase_bound_runtime()
+    _activate_v5(runtime, 1)
+    last = runtime._steps[1]["id"]
+    first = runtime._steps[0]["id"]
+
+    cue = runtime._cinematic_cue("thinking")
+    assert cue["layers"][1]["sdPath"].endswith(f"{last}.robot.thinking%40v1")
+    assert cue["playbackMode"] == "loop"
+    assert runtime._layered_cinematic_phases["thinking"]["layers"][1]["sdPath"].endswith(f"{first}.robot.thinking%40v1")
+    assert runtime._cinematic_cue("retry-level-2") is cue
+    assert runtime._cinematic_cue("correct")["phaseId"] == "celebrate"
+    assert runtime._cinematic_cue("correct")["playbackMode"] == "once"
+    assert runtime._cinematic_cue("exit")["layers"][1]["sdPath"].endswith(f"{last}.robot.exit%40v1")
+    # The first activity binds no exit clip and the last activity no entrance clip.
+    assert runtime._course_cinematic_cue("exit", activity_id=first) is None
+    assert runtime._course_cinematic_cue("walk", activity_id=last) is None
+
+
+@pytest.mark.asyncio
+async def test_v5_entrance_runs_once_walk_settles_before_the_first_prompt_and_never_replays() -> None:
+    runtime = _phase_bound_runtime(fly_ms=100, walk_ms=200)
+    continued: list[tuple] = []
+
+    async def continue_after(step_id, step_seq, **kwargs):
+        continued.append((step_id, step_seq))
+
+    runtime._continue_after_step_visuals = continue_after  # type: ignore[method-assign]
+    runtime.state = S_RUNNING
+    first, last = runtime._steps[0]["id"], runtime._steps[1]["id"]
+    # lesson_start(flyIn) has just been acknowledged.
+    runtime._note_cinematic_phase_started()
+
+    await runtime._emit_step()
+    await asyncio.sleep(0)
+    assert _cinematic_frames(runtime) == []  # flyIn (100 ms) is still running: no walk yet
+    await asyncio.sleep(0.25)
+    assert _cinematic_frames(runtime)[-1] == ("lesson_prepare", "prepare", "walk",
+                                               f"sd://tbot/lesson-assets/test/{first}.robot.walk%40v1")
+    prepare = _frames(runtime)[-1]
+    assert prepare["body"]["cinematicPhase"]["playbackMode"] == "once"
+    await _ack_prepare_and_start(runtime, 1)
+    await asyncio.sleep(0.05)
+    assert [entry for entry in _cinematic_frames(runtime) if entry[1] == "prepare"][-1][2] == "walk"
+    assert continued == []  # walk (200 ms) still running: no talking clip, no prompt
+    await asyncio.sleep(0.35)
+    assert _cinematic_frames(runtime)[-1] == ("lesson_prepare", "prepare", "teach",
+                                               f"sd://tbot/lesson-assets/test/{first}.robot.teach%40v1")
+    assert _frames(runtime)[-1]["body"]["cinematicPhase"]["playbackMode"] == "loop"
+    assert continued == []
+    await _ack_prepare_and_start(runtime, 3)
+    await asyncio.sleep(0.05)
+    assert continued == [(first, runtime._step_seq)]
+    assert runtime._entrance_completed is True
+    assert runtime._cinematic_phase["phaseId"] == "teach"
+    prepared = [entry[2] for entry in _cinematic_frames(runtime) if entry[1] == "prepare"]
+    assert prepared == ["walk", "teach"]
+
+    # Next activity: talking clip of that activity only; the entrance is never replayed.
+    await runtime._emit_step()
+    await asyncio.sleep(0.05)
+    assert _cinematic_frames(runtime)[-1] == ("lesson_prepare", "prepare", "teach",
+                                               f"sd://tbot/lesson-assets/test/{last}.robot.teach%40v1")
+    await _ack_prepare_and_start(runtime, 5)
+    await asyncio.sleep(0.05)
+    prepared = [entry[2] for entry in _cinematic_frames(runtime) if entry[1] == "prepare"]
+    assert prepared == ["walk", "teach", "teach"]
+    assert "flyIn" not in prepared
+
+
+@pytest.mark.asyncio
+async def test_v5_retry_and_resume_do_not_restart_the_flight() -> None:
+    runtime = _phase_bound_runtime()
+    runtime._entrance_completed = True
+    _activate_v5(runtime, 1)
+    last = runtime._steps[1]["id"]
+    runtime._cinematic_phase = runtime._layered_cinematic_activity_phases[last]["teach"]
+
+    task = asyncio.create_task(runtime._apply_authored_cinematic_effect("retry-level-3"))
+    await asyncio.sleep(0)
+    prepare, _ = await _ack_prepare_and_start(runtime, 1)
+    assert prepare["body"]["cinematicPhase"]["phaseId"] == "thinking"
+    assert prepare["body"]["cinematicPhase"]["playbackMode"] == "loop"
+    assert prepare["body"]["cinematicPhase"]["layers"][1]["sdPath"].endswith(f"{last}.robot.thinking%40v1")
+    assert await task is True
+
+    runtime.state = S_PAUSED
+    result = await runtime.resume()
+    resumed = _frames(runtime)[-1]
+    assert resumed["type"] == "lesson_cinematic_control"
+    assert resumed["body"]["command"] == "resume"
+    assert resumed["body"]["phaseId"] == "thinking"
+    assert result.accepted is False
+    prepared = [entry[2] for entry in _cinematic_frames(runtime) if entry[1] == "prepare"]
+    assert prepared == ["thinking"]
+    assert runtime._entrance_completed is True
+
+
+@pytest.mark.asyncio
+async def test_v5_course_transitions_bind_talking_listening_thinking_and_celebrate_clips() -> None:
+    runtime = _phase_bound_runtime()
+    runtime._entrance_completed = True
+    _activate_v5(runtime, 0)
+    first = runtime._steps[0]["id"]
+    runtime._cinematic_phase = runtime._layered_cinematic_activity_phases[first]["teach"]
+
+    # Listening: the child-response window opens.
+    generation = runtime._course_assessment_generation
+    assert await runtime._open_course_assessment_window(generation) is True
+    await asyncio.sleep(0)
+    prepare, _ = await _ack_prepare_and_start(runtime, 1)
+    assert prepare["body"]["cinematicPhase"]["phaseId"] == "listen"
+    assert prepare["body"]["cinematicPhase"]["playbackMode"] == "loop"
+    assert prepare["body"]["cinematicPhase"]["layers"][1]["sdPath"].endswith(f"{first}.robot.listen%40v1")
+
+    # Thinking: only while an observation is processed.
+    assert runtime._queue_course_cinematic_phase("thinking") is True
+    await asyncio.sleep(0)
+    prepare, _ = await _ack_prepare_and_start(runtime, 3)
+    assert prepare["body"]["cinematicPhase"]["phaseId"] == "thinking"
+    assert prepare["body"]["cinematicPhase"]["playbackMode"] == "loop"
+
+    # A celebratory decision dispatch plays celebrate once; a plain decision talks.
+    def decision(visual_state: str) -> CourseDecision:
+        return CourseDecision(
+            f"d-{visual_state}", True, SessionState.WORD_ACTIVE, "ADVANCE_ACTIVITY", "acknowledge_child",
+            None, None, EmbodiedIntent.PRESENT_CENTER, False, None,
+            activity_id=first, visual_state=visual_state, replay_entrance=False,
+        )
+    await runtime._dispatch_course_embodied_decision(decision("correct"))
+    await asyncio.sleep(0)
+    prepare, _ = await _ack_prepare_and_start(runtime, 5)
+    assert prepare["body"]["cinematicPhase"]["phaseId"] == "celebrate"
+    assert prepare["body"]["cinematicPhase"]["playbackMode"] == "once"
+    await runtime._dispatch_course_embodied_decision(decision("retry"))
+    await asyncio.sleep(0)
+    prepare, _ = await _ack_prepare_and_start(runtime, 7)
+    assert prepare["body"]["cinematicPhase"]["phaseId"] == "teach"
+    prepared = [entry[2] for entry in _cinematic_frames(runtime) if entry[1] == "prepare"]
+    assert prepared == ["listen", "thinking", "celebrate", "teach"]
+    assert "flyIn" not in prepared and "walk" not in prepared
+
+
+@pytest.mark.asyncio
+async def test_v5_course_transitions_are_ignored_for_legacy_single_clip_manifests() -> None:
+    runtime = _v5_runtime()
+    first = runtime._steps[0]["id"]
+    runtime._steps[0]["activityId"] = first
+    runtime._layered_cinematic_activity_phases = {first: {"teach": runtime._layered_cinematic_phases["teach"]}}
+    _activate_v5(runtime, 0)
+    assert runtime._queue_course_cinematic_phase("listen") is False
+    assert await runtime._open_course_assessment_window(runtime._course_assessment_generation) is True
+    await asyncio.sleep(0.05)
+    assert _cinematic_frames(runtime) == []
+    assert runtime._layered_cinematic_phase_for_step(runtime._steps[0]) is runtime._layered_cinematic_phases["teach"]
+
+
+@pytest.mark.asyncio
+async def test_v5_completion_plays_exit_to_its_last_frame_before_the_typed_stop() -> None:
+    runtime = _phase_bound_runtime()
+    runtime._entrance_completed = True
+    _activate_v5(runtime, 1)
+    last = runtime._steps[1]["id"]
+    runtime._cinematic_phase = runtime._layered_cinematic_activity_phases[last]["teach"]
+    runtime._step_completed = True
+
+    finishing = asyncio.create_task(runtime._maybe_finish_step())
+    await asyncio.sleep(0)
+    prepare, start = await _ack_prepare_and_start(runtime, 1)
+    assert prepare["body"]["cinematicPhase"]["phaseId"] == "exit"
+    assert prepare["body"]["cinematicPhase"]["playbackMode"] == "once"
+    assert prepare["body"]["cinematicPhase"]["layers"][1]["sdPath"].endswith(f"{last}.robot.exit%40v1")
+    await asyncio.sleep(0.05)
+    assert _frames(runtime)[-1]["type"] == "lesson_start"  # exit (100 ms) still holding: no stop yet
+    await asyncio.sleep(0.25)
+    await finishing
+    stop = _frames(runtime)[-1]
+    assert stop["type"] == "lesson_stop"
+    assert stop["body"]["reason"] == "COMPLETED"
+    assert stop["body"]["cinematicPhase"] == {"command": "stop", "phaseId": "exit",
+                                              "commandSequenceId": stop["body"]["cinematicPhase"]["commandSequenceId"]}
+    types = [frame["type"] for frame in _frames(runtime)]
+    assert types.index("lesson_stop") > types.index("lesson_start")

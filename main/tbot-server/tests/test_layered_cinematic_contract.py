@@ -491,3 +491,62 @@ def test_rejects_invalid_layered_cinematic_contract(mutate, code: str) -> None:
         project_layered_cinematic_phase(phase, pack)
 
     assert exc_info.value.code == code
+
+
+def _generation_asset(slot: str, phase: str) -> dict:
+    layer = _phase()["layers"][2]
+    return {
+        "key": "robot.teach@v1",
+        "sharedAssetKey": "robot.teach",
+        "sharedAssetVersion": 1,
+        "mediaType": "video/mp4",
+        "compatibilityMetadata": deepcopy(layer["metadata"]),
+        "visualRefs": [{"stepKey": "a1", "phase": phase, "slot": slot}],
+    }
+
+
+@pytest.mark.parametrize("slot, phase", [
+    ("robotOverlay", "opening"),
+    ("robotOverlay.flyIn", "flyIn"),
+    ("robotOverlay.exit", "exit"),
+])
+def test_generation_asset_accepts_phase_bound_robot_slots(slot: str, phase: str) -> None:
+    from core.lesson.layered_cinematic_contract import validate_layered_cinematic_generation_asset
+
+    validated = validate_layered_cinematic_generation_asset(_generation_asset(slot, phase))
+    assert validated["layer"] == "robotOverlay"
+    assert validated["visualRefs"] == [{"stepKey": "a1", "phase": phase, "slot": slot}]
+
+
+@pytest.mark.parametrize("slot, phase", [
+    ("robotOverlay.hover", "hover"),
+    ("robotOverlay.flyIn", "teach"),
+    ("teachingObject.teach", "teach"),
+    ("robotOverlay.", "teach"),
+])
+def test_generation_asset_rejects_unknown_or_mismatched_phase_slots(slot: str, phase: str) -> None:
+    from core.lesson.layered_cinematic_contract import validate_layered_cinematic_generation_asset
+
+    with pytest.raises(LayeredCinematicContractError) as error:
+        validate_layered_cinematic_generation_asset(_generation_asset(slot, phase))
+    assert error.value.code == "CINEMATIC_METADATA_MISMATCH"
+
+
+def test_runtime_phase_projection_keeps_loop_playback_and_per_phase_rects() -> None:
+    phase = _phase()
+    phase["phaseId"] = "flyIn"
+    phase["playbackMode"] = "loop"
+    phase["layers"][2]["metadata"]["rect"] = {"x": 240, "y": 0, "width": 240, "height": 240}
+    pack = _pack()
+    pack["assets"][2]["compatibilityMetadata"] = deepcopy(phase["layers"][2]["metadata"])
+    projected = project_layered_cinematic_phase(phase, pack)
+    assert projected["playbackMode"] == "loop"
+    assert projected["layers"][2]["rect"] == {"x": 240, "y": 0, "width": 240, "height": 240}
+    phase["phaseId"] = "hover"
+    with pytest.raises(LayeredCinematicContractError, match="phase identity is invalid"):
+        project_layered_cinematic_phase(phase, pack)
+    phase["phaseId"] = "walk"
+    phase["layers"][2]["metadata"]["rect"] = {"x": 300, "y": 80, "width": 240, "height": 240}
+    pack["assets"][2]["compatibilityMetadata"] = deepcopy(phase["layers"][2]["metadata"])
+    with pytest.raises(LayeredCinematicContractError, match="out of bounds"):
+        project_layered_cinematic_phase(phase, pack)
