@@ -90,6 +90,7 @@ class SdPackSyncCoordinator:
         self._recovery_backoff_sec = max(0.0, float(recovery_backoff_sec))
         self._uncertain_cache_key: str | None = None
         self._recover_after = 0.0
+        self._source_reference = None
 
     async def request(
         self,
@@ -216,10 +217,45 @@ async def request_sd_pack_sync(
     operation: Callable[[], Awaitable[Any]],
     *,
     foreground: bool = False,
+    shared_asset_store: SharedAssetStore | None = None,
 ) -> Any:
-    return await _sd_pack_sync_coordinator(conn).request(
+    coordinator = _sd_pack_sync_coordinator(conn)
+
+    async def protected_operation():
+        from core.lesson.sd_pack_gc import LivePackReference
+
+        store = shared_asset_store
+        if store is None:
+            return await operation()
+        reference = LivePackReference(store, cache_key)
+        retain = False
+        try:
+            if not store.is_pack_ready(cache_key):
+                raise ValueError("SD sync source pack is not READY")
+            try:
+                result = await operation()
+            except Exception as exc:
+                retain = _sd_sync_completion_unknown(exc)
+                raise
+            else:
+                retain = _sd_sync_storage_busy(result)
+                if not retain and coordinator._source_reference is not None:
+                    coordinator._source_reference.close()
+                    coordinator._source_reference = None
+                return result
+        finally:
+            if retain:
+                previous = coordinator._source_reference
+                coordinator._source_reference = reference
+                if previous is not None:
+                    previous.close()
+            else:
+                reference.close()
+
+    # Ownership belongs to the shielded worker, including cancelled request waiters.
+    return await coordinator.request(
         cache_key,
-        operation,
+        protected_operation,
         foreground=foreground,
     )
 
@@ -464,10 +500,16 @@ async def _call_sd_pack_sync_with_voice_guard(
     while busy_check():
         await sleep(poll_interval)
     cache_key = str(pack.get("cacheKey") or "")
+    mount_root = _lesson_config(getattr(conn, "config", {}) or {}).get("asset_pack_mount_root")
+    store = None
+    if mount_root:
+        mounted = Path(str(mount_root)).resolve()
+        store = SharedAssetStore(mounted.parent, pack_root=mounted, cleanup_on_init=False)
     return await request_sd_pack_sync(
         conn,
         cache_key,
         lambda: call_sd_pack_sync_tool(conn, mcp_client, pack),
+        shared_asset_store=store,
     )
 
 

@@ -310,6 +310,11 @@ class AssetCache:
         for asset in self.assets:
             for source in self._source_aliases(asset):
                 self._by_source.setdefault(source, asset)
+        self._live_pack_reference = None
+        if self._shared_asset_store is not None:
+            from core.lesson.sd_pack_gc import LivePackReference
+
+            self._live_pack_reference = LivePackReference(self._shared_asset_store, self.cache_key)
 
     @staticmethod
     def _describe_keyless(asset: Dict[str, Any]) -> str:
@@ -855,7 +860,11 @@ class AssetCache:
             return False
 
     async def aclose(self) -> None:
-        await self._maybe_close_client(force=True)
+        try:
+            await self._maybe_close_client(force=True)
+        finally:
+            if self._live_pack_reference is not None:
+                self._live_pack_reference.close()
 
     async def evict(self) -> None:
         """P5 eviction (republish-on-connect): tear down THIS version's cache so a
@@ -872,11 +881,20 @@ class AssetCache:
             asset.checksum_ok = False
             asset.reason = "evicted"
         try:
-            if os.path.isdir(self.cache_dir):
-                shutil.rmtree(self.cache_dir, ignore_errors=True)
             pack_dir = self._asset_pack_dir()
             if pack_dir and os.path.isdir(pack_dir):
-                shutil.rmtree(pack_dir, ignore_errors=True)
+                if self._shared_asset_store is not None:
+                    self._shared_asset_store.delete_pack(self.cache_key)
+                else:
+                    shutil.rmtree(pack_dir, ignore_errors=True)
+            # The local cache may be the mounted pack itself (including symlinks).
+            cache_path = os.path.realpath(self.cache_dir)
+            managed_root = str(self._shared_asset_store.pack_root) if self._shared_asset_store else None
+            overlaps_managed = managed_root is not None and os.path.commonpath(
+                (cache_path, managed_root)
+            ) in (cache_path, managed_root)
+            if not overlaps_managed and os.path.isdir(self.cache_dir):
+                shutil.rmtree(self.cache_dir, ignore_errors=True)
         except OSError:  # pragma: no cover - best-effort teardown
             pass
 

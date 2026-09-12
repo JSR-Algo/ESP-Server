@@ -3299,6 +3299,13 @@ class LessonRuntime:
             pass
 
     async def close(self) -> None:
+        try:
+            await self._close_runtime_resources()
+        finally:
+            if self.asset_cache is not None:
+                await self.asset_cache.aclose()
+
+    async def _close_runtime_resources(self) -> None:
         self._closed = True
         self._course_playout_deferred_finish = None
         phase_task = self._course_phase_task
@@ -3342,8 +3349,6 @@ class LessonRuntime:
             await asyncio.gather(visual_transition_task, return_exceptions=True)
         if self.forwarder is not None:
             await self.forwarder.aclose()
-        if self.asset_cache is not None:
-            await self.asset_cache.aclose()
 
     def _is_active_runtime(self) -> bool:
         if self._closed:
@@ -8436,6 +8441,7 @@ class LessonRuntime:
                     cache_key,
                     foreground_operation,
                     foreground=True,
+                    shared_asset_store=getattr(self.asset_cache, "_shared_asset_store", None),
                 )
             )
             started_task = asyncio.create_task(foreground_started.wait())
@@ -9878,8 +9884,7 @@ def _sd_pack_gc_for_connection(conn: Any, lesson_cfg: Dict[str, Any]) -> Any:
         return None
     try:
         from core.lesson.sd_pack_gc import (
-            ACTIVATION_STATE_FILENAME, SdPackGarbageCollector,
-            activation_protected_cache_keys,
+            SdPackGarbageCollector, shared_protected_cache_keys,
         )
         from core.lesson.sd_pack_evict import protected_cache_keys
         from core.lesson.shared_asset_store import SharedAssetStore
@@ -9890,7 +9895,7 @@ def _sd_pack_gc_for_connection(conn: Any, lesson_cfg: Dict[str, Any]) -> Any:
         render_busy = lambda: getattr(runtime, "state", None) in (S_RUNNING, S_PAUSED)
 
         def live_protected_keys():
-            keys = activation_protected_cache_keys(store.root / ACTIVATION_STATE_FILENAME)
+            keys = shared_protected_cache_keys(store)
             registry = getattr(getattr(conn, "server", None), "lesson_connections", {})
             # Connection mutations and collection run on the same event loop;
             # the deletion-time probe runs synchronously under the GC lock.
@@ -9928,9 +9933,13 @@ def _sd_pack_activation_for_connection(conn: Any, gc: Any) -> Any:
     if activation is not None:
         return activation
     try:
-        from core.lesson.sd_pack_gc import SdPackActivationState
+        from core.lesson.sd_pack_gc import (
+            SdPackActivationState, device_activation_state_path, shared_protected_cache_keys,
+        )
 
-        activation = SdPackActivationState(gc.shared_store)
+        state_path = device_activation_state_path(gc.shared_store, getattr(conn, "device_id", None))
+        shared_protected_cache_keys(gc.shared_store)
+        activation = SdPackActivationState(gc.shared_store, state_path=state_path)
         conn.lesson_sd_pack_activation = activation
         return activation
     except (OSError, ValueError, TypeError):

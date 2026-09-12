@@ -222,7 +222,13 @@ class SharedAssetStore:
         blocked and will re-attest the now-missing pack and fail closed.
         """
         with self._gc_lock(exclusive=True):
+            from core.lesson.sd_pack_gc import shared_protected_cache_keys
+
             protected = {str(key) for key in protected_cache_keys if key}
+            try:
+                protected.update(shared_protected_cache_keys(self))
+            except (OSError, ValueError, TypeError):
+                raise PackDeletionRefused(cache_key) from None
             if protection_probe is not None:
                 protected.update(
                     str(key) for key in (protection_probe() or ()) if key
@@ -245,7 +251,10 @@ class SharedAssetStore:
 
     def sweep_unreferenced_cas(self, protected_cache_keys: set[str] = frozenset()) -> list[str]:
         with self._gc_lock(exclusive=True):
-            return self._sweep_unreferenced_cas_unlocked(set(protected_cache_keys))
+            from core.lesson.sd_pack_gc import shared_protected_cache_keys
+
+            protected = set(protected_cache_keys) | shared_protected_cache_keys(self)
+            return self._sweep_unreferenced_cas_unlocked(protected)
 
     def _sweep_unreferenced_cas_unlocked(self, protected: set[str]) -> list[str]:
         reachable = set()

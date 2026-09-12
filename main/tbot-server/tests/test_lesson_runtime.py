@@ -3082,8 +3082,9 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         coordinator_calls = []
 
         async def capture_coordinator(
-            conn_arg, cache_key, operation, *, foreground=False
+            conn_arg, cache_key, operation, *, foreground=False, shared_asset_store=None
         ):
+            self.assertIsNone(shared_asset_store)
             coordinator_calls.append((conn_arg, cache_key, foreground))
             return await operation()
 

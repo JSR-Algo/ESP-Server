@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import os
 import shutil
-import fcntl
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -17,6 +18,84 @@ from core.lesson.shared_asset_store import PackDeletionRefused, SharedAssetStore
 DEFAULT_GC_FREE_PERCENT = 20.0
 DEFAULT_PRELOAD_MIN_FREE_PERCENT = 5.0
 ACTIVATION_STATE_FILENAME = "lesson-pack-activation.json"
+ACTIVATION_STATES_DIRECTORY = "lesson-pack-activations"
+LIVE_REFERENCES_DIRECTORY = "lesson-pack-references"
+
+
+def device_activation_state_path(store: SharedAssetStore, device_id: str) -> Path:
+    if not isinstance(device_id, str) or not device_id.strip():
+        raise ValueError("device identity required for pack activation")
+    digest = hashlib.sha256(device_id.encode("utf-8")).hexdigest()
+    return store.root / ACTIVATION_STATES_DIRECTORY / (digest + ".json")
+
+
+class LivePackReference:
+    """An exact runtime reference; kernel ownership ends on close or process death."""
+
+    def __init__(self, store: SharedAssetStore, cache_key: str) -> None:
+        self._handle = None
+        self.path = store.root / LIVE_REFERENCES_DIRECTORY / (uuid.uuid4().hex + ".json")
+        with store._gc_lock(exclusive=False), store._parts_lock(exclusive=False, blocking=True):
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(".part")
+            handle = temporary.open("x+b")
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                handle.write(json.dumps({"current": cache_key}).encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
+                os.replace(temporary, self.path)
+                store._fsync_dir(self.path.parent)
+                self._handle = handle
+            except BaseException:
+                handle.close()
+                temporary.unlink(missing_ok=True)
+                self.path.unlink(missing_ok=True)
+                raise
+
+    def close(self) -> None:
+        handle, self._handle = self._handle, None
+        if handle is not None:
+            try:
+                self.path.unlink(missing_ok=True)
+            finally:
+                handle.close()
+
+
+def shared_protected_cache_keys(store: SharedAssetStore) -> Set[str]:
+    # Retain the old unscoped record: it has no device identity for safe migration.
+    keys = activation_protected_cache_keys(store.root / ACTIVATION_STATE_FILENAME)
+    states = store.root / ACTIVATION_STATES_DIRECTORY
+    if states.exists():
+        for path in states.iterdir():
+            if path.suffix == ".json":
+                keys.update(activation_protected_cache_keys(path))
+    references = store.root / LIVE_REFERENCES_DIRECTORY
+    if references.exists():
+        for path in references.iterdir():
+            if path.suffix != ".json":
+                continue
+            try:
+                handle = path.open("rb")
+            except FileNotFoundError:
+                continue
+            with handle:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    record = json.load(handle)
+                    if (
+                        not isinstance(record, dict)
+                        or set(record) != {"current"}
+                        or not isinstance(record["current"], str)
+                        or not record["current"]
+                    ):
+                        raise ValueError("invalid live pack reference")
+                    keys.add(record["current"])
+                else:
+                    # UUID records are never reused; a released lock cannot revive.
+                    path.unlink(missing_ok=True)
+    return keys
 
 
 def _no_protected_keys() -> Set[str]:
@@ -85,14 +164,9 @@ class SdPackGarbageCollector:
         self._disk_usage = disk_usage
         self._voice_busy = voice_busy or (lambda: False)
         self._render_busy = render_busy or (lambda: False)
-        # Every connection on this server shares one activation record, so the
-        # caller's own runtime keys are not the whole protected set: another
-        # robot's current/candidate pack must survive this robot's GC too.
         if protected_keys_provider is None and self.shared_store is not None:
-            state_path = self.shared_store.root / ACTIVATION_STATE_FILENAME
-
             def protected_keys_provider() -> Set[str]:
-                return activation_protected_cache_keys(state_path)
+                return shared_protected_cache_keys(self.shared_store)
 
         self._protected_keys_provider = protected_keys_provider or _no_protected_keys
 
@@ -319,14 +393,14 @@ class SdPackActivationState:
             return bool(
                 expected
                 and expected == self.candidate
-                and self.store.is_pack_ready(expected["cacheKey"])
+                and self.store._is_pack_ready_locked(expected["cacheKey"])
             )
 
     def activate_candidate(self, identity: Any = None) -> bool:
         with self._state_lock():
             self._reload_unlocked()
             expected = self._identity(identity) if identity is not None else self.candidate
-            if not expected or expected != self.candidate or not self.store.is_pack_ready(expected["cacheKey"]):
+            if not expected or expected != self.candidate or not self.store._is_pack_ready_locked(expected["cacheKey"]):
                 return False
             old = self.current
             self.current = expected
@@ -348,7 +422,7 @@ class SdPackActivationState:
             expected = self._identity(exact_identity)
             if not expected or expected != self.previous_known_good:
                 return False
-            if not self.store.is_pack_ready(expected["cacheKey"]):
+            if not self.store._is_pack_ready_locked(expected["cacheKey"]):
                 return False
             old = self.current
             self.current = expected
@@ -421,12 +495,13 @@ class SdPackActivationState:
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        with temp.open("wb") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(str(temp), str(self.state_path))
-        self.store._fsync_dir(self.state_path.parent)
+        with self.store._parts_lock(exclusive=False, blocking=True):
+            with temp.open("wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(str(temp), str(self.state_path))
+            self.store._fsync_dir(self.state_path.parent)
 
     @contextmanager
     def _state_lock(self):
@@ -435,6 +510,8 @@ class SdPackActivationState:
         with lock_path.open("a+b") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             try:
-                yield
+                # Keep attestation AND publication on one side of GC deletion.
+                with self.store._gc_lock(exclusive=False):
+                    yield
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
