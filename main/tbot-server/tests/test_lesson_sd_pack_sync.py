@@ -508,6 +508,7 @@ async def test_sync_cached_lesson_assets_to_sd_calls_mcp_for_each_cached_pack(mo
         return json.dumps(
             {
                 "ready": True,
+                "activated": True,
                 "cacheKey": pack["cacheKey"],
                 "manifestChecksum": pack["manifestChecksum"],
                 "downloadedCount": len(pack["assets"]),
@@ -599,6 +600,7 @@ async def test_sync_cached_lesson_assets_to_sd_preserves_per_cache_firmware_coun
         if pack["cacheKey"] == first_key:
             return {
                 "ready": True,
+                "activated": True,
                 "cacheKey": first_key,
                 "manifestChecksum": first_checksum,
                 "downloadedCount": 2,
@@ -733,6 +735,7 @@ async def test_sync_cached_lesson_assets_to_sd_rejects_optional_asset_failure(
     async def fake_call(_conn, _client, _pack):
         return {
             "ready": True,
+            "activated": True,
             "cacheKey": cache_key,
             "manifestChecksum": checksum,
             "downloadedCount": 0,
@@ -766,6 +769,7 @@ async def test_sync_cached_lesson_assets_to_sd_rejects_optional_asset_failure(
     [
         {
             "ready": True,
+            "activated": True,
             "manifestChecksum": "a" * 64,
             "downloadedCount": 1,
             "skippedCount": 0,
@@ -773,6 +777,7 @@ async def test_sync_cached_lesson_assets_to_sd_rejects_optional_asset_failure(
         },
         {
             "ready": True,
+            "activated": True,
             "cacheKey": "lesson-b/v1-" + "a" * 64,
             "manifestChecksum": "a" * 64,
             "downloadedCount": 1,
@@ -788,6 +793,7 @@ async def test_sync_cached_lesson_assets_to_sd_rejects_optional_asset_failure(
         },
         {
             "ready": True,
+            "activated": True,
             "cacheKey": "lesson-a/v1-" + "a" * 64,
             "manifestChecksum": "b" * 64,
             "downloadedCount": 1,
@@ -803,6 +809,7 @@ async def test_sync_cached_lesson_assets_to_sd_rejects_optional_asset_failure(
         },
         {
             "ready": True,
+            "activated": True,
             "cacheKey": "lesson-a/v1-" + "a" * 64,
             "manifestChecksum": "a" * 64,
             "downloadedCount": 1,
@@ -811,6 +818,7 @@ async def test_sync_cached_lesson_assets_to_sd_rejects_optional_asset_failure(
         },
         {
             "ready": True,
+            "activated": True,
             "cacheKey": "lesson-a/v1-" + "a" * 64,
             "manifestChecksum": "a" * 64,
             "downloadedCount": 0,
@@ -819,6 +827,7 @@ async def test_sync_cached_lesson_assets_to_sd_rejects_optional_asset_failure(
         },
         {
             "ready": True,
+            "activated": True,
             "cacheKey": "lesson-a/v1-" + "a" * 64,
             "manifestChecksum": "a" * 64,
             "downloadedCount": 1,
@@ -871,6 +880,18 @@ async def test_background_sync_rejects_inexact_firmware_attestation(
     assert result["resultsByCacheKey"][cache_key]["ready"] is False
 
 
+@pytest.mark.parametrize("activated", [False, None, "true", 1])
+def test_verified_files_without_successful_activation_are_not_ready(activated):
+    checksum = "a" * 64
+    pack = {"cacheKey": f"lesson-a/v1-{checksum}", "manifestChecksum": checksum,
+            "assets": [{"key": "poster"}]}
+    result = {"ready": True, "cacheKey": pack["cacheKey"], "manifestChecksum": checksum,
+              "downloadedCount": 1, "skippedCount": 0, "failedCount": 0}
+    if activated is not None:
+        result["activated"] = activated
+    assert sd_pack_sync.normalize_firmware_sync_result(pack["cacheKey"], result, pack)["ready"] is False
+
+
 @pytest.mark.asyncio
 async def test_background_sync_accepts_exact_firmware_attestation(monkeypatch):
     checksum = "a" * 64
@@ -894,6 +915,7 @@ async def test_background_sync_accepts_exact_firmware_attestation(monkeypatch):
     async def fake_call(_conn, _client, _pack):
         return {
             "ready": True,
+            "activated": True,
             "cacheKey": cache_key,
             "manifestChecksum": checksum,
             "downloadedCount": 1,
@@ -933,6 +955,7 @@ async def test_background_sync_accepts_reused_firmware_attestation(monkeypatch):
     async def fake_call(_conn, _client, _pack):
         return {
             "ready": True,
+            "activated": True,
             "cacheKey": cache_key,
             "manifestChecksum": checksum,
             "downloadedCount": 1,
@@ -1044,6 +1067,7 @@ async def test_background_sync_pauses_while_voice_is_busy(monkeypatch, tmp_path)
         calls.append(pack["cacheKey"])
         return {
             "ready": True,
+            "activated": True,
             "cacheKey": cache_key,
             "manifestChecksum": checksum,
             "downloadedCount": 1,
@@ -1102,6 +1126,7 @@ async def test_background_sync_does_not_cancel_dispatched_transfer_when_voice_tu
         await release_transfer.wait()
         return {
             "ready": True,
+            "activated": True,
             "cacheKey": cache_key,
             "manifestChecksum": checksum,
             "downloadedCount": 1,

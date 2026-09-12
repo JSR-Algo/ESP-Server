@@ -142,7 +142,9 @@ POSTER_REPUBLISHED = base64.b64decode(
 )
 BARN = b"barn-bytes-abc"
 BASE = "http://assets.test"
-BACKEND_CANONICAL_MANIFEST_PATH = os.path.realpath(
+BACKEND_CANONICAL_MANIFEST_PATH = os.path.realpath(os.path.join(
+    os.environ["TBOT_BACKEND_WORKTREE"], "scripts", "seed", "076_canonical-manifest.espTft.json",
+)) if os.environ.get("TBOT_BACKEND_WORKTREE") else os.path.realpath(
     os.path.join(
         os.path.dirname(__file__),
         "..",
@@ -156,7 +158,9 @@ BACKEND_CANONICAL_MANIFEST_PATH = os.path.realpath(
         "076_canonical-manifest.espTft.json",
     )
 )
-FIRMWARE_LESSON_ROOT = os.path.realpath(
+FIRMWARE_LESSON_ROOT = os.path.realpath(os.path.join(
+    os.environ["TBOT_FIRMWARE_WORKTREE"], "lesson",
+)) if os.environ.get("TBOT_FIRMWARE_WORKTREE") else os.path.realpath(
     os.path.join(
         os.path.dirname(__file__),
         "..",
@@ -207,6 +211,8 @@ def _client_for(assets, *, corrupt=None, **kw):
 
 def _canonical_backend_assets_for_test():
     if not os.path.exists(BACKEND_CANONICAL_MANIFEST_PATH):
+        if os.environ.get("TBOT_BACKEND_WORKTREE"):
+            raise AssertionError(f"selected backend canonical manifest missing: {BACKEND_CANONICAL_MANIFEST_PATH}")
         raise unittest.SkipTest("backend canonical espTft manifest lives in sibling tbot-backend checkout")
     with open(BACKEND_CANONICAL_MANIFEST_PATH) as fh:
         manifest = json.load(fh)
@@ -215,6 +221,8 @@ def _canonical_backend_assets_for_test():
     for asset in manifest["assets"]:
         asset_path = os.path.join(FIRMWARE_LESSON_ROOT, asset["path"])
         if not os.path.exists(asset_path):
+            if os.environ.get("TBOT_FIRMWARE_WORKTREE"):
+                raise AssertionError(f"selected firmware lesson asset missing: {asset_path}")
             raise unittest.SkipTest(f"firmware lesson asset missing: {asset_path}")
         with open(asset_path, "rb") as fh:
             content = fh.read()

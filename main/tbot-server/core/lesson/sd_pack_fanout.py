@@ -851,7 +851,7 @@ def _dto_from_cache_result(
         result = {}
     critical_failed = _bounded_count(result.get("criticalFailedCount"))
     failed = _bounded_count(result.get("failedCount"))
-    ready = bool(result.get("ready", critical_failed == 0)) and critical_failed == 0
+    ready = result.get("ready") is True and critical_failed == 0
     body = {
         "deviceId": str(backend_device_id or "").strip(),
         "cacheKey": str(cache_key or "").strip(),

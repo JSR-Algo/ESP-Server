@@ -125,6 +125,72 @@ def test_gc_skips_collection_when_protection_cannot_be_read(tmp_path):
     assert pack.exists()
 
 
+@pytest.mark.parametrize("content", ['{"current":', '[]', '{"current": 42}', '{"candidate": {}}'])
+def test_gc_refuses_corrupt_default_activation_protection(tmp_path, content):
+    store = SharedAssetStore(tmp_path / "tbot")
+    pack = _ready_pack(store, CACHE_KEY, POSTER)
+    (store.root / "lesson-pack-activation.json").write_text(content)
+    gc = SdPackGarbageCollector(
+        store.pack_root, shared_store=store, quota_bytes=1,
+        disk_usage=lambda _path: _disk(100, 50),
+    )
+
+    assert gc.collect_one() == {"skipped": "protection_unavailable"}
+    assert pack.exists()
+
+
+def test_gc_refuses_unreadable_default_activation_protection(tmp_path, monkeypatch):
+    store = SharedAssetStore(tmp_path / "tbot")
+    pack = _ready_pack(store, CACHE_KEY, POSTER)
+    state_path = store.root / "lesson-pack-activation.json"
+    read_text = Path.read_text
+
+    def denied(path, *args, **kwargs):
+        if path == state_path:
+            raise PermissionError("activation state inaccessible")
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    gc = SdPackGarbageCollector(
+        store.pack_root, shared_store=store, quota_bytes=1,
+        disk_usage=lambda _path: _disk(100, 50),
+    )
+    assert gc.collect_one() == {"skipped": "protection_unavailable"}
+    assert pack.exists()
+
+
+def test_gc_allows_valid_empty_activation_protection(tmp_path):
+    store = SharedAssetStore(tmp_path / "tbot")
+    pack = _ready_pack(store, CACHE_KEY, POSTER)
+    (store.root / "lesson-pack-activation.json").write_text(
+        '{"current": null, "candidate": null, "previousKnownGood": null}'
+    )
+    gc = SdPackGarbageCollector(
+        store.pack_root, shared_store=store, quota_bytes=1,
+        disk_usage=lambda _path: _disk(100, 50),
+    )
+    assert gc.collect_one()["deleted"] == CACHE_KEY
+    assert not pack.exists()
+
+
+@pytest.mark.parametrize("operation", ["begin_candidate", "abort_candidate", "set_current_if_empty"])
+def test_corrupt_activation_state_cannot_be_overwritten_to_lose_protection(tmp_path, operation):
+    store = SharedAssetStore(tmp_path / "tbot")
+    pack = _ready_pack(store, CACHE_KEY, POSTER)
+    state = SdPackActivationState(store, current_cache_key=CACHE_KEY)
+    state_path = store.root / "lesson-pack-activation.json"
+    corrupt = '{"current":'
+    state_path.write_text(corrupt)
+    with pytest.raises(ValueError):
+        method = getattr(state, operation)
+        method() if operation == "abort_candidate" else method(CACHE_KEY)
+    assert state_path.read_text() == corrupt
+    gc = SdPackGarbageCollector(store.pack_root, shared_store=store, quota_bytes=1,
+                              disk_usage=lambda _path: _disk(100, 50))
+    assert gc.collect_one() == {"skipped": "protection_unavailable"}
+    assert pack.exists()
+
+
 def test_delete_pack_refuses_a_protected_key_instead_of_deleting_it(tmp_path):
     from core.lesson.shared_asset_store import PackDeletionRefused
 

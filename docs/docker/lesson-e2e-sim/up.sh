@@ -15,7 +15,11 @@ ESP_REPO="$(cd -- "${DOCKER_DIR}/../.." && pwd)"
 # Walk up to the TBOT umbrella rather than counting '..' segments: this checkout may
 # be the canonical robot/esp32-server OR a git worktree two levels deeper, and a fixed
 # relative hop silently resolves to the wrong directory in one of the two layouts.
-TBOT_ROOT="${ESP_REPO}"
+TBOT_ROOT="${TBOT_WORKSPACE_ROOT:-${ESP_REPO}}"
+if [[ -n "${TBOT_WORKSPACE_ROOT:-}" && ! ( -d "${TBOT_ROOT}/tbot-backend" && -d "${TBOT_ROOT}/robot" ) ]]; then
+  echo "[up] FATAL: TBOT_WORKSPACE_ROOT must contain tbot-backend/ and robot/" >&2
+  exit 1
+fi
 while [[ "${TBOT_ROOT}" != "/" && ! ( -d "${TBOT_ROOT}/tbot-backend" && -d "${TBOT_ROOT}/robot" ) ]]; do
   TBOT_ROOT="$(dirname "${TBOT_ROOT}")"
 done

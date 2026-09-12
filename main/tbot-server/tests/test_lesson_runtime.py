@@ -1518,6 +1518,67 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([frame["type"] for frame in self._sent_frames(conn)], ["lesson_prepare"])
 
+    async def test_sd_preload_reports_ready_only_after_robot_attestation(self):
+        await self._assert_sd_preload_report_order(attested=True)
+
+    async def test_sd_preload_reports_failure_when_robot_does_not_attest(self):
+        await self._assert_sd_preload_report_order(attested=False)
+
+    async def test_sd_preload_does_not_report_after_close_during_attestation(self):
+        await self._assert_sd_preload_report_order(attested=True, stale="close")
+
+    async def test_sd_preload_does_not_report_after_replacement_during_attestation(self):
+        await self._assert_sd_preload_report_order(attested=True, stale="replace")
+
+    async def _assert_sd_preload_report_order(self, *, attested, stale=None):
+        from unittest.mock import AsyncMock
+
+        class _ReadyCache(_FakeAssetCache):
+            def synthesize_preload_status(self, assignment_version):
+                return {"ready": True, "assets": [{
+                    "key": "backgroundScene.poster", "critical": True,
+                    "state": "READY", "checksumOk": True,
+                }]}
+
+        reports = []
+        sync_entered, sync_release = asyncio.Event(), asyncio.Event()
+
+        async def report(body):
+            reports.append(dict(body))
+
+        async def sync():
+            sync_entered.set()
+            await sync_release.wait()
+            return attested
+
+        rt = self._runtime(asset_cache=_ReadyCache(ready=True), preload_status_reporter=report)
+        rt._sync_sd_asset_pack_to_robot = sync
+        rt._emit_error = AsyncMock()
+        rt._notify_lesson_terminal = AsyncMock()
+        task = asyncio.create_task(rt._preload_sd_asset_pack_before_prepare())
+        try:
+            await asyncio.wait_for(sync_entered.wait(), 1)
+            self.assertEqual(reports, [], "ESP cache bytes cannot attest robot storage")
+            if stale == "close":
+                await rt.close()
+            elif stale == "replace":
+                rt.conn.lesson_runtime = object()
+            sync_release.set()
+            self.assertEqual(await task, attested and not stale)
+            await asyncio.sleep(0)
+            if stale:
+                self.assertEqual(reports, [])
+                self.assertEqual(rt._preload_status_report_tasks, set())
+                self.assertEqual(self._sent_frames(rt.conn), [])
+                return
+            self.assertEqual([item["state"] for item in reports], ["READY" if attested else "FAILED"])
+            if not attested:
+                self.assertTrue(all(item.get("checksumOk") is not True for item in reports))
+        finally:
+            sync_release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            await rt.close()
+
     async def test_preload_reports_real_synthesized_critical_asset_statuses_to_backend(self):
         class _SynthesizingAssetCache(AssetCache):
             async def preload(self):
@@ -2843,6 +2904,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         async def sync_ready(*_args, **_kwargs):
             return {
                 "ready": True,
+                "activated": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 20,
@@ -2901,6 +2963,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         async def sync_ready(*_args, **_kwargs):
             return {
                 "ready": True,
+                "activated": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 64,
@@ -3038,6 +3101,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             return json.dumps(
                 {
                     "ready": True,
+                    "activated": True,
                     "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                     "manifestChecksum": _manifest_checksum(),
                     "downloadedCount": 3,
@@ -3100,6 +3164,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         async def cold_sync(*_args, **_kwargs):
             return {
                 "ready": True,
+                "activated": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
@@ -3132,6 +3197,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         async def reused_sync(*_args, **_kwargs):
             return {
                 "ready": True,
+                "activated": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 2,
@@ -3292,6 +3358,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             return json.dumps(
                 {
                     "ready": True,
+                    "activated": True,
                     "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                     "packChecksum": _manifest_checksum(),
                     "downloadedCount": 0,
@@ -3315,6 +3382,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         invalid_results = (
             {
                 "ready": False,
+                "activated": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "downloadedCount": 3,
                 "skippedCount": 0,
@@ -3322,6 +3390,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             },
             {
                 "ready": True,
+                "activated": True,
                 "cacheKey": "wrong-cache-key",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
@@ -3330,6 +3399,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             },
             {
                 "ready": True,
+                "activated": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 2,
@@ -3338,6 +3408,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             },
             {
                 "ready": True,
+                "activated": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
@@ -3346,6 +3417,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             },
             {
                 "ready": True,
+                "activated": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
@@ -3355,6 +3427,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             },
             {
                 "ready": True,
+                "activated": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "downloadedCount": 3,
                 "skippedCount": 0,
@@ -3362,6 +3435,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             },
             {
                 "ready": True,
+                "activated": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": "forged-checksum",
                 "downloadedCount": 3,
@@ -3370,6 +3444,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             },
             {
                 "ready": True,
+                "activated": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "packChecksum": "contradictory-checksum",
@@ -3411,6 +3486,28 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("checksum_verified", messages)
                 self.assertNotIn("asset_cache_hit", messages)
 
+    async def test_sd_asset_pack_rejects_unactivated_firmware_attestation(self):
+        for activation in ({}, {"activated": False}, {"activated": "true"}):
+            with self.subTest(activation=activation):
+                conn = _FakeConn()
+                conn.config = {"lesson": {"asset_delivery_mode": "sd_pack"}}
+                conn.mcp_client = _ReadyLessonAssetMcpClient()
+                rt = self._runtime(conn=conn, asset_cache=_FirmwareSyncAssetCache(ready=True))
+                result = {
+                    "ready": True,
+                    "cacheKey": "w01-d01-barn-say-it/v3-" + _manifest_checksum(),
+                    "manifestChecksum": _manifest_checksum(),
+                    "downloadedCount": 3, "skippedCount": 0, "failedCount": 0,
+                    **activation,
+                }
+
+                async def sync(*_args, **_kwargs):
+                    return result
+
+                with patch("core.lesson.runtime.call_mcp_tool", new=sync):
+                    self.assertFalse(await rt._sync_sd_asset_pack_to_robot())
+                await rt.close()
+
     async def test_sd_asset_pack_waits_for_mcp_discovery_before_prepare(self):
         class _EventuallyReadyMcpClient(_ReadyLessonAssetMcpClient):
             def __init__(self):
@@ -3437,6 +3534,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             calls.append((args, kwargs, list(conn.websocket.sent)))
             return {
                 "ready": True,
+                "activated": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
@@ -3470,6 +3568,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("MCP tools disabled during lesson")
             return {
                 "ready": True,
+                "activated": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
@@ -3663,6 +3762,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             attempts += 1
             return {
                 "ready": True,
+                "activated": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
@@ -3704,6 +3804,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 raise Exception("lesson asset sync busy or worker unavailable")
             return {
                 "ready": True,
+                "activated": True,
                 "cacheKey": asset_cache.cache_key,
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
@@ -3762,6 +3863,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             attempts += 1
             return {
                 "ready": True,
+                "activated": True,
                 "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
@@ -3809,6 +3911,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             attempts += 1
             return {
                 "ready": True,
+                "activated": True,
                 "cacheKey": asset_cache.cache_key,
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
@@ -3970,6 +4073,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
             return json.dumps(
                 {
                     "ready": True,
+                    "activated": True,
                     "cacheKey": "w01-d01-barn-say-it/v3-9b1f7c2a5d3e8f04a6c1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
                     "manifestChecksum": _manifest_checksum(),
                     "downloadedCount": 3,
@@ -4004,6 +4108,7 @@ class LessonRuntimeTest(unittest.IsolatedAsyncioTestCase):
         async def inexact_attestation(*_args, **_kwargs):
             return {
                 "ready": True,
+                "activated": True,
                 "cacheKey": "different-pack/v1-" + ("b" * 64),
                 "manifestChecksum": _manifest_checksum(),
                 "downloadedCount": 3,
@@ -9568,6 +9673,32 @@ class RepublishOnConnectTest(unittest.IsolatedAsyncioTestCase):
         sent = [json.loads(payload) for payload in conn.websocket.sent]
         self.assertEqual([frame["type"] for frame in sent], ["lesson_error"])
         self.assertEqual(sent[0]["body"]["code"], "ASSET_CHECKSUM_MISMATCH")
+
+    async def test_corrupt_activation_record_refuses_start_without_overwrite(self):
+        from pathlib import Path
+        import core.lesson.runtime as runtime_module
+        import core.lesson.asset_cache as asset_cache_module
+
+        conn = _RepublishConn()
+        with tempfile.TemporaryDirectory() as root:
+            state_path = Path(root) / "lesson-pack-activation.json"
+            state_path.write_text('{"current":')
+            conn.config["lesson"].update({
+                "asset_delivery_mode": "sd_pack",
+                "asset_pack_mount_root": str(Path(root) / "lesson-assets"),
+            })
+            (Path(root) / "lesson-assets").mkdir()
+            undo = self._patch_backend(self._assignment(lesson_version=3, assignment_version=1), _build_manifest())
+            try:
+                with patch.object(asset_cache_module, "AssetCache", wraps=asset_cache_module.AssetCache) as cache_factory:
+                    result = await runtime_module.maybe_start_lesson_on_connect(conn)
+            finally:
+                undo()
+            cache_factory.assert_not_called()
+            self.assertIsNone(result)
+            self.assertEqual(conn.lesson_start_status["code"], "ASSET_PACK_NOT_READY")
+            self.assertEqual(state_path.read_text(), '{"current":')
+            self.assertEqual(conn.websocket.sent, [])
 
     async def test_asset_cache_size_limits_are_passed_from_lesson_config(self):
         import core.lesson.asset_cache as asset_cache_module

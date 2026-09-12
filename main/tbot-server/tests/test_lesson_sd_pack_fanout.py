@@ -16,6 +16,7 @@ CACHE_KEY_B = f"lesson-b/v1-{CHECKSUM_B}"
 
 @pytest.fixture(autouse=True)
 def _clear_pending(monkeypatch):
+    monkeypatch.setattr(sd_pack_sync, "_LAST_FULL_SYNC_AT", {})
     sd_pack_fanout.set_pending_store_for_tests(InMemoryLessonSdPendingStore(random=lambda: 0.0))
 
     async def callback_ok(*_args, **_kwargs):
@@ -36,6 +37,7 @@ def _write_pack(root, cache_key, name="backgroundScene.poster", body=b"asset"):
 def _successful_attestation(pack, *, downloaded_count=1, skipped_count=0):
     return {
         "ready": True,
+        "activated": True,
         "cacheKey": pack["cacheKey"],
         "manifestChecksum": pack["manifestChecksum"],
         "downloadedCount": downloaded_count,
@@ -49,6 +51,31 @@ def _http_status_error(status: int) -> httpx.HTTPStatusError:
     request = httpx.Request("POST", "https://backend.test/device-result")
     response = httpx.Response(status, request=request)
     return httpx.HTTPStatusError(str(status), request=request, response=response)
+
+
+@pytest.mark.asyncio
+async def test_unattempted_pack_is_retained_and_never_reported_ready(monkeypatch):
+    callbacks = []
+
+    async def capture(_config, *, result):
+        callbacks.append(result)
+
+    monkeypatch.setattr(sd_pack_fanout, "_post_one_sync_result", capture)
+    partial = {"resultsByCacheKey": {CACHE_KEY_A: {
+        "cacheKey": CACHE_KEY_A, "ready": False, "failedCount": 1,
+        "criticalFailedCount": 1, "errorCode": "storage_busy",
+    }}}
+    cleared, retained = sd_pack_fanout._classify_robot_results(
+        "device-a", [CACHE_KEY_A, CACHE_KEY_B], partial,
+    )
+    assert cleared == []
+    assert retained == [CACHE_KEY_A, CACHE_KEY_B]
+    await sd_pack_fanout._post_sync_results(
+        {}, backend_device_id="device-a", cache_keys=[CACHE_KEY_A, CACHE_KEY_B],
+        sync_result=partial,
+    )
+    assert len(callbacks) == 2
+    assert all(row["ready"] is False for row in callbacks)
 
 
 @pytest.mark.asyncio

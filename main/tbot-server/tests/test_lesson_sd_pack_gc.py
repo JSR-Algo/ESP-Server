@@ -3,6 +3,7 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -370,6 +371,53 @@ def test_runtime_gc_boot_cleanup_runs_once_per_pack_root(monkeypatch, tmp_path):
     runtime._sd_pack_gc_for_connection(conn, config)
 
     assert calls == [(tmp_path / "tbot/lesson-assets").resolve()]
+
+
+def test_runtime_gc_protects_all_connections_after_three_activations(tmp_path):
+    from core.lesson import runtime
+
+    store = SharedAssetStore(tmp_path / "tbot")
+    connections = {}
+    for number in (1, 2, 3):
+        checksum = str(number) * 64
+        key = f"lesson-{number}/v1-{checksum}"
+        _ready_pack(store, key, str(number).encode())
+        activation = SdPackActivationState(store)
+        activation.begin_candidate({"cacheKey": key, "lessonVersion": 1, "manifestChecksum": checksum})
+        assert activation.activate_candidate()
+        connections[str(number)] = SimpleNamespace(
+            lesson_runtime=SimpleNamespace(asset_cache=SimpleNamespace(cache_key=key)),
+            lesson_sd_pack_activation=activation,
+        )
+    conn = SimpleNamespace(server=SimpleNamespace(lesson_connections=connections))
+    gc = runtime._sd_pack_gc_for_connection(conn, {
+        "asset_pack_mount_root": str(store.pack_root), "sd_cache_quota_bytes": 1,
+    })
+
+    assert gc.collect_one() == {"skipped": "no_evictable_pack"}
+    assert all(store.is_pack_ready(item.lesson_runtime.asset_cache.cache_key) for item in connections.values())
+
+
+def test_runtime_gc_rereads_connection_protection_at_deletion(tmp_path):
+    from core.lesson import runtime
+
+    store = SharedAssetStore(tmp_path / "tbot")
+    key = "lesson/v1-" + "a" * 64
+    pack = _ready_pack(store, key, b"active-late")
+    connections = {}
+    conn = SimpleNamespace(server=SimpleNamespace(lesson_connections=connections))
+    gc = runtime._sd_pack_gc_for_connection(conn, {
+        "asset_pack_mount_root": str(store.pack_root), "sd_cache_quota_bytes": 1,
+    })
+    delete_pack = gc.shared_store.delete_pack
+
+    def protect_before_delete(cache_key, **kwargs):
+        connections["other"] = SimpleNamespace(lesson_previous_known_good_cache_key=key)
+        return delete_pack(cache_key, **kwargs)
+
+    gc.shared_store.delete_pack = protect_before_delete
+    assert gc.collect_one() == {"skipped": "pack_became_protected"}
+    assert pack.exists()
 
 
 def test_backend_rollback_requires_exact_old_version_and_checksum(tmp_path):

@@ -9,6 +9,10 @@ MERGE_TIMELINE = ROOT / "docs" / "docker" / "lesson-e2e-sim" / "merge_timeline.p
 
 
 def _tbot_root() -> Path:
+    if os.environ.get("TBOT_WORKSPACE_ROOT"):
+        candidate = Path(os.environ["TBOT_WORKSPACE_ROOT"]).resolve()
+        assert (candidate / "tbot-backend").is_dir() and (candidate / "robot").is_dir()
+        return candidate
     for candidate in (ROOT, *ROOT.parents):
         if (candidate / "tbot-backend").is_dir() and (candidate / "robot").is_dir():
             return candidate
@@ -86,7 +90,8 @@ def test_default_simulation_builds_checkout_local_base_before_runtime(tmp_path: 
     assert "main-dd48f39d-local-20260805" not in commands
     assert "local/tbot-backend:lesson-studio-e2e" in commands
     assert "local/tbot-server-web:lesson-studio-e2e" in commands
-    assert str(_tbot_root() / "tbot-backend" / "Dockerfile") in commands
+    backend = Path(os.environ.get("TBOT_BACKEND_WORKTREE", str(_tbot_root() / "tbot-backend")))
+    assert str(backend / "Dockerfile") in commands
     assert str(ROOT / "Dockerfile-web") in commands
     assert "WEB_NODE_IMAGE=node:20" in commands
 

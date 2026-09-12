@@ -34,10 +34,10 @@ def activation_protected_cache_keys(state_path: Any) -> Set[str]:
     """
     try:
         loaded = json.loads(Path(state_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+    except FileNotFoundError:
         return set()
     if not isinstance(loaded, dict):
-        return set()
+        raise ValueError("invalid activation protection record")
     keys: Set[str] = set()
     for slot in ("current", "candidate", "previousKnownGood"):
         value = loaded.get(slot)
@@ -47,6 +47,10 @@ def activation_protected_cache_keys(state_path: Any) -> Set[str]:
             cache_key = value.get("cacheKey")
             if isinstance(cache_key, str) and cache_key:
                 keys.add(cache_key)
+            else:
+                raise ValueError("invalid activation protection identity")
+        elif value is not None:
+            raise ValueError("invalid activation protection identity")
     return keys
 
 
@@ -388,9 +392,14 @@ class SdPackActivationState:
     def _load(self) -> Dict[str, Any]:
         try:
             value = json.loads(self.state_path.read_text(encoding="utf-8"))
-            return value if isinstance(value, dict) else {}
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        except FileNotFoundError:
             return {}
+        if not isinstance(value, dict) or any(
+            value.get(slot) is not None and self._identity(value[slot]) is None
+            for slot in ("current", "candidate", "previousKnownGood")
+        ):
+            raise ValueError("invalid activation state")
+        return value
 
     def _reload_unlocked(self) -> None:
         loaded = self._load()

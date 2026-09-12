@@ -718,7 +718,11 @@ def _sync_result_ready(result: Any, requested_pack: dict[str, Any]) -> bool:
         or not expected_checksum
     ):
         return False
-    if result.get("ready") is not True or result.get("cacheKey") != expected_cache_key:
+    if (
+        result.get("ready") is not True
+        or result.get("activated") is not True
+        or result.get("cacheKey") != expected_cache_key
+    ):
         return False
     response_checksums = [
         result[key]
@@ -755,7 +759,7 @@ def normalize_firmware_sync_result(
     ready = (
         _sync_result_ready(result, requested_pack)
         if requested_pack is not None
-        else bool(result.get("ready", critical_failed == 0)) and critical_failed == 0
+        else False
     )
     body = {
         "cacheKey": str(cache_key or "").strip(),

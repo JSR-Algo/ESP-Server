@@ -8,11 +8,13 @@ from unittest.mock import AsyncMock, patch
 from urllib.parse import quote
 
 import pytest
+import httpx
 from aiohttp import web
 
 from core.lesson.flattened_cinematic_contract import TRGB_MEDIA_TYPE, trgb_container_bytes
 from core.lesson.sd_pack_materializer import (
     _METRICS,
+    _download_asset,
     MaterializationError,
     _PinnedAddressAsyncNetworkBackend,
     _validate_asset,
@@ -1571,3 +1573,85 @@ async def test_materialize_handler_malformed_json_returns_400(monkeypatch):
     assert response.status == 400
     assert _json_response(response)["error"] == "INVALID_REQUEST"
     assert "private-token" not in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["missing", "corrupt"])
+async def test_restart_repairs_unverified_pack_bytes_before_replaying(tmp_path, fault):
+    config = _config(tmp_path)
+    client = _Client({"https://assets.example/poster.jpg?sig=secret": [POSTER],
+                      "https://assets.example/barn.png": [BARN]})
+    await materialize_lesson_sd_pack(_manifest(), config=config, client=client, resolver=_public_resolver)
+    root = tmp_path / "sd" / "tbot"
+    store = SharedAssetStore(root)
+    asset = root / "lesson-assets" / CACHE_KEY / "backgroundScene.poster"
+    if fault == "missing":
+        asset.unlink()
+    else:
+        asset.write_bytes(b"corrupted-storage")
+    assert not SharedAssetStore(root).is_pack_ready(CACHE_KEY)
+    repaired = await materialize_lesson_sd_pack(
+        _manifest(), config=config, client=client, resolver=_public_resolver,
+    )
+    assert repaired["ready"] is True
+    assert SharedAssetStore(root).is_pack_ready(CACHE_KEY)
+    assert asset.read_bytes() == POSTER
+    requests = list(client.requests)
+    warm = await materialize_lesson_sd_pack(
+        _manifest(), config=config, client=client, resolver=_public_resolver,
+    )
+    assert warm["downloadedCount"] == 0
+    assert warm["skippedCount"] == 2
+    assert client.requests == requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault,expected", [
+    ("ok", None), ("404", "DOWNLOAD_FAILED"), ("timeout", "DOWNLOAD_FAILED"),
+    ("interrupted", "DOWNLOAD_FAILED"), ("checksum", "CHECKSUM_MISMATCH"),
+])
+async def test_download_helper_real_http_bytes_and_faults(tmp_path, fault, expected):
+    # Exercise the real transport helper; loopback is deliberately not whole-pack admission.
+    payload = bytes(range(256)) * 32
+    release = asyncio.Event()
+
+    async def handler(request):
+        if fault == "404":
+            raise web.HTTPNotFound()
+        if fault == "timeout":
+            await release.wait()
+        if fault == "interrupted":
+            response = web.StreamResponse(headers={"Content-Length": str(len(payload))})
+            await response.prepare(request)
+            await response.write(payload[:100])
+            request.transport.close()
+            return response
+        return web.Response(body=payload)
+
+    application = web.Application()
+    application.router.add_get("/asset", handler)
+    runner = web.AppRunner(application)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    asset = {"key": "real-http", "onlineUrl": f"http://127.0.0.1:{port}/asset",
+             "size": len(payload), "sha256": "0" * 64 if fault == "checksum" else _sha(payload)}
+    try:
+        async with httpx.AsyncClient(timeout=0.2, trust_env=False) as client:
+            if expected:
+                with pytest.raises(MaterializationError) as caught:
+                    await _download_asset(client, asset, tmp_path, 0,
+                                          {"maxFileBytes": len(payload), "maxPackBytes": len(payload)})
+                assert caught.value.code == expected
+            else:
+                target, count = await _download_asset(
+                    client, asset, tmp_path, 0,
+                    {"maxFileBytes": len(payload), "maxPackBytes": len(payload)},
+                )
+                assert count == len(payload)
+                assert target.read_bytes() == payload
+                assert _sha(target.read_bytes()) == asset["sha256"]
+    finally:
+        release.set()
+        await runner.cleanup()

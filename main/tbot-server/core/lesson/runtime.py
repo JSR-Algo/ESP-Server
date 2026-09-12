@@ -6252,7 +6252,9 @@ class LessonRuntime:
         except Exception:  # pragma: no cover - alarm is best-effort
             pass
 
-    def _start_preload_status_reports(self, status: Dict[str, Any]) -> None:
+    def _start_preload_status_reports(
+        self, status: Dict[str, Any], *, sd_attested: Optional[bool] = None
+    ) -> None:
         reporter = self.preload_status_reporter
         if not callable(reporter):
             return
@@ -6262,6 +6264,8 @@ class LessonRuntime:
             state = asset.get("state")
             if state not in ("READY", "FAILED"):
                 continue
+            if sd_attested is False:
+                state = "FAILED"
             asset_id = asset.get("assetId") or asset.get("key") or asset.get("id")
             if not asset_id:
                 continue
@@ -6270,7 +6274,7 @@ class LessonRuntime:
                 "assetId": asset_id,
                 "state": state,
             }
-            if asset.get("checksumOk") is not None:
+            if sd_attested is not False and asset.get("checksumOk") is not None:
                 report["checksumOk"] = bool(asset.get("checksumOk"))
             task = asyncio.create_task(self._send_preload_status_report(reporter, report))
             self._preload_status_report_tasks.add(task)
@@ -6362,11 +6366,11 @@ class LessonRuntime:
         finally:
             self._alarm_preload(False)
 
+        if not self._is_active_runtime():
+            return False
         status = self.asset_cache.synthesize_preload_status(self.assignment_version)
-        self._start_preload_status_reports(status)
-        if self._preload_status_report_tasks:
-            await asyncio.sleep(0)
         if not ready or not status.get("ready"):
+            self._start_preload_status_reports(status, sd_attested=False)
             self.last_error = LessonError(
                 ASSET_PACK_NOT_READY,
                 "verified SD asset pack is not ready for this lesson",
@@ -6377,7 +6381,11 @@ class LessonRuntime:
             await self._emit_error(self.last_error)
             await self._notify_lesson_terminal("sd_asset_pack_not_ready")
             return False
-        if not await self._sync_sd_asset_pack_to_robot():
+        attested = await self._sync_sd_asset_pack_to_robot()
+        if not self._is_active_runtime():
+            return False
+        if not attested:
+            self._start_preload_status_reports(status, sd_attested=False)
             if not (
                 self.last_error is not None
                 and self.last_error.code == "SD_SYNC_REALTIME_BUSY_TIMEOUT"
@@ -6395,6 +6403,10 @@ class LessonRuntime:
             await self._emit_error(self.last_error)
             await self._notify_lesson_terminal("sd_asset_pack_sync_failed")
             return False
+        # The backend's READY state describes robot storage, not the ESP cache.
+        self._start_preload_status_reports(status)
+        if self._preload_status_report_tasks:
+            await asyncio.sleep(0)
         return True
 
     async def _emit_step(self) -> None:
@@ -8564,7 +8576,11 @@ class LessonRuntime:
             or expected_checksum != self.manifest_checksum
         ):
             return None
-        if result.get("ready") is not True or result.get("cacheKey") != expected_cache_key:
+        if (
+            result.get("ready") is not True
+            or result.get("activated") is not True
+            or result.get("cacheKey") != expected_cache_key
+        ):
             return None
         response_checksums = [
             result[key]
@@ -9513,21 +9529,29 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
             "lessonVersion": new_lesson_version,
             "manifestChecksum": new_manifest_checksum,
         }
-        activation = _sd_pack_activation_for_connection(conn, gc)
-        if activation is not None:
-            old_cache = getattr(republish_previous, "asset_cache", None)
-            old_cache_key = getattr(old_cache, "cache_key", None)
-            if isinstance(old_cache_key, str) and old_cache_key:
-                activation.set_current_if_empty(
-                    {
-                        "cacheKey": old_cache_key,
-                        "lessonVersion": int(getattr(republish_previous, "lesson_version", 0)),
-                        "manifestChecksum": str(
-                            getattr(republish_previous, "manifest_checksum", "")
-                        ),
-                    }
-                )
-            activation.begin_candidate(candidate_identity)
+        try:
+            activation = _sd_pack_activation_for_connection(conn, gc)
+            if activation is None:
+                raise ValueError("activation state unavailable")
+            else:
+                old_cache = getattr(republish_previous, "asset_cache", None)
+                old_cache_key = getattr(old_cache, "cache_key", None)
+                if isinstance(old_cache_key, str) and old_cache_key:
+                    activation.set_current_if_empty(
+                        {
+                            "cacheKey": old_cache_key,
+                            "lessonVersion": int(getattr(republish_previous, "lesson_version", 0)),
+                            "manifestChecksum": str(
+                                getattr(republish_previous, "manifest_checksum", "")
+                            ),
+                        }
+                    )
+                activation.begin_candidate(candidate_identity)
+        except (OSError, ValueError, TypeError):
+            _set_lesson_start_status(conn, "ASSET_PACK_NOT_READY", "Gói bài học chưa xác minh xong.")
+            _log("warning", "lesson start refused: activation protection unavailable")
+            await _cleanup_failed_start("lesson_start_refused")
+            return republish_previous
         result = gc.collect_one(
             active_cache_key=getattr(
                 getattr(getattr(conn, "lesson_runtime", None), "asset_cache", None),
@@ -9853,13 +9877,27 @@ def _sd_pack_gc_for_connection(conn: Any, lesson_cfg: Dict[str, Any]) -> Any:
     if not mount_root:
         return None
     try:
-        from core.lesson.sd_pack_gc import SdPackGarbageCollector
+        from core.lesson.sd_pack_gc import (
+            ACTIVATION_STATE_FILENAME, SdPackGarbageCollector,
+            activation_protected_cache_keys,
+        )
+        from core.lesson.sd_pack_evict import protected_cache_keys
         from core.lesson.shared_asset_store import SharedAssetStore
 
         mounted = Path(str(mount_root)).resolve()
         store = SharedAssetStore(mounted.parent, pack_root=mounted, cleanup_on_init=False)
         runtime = getattr(conn, "lesson_runtime", None)
         render_busy = lambda: getattr(runtime, "state", None) in (S_RUNNING, S_PAUSED)
+
+        def live_protected_keys():
+            keys = activation_protected_cache_keys(store.root / ACTIVATION_STATE_FILENAME)
+            registry = getattr(getattr(conn, "server", None), "lesson_connections", {})
+            # Connection mutations and collection run on the same event loop;
+            # the deletion-time probe runs synchronously under the GC lock.
+            for connection in (conn, *tuple(registry.values())):
+                keys.update(protected_cache_keys(connection))
+            return keys
+
         gc = SdPackGarbageCollector(
             mounted,
             shared_store=store,
@@ -9868,6 +9906,7 @@ def _sd_pack_gc_for_connection(conn: Any, lesson_cfg: Dict[str, Any]) -> Any:
             preload_min_free_percent=lesson_cfg.get("sd_preload_min_free_percent", 5),
             voice_busy=getattr(conn, "is_realtime_busy", None),
             render_busy=render_busy,
+            protected_keys_provider=live_protected_keys,
         )
         if mounted not in _SD_PACK_BOOT_CLEANED_ROOTS:
             gc.boot_cleanup()
