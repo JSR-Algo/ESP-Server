@@ -202,7 +202,11 @@ try {
   assert.match(courseModeResult.savedChecksum, /^[a-f0-9]{64}$/);
   const courseModeMobileAudit = await auditLayoutAt(390);
   assertNoPageOverflow(courseModeMobileAudit);
-  assertResponsiveOverflowControls(courseModeMobileAudit);
+  assertResponsiveOverflowControls(courseModeMobileAudit, { assetPickerRequired: false });
+  const phaseLayout = await evaluate(`(()=>{const panel=document.querySelector('[data-testid="course-mode-visual-selection"]');return {labels:[...panel.querySelectorAll('label')].map(el=>el.textContent),selects:[...panel.querySelectorAll('select')].map(el=>({left:el.getBoundingClientRect().left,right:el.getBoundingClientRect().right})),width:innerWidth}})()`);
+  assert.deepEqual(phaseLayout.labels.slice(2), ['Fly in', 'Walk', 'Talk', 'Listen', 'Thinking', 'Celebrate', 'Exit']);
+  assert.equal(phaseLayout.selects.length, 9);
+  assert.ok(phaseLayout.selects.every(rect=>rect.left >= 0 && rect.right <= phaseLayout.width), 'all phase selectors fit the mobile viewport');
 
   assert.deepEqual(await evaluate('window.__MOUNT_COURSE_MODE_LOAD_ERROR__()'), {
     loadingVisible: true,

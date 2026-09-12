@@ -86,7 +86,7 @@
         v-if="courseModeIsCurriculum"
         :value="courseModeDraft"
         :assets="courseModeAssets"
-        :disabled="!isDraft || courseModeLoading || courseModeSaving"
+        :disabled="!isDraft || courseModeLoading || courseModeSaving || courseVisualDirty || courseVisualSaving"
         :saving="courseModeSaving"
         :dirty="courseModeDirty"
         :error="courseModeError"
@@ -162,7 +162,17 @@
               Save step
             </el-button>
           </div>
-          <section class="lesson-visual-pair" v-loading="savingLessonVisuals" :aria-busy="savingLessonVisuals ? 'true' : 'false'">
+          <CourseModeVisualSelection v-if="isCourseModeV5 && courseModeContract"
+            :key="lessonId" :lesson-id="lessonId" :is-draft="isDraft" :contract="courseModeContract"
+            :visual-checksum="courseModeExpectedVisualChecksum || ''"
+            :catalog-loading="Object.values(cinematicLibraryLoading).some(Boolean)"
+            :catalog-error="Object.values(cinematicLibraryErrors).filter(Boolean).join(' ')"
+            :assets="[].concat(rawCinematicLibraries.backgroundScene, rawCinematicLibraries.teachingObject, rawCinematicLibraries.robotOverlay)"
+            :disabled="courseModeDirty || courseModeSaving || courseModeLoading || lessonVisualSelectionDisabled"
+            @dirty="courseVisualDirty = $event" @saving="courseVisualSaving = $event" @saved="onCourseVisualSaved"
+            @reload-assets="loadCinematicLibraries"
+          />
+          <section v-if="!isCourseModeV5" class="lesson-visual-pair" v-loading="savingLessonVisuals" :aria-busy="savingLessonVisuals ? 'true' : 'false'">
             <div class="lesson-visual-pair__heading">
               <div>
                 <h4>{{ $t(isCourseModeV5 ? 'lesson.visualTripleTitle' : 'lesson.visualPairTitle') }}</h4>
@@ -648,6 +658,7 @@ import HeaderBar from '@/components/HeaderBar.vue';
 import LessonAssetManager from '@/components/LessonAssetManager.vue';
 import CinematicLayerPicker, { SLOT_CATEGORY as CINEMATIC_SLOT_CATEGORY } from '@/components/lesson/CinematicLayerPicker.vue';
 import CourseModeActivityTimeline from '@/components/lesson/CourseModeActivityTimeline.vue';
+import CourseModeVisualSelection from '@/components/lesson/CourseModeVisualSelection.vue';
 import LessonEngagementTrack from '@/components/lesson/LessonEngagementTrack.vue';
 import LessonInteractionPanel from '@/components/lesson/LessonInteractionPanel.vue';
 import LessonPublishReadiness from '@/components/lesson/LessonPublishReadiness.vue';
@@ -664,6 +675,7 @@ import TVideoJourneyEditor from '@/components/lesson/TVideoJourneyEditor.vue';
 import { createFarmJourneyDraft } from '@/components/lesson/tvideo-journey';
 import { reserveAssetReadEpoch } from '@/components/lesson/asset-read-epoch';
 import { canonicalLessonVisualPair, buildLessonVisualRequest } from '@/components/lesson/lesson-visual-selection';
+import { courseModeAssetRejection } from '@/components/lesson/lesson-visual-selection';
 import {
   assetDeletionImpact,
   bindClonedAssetToStep,
@@ -726,6 +738,7 @@ export default {
   components: {
     CinematicLayerPicker,
     CourseModeActivityTimeline,
+    CourseModeVisualSelection,
     HeaderBar,
     LessonAssetManager,
     LessonEngagementTrack,
@@ -873,6 +886,8 @@ export default {
       courseModeDraft: null,
       courseModeLoading: false,
       courseModeSaving: false,
+      courseVisualDirty: false,
+      courseVisualSaving: false,
       courseModeDirty: false,
       courseModeError: '',
       courseModeSavedMessage: '',
@@ -967,6 +982,10 @@ export default {
         || detectCourseModeAuthority(this.lesson, this.steps, manifest);
     },
     courseModeAssets() {
+      if (this.isCourseModeV5) {
+        return [...(this.rawCinematicLibraries.backgroundScene || []), ...(this.rawCinematicLibraries.teachingObject || [])]
+          .filter(asset => !courseModeAssetRejection(asset, asset.category === 'scene' ? 'backgroundScene' : 'teachingObject'));
+      }
       const byIdentity = new Map();
       const publishedCatalog = [
         ...(this.rawCinematicLibraries.backgroundScene || []),
@@ -1134,6 +1153,7 @@ export default {
     },
     hasPendingAuthoringChanges() {
       return this.courseModeDirty
+        || this.courseVisualDirty || this.courseVisualSaving
         || this.courseModeSaving
         || this.hasUnsavedDrafts
         || Boolean(this.pendingLessonVisualPair)
@@ -1362,6 +1382,8 @@ export default {
       this.courseModeDraft = null;
       this.courseModeLoading = false;
       this.courseModeSaving = false;
+      this.courseVisualDirty = false;
+      this.courseVisualSaving = false;
       this.courseModeDirty = false;
       this.courseModeError = '';
       this.courseModeSavedMessage = '';
@@ -1511,6 +1533,13 @@ export default {
         this.canonicalDemo = null;
         this.$message.warning(error instanceof Error ? error.message : 'Canonical demo could not be loaded');
       }
+    },
+    onCourseVisualSaved() {
+      this.invalidatePreview();
+      this.invalidateFlattenedDerivativeStatus();
+      this.loadCourseModeContract();
+      this.fetchSteps();
+      this.loadLessonAssetGenerationStatus();
     },
     async loadLessonCapabilities() {
       this.lessonCapabilities = await loadLessonRolloutCapabilities();
@@ -1946,6 +1975,7 @@ export default {
         || this.savingLessonVisuals
         || this.courseModeDirty
         || this.courseModeSaving
+        || this.courseVisualDirty || this.courseVisualSaving
         || (this.isTVideoJourney && (this.tvideoJourneyDirty || this.tvideoJourneySaving))
         || Boolean(this.pendingLessonVisualPair)
         || this.validating

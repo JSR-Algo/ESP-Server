@@ -493,6 +493,10 @@ export default {
     });
   },
 
+  getLessonVisuals(lessonId, onSuccess, onError) {
+    nestRequest({ url: `${getNestUrl()}/lessons/${lessonId}/visuals`, method: 'GET', onSuccess, onError });
+  },
+
   retryLessonAssetGeneration(onSuccess, onError) {
     nestRequest({
       url: `${getNestUrl()}/lesson-assets/retry`,

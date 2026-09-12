@@ -6,10 +6,94 @@ const {
   adminApi,
   createCourseModeDraft,
   createPublishableCourseModeVisuals,
-  createVisualTriple,
 } = require('./helpers/admin-api');
 
 const gotoLessonEditor = (page, lessonId) => gotoAppRoute(page, `#/lesson-editor?lessonId=${lessonId}`);
+
+test('@s07-assets persists seven phase bindings and preserves activity image versions on reselection', async ({page},testInfo)=>{
+  const {s07Draft,s07Api,openS07Session}=require('./helpers/s07-session');
+  const config=await openS07Session(page);
+  const {lesson}=await s07Draft(page);
+  const source=await s07Api(page,'GET',`/lessons/${config.source}/visuals`);
+  const sourceAssets=await s07Api(page,'GET',`/lessons/${config.source}/assets?profile=espTft`);
+  const sourceImage=sourceAssets.assets.find(a=>(a.layer||a.slot)==='backgroundScene');
+  expect(sourceImage && sourceImage.assetId).toBeTruthy();
+  await s07Api(page,'POST',`/lessons/${lesson.id}/assets`,{profile:'espTft',sourceAssetId:sourceImage.assetId});
+  const phases=['flyIn','walk','teach','listen','thinking','celebrate','exit'];
+  const first=slot=>source.refs.find(r=>r.slot===slot)?.assetVersionId;
+  const ids=process.env.CPR_S07_SESSION_FILE
+    ? {background:first('backgroundScene'),object:first('teachingObject'),...Object.fromEntries(phases.map(p=>[p,first(`robotOverlay.${p}`)]))}
+    : (await require('./helpers/s07-session').publishedCourseModeSelection(page,lesson.id)).ids;
+  expect(Object.values(ids).every(Boolean)).toBe(true);
+  const pageErrors=[];page.on('pageerror',e=>pageErrors.push(e.message));
+  await gotoLessonEditor(page,lesson.id);
+  const panel=page.getByTestId('course-mode-visual-selection');await expect(panel).toBeVisible();
+  const libraryRoute='**/lesson-visual-assets?*';
+  await page.route(libraryRoute,route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({message:'Injected library failure'})}));
+  await panel.getByRole('button',{name:'Refresh asset library',exact:true}).click();
+  await expect(panel.locator('.el-alert--error')).toBeVisible();
+  await page.unroute(libraryRoute);
+  await panel.getByRole('button',{name:'Refresh asset library',exact:true}).click();
+  await expect(panel.locator('.el-alert--error')).toHaveCount(0);
+  for(const [key,id]of Object.entries(ids))await panel.getByTestId(`course-visual-${key}`).locator('select').selectOption(id);
+  const save=async()=>{const pending=page.waitForResponse(r=>r.url().endsWith(`/lessons/${lesson.id}/visuals`)&&r.request().method()==='PUT');await panel.getByRole('button',{name:'Save visual bindings',exact:true}).click();const response=await pending;expect(response.status(),await response.text()).toBe(200);await expect(panel).toContainText('Visual versions saved and read back.');return response.request().postDataJSON();};
+  const request=await save();expect(Object.keys(request.robotAssetVersionIds).sort()).toEqual(phases.slice().sort());
+  const before=await s07Api(page,'GET',`/lessons/${lesson.id}/visuals`);
+  const catalog=await s07Api(page,'GET','/lesson-visual-assets?category=robotPose&profile=espTft');
+  const copyVersion=asset=>s07Api(page,'POST',`/lesson-visual-assets/${encodeURIComponent(asset.asset_key||asset.assetKey)}/versions`,{category:asset.category,title:asset.title,profile:'espTft',storagePath:asset.storage_path||asset.storagePath,sha256:asset.sha256,mimeType:asset.mime_type||asset.mimeType,bytes:Number(asset.bytes),width:Number(asset.width),height:Number(asset.height),publicationState:'published',compatibilityMetadata:asset.compatibility_metadata||asset.compatibilityMetadata});
+  const selectedTalk=catalog.find(a=>(a.version_id||a.versionId)===ids.teach);
+  expect(selectedTalk).toBeTruthy();const alternativeId=(await copyVersion(selectedTalk)).id;
+  await panel.getByRole('button',{name:'Refresh asset library',exact:true}).click();
+  await panel.getByTestId('course-visual-teach').locator('select').selectOption(alternativeId);
+  const concurrent=await s07Api(page,'GET',`/lessons/${lesson.id}/course-mode`);
+  concurrent.contract.activities[0].contextId='s07-visual-conflict';
+  const {withCanonicalCourseModeChecksum}=require('./helpers/admin-api');
+  await s07Api(page,'PUT',`/lessons/${lesson.id}/course-mode`,{contract:withCanonicalCourseModeChecksum(concurrent.contract),expectedChecksum:concurrent.checksum,expectedVisualChecksum:concurrent.visualChecksum});
+  const conflictResponse=page.waitForResponse(r=>r.url().endsWith(`/lessons/${lesson.id}/visuals`)&&r.request().method()==='PUT');
+  await panel.getByRole('button',{name:'Save visual bindings',exact:true}).click();
+  expect((await conflictResponse).status()).toBe(409);
+  await expect(panel.getByTestId('course-visual-teach').locator('select')).toHaveValue(alternativeId);
+  await panel.getByRole('button',{name:'Read saved bindings',exact:true}).click();
+  await panel.getByRole('button',{name:'Keep my selections with this saved version',exact:true}).click();
+  const fresh=await s07Api(page,'GET',`/lessons/${lesson.id}/visuals`);
+  const second=await save();expect(second.expectedVisualChecksum).toBe(fresh.visualChecksum);
+  const after=await s07Api(page,'GET',`/lessons/${lesson.id}/visuals`);
+  expect(after.refs.filter(r=>r.slot!=='robotOverlay.teach')).toEqual(before.refs.filter(r=>r.slot!=='robotOverlay.teach'));
+  expect(after.refs.filter(r=>r.slot==='robotOverlay.teach').every(r=>r.assetVersionId===alternativeId)).toBe(true);
+  for(const id of new Set(after.refs.map(r=>r.assetVersionId)))expect(JSON.stringify(after.cinematicPhases)).toContain(id);
+  // New versions reuse the exact selected source bytes/metadata in this isolated database.
+  const imageCatalog=await s07Api(page,'GET','/lesson-visual-assets?profile=espTft');
+  const replacements={};let current=after;
+  for(const [key,slot]of [['background','backgroundScene'],['object','teachingObject']]){
+    const asset=imageCatalog.find(a=>(a.version_id||a.versionId)===ids[key]);expect(asset).toBeTruthy();
+    const version=await copyVersion(asset);
+    replacements[key]=version.id;
+    await panel.getByRole('button',{name:'Refresh asset library',exact:true}).click();
+    await panel.getByTestId(`course-visual-${key}`).locator('select').selectOption(version.id);
+    await save();const next=await s07Api(page,'GET',`/lessons/${lesson.id}/visuals`);
+    expect(next.refs.filter(r=>r.slot!==slot||r.assetVersionId!==version.id)).toEqual(current.refs.filter(r=>r.slot!==slot||r.assetVersionId!==ids[key]));
+    expect(next.refs.some(r=>r.slot===slot&&r.assetVersionId===version.id)).toBe(true);current=next;
+  }
+  const timeline=page.getByTestId('course-mode-activity-timeline');
+  const backgroundField=timeline.locator('.activity-card').first().locator('.el-form-item').filter({hasText:'Published background key'}).locator('input');
+  await backgroundField.click();await page.locator('.el-select-dropdown:visible .el-select-dropdown__item').filter({hasText:'scene.classroom'}).first().click();
+  await timeline.getByRole('button',{name:'Save Course Mode',exact:true}).click();await expect(timeline.getByRole('status')).toContainText('Saved');
+  const override=await s07Api(page,'GET',`/lessons/${lesson.id}/visuals`);
+  const firstStep=current.refs[0].stepKey;
+  expect(override.refs.filter(r=>r.slot!=='backgroundScene'||r.stepKey!==firstStep)).toEqual(current.refs.filter(r=>r.slot!=='backgroundScene'||r.stepKey!==firstStep));
+  expect(override.refs.find(r=>r.slot==='backgroundScene'&&r.stepKey===firstStep).assetVersionId).not.toBe(replacements.background);
+  // Delay the real catalog response until saved refs render, exercising dynamic option hydration.
+  await page.route(libraryRoute,async route=>{const response=await route.fetch();await new Promise(resolve=>setTimeout(resolve,500));await route.fulfill({response});});
+  await page.reload();await expect(panel.getByTestId('course-visual-teach').locator('select')).toHaveValue(alternativeId);
+  await expect(panel).not.toContainText('Loading asset library...');
+  await expect(panel.getByTestId('course-visual-teach').locator('select')).toHaveValue(alternativeId);
+  await page.unroute(libraryRoute);
+  await expect(panel.getByTestId('course-visual-background').locator('select')).toHaveValue(override.refs.find(r=>r.slot==='backgroundScene').assetVersionId);
+  await expect(panel.getByTestId('course-visual-object').locator('select')).toHaveValue(replacements.object);
+  for(const width of [1440,390]){await page.setViewportSize({width,height:900});await panel.scrollIntoViewIfNeeded();expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);await panel.screenshot({path:testInfo.outputPath(`bindings-${width}.png`)});}
+  await require('node:fs/promises').writeFile(testInfo.outputPath('persisted-bindings.json'),JSON.stringify({lessonId:lesson.id,sourceLessonId:config.source,request,second,before,after,replacements,current,override,pageErrors},null,2));
+  expect(pageErrors).toEqual([]);
+});
 
 test('authors, saves, and reloads the canonical Course Mode contract', async ({ page }) => {
   const assertNoUnexpectedPageErrors = monitorUnexpectedPageErrors(page);
@@ -46,63 +130,48 @@ test('authors, saves, and reloads the canonical Course Mode contract', async ({ 
   assertNoUnexpectedPageErrors();
 });
 
-test('renders the persisted asset triple in the exact 480x320 renderer-v5 projection', async ({ page }, testInfo) => {
+test('renders persisted seven-phase bindings in the exact 480x320 renderer-v5 projection', async ({ page }, testInfo) => {
   const assertNoUnexpectedPageErrors = monitorUnexpectedPageErrors(page);
   await loginAsLessonAuthor(page);
-  await installCinematicTestRoutes(page);
   const fixture = await createCourseModeDraft(page);
-  const visuals = await createVisualTriple(page, fixture.lesson.id, fixture.runId, { bind: false });
+  const { publishedCourseModeSelection } = require('./helpers/s07-session');
+  const selection = await publishedCourseModeSelection(page, fixture.lesson.id);
   await createPublishableCourseModeVisuals(page, fixture.lesson.id);
-
-  const initialSteps = await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}/steps`);
-  const initialVersionIds = (initialSteps[0].visualRefs || []).map((reference) => (
-    reference.assetVersionId || reference.asset_version_id
-  ));
-  expect(initialVersionIds).not.toEqual(expect.arrayContaining(Object.values(visuals).map((visual) => visual.id)));
-
-  const initialPreviewGate = page.waitForResponse((response) => (
-    response.url().includes(`/lessons/${fixture.lesson.id}/manifest-preview`)
-      && response.request().method() === 'GET'
-      && [400, 422].includes(response.status())
-  ));
+  const initial = await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}/visuals`);
+  expect(initial.refs).toEqual([]);
   await gotoLessonEditor(page, fixture.lesson.id);
-  await expect(page.getByTestId('course-mode-activity-timeline')).toBeVisible();
-  expect([400, 422]).toContain((await initialPreviewGate).status());
-  const selectVisual = async (testId, assetKey) => {
-    const tile = page.getByTestId(testId).locator('.asset-tile').filter({ hasText: assetKey }).first();
-    await expect(tile).toBeVisible();
-    await tile.locator('.asset-tile__select').click();
-  };
-  const visualSave = page.waitForResponse((response) => (
+  const panel = page.getByTestId('course-mode-visual-selection');
+  await expect(panel).toBeVisible();
+  for (const [key, id] of Object.entries(selection.ids)) {
+    await panel.getByTestId(`course-visual-${key}`).locator('select').selectOption(id);
+  }
+  const visualSave = page.waitForResponse(response => (
     response.url().endsWith(`/lessons/${fixture.lesson.id}/visuals`)
       && response.request().method() === 'PUT'
-      && response.request().postDataJSON().robotAssetVersionId === visuals.robotOverlay.id
   ));
-  await selectVisual('lesson-robot-selector', `robot.e2e.${fixture.runId}`);
-  await selectVisual('lesson-background-selector', 'scene.playground-park');
-  const recoveredPreview = page.waitForResponse((response) => (
+  const recoveredPreview = page.waitForResponse(response => (
     response.url().includes(`/lessons/${fixture.lesson.id}/manifest-preview`)
-      && response.request().method() === 'GET'
-      && response.status() === 200
+      && response.request().method() === 'GET' && response.status() === 200
   ));
-  await selectVisual('lesson-object-selector', 'object.no');
+  await panel.getByRole('button', { name: 'Save visual bindings', exact: true }).click();
   const visualSaveResponse = await visualSave;
   expect(visualSaveResponse.status(), await visualSaveResponse.text()).toBe(200);
   expect(visualSaveResponse.request().postDataJSON()).toEqual({
-    backgroundAssetVersionId: visuals.backgroundScene.id,
-    objectAssetVersionId: visuals.teachingObject.id,
-    robotAssetVersionId: visuals.robotOverlay.id,
+    expectedChecksum: initial.checksum, expectedVisualChecksum: initial.visualChecksum,
+    backgroundAssetVersionId: selection.ids.background,
+    objectAssetVersionId: selection.ids.object,
+    robotAssetVersionIds: selection.robotAssetVersionIds,
   });
-  const persistedSteps = await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}/steps`);
-  const persistedBySlot = Object.fromEntries((persistedSteps[0].visualRefs || []).map((reference) => [
-    reference.slot,
-    reference.assetVersionId || reference.asset_version_id,
-  ]));
-  expect(persistedBySlot).toMatchObject({
-    backgroundScene: visuals.backgroundScene.id,
-    teachingObject: visuals.teachingObject.id,
-    robotOverlay: visuals.robotOverlay.id,
-  });
+  const persisted = await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}/visuals`);
+  for (const [phase, id] of Object.entries(selection.robotAssetVersionIds)) {
+    const refs = persisted.refs.filter(ref => ref.slot === `robotOverlay.${phase}`);
+    expect(refs.length).toBeGreaterThan(0);
+    expect(refs.every(ref => ref.assetVersionId === id)).toBe(true);
+  }
+  for (const id of [selection.ids.background, selection.ids.object]) {
+    expect(persisted.refs.some(ref => ref.assetVersionId === id)).toBe(true);
+    expect(JSON.stringify(persisted.cinematicPhases)).toContain(id);
+  }
   const response = await recoveredPreview;
   expect(response.status(), await response.text()).toBe(200);
   const stage = page.getByTestId('esp-tft-stage');
