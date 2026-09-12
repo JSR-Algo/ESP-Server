@@ -530,6 +530,8 @@ def test_v3_asset_materialization_is_not_relabelled_as_v4() -> None:
         "key": "scene@v3", "path": "scene.mp4", "url": "https://cdn.example/scene.mp4",
         "sha256": "c" * 64, "size": 10, "critical": True,
         "layer": "backgroundScene", "role": "video", "mediaType": "video/mp4",
+        "sharedAssetKey": None, "sharedAssetVersion": None,
+        "compatibilityMetadata": None, "visualRefs": None,
     }]
 
 
