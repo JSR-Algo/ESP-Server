@@ -42,6 +42,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import test_lesson_runtime as T  # noqa: E402  (sibling test harness)
 import test_layered_cinematic_contract as L  # noqa: E402
+from tests.sd_mcp_device import install_sd_mcp_device
 from core.lesson.errors import LessonError  # noqa: E402
 from core.lesson.flattened_cinematic_contract import trgb_container_bytes  # noqa: E402
 from core.lesson.runtime import (  # noqa: E402
@@ -199,6 +200,7 @@ def _cinematic_runtime(*, conn=None, manifest=None, cache=None, sleep=None):
             },
         }
     )
+    install_sd_mcp_device(conn)
     conn.device_id = "robot-v3"
     conn.config = {
         "lesson": {
@@ -254,6 +256,8 @@ class _FlattenedAssetCache(_CinematicAssetCache):
         path = f"{pack['localRoot']}/flattenedCinematic.opening"
         pack["assets"] = [{
             "key": "flattenedCinematic.opening", "state": "READY", "checksumOk": True,
+            "critical": True,
+            "url": f"https://cdn.example.test/lessons/derivatives/{'d' * 64}/opening.mp4",
             "localPath": path, "sdPath": path, "sha256": "a" * 64, "size": 1234,
             "mediaType": "video/mp4", "derivativeId": "d" * 64, "phaseId": "opening",
             "compatibilityMetadata": {
@@ -297,7 +301,7 @@ class _FlattenedV2AssetCache(_CinematicAssetCache):
         path = f"{pack['localRoot']}/flattenedCinematic.barn-opening"
         source = f"lessons/derivatives/{'d' * 64}/barn-opening.trgb"
         pack["assets"] = [{
-            "key": "flattenedCinematic.barn-opening", "state": "READY", "checksumOk": True,
+            "key": "flattenedCinematic.barn-opening", "critical": True, "state": "READY", "checksumOk": True,
             "path": source, "url": f"https://cdn.example.test/{source}",
             "onlineUrl": f"https://cdn.example.test/{source}",
             "localPath": path, "sdPath": path, "sha256": "a" * 64,
@@ -321,6 +325,7 @@ def _flattened_runtime(*, conn=None):
         "lesson": True, "renderer": [RENDERER_V4],
         "lessonRendererV4": {"flattenedMjpegCinematic": True, "sdAssetPack": True},
     })
+    install_sd_mcp_device(conn)
     conn.device_id = "robot-v4"
     conn.config = {"lesson": {
         "renderer_v4_enabled": True, "rollout_device_allowlist": ["robot-v4"],
@@ -339,6 +344,7 @@ def _flattened_v2_runtime(*, conn=None):
         "lesson": True, "renderer": [RENDERER_V4],
         "lessonRendererV4": {"flattenedMjpegCinematic": True, "sdAssetPack": True},
     })
+    install_sd_mcp_device(conn)
     conn.device_id = "robot-v4"
     conn.config = {"lesson": {
         "renderer_v4_enabled": True, "rollout_device_allowlist": ["robot-v4"],
@@ -396,6 +402,7 @@ class CinematicCapabilitySelectionTest(unittest.TestCase):
             "renderer": [RENDERER_V5],
             "lessonRendererV5": {"layeredCinematic": True, "sdAssetPack": True},
         })
+        install_sd_mcp_device(conn)
         conn.device_id = "robot-layered"
         conn.config = {"lesson": {
             "renderer_v5_enabled": True,
@@ -424,14 +431,22 @@ class LayeredCinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
         })
 
         class AssetCache(T._FakeAssetCache):
-            def asset_pack_manifest(self, **_kwargs):
-                return L._pack()
+            def asset_pack_manifest(self, **kwargs):
+                pack = super().asset_pack_manifest(**kwargs)
+                pack["localRoot"] = f"sd://tbot/lesson-assets/{self.cache_key}"
+                pack["assets"] = L._pack()["assets"]
+                for asset, layer in zip(pack["assets"], L._phase()["layers"]):
+                    path = pack["localRoot"] + "/" + asset["key"].replace("@", "%40")
+                    asset.update(localPath=path, sdPath=path, critical=True, layer=layer["layer"],
+                                 onlineUrl="https://assets.example/" + asset["key"])
+                return pack
 
         conn = T._FakeConn(features={
             "lesson": True,
             "renderer": [RENDERER_V5],
             "lessonRendererV5": {"layeredCinematic": True, "sdAssetPack": True},
         })
+        install_sd_mcp_device(conn)
         conn.device_id = "robot-layered"
         conn.config = {"lesson": {
             "renderer_v5_enabled": True,

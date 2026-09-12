@@ -718,6 +718,9 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
             "sample_asset_base_url": "https://esp.example/sample",
         }})
 
+        from tests.sd_mcp_device import install_sd_mcp_device
+        install_sd_mcp_device(conn)
+        conn.config["lesson"].setdefault("sample_asset_base_url", "https://esp.example/sample")
         runtime = await start_sample_lesson(conn)
 
         self.assertIsNotNone(runtime)
@@ -797,6 +800,9 @@ class SampleLessonDriveTest(unittest.IsolatedAsyncioTestCase):
             }
         )
 
+        from tests.sd_mcp_device import install_sd_mcp_device
+        install_sd_mcp_device(conn)
+        conn.config["lesson"].setdefault("sample_asset_base_url", "https://esp.example/sample")
         runtime = await start_sample_lesson(conn)
         self.assertIsNotNone(runtime)
 

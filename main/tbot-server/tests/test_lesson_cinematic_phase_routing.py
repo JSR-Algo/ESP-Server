@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import test_lesson_conversation_integration as conversation_fixtures
 import test_lesson_runtime as legacy
+from tests.sd_mcp_device import install_sd_mcp_device
 
 from core.lesson.course_orchestrator import CourseDecision, SessionState
 from core.lesson.embodied_intent import EmbodiedIntent
@@ -50,7 +51,7 @@ def _v5_runtime() -> LessonRuntime:
     runtime.renderer_capabilities = [RENDERER_V5]
     runtime.conn.device_id = "robot-v5"
     runtime.conn.features = {
-        "lesson": True,
+        "lesson": True, "mcp": True,
         "renderer": [RENDERER_V5],
         "lessonRendererV5": {"layeredCinematic": True, "sdAssetPack": True},
     }
@@ -100,6 +101,7 @@ def _runtime_from_manifest(manifest: dict) -> LessonRuntime:
             },
         }
     )
+    install_sd_mcp_device(conn)
     conn.device_id = "robot-v4"
     conn.config = {
         "lesson": {

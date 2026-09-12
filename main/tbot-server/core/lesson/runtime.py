@@ -8249,8 +8249,8 @@ class LessonRuntime:
     async def _sync_sd_asset_pack_to_robot(self) -> bool:
         mcp_client = getattr(self.conn, "mcp_client", None)
         if mcp_client is None:
-            features = getattr(self.conn, "features", {}) or {}
-            return not bool(features.get("mcp"))
+            self._log("warning", "robot SD sync unavailable: no MCP client")
+            return False
         lesson_cfg = _lesson_config(getattr(self.conn, "config", {}) or {})
         is_ready = getattr(mcp_client, "is_ready", None)
         if callable(is_ready):

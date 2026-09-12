@@ -12,6 +12,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(__file__))
 
 import test_lesson_runtime as legacy
+from tests.sd_mcp_device import install_sd_mcp_device
 from test_lesson_conversation_runtime import _backend_manifest
 
 from core.lesson.conversation_contract import LessonToolIdentity
@@ -113,6 +114,9 @@ class _ConversationAssetCache(legacy._FakeAssetCache):
             pack["assets"].append(
                 {
                     "key": f"flattenedCinematic.{cue_id}",
+                    "critical": True,
+                    "url": asset["url"],
+                    "path": asset["path"],
                     "state": "READY",
                     "checksumOk": True,
                     "localPath": path,
@@ -143,6 +147,7 @@ def _runtime(*, manifest: dict | None = None) -> LessonRuntime:
             },
         }
     )
+    install_sd_mcp_device(conn)
     conn.device_id = "robot-v4"
     conn.config = {
         "lesson": {
