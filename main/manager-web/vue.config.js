@@ -79,7 +79,9 @@ module.exports = defineConfig({
         changeOrigin: true,
         pathRewrite: { '^/nestjs': '' },
         onProxyReq(proxyReq) {
-          proxyReq.setHeader('X-TBOT-Admin-Key', adminProxyKey);
+          // An empty key is still a presented credential and is rejected by NestJS.
+          if (adminProxyKey) proxyReq.setHeader('X-TBOT-Admin-Key', adminProxyKey);
+          else proxyReq.removeHeader('X-TBOT-Admin-Key');
           // Per-user NestJS session token (from the manager-web NestJS login)
           // rides X-Nest-Authorization, because flyio's request layer force-
           // overwrites Authorization with the manager-api token. Promote it to

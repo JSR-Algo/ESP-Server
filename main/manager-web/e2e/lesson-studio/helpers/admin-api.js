@@ -110,7 +110,8 @@ async function createCourseModeDraft(page, { weekNumber = 1, runId } = {}) {
     durationPreset: 8,
   });
   const contract = canonicalCourseModeContract(weekNumber);
-  await adminApi(page, 'PUT', `/lessons/${lesson.id}/course-mode`, { expectedChecksum: null, contract });
+  const initialVisuals = await adminApi(page, 'GET', `/lessons/${lesson.id}/visuals`);
+  await adminApi(page, 'PUT', `/lessons/${lesson.id}/course-mode`, { expectedChecksum: null, expectedVisualChecksum: initialVisuals.visualChecksum, contract });
   const sourceLessons = ['00000006-0002-0000-0000-000000000001'];
   const sourceAssets = (await Promise.all(sourceLessons.map((sourceLessonId) => (
     adminApi(page, 'GET', `/lessons/${sourceLessonId}/assets?profile=espTft`)

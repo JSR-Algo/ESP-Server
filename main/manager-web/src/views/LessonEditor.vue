@@ -1,6 +1,13 @@
 <template>
   <div class="welcome">
     <HeaderBar />
+    <el-dialog :title="$t('lesson.unsavedLeaveTitle')" :visible.sync="unsavedLeaveVisible" width="min(480px, 95vw)" @close="resolveEditorLeave(false)">
+      <p>{{ $t('lesson.unsavedLeaveBody') }}</p>
+      <span slot="footer">
+        <el-button @click="resolveEditorLeave(false)">{{ $t('lesson.unsavedLeaveStay') }}</el-button>
+        <el-button type="primary" @click="resolveEditorLeave(true)">{{ $t('lesson.unsavedLeaveDiscard') }}</el-button>
+      </span>
+    </el-dialog>
 
     <!-- Lesson header -->
     <div class="operation-bar">
@@ -33,6 +40,10 @@
     </div>
 
     <div class="main-wrapper" v-loading="loading">
+      <section v-if="lessonLoadError" role="alert" data-testid="lesson-load-error">
+        <p>{{ lessonLoadError }}</p>
+        <el-button @click="fetchAll">Retry lesson load</el-button>
+      </section>
       <!-- Publish / preview result -->
       <el-alert
         v-if="publishMessage"
@@ -80,10 +91,23 @@
         :dirty="courseModeDirty"
         :error="courseModeError"
         :saved-message="courseModeSavedMessage"
+        :save-blocked="courseModeConflict"
         @input="onCourseModeDraftInput"
         @save="saveCourseModeContract"
+        @undo="undoCourseModeDraft"
       />
-      <section v-else-if="isCourseModeAuthority && !courseModeContract" class="course-mode-load-state" aria-live="polite">
+      <section v-if="courseModeConflict" class="course-mode-conflict" style="overflow-wrap: anywhere" data-testid="course-mode-conflict">
+        <p>Your edits are retained. Read the saved version and compare before choosing how to continue.</p>
+        <el-button :loading="courseModeLoading" @click="reviewCourseModeConflict">Read saved version</el-button>
+        <div v-if="courseModeConflictSnapshot">
+          <details><summary>Your unsaved activities</summary><pre style="white-space: pre-wrap">{{ JSON.stringify(courseModeDraft, null, 2) }}</pre></details>
+          <details><summary>Currently saved activities</summary><pre style="white-space: pre-wrap">{{ JSON.stringify(courseModeConflictSnapshot.contract, null, 2) }}</pre></details>
+          <el-button @click="keepCourseModeDraftAfterReview">Keep my draft for editing</el-button>
+          <el-button @click="useSavedCourseModeAfterReview">Use saved version</el-button>
+          <p>Keeping your draft does not save it. Review your edits, then save explicitly.</p>
+        </div>
+      </section>
+      <section v-if="isCourseModeAuthority && !courseModeContract" class="course-mode-load-state" aria-live="polite">
         <p v-if="courseModeLoading" data-testid="course-mode-loading" role="status">Loading Course Mode activities…</p>
         <el-alert v-else data-testid="course-mode-load-error" :title="courseModeError || 'Course Mode activities could not be loaded.'" type="error" :closable="false" show-icon />
         <el-button v-if="!courseModeLoading" data-testid="course-mode-load-retry" size="small" :loading="courseModeLoading" @click="loadCourseModeContract">
@@ -91,7 +115,7 @@
         </el-button>
       </section>
       <el-alert
-        v-else-if="courseModeContract"
+        v-else-if="courseModeContract && !courseModeIsCurriculum"
         title="This frozen pilot contract is available for audit only. Curriculum activity editing is not applicable."
         type="info"
         :closable="false"
@@ -729,6 +753,8 @@ export default {
       steps: [],
       stepTypes: [],
       loading: false,
+      lessonLoadError: '',
+      unsavedLeaveVisible: false,
       stepEditor,
       lessonUpdateSafety,
       validating: false,
@@ -841,6 +867,9 @@ export default {
       tvideoJourneyRequestId: 0,
       courseModeContract: null,
       courseModeExpectedChecksum: null,
+      courseModeExpectedVisualChecksum: null,
+      courseModeConflict: false,
+      courseModeConflictSnapshot: null,
       courseModeDraft: null,
       courseModeLoading: false,
       courseModeSaving: false,
@@ -1208,6 +1237,7 @@ export default {
         return;
       }
       this.savingLessonVisuals = false;
+      this.creatingNextVersion = false;
       this.pendingLessonVisualPair = null;
       this.lessonVisualReconciliationRequired = false;
       this.lessonStepsRequestId += 1;
@@ -1265,11 +1295,11 @@ export default {
       next();
       return;
     }
-    this.$confirm(this.$t('lesson.unsavedLeaveBody'), this.$t('lesson.unsavedLeaveTitle'), {
-      confirmButtonText: this.$t('lesson.unsavedLeaveDiscard'),
-      cancelButtonText: this.$t('lesson.unsavedLeaveStay'),
-      type: 'warning',
-    }).then(() => next()).catch(() => next(false));
+    this.requestEditorLeave(next);
+  },
+  beforeRouteUpdate(to, from, next) {
+    if (to.query.lessonId === from.query.lessonId || !this.hasPendingAuthoringChanges) return next();
+    this.requestEditorLeave(next);
   },
   beforeDestroy() {
     this.editorDestroying = true;
@@ -1300,6 +1330,19 @@ export default {
     this.lessonUpdateSafety.release();
   },
   methods: {
+    requestEditorLeave(next) {
+      if (this._pendingRouteNext) this._pendingRouteNext(false);
+      this._pendingRouteNext = next;
+      this.unsavedLeaveVisible = true;
+    },
+    resolveEditorLeave(discard) {
+      const next = this._pendingRouteNext;
+      this._pendingRouteNext = null;
+      this.unsavedLeaveVisible = false;
+      if (!next) return;
+      if (discard) next();
+      else next(false);
+    },
     onCourseModeDraftInput(value) {
       if (this.courseModeSaving) return false;
       this.courseModeDraft = value;
@@ -1313,6 +1356,9 @@ export default {
       this.courseModeRequestId += 1;
       this.courseModeContract = null;
       this.courseModeExpectedChecksum = null;
+      this.courseModeExpectedVisualChecksum = null;
+      this.courseModeConflict = false;
+      this.courseModeConflictSnapshot = null;
       this.courseModeDraft = null;
       this.courseModeLoading = false;
       this.courseModeSaving = false;
@@ -1321,30 +1367,102 @@ export default {
       this.courseModeSavedMessage = '';
       this.courseModeRevision = 0;
     },
-    loadCourseModeContract() {
-      if (this.editorDestroying) return false;
+    validCourseModeSnapshot(response) {
+      const object = value => Boolean(value && typeof value === 'object' && !Array.isArray(value));
+      return Boolean(response && response.lessonId === this.lessonId
+        && /^[a-f0-9]{64}$/.test(response.checksum)
+        && /^[a-f0-9]{64}$/.test(response.visualChecksum)
+        && response.contract && response.contract.contractChecksum === response.checksum
+        && Array.isArray(response.contract.activities) && Array.isArray(response.contract.targets)
+        && response.contract.targets.every(target => object(target)
+          && (target.vietnameseMeanings == null || Array.isArray(target.vietnameseMeanings)))
+        && response.contract.activities.every(activity => object(activity)
+          && (!response.contract.session || (object(activity.visual) && object(activity.answerPolicy)
+            && object(activity.outcomes) && Object.values(activity.outcomes).every(object)
+            && Array.isArray(activity.targetIds) && Array.isArray(activity.modalities)))));
+    },
+    courseModeFailure(message, error) {
+      const status = error && (error.status || (error.response && error.response.status));
+      const recovery = status === 401 ? 'Sign in again, then retry. Your edits are retained.'
+        : status === 403 ? 'Your account cannot edit this lesson. Your edits are retained; contact its owner.'
+          : status === 409 ? 'The saved lesson changed. Your edits are retained; read and compare the saved version.'
+            : 'Your edits are retained. Check the connection and read the saved version before retrying.';
+      return `${message || 'Course Mode request failed.'} ${recovery}`;
+    },
+    adoptCourseModeSnapshot(response, keepDraft = false) {
+      this.courseModeContract = JSON.parse(JSON.stringify(response.contract));
+      this.courseModeExpectedChecksum = response.checksum;
+      this.courseModeExpectedVisualChecksum = response.visualChecksum;
+      if (!keepDraft) {
+        this.courseModeDraft = JSON.parse(JSON.stringify(response.contract));
+        this.courseModeDirty = false;
+        this.courseModeRevision = 0;
+      }
+    },
+    loadCourseModeContract(options = {}) {
+      if (this.editorDestroying || this.courseModeSaving || (this.courseModeDirty && !options.compare)) return false;
       const lessonId = this.lessonId;
       const requestId = ++this.courseModeRequestId;
       this.courseModeLoading = true;
       this.courseModeError = '';
       Api.lesson.getCourseModeContract(lessonId, (response) => {
         if (this.editorDestroying || requestId !== this.courseModeRequestId || lessonId !== this.lessonId) return;
-        const contract = response && response.contract ? response.contract : response;
-        this.courseModeContract = contract;
-        this.courseModeExpectedChecksum = contract && contract.contractChecksum ? contract.contractChecksum : null;
-        this.courseModeDraft = JSON.parse(JSON.stringify(contract));
-        this.courseModeDirty = false;
-        this.courseModeRevision = 0;
         this.courseModeLoading = false;
+        if (!this.validCourseModeSnapshot(response)) {
+          this.courseModeError = 'Incomplete Course Mode response. Retry loading the saved version; your edits are retained.';
+          return;
+        }
+        if (options.compare) this.courseModeConflictSnapshot = JSON.parse(JSON.stringify(response));
+        else this.adoptCourseModeSnapshot(response);
       }, (message, error) => {
         if (this.editorDestroying || requestId !== this.courseModeRequestId || lessonId !== this.lessonId) return;
         this.courseModeLoading = false;
-        this.courseModeError = message || 'Course Mode contract could not be loaded.';
+        this.courseModeError = this.courseModeFailure(message, error);
       });
       return true;
     },
+    reviewCourseModeConflict() {
+      this.courseModeConflict = true;
+      return this.loadCourseModeContract({ compare: true });
+    },
+    keepCourseModeDraftAfterReview() {
+      if (!this.courseModeConflictSnapshot || this.courseModeLoading) return false;
+      this.adoptCourseModeSnapshot(this.courseModeConflictSnapshot, true);
+      this.courseModeDirty = JSON.stringify(this.courseModeDraft) !== JSON.stringify(this.courseModeContract);
+      this.courseModeConflict = false;
+      this.courseModeConflictSnapshot = null;
+      this.courseModeError = '';
+      this.invalidatePreview();
+      return true;
+    },
+    async useSavedCourseModeAfterReview() {
+      if (!this.courseModeConflictSnapshot || this.courseModeLoading) return false;
+      const id = this.lessonId;
+      const snapshot = this.courseModeConflictSnapshot;
+      try { await this.$confirm('Discard your unsaved Course Mode edits and use the saved version?', 'Use saved version'); } catch { return false; }
+      if (id !== this.lessonId || snapshot !== this.courseModeConflictSnapshot) return false;
+      this.adoptCourseModeSnapshot(snapshot);
+      this.courseModeConflict = false;
+      this.courseModeConflictSnapshot = null;
+      this.courseModeError = '';
+      this.invalidatePreview();
+      this.fetchSteps();
+      return true;
+    },
+    async undoCourseModeDraft() {
+      if (!this.courseModeDirty || this.courseModeSaving || this.courseModeLoading) return false;
+      const id = this.lessonId;
+      const revision = this.courseModeRevision;
+      try { await this.$confirm('Discard the unsaved edits in this draft?', 'Undo Course Mode edits'); } catch { return false; }
+      if (id !== this.lessonId || revision !== this.courseModeRevision || this.courseModeSaving) return false;
+      this.courseModeDraft = JSON.parse(JSON.stringify(this.courseModeContract));
+      this.courseModeDirty = false;
+      this.courseModeSavedMessage = '';
+      this.invalidatePreview();
+      return true;
+    },
     async saveCourseModeContract() {
-      if (!this.isDraft || !this.courseModeDraft || !this.courseModeDirty || this.courseModeSaving) return false;
+      if (!this.isDraft || !this.courseModeDraft || !this.courseModeDirty || this.courseModeSaving || this.courseModeLoading || this.courseModeConflict) return false;
       const lessonId = this.lessonId;
       const requestId = ++this.courseModeRequestId;
       const saveRevision = this.courseModeRevision;
@@ -1354,25 +1472,26 @@ export default {
       try {
         const contract = await withCourseModeChecksum(normalizeCourseModeVisualKeys(this.courseModeDraft));
         if (this.editorDestroying || requestId !== this.courseModeRequestId || lessonId !== this.lessonId) return false;
-        Api.lesson.saveCourseModeContract(lessonId, contract, this.courseModeExpectedChecksum, (response) => {
+        Api.lesson.saveCourseModeContract(lessonId, contract, this.courseModeExpectedChecksum, this.courseModeExpectedVisualChecksum, (response) => {
           if (this.editorDestroying || requestId !== this.courseModeRequestId || lessonId !== this.lessonId) return;
-          const saved = response && response.contract ? response.contract : contract;
           this.courseModeSaving = false;
-          this.courseModeContract = saved;
-          this.courseModeExpectedChecksum = response && response.checksum
-            ? response.checksum
-            : saved.contractChecksum;
-          if (this.courseModeRevision === saveRevision) {
-            this.courseModeDraft = JSON.parse(JSON.stringify(saved));
-            this.courseModeDirty = false;
-            this.courseModeSavedMessage = `Saved · ${String(response && response.checksum ? response.checksum : saved.contractChecksum).slice(0, 12)}`;
+          if (!this.validCourseModeSnapshot(response)) {
+            this.courseModeError = 'Save returned an incomplete response. Your edits are retained; read and compare the saved version.';
+            this.courseModeConflict = true;
+            return;
+          }
+          const sameRevision = this.courseModeRevision === saveRevision;
+          this.adoptCourseModeSnapshot(response, !sameRevision);
+          if (sameRevision) {
+            this.courseModeSavedMessage = `Saved · ${response.checksum.slice(0, 12)}`;
           }
           this.invalidatePreview();
           this.fetchSteps();
-        }, (message) => {
+        }, (message, error) => {
           if (this.editorDestroying || requestId !== this.courseModeRequestId || lessonId !== this.lessonId) return;
           this.courseModeSaving = false;
-          this.courseModeError = message || 'Course Mode contract could not be saved.';
+          this.courseModeError = this.courseModeFailure(message, error);
+          this.courseModeConflict = Boolean(!error || !error.status || error.status === 409 || error.status >= 500);
         });
       } catch (error) {
         if (requestId === this.courseModeRequestId) {
@@ -1413,8 +1532,12 @@ export default {
       if (this.creatingNextVersion || !this.lesson || this.lesson.status !== 'published') return false;
       const publishedLessonId = this.lesson.lessonId;
       const publishedLessonVersion = Number(this.lesson.lessonVersion);
+      const loadRequestId = this.lessonLoadRequestId;
+      const current = () => !this.editorDestroying && this.lessonId === publishedLessonId
+        && this.lessonLoadRequestId === loadRequestId;
       this.creatingNextVersion = true;
       const onSuccess = (draft) => {
+        if (!current()) return;
         this.creatingNextVersion = false;
         if (!draft || !draft.lessonId || draft.lessonId === publishedLessonId || draft.status !== 'draft'
           || !Number.isSafeInteger(publishedLessonVersion) || publishedLessonVersion < 1
@@ -1429,6 +1552,7 @@ export default {
         });
       };
       const onError = (message) => {
+        if (!current()) return;
         this.creatingNextVersion = false;
         this.$message.error(message || this.$t('lesson.nextVersionFailed'));
       };
@@ -1968,10 +2092,17 @@ export default {
       this.clearValidationProofState();
       this.clearPromptSaveState();
       this.loading = true;
+      this.lessonLoadError = '';
       Api.lesson.getLesson(
         lessonId,
         (l) => {
           if (this.editorDestroying || requestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;
+          if (!l || l.lessonId !== lessonId || !l.status || !l.manifestVersion) {
+            this.loading = false;
+            this.lesson = null;
+            this.lessonLoadError = 'Incomplete lesson response. Retry loading this lesson.';
+            return;
+          }
           this.lesson = l;
           this.loadCourseModeContract();
           if (l.manifestVersion !== 'teebot-lesson-renderer.v4') this.resetTVideoJourneyState();
@@ -1984,6 +2115,7 @@ export default {
         (msg) => {
           if (this.editorDestroying || requestId !== this.lessonLoadRequestId || lessonId !== this.lessonId) return;
           this.loading = false;
+          this.lessonLoadError = msg || 'Lesson could not be loaded. Check your connection and access, then retry.';
           this.$message.error(msg);
         },
       );

@@ -64,6 +64,7 @@ const canCreateCourseModeV5Version = vm.runInNewContext(`(${extractObjectMethod(
 const notifications = [];
 const navigations = [];
 const context = {
+  get lessonId() { return this.$route.query.lessonId; },
   lesson: { lessonId: 'published-1', lessonVersion: 5, status: 'published' },
   creatingNextVersion: false,
   $route: {

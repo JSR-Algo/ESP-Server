@@ -6,7 +6,8 @@
         <h3>Child interaction timeline</h3>
         <p>Edit the authored activities. Projected steps below remain read-only audit output.</p>
       </div>
-      <el-button type="primary" size="small" :loading="saving" :disabled="disabled || saving || !dirty || report.overDuration || report.leakageActivityIds.length > 0" @click="$emit('save')">
+      <el-button size="small" :disabled="disabled || saving || !dirty" @click="$emit('undo')">Undo edits</el-button>
+      <el-button type="primary" size="small" :loading="saving" :disabled="disabled || saving || saveBlocked || !dirty || report.overDuration || report.leakageActivityIds.length > 0" @click="$emit('save')">
         Save Course Mode
       </el-button>
     </header>
@@ -140,6 +141,7 @@ export default {
     assets: { type: Array, default: () => [] },
     disabled: { type: Boolean, default: false },
     saving: { type: Boolean, default: false },
+    saveBlocked: { type: Boolean, default: false },
     dirty: { type: Boolean, default: false },
     error: { type: String, default: '' },
     savedMessage: { type: String, default: '' },
