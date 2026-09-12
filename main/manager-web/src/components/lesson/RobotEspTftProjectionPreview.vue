@@ -55,6 +55,7 @@
             :layer-class="['stage-layer', `layer-${layer.id}`, layer.id === 'robotOverlay' ? (playing ? entranceClass : motionClass) : '']"
             :position-style="layerStyle(layer)"
             :controlled="isV5 || cinematicFlattenable"
+            :transport-master="isV5 && layer.id === 'robotOverlay'"
             :playback-mode="cinematicPlaybackMode"
             :duration-ms="cinematicDurationMs"
             :playing="cinematicPlaying"
@@ -484,13 +485,15 @@ export default {
           this.cinematicStartedAt = null;
           return;
         }
-        if (this.cinematicStartedAt === null) this.cinematicStartedAt = timestamp - this.cinematicClockMs;
-        const elapsed = Math.max(0, timestamp - this.cinematicStartedAt);
+        const master = this.cinematicLayerById('robotOverlay').mediaPlaybackState();
+        if (master.pending || master.seeking) return;
+        // The video owns elapsed time; wall time must not consume buffering or pending Play.
+        const elapsed = Math.max(0, master.currentTimeSec * 1000);
         const duration = this.cinematicDurationMs;
         if (this.cinematicPlaybackMode === 'loop' && duration > 0) this.cinematicClockMs = elapsed % duration;
         else {
-          this.cinematicClockMs = Math.min(elapsed, duration);
-          if (elapsed >= duration) {
+          this.cinematicClockMs = master.ended ? duration : Math.min(elapsed, duration);
+          if (master.ended || elapsed >= duration) {
             this.cinematicPlaying = false;
             this.stopCinematicClock();
           }

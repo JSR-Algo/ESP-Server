@@ -7,6 +7,10 @@ const helpers = readFileSync(new URL('../../src/components/lesson/flattened-cine
 const url = code => `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`;
 const script = source.match(/<script>([\s\S]*?)<\/script>/)[1].replace("'./flattened-cinematic-preview'", JSON.stringify(url(helpers)));
 const component = (await import(url(script))).default;
+const parentSource = readFileSync(new URL('../../src/components/lesson/RobotEspTftProjectionPreview.vue', import.meta.url), 'utf8');
+const parentScript = parentSource.match(/<script>([\s\S]*?)<\/script>/)[1]
+  .replace(/import[\s\S]*?from\s+['"][^'"]+['"];?/g, '').replace('export default', 'return');
+const parent = new Function('CinematicVideoLayer', 'FlattenedCinematicPreview', parentScript)({}, {});
 globalThis.requestAnimationFrame = () => 1;
 globalThis.cancelAnimationFrame = () => {};
 function setup() {
@@ -93,4 +97,70 @@ test('a stale canvas cannot certify a new source that draws no pixels', () => {
   }) };
   assert.equal(vm.renderFrame(video, canvas), false);
   assert.match(vm.errorMessage, /decoded frame/);
+});
+
+function transportSetup(mode = 'once') {
+  const child = setup(); child.vm.transportMaster = true; child.vm.durationMs = 3200; child.vm.playbackMode = mode;
+  const preview = { ...parent.methods, isV5: true, cinematicPlaying: false, cinematicClockMs: 0,
+    cinematicStartedAt: null, cinematicFrameHandle: null, cinematicReplayNonce: 0,
+    cinematicDurationMs: 3200, cinematicPlaybackMode: mode, projection: { cinematicPhase: {} }, mediaErrors: {},
+    $refs: { cinematicLayers: [child.vm], stageImages: [{ complete: true, naturalWidth: 480 }] }, scheduleCinematicFrame() {} };
+  const sync = () => { child.vm.playing = preview.cinematicPlaying; child.vm.clockMs = preview.cinematicClockMs; child.vm.syncPlayback(); };
+  return { ...child, preview, sync };
+}
+
+test('normal Play cannot consume a once phase while the actual play promise is pending', async () => {
+  const { vm, video, preview, sync } = transportSetup(); let resolve;
+  video.play = () => new Promise(done => { resolve = done; });
+  preview.toggleCinematicPlayback(); sync(); assert.equal(vm.playPending, true);
+  preview.advanceCinematicClock(1000); sync(); preview.advanceCinematicClock(4200); sync();
+  assert.equal(preview.cinematicClockMs, 0); assert.equal(preview.cinematicPlaying, true);
+  assert.equal(video.currentTime, 0);
+  video.paused = false; resolve(); await Promise.resolve();
+  video.currentTime = .2; preview.advanceCinematicClock(9000); sync();
+  assert.equal(preview.cinematicClockMs, 200); assert.equal(video.currentTime, .2);
+});
+
+test('once and loop clocks follow real transport across buffering and resume', () => {
+  for (const mode of ['once', 'loop']) {
+    const { video, preview, sync } = transportSetup(mode); preview.cinematicPlaying = true; video.paused = false;
+    video.currentTime = .7; preview.advanceCinematicClock(1000); sync(); assert.equal(preview.cinematicClockMs, 700);
+    video.readyState = 1; preview.advanceCinematicClock(10000); sync(); assert.equal(preview.cinematicClockMs, 700);
+    video.readyState = 2; preview.advanceCinematicClock(11000); sync(); assert.equal(preview.cinematicClockMs, 700);
+    video.currentTime = 1.1; preview.advanceCinematicClock(12000); sync(); assert.equal(preview.cinematicClockMs, 1100);
+    if (mode === 'once') {
+      video.currentTime = 3.2; video.ended = true; video.paused = true; preview.advanceCinematicClock(13000); sync();
+      assert.equal(preview.cinematicClockMs, 3200); assert.equal(preview.cinematicPlaying, false);
+    } else {
+      video.currentTime = .05; preview.advanceCinematicClock(13000); sync();
+      assert.equal(preview.cinematicClockMs, 50); assert.equal(preview.cinematicPlaying, true);
+    }
+  }
+});
+
+test('transport master ignores automatic clock feedback but honors explicit seek and replay', () => {
+  const { vm, video, preview, sync } = transportSetup(); preview.cinematicPlaying = true; video.paused = false; video.currentTime = .5;
+  preview.cinematicClockMs = 2500; sync(); assert.equal(video.currentTime, .5);
+  preview.seekCinematic(1700); vm.clockMs = preview.cinematicClockMs; component.watch.replayNonce.call(vm); assert.equal(video.currentTime, 1.7);
+  preview.replayCinematic(); vm.clockMs = preview.cinematicClockMs; component.watch.replayNonce.call(vm); assert.equal(video.currentTime, 0);
+});
+
+test('pause/source change invalidates pending play settlement and rejection', async () => {
+  for (const rejectOld of [false, true]) {
+    const { vm, video } = transportSetup(); let settle;
+    vm.playing = true; video.play = () => new Promise((resolve, reject) => { settle = rejectOld ? reject : resolve; });
+    vm.syncPlayback(); vm.playing = false; component.watch.playing.call(vm);
+    vm.src = 'next.mp4'; component.watch.src.call(vm); settle(); await Promise.resolve();
+    assert.equal(vm.playPending, false); assert.equal(vm.playBlocked, false); assert.equal(vm.errorMessage, ''); assert.equal(video.paused, true);
+  }
+});
+
+test('stale play completion cannot settle a newer resumed play request', async () => {
+  const { vm, video } = transportSetup(); const completions = [];
+  video.play = () => new Promise(resolve => completions.push(resolve));
+  vm.playing = true; vm.syncPlayback();
+  vm.playing = false; component.watch.playing.call(vm);
+  vm.playing = true; component.watch.playing.call(vm); assert.equal(completions.length, 2);
+  completions[0](); await Promise.resolve(); assert.equal(vm.playPending, true);
+  completions[1](); await Promise.resolve(); assert.equal(vm.playPending, false);
 });

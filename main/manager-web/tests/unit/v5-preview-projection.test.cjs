@@ -80,7 +80,7 @@ test('v5 never adds CSS motion to baked media', () => {
 test('once clock stops at final frame while loop clock wraps', () => {
   const c = component();
   for (const [mode, expected, playing] of [['once', 3000, false], ['loop', 200, true]]) {
-    const state = { isV5: true, cinematicPlaying: true, cinematicStartedAt: 0, cinematicClockMs: 0, cinematicDurationMs: 3000, cinematicPlaybackMode: mode, cinematicMediaReady() { return true; }, stopCinematicClock() { this.stopped = true; } };
+    const state = { isV5: true, cinematicPlaying: true, cinematicStartedAt: 0, cinematicClockMs: 0, cinematicDurationMs: 3000, cinematicPlaybackMode: mode, cinematicMediaReady() { return true; }, cinematicLayerById() { return { mediaPlaybackState: () => ({ currentTimeSec: 3.2 }) }; }, stopCinematicClock() { this.stopped = true; } };
     c.methods.advanceCinematicClock.call(state, 3200);
     assert.equal(state.cinematicClockMs, expected);
     assert.equal(state.cinematicPlaying, playing);
@@ -122,7 +122,7 @@ test('stale media errors cannot stop the newly selected source', () => {
 test('phase clock waits for decoded media without consuming entrance time', () => {
  const c=component();const state={isV5:true,cinematicStartedAt:null,cinematicClockMs:0,cinematicDurationMs:3200,cinematicPlaybackMode:'once',cinematicPlaying:true,cinematicMediaReady:()=>false};
  c.methods.advanceCinematicClock.call(state,4000);assert.equal(state.cinematicClockMs,0);assert.equal(state.cinematicPlaying,true);
- state.cinematicMediaReady=()=>true;c.methods.advanceCinematicClock.call(state,5000);assert.equal(state.cinematicClockMs,0);
+ state.cinematicMediaReady=()=>true;state.cinematicLayerById=()=>({mediaPlaybackState:()=>({currentTimeSec:0})});c.methods.advanceCinematicClock.call(state,5000);assert.equal(state.cinematicClockMs,0);
 });
 test('explicit media retry resets failed sources and remounts their generation',()=>{
  const c=component();const state={mediaErrors:{'background:/bad.jpg':'failed'},mediaRetryNonce:0,resetCinematicPlayback(){},armImageDeadline(){}};

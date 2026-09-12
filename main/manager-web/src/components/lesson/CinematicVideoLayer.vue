@@ -6,7 +6,7 @@
       :src="src"
       crossorigin="anonymous"
       :autoplay="!controlled"
-      :loop="!controlled"
+      :loop="!controlled || (transportMaster && playbackMode === 'loop')"
       muted
       playsinline
       preload="auto"
@@ -32,6 +32,7 @@ export default {
     layerClass: { type: [String, Array, Object], default: '' },
     positionStyle: { type: Object, required: true },
     controlled: { type: Boolean, default: false },
+    transportMaster: { type: Boolean, default: false },
     playing: { type: Boolean, default: true },
     clockMs: { type: Number, default: 0 },
     replayNonce: { type: Number, default: 0 },
@@ -138,6 +139,9 @@ export default {
       return {
         layerId: this.layerId,
         ready: Boolean(video && video.readyState >= 2 && Number.isFinite(currentTimeSec)),
+        pending: this.playPending,
+        seeking: Boolean(video && video.seeking),
+        ended: Boolean(video && video.ended),
         currentTimeSec: Number.isFinite(currentTimeSec) ? currentTimeSec : 0
       };
     },
@@ -168,7 +172,7 @@ export default {
       const localSeconds = bounded && this.playbackMode === 'loop' ? targetSeconds % duration
         : bounded && this.playbackMode === 'once' ? Math.min(targetSeconds, duration) : targetSeconds;
       let didSeek = false;
-      if (video.readyState > 0 && (force || shouldResyncVideo(targetSeconds, video.currentTime))) {
+      if (video.readyState > 0 && (force || (!this.transportMaster && shouldResyncVideo(targetSeconds, video.currentTime)))) {
         try {
           video.currentTime = localSeconds;
           didSeek = true;

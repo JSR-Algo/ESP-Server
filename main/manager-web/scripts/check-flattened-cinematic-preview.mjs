@@ -200,7 +200,7 @@ assert.match(videoLayerSource, /applyChromaKey\(frame\.data, this\.chromaKey\)/,
   'exact video layers must share the tested chroma compositor');
 assert.ok(videoLayerSource.includes('syncPlayback('), 'CinematicVideoLayer must provide syncPlayback');
 assert.match(videoLayerSource, /:autoplay="!controlled"/, 'legacy mode must retain autoplay while controlled mode disables it');
-assert.match(videoLayerSource, /:loop="!controlled"/, 'legacy mode must retain looping while controlled mode disables it');
+assert.match(videoLayerSource, /:loop="!controlled \|\| \(transportMaster && playbackMode === 'loop'\)"/, 'legacy mode loops; only a looping transport master enables native looping in controlled mode');
 assert.match(
   videoLayerSource,
   /syncPlayback\([^)]*\)\s*\{[\s\S]*if \(!this\.controlled/,
@@ -345,7 +345,7 @@ function createVideoLayer({ playing = true, clockMs = 0, currentTime = 0, paused
 
 const playbackStateLayer = createVideoLayer({ currentTime: 1.234 });
 assert.deepEqual(playbackStateLayer.instance.mediaPlaybackState(), {
-  layerId: 'background', ready: true, currentTimeSec: 1.234
+  layerId: 'background', ready: true, currentTimeSec: 1.234, pending: false, seeking: false, ended: false
 });
 
 const stalledMaster = createVideoLayer({ playing: true, clockMs: 1000, currentTime: 1, paused: false });
