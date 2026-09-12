@@ -45,7 +45,7 @@ for (const token of [
   ':projection="projection"',
   ':clock-ms="cinematicClockMs"',
   ':replay-nonce="cinematicReplayNonce"',
-  ':controlled="cinematicFlattenable"',
+  ':controlled="isV5 || cinematicFlattenable"',
   ':layer-id="layer.id"'
 ]) {
   assert.ok(exactPreviewSource.includes(token), `RobotEspTftProjectionPreview.vue must include ${token}`);

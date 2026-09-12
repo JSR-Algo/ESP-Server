@@ -259,6 +259,10 @@ rendererV5.cinematicPhases = [{
     { slot: 'robotOverlay', metadata: { mediaKind: 'video', mediaType: 'video/mp4', rect: { x: 118, y: 160, width: 150, height: 150 }, chromaKey: { keyColor: '#00ff00' } } }
   ]
 }];
+rendererV5.assets = rendererV5.cinematicPhases[0].layers.map((layer, index) => {
+  Object.assign(layer, { assetVersionId: `00000000-0000-4000-8000-00000000000${index}`, assetKey: layer.slot, version: 1, bytes: 123, sha256: String(index).repeat(64) });
+  return { ...layer, mediaType: layer.metadata.mediaType, url: ['https://cdn.test/background.jpg', 'https://cdn.test/object.png', 'https://cdn.test/robot.mp4'][index] };
+});
 const exactV5 = projection.projectEspTftPreview(rendererV5, 0, 'correct');
 assert.deepEqual(
   exactV5.layers.slice(0, 3).map(({ id, src, mediaType, bounds, chromaKey }) => ({ id, src, mediaType, bounds, chromaKey })),

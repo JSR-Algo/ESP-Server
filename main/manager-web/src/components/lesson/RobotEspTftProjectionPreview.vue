@@ -22,6 +22,16 @@
       <strong>Firmware-incompatible preview</strong>
       <span v-for="warning in projection.warnings" :key="warning">{{ warning }}</span>
     </div>
+    <div v-if="Object.keys(mediaErrors).length" class="firmware-warning" role="alert">
+      <span v-for="(message, key) in mediaErrors" :key="key">{{ message }}</span>
+      <button type="button" @click="retryMedia">Retry media</button>
+    </div>
+    <div v-if="isV5" class="state-controls" aria-label="Persisted cinematic phases">
+      <button v-for="phaseId in projection.availablePhases" :key="phaseId" type="button"
+        :aria-pressed="projection.cinematicPhase && projection.cinematicPhase.phaseId === phaseId ? 'true' : 'false'"
+        @click="selectPhase(phaseId)">{{ phaseId }}</button>
+      <span v-if="projection.cinematicPhase">{{ projection.cinematicPhase.playbackMode }} · {{ cinematicDurationMs }}ms</span>
+    </div>
 
     <div
       :class="['cinematic-comparison', { 'cinematic-comparison--enabled': cinematicComparisonEnabled }]"
@@ -34,26 +44,36 @@
         <template v-for="layer in projection.layers">
           <CinematicVideoLayer
             v-if="layer.visible && ['background', 'teachingObject', 'robotOverlay'].includes(layer.id) && layer.mediaType === 'video/mp4'"
-            :key="layer.id === 'robotOverlay' ? `robotOverlay-video-${activeIndex}-${motionNonce}` : `${layer.id}-video`"
+            :key="layer.id === 'robotOverlay' ? `robotOverlay-video-${activeIndex}-${motionNonce}-${mediaRetryNonce}` : `${layer.id}-video-${mediaRetryNonce}`"
             ref="cinematicLayers"
             :layer-id="layer.id"
+            :data-asset-version-id="layer.assetVersionId"
+            :data-source-sha256="layer.sha256"
+            :data-layer-id="layer.id"
             :src="layer.src"
             :chroma-key="layer.chromaKey"
             :layer-class="['stage-layer', `layer-${layer.id}`, layer.id === 'robotOverlay' ? (playing ? entranceClass : motionClass) : '']"
             :position-style="layerStyle(layer)"
-            :controlled="cinematicFlattenable"
+            :controlled="isV5 || cinematicFlattenable"
+            :playback-mode="cinematicPlaybackMode"
+            :duration-ms="cinematicDurationMs"
             :playing="cinematicPlaying"
             :clock-ms="cinematicClockMs"
             :replay-nonce="cinematicReplayNonce"
+            @media-error="handleMediaError"
           />
           <img
+            ref="stageImages"
             v-else-if="layer.visible && ['background', 'teachingObject', 'robotOverlay'].includes(layer.id)"
-            :key="layer.id === 'robotOverlay' ? `robotOverlay-${activeIndex}-${motionNonce}` : layer.id"
+            :key="layer.id === 'robotOverlay' ? `robotOverlay-${activeIndex}-${motionNonce}-${mediaRetryNonce}` : `${layer.id}-${mediaRetryNonce}`"
             :class="['stage-layer', `layer-${layer.id}`, layer.id === 'robotOverlay' ? (playing ? entranceClass : motionClass) : '']"
             :style="layerStyle(layer)"
             :src="layer.src"
             :alt="layer.id === 'teachingObject' ? word : ''"
+            :data-asset-version-id="layer.assetVersionId"
+            :data-source-sha256="layer.sha256"
             draggable="false"
+            @error="handleMediaError({ layerId: layer.id, src: layer.src, message: `${layer.id} image failed to load/decode: ${layer.src}` })"
           />
           <div
             v-else-if="layer.id === 'teachingObject' && selectedPath === 'missingOptionalVisual'"
@@ -111,15 +131,23 @@
           </div>
         </div>
       </section>
-      <div v-if="cinematicFlattenable" class="cinematic-controls">
+      <div v-if="cinematicFlattenable || isV5" class="cinematic-controls">
         <button type="button" class="play-btn" :aria-pressed="cinematicPlaying ? 'true' : 'false'" @click="toggleCinematicPlayback">
           {{ cinematicPlaying ? '❚❚ Pause cinematic' : '► Play cinematic' }}
         </button>
         <button type="button" class="cinematic-replay-btn" @click="replayCinematic">↻ Replay</button>
         <span aria-hidden="true">{{ Math.round(cinematicClockMs) }}ms / {{ cinematicDurationMs }}ms</span>
+        <input v-if="isV5" type="range" aria-label="Seek cinematic" min="0" :max="cinematicDurationMs" step="1"
+          :value="cinematicClockMs" @input="seekCinematic($event.target.value)" />
       </div>
     </div>
-    <p class="truth-note">The stage is the exact robot layer projection. Browser transitions only illustrate timing; the physical entrance is firmware-owned.</p>
+    <p class="truth-note">{{ isV5 ? 'Persisted phase media and geometry. Select each phase to inspect the storyboard; playback does not simulate child responses.' : 'The stage is the exact robot layer projection. Browser transitions only illustrate timing; the physical entrance is firmware-owned.' }}</p>
+    <div v-if="isV5" class="preview-context" data-testid="v5-preview-context">
+      <p>Author context outside the TFT stage: {{ projection.caption }}</p>
+      <p v-if="projection.cinematicPhase && projection.cinematicPhase.phaseId === 'listen'">Listening phase selected. No microphone session is active.</p>
+      <p role="status">Audio unavailable in this preview: the persisted character clips are silent; lesson audio was not supplied.</p>
+      <p>The TFT composite contains background, object and character only. Captions and listening UI are not implemented on TFT.</p>
+    </div>
     <ol v-if="projection.openingPhaseTrace.length" class="opening-phase-trace" aria-label="Renderer v2 opening phase geometry">
       <li v-for="sample in projection.openingPhaseTrace" :key="sample.boundary">
         <strong>{{ sample.boundary }}</strong>
@@ -129,7 +157,7 @@
       </li>
     </ol>
 
-    <div class="play-bar">
+    <div v-if="!isV5" class="play-bar">
       <button type="button" class="play-btn" :aria-pressed="playing ? 'true' : 'false'" @click="togglePlay">
         {{ playing ? '❚❚ Pause' : '► Play lesson' }}
       </button>
@@ -210,6 +238,11 @@ export default {
     return {
       selectedPath: RESPONSE_PATHS.includes(this.initialPath) ? this.initialPath : 'correct',
       degradedReason: null,
+      selectedPhase: '',
+      mediaErrors: {},
+      mediaRetryNonce: 0,
+      imageLoadTimer: null,
+      imageLoadGeneration: 0,
       showSafeZones: false,
       motionNonce: 0,
       // Animated "play the lesson" preview. Steps the robot through every manifest
@@ -250,7 +283,13 @@ export default {
       return this.playing ? this.playStep : this.stepIndex;
     },
     projection() {
-      return projectEspTftPreview(this.manifest, this.activeIndex, this.selectedPath, this.degradedReason, this.rendererMetadata);
+      return projectEspTftPreview(this.manifest, this.activeIndex, this.selectedPath, this.degradedReason, this.rendererMetadata, this.selectedPhase);
+    },
+    isV5() {
+      return this.manifest.manifestVersion === 'teebot-lesson-renderer.v5';
+    },
+    cinematicPlaybackMode() {
+      return this.isV5 && this.projection.cinematicPhase ? this.projection.cinematicPhase.playbackMode : 'loop';
     },
     cinematicComparisonEnabled() {
       return this.cinematicComparisonStatus.candidate;
@@ -269,6 +308,7 @@ export default {
       return `Robot Flattened preview is incomplete. ${details.join(' ')}`;
     },
     cinematicDurationMs() {
+      if (this.isV5) return (this.projection.cinematicPhase && this.projection.cinematicPhase.durationMs) || 0;
       const phases = Array.isArray(this.manifest && this.manifest.cinematicPhases)
         ? this.manifest.cinematicPhases
         : [];
@@ -300,6 +340,7 @@ export default {
       return pill ? pill.text : '';
     },
     motionClass() {
+      if (this.isV5) return '';
       // While playing, the robot performs the step's own "present" motion; otherwise
       // it reflects the response path the author is inspecting.
       const preset = this.playing && this.projection.presentMotion
@@ -315,6 +356,7 @@ export default {
       return `motion-breathe motion-${this.motionNonce % 2}`;
     },
     entranceClass() {
+      if (this.isV5) return '';
       // During playback: a step with a scripted entrance (e.g. flyIn) plays that
       // arrival; a step without one performs its present motion instead, so every
       // step animates the way the lesson intends.
@@ -332,18 +374,88 @@ export default {
     }
   },
   watch: {
+    manifest() {
+      this.stopPlay();
+      this.resetCinematicPlayback();
+      this.selectedPhase = '';
+      this.playStep = 0;
+      this.mediaErrors = {};
+      this.mediaRetryNonce += 1;
+    },
+    stepIndex() {
+      if (!this.isV5) return;
+      this.stopPlay();
+      this.selectedPhase = '';
+      this.resetCinematicPlayback();
+    },
     initialPath(path) {
       if (RESPONSE_PATHS.includes(path)) this.selectPath(path);
     },
     projection() {
       this.resetCinematicPlayback();
+      const current = new Set(this.projection.layers.map(layer => `${layer.id}:${layer.src}`));
+      this.mediaErrors = Object.fromEntries(Object.entries(this.mediaErrors).filter(([key]) => current.has(key)));
+      this.armImageDeadline();
     }
   },
+  mounted() {
+    this.armImageDeadline();
+  },
   beforeDestroy() {
+    this.clearImageDeadline();
     this.clearPlayTimer();
     this.stopCinematicClock();
   },
   methods: {
+    clearImageDeadline() {
+      this.imageLoadGeneration = (this.imageLoadGeneration || 0) + 1;
+      if (this.imageLoadTimer !== null) clearTimeout(this.imageLoadTimer);
+      this.imageLoadTimer = null;
+    },
+    armImageDeadline() {
+      this.clearImageDeadline();
+      const generation = this.imageLoadGeneration;
+      this.$nextTick(() => {
+        if (generation !== this.imageLoadGeneration || this._isDestroyed || this._isBeingDestroyed) return;
+        const layers = this.projection.layers.filter(layer => layer.visible && String(layer.mediaType).startsWith('image/'));
+        this.imageLoadTimer = setTimeout(() => {
+          const images = this.$refs.stageImages || [];
+          layers.forEach(layer => {
+            const image = images.find(item => item.getAttribute('src') === layer.src);
+            if (image && !image.complete) this.handleMediaError({ layerId: layer.id, src: layer.src, message: `${layer.id} image load timed out.` });
+          });
+        }, 15000);
+        if (this.imageLoadTimer && this.imageLoadTimer.unref) this.imageLoadTimer.unref();
+      });
+    },
+    retryMedia() {
+      this.resetCinematicPlayback();
+      this.mediaErrors = {};
+      this.mediaRetryNonce += 1;
+      this.armImageDeadline();
+    },
+    cinematicMediaReady() {
+      const robot = this.cinematicLayerById('robotOverlay');
+      const images = this.$refs.stageImages || [];
+      return Boolean(robot && robot.mediaPlaybackState().ready && images.every(image => image.complete && image.naturalWidth > 0));
+    },
+    selectPhase(phaseId) {
+      if (!this.projection.availablePhases.includes(phaseId)) return;
+      this.stopPlay();
+      this.selectedPhase = phaseId;
+      this.resetCinematicPlayback();
+    },
+    seekCinematic(value) {
+      this.cinematicClockMs = Math.max(0, Math.min(Number(value) || 0, this.cinematicDurationMs));
+      this.cinematicStartedAt = null;
+      this.cinematicReplayNonce += 1;
+    },
+    handleMediaError(error) {
+      if (!error || !this.projection.layers.some(layer => layer.id === error.layerId && layer.src === error.src)) return;
+      this.$set(this.mediaErrors, `${error.layerId}:${error.src}`, error.message);
+      this.cinematicPlaying = false;
+      this.stopCinematicClock();
+    },
     clearPlayTimer() {
       if (this.playTimer) { clearTimeout(this.playTimer); this.playTimer = null; }
     },
@@ -367,6 +479,24 @@ export default {
       });
     },
     advanceCinematicClock(timestamp) {
+      if (this.isV5) {
+        if (!this.cinematicMediaReady()) {
+          this.cinematicStartedAt = null;
+          return;
+        }
+        if (this.cinematicStartedAt === null) this.cinematicStartedAt = timestamp - this.cinematicClockMs;
+        const elapsed = Math.max(0, timestamp - this.cinematicStartedAt);
+        const duration = this.cinematicDurationMs;
+        if (this.cinematicPlaybackMode === 'loop' && duration > 0) this.cinematicClockMs = elapsed % duration;
+        else {
+          this.cinematicClockMs = Math.min(elapsed, duration);
+          if (elapsed >= duration) {
+            this.cinematicPlaying = false;
+            this.stopCinematicClock();
+          }
+        }
+        return;
+      }
       const background = this.cinematicLayerById('background');
       const master = background && typeof background.mediaPlaybackState === 'function'
         ? background.mediaPlaybackState()
@@ -382,10 +512,10 @@ export default {
       this.cinematicClockMs = elapsed % this.cinematicDurationMs;
     },
     scheduleCinematicFrame() {
-      if (!this.cinematicPlaying || !this.cinematicFlattenable || this.cinematicFrameHandle !== null) return;
+      if (!this.cinematicPlaying || !(this.isV5 || this.cinematicFlattenable) || this.cinematicFrameHandle !== null) return;
       this.cinematicFrameHandle = requestAnimationFrame((timestamp) => {
         this.cinematicFrameHandle = null;
-        if (!this.cinematicPlaying || !this.cinematicFlattenable) return;
+        if (!this.cinematicPlaying || !(this.isV5 || this.cinematicFlattenable)) return;
         this.advanceCinematicClock(timestamp);
         this.scheduleCinematicFrame();
       });
@@ -396,6 +526,9 @@ export default {
         this.stopCinematicClock();
         return;
       }
+      if (this.isV5 && (!this.projection.cinematicPhase || this.cinematicDurationMs <= 0
+        || Object.keys(this.mediaErrors).length || !this.cinematicMediaReady())) return;
+      if (this.isV5 && this.cinematicClockMs >= this.cinematicDurationMs) this.replayCinematic();
       this.cinematicPlaying = true;
       this.cinematicStartedAt = null;
       this.scheduleCinematicFrame();
@@ -451,8 +584,12 @@ export default {
     selectPath(path) {
       if (this.playing) this.stopPlay();
       this.selectedPath = path;
+      if (this.isV5) {
+        const phaseByPath = { correct: 'celebrate', completion: 'exit', nearMiss: 'teach', incorrect: 'teach', retry: 'teach', timeout: 'listen', braveTry: 'celebrate', silence: 'listen', sttUnavailable: 'teach', missingOptionalVisual: 'teach' };
+        this.selectedPhase = phaseByPath[path] || path;
+      }
       this.motionNonce += 1;
-      this.$emit('path-change', { path, projection: projectEspTftPreview(this.manifest, this.activeIndex, path, this.degradedReason, this.rendererMetadata) });
+      this.$emit('path-change', { path, projection: projectEspTftPreview(this.manifest, this.activeIndex, path, this.degradedReason, this.rendererMetadata, this.selectedPhase) });
     },
     selectVisualState(state) {
       if (!VISUAL_STATES.includes(state)) return;
@@ -495,6 +632,8 @@ export default {
 .stage-shell { width: 100%; overflow-x: auto; padding: 14px; box-sizing: border-box; border-radius: 18px; background: repeating-linear-gradient(135deg, #18231d, #18231d 10px, #202f26 10px, #202f26 20px); }
 .stage { position: relative; width: 480px; height: 320px; margin: 0 auto; overflow: hidden; background: #dce8c2; box-shadow: 0 12px 30px rgba(0, 0, 0, .35); font-family: "Trebuchet MS", sans-serif; }
 .truth-note { margin:7px 2px 0; color:#68766c; font-size:12px; }
+.preview-context { margin-top: 10px; padding: 8px 12px; border: 1px solid #cbd8cf; background: #f5f8f4; font-size: 12px; }
+.preview-context p { margin: 5px 0; }
 .opening-phase-trace { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:6px; margin:10px 0 0; padding:0; list-style:none; }
 .opening-phase-trace li { display:grid; gap:2px; padding:7px 9px; border:1px solid #cbd8cf; border-radius:8px; background:#f5f8f4; font-size:11px; }
 .opening-phase-trace strong { color:#18382c; }

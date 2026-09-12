@@ -215,7 +215,7 @@ export function findForbiddenFirmwareCapabilities(manifest) {
   const warnings = new Set();
   const value = asObject(manifest);
   if (value.profile && value.profile !== 'espTft') warnings.add(`Unsupported profile "${value.profile}". Preview parity only applies to espTft.`);
-  walkForbidden(value, warnings, 'manifest', supportsDirectMp4Cinematic(value));
+  walkForbidden(value, warnings, 'manifest', supportsDirectMp4Cinematic(value) || value.manifestVersion === 'teebot-lesson-renderer.v5');
   return [...warnings].sort();
 }
 
@@ -227,16 +227,19 @@ function cinematicLayer(manifest, slot) {
   return layers.find((candidate) => asObject(candidate).slot === slot) || null;
 }
 
-function layeredCinematicLayer(manifest, step, slot) {
-  if (String(asObject(manifest).manifestVersion) !== 'teebot-lesson-renderer.v5') return null;
+function activityCinematicPhases(manifest, step) {
+  if (String(asObject(manifest).manifestVersion) !== 'teebot-lesson-renderer.v5') return [];
   const activityId = String(asObject(step).activityId || asObject(step).id || '');
   const phases = Array.isArray(asObject(manifest).cinematicPhases) ? manifest.cinematicPhases : [];
-  const phase = phases.find((candidate) => {
+  return phases.filter((candidate) => {
     const value = asObject(candidate);
     return value.templateId === 'layeredCinematic'
       && Array.isArray(value.activityIds)
       && value.activityIds.map(String).includes(activityId);
   });
+}
+
+function layeredCinematicLayer(phase, slot) {
   const layers = Array.isArray(asObject(phase).layers) ? phase.layers : [];
   return layers.find((candidate) => asObject(candidate).slot === slot) || null;
 }
@@ -268,6 +271,22 @@ function cinematicBounds(layer, fallback, fit) {
 function cinematicSource(layer) {
   const value = asObject(layer);
   return typeof value.url === 'string' && value.url ? value.url : (typeof value.path === 'string' ? value.path : '');
+}
+
+function layeredCinematicSource(manifest, layer) {
+  const value = asObject(layer);
+  if (!value.assetVersionId || !value.assetKey || !value.sha256) return '';
+  const assets = Array.isArray(manifest.assets) ? manifest.assets : [];
+  const matches = assets.filter((asset) => {
+    const id = asObject(asset);
+    return (id.assetKey || String(id.id || id.assetId || '').replace(/@v\d+$/, '')) === value.assetKey
+      && Number(id.version) === Number(value.version)
+      && id.sha256 === value.sha256 && Number(id.bytes) === Number(value.bytes)
+      && id.mediaType === layerMediaType(layer)
+      && (!id.assetVersionId || id.assetVersionId === value.assetVersionId);
+  });
+  const sources = [...new Set(matches.map(cinematicSource).filter(Boolean))];
+  return sources.length === 1 ? sources[0] : '';
 }
 
 function rendererLabel(manifestVersion) {
@@ -320,7 +339,7 @@ function openingEntranceCount(served, steps) {
   }).length;
 }
 
-export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'correct', requestedDegradedReason = null, rendererMetadata = null) {
+export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'correct', requestedDegradedReason = null, rendererMetadata = null, requestedPhase = '') {
   const served = asObject(manifest);
   const metadata = asObject(rendererMetadata);
   const steps = Array.isArray(served.steps) ? served.steps : [];
@@ -349,12 +368,18 @@ export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'c
   const manifestVersion = String(served.manifestVersion || '');
   const v2 = manifestVersion === RENDERER_V2_MANIFEST_VERSION;
   const v3 = supportsDirectMp4Cinematic(served);
+  const v5 = manifestVersion === 'teebot-lesson-renderer.v5';
+  const activityPhases = activityCinematicPhases(served, step);
+  const phase = requestedPhase
+    ? activityPhases.find((item) => item.phaseId === requestedPhase)
+    : activityPhases[0];
   const capability = rendererCapability(served, metadata);
   const motionOwner = physicalMotionOwner(served, metadata);
   const opening = asObject(served.openingEntrance);
   const openingPhaseTrace = v2 ? projectRendererV2OpeningTrace(step.templateProjection) : [];
   const openingCount = openingEntranceCount(served, steps);
   const warnings = new Set(findForbiddenFirmwareCapabilities(served));
+  if (v5 && !phase) warnings.add(`Cinematic phase ${requestedPhase || '(default)'} is unavailable for activity ${step.activityId || step.id || '(missing)'}.`);
   if (v2 && openingCount !== 1) warnings.add('Renderer v2 requires exactly one opening entrance.');
   if (v2 && motionOwner && motionOwner !== 'server') warnings.add('Renderer v2 requires physicalMotionOwner=server.');
   if (v2 && capability.supported === false) warnings.add('Selected firmware is renderer-v1 only; the authored renderer-v2 entrance and visual states are unsupported.');
@@ -362,16 +387,36 @@ export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'c
   const cinematicBackground = cinematicLayer(served, 'backgroundScene');
   const cinematicObject = cinematicLayer(served, 'teachingObject');
   const cinematicRobot = cinematicLayer(served, 'robotOverlay');
-  const layeredBackground = layeredCinematicLayer(served, step, 'backgroundScene');
-  const layeredObject = layeredCinematicLayer(served, step, 'teachingObject');
-  const layeredRobot = layeredCinematicLayer(served, step, 'robotOverlay');
+  const layeredBackground = layeredCinematicLayer(phase, 'backgroundScene');
+  const layeredObject = layeredCinematicLayer(phase, 'teachingObject');
+  const layeredRobot = layeredCinematicLayer(phase, 'robotOverlay');
   const backgroundSrc = v3 ? cinematicSource(cinematicBackground) : mediaSource(background.poster);
   const objectSrc = v3 ? cinematicSource(cinematicObject) : mediaSource(object.asset);
   const robotSrc = v3 ? cinematicSource(cinematicRobot) : (mediaSource(robot.asset) || mediaSource(robot.atlas));
   const hideRobotOverlay = Boolean(degradedFallback && degradedFallback.hideOverlay);
+  const v5Layers = [
+    ['background', 'backgroundScene', layeredBackground, ESP_TFT_GEOMETRY.background, 'cover'],
+    ['teachingObject', 'teachingObject', layeredObject, ESP_TFT_GEOMETRY.teachingObject, 'contain'],
+    ['robotOverlay', 'robotOverlay', layeredRobot, ESP_TFT_GEOMETRY.robotOverlay, 'contain']
+  ].map(([id, slot, layer, bounds, fit], index) => {
+    const source = layeredCinematicSource(served, layer);
+    if (v5 && phase && (layer || id !== 'teachingObject') && !source) warnings.add(`Cinematic ${slot} source is unavailable in phase ${phase.phaseId}.`);
+    return {
+      id, z: index * 10, bounds: cinematicBounds(layer, bounds, asObject(asObject(layer).metadata).fit || fit),
+      src: source, mediaType: layerMediaType(layer), chromaKey: id === 'robotOverlay' ? layerChromaKey(layer) : null,
+      assetVersionId: asObject(layer).assetVersionId || '', sha256: asObject(layer).sha256 || '',
+      visible: Boolean(source) && !(id === 'robotOverlay' && hideRobotOverlay) && !(id === 'teachingObject' && optionalVisualMissing)
+    };
+  });
 
   return {
     manifestVersion,
+    caption: String(step.prompt || ''),
+    availablePhases: activityPhases.map((item) => item.phaseId),
+    cinematicPhase: v5 && phase ? {
+      phaseId: phase.phaseId, playbackMode: phase.playbackMode,
+      durationMs: Number(asObject(phase.timing).durationMs) || Number(asObject(asObject(layeredRobot).metadata).durationMs) || 0
+    } : null,
     rendererLabel: rendererLabel(manifestVersion),
     physicalMotionOwner: motionOwner,
     openingEntrance: opening,
@@ -399,7 +444,11 @@ export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'c
     visualState,
     stage: ESP_TFT_GEOMETRY.stage,
     safeZones: ESP_TFT_GEOMETRY.safeZones,
-    layers: [
+    layers: v5 ? [...v5Layers,
+      { id: 'wordPill', z: 30, bounds: ESP_TFT_GEOMETRY.wordPill, text: '', visible: false },
+      { id: 'progress', z: 40, bounds: ESP_TFT_GEOMETRY.progress, active: safeIndex + 1, total: steps.length, visible: false },
+      { id: 'prompt', z: 50, bounds: ESP_TFT_GEOMETRY.prompt, text: String(step.prompt || ''), visible: false }
+    ] : [
       { id: 'background', z: 0, bounds: v3 ? cinematicBounds(cinematicBackground, ESP_TFT_GEOMETRY.background, 'cover') : (layeredBackground ? cinematicBounds(layeredBackground, ESP_TFT_GEOMETRY.background, 'cover') : ESP_TFT_GEOMETRY.background), src: backgroundSrc, mediaType: v3 ? layerMediaType(cinematicBackground) : layerMediaType(layeredBackground), chromaKey: null, visible: Boolean(backgroundSrc) },
       { id: 'teachingObject', z: 10, bounds: v3 ? cinematicBounds(cinematicObject, ESP_TFT_GEOMETRY.teachingObject, 'contain') : (layeredObject ? cinematicBounds(layeredObject, ESP_TFT_GEOMETRY.teachingObject, 'contain') : ESP_TFT_GEOMETRY.teachingObject), src: optionalVisualMissing ? '' : objectSrc, mediaType: v3 ? layerMediaType(cinematicObject) : layerMediaType(layeredObject), chromaKey: v3 ? layerChromaKey(cinematicObject) : layerChromaKey(layeredObject), visible: !optionalVisualMissing && Boolean(objectSrc) },
       { id: 'robotOverlay', z: 20, bounds: v3 ? cinematicBounds(cinematicRobot, ESP_TFT_GEOMETRY.robotOverlay, 'contain') : (layeredRobot ? cinematicBounds(layeredRobot, ESP_TFT_GEOMETRY.robotOverlay, 'contain') : (openingPhaseTrace.length ? openingPhaseTrace[openingPhaseTrace.length - 1].bounds : ESP_TFT_GEOMETRY.robotOverlay)), src: robotSrc, mediaType: v3 ? layerMediaType(cinematicRobot) : layerMediaType(layeredRobot), chromaKey: v3 ? layerChromaKey(cinematicRobot) : layerChromaKey(layeredRobot), visible: !hideRobotOverlay && Boolean(robotSrc), overlayKey: String(visualStateOverride.overlayKey || robot.assetKey || robot.overlayKey || '') },

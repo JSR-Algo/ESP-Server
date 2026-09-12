@@ -122,3 +122,91 @@ test('real admin previews the exact espTft scene and all response paths', async 
   await expect(stage.locator('img.layer-teachingObject')).toHaveCount(0);
   assertNoUnexpectedPageErrors();
 });
+
+
+test('@s08 saved v5 candidate exposes real media, phases and failures', async ({ page, browserName }, testInfo) => {
+  const fs = require('node:fs');
+  const { openS07Session, s07Api } = require('./helpers/s07-session');
+  const config = await openS07Session(page);
+  const original = await s07Api(page, 'GET', `/lessons/${config.source}/course-mode`);
+  const visuals = await s07Api(page, 'GET', `/lessons/${config.source}/visuals`);
+  const key = `cpr-s08-${Date.now()}-${browserName}`;
+  const course = await s07Api(page, 'POST', '/courses', { courseKey:key,title:key,locale:'en-US',ageBand:'4-6' });
+  const lesson = await s07Api(page, 'POST', `/courses/${course.id}/lessons`, { lessonKey:key,title:key,locale:'en-US',ageBand:'4-6',rendererVersion:'teebot-lesson-renderer.v5',estimatedDurationSec:480,durationPreset:8 });
+  const initial = await s07Api(page, 'GET', `/lessons/${lesson.id}/visuals`);
+  await s07Api(page, 'PUT', `/lessons/${lesson.id}/course-mode`, { contract:original.contract,expectedChecksum:initial.checksum,expectedVisualChecksum:initial.visualChecksum });
+  const sourceAssets = await s07Api(page,'GET',`/lessons/${config.source}/assets?profile=espTft`);
+  const image = sourceAssets.assets.find(a => (a.layer||a.slot)==='backgroundScene');
+  await s07Api(page,'POST',`/lessons/${lesson.id}/assets`,{profile:'espTft',sourceAssetId:image.assetId});
+  const phases = ['flyIn','walk','teach','listen','thinking','celebrate','exit'];
+  const ids = {background:visuals.refs.find(r=>r.slot==='backgroundScene').assetVersionId,object:visuals.refs.find(r=>r.slot==='teachingObject').assetVersionId,...Object.fromEntries(phases.map(phase => [phase,visuals.refs.find(r=>r.slot===`robotOverlay.${phase}`).assetVersionId]))};
+  const errors = []; page.on('pageerror', error => errors.push(error.message));
+  // Forward unchanged requests through the task-owned raw-container tunnel.
+  // This preserves source bytes; image HTML and decoder failures remain failures.
+  await page.route('http://127.0.0.1:8103/**', async route => {
+    const response = await route.fetch({url:route.request().url().replace(':8103',':18103'),timeout:10000});
+    await route.fulfill({response,headers:{...response.headers(),'access-control-allow-origin':'*'}});
+  });
+  await page.goto(`/#/lesson-editor?lessonId=${lesson.id}`);
+  const panel = page.getByTestId('course-mode-visual-selection'); await expect(panel).toBeVisible();
+  for (const [phase,id] of Object.entries(ids)) await panel.getByTestId(`course-visual-${phase}`).locator('select').selectOption(id);
+  const saved = page.waitForResponse(r=>r.url().endsWith(`/lessons/${lesson.id}/visuals`) && r.request().method()==='PUT');
+  await panel.getByRole('button',{name:'Save visual bindings',exact:true}).click(); expect((await saved).status()).toBe(200);
+  await expect(panel).toContainText('Visual versions saved and read back.');
+  const persisted = await s07Api(page,'GET',`/lessons/${lesson.id}/visuals`);
+  const response = await s07Api(page,'GET',`/lessons/${lesson.id}/manifest-preview?profile=espTft`);
+  expect(response.manifest.cinematicPhases).toEqual(persisted.cinematicPhases);
+  await page.reload();
+  const stage = page.getByTestId('esp-tft-stage'); await expect(stage).toBeVisible();
+  await expect(page.getByTestId('preview-persistence-status')).toContainText('Saved draft preview');
+  expect(await stage.evaluate(el=>[el.clientWidth,el.clientHeight])).toEqual([480,320]);
+  const preview = page.locator('.robot-preview').first();
+  await expect(preview).toContainText('image failed to load/decode');
+  const evidence = {lessonId:lesson.id,checksum:response.checksum,manifest:response.manifest,persisted,transport:'8103 -> task-owned raw-container tunnel18103; unchanged bytes, explicit transport CORS',browserName,captures:[]};
+  if(browserName==='chromium') {
+    await expect(preview).toContainText('failed to load/decode. A verified browser representation is required');
+    await stage.screenshot({path:testInfo.outputPath('chromium-real-decode-error.png')});
+  } else {
+    const video = stage.locator('video');
+    for (const phase of response.manifest.cinematicPhases.filter(p=>p.activityIds.includes(response.manifest.steps[0].activityId||response.manifest.steps[0].id))) {
+      await preview.getByRole('button',{name:phase.phaseId,exact:true}).click();
+      const robot = phase.layers.find(l=>l.slot==='robotOverlay');
+      const asset = response.manifest.assets.find(a=>a.assetKey===robot.assetKey && a.version===robot.version && a.sha256===robot.sha256);
+      await expect(video).toHaveAttribute('src',asset.url);
+      await expect.poll(()=>video.evaluate(v=>v.readyState)).toBeGreaterThanOrEqual(2);
+      const rawPixels = await video.evaluate(v => {
+        const canvas = document.createElement('canvas'); canvas.width = v.videoWidth; canvas.height = v.videoHeight;
+        const context = canvas.getContext('2d'); context.drawImage(v,0,0);
+        return context.getImageData(0,0,canvas.width,canvas.height).data.some((value,index) => index % 4 === 3 && value > 0);
+      });
+      if (!rawPixels) {
+        await expect(preview).toContainText('has no decoded frame');
+        const file = `${phase.phaseId}-decode-error.png`;
+        await stage.screenshot({path:testInfo.outputPath(file)});
+        evidence.captures.push({phaseId:phase.phaseId,file,sourceSha256:robot.sha256,decoded:false});
+        continue;
+      }
+      expect(await stage.locator('.layer-robotOverlay').evaluate(el=>getComputedStyle(el).animationName)).toBe('none');
+      for(const [label,frame] of [['first',0],['middle',Math.floor(robot.metadata.frameCount/2)],['final',robot.metadata.frameCount-1]]) {
+        const ms=Math.ceil(frame*1000/robot.metadata.fps);
+        await preview.locator('input[type=range]').fill(String(ms));
+        await expect.poll(()=>video.evaluate(v=>v.currentTime)).toBeCloseTo(ms/1000,1);
+        await page.waitForTimeout(150);
+        // A blank character canvas cannot qualify a decoded storyboard checkpoint.
+        // The exact exit tail is intentionally green before chroma keying.
+        if (!(phase.phaseId === 'exit' && label === 'final')) {
+          expect(await stage.locator('.cinematic-canvas').evaluate(canvas =>
+            canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data.some((value,index) => index % 4 === 3 && value > 0))).toBe(true);
+        }
+        const file=`${phase.phaseId}-${label}.png`;await stage.screenshot({path:testInfo.outputPath(file)});
+        evidence.captures.push({phaseId:phase.phaseId,label,frame,ms,file,sourceSha256:robot.sha256,assetVersionId:robot.assetVersionId,geometry:robot.metadata.rect});
+      }
+    }
+    await preview.getByRole('button',{name:'Replay',exact:false}).click();
+    await expect.poll(()=>video.evaluate(v=>v.currentTime)).toBe(0);
+  }
+  fs.writeFileSync(testInfo.outputPath('candidate-preview.json'),JSON.stringify(evidence,null,2));
+  await page.goto('/#/courses');
+  await page.unrouteAll({behavior:'wait'});
+  expect(errors).toEqual([]);
+});

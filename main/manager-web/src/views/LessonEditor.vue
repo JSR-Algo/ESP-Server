@@ -339,6 +339,7 @@
                 </template>
               </section>
               <section v-if="previewManifest" class="preview-surface exact-renderer-surface" data-testid="exact-robot-renderer">
+                <p data-testid="preview-persistence-status" role="status">{{ isDraft ? 'Saved draft preview. This version is not published to the robot.' : 'Saved published manifest preview.' }} Checksum: {{ previewManifest.checksum }}</p>
                 <div class="preview-heading">
                   <span class="eyebrow">EXACT ROBOT RENDERER</span>
                   <span class="preview-heading__hint">TFT 480×320 — lớp ảnh tĩnh, visual state và fallback theo manifest đã chuẩn hóa</span>
@@ -352,6 +353,7 @@
               </section>
               <div v-else class="preview-empty">
                 <strong>Robot preview</strong>
+                <span v-if="courseModeDirty || courseVisualDirty">Unsaved changes are not included in robot playback. Save and read back before previewing.</span>
                 <span>Generate the espTft manifest preview to inspect the exact 480×320 scene.</span>
                 <el-button size="small" :disabled="proofActionsDisabled" @click="doPreview">Generate preview</el-button>
               </div>
