@@ -3,6 +3,7 @@ const { readFileSync } = require('node:fs');
 const { loginAsLessonAuthor } = require('./helpers/session');
 const { adminApi, adminApiResponse, createCourseModeDraft, createVisualTriple } = require('./helpers/admin-api');
 const { observeJourney, assertHttpMedia, assertDecodedStage, waitForPublishedPack } = require('./helpers/real-service-evidence');
+const { visitPersistedPhases } = require('./helpers/persisted-phases');
 
 test('real v5 next draft, edits, publication, new assignment, rollback and insights', async ({ page }, testInfo) => {
   test.setTimeout(180000);
@@ -81,20 +82,10 @@ test('real v5 next draft, edits, publication, new assignment, rollback and insig
     await assertHttpMedia(page, preview.manifest);
     const stage = page.getByTestId('esp-tft-stage');
     await stage.scrollIntoViewIfNeeded();
-    const phaseControls = page.getByLabel('Persisted cinematic phases');
-    const phaseIds = ['flyIn', 'walk', 'teach', 'listen', 'thinking', 'celebrate', 'exit'];
-    for (const phaseId of phaseIds) {
-      await phaseControls.getByRole('button', { name: phaseId, exact: true }).click();
-      const phase = preview.manifest.cinematicPhases.find(item => item.phaseId === phaseId);
-      expect(phase, `persisted ${phaseId}`).toBeTruthy();
-      for (const layer of phase.layers) {
-        const rendered = stage.locator(`.layer-${layer.slot === 'backgroundScene' ? 'background' : layer.slot}`);
-        await expect(rendered).toHaveAttribute('data-source-sha256', layer.sha256);
-        await expect(rendered).toHaveAttribute('data-asset-version-id', layer.assetVersionId);
-      }
+    await visitPersistedPhases(page, preview.manifest, async ({ phase, activityId, stepIndex }) => {
       await assertDecodedStage(stage);
-      await journal.checkpoint(testInfo, `actual-${phaseId}`, { phase });
-    }
+      await journal.checkpoint(testInfo, `actual-${stepIndex}-${phase.phaseId}`, { activityId, phase });
+    });
     await journal.checkpoint(testInfo, 'actual-preview', { nextId, checksum: preview.checksum });
 
     const validate = page.waitForResponse(r => r.request().method() === 'POST' && r.url().endsWith(`/lessons/${nextId}/validate`));

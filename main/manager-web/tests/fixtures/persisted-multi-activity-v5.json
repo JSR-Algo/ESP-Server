@@ -1,0 +1,3087 @@
+{
+  "manifestVersion": "teebot-lesson-renderer.v5",
+  "protocolVersion": "teebot-lesson-renderer.v5",
+  "courseId": "cpr-s07-1789238736740-p19u4",
+  "lessonId": "cpr-s07-1789238736740-p19u4",
+  "lessonVersion": 1,
+  "locale": "en-US",
+  "ageBand": "4-6",
+  "profile": "espTft",
+  "title": "cpr-s07-1789238736740-p19u4",
+  "layerOrder": [
+    "backgroundScene",
+    "teachingObject",
+    "robotOverlay"
+  ],
+  "steps": [
+    {
+      "id": "w06.a01",
+      "type": "greeting",
+      "prompt": "Let's try picture greeting.",
+      "subject": "course-mode",
+      "robotState": "talking",
+      "pose": "teach",
+      "expression": "teaching",
+      "phase": "talk",
+      "completionClass": "passive",
+      "entrance": "flyIn",
+      "authority": "courseMode",
+      "activityId": "w06.a01",
+      "scene": {
+        "backgroundScene": {
+          "mode": "poster",
+          "poster": {
+            "key": "scene.classroom@v1",
+            "assetKey": "scene.classroom",
+            "version": 1,
+            "src": "http://127.0.0.1:8103/tvideo-demo/shared/course-mode/scene.classroom/v1.jpg",
+            "sha256": "56de09374843a96b40322ebec2a956498ac144938dcc8a8af7b018d0554873c2"
+          }
+        },
+        "teachingObject": {
+          "asset": {
+            "key": "object.green@v6",
+            "assetKey": "object.green",
+            "version": 6,
+            "src": "http://127.0.0.1:8103/tvideo-demo/shared/course-mode/object.green/v1.png",
+            "sha256": "109546a39a0b37de8d7777de98e8a8d8e982d028c6be586719ceb0e1566c595c"
+          }
+        },
+        "robotOverlay": {
+          "robotState": "talking",
+          "pose": "teach",
+          "expression": "teaching",
+          "asset": {
+            "key": "cpr-t09.robot.teach@v3",
+            "assetKey": "cpr-t09.robot.teach",
+            "version": 3,
+            "src": "http://127.0.0.1:8103/tvideo-demo/cpr-t09/teach.mp4",
+            "sha256": "51d6af617aded7fd0ba5100096132f3a35b4b41ed2977114a88cd4ac8b663304"
+          }
+        }
+      },
+      "audio": {
+        "via": "tts"
+      },
+      "timeoutSec": 25
+    },
+    {
+      "id": "w06.a02",
+      "type": "focus",
+      "prompt": "Let's try picture reveal.",
+      "subject": "course-mode",
+      "robotState": "talking",
+      "pose": "teach",
+      "expression": "teaching",
+      "phase": "talk",
+      "completionClass": "passive",
+      "entrance": "none",
+      "authority": "courseMode",
+      "activityId": "w06.a02",
+      "scene": {
+        "backgroundScene": {
+          "mode": "poster",
+          "poster": {
+            "key": "scene.garden@v6",
+            "assetKey": "scene.garden",
+            "version": 6,
+            "src": "http://127.0.0.1:8103/tvideo-demo/shared/course-mode/scene.garden/v1.jpg",
+            "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc"
+          }
+        },
+        "teachingObject": {
+          "asset": {
+            "key": "object.orange@v1",
+            "assetKey": "object.orange",
+            "version": 1,
+            "src": "http://127.0.0.1:8103/tvideo-demo/shared/course-mode/object.orange/v1.png",
+            "sha256": "f17e22790345c23f1570b07f0a62c466c0096ab6458afe8e31c3d22826fa07e2"
+          }
+        },
+        "robotOverlay": {
+          "robotState": "talking",
+          "pose": "teach",
+          "expression": "teaching",
+          "asset": {
+            "key": "cpr-t09.robot.teach@v3",
+            "assetKey": "cpr-t09.robot.teach",
+            "version": 3,
+            "src": "http://127.0.0.1:8103/tvideo-demo/cpr-t09/teach.mp4",
+            "sha256": "51d6af617aded7fd0ba5100096132f3a35b4b41ed2977114a88cd4ac8b663304"
+          }
+        }
+      },
+      "audio": {
+        "via": "tts"
+      },
+      "timeoutSec": 30
+    },
+    {
+      "id": "w06.a03",
+      "type": "focus",
+      "prompt": "Your turn for discover.",
+      "subject": "course-mode",
+      "robotState": "talking",
+      "pose": "teach",
+      "expression": "teaching",
+      "phase": "talk",
+      "completionClass": "passive",
+      "entrance": "none",
+      "authority": "courseMode",
+      "activityId": "w06.a03",
+      "teachingWord": {
+        "text": "red",
+        "displayText": "RED"
+      },
+      "scene": {
+        "backgroundScene": {
+          "mode": "poster",
+          "poster": {
+            "key": "scene.garden@v6",
+            "assetKey": "scene.garden",
+            "version": 6,
+            "src": "http://127.0.0.1:8103/tvideo-demo/shared/course-mode/scene.garden/v1.jpg",
+            "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc"
+          }
+        },
+        "teachingObject": null,
+        "robotOverlay": {
+          "robotState": "talking",
+          "pose": "teach",
+          "expression": "teaching",
+          "asset": {
+            "key": "cpr-t09.robot.teach@v3",
+            "assetKey": "cpr-t09.robot.teach",
+            "version": 3,
+            "src": "http://127.0.0.1:8103/tvideo-demo/cpr-t09/teach.mp4",
+            "sha256": "51d6af617aded7fd0ba5100096132f3a35b4b41ed2977114a88cd4ac8b663304"
+          }
+        }
+      },
+      "audio": {
+        "via": "tts"
+      },
+      "timeoutSec": 45
+    },
+    {
+      "id": "w06.a04",
+      "type": "model",
+      "prompt": "Let's try picture model meaning.",
+      "subject": "course-mode",
+      "robotState": "modeling",
+      "pose": "teach",
+      "expression": "teaching",
+      "phase": "talk",
+      "completionClass": "interactive",
+      "entrance": "none",
+      "authority": "courseMode",
+      "activityId": "w06.a04",
+      "teachingWord": {
+        "text": "blue",
+        "displayText": "BLUE"
+      },
+      "scene": {
+        "backgroundScene": {
+          "mode": "poster",
+          "poster": {
+            "key": "scene.garden@v6",
+            "assetKey": "scene.garden",
+            "version": 6,
+            "src": "http://127.0.0.1:8103/tvideo-demo/shared/course-mode/scene.garden/v1.jpg",
+            "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc"
+          }
+        },
+        "teachingObject": null,
+        "robotOverlay": {
+          "robotState": "modeling",
+          "pose": "teach",
+          "expression": "teaching",
+          "asset": {
+            "key": "cpr-t09.robot.teach@v3",
+            "assetKey": "cpr-t09.robot.teach",
+            "version": 3,
+            "src": "http://127.0.0.1:8103/tvideo-demo/cpr-t09/teach.mp4",
+            "sha256": "51d6af617aded7fd0ba5100096132f3a35b4b41ed2977114a88cd4ac8b663304"
+          }
+        }
+      },
+      "audio": {
+        "via": "tts"
+      },
+      "timeoutSec": 50
+    },
+    {
+      "id": "w06.a05",
+      "type": "listen",
+      "prompt": "Let's try find difference.",
+      "subject": "course-mode",
+      "robotState": "listening",
+      "pose": "listening",
+      "expression": "listening",
+      "phase": "listen",
+      "completionClass": "interactive",
+      "entrance": "none",
+      "authority": "courseMode",
+      "activityId": "w06.a05",
+      "teachingWord": {
+        "text": "yellow",
+        "displayText": "YELLOW"
+      },
+      "scene": {
+        "backgroundScene": {
+          "mode": "poster",
+          "poster": {
+            "key": "scene.garden@v6",
+            "assetKey": "scene.garden",
+            "version": 6,
+            "src": "http://127.0.0.1:8103/tvideo-demo/shared/course-mode/scene.garden/v1.jpg",
+            "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc"
+          }
+        },
+        "teachingObject": null,
+        "robotOverlay": {
+          "robotState": "listening",
+          "pose": "listening",
+          "expression": "listening",
+          "asset": {
+            "key": "cpr-t09.robot.teach@v3",
+            "assetKey": "cpr-t09.robot.teach",
+            "version": 3,
+            "src": "http://127.0.0.1:8103/tvideo-demo/cpr-t09/teach.mp4",
+            "sha256": "51d6af617aded7fd0ba5100096132f3a35b4b41ed2977114a88cd4ac8b663304"
+          }
+        }
+      },
+      "audio": {
+        "via": "tts"
+      },
+      "timeoutSec": 50
+    },
+    {
+      "id": "w06.a06",
+      "type": "repeat",
+      "prompt": "Let's try supported naming.",
+      "subject": "course-mode",
+      "robotState": "listening",
+      "pose": "listening",
+      "expression": "listening",
+      "phase": "listen",
+      "completionClass": "interactive",
+      "entrance": "none",
+      "authority": "courseMode",
+      "activityId": "w06.a06",
+      "interaction": {
+        "template": "safeSpeaking",
+        "funPattern": "whisperThenLoud",
+        "maxAttempts": 3,
+        "correctThreshold": 0.85,
+        "listenTimeoutSec": 6,
+        "braveTryThreshold": 0.7
+      },
+      "scene": {
+        "backgroundScene": {
+          "mode": "poster",
+          "poster": {
+            "key": "scene.garden@v6",
+            "assetKey": "scene.garden",
+            "version": 6,
+            "src": "http://127.0.0.1:8103/tvideo-demo/shared/course-mode/scene.garden/v1.jpg",
+            "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc"
+          }
+        },
+        "teachingObject": null,
+        "robotOverlay": {
+          "robotState": "listening",
+          "pose": "listening",
+          "expression": "listening",
+          "asset": {
+            "key": "cpr-t09.robot.teach@v3",
+            "assetKey": "cpr-t09.robot.teach",
+            "version": 3,
+            "src": "http://127.0.0.1:8103/tvideo-demo/cpr-t09/teach.mp4",
+            "sha256": "51d6af617aded7fd0ba5100096132f3a35b4b41ed2977114a88cd4ac8b663304"
+          }
+        }
+      },
+      "audio": {
+        "via": "tts"
+      },
+      "timeoutSec": 55
+    },
+    {
+      "id": "w06.a07",
+      "type": "listen",
+      "prompt": "Let's try hidden picture recall.",
+      "subject": "course-mode",
+      "robotState": "listening",
+      "pose": "listening",
+      "expression": "listening",
+      "phase": "listen",
+      "completionClass": "interactive",
+      "entrance": "none",
+      "authority": "courseMode",
+      "activityId": "w06.a07",
+      "interaction": {
+        "template": "safeSpeaking",
+        "funPattern": "soundGuess",
+        "maxAttempts": 3,
+        "correctThreshold": 0.85,
+        "listenTimeoutSec": 6,
+        "braveTryThreshold": 0.7
+      },
+      "scene": {
+        "backgroundScene": {
+          "mode": "poster",
+          "poster": {
+            "key": "scene.garden@v6",
+            "assetKey": "scene.garden",
+            "version": 6,
+            "src": "http://127.0.0.1:8103/tvideo-demo/shared/course-mode/scene.garden/v1.jpg",
+            "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc"
+          }
+        },
+        "teachingObject": null,
+        "robotOverlay": {
+          "robotState": "listening",
+          "pose": "listening",
+          "expression": "listening",
+          "asset": {
+            "key": "cpr-t09.robot.teach@v3",
+            "assetKey": "cpr-t09.robot.teach",
+            "version": 3,
+            "src": "http://127.0.0.1:8103/tvideo-demo/cpr-t09/teach.mp4",
+            "sha256": "51d6af617aded7fd0ba5100096132f3a35b4b41ed2977114a88cd4ac8b663304"
+          }
+        }
+      },
+      "audio": {
+        "via": "tts"
+      },
+      "timeoutSec": 55
+    },
+    {
+      "id": "w06.a08",
+      "type": "listen",
+      "prompt": "Let's try second scene naming.",
+      "subject": "course-mode",
+      "robotState": "listening",
+      "pose": "listening",
+      "expression": "listening",
+      "phase": "listen",
+      "completionClass": "interactive",
+      "entrance": "none",
+      "authority": "courseMode",
+      "activityId": "w06.a08",
+      "interaction": {
+        "template": "safeSpeaking",
+        "funPattern": "miniStoryRescue",
+        "maxAttempts": 3,
+        "correctThreshold": 0.85,
+        "listenTimeoutSec": 6,
+        "braveTryThreshold": 0.7
+      },
+      "scene": {
+        "backgroundScene": {
+          "mode": "poster",
+          "poster": {
+            "key": "scene.garden@v6",
+            "assetKey": "scene.garden",
+            "version": 6,
+            "src": "http://127.0.0.1:8103/tvideo-demo/shared/course-mode/scene.garden/v1.jpg",
+            "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc"
+          }
+        },
+        "teachingObject": null,
+        "robotOverlay": {
+          "robotState": "listening",
+          "pose": "listening",
+          "expression": "listening",
+          "asset": {
+            "key": "cpr-t09.robot.teach@v3",
+            "assetKey": "cpr-t09.robot.teach",
+            "version": 3,
+            "src": "http://127.0.0.1:8103/tvideo-demo/cpr-t09/teach.mp4",
+            "sha256": "51d6af617aded7fd0ba5100096132f3a35b4b41ed2977114a88cd4ac8b663304"
+          }
+        }
+      },
+      "audio": {
+        "via": "tts"
+      },
+      "timeoutSec": 65
+    },
+    {
+      "id": "w06.a09",
+      "type": "listen",
+      "prompt": "Let's try delayed picture recall.",
+      "subject": "course-mode",
+      "robotState": "listening",
+      "pose": "listening",
+      "expression": "listening",
+      "phase": "listen",
+      "completionClass": "interactive",
+      "entrance": "none",
+      "authority": "courseMode",
+      "activityId": "w06.a09",
+      "interaction": {
+        "template": "safeSpeaking",
+        "funPattern": "robotForgot",
+        "maxAttempts": 3,
+        "correctThreshold": 0.85,
+        "listenTimeoutSec": 6,
+        "braveTryThreshold": 0.7
+      },
+      "scene": {
+        "backgroundScene": {
+          "mode": "poster",
+          "poster": {
+            "key": "scene.garden@v6",
+            "assetKey": "scene.garden",
+            "version": 6,
+            "src": "http://127.0.0.1:8103/tvideo-demo/shared/course-mode/scene.garden/v1.jpg",
+            "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc"
+          }
+        },
+        "teachingObject": null,
+        "robotOverlay": {
+          "robotState": "listening",
+          "pose": "listening",
+          "expression": "listening",
+          "asset": {
+            "key": "cpr-t09.robot.teach@v3",
+            "assetKey": "cpr-t09.robot.teach",
+            "version": 3,
+            "src": "http://127.0.0.1:8103/tvideo-demo/cpr-t09/teach.mp4",
+            "sha256": "51d6af617aded7fd0ba5100096132f3a35b4b41ed2977114a88cd4ac8b663304"
+          }
+        }
+      },
+      "audio": {
+        "via": "tts"
+      },
+      "timeoutSec": 65
+    },
+    {
+      "id": "w06.a10",
+      "type": "celebrate",
+      "prompt": "Let's try picture celebration.",
+      "subject": "course-mode",
+      "robotState": "celebrating",
+      "pose": "celebrate",
+      "expression": "celebrating",
+      "phase": "celebrate",
+      "completionClass": "passive",
+      "entrance": "none",
+      "authority": "courseMode",
+      "activityId": "w06.a10",
+      "scene": {
+        "backgroundScene": {
+          "mode": "poster",
+          "poster": {
+            "key": "scene.garden@v6",
+            "assetKey": "scene.garden",
+            "version": 6,
+            "src": "http://127.0.0.1:8103/tvideo-demo/shared/course-mode/scene.garden/v1.jpg",
+            "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc"
+          }
+        },
+        "teachingObject": {
+          "asset": {
+            "key": "object.red@v1",
+            "assetKey": "object.red",
+            "version": 1,
+            "src": "http://127.0.0.1:8103/tvideo-demo/shared/course-mode/object.red/v1.png",
+            "sha256": "a625772866399ae2e0ba087bb59328e3b918d07b22b034d89506eca6b7c95d66"
+          }
+        },
+        "robotOverlay": {
+          "robotState": "celebrating",
+          "pose": "celebrate",
+          "expression": "celebrating",
+          "asset": {
+            "key": "cpr-t09.robot.teach@v3",
+            "assetKey": "cpr-t09.robot.teach",
+            "version": 3,
+            "src": "http://127.0.0.1:8103/tvideo-demo/cpr-t09/teach.mp4",
+            "sha256": "51d6af617aded7fd0ba5100096132f3a35b4b41ed2977114a88cd4ac8b663304"
+          }
+        }
+      },
+      "audio": {
+        "via": "tts"
+      },
+      "timeoutSec": 35
+    }
+  ],
+  "assets": [
+    {
+      "assetId": "backgroundScene.poster",
+      "id": "backgroundScene.poster",
+      "layer": "backgroundScene",
+      "role": "poster",
+      "mediaType": "image/jpeg",
+      "path": "assets/background/barn-round-field-poster.jpg",
+      "url": "http://127.0.0.1:8103/tvideo-demo/assets/background/barn-round-field-poster.jpg",
+      "sha256": "d5cdaba9f9086ef56a5f41c5fddf2e32b91ecfe141cc346f3221c7b221a3a357",
+      "bytes": 18482,
+      "dimensions": {
+        "width": 320,
+        "height": 180
+      },
+      "critical": true
+    },
+    {
+      "assetId": "scene.classroom@v1",
+      "id": "scene.classroom@v1",
+      "assetKey": "scene.classroom",
+      "version": 1,
+      "layer": "backgroundScene",
+      "role": "poster",
+      "mediaType": "image/jpeg",
+      "path": "shared/course-mode/scene.classroom/v1.jpg",
+      "url": "http://127.0.0.1:8103/tvideo-demo/shared/course-mode/scene.classroom/v1.jpg",
+      "sha256": "56de09374843a96b40322ebec2a956498ac144938dcc8a8af7b018d0554873c2",
+      "bytes": 43599,
+      "dimensions": {
+        "width": 480,
+        "height": 320
+      },
+      "critical": true
+    },
+    {
+      "assetId": "object.green@v6",
+      "id": "object.green@v6",
+      "assetKey": "object.green",
+      "version": 6,
+      "layer": "teachingObject",
+      "role": "primarySubject",
+      "mediaType": "image/png",
+      "path": "shared/course-mode/object.green/v1.png",
+      "url": "http://127.0.0.1:8103/tvideo-demo/shared/course-mode/object.green/v1.png",
+      "sha256": "109546a39a0b37de8d7777de98e8a8d8e982d028c6be586719ceb0e1566c595c",
+      "bytes": 15086,
+      "dimensions": {
+        "width": 95,
+        "height": 95
+      },
+      "critical": true
+    },
+    {
+      "assetId": "cpr-t09.robot.celebrate@v2",
+      "id": "cpr-t09.robot.celebrate@v2",
+      "assetKey": "cpr-t09.robot.celebrate",
+      "version": 2,
+      "layer": "robotOverlay",
+      "role": "pose",
+      "mediaType": "video/mp4",
+      "path": "cpr-t09/celebrate.mp4",
+      "url": "http://127.0.0.1:8103/tvideo-demo/cpr-t09/celebrate.mp4",
+      "sha256": "fb348396f7d264403d5893596cbc6347fe2687f3cd00185ed4a69ee3dd36cafa",
+      "bytes": 573897,
+      "dimensions": {
+        "width": 150,
+        "height": 150
+      },
+      "critical": true
+    },
+    {
+      "assetId": "cpr-t09.robot.flyIn@v2",
+      "id": "cpr-t09.robot.flyIn@v2",
+      "assetKey": "cpr-t09.robot.flyIn",
+      "version": 2,
+      "layer": "robotOverlay",
+      "role": "pose",
+      "mediaType": "video/mp4",
+      "path": "cpr-t09/flyIn.mp4",
+      "url": "http://127.0.0.1:8103/tvideo-demo/cpr-t09/flyIn.mp4",
+      "sha256": "88cda7f86672a272ce5294167ca5c08f11ac60b66d15f58495b48f5cf0e36e93",
+      "bytes": 95007,
+      "dimensions": {
+        "width": 240,
+        "height": 240
+      },
+      "critical": true
+    },
+    {
+      "assetId": "cpr-t09.robot.listen@v2",
+      "id": "cpr-t09.robot.listen@v2",
+      "assetKey": "cpr-t09.robot.listen",
+      "version": 2,
+      "layer": "robotOverlay",
+      "role": "pose",
+      "mediaType": "video/mp4",
+      "path": "cpr-t09/listen.mp4",
+      "url": "http://127.0.0.1:8103/tvideo-demo/cpr-t09/listen.mp4",
+      "sha256": "bde96cf377287b4eb5884e8bb5d1e848da97bb7a9af3dd2f931ac0d391f38e5f",
+      "bytes": 420097,
+      "dimensions": {
+        "width": 150,
+        "height": 150
+      },
+      "critical": true
+    },
+    {
+      "assetId": "cpr-t09.robot.teach@v3",
+      "id": "cpr-t09.robot.teach@v3",
+      "assetKey": "cpr-t09.robot.teach",
+      "version": 3,
+      "layer": "robotOverlay",
+      "role": "pose",
+      "mediaType": "video/mp4",
+      "path": "cpr-t09/teach.mp4",
+      "url": "http://127.0.0.1:8103/tvideo-demo/cpr-t09/teach.mp4",
+      "sha256": "51d6af617aded7fd0ba5100096132f3a35b4b41ed2977114a88cd4ac8b663304",
+      "bytes": 548698,
+      "dimensions": {
+        "width": 150,
+        "height": 150
+      },
+      "critical": true
+    },
+    {
+      "assetId": "cpr-t10.robot.thinking-standin@v1",
+      "id": "cpr-t10.robot.thinking-standin@v1",
+      "assetKey": "cpr-t10.robot.thinking-standin",
+      "version": 1,
+      "layer": "robotOverlay",
+      "role": "pose",
+      "mediaType": "video/mp4",
+      "path": "cpr-t09/listen.mp4",
+      "url": "http://127.0.0.1:8103/tvideo-demo/cpr-t09/listen.mp4",
+      "sha256": "bde96cf377287b4eb5884e8bb5d1e848da97bb7a9af3dd2f931ac0d391f38e5f",
+      "bytes": 420097,
+      "dimensions": {
+        "width": 150,
+        "height": 150
+      },
+      "critical": true
+    },
+    {
+      "assetId": "cpr-t09.robot.walk@v2",
+      "id": "cpr-t09.robot.walk@v2",
+      "assetKey": "cpr-t09.robot.walk",
+      "version": 2,
+      "layer": "robotOverlay",
+      "role": "pose",
+      "mediaType": "video/mp4",
+      "path": "cpr-t09/walk.mp4",
+      "url": "http://127.0.0.1:8103/tvideo-demo/cpr-t09/walk.mp4",
+      "sha256": "a3914fcf2b14c855879256175d46d30d03313167ce8daa35b82e3dbcef771de3",
+      "bytes": 409003,
+      "dimensions": {
+        "width": 240,
+        "height": 240
+      },
+      "critical": true
+    },
+    {
+      "assetId": "scene.garden@v6",
+      "id": "scene.garden@v6",
+      "assetKey": "scene.garden",
+      "version": 6,
+      "layer": "backgroundScene",
+      "role": "poster",
+      "mediaType": "image/jpeg",
+      "path": "shared/course-mode/scene.garden/v1.jpg",
+      "url": "http://127.0.0.1:8103/tvideo-demo/shared/course-mode/scene.garden/v1.jpg",
+      "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc",
+      "bytes": 43599,
+      "dimensions": {
+        "width": 480,
+        "height": 320
+      },
+      "critical": true
+    },
+    {
+      "assetId": "object.orange@v1",
+      "id": "object.orange@v1",
+      "assetKey": "object.orange",
+      "version": 1,
+      "layer": "teachingObject",
+      "role": "primarySubject",
+      "mediaType": "image/png",
+      "path": "shared/course-mode/object.orange/v1.png",
+      "url": "http://127.0.0.1:8103/tvideo-demo/shared/course-mode/object.orange/v1.png",
+      "sha256": "f17e22790345c23f1570b07f0a62c466c0096ab6458afe8e31c3d22826fa07e2",
+      "bytes": 15086,
+      "dimensions": {
+        "width": 95,
+        "height": 95
+      },
+      "critical": true
+    },
+    {
+      "assetId": "object.red@v1",
+      "id": "object.red@v1",
+      "assetKey": "object.red",
+      "version": 1,
+      "layer": "teachingObject",
+      "role": "primarySubject",
+      "mediaType": "image/png",
+      "path": "shared/course-mode/object.red/v1.png",
+      "url": "http://127.0.0.1:8103/tvideo-demo/shared/course-mode/object.red/v1.png",
+      "sha256": "a625772866399ae2e0ba087bb59328e3b918d07b22b034d89506eca6b7c95d66",
+      "bytes": 15086,
+      "dimensions": {
+        "width": 95,
+        "height": 95
+      },
+      "critical": true
+    },
+    {
+      "assetId": "cpr-t09.robot.exit@v2",
+      "id": "cpr-t09.robot.exit@v2",
+      "assetKey": "cpr-t09.robot.exit",
+      "version": 2,
+      "layer": "robotOverlay",
+      "role": "pose",
+      "mediaType": "video/mp4",
+      "path": "cpr-t09/exit.mp4",
+      "url": "http://127.0.0.1:8103/tvideo-demo/cpr-t09/exit.mp4",
+      "sha256": "a6f5e52a3cb6e7e15b10a6c7008802fb993e62c9d5e1f43ce0ca40507f05e73a",
+      "bytes": 153653,
+      "dimensions": {
+        "width": 150,
+        "height": 150
+      },
+      "critical": true
+    }
+  ],
+  "cinematicPhases": [
+    {
+      "layers": [
+        {
+          "slot": "backgroundScene",
+          "bytes": 43599,
+          "layer": "background",
+          "sha256": "56de09374843a96b40322ebec2a956498ac144938dcc8a8af7b018d0554873c2",
+          "version": 1,
+          "assetKey": "scene.classroom",
+          "metadata": {
+            "fit": "cover",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 320
+            },
+            "width": 480,
+            "height": 320,
+            "mediaKind": "image",
+            "mediaType": "image/jpeg"
+          },
+          "assetVersionId": "2760da21-9542-4cf4-8ee1-a00e0747f0ab"
+        },
+        {
+          "slot": "teachingObject",
+          "bytes": 15086,
+          "layer": "teachingObject",
+          "sha256": "109546a39a0b37de8d7777de98e8a8d8e982d028c6be586719ceb0e1566c595c",
+          "version": 6,
+          "assetKey": "object.green",
+          "metadata": {
+            "fit": "contain",
+            "rect": {
+              "x": 20,
+              "y": 168,
+              "width": 95,
+              "height": 95
+            },
+            "width": 95,
+            "height": 95,
+            "mediaKind": "image",
+            "mediaType": "image/png"
+          },
+          "assetVersionId": "cb3dd50f-5897-4ce6-82bf-353accea65d7"
+        },
+        {
+          "slot": "robotOverlay",
+          "bytes": 95007,
+          "layer": "robotOverlay",
+          "sha256": "88cda7f86672a272ce5294167ca5c08f11ac60b66d15f58495b48f5cf0e36e93",
+          "version": 2,
+          "assetKey": "cpr-t09.robot.flyIn",
+          "metadata": {
+            "fps": 15,
+            "rect": {
+              "x": 240,
+              "y": 0,
+              "width": 240,
+              "height": 240
+            },
+            "codec": "mjpeg",
+            "width": 240,
+            "height": 240,
+            "hasAudio": false,
+            "chromaKey": {
+              "keyColor": "#00ff00",
+              "tolerance": 32,
+              "featherPx": 4
+            },
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "durationMs": 3200,
+            "frameCount": 48
+          },
+          "assetVersionId": "cc9633a9-3c6a-47d7-88ad-b87195cc49ed"
+        }
+      ],
+      "timing": {
+        "durationMs": 3200
+      },
+      "phaseId": "flyIn",
+      "templateId": "layeredCinematic",
+      "activityIds": [
+        "w06.a01"
+      ],
+      "playbackMode": "once",
+      "templateVersion": 1
+    },
+    {
+      "layers": [
+        {
+          "slot": "backgroundScene",
+          "bytes": 43599,
+          "layer": "background",
+          "sha256": "56de09374843a96b40322ebec2a956498ac144938dcc8a8af7b018d0554873c2",
+          "version": 1,
+          "assetKey": "scene.classroom",
+          "metadata": {
+            "fit": "cover",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 320
+            },
+            "width": 480,
+            "height": 320,
+            "mediaKind": "image",
+            "mediaType": "image/jpeg"
+          },
+          "assetVersionId": "2760da21-9542-4cf4-8ee1-a00e0747f0ab"
+        },
+        {
+          "slot": "teachingObject",
+          "bytes": 15086,
+          "layer": "teachingObject",
+          "sha256": "109546a39a0b37de8d7777de98e8a8d8e982d028c6be586719ceb0e1566c595c",
+          "version": 6,
+          "assetKey": "object.green",
+          "metadata": {
+            "fit": "contain",
+            "rect": {
+              "x": 20,
+              "y": 168,
+              "width": 95,
+              "height": 95
+            },
+            "width": 95,
+            "height": 95,
+            "mediaKind": "image",
+            "mediaType": "image/png"
+          },
+          "assetVersionId": "cb3dd50f-5897-4ce6-82bf-353accea65d7"
+        },
+        {
+          "slot": "robotOverlay",
+          "bytes": 409003,
+          "layer": "robotOverlay",
+          "sha256": "a3914fcf2b14c855879256175d46d30d03313167ce8daa35b82e3dbcef771de3",
+          "version": 2,
+          "assetKey": "cpr-t09.robot.walk",
+          "metadata": {
+            "fps": 15,
+            "rect": {
+              "x": 73,
+              "y": 80,
+              "width": 240,
+              "height": 240
+            },
+            "codec": "mjpeg",
+            "width": 240,
+            "height": 240,
+            "hasAudio": false,
+            "chromaKey": {
+              "keyColor": "#00ff00",
+              "tolerance": 32,
+              "featherPx": 4
+            },
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "durationMs": 5000,
+            "frameCount": 75
+          },
+          "assetVersionId": "e022cab4-99a2-4ad1-be82-ae4fac4ba8f1"
+        }
+      ],
+      "timing": {
+        "durationMs": 5000
+      },
+      "phaseId": "walk",
+      "templateId": "layeredCinematic",
+      "activityIds": [
+        "w06.a01"
+      ],
+      "playbackMode": "once",
+      "templateVersion": 1
+    },
+    {
+      "layers": [
+        {
+          "slot": "backgroundScene",
+          "bytes": 43599,
+          "layer": "background",
+          "sha256": "56de09374843a96b40322ebec2a956498ac144938dcc8a8af7b018d0554873c2",
+          "version": 1,
+          "assetKey": "scene.classroom",
+          "metadata": {
+            "fit": "cover",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 320
+            },
+            "width": 480,
+            "height": 320,
+            "mediaKind": "image",
+            "mediaType": "image/jpeg"
+          },
+          "assetVersionId": "2760da21-9542-4cf4-8ee1-a00e0747f0ab"
+        },
+        {
+          "slot": "teachingObject",
+          "bytes": 15086,
+          "layer": "teachingObject",
+          "sha256": "109546a39a0b37de8d7777de98e8a8d8e982d028c6be586719ceb0e1566c595c",
+          "version": 6,
+          "assetKey": "object.green",
+          "metadata": {
+            "fit": "contain",
+            "rect": {
+              "x": 20,
+              "y": 168,
+              "width": 95,
+              "height": 95
+            },
+            "width": 95,
+            "height": 95,
+            "mediaKind": "image",
+            "mediaType": "image/png"
+          },
+          "assetVersionId": "cb3dd50f-5897-4ce6-82bf-353accea65d7"
+        },
+        {
+          "slot": "robotOverlay",
+          "bytes": 548698,
+          "layer": "robotOverlay",
+          "sha256": "51d6af617aded7fd0ba5100096132f3a35b4b41ed2977114a88cd4ac8b663304",
+          "version": 3,
+          "assetKey": "cpr-t09.robot.teach",
+          "metadata": {
+            "fps": 15,
+            "rect": {
+              "x": 118,
+              "y": 160,
+              "width": 150,
+              "height": 150
+            },
+            "codec": "mjpeg",
+            "width": 150,
+            "height": 150,
+            "hasAudio": false,
+            "chromaKey": {
+              "keyColor": "#00ff00",
+              "tolerance": 32,
+              "featherPx": 4
+            },
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "durationMs": 4000,
+            "frameCount": 60
+          },
+          "assetVersionId": "38baacac-bbdb-497e-bb50-85e8a8e9c01c"
+        }
+      ],
+      "timing": {
+        "durationMs": 4000
+      },
+      "phaseId": "teach",
+      "templateId": "layeredCinematic",
+      "activityIds": [
+        "w06.a01"
+      ],
+      "playbackMode": "loop",
+      "templateVersion": 1
+    },
+    {
+      "layers": [
+        {
+          "slot": "backgroundScene",
+          "bytes": 43599,
+          "layer": "background",
+          "sha256": "56de09374843a96b40322ebec2a956498ac144938dcc8a8af7b018d0554873c2",
+          "version": 1,
+          "assetKey": "scene.classroom",
+          "metadata": {
+            "fit": "cover",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 320
+            },
+            "width": 480,
+            "height": 320,
+            "mediaKind": "image",
+            "mediaType": "image/jpeg"
+          },
+          "assetVersionId": "2760da21-9542-4cf4-8ee1-a00e0747f0ab"
+        },
+        {
+          "slot": "teachingObject",
+          "bytes": 15086,
+          "layer": "teachingObject",
+          "sha256": "109546a39a0b37de8d7777de98e8a8d8e982d028c6be586719ceb0e1566c595c",
+          "version": 6,
+          "assetKey": "object.green",
+          "metadata": {
+            "fit": "contain",
+            "rect": {
+              "x": 20,
+              "y": 168,
+              "width": 95,
+              "height": 95
+            },
+            "width": 95,
+            "height": 95,
+            "mediaKind": "image",
+            "mediaType": "image/png"
+          },
+          "assetVersionId": "cb3dd50f-5897-4ce6-82bf-353accea65d7"
+        },
+        {
+          "slot": "robotOverlay",
+          "bytes": 420097,
+          "layer": "robotOverlay",
+          "sha256": "bde96cf377287b4eb5884e8bb5d1e848da97bb7a9af3dd2f931ac0d391f38e5f",
+          "version": 2,
+          "assetKey": "cpr-t09.robot.listen",
+          "metadata": {
+            "fps": 15,
+            "rect": {
+              "x": 118,
+              "y": 160,
+              "width": 150,
+              "height": 150
+            },
+            "codec": "mjpeg",
+            "width": 150,
+            "height": 150,
+            "hasAudio": false,
+            "chromaKey": {
+              "keyColor": "#00ff00",
+              "tolerance": 32,
+              "featherPx": 4
+            },
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "durationMs": 3000,
+            "frameCount": 45
+          },
+          "assetVersionId": "4c94d52a-62bc-4014-9bf8-d8acbbe5d2db"
+        }
+      ],
+      "timing": {
+        "durationMs": 3000
+      },
+      "phaseId": "listen",
+      "templateId": "layeredCinematic",
+      "activityIds": [
+        "w06.a01"
+      ],
+      "playbackMode": "loop",
+      "templateVersion": 1
+    },
+    {
+      "layers": [
+        {
+          "slot": "backgroundScene",
+          "bytes": 43599,
+          "layer": "background",
+          "sha256": "56de09374843a96b40322ebec2a956498ac144938dcc8a8af7b018d0554873c2",
+          "version": 1,
+          "assetKey": "scene.classroom",
+          "metadata": {
+            "fit": "cover",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 320
+            },
+            "width": 480,
+            "height": 320,
+            "mediaKind": "image",
+            "mediaType": "image/jpeg"
+          },
+          "assetVersionId": "2760da21-9542-4cf4-8ee1-a00e0747f0ab"
+        },
+        {
+          "slot": "teachingObject",
+          "bytes": 15086,
+          "layer": "teachingObject",
+          "sha256": "109546a39a0b37de8d7777de98e8a8d8e982d028c6be586719ceb0e1566c595c",
+          "version": 6,
+          "assetKey": "object.green",
+          "metadata": {
+            "fit": "contain",
+            "rect": {
+              "x": 20,
+              "y": 168,
+              "width": 95,
+              "height": 95
+            },
+            "width": 95,
+            "height": 95,
+            "mediaKind": "image",
+            "mediaType": "image/png"
+          },
+          "assetVersionId": "cb3dd50f-5897-4ce6-82bf-353accea65d7"
+        },
+        {
+          "slot": "robotOverlay",
+          "bytes": 420097,
+          "layer": "robotOverlay",
+          "sha256": "bde96cf377287b4eb5884e8bb5d1e848da97bb7a9af3dd2f931ac0d391f38e5f",
+          "version": 1,
+          "assetKey": "cpr-t10.robot.thinking-standin",
+          "metadata": {
+            "fps": 15,
+            "rect": {
+              "x": 118,
+              "y": 160,
+              "width": 150,
+              "height": 150
+            },
+            "codec": "mjpeg",
+            "width": 150,
+            "height": 150,
+            "hasAudio": false,
+            "chromaKey": {
+              "keyColor": "#00ff00",
+              "tolerance": 32,
+              "featherPx": 4
+            },
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "durationMs": 3000,
+            "frameCount": 45
+          },
+          "assetVersionId": "66235d8b-698c-4d5f-a811-c34fd7d7ed24"
+        }
+      ],
+      "timing": {
+        "durationMs": 3000
+      },
+      "phaseId": "thinking",
+      "templateId": "layeredCinematic",
+      "activityIds": [
+        "w06.a01"
+      ],
+      "playbackMode": "loop",
+      "templateVersion": 1
+    },
+    {
+      "layers": [
+        {
+          "slot": "backgroundScene",
+          "bytes": 43599,
+          "layer": "background",
+          "sha256": "56de09374843a96b40322ebec2a956498ac144938dcc8a8af7b018d0554873c2",
+          "version": 1,
+          "assetKey": "scene.classroom",
+          "metadata": {
+            "fit": "cover",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 320
+            },
+            "width": 480,
+            "height": 320,
+            "mediaKind": "image",
+            "mediaType": "image/jpeg"
+          },
+          "assetVersionId": "2760da21-9542-4cf4-8ee1-a00e0747f0ab"
+        },
+        {
+          "slot": "teachingObject",
+          "bytes": 15086,
+          "layer": "teachingObject",
+          "sha256": "109546a39a0b37de8d7777de98e8a8d8e982d028c6be586719ceb0e1566c595c",
+          "version": 6,
+          "assetKey": "object.green",
+          "metadata": {
+            "fit": "contain",
+            "rect": {
+              "x": 20,
+              "y": 168,
+              "width": 95,
+              "height": 95
+            },
+            "width": 95,
+            "height": 95,
+            "mediaKind": "image",
+            "mediaType": "image/png"
+          },
+          "assetVersionId": "cb3dd50f-5897-4ce6-82bf-353accea65d7"
+        },
+        {
+          "slot": "robotOverlay",
+          "bytes": 573897,
+          "layer": "robotOverlay",
+          "sha256": "fb348396f7d264403d5893596cbc6347fe2687f3cd00185ed4a69ee3dd36cafa",
+          "version": 2,
+          "assetKey": "cpr-t09.robot.celebrate",
+          "metadata": {
+            "fps": 15,
+            "rect": {
+              "x": 118,
+              "y": 160,
+              "width": 150,
+              "height": 150
+            },
+            "codec": "mjpeg",
+            "width": 150,
+            "height": 150,
+            "hasAudio": false,
+            "chromaKey": {
+              "keyColor": "#00ff00",
+              "tolerance": 32,
+              "featherPx": 4
+            },
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "durationMs": 4000,
+            "frameCount": 60
+          },
+          "assetVersionId": "7f2f3b87-8161-4576-a06b-fd4d8a9345f4"
+        }
+      ],
+      "timing": {
+        "durationMs": 4000
+      },
+      "phaseId": "celebrate",
+      "templateId": "layeredCinematic",
+      "activityIds": [
+        "w06.a01"
+      ],
+      "playbackMode": "once",
+      "templateVersion": 1
+    },
+    {
+      "layers": [
+        {
+          "slot": "backgroundScene",
+          "bytes": 43599,
+          "layer": "background",
+          "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc",
+          "version": 6,
+          "assetKey": "scene.garden",
+          "metadata": {
+            "fit": "cover",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 320
+            },
+            "width": 480,
+            "height": 320,
+            "mediaKind": "image",
+            "mediaType": "image/jpeg"
+          },
+          "assetVersionId": "cd4ead1d-3e09-4e97-948e-756f42b6b0f3"
+        },
+        {
+          "slot": "teachingObject",
+          "bytes": 15086,
+          "layer": "teachingObject",
+          "sha256": "f17e22790345c23f1570b07f0a62c466c0096ab6458afe8e31c3d22826fa07e2",
+          "version": 1,
+          "assetKey": "object.orange",
+          "metadata": {
+            "fit": "contain",
+            "rect": {
+              "x": 20,
+              "y": 168,
+              "width": 95,
+              "height": 95
+            },
+            "width": 95,
+            "height": 95,
+            "mediaKind": "image",
+            "mediaType": "image/png"
+          },
+          "assetVersionId": "bc909a6e-10ca-4b63-8c16-a5f136369d4f"
+        },
+        {
+          "slot": "robotOverlay",
+          "bytes": 548698,
+          "layer": "robotOverlay",
+          "sha256": "51d6af617aded7fd0ba5100096132f3a35b4b41ed2977114a88cd4ac8b663304",
+          "version": 3,
+          "assetKey": "cpr-t09.robot.teach",
+          "metadata": {
+            "fps": 15,
+            "rect": {
+              "x": 118,
+              "y": 160,
+              "width": 150,
+              "height": 150
+            },
+            "codec": "mjpeg",
+            "width": 150,
+            "height": 150,
+            "hasAudio": false,
+            "chromaKey": {
+              "keyColor": "#00ff00",
+              "tolerance": 32,
+              "featherPx": 4
+            },
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "durationMs": 4000,
+            "frameCount": 60
+          },
+          "assetVersionId": "38baacac-bbdb-497e-bb50-85e8a8e9c01c"
+        }
+      ],
+      "timing": {
+        "durationMs": 4000
+      },
+      "phaseId": "teach",
+      "templateId": "layeredCinematic",
+      "activityIds": [
+        "w06.a02"
+      ],
+      "playbackMode": "loop",
+      "templateVersion": 1
+    },
+    {
+      "layers": [
+        {
+          "slot": "backgroundScene",
+          "bytes": 43599,
+          "layer": "background",
+          "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc",
+          "version": 6,
+          "assetKey": "scene.garden",
+          "metadata": {
+            "fit": "cover",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 320
+            },
+            "width": 480,
+            "height": 320,
+            "mediaKind": "image",
+            "mediaType": "image/jpeg"
+          },
+          "assetVersionId": "cd4ead1d-3e09-4e97-948e-756f42b6b0f3"
+        },
+        {
+          "slot": "teachingObject",
+          "bytes": 15086,
+          "layer": "teachingObject",
+          "sha256": "f17e22790345c23f1570b07f0a62c466c0096ab6458afe8e31c3d22826fa07e2",
+          "version": 1,
+          "assetKey": "object.orange",
+          "metadata": {
+            "fit": "contain",
+            "rect": {
+              "x": 20,
+              "y": 168,
+              "width": 95,
+              "height": 95
+            },
+            "width": 95,
+            "height": 95,
+            "mediaKind": "image",
+            "mediaType": "image/png"
+          },
+          "assetVersionId": "bc909a6e-10ca-4b63-8c16-a5f136369d4f"
+        },
+        {
+          "slot": "robotOverlay",
+          "bytes": 420097,
+          "layer": "robotOverlay",
+          "sha256": "bde96cf377287b4eb5884e8bb5d1e848da97bb7a9af3dd2f931ac0d391f38e5f",
+          "version": 2,
+          "assetKey": "cpr-t09.robot.listen",
+          "metadata": {
+            "fps": 15,
+            "rect": {
+              "x": 118,
+              "y": 160,
+              "width": 150,
+              "height": 150
+            },
+            "codec": "mjpeg",
+            "width": 150,
+            "height": 150,
+            "hasAudio": false,
+            "chromaKey": {
+              "keyColor": "#00ff00",
+              "tolerance": 32,
+              "featherPx": 4
+            },
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "durationMs": 3000,
+            "frameCount": 45
+          },
+          "assetVersionId": "4c94d52a-62bc-4014-9bf8-d8acbbe5d2db"
+        }
+      ],
+      "timing": {
+        "durationMs": 3000
+      },
+      "phaseId": "listen",
+      "templateId": "layeredCinematic",
+      "activityIds": [
+        "w06.a02"
+      ],
+      "playbackMode": "loop",
+      "templateVersion": 1
+    },
+    {
+      "layers": [
+        {
+          "slot": "backgroundScene",
+          "bytes": 43599,
+          "layer": "background",
+          "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc",
+          "version": 6,
+          "assetKey": "scene.garden",
+          "metadata": {
+            "fit": "cover",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 320
+            },
+            "width": 480,
+            "height": 320,
+            "mediaKind": "image",
+            "mediaType": "image/jpeg"
+          },
+          "assetVersionId": "cd4ead1d-3e09-4e97-948e-756f42b6b0f3"
+        },
+        {
+          "slot": "teachingObject",
+          "bytes": 15086,
+          "layer": "teachingObject",
+          "sha256": "f17e22790345c23f1570b07f0a62c466c0096ab6458afe8e31c3d22826fa07e2",
+          "version": 1,
+          "assetKey": "object.orange",
+          "metadata": {
+            "fit": "contain",
+            "rect": {
+              "x": 20,
+              "y": 168,
+              "width": 95,
+              "height": 95
+            },
+            "width": 95,
+            "height": 95,
+            "mediaKind": "image",
+            "mediaType": "image/png"
+          },
+          "assetVersionId": "bc909a6e-10ca-4b63-8c16-a5f136369d4f"
+        },
+        {
+          "slot": "robotOverlay",
+          "bytes": 420097,
+          "layer": "robotOverlay",
+          "sha256": "bde96cf377287b4eb5884e8bb5d1e848da97bb7a9af3dd2f931ac0d391f38e5f",
+          "version": 1,
+          "assetKey": "cpr-t10.robot.thinking-standin",
+          "metadata": {
+            "fps": 15,
+            "rect": {
+              "x": 118,
+              "y": 160,
+              "width": 150,
+              "height": 150
+            },
+            "codec": "mjpeg",
+            "width": 150,
+            "height": 150,
+            "hasAudio": false,
+            "chromaKey": {
+              "keyColor": "#00ff00",
+              "tolerance": 32,
+              "featherPx": 4
+            },
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "durationMs": 3000,
+            "frameCount": 45
+          },
+          "assetVersionId": "66235d8b-698c-4d5f-a811-c34fd7d7ed24"
+        }
+      ],
+      "timing": {
+        "durationMs": 3000
+      },
+      "phaseId": "thinking",
+      "templateId": "layeredCinematic",
+      "activityIds": [
+        "w06.a02"
+      ],
+      "playbackMode": "loop",
+      "templateVersion": 1
+    },
+    {
+      "layers": [
+        {
+          "slot": "backgroundScene",
+          "bytes": 43599,
+          "layer": "background",
+          "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc",
+          "version": 6,
+          "assetKey": "scene.garden",
+          "metadata": {
+            "fit": "cover",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 320
+            },
+            "width": 480,
+            "height": 320,
+            "mediaKind": "image",
+            "mediaType": "image/jpeg"
+          },
+          "assetVersionId": "cd4ead1d-3e09-4e97-948e-756f42b6b0f3"
+        },
+        {
+          "slot": "teachingObject",
+          "bytes": 15086,
+          "layer": "teachingObject",
+          "sha256": "f17e22790345c23f1570b07f0a62c466c0096ab6458afe8e31c3d22826fa07e2",
+          "version": 1,
+          "assetKey": "object.orange",
+          "metadata": {
+            "fit": "contain",
+            "rect": {
+              "x": 20,
+              "y": 168,
+              "width": 95,
+              "height": 95
+            },
+            "width": 95,
+            "height": 95,
+            "mediaKind": "image",
+            "mediaType": "image/png"
+          },
+          "assetVersionId": "bc909a6e-10ca-4b63-8c16-a5f136369d4f"
+        },
+        {
+          "slot": "robotOverlay",
+          "bytes": 573897,
+          "layer": "robotOverlay",
+          "sha256": "fb348396f7d264403d5893596cbc6347fe2687f3cd00185ed4a69ee3dd36cafa",
+          "version": 2,
+          "assetKey": "cpr-t09.robot.celebrate",
+          "metadata": {
+            "fps": 15,
+            "rect": {
+              "x": 118,
+              "y": 160,
+              "width": 150,
+              "height": 150
+            },
+            "codec": "mjpeg",
+            "width": 150,
+            "height": 150,
+            "hasAudio": false,
+            "chromaKey": {
+              "keyColor": "#00ff00",
+              "tolerance": 32,
+              "featherPx": 4
+            },
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "durationMs": 4000,
+            "frameCount": 60
+          },
+          "assetVersionId": "7f2f3b87-8161-4576-a06b-fd4d8a9345f4"
+        }
+      ],
+      "timing": {
+        "durationMs": 4000
+      },
+      "phaseId": "celebrate",
+      "templateId": "layeredCinematic",
+      "activityIds": [
+        "w06.a02"
+      ],
+      "playbackMode": "once",
+      "templateVersion": 1
+    },
+    {
+      "layers": [
+        {
+          "slot": "backgroundScene",
+          "bytes": 43599,
+          "layer": "background",
+          "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc",
+          "version": 6,
+          "assetKey": "scene.garden",
+          "metadata": {
+            "fit": "cover",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 320
+            },
+            "width": 480,
+            "height": 320,
+            "mediaKind": "image",
+            "mediaType": "image/jpeg"
+          },
+          "assetVersionId": "cd4ead1d-3e09-4e97-948e-756f42b6b0f3"
+        },
+        {
+          "slot": "robotOverlay",
+          "bytes": 548698,
+          "layer": "robotOverlay",
+          "sha256": "51d6af617aded7fd0ba5100096132f3a35b4b41ed2977114a88cd4ac8b663304",
+          "version": 3,
+          "assetKey": "cpr-t09.robot.teach",
+          "metadata": {
+            "fps": 15,
+            "rect": {
+              "x": 118,
+              "y": 160,
+              "width": 150,
+              "height": 150
+            },
+            "codec": "mjpeg",
+            "width": 150,
+            "height": 150,
+            "hasAudio": false,
+            "chromaKey": {
+              "keyColor": "#00ff00",
+              "tolerance": 32,
+              "featherPx": 4
+            },
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "durationMs": 4000,
+            "frameCount": 60
+          },
+          "assetVersionId": "38baacac-bbdb-497e-bb50-85e8a8e9c01c"
+        }
+      ],
+      "timing": {
+        "durationMs": 4000
+      },
+      "phaseId": "teach",
+      "templateId": "layeredCinematic",
+      "activityIds": [
+        "w06.a03",
+        "w06.a04",
+        "w06.a05",
+        "w06.a06",
+        "w06.a07",
+        "w06.a08",
+        "w06.a09"
+      ],
+      "playbackMode": "loop",
+      "templateVersion": 1
+    },
+    {
+      "layers": [
+        {
+          "slot": "backgroundScene",
+          "bytes": 43599,
+          "layer": "background",
+          "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc",
+          "version": 6,
+          "assetKey": "scene.garden",
+          "metadata": {
+            "fit": "cover",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 320
+            },
+            "width": 480,
+            "height": 320,
+            "mediaKind": "image",
+            "mediaType": "image/jpeg"
+          },
+          "assetVersionId": "cd4ead1d-3e09-4e97-948e-756f42b6b0f3"
+        },
+        {
+          "slot": "robotOverlay",
+          "bytes": 420097,
+          "layer": "robotOverlay",
+          "sha256": "bde96cf377287b4eb5884e8bb5d1e848da97bb7a9af3dd2f931ac0d391f38e5f",
+          "version": 2,
+          "assetKey": "cpr-t09.robot.listen",
+          "metadata": {
+            "fps": 15,
+            "rect": {
+              "x": 118,
+              "y": 160,
+              "width": 150,
+              "height": 150
+            },
+            "codec": "mjpeg",
+            "width": 150,
+            "height": 150,
+            "hasAudio": false,
+            "chromaKey": {
+              "keyColor": "#00ff00",
+              "tolerance": 32,
+              "featherPx": 4
+            },
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "durationMs": 3000,
+            "frameCount": 45
+          },
+          "assetVersionId": "4c94d52a-62bc-4014-9bf8-d8acbbe5d2db"
+        }
+      ],
+      "timing": {
+        "durationMs": 3000
+      },
+      "phaseId": "listen",
+      "templateId": "layeredCinematic",
+      "activityIds": [
+        "w06.a03",
+        "w06.a04",
+        "w06.a05",
+        "w06.a06",
+        "w06.a07",
+        "w06.a08",
+        "w06.a09"
+      ],
+      "playbackMode": "loop",
+      "templateVersion": 1
+    },
+    {
+      "layers": [
+        {
+          "slot": "backgroundScene",
+          "bytes": 43599,
+          "layer": "background",
+          "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc",
+          "version": 6,
+          "assetKey": "scene.garden",
+          "metadata": {
+            "fit": "cover",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 320
+            },
+            "width": 480,
+            "height": 320,
+            "mediaKind": "image",
+            "mediaType": "image/jpeg"
+          },
+          "assetVersionId": "cd4ead1d-3e09-4e97-948e-756f42b6b0f3"
+        },
+        {
+          "slot": "robotOverlay",
+          "bytes": 420097,
+          "layer": "robotOverlay",
+          "sha256": "bde96cf377287b4eb5884e8bb5d1e848da97bb7a9af3dd2f931ac0d391f38e5f",
+          "version": 1,
+          "assetKey": "cpr-t10.robot.thinking-standin",
+          "metadata": {
+            "fps": 15,
+            "rect": {
+              "x": 118,
+              "y": 160,
+              "width": 150,
+              "height": 150
+            },
+            "codec": "mjpeg",
+            "width": 150,
+            "height": 150,
+            "hasAudio": false,
+            "chromaKey": {
+              "keyColor": "#00ff00",
+              "tolerance": 32,
+              "featherPx": 4
+            },
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "durationMs": 3000,
+            "frameCount": 45
+          },
+          "assetVersionId": "66235d8b-698c-4d5f-a811-c34fd7d7ed24"
+        }
+      ],
+      "timing": {
+        "durationMs": 3000
+      },
+      "phaseId": "thinking",
+      "templateId": "layeredCinematic",
+      "activityIds": [
+        "w06.a03",
+        "w06.a04",
+        "w06.a05",
+        "w06.a06",
+        "w06.a07",
+        "w06.a08",
+        "w06.a09"
+      ],
+      "playbackMode": "loop",
+      "templateVersion": 1
+    },
+    {
+      "layers": [
+        {
+          "slot": "backgroundScene",
+          "bytes": 43599,
+          "layer": "background",
+          "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc",
+          "version": 6,
+          "assetKey": "scene.garden",
+          "metadata": {
+            "fit": "cover",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 320
+            },
+            "width": 480,
+            "height": 320,
+            "mediaKind": "image",
+            "mediaType": "image/jpeg"
+          },
+          "assetVersionId": "cd4ead1d-3e09-4e97-948e-756f42b6b0f3"
+        },
+        {
+          "slot": "robotOverlay",
+          "bytes": 573897,
+          "layer": "robotOverlay",
+          "sha256": "fb348396f7d264403d5893596cbc6347fe2687f3cd00185ed4a69ee3dd36cafa",
+          "version": 2,
+          "assetKey": "cpr-t09.robot.celebrate",
+          "metadata": {
+            "fps": 15,
+            "rect": {
+              "x": 118,
+              "y": 160,
+              "width": 150,
+              "height": 150
+            },
+            "codec": "mjpeg",
+            "width": 150,
+            "height": 150,
+            "hasAudio": false,
+            "chromaKey": {
+              "keyColor": "#00ff00",
+              "tolerance": 32,
+              "featherPx": 4
+            },
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "durationMs": 4000,
+            "frameCount": 60
+          },
+          "assetVersionId": "7f2f3b87-8161-4576-a06b-fd4d8a9345f4"
+        }
+      ],
+      "timing": {
+        "durationMs": 4000
+      },
+      "phaseId": "celebrate",
+      "templateId": "layeredCinematic",
+      "activityIds": [
+        "w06.a03",
+        "w06.a04",
+        "w06.a05",
+        "w06.a06",
+        "w06.a07",
+        "w06.a08",
+        "w06.a09"
+      ],
+      "playbackMode": "once",
+      "templateVersion": 1
+    },
+    {
+      "layers": [
+        {
+          "slot": "backgroundScene",
+          "bytes": 43599,
+          "layer": "background",
+          "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc",
+          "version": 6,
+          "assetKey": "scene.garden",
+          "metadata": {
+            "fit": "cover",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 320
+            },
+            "width": 480,
+            "height": 320,
+            "mediaKind": "image",
+            "mediaType": "image/jpeg"
+          },
+          "assetVersionId": "cd4ead1d-3e09-4e97-948e-756f42b6b0f3"
+        },
+        {
+          "slot": "teachingObject",
+          "bytes": 15086,
+          "layer": "teachingObject",
+          "sha256": "a625772866399ae2e0ba087bb59328e3b918d07b22b034d89506eca6b7c95d66",
+          "version": 1,
+          "assetKey": "object.red",
+          "metadata": {
+            "fit": "contain",
+            "rect": {
+              "x": 20,
+              "y": 168,
+              "width": 95,
+              "height": 95
+            },
+            "width": 95,
+            "height": 95,
+            "mediaKind": "image",
+            "mediaType": "image/png"
+          },
+          "assetVersionId": "a638da38-fe1b-4bc1-82fb-cdcd31e7cad1"
+        },
+        {
+          "slot": "robotOverlay",
+          "bytes": 548698,
+          "layer": "robotOverlay",
+          "sha256": "51d6af617aded7fd0ba5100096132f3a35b4b41ed2977114a88cd4ac8b663304",
+          "version": 3,
+          "assetKey": "cpr-t09.robot.teach",
+          "metadata": {
+            "fps": 15,
+            "rect": {
+              "x": 118,
+              "y": 160,
+              "width": 150,
+              "height": 150
+            },
+            "codec": "mjpeg",
+            "width": 150,
+            "height": 150,
+            "hasAudio": false,
+            "chromaKey": {
+              "keyColor": "#00ff00",
+              "tolerance": 32,
+              "featherPx": 4
+            },
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "durationMs": 4000,
+            "frameCount": 60
+          },
+          "assetVersionId": "38baacac-bbdb-497e-bb50-85e8a8e9c01c"
+        }
+      ],
+      "timing": {
+        "durationMs": 4000
+      },
+      "phaseId": "teach",
+      "templateId": "layeredCinematic",
+      "activityIds": [
+        "w06.a10"
+      ],
+      "playbackMode": "loop",
+      "templateVersion": 1
+    },
+    {
+      "layers": [
+        {
+          "slot": "backgroundScene",
+          "bytes": 43599,
+          "layer": "background",
+          "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc",
+          "version": 6,
+          "assetKey": "scene.garden",
+          "metadata": {
+            "fit": "cover",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 320
+            },
+            "width": 480,
+            "height": 320,
+            "mediaKind": "image",
+            "mediaType": "image/jpeg"
+          },
+          "assetVersionId": "cd4ead1d-3e09-4e97-948e-756f42b6b0f3"
+        },
+        {
+          "slot": "teachingObject",
+          "bytes": 15086,
+          "layer": "teachingObject",
+          "sha256": "a625772866399ae2e0ba087bb59328e3b918d07b22b034d89506eca6b7c95d66",
+          "version": 1,
+          "assetKey": "object.red",
+          "metadata": {
+            "fit": "contain",
+            "rect": {
+              "x": 20,
+              "y": 168,
+              "width": 95,
+              "height": 95
+            },
+            "width": 95,
+            "height": 95,
+            "mediaKind": "image",
+            "mediaType": "image/png"
+          },
+          "assetVersionId": "a638da38-fe1b-4bc1-82fb-cdcd31e7cad1"
+        },
+        {
+          "slot": "robotOverlay",
+          "bytes": 420097,
+          "layer": "robotOverlay",
+          "sha256": "bde96cf377287b4eb5884e8bb5d1e848da97bb7a9af3dd2f931ac0d391f38e5f",
+          "version": 2,
+          "assetKey": "cpr-t09.robot.listen",
+          "metadata": {
+            "fps": 15,
+            "rect": {
+              "x": 118,
+              "y": 160,
+              "width": 150,
+              "height": 150
+            },
+            "codec": "mjpeg",
+            "width": 150,
+            "height": 150,
+            "hasAudio": false,
+            "chromaKey": {
+              "keyColor": "#00ff00",
+              "tolerance": 32,
+              "featherPx": 4
+            },
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "durationMs": 3000,
+            "frameCount": 45
+          },
+          "assetVersionId": "4c94d52a-62bc-4014-9bf8-d8acbbe5d2db"
+        }
+      ],
+      "timing": {
+        "durationMs": 3000
+      },
+      "phaseId": "listen",
+      "templateId": "layeredCinematic",
+      "activityIds": [
+        "w06.a10"
+      ],
+      "playbackMode": "loop",
+      "templateVersion": 1
+    },
+    {
+      "layers": [
+        {
+          "slot": "backgroundScene",
+          "bytes": 43599,
+          "layer": "background",
+          "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc",
+          "version": 6,
+          "assetKey": "scene.garden",
+          "metadata": {
+            "fit": "cover",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 320
+            },
+            "width": 480,
+            "height": 320,
+            "mediaKind": "image",
+            "mediaType": "image/jpeg"
+          },
+          "assetVersionId": "cd4ead1d-3e09-4e97-948e-756f42b6b0f3"
+        },
+        {
+          "slot": "teachingObject",
+          "bytes": 15086,
+          "layer": "teachingObject",
+          "sha256": "a625772866399ae2e0ba087bb59328e3b918d07b22b034d89506eca6b7c95d66",
+          "version": 1,
+          "assetKey": "object.red",
+          "metadata": {
+            "fit": "contain",
+            "rect": {
+              "x": 20,
+              "y": 168,
+              "width": 95,
+              "height": 95
+            },
+            "width": 95,
+            "height": 95,
+            "mediaKind": "image",
+            "mediaType": "image/png"
+          },
+          "assetVersionId": "a638da38-fe1b-4bc1-82fb-cdcd31e7cad1"
+        },
+        {
+          "slot": "robotOverlay",
+          "bytes": 420097,
+          "layer": "robotOverlay",
+          "sha256": "bde96cf377287b4eb5884e8bb5d1e848da97bb7a9af3dd2f931ac0d391f38e5f",
+          "version": 1,
+          "assetKey": "cpr-t10.robot.thinking-standin",
+          "metadata": {
+            "fps": 15,
+            "rect": {
+              "x": 118,
+              "y": 160,
+              "width": 150,
+              "height": 150
+            },
+            "codec": "mjpeg",
+            "width": 150,
+            "height": 150,
+            "hasAudio": false,
+            "chromaKey": {
+              "keyColor": "#00ff00",
+              "tolerance": 32,
+              "featherPx": 4
+            },
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "durationMs": 3000,
+            "frameCount": 45
+          },
+          "assetVersionId": "66235d8b-698c-4d5f-a811-c34fd7d7ed24"
+        }
+      ],
+      "timing": {
+        "durationMs": 3000
+      },
+      "phaseId": "thinking",
+      "templateId": "layeredCinematic",
+      "activityIds": [
+        "w06.a10"
+      ],
+      "playbackMode": "loop",
+      "templateVersion": 1
+    },
+    {
+      "layers": [
+        {
+          "slot": "backgroundScene",
+          "bytes": 43599,
+          "layer": "background",
+          "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc",
+          "version": 6,
+          "assetKey": "scene.garden",
+          "metadata": {
+            "fit": "cover",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 320
+            },
+            "width": 480,
+            "height": 320,
+            "mediaKind": "image",
+            "mediaType": "image/jpeg"
+          },
+          "assetVersionId": "cd4ead1d-3e09-4e97-948e-756f42b6b0f3"
+        },
+        {
+          "slot": "teachingObject",
+          "bytes": 15086,
+          "layer": "teachingObject",
+          "sha256": "a625772866399ae2e0ba087bb59328e3b918d07b22b034d89506eca6b7c95d66",
+          "version": 1,
+          "assetKey": "object.red",
+          "metadata": {
+            "fit": "contain",
+            "rect": {
+              "x": 20,
+              "y": 168,
+              "width": 95,
+              "height": 95
+            },
+            "width": 95,
+            "height": 95,
+            "mediaKind": "image",
+            "mediaType": "image/png"
+          },
+          "assetVersionId": "a638da38-fe1b-4bc1-82fb-cdcd31e7cad1"
+        },
+        {
+          "slot": "robotOverlay",
+          "bytes": 573897,
+          "layer": "robotOverlay",
+          "sha256": "fb348396f7d264403d5893596cbc6347fe2687f3cd00185ed4a69ee3dd36cafa",
+          "version": 2,
+          "assetKey": "cpr-t09.robot.celebrate",
+          "metadata": {
+            "fps": 15,
+            "rect": {
+              "x": 118,
+              "y": 160,
+              "width": 150,
+              "height": 150
+            },
+            "codec": "mjpeg",
+            "width": 150,
+            "height": 150,
+            "hasAudio": false,
+            "chromaKey": {
+              "keyColor": "#00ff00",
+              "tolerance": 32,
+              "featherPx": 4
+            },
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "durationMs": 4000,
+            "frameCount": 60
+          },
+          "assetVersionId": "7f2f3b87-8161-4576-a06b-fd4d8a9345f4"
+        }
+      ],
+      "timing": {
+        "durationMs": 4000
+      },
+      "phaseId": "celebrate",
+      "templateId": "layeredCinematic",
+      "activityIds": [
+        "w06.a10"
+      ],
+      "playbackMode": "once",
+      "templateVersion": 1
+    },
+    {
+      "layers": [
+        {
+          "slot": "backgroundScene",
+          "bytes": 43599,
+          "layer": "background",
+          "sha256": "f864f000dba6a1bf26fd2f1e457d594f7e4d8e6e8b1f565f2dae2431127349fc",
+          "version": 6,
+          "assetKey": "scene.garden",
+          "metadata": {
+            "fit": "cover",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 320
+            },
+            "width": 480,
+            "height": 320,
+            "mediaKind": "image",
+            "mediaType": "image/jpeg"
+          },
+          "assetVersionId": "cd4ead1d-3e09-4e97-948e-756f42b6b0f3"
+        },
+        {
+          "slot": "teachingObject",
+          "bytes": 15086,
+          "layer": "teachingObject",
+          "sha256": "a625772866399ae2e0ba087bb59328e3b918d07b22b034d89506eca6b7c95d66",
+          "version": 1,
+          "assetKey": "object.red",
+          "metadata": {
+            "fit": "contain",
+            "rect": {
+              "x": 20,
+              "y": 168,
+              "width": 95,
+              "height": 95
+            },
+            "width": 95,
+            "height": 95,
+            "mediaKind": "image",
+            "mediaType": "image/png"
+          },
+          "assetVersionId": "a638da38-fe1b-4bc1-82fb-cdcd31e7cad1"
+        },
+        {
+          "slot": "robotOverlay",
+          "bytes": 153653,
+          "layer": "robotOverlay",
+          "sha256": "a6f5e52a3cb6e7e15b10a6c7008802fb993e62c9d5e1f43ce0ca40507f05e73a",
+          "version": 2,
+          "assetKey": "cpr-t09.robot.exit",
+          "metadata": {
+            "fps": 15,
+            "rect": {
+              "x": 118,
+              "y": 160,
+              "width": 150,
+              "height": 150
+            },
+            "codec": "mjpeg",
+            "width": 150,
+            "height": 150,
+            "hasAudio": false,
+            "chromaKey": {
+              "keyColor": "#00ff00",
+              "tolerance": 32,
+              "featherPx": 4
+            },
+            "mediaKind": "video",
+            "mediaType": "video/mp4",
+            "durationMs": 3000,
+            "frameCount": 45
+          },
+          "assetVersionId": "be029eeb-b555-4d07-b344-722de20bab2c"
+        }
+      ],
+      "timing": {
+        "durationMs": 3000
+      },
+      "phaseId": "exit",
+      "templateId": "layeredCinematic",
+      "activityIds": [
+        "w06.a10"
+      ],
+      "playbackMode": "once",
+      "templateVersion": 1
+    }
+  ],
+  "features": {
+    "lessonRendererV5": {
+      "layeredCinematic": true,
+      "assetSource": "publishedVersionedVisualRefs"
+    }
+  },
+  "courseModeContract": {
+    "lesson": {
+      "lessonId": "curriculum.w06",
+      "lessonVersion": 1,
+      "lessonSessionId": "curriculum.w06.session"
+    },
+    "preset": {
+      "presetId": "courseCompanion",
+      "presetVersion": 2
+    },
+    "session": {
+      "maxAttempts": 3,
+      "softDeadlineSec": 480,
+      "listenTimeoutSec": 6
+    },
+    "targets": [
+      {
+        "role": "primary",
+        "targetId": "w06.red",
+        "targetWord": "red",
+        "activityIds": [
+          "w06.a03",
+          "w06.a04",
+          "w06.a05",
+          "w06.a06",
+          "w06.a07",
+          "w06.a08",
+          "w06.a09",
+          "w06.a10"
+        ],
+        "vietnameseMeanings": [
+          "\u0111\u1ecf"
+        ]
+      },
+      {
+        "role": "primary",
+        "targetId": "w06.blue",
+        "targetWord": "blue",
+        "activityIds": [
+          "w06.a03",
+          "w06.a04",
+          "w06.a05",
+          "w06.a06",
+          "w06.a07",
+          "w06.a08",
+          "w06.a09"
+        ],
+        "vietnameseMeanings": [
+          "xanh d\u01b0\u01a1ng"
+        ]
+      },
+      {
+        "role": "primary",
+        "targetId": "w06.yellow",
+        "targetWord": "yellow",
+        "activityIds": [
+          "w06.a03",
+          "w06.a04",
+          "w06.a05",
+          "w06.a06",
+          "w06.a07",
+          "w06.a08",
+          "w06.a09"
+        ],
+        "vietnameseMeanings": [
+          "v\u00e0ng"
+        ]
+      },
+      {
+        "role": "exposure",
+        "targetId": "w06.green",
+        "targetWord": "green",
+        "activityIds": [
+          "w06.a01"
+        ],
+        "vietnameseMeanings": [
+          "xanh l\u00e1"
+        ]
+      },
+      {
+        "role": "exposure",
+        "targetId": "w06.orange",
+        "targetWord": "orange",
+        "activityIds": [
+          "w06.a02"
+        ],
+        "vietnameseMeanings": [
+          "m\u00e0u cam"
+        ]
+      }
+    ],
+    "renderer": {
+      "rendererId": "teebot-lesson-renderer.v5",
+      "visualLayoutContract": "renderer-v5.layered-cinematic-layout.v1"
+    },
+    "fixtureId": "curriculum.w06",
+    "activities": [
+      {
+        "stage": "OPENING",
+        "visual": {
+          "fallback": "robotActing",
+          "strategy": "publishedTeachingObject",
+          "objectAssetKey": "object.green",
+          "backgroundAssetKey": "scene.classroom"
+        },
+        "outcomes": {
+          "help": {
+            "action": "support",
+            "activityId": "w06.a02"
+          },
+          "continue": {
+            "action": "advance"
+          },
+          "regulationBreak": {
+            "action": "pause"
+          }
+        },
+        "contextId": "s07-visual-conflict",
+        "targetIds": [
+          "w06.green"
+        ],
+        "activityId": "w06.a01",
+        "modalities": [
+          "choice",
+          "silence",
+          "help"
+        ],
+        "activityType": "picture_greeting",
+        "answerPolicy": {
+          "targetTextVisible": false,
+          "spokenTargetInPrompt": false,
+          "minElapsedSinceFullModelMs": 0,
+          "minInterveningActivityCount": 0,
+          "targetAudioBeforeAssessment": false,
+          "multipleChoiceContainsTarget": false
+        },
+        "evidenceName": "EXPOSED",
+        "embodiedIntent": "GREET_SMALL",
+        "responseStartSec": 10,
+        "visualFocusRegion": "focus.center.primary",
+        "expectedDurationSec": 25,
+        "listeningTransition": [
+          "speech_complete",
+          "gesture_settled",
+          "head_centered",
+          "arms_lowered",
+          "motor_stopped",
+          "assessment_window_open"
+        ],
+        "reducedMotionFallback": "face_and_transient_focus_cue"
+      },
+      {
+        "stage": "DISCOVER",
+        "visual": {
+          "fallback": "robotActing",
+          "strategy": "publishedTeachingObject",
+          "objectAssetKey": "object.orange",
+          "backgroundAssetKey": "scene.garden"
+        },
+        "outcomes": {
+          "help": {
+            "action": "support",
+            "activityId": "w06.a03"
+          },
+          "continue": {
+            "action": "advance"
+          },
+          "regulationBreak": {
+            "action": "pause"
+          }
+        },
+        "contextId": "w06.pictureDiscovery.2",
+        "targetIds": [
+          "w06.orange"
+        ],
+        "activityId": "w06.a02",
+        "modalities": [
+          "choice",
+          "gesture",
+          "help"
+        ],
+        "activityType": "picture_reveal",
+        "answerPolicy": {
+          "targetTextVisible": false,
+          "spokenTargetInPrompt": false,
+          "minElapsedSinceFullModelMs": 0,
+          "minInterveningActivityCount": 0,
+          "targetAudioBeforeAssessment": false,
+          "multipleChoiceContainsTarget": false
+        },
+        "evidenceName": "EXPOSED",
+        "embodiedIntent": "PRESENT_CENTER",
+        "responseStartSec": 10,
+        "visualFocusRegion": "focus.center.primary",
+        "expectedDurationSec": 30,
+        "listeningTransition": [
+          "speech_complete",
+          "gesture_settled",
+          "head_centered",
+          "arms_lowered",
+          "motor_stopped",
+          "assessment_window_open"
+        ],
+        "reducedMotionFallback": "face_and_transient_focus_cue"
+      },
+      {
+        "stage": "DISCOVER",
+        "visual": {
+          "fallback": "robotActing",
+          "strategy": "embodiedFallback",
+          "objectAssetKey": null,
+          "backgroundAssetKey": "scene.garden"
+        },
+        "outcomes": {
+          "help": {
+            "action": "support",
+            "activityId": "w06.a04"
+          },
+          "continue": {
+            "action": "advance"
+          },
+          "regulationBreak": {
+            "action": "pause"
+          }
+        },
+        "contextId": "w06.pictureDiscovery.3",
+        "targetIds": [
+          "w06.red",
+          "w06.blue",
+          "w06.yellow"
+        ],
+        "activityId": "w06.a03",
+        "modalities": [
+          "choice",
+          "gesture",
+          "help"
+        ],
+        "activityType": "picture_shared_discovery",
+        "answerPolicy": {
+          "targetTextVisible": false,
+          "spokenTargetInPrompt": false,
+          "minElapsedSinceFullModelMs": 0,
+          "minInterveningActivityCount": 0,
+          "targetAudioBeforeAssessment": false,
+          "multipleChoiceContainsTarget": false
+        },
+        "evidenceName": "EXPOSED",
+        "embodiedIntent": "PRESENT_CENTER",
+        "responseStartSec": 10,
+        "visualFocusRegion": "focus.center.primary",
+        "expectedDurationSec": 45,
+        "listeningTransition": [
+          "speech_complete",
+          "gesture_settled",
+          "head_centered",
+          "arms_lowered",
+          "motor_stopped",
+          "assessment_window_open"
+        ],
+        "reducedMotionFallback": "face_and_transient_focus_cue"
+      },
+      {
+        "stage": "UNDERSTAND",
+        "visual": {
+          "fallback": "robotActing",
+          "strategy": "embodiedFallback",
+          "objectAssetKey": null,
+          "backgroundAssetKey": "scene.garden"
+        },
+        "outcomes": {
+          "help": {
+            "action": "support",
+            "activityId": "w06.a05"
+          },
+          "continue": {
+            "action": "advance"
+          },
+          "regulationBreak": {
+            "action": "pause"
+          }
+        },
+        "contextId": "w06.pictureDiscovery.4",
+        "targetIds": [
+          "w06.red",
+          "w06.blue",
+          "w06.yellow"
+        ],
+        "activityId": "w06.a04",
+        "modalities": [
+          "choice",
+          "gesture",
+          "help"
+        ],
+        "activityType": "picture_model_meaning",
+        "answerPolicy": {
+          "targetTextVisible": false,
+          "spokenTargetInPrompt": false,
+          "minElapsedSinceFullModelMs": 0,
+          "minInterveningActivityCount": 0,
+          "targetAudioBeforeAssessment": false,
+          "multipleChoiceContainsTarget": false
+        },
+        "evidenceName": "UNDERSTOOD",
+        "embodiedIntent": "MODEL_WORD",
+        "responseStartSec": 10,
+        "visualFocusRegion": "focus.center.primary",
+        "expectedDurationSec": 50,
+        "listeningTransition": [
+          "speech_complete",
+          "gesture_settled",
+          "head_centered",
+          "arms_lowered",
+          "motor_stopped",
+          "assessment_window_open"
+        ],
+        "reducedMotionFallback": "face_and_transient_focus_cue"
+      },
+      {
+        "stage": "GUIDED_ACTION",
+        "visual": {
+          "fallback": "robotActing",
+          "strategy": "embodiedFallback",
+          "objectAssetKey": null,
+          "backgroundAssetKey": "scene.garden"
+        },
+        "outcomes": {
+          "help": {
+            "action": "support",
+            "activityId": "w06.a06"
+          },
+          "continue": {
+            "action": "advance"
+          },
+          "regulationBreak": {
+            "action": "pause"
+          }
+        },
+        "contextId": "w06.pictureDiscovery.5",
+        "targetIds": [
+          "w06.red",
+          "w06.blue",
+          "w06.yellow"
+        ],
+        "activityId": "w06.a05",
+        "modalities": [
+          "choice",
+          "gesture",
+          "help"
+        ],
+        "activityType": "find_difference",
+        "answerPolicy": {
+          "targetTextVisible": false,
+          "spokenTargetInPrompt": false,
+          "minElapsedSinceFullModelMs": 0,
+          "minInterveningActivityCount": 0,
+          "targetAudioBeforeAssessment": false,
+          "multipleChoiceContainsTarget": false
+        },
+        "evidenceName": "EXPOSED",
+        "embodiedIntent": "THINK_CURIOUS",
+        "responseStartSec": 10,
+        "visualFocusRegion": "focus.center.primary",
+        "expectedDurationSec": 50,
+        "listeningTransition": [
+          "speech_complete",
+          "gesture_settled",
+          "head_centered",
+          "arms_lowered",
+          "motor_stopped",
+          "assessment_window_open"
+        ],
+        "reducedMotionFallback": "face_and_transient_focus_cue"
+      },
+      {
+        "stage": "SUPPORTED_SPEECH",
+        "visual": {
+          "fallback": "robotActing",
+          "strategy": "embodiedFallback",
+          "objectAssetKey": null,
+          "backgroundAssetKey": "scene.garden"
+        },
+        "outcomes": {
+          "help": {
+            "action": "support",
+            "activityId": "w06.a07"
+          },
+          "continue": {
+            "action": "advance"
+          },
+          "regulationBreak": {
+            "action": "pause"
+          }
+        },
+        "contextId": "w06.pictureDiscovery.6",
+        "targetIds": [
+          "w06.red",
+          "w06.blue",
+          "w06.yellow"
+        ],
+        "activityId": "w06.a06",
+        "modalities": [
+          "speech_en",
+          "gesture",
+          "help"
+        ],
+        "activityType": "supported_naming",
+        "answerPolicy": {
+          "targetTextVisible": false,
+          "spokenTargetInPrompt": false,
+          "minElapsedSinceFullModelMs": 0,
+          "minInterveningActivityCount": 0,
+          "targetAudioBeforeAssessment": false,
+          "multipleChoiceContainsTarget": false
+        },
+        "evidenceName": "SUPPORTED_SPEECH",
+        "embodiedIntent": "MODEL_WORD",
+        "responseStartSec": 10,
+        "visualFocusRegion": "focus.center.primary",
+        "expectedDurationSec": 55,
+        "listeningTransition": [
+          "speech_complete",
+          "gesture_settled",
+          "head_centered",
+          "arms_lowered",
+          "motor_stopped",
+          "assessment_window_open"
+        ],
+        "reducedMotionFallback": "face_and_transient_focus_cue"
+      },
+      {
+        "stage": "RECALL",
+        "visual": {
+          "fallback": "robotActing",
+          "strategy": "embodiedFallback",
+          "objectAssetKey": null,
+          "backgroundAssetKey": "scene.garden"
+        },
+        "outcomes": {
+          "help": {
+            "action": "support",
+            "activityId": "w06.a08"
+          },
+          "continue": {
+            "action": "advance"
+          },
+          "regulationBreak": {
+            "action": "pause"
+          }
+        },
+        "contextId": "w06.pictureDiscovery.7",
+        "targetIds": [
+          "w06.red",
+          "w06.blue",
+          "w06.yellow"
+        ],
+        "activityId": "w06.a07",
+        "modalities": [
+          "speech_en",
+          "silence",
+          "help"
+        ],
+        "activityType": "hidden_picture_recall",
+        "answerPolicy": {
+          "targetTextVisible": false,
+          "spokenTargetInPrompt": false,
+          "minElapsedSinceFullModelMs": 20000,
+          "minInterveningActivityCount": 1,
+          "targetAudioBeforeAssessment": false,
+          "multipleChoiceContainsTarget": false
+        },
+        "evidenceName": "INDEPENDENT_RECALL",
+        "embodiedIntent": "LISTEN_STILL",
+        "responseStartSec": 10,
+        "visualFocusRegion": "focus.center.primary",
+        "expectedDurationSec": 55,
+        "listeningTransition": [
+          "speech_complete",
+          "gesture_settled",
+          "head_centered",
+          "arms_lowered",
+          "motor_stopped",
+          "assessment_window_open"
+        ],
+        "reducedMotionFallback": "face_and_transient_focus_cue"
+      },
+      {
+        "stage": "TRANSFER",
+        "visual": {
+          "fallback": "robotActing",
+          "strategy": "embodiedFallback",
+          "objectAssetKey": null,
+          "backgroundAssetKey": "scene.garden"
+        },
+        "outcomes": {
+          "help": {
+            "action": "support",
+            "activityId": "w06.a09"
+          },
+          "continue": {
+            "action": "advance"
+          },
+          "regulationBreak": {
+            "action": "pause"
+          }
+        },
+        "contextId": "w06.pictureDiscovery.8",
+        "targetIds": [
+          "w06.red",
+          "w06.blue",
+          "w06.yellow"
+        ],
+        "activityId": "w06.a08",
+        "modalities": [
+          "speech_en",
+          "choice",
+          "help"
+        ],
+        "activityType": "second_scene_naming",
+        "answerPolicy": {
+          "targetTextVisible": false,
+          "spokenTargetInPrompt": false,
+          "minElapsedSinceFullModelMs": 20000,
+          "minInterveningActivityCount": 1,
+          "targetAudioBeforeAssessment": false,
+          "multipleChoiceContainsTarget": false
+        },
+        "evidenceName": "TRANSFERRED",
+        "embodiedIntent": "THINK_CURIOUS",
+        "responseStartSec": 10,
+        "visualFocusRegion": "focus.center.primary",
+        "expectedDurationSec": 65,
+        "listeningTransition": [
+          "speech_complete",
+          "gesture_settled",
+          "head_centered",
+          "arms_lowered",
+          "motor_stopped",
+          "assessment_window_open"
+        ],
+        "reducedMotionFallback": "face_and_transient_focus_cue"
+      },
+      {
+        "stage": "DELAYED_RECALL",
+        "visual": {
+          "fallback": "robotActing",
+          "strategy": "embodiedFallback",
+          "objectAssetKey": null,
+          "backgroundAssetKey": "scene.garden"
+        },
+        "outcomes": {
+          "help": {
+            "action": "support",
+            "activityId": "w06.a10"
+          },
+          "continue": {
+            "action": "advance"
+          },
+          "regulationBreak": {
+            "action": "pause"
+          }
+        },
+        "contextId": "w06.pictureDiscovery.9",
+        "targetIds": [
+          "w06.red",
+          "w06.blue",
+          "w06.yellow"
+        ],
+        "activityId": "w06.a09",
+        "modalities": [
+          "speech_en",
+          "silence",
+          "help"
+        ],
+        "activityType": "delayed_picture_recall",
+        "answerPolicy": {
+          "targetTextVisible": false,
+          "spokenTargetInPrompt": false,
+          "minElapsedSinceFullModelMs": 20000,
+          "minInterveningActivityCount": 1,
+          "targetAudioBeforeAssessment": false,
+          "multipleChoiceContainsTarget": false
+        },
+        "evidenceName": "MASTERED_TODAY",
+        "embodiedIntent": "CELEBRATE_RECALL",
+        "responseStartSec": 10,
+        "visualFocusRegion": "focus.center.primary",
+        "expectedDurationSec": 65,
+        "listeningTransition": [
+          "speech_complete",
+          "gesture_settled",
+          "head_centered",
+          "arms_lowered",
+          "motor_stopped",
+          "assessment_window_open"
+        ],
+        "reducedMotionFallback": "face_and_transient_focus_cue"
+      },
+      {
+        "stage": "CLOSING",
+        "visual": {
+          "fallback": "robotActing",
+          "strategy": "publishedTeachingObject",
+          "objectAssetKey": "object.red",
+          "backgroundAssetKey": "scene.garden"
+        },
+        "outcomes": {
+          "finished": {
+            "action": "complete"
+          },
+          "regulationBreak": {
+            "action": "pause"
+          }
+        },
+        "contextId": "w06.pictureDiscovery.10",
+        "targetIds": [
+          "w06.red"
+        ],
+        "activityId": "w06.a10",
+        "modalities": [
+          "choice",
+          "silence",
+          "help"
+        ],
+        "activityType": "picture_celebration",
+        "answerPolicy": {
+          "targetTextVisible": false,
+          "spokenTargetInPrompt": false,
+          "minElapsedSinceFullModelMs": 0,
+          "minInterveningActivityCount": 0,
+          "targetAudioBeforeAssessment": false,
+          "multipleChoiceContainsTarget": false
+        },
+        "evidenceName": "EXPOSED",
+        "embodiedIntent": "GOODBYE_SMALL",
+        "responseStartSec": 10,
+        "visualFocusRegion": "focus.center.primary",
+        "expectedDurationSec": 35,
+        "listeningTransition": [
+          "speech_complete",
+          "gesture_settled",
+          "head_centered",
+          "arms_lowered",
+          "motor_stopped",
+          "assessment_window_open"
+        ],
+        "reducedMotionFallback": "face_and_transient_focus_cue"
+      }
+    ],
+    "visualFocus": {
+      "regions": [
+        "focus.center.primary",
+        "focus.left.choice",
+        "focus.right.choice"
+      ],
+      "directionSource": "authored_visual_focus_region",
+      "presentCenterTarget": "single_teaching_object"
+    },
+    "checksumRules": {
+      "encoding": "UTF-8",
+      "algorithm": "SHA-256",
+      "arrayOrder": "preserved",
+      "whitespace": "none",
+      "objectKeyOrder": "lexicographic",
+      "canonicalization": "tbot-json-c14n.v1",
+      "excludedJsonPointers": [
+        "/contractChecksum"
+      ],
+      "unicodeNormalization": "NFC"
+    },
+    "evidenceNames": [
+      "NOT_STARTED",
+      "EXPOSED",
+      "UNDERSTOOD",
+      "SUPPORTED_SPEECH",
+      "INDEPENDENT_RECALL",
+      "TRANSFERRED",
+      "MASTERED_TODAY",
+      "REVIEW_NEEDED"
+    ],
+    "schemaVersion": 1,
+    "contractVersion": "courseCompanion.v2.contract.v1",
+    "contractChecksum": "1c718d122c2ccee527d388f907077002ecfe2d96cb6885cbeb2ea3fabcee2737",
+    "embodiedIntentNames": [
+      "REST_WARM",
+      "GREET_SMALL",
+      "INVITE_CHILD",
+      "PRESENT_CENTER",
+      "PRESENT_LEFT",
+      "PRESENT_RIGHT",
+      "LISTEN_STILL",
+      "THINK_CURIOUS",
+      "ACKNOWLEDGE_STORY",
+      "MODEL_WORD",
+      "ENCOURAGE_SMALL",
+      "TRY_DIFFERENT_WAY",
+      "CELEBRATE_RECALL",
+      "CELEBRATE_MASTERY",
+      "COMFORT_CALM",
+      "PAUSE_CHOICE",
+      "GOODBYE_SMALL"
+    ]
+  }
+}

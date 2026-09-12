@@ -2,6 +2,7 @@ const { test, expect } = require('@playwright/test');
 const { loginAsLessonAuthor } = require('./helpers/session');
 const { monitorUnexpectedPageErrors } = require('./helpers/page-errors');
 const { gotoAppRoute, stabilizeStageMedia } = require('./helpers/navigation');
+const { visitPersistedPhases } = require('./helpers/persisted-phases');
 const {
   adminApi,
   createCourseModeDraft,
@@ -173,6 +174,7 @@ test('renders persisted seven-phase bindings in the exact 480x320 renderer-v5 pr
   }
   const response = await recoveredPreview;
   expect(response.status(), await response.text()).toBe(200);
+  const { manifest } = (await response.json()).data;
   const stage = page.getByTestId('esp-tft-stage');
   await expect(stage).toBeAttached();
   await stage.scrollIntoViewIfNeeded();
@@ -249,19 +251,10 @@ test('renders persisted seven-phase bindings in the exact 480x320 renderer-v5 pr
   expect(zByLayer.background).toBeLessThan(zByLayer.teachingObject);
   expect(zByLayer.teachingObject).toBeLessThan(zByLayer.robotOverlay);
   const preview = page.locator('.robot-preview').first();
-  const phaseControls = preview.getByLabel('Persisted cinematic phases');
-  const phases = await phaseControls.getByRole('button').allTextContents();
-  expect(phases).toContain('flyIn');
-  expect(phases).toContain('teach');
-  for (const phase of phases) {
-    await phaseControls.getByRole('button', { name: phase, exact: true }).click();
-    const persistedPhase = persisted.cinematicPhases.find(item => item.phaseId === phase);
-    expect(persistedPhase).toBeTruthy();
-    const videoLayer = persistedPhase.layers.find(layer => layer.slot === 'robotOverlay');
-    await expect(stage.locator('.layer-robotOverlay')).toHaveAttribute('data-source-sha256', videoLayer.sha256);
+  await visitPersistedPhases(page, manifest, async ({ phase, stepIndex }) => {
     await require('./helpers/real-service-evidence').assertDecodedStage(stage);
-    await stage.screenshot({ path: testInfo.outputPath(`actual-${phase}.png`) });
-  }
+    await stage.screenshot({ path: testInfo.outputPath(`actual-${stepIndex}-${phase.phaseId}.png`) });
+  });
   await preview.getByRole('button', { name: /play cinematic/i }).click();
   await expect.poll(() => stage.locator('video').evaluate(video => video.currentTime)).toBeGreaterThan(0);
   await preview.getByRole('button', { name: /replay/i }).click();
