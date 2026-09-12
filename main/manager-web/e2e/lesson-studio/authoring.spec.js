@@ -78,6 +78,8 @@ test('admin creates and persists an eight-minute safe-speaking lesson draft', as
     response.url().includes('/nestjs/v1/admin/lessons/')
       && response.url().endsWith('/validate')
       && response.request().method() === 'POST');
+  const lessonId = new URLSearchParams(page.url().split('?')[1]).get('lessonId');
+  assertNoUnexpectedPageErrors.expectFault('POST', `/nestjs/v1/admin/lessons/${lessonId}/validate`, 422, 'draft has no asset bundle');
   await page.getByRole('button', { name: 'Validate' }).click();
   const validationResponse = await validateLesson;
   expect(validationResponse.status()).toBe(422);

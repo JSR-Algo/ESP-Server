@@ -2,6 +2,7 @@ const { test, expect } = require('@playwright/test');
 const { loginAsLessonAuthor } = require('./helpers/session');
 const { monitorUnexpectedPageErrors } = require('./helpers/page-errors');
 const { nestFetch } = require('./helpers/admin-api');
+const { verifiedCatalogImage, createLegacyFixtureCourse, bindLegacyVisuals } = require('./helpers/legacy-fixtures');
 
 const nestApi = (page, path, options) => nestFetch(page, path, options);
 
@@ -10,50 +11,18 @@ test('real admin previews the exact espTft scene and all response paths', async 
   const runId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   await loginAsLessonAuthor(page);
 
-  const sourceLessonId = '00000006-0002-0000-0000-000000000001';
-  const sourceCourseId = '00000006-0001-0000-0000-000000000001';
-  const existing = await nestApi(page, `/courses/${sourceCourseId}/lessons`);
-  for (const row of existing.filter((item) => item.lesson_key === 'w01-d01-barn-say-it' && item.status === 'draft')) {
-    await nestApi(page, `/lessons/${row.id}`, { method: 'DELETE' });
-  }
-  const lesson = await nestApi(page, `/lessons/${sourceLessonId}/new-version`, { method: 'POST' });
-  await nestApi(page, `/lessons/${lesson.id}`, { method: 'PATCH', body: { title: `Preview lesson ${runId}` } });
-  const [step] = await nestApi(page, `/lessons/${lesson.id}/steps`);
-
-  const visuals = [
-    { slot: 'backgroundScene', category: 'scene', assetKey: `e2e.${runId}.background`, sha256: 'a'.repeat(64) },
-    { slot: 'teachingObject', category: 'teachingObject', assetKey: `e2e.${runId}.object`, sha256: 'b'.repeat(64) },
-    { slot: 'robotOverlay', category: 'robotPose', assetKey: `e2e.${runId}.robot`, sha256: 'c'.repeat(64) },
-  ];
+  const visuals = [ ['backgroundScene', 'scene'], ['teachingObject', 'teachingObject'], ['robotOverlay', 'robotPose'] ];
   const versionIdBySlot = {};
-  for (const visual of visuals) {
-    const version = await nestApi(page, `/lesson-visual-assets/${visual.assetKey}/versions`, {
-      method: 'POST',
-      body: {
-        category: visual.category,
-        title: `E2E ${visual.slot} ${runId}`,
-        profile: 'espTft',
-        storagePath: 'http://127.0.0.1:8102/favicon.ico',
-        sha256: visual.sha256,
-        mimeType: 'image/png',
-        bytes: 5430,
-        width: 64,
-        height: 64,
-        publicationState: 'published',
-      },
-    });
-    versionIdBySlot[visual.slot] = version.id;
+  for (const [slot, category] of visuals) {
+    const image = await verifiedCatalogImage(page, { category, profile: 'espTft' });
+    versionIdBySlot[slot] = image.versionId;
   }
+  const { lesson, steps: [step] } = await createLegacyFixtureCourse(page, `e2e-preview-${runId}`);
+  await nestApi(page, `/lessons/${lesson.id}`, { method: 'PATCH', body: { title: `Preview lesson ${runId}` } });
 
   // Only robotOverlay is a per-step slot (PER_STEP_VISUAL_SLOTS); background and
   // teaching object are lesson-wide and must go through the visuals command.
-  await nestApi(page, `/lessons/${lesson.id}/visuals`, {
-    method: 'PUT',
-    body: {
-      backgroundAssetVersionId: versionIdBySlot.backgroundScene,
-      objectAssetVersionId: versionIdBySlot.teachingObject,
-    },
-  });
+  await bindLegacyVisuals(page, lesson.id, versionIdBySlot.backgroundScene, versionIdBySlot.teachingObject);
   await nestApi(page, `/lessons/${lesson.id}/steps/${encodeURIComponent(step.step_key)}/visual-refs/robotOverlay`, {
     method: 'PUT', body: { assetVersionId: versionIdBySlot.robotOverlay },
   });
@@ -92,6 +61,9 @@ test('real admin previews the exact espTft scene and all response paths', async 
   await expect(stage.locator('img.layer-background')).toBeVisible();
   await expect(stage.locator('img.layer-teachingObject')).toBeVisible();
   await expect(stage.locator('img.layer-robotOverlay')).toBeVisible();
+  for (const layer of ['background', 'teachingObject', 'robotOverlay']) {
+    await expect.poll(() => stage.locator(`img.layer-${layer}`).evaluate(image => image.complete && image.naturalWidth > 0)).toBe(true);
+  }
 
   const expectations = [
     ['Correct', 'Slave command: goodbye'],
@@ -124,7 +96,7 @@ test('real admin previews the exact espTft scene and all response paths', async 
 });
 
 
-test('@s08 saved v5 candidate exposes real media, phases and failures', async ({ page, browserName }, testInfo) => {
+test('@diagnostic @s08 saved v5 candidate exposes actual media failures (not visual qualification)', async ({ page, browserName }, testInfo) => {
   const fs = require('node:fs');
   const { openS07Session, s07Api } = require('./helpers/s07-session');
   const config = await openS07Session(page);
@@ -141,12 +113,6 @@ test('@s08 saved v5 candidate exposes real media, phases and failures', async ({
   const phases = ['flyIn','walk','teach','listen','thinking','celebrate','exit'];
   const ids = {background:visuals.refs.find(r=>r.slot==='backgroundScene').assetVersionId,object:visuals.refs.find(r=>r.slot==='teachingObject').assetVersionId,...Object.fromEntries(phases.map(phase => [phase,visuals.refs.find(r=>r.slot===`robotOverlay.${phase}`).assetVersionId]))};
   const errors = []; page.on('pageerror', error => errors.push(error.message));
-  // Forward unchanged requests through the task-owned raw-container tunnel.
-  // This preserves source bytes; image HTML and decoder failures remain failures.
-  await page.route('http://127.0.0.1:8103/**', async route => {
-    const response = await route.fetch({url:route.request().url().replace(':8103',':18103'),timeout:10000});
-    await route.fulfill({response,headers:{...response.headers(),'access-control-allow-origin':'*'}});
-  });
   await page.goto(`/#/lesson-editor?lessonId=${lesson.id}`);
   const panel = page.getByTestId('course-mode-visual-selection'); await expect(panel).toBeVisible();
   for (const [phase,id] of Object.entries(ids)) await panel.getByTestId(`course-visual-${phase}`).locator('select').selectOption(id);
@@ -162,7 +128,7 @@ test('@s08 saved v5 candidate exposes real media, phases and failures', async ({
   expect(await stage.evaluate(el=>[el.clientWidth,el.clientHeight])).toEqual([480,320]);
   const preview = page.locator('.robot-preview').first();
   await expect(preview).toContainText('image failed to load/decode');
-  const evidence = {lessonId:lesson.id,checksum:response.checksum,manifest:response.manifest,persisted,transport:'8103 -> task-owned raw-container tunnel18103; unchanged bytes, explicit transport CORS',browserName,captures:[]};
+  const evidence = {lessonId:lesson.id,checksum:response.checksum,manifest:response.manifest,persisted,transport:'direct selected HTTP media origin; no network interception',browserName,captures:[]};
   if(browserName==='chromium') {
     await expect(preview).toContainText('failed to load/decode. A verified browser representation is required');
     await stage.screenshot({path:testInfo.outputPath('chromium-real-decode-error.png')});

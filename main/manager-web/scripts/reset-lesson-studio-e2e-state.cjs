@@ -70,11 +70,13 @@ function composeEnvironment(env = process.env) {
 }
 
 function resetLessonStudioE2EState(options = resetOptionsFromEnvironment()) {
+  preflightLessonStudioE2EStack({ projectName: options.projectName, composeFile: options.composeFile, composeExecutable: options.composeExecutable });
   for (const [command, ...args] of buildResetCommands(options)) {
     const result = spawnSync(command, args, {
       encoding: 'utf8',
       stdio: 'inherit',
       env: composeEnvironment(),
+      timeout: 15000,
     });
 
     if (result.error) throw result.error;
@@ -84,15 +86,15 @@ function resetLessonStudioE2EState(options = resetOptionsFromEnvironment()) {
   }
 }
 
-function preflightLessonStudioE2EStack({ env = process.env, run = (command, args) => {
-  const result = spawnSync(command, args, { encoding: 'utf8', env });
+function preflightLessonStudioE2EStack({ env = process.env, projectName, composeFile, composeExecutable, run = (command, args) => {
+  const result = spawnSync(command, args, { encoding: 'utf8', env, timeout: 10000 });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(result.stderr || `command failed: ${command}`);
   return result.stdout.trim();
 } } = {}) {
-  const compose = composeExecutableFromEnvironment(env, { requireExplicit: env.CI === '1' || env.CI === 'true' });
-  const project = (env.COMPOSE_PROJECT_NAME || env.LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME || 'tbot-ls-e2e');
-  const file = DEFAULT_COMPOSE_FILE;
+  const compose = composeExecutable || composeExecutableFromEnvironment(env, { requireExplicit: env.CI === '1' || env.CI === 'true' });
+  const project = projectName || env.COMPOSE_PROJECT_NAME || env.LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME || 'tbot-ls-e2e';
+  const file = composeFile || DEFAULT_COMPOSE_FILE;
   const services = ['redis', 'postgres', 'mysql', 'backend', 'seed-postgres', 'web', 'seed-mysql'];
   const backendRoot = env.TBOT_LESSON_STUDIO_BACKEND_MOUNT_ROOT || env.TBOT_BACKEND_WORKTREE;
   const firmwareRoot = env.TBOT_LESSON_STUDIO_FIRMWARE_MOUNT_ROOT || env.TBOT_FIRMWARE_WORKTREE;

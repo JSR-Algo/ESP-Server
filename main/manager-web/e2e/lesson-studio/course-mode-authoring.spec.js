@@ -1,7 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const { loginAsLessonAuthor } = require('./helpers/session');
 const { monitorUnexpectedPageErrors } = require('./helpers/page-errors');
-const { gotoAppRoute, installCinematicTestRoutes, stabilizeStageMedia } = require('./helpers/navigation');
+const { gotoAppRoute, stabilizeStageMedia } = require('./helpers/navigation');
 const {
   adminApi,
   createCourseModeDraft,
@@ -90,7 +90,7 @@ test('@s07-assets persists seven phase bindings and preserves activity image ver
   await page.unroute(libraryRoute);
   await expect(panel.getByTestId('course-visual-background').locator('select')).toHaveValue(override.refs.find(r=>r.slot==='backgroundScene').assetVersionId);
   await expect(panel.getByTestId('course-visual-object').locator('select')).toHaveValue(replacements.object);
-  for(const width of [1440,390]){await page.setViewportSize({width,height:900});await panel.scrollIntoViewIfNeeded();expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);await panel.screenshot({path:testInfo.outputPath(`bindings-${width}.png`)});}
+  for(const width of [1440,390]){await page.setViewportSize({width,height:width===390?844:900});await panel.scrollIntoViewIfNeeded();expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);await panel.screenshot({path:testInfo.outputPath(`bindings-${width}.png`)});}
   await require('node:fs/promises').writeFile(testInfo.outputPath('persisted-bindings.json'),JSON.stringify({lessonId:lesson.id,sourceLessonId:config.source,request,second,before,after,replacements,current,override,pageErrors},null,2));
   expect(pageErrors).toEqual([]);
 });
@@ -98,7 +98,6 @@ test('@s07-assets persists seven phase bindings and preserves activity image ver
 test('authors, saves, and reloads the canonical Course Mode contract', async ({ page }) => {
   const assertNoUnexpectedPageErrors = monitorUnexpectedPageErrors(page);
   await loginAsLessonAuthor(page);
-  await installCinematicTestRoutes(page);
   const fixture = await createCourseModeDraft(page);
 
   await gotoLessonEditor(page, fixture.lesson.id);
@@ -249,26 +248,24 @@ test('renders persisted seven-phase bindings in the exact 480x320 renderer-v5 pr
   ]));
   expect(zByLayer.background).toBeLessThan(zByLayer.teachingObject);
   expect(zByLayer.teachingObject).toBeLessThan(zByLayer.robotOverlay);
-  const backgroundIdentityBefore = await stage.locator('.layer-background').evaluateAll((elements) =>
-    elements.map((element) => `${element.className}|${element.getAttribute('src')}|${element.getAttribute('style')}`));
-  await expect(page.getByText(/entrance:/i)).toBeVisible();
-  const transitionStartedAt = Date.now();
-  await page.getByRole('button', { name: /play lesson/i }).click();
-  await expect(page.getByText(/Step 2 \/ /)).toBeVisible();
-  if (testInfo.project.name.includes('webkit')) {
-    expect(Date.now() - transitionStartedAt).toBeLessThan(5000);
-    await stabilizeStageMedia(stage);
-    await expect(stage).toHaveScreenshot('course-mode-step-2.png', {
-      animations: 'disabled',
-      maxDiffPixels: 1200,
-      maxDiffPixelRatio: 0.01,
-    });
+  const preview = page.locator('.robot-preview').first();
+  const phaseControls = preview.getByLabel('Persisted cinematic phases');
+  const phases = await phaseControls.getByRole('button').allTextContents();
+  expect(phases).toContain('flyIn');
+  expect(phases).toContain('teach');
+  for (const phase of phases) {
+    await phaseControls.getByRole('button', { name: phase, exact: true }).click();
+    const persistedPhase = persisted.cinematicPhases.find(item => item.phaseId === phase);
+    expect(persistedPhase).toBeTruthy();
+    const videoLayer = persistedPhase.layers.find(layer => layer.slot === 'robotOverlay');
+    await expect(stage.locator('.layer-robotOverlay')).toHaveAttribute('data-source-sha256', videoLayer.sha256);
+    await require('./helpers/real-service-evidence').assertDecodedStage(stage);
+    await stage.screenshot({ path: testInfo.outputPath(`actual-${phase}.png`) });
   }
-  await expect(stage.locator('.layer-robotOverlay')).toBeVisible();
-  expect(await stage.locator('.layer-background').evaluateAll((elements) =>
-    elements.map((element) => `${element.className}|${element.getAttribute('src')}|${element.getAttribute('style')}`)))
-    .toEqual(backgroundIdentityBefore);
-  await expect(stage.locator('.layer-teachingObject')).toHaveCount(0);
+  await preview.getByRole('button', { name: /play cinematic/i }).click();
+  await expect.poll(() => stage.locator('video').evaluate(video => video.currentTime)).toBeGreaterThan(0);
+  await preview.getByRole('button', { name: /replay/i }).click();
+  await expect.poll(() => stage.locator('video').evaluate(video => video.currentTime)).toBeLessThan(0.2);
   assertNoUnexpectedPageErrors();
 });
 

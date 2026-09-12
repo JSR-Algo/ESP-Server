@@ -57,18 +57,20 @@ function canonicalBackendRoot() {
   return root;
 }
 
-function canonicalCourseModeContract(weekNumber = 1) {
+function canonicalCourseModeContract(weekNumber = 1, publishedAssetKeys = []) {
   const root = canonicalBackendRoot();
   const source = [
     "const compiler=require('./dist/lessons/course-mode/curriculum-course-mode.js')",
     "const curriculum=require('./dist/lessons/course-mode/curriculum-6month.js')",
     `const week=curriculum.CURRICULUM[${Number(weekNumber) - 1}]`,
     "if(!week) throw new Error('unknown curriculum week')",
-    "const versions=new Map([['scene.playground-park','11111111-1111-4111-8111-111111111111'],['object.no','22222222-2222-4222-8222-222222222222']])",
+    "const keys=JSON.parse(require('node:fs').readFileSync(0,'utf8'))",
+    "const versions=new Map(keys.map(key=>[key,key]))",
     'process.stdout.write(JSON.stringify(compiler.compileCurriculumCourseMode(week,compiler.buildAssetCatalog(versions))))',
   ].join(';');
   return JSON.parse(execFileSync(process.execPath, ['-e', source], {
     cwd: root,
+    input: JSON.stringify(publishedAssetKeys),
     encoding: 'utf8',
     maxBuffer: 1024 * 1024,
   }));
@@ -109,97 +111,42 @@ async function createCourseModeDraft(page, { weekNumber = 1, runId } = {}) {
     estimatedDurationSec: 480,
     durationPreset: 8,
   });
-  const contract = canonicalCourseModeContract(weekNumber);
+  const catalog = await adminApi(page, 'GET', '/lesson-visual-assets?profile=espTft');
+  const contract = canonicalCourseModeContract(weekNumber, catalog
+    .filter(asset => (asset.publication_state || asset.publicationState) === 'published')
+    .map(asset => asset.asset_key || asset.assetKey));
   const initialVisuals = await adminApi(page, 'GET', `/lessons/${lesson.id}/visuals`);
   await adminApi(page, 'PUT', `/lessons/${lesson.id}/course-mode`, { expectedChecksum: null, expectedVisualChecksum: initialVisuals.visualChecksum, contract });
-  const sourceLessons = ['00000006-0002-0000-0000-000000000001'];
-  const sourceAssets = (await Promise.all(sourceLessons.map((sourceLessonId) => (
-    adminApi(page, 'GET', `/lessons/${sourceLessonId}/assets?profile=espTft`)
-  )))).flatMap((result) => result.assets);
-  for (const assetKey of [
-    'robotOverlay.teach',
-    'robotOverlay.listening',
-    'robotOverlay.celebrate',
-  ]) {
-    const sourceAssetId = sourceAssets.find((asset) => asset.assetKey === assetKey)?.assetId;
-    expect(sourceAssetId, `seeded source asset must exist for ${assetKey}`).toBeTruthy();
-    await adminApi(page, 'POST', `/lessons/${lesson.id}/assets`, {
-      profile: 'espTft',
-      sourceAssetId,
-    });
-  }
+  await createPublishableCourseModeVisuals(page, lesson.id);
   return { course, lesson: await adminApi(page, 'GET', `/lessons/${lesson.id}`), contract, runId: suffix };
 }
 
-async function createVisualTriple(page, lessonId, runId, { bind = true } = {}) {
-  const definitions = [
-    ['backgroundScene', 'scene', 'scene.playground-park'],
-    ['teachingObject', 'teachingObject', 'object.no'],
-    ['robotOverlay', 'robotPose', `robot.e2e.${runId}`],
-  ];
-  const versions = {};
-  const sourceBySlot = {
-    backgroundScene: 'assets/t54-layered/background-farm.jpg',
-    teachingObject: 'assets/objects/barn.png',
-    robotOverlay: 'assets/t54-layered/robot-teach.mp4',
-  };
-  const compatibilityBySlot = {
-    backgroundScene: {
-      mediaKind: 'image', mediaType: 'image/jpeg', width: 480, height: 320,
-      rect: { x: 0, y: 0, width: 480, height: 320 }, fit: 'cover',
-    },
-    teachingObject: {
-      mediaKind: 'image', mediaType: 'image/png', width: 95, height: 95,
-      rect: { x: 20, y: 168, width: 95, height: 95 }, fit: 'contain',
-    },
-    robotOverlay: {
-      mediaKind: 'video', mediaType: 'video/mp4', codec: 'mjpeg', hasAudio: false,
-      width: 240, height: 240, fps: 10, durationMs: 1000, frameCount: 10,
-      rect: { x: 118, y: 160, width: 150, height: 150 },
-      chromaKey: { keyColor: '#00ff00', tolerance: 20, featherPx: 1 },
-    },
-  };
-  for (const [slot, category, assetKey] of definitions) {
-    versions[slot] = await adminApi(page, 'POST', `/lesson-visual-assets/${encodeURIComponent(assetKey)}/versions`, {
-      category,
-      title: `E2E ${slot} ${runId}`,
-      profile: 'espTft',
-      storagePath: sourceBySlot[slot],
-      sha256: slot === 'backgroundScene'
-        ? 'd4abb6087dc3122e0a00feb5e6a86b03dc7db550eb59d25e92f54d0fd09e4fc0'
-        : slot === 'teachingObject'
-          ? 'eac30a7ddf3f14df79f27c3eb39f2114f3a780d5670bb11ef62446f5fa5dcbb9'
-          : 'f2d496b5e750e895f7e086aec827d7b99d0bb322d73ea660a2e84ff484b602c4',
-      mimeType: slot === 'backgroundScene' ? 'image/jpeg' : slot === 'robotOverlay' ? 'video/mp4' : 'image/png',
-      bytes: slot === 'backgroundScene' ? 43599 : slot === 'teachingObject' ? 200618 : 223033,
-      width: slot === 'backgroundScene' ? 480 : slot === 'robotOverlay' ? 240 : 95,
-      height: slot === 'backgroundScene' ? 320 : slot === 'robotOverlay' ? 240 : 95,
-      publicationState: 'published',
-      compatibilityMetadata: compatibilityBySlot[slot],
-    });
-  }
+async function createVisualTriple(page, lessonId, _runId, { bind = true } = {}) {
+  const selection = await require('./s07-session').publishedCourseModeSelection(page, lessonId);
   if (bind) {
+    const snapshot = await adminApi(page, 'GET', `/lessons/${lessonId}/visuals`);
     await adminApi(page, 'PUT', `/lessons/${lessonId}/visuals`, {
-      backgroundAssetVersionId: versions.backgroundScene.id,
-      objectAssetVersionId: versions.teachingObject.id,
-      robotAssetVersionId: versions.robotOverlay.id,
+      expectedChecksum: snapshot.checksum,
+      expectedVisualChecksum: snapshot.visualChecksum,
+      backgroundAssetVersionId: selection.ids.background,
+      ...(selection.ids.object ? { objectAssetVersionId: selection.ids.object } : {}),
+      robotAssetVersionIds: selection.robotAssetVersionIds,
     });
   }
-  return versions;
+  return selection;
 }
 
 async function createPublishableCourseModeVisuals(page, lessonId) {
-  const source = await adminApi(
-    page,
-    'GET',
-    '/lessons/00000006-0002-0000-0000-000000000001/assets?profile=espTft',
-  );
-  for (const assetKey of ['backgroundScene.poster', 'teachingObject.barn']) {
-    const sourceAssetId = source.assets.find((asset) => asset.assetKey === assetKey)?.assetId;
-    expect(sourceAssetId, `seeded source asset must exist for ${assetKey}`).toBeTruthy();
+  const sourceId = process.env.LESSON_STUDIO_E2E_VISUAL_SOURCE_LESSON_ID
+    || '00000006-0002-0000-0000-000000000001';
+  const source = await adminApi(page, 'GET', `/lessons/${sourceId}/assets?profile=espTft`);
+  expect(source.assets.length, 'selected source must have an actual asset bundle').toBeGreaterThan(0);
+  const current = await adminApi(page, 'GET', `/lessons/${lessonId}/assets?profile=espTft`);
+  const existing = new Set(current.assets.map(asset => asset.assetId));
+  for (const asset of source.assets) {
+    if (existing.has(asset.assetId)) continue;
     await adminApi(page, 'POST', `/lessons/${lessonId}/assets`, {
-      profile: 'espTft',
-      sourceAssetId,
+      profile: 'espTft', sourceAssetId: asset.assetId,
     });
   }
 }

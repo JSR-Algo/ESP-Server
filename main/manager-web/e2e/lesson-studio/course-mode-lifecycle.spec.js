@@ -1,7 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const { loginAsLessonAuthor } = require('./helpers/session');
 const { monitorUnexpectedPageErrors } = require('./helpers/page-errors');
-const { gotoAppRoute, installCinematicTestRoutes } = require('./helpers/navigation');
+const { gotoAppRoute } = require('./helpers/navigation');
 const {
   adminApi,
   adminApiResponse,
@@ -12,42 +12,45 @@ const {
   withCanonicalCourseModeChecksum,
 } = require('./helpers/admin-api');
 
-test('binds the provisioned Course Mode visual triple through the admin pickers', async ({ page }) => {
+test('binds the selected seven-phase Course Mode sources through the admin pickers', async ({ page }, testInfo) => {
   const assertNoUnexpectedPageErrors = monitorUnexpectedPageErrors(page);
   await loginAsLessonAuthor(page);
-  await installCinematicTestRoutes(page);
   const fixture = await createCourseModeDraft(page);
-  const versions = await createVisualTriple(page, fixture.lesson.id, fixture.runId, { bind: false });
-
+  const selection = await createVisualTriple(page, fixture.lesson.id, fixture.runId, { bind: false });
+  const initial = await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}/visuals`);
   await gotoAppRoute(page, `#/lesson-editor?lessonId=${fixture.lesson.id}`);
-  const selections = [
-    ['lesson-background-selector', 'scene.playground-park'],
-    ['lesson-object-selector', 'object.no'],
-    ['lesson-robot-selector', `robot.e2e.${fixture.runId}`],
-  ];
-  for (const [index, [testId, assetKey]] of selections.entries()) {
-    const picker = page.getByTestId(testId);
-    const escapedKey = assetKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const button = picker.getByRole('button', { name: new RegExp(`^${escapedKey} v`) }).first();
-    await expect(button).toBeEnabled();
-    const visualSave = index === selections.length - 1
-      ? page.waitForResponse((response) => response.request().method() === 'PUT'
-        && response.url().includes(`/nestjs/v1/admin/lessons/${fixture.lesson.id}/visuals`))
-      : null;
-    await button.click();
-    if (visualSave) expect((await visualSave).status()).toBe(200);
+  const panel = page.getByTestId('course-mode-visual-selection');
+  for (const [slot, id] of Object.entries(selection.ids)) {
+    await panel.getByTestId(`course-visual-${slot}`).locator('select').selectOption(id);
   }
-
-  const steps = await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}/steps`);
-  const refs = steps[0].visual_refs || steps[0].visualRefs;
-  expect(Object.fromEntries(refs.map((ref) => [
-    ref.slot,
-    ref.asset_version_id || ref.assetVersionId,
-  ]))).toMatchObject({
-    backgroundScene: versions.backgroundScene.id,
-    teachingObject: versions.teachingObject.id,
-    robotOverlay: versions.robotOverlay.id,
+  const save = page.waitForResponse(response => response.request().method() === 'PUT'
+    && response.url().endsWith(`/lessons/${fixture.lesson.id}/visuals`));
+  const button = panel.getByRole('button', { name: 'Save visual bindings', exact: true });
+  await button.scrollIntoViewIfNeeded();
+  const box = await button.boundingBox();
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(page.viewportSize().width);
+  await button.click();
+  const response = await save;
+  expect(response.status()).toBe(200);
+  expect(response.request().postDataJSON()).toMatchObject({
+    expectedChecksum: initial.checksum, expectedVisualChecksum: initial.visualChecksum,
+    robotAssetVersionIds: selection.robotAssetVersionIds,
   });
+  const persisted = await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}/visuals`);
+  for (const [phase, id] of Object.entries(selection.robotAssetVersionIds)) {
+    const refs = persisted.refs.filter(ref => ref.slot === `robotOverlay.${phase}`);
+    expect(refs.length).toBeGreaterThan(0);
+    expect(refs.every(ref => ref.assetVersionId === id)).toBe(true);
+    expect(JSON.stringify(persisted.cinematicPhases)).toContain(id);
+  }
+  await page.reload();
+  for (const [slot, id] of Object.entries(selection.ids)) {
+    await expect(panel.getByTestId(`course-visual-${slot}`).locator('select')).toHaveValue(id);
+  }
+  await testInfo.attach('persisted-seven-phase-bindings', { body: JSON.stringify(persisted), contentType: 'application/json' });
+  await button.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath('seven-phase-readback.png') });
   assertNoUnexpectedPageErrors();
 });
 
@@ -58,19 +61,25 @@ test('validates, publishes, clones, and keeps the published Course Mode version 
   await createVisualTriple(page, fixture.lesson.id, fixture.runId);
   await createPublishableCourseModeVisuals(page, fixture.lesson.id);
 
-  const malformed = structuredClone(fixture.contract);
+  const saved = await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}/course-mode`);
+  const malformed = structuredClone(saved.contract);
   malformed.activities[0].expectedDurationSec = 999;
   const malformedResponse = await adminApiResponse(page, 'PUT', `/lessons/${fixture.lesson.id}/course-mode`, {
-    expectedChecksum: fixture.contract.contractChecksum,
+    expectedChecksum: saved.checksum,
+    expectedVisualChecksum: saved.visualChecksum,
     contract: malformed,
   });
   expect(malformedResponse.status()).toBe(400);
+  const malformedBody = await malformedResponse.json();
+  expect(malformedBody.code).toBe('VALIDATION_ERROR');
+  expect(malformedBody.message).not.toMatch(/expected.*checksum/i);
   expect(await adminApi(page, 'POST', `/lessons/${fixture.lesson.id}/validate`)).toMatchObject({ valid: true });
   const published = await adminApi(page, 'POST', `/lessons/${fixture.lesson.id}/publish`);
   expect(published).toMatchObject({ status: 'published' });
 
   const immutable = await adminApiResponse(page, 'PUT', `/lessons/${fixture.lesson.id}/course-mode`, {
-    expectedChecksum: fixture.contract.contractChecksum,
+    expectedChecksum: saved.checksum,
+    expectedVisualChecksum: saved.visualChecksum,
     contract: fixture.contract,
   });
   expect(immutable.status()).toBe(409);
@@ -97,10 +106,10 @@ test('deduplicates identical retries and rejects a stale second-admin draft writ
   const before = await adminApi(first, 'GET', `/courses/${fixture.course.id}/lessons`);
   const [retryA, retryB] = await Promise.all([
     adminApiResponse(first, 'PUT', `/lessons/${fixture.lesson.id}/course-mode`, {
-      expectedChecksum: stale.contract.contractChecksum, contract: stale.contract,
+      expectedChecksum: stale.checksum, expectedVisualChecksum: stale.visualChecksum, contract: stale.contract,
     }),
     adminApiResponse(first, 'PUT', `/lessons/${fixture.lesson.id}/course-mode`, {
-      expectedChecksum: stale.contract.contractChecksum, contract: stale.contract,
+      expectedChecksum: stale.checksum, expectedVisualChecksum: stale.visualChecksum, contract: stale.contract,
     }),
   ]);
   expect([retryA.status(), retryB.status()].sort()).toEqual([200, 200]);
@@ -117,7 +126,7 @@ test('deduplicates identical retries and rejects a stale second-admin draft writ
   winner.activities[0].contextId = `${winner.activities[0].contextId}.admin-a`;
   const winnerWithChecksum = withCanonicalCourseModeChecksum(winner);
   const winnerResponse = await adminApi(first, 'PUT', `/lessons/${fixture.lesson.id}/course-mode`, {
-    expectedChecksum: stale.contract.contractChecksum,
+    expectedChecksum: stale.checksum, expectedVisualChecksum: stale.visualChecksum,
     contract: winnerWithChecksum,
   });
   expect(winnerResponse.checksum).toBe(winnerWithChecksum.contractChecksum);
@@ -125,7 +134,7 @@ test('deduplicates identical retries and rejects a stale second-admin draft writ
   loser.activities[0].contextId = `${loser.activities[0].contextId}.admin-b`;
   const loserWithChecksum = withCanonicalCourseModeChecksum(loser);
   const staleWrite = await adminApiResponse(second, 'PUT', `/lessons/${fixture.lesson.id}/course-mode`, {
-    expectedChecksum: stale.contract.contractChecksum,
+    expectedChecksum: stale.checksum, expectedVisualChecksum: stale.visualChecksum,
     contract: loserWithChecksum,
   });
   expect(staleWrite.status()).toBe(409);
@@ -133,10 +142,12 @@ test('deduplicates identical retries and rejects a stale second-admin draft writ
   const persistedWinner = await adminApi(first, 'GET', `/lessons/${fixture.lesson.id}/course-mode`);
   expect(persistedWinner.contract.contractChecksum).toBe(winnerWithChecksum.contractChecksum);
   expect(persistedWinner.contract.activities[0].contextId).toBe(winnerWithChecksum.activities[0].contextId);
+  const visualSnapshot = await adminApi(second, 'GET', `/lessons/${fixture.lesson.id}/visuals`);
   await adminApi(second, 'PUT', `/lessons/${fixture.lesson.id}/visuals`, {
-    backgroundAssetVersionId: visuals.backgroundScene.id,
-    objectAssetVersionId: visuals.teachingObject.id,
-    robotAssetVersionId: visuals.robotOverlay.id,
+    expectedChecksum: visualSnapshot.checksum, expectedVisualChecksum: visualSnapshot.visualChecksum,
+    backgroundAssetVersionId: visuals.ids.background,
+    ...(visuals.ids.object ? { objectAssetVersionId: visuals.ids.object } : {}),
+    robotAssetVersionIds: visuals.robotAssetVersionIds,
   });
 
   await adminApi(second, 'POST', `/lessons/${fixture.lesson.id}/publish`);

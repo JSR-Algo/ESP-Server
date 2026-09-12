@@ -1,38 +1,3 @@
-const { resolve } = require('node:path');
-
-const cinematicAsset = (path) => resolve(__dirname, '../../../public/tvideo-demo/assets', path);
-
-async function installCinematicTestRoutes(page) {
-  await page.route('**/tvideo-demo/index.html?embed=1', (route) => route.fulfill({
-    status: 200,
-    contentType: 'text/html',
-    body: '<!doctype html><script>parent.postMessage({type:"tvideo-ready"},"*")</script>',
-  }));
-  await page.route('https://fonts.googleapis.com/**', (route) => route.fulfill({
-    status: 200,
-    contentType: 'text/css',
-    body: '',
-  }));
-  await page.route('**/tvideo-demo/assets/t54-layered/background-farm.jpg', (route) => route.fulfill({
-    status: 200,
-    contentType: 'image/jpeg',
-    headers: { 'access-control-allow-origin': '*' },
-    path: cinematicAsset('t54-layered/background-farm.jpg'),
-  }));
-  await page.route('**/tvideo-demo/assets/objects/barn.png', (route) => route.fulfill({
-    status: 200,
-    contentType: 'image/png',
-    headers: { 'access-control-allow-origin': '*' },
-    path: cinematicAsset('objects/barn.png'),
-  }));
-  await page.route('**/tvideo-demo/assets/t54-layered/robot-teach.mp4', (route) => route.fulfill({
-    status: 200,
-    contentType: 'video/mp4',
-    headers: { 'access-control-allow-origin': '*' },
-    path: cinematicAsset('t54-layered/robot-teach.mp4'),
-  }));
-}
-
 async function stabilizeStageMedia(stage, currentTimeSec = 0.4) {
   await stage.locator('video').evaluateAll(async (videos, targetTime) => {
     await Promise.all(videos.map(async (video) => {
@@ -57,4 +22,4 @@ async function gotoAppRoute(page, hash) {
   await page.waitForURL((url) => url.hash === hash);
 }
 
-module.exports = { gotoAppRoute, installCinematicTestRoutes, stabilizeStageMedia };
+module.exports = { gotoAppRoute, stabilizeStageMedia };

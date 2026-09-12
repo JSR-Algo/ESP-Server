@@ -78,6 +78,7 @@ async function loginAsLessonAuthor(page, credentials = {}) {
     return response.status;
   })).toBe(200);
 
+  require('./real-service-evidence').expectObservedFault(page, 'GET', '/nestjs/v1/admin/courses', 401, 'real author sign-in challenge');
   await page.goto('/login#/course-management');
 
   const authorDialog = page.getByRole('dialog', { name: /sign in as author/i });
