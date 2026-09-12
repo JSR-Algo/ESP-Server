@@ -747,6 +747,9 @@ def _cinematic_frames(runtime: LessonRuntime) -> list[tuple[str, str, str | None
 
 
 async def _ack_prepare_and_start(runtime: LessonRuntime, inbound: int) -> tuple[dict, dict]:
+    deadline = asyncio.get_running_loop().time() + 1.0
+    while _frames(runtime)[-1]['type'] != 'lesson_prepare' and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.001)
     prepare = _frames(runtime)[-1]
     assert prepare["type"] == "lesson_prepare"
     await runtime.on_lesson_ack(_v5_ack(runtime, prepare, inbound))
@@ -758,10 +761,11 @@ async def _ack_prepare_and_start(runtime: LessonRuntime, inbound: int) -> tuple[
 
 def test_index_binds_one_phase_per_activity_and_phase_and_rejects_duplicates() -> None:
     phases = [_bound_phase("a1", "flyIn", 100), _bound_phase("a1", "teach", 300), _bound_phase("a2", "teach", 300)]
+    phases.extend(_bound_phase(a, p, 300) for a in ('a1', 'a2') for p in ('listen', 'thinking', 'celebrate'))
     canonical, by_activity = _index_layered_cinematic_phases(phases)
-    assert set(canonical) == {"flyIn", "teach"}
+    assert set(canonical) == {"flyIn", "teach", "listen", "thinking", "celebrate"}
     assert canonical["teach"] is phases[1]
-    assert set(by_activity["a1"]) == {"flyIn", "teach"}
+    assert set(by_activity["a1"]) == {"flyIn", "teach", "listen", "thinking", "celebrate"}
     assert by_activity["a2"]["teach"] is phases[2]
     # Legacy single-phase authority still indexes to one bound phase per activity.
     _, legacy = _index_layered_cinematic_phases([_bound_phase("a1", "teach", 300)])
@@ -819,27 +823,28 @@ async def test_v5_entrance_runs_once_walk_settles_before_the_first_prompt_and_ne
     assert [entry for entry in _cinematic_frames(runtime) if entry[1] == "prepare"][-1][2] == "walk"
     assert continued == []  # walk (200 ms) still running: no talking clip, no prompt
     await asyncio.sleep(0.35)
-    assert _cinematic_frames(runtime)[-1] == ("lesson_prepare", "prepare", "teach",
-                                               f"sd://tbot/lesson-assets/test/{first}.robot.teach%40v1")
-    assert _frames(runtime)[-1]["body"]["cinematicPhase"]["playbackMode"] == "loop"
-    assert continued == []
-    await _ack_prepare_and_start(runtime, 3)
-    await asyncio.sleep(0.05)
     assert continued == [(first, runtime._step_seq)]
     assert runtime._entrance_completed is True
+    assert runtime._cinematic_phase["phaseId"] == "walk"  # final frame holds until verified audio
+    assert [entry[2] for entry in _cinematic_frames(runtime) if entry[1] == "prepare"] == ["walk"]
+    assert runtime.on_course_playout_started(
+        assignment_id=runtime.assignment_id, session_id=runtime.session_id,
+        activity_id=first, step_sequence=runtime._step_seq, playout_id=1,
+    )
+    await asyncio.sleep(0)
+    await _ack_prepare_and_start(runtime, 3)
     assert runtime._cinematic_phase["phaseId"] == "teach"
-    prepared = [entry[2] for entry in _cinematic_frames(runtime) if entry[1] == "prepare"]
-    assert prepared == ["walk", "teach"]
+    assert runtime._cinematic_phase["playbackMode"] == "loop"
 
-    # Next activity: talking clip of that activity only; the entrance is never replayed.
+    # A new activity uses its attentive clip until that activity's audio starts.
     await runtime._emit_step()
     await asyncio.sleep(0.05)
-    assert _cinematic_frames(runtime)[-1] == ("lesson_prepare", "prepare", "teach",
-                                               f"sd://tbot/lesson-assets/test/{last}.robot.teach%40v1")
+    assert _cinematic_frames(runtime)[-1] == ("lesson_prepare", "prepare", "listen",
+                                               f"sd://tbot/lesson-assets/test/{last}.robot.listen%40v1")
     await _ack_prepare_and_start(runtime, 5)
     await asyncio.sleep(0.05)
     prepared = [entry[2] for entry in _cinematic_frames(runtime) if entry[1] == "prepare"]
-    assert prepared == ["walk", "teach", "teach"]
+    assert prepared == ["walk", "teach", "listen"]
     assert "flyIn" not in prepared
 
 
@@ -895,7 +900,7 @@ async def test_v5_course_transitions_bind_talking_listening_thinking_and_celebra
     assert prepare["body"]["cinematicPhase"]["phaseId"] == "thinking"
     assert prepare["body"]["cinematicPhase"]["playbackMode"] == "loop"
 
-    # A celebratory decision dispatch plays celebrate once; a plain decision talks.
+    # A celebratory outcome plays once; a plain dispatch waits attentively for audio.
     def decision(visual_state: str) -> CourseDecision:
         return CourseDecision(
             f"d-{visual_state}", True, SessionState.WORD_ACTIVE, "ADVANCE_ACTIVITY", "acknowledge_child",
@@ -908,11 +913,13 @@ async def test_v5_course_transitions_bind_talking_listening_thinking_and_celebra
     assert prepare["body"]["cinematicPhase"]["phaseId"] == "celebrate"
     assert prepare["body"]["cinematicPhase"]["playbackMode"] == "once"
     await runtime._dispatch_course_embodied_decision(decision("retry"))
-    await asyncio.sleep(0)
+    await asyncio.sleep(0.05)
+    assert _frames(runtime)[-1]["type"] == "lesson_start"  # celebration is still running
+    await asyncio.sleep(0.4)
     prepare, _ = await _ack_prepare_and_start(runtime, 7)
-    assert prepare["body"]["cinematicPhase"]["phaseId"] == "teach"
+    assert prepare["body"]["cinematicPhase"]["phaseId"] == "listen"
     prepared = [entry[2] for entry in _cinematic_frames(runtime) if entry[1] == "prepare"]
-    assert prepared == ["listen", "thinking", "celebrate", "teach"]
+    assert prepared == ["listen", "thinking", "celebrate", "listen"]
     assert "flyIn" not in prepared and "walk" not in prepared
 
 

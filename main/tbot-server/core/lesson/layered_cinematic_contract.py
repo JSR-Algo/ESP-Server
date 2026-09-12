@@ -297,10 +297,13 @@ def project_layered_cinematic_phase(
     )
     if not isinstance(layers, list) or len(layers) != len(expected_slots):
         _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic phase has invalid layer cardinality")
-    assets_by_key = {
-        item.get("key"): item for item in assets
-        if isinstance(item, dict) and isinstance(item.get("key"), str)
-    }
+    assets_by_key = {}
+    for item in assets:
+        if not isinstance(item, dict) or not isinstance(item.get("key"), str):
+            _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic SD asset key is invalid")
+        if item["key"] in assets_by_key:
+            _fail("CINEMATIC_METADATA_MISMATCH", "layered cinematic SD asset authority is duplicated")
+        assets_by_key[item["key"]] = item
     projected: list[dict[str, Any]] = []
     robot_fps: int | None = None
     robot_frames: int | None = None
