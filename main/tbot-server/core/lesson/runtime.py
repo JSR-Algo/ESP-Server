@@ -5466,6 +5466,8 @@ class LessonRuntime:
             previous.cancel()
         step_id = self._step_id
         step_seq = self._step_seq
+        assignment_id = self.assignment_id
+        session_id = self.session_id
         target_activity = activity_id or self._current_cinematic_activity_id()
 
         async def run() -> None:
@@ -5475,15 +5477,22 @@ class LessonRuntime:
             if entrance is not None and not entrance.done():
                 await asyncio.shield(entrance)
             deadline = asyncio.get_running_loop().time() + 10.0
-            while self._authored_cinematic_pending is not None:
-                if asyncio.get_running_loop().time() >= deadline or self.state in (S_FAILED, S_COMPLETED):
+            while True:
+                if (self._step_id != step_id or self._step_seq != step_seq
+                        or self.assignment_id != assignment_id or self.session_id != session_id
+                        or self._current_cinematic_activity_id() != target_activity
+                        or self.state not in (S_RUNNING, S_PAUSED) or not self._is_active_runtime()
+                        or self._cinematic_cancel_sent or self._completion_stop_sent):
                     return
+                if self._authored_cinematic_pending is not None:
+                    if asyncio.get_running_loop().time() >= deadline:
+                        return
+                elif (self._cinematic_pending_command is None and self.state == S_RUNNING
+                        and self._running_once_phase_remaining_sec() <= 0):
+                    break
+                # Keep the queued intent across pause/resume ACKs; no phase may
+                # replace the pending lifecycle command while RUNNING is stale.
                 await asyncio.sleep(0.05)
-            await self._await_running_entrance_phase()
-            if (self._step_id != step_id or self._step_seq != step_seq
-                    or self._current_cinematic_activity_id() != target_activity
-                    or self.state != S_RUNNING or not self._is_active_runtime() or self._cinematic_cancel_sent):
-                return
             await self._apply_authored_cinematic_effect(phase_id, activity_id=target_activity)
 
         self._course_phase_task = asyncio.create_task(run())
